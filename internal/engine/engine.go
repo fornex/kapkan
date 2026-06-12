@@ -462,25 +462,29 @@ func (e *Engine) evalTick(now time.Time) {
 						st.threshold = threshold
 						st.startedAt = now
 						metrics.AttacksTotal.Inc()
+						sample := e.collectHostSample(sh, addr, d, nowSec-e.windowSec)
+						cls := classify(rates[d], sample)
 						e.log.Warn("attack detected",
 							"target", addr.String(), "group", g.Name,
 							"direction", string(dirName(d)), "metric", string(metric),
+							"type", clsType(cls),
 							"rate", rate, "threshold", threshold,
 							"pps", rates[d].PPS, "mbps", rates[d].Mbps,
 							"flows_per_sec", rates[d].FlowsPerSec)
 						e.emit(Event{
-							Kind:       AttackStarted,
-							Scope:      ScopeHost,
-							Target:     addr,
-							Group:      g.Name,
-							Direction:  dirName(d),
-							BanEnabled: g.BanEnabled,
-							Metric:     metric,
-							Rate:       rate,
-							Threshold:  threshold,
-							Rates:      rates[d],
-							At:         now,
-							Sample:     e.collectHostSample(sh, addr, d, nowSec-e.windowSec),
+							Kind:           AttackStarted,
+							Scope:          ScopeHost,
+							Target:         addr,
+							Group:          g.Name,
+							Direction:      dirName(d),
+							BanEnabled:     g.BanEnabled,
+							Metric:         metric,
+							Rate:           rate,
+							Threshold:      threshold,
+							Rates:          rates[d],
+							At:             now,
+							Sample:         sample,
+							Classification: cls,
 						})
 					}
 					st.belowSince = time.Time{}
@@ -546,25 +550,29 @@ func (e *Engine) evalGroups(cfg *config.Config, totals [][2]Rates, hysteresis ti
 					st.threshold = threshold
 					st.startedAt = now
 					metrics.AttacksTotal.Inc()
+					// evalGroups runs outside all shard locks, which
+					// collectGroupSample requires.
+					sample := e.collectGroupSample(cfg, gi, d, now.Unix()-e.windowSec)
+					cls := classify(totals[gi][d], sample)
 					e.log.Warn("group attack detected",
 						"group", g.Name, "direction", string(dirName(d)),
 						"metric", string(metric),
+						"type", clsType(cls),
 						"rate", rate, "threshold", threshold,
 						"pps", totals[gi][d].PPS, "mbps", totals[gi][d].Mbps,
 						"flows_per_sec", totals[gi][d].FlowsPerSec)
 					e.emit(Event{
-						Kind:      AttackStarted,
-						Scope:     ScopeGroup,
-						Group:     g.Name,
-						Direction: dirName(d),
-						Metric:    metric,
-						Rate:      rate,
-						Threshold: threshold,
-						Rates:     totals[gi][d],
-						At:        now,
-						// evalGroups runs outside all shard locks, which
-						// collectGroupSample requires.
-						Sample: e.collectGroupSample(cfg, gi, d, now.Unix()-e.windowSec),
+						Kind:           AttackStarted,
+						Scope:          ScopeGroup,
+						Group:          g.Name,
+						Direction:      dirName(d),
+						Metric:         metric,
+						Rate:           rate,
+						Threshold:      threshold,
+						Rates:          totals[gi][d],
+						At:             now,
+						Sample:         sample,
+						Classification: cls,
 					})
 				}
 				st.belowSince = time.Time{}

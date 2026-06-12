@@ -355,6 +355,7 @@ func TestPayloadMatchesPublishedSchema(t *testing.T) {
 		TopDstPorts: []engine.Counter{{Key: "53", Packets: 1, Bytes: 468}},
 		Protocols:   []engine.Counter{{Key: "udp", Packets: 1, Bytes: 468}},
 	}
+	ev.Classification = &engine.Classification{Type: engine.AttackNTPAmplification, Confidence: 0.9, SrcPort: 123}
 	n := New(storeFrom(t, yamlWith("")), discardLogger())
 	ban := &mitigate.Ban{State: mitigate.BanActive, Route: "203.0.113.50/32 next-hop 192.0.2.1", DryRun: true}
 	body, err := json.Marshal(n.buildPayload("attack_started", ev, ban))
@@ -368,6 +369,26 @@ func TestPayloadMatchesPublishedSchema(t *testing.T) {
 
 	// Top level.
 	keysMatch(t, "payload", got, schemaNode(t, schema, "properties"))
+
+	// Classification object and its attack-type enum.
+	gotCls, ok := got["classification"].(map[string]any)
+	if !ok {
+		t.Fatal("payload classification missing")
+	}
+	keysMatch(t, "classification", gotCls, schemaNode(t, schema, "properties", "classification", "properties"))
+	typeEnum := schemaNode(t, schema, "properties", "classification", "properties", "type")["enum"].([]any)
+	documentedTypes := map[string]bool{}
+	for _, v := range typeEnum {
+		documentedTypes[v.(string)] = true
+	}
+	for _, at := range engine.AttackTypes() {
+		if !documentedTypes[string(at)] {
+			t.Errorf("attack type %q missing from the schema enum", at)
+		}
+	}
+	if len(documentedTypes) != len(engine.AttackTypes()) {
+		t.Errorf("schema enum has %d attack types, engine defines %d", len(documentedTypes), len(engine.AttackTypes()))
+	}
 
 	// Nested sample object.
 	gotSample, ok := got["sample"].(map[string]any)
@@ -670,5 +691,32 @@ func TestSlackEscapesReservedChars(t *testing.T) {
 	}
 	if !strings.Contains(text, "&lt;y&gt;") {
 		t.Errorf("expected escaped sequence in:\n%s", text)
+	}
+}
+
+// TestClassificationInMessages: the inferred vector renders in Telegram,
+// Slack and email texts, including the reflected port for amplification.
+func TestClassificationInMessages(t *testing.T) {
+	ev := sampleEvent()
+	ev.Classification = &engine.Classification{Type: engine.AttackNTPAmplification, Confidence: 0.94, SrcPort: 123}
+	n := New(storeFrom(t, yamlWith("")), discardLogger())
+	p := n.buildPayload("attack_started", ev, nil)
+
+	want := "Type: ntp_amplification (94% confidence, reflected from port 123)"
+	if text := formatTelegram(p); !strings.Contains(text, want) {
+		t.Errorf("telegram missing classification:\n%s", text)
+	}
+	if text := formatSlack(p); !strings.Contains(text, want) {
+		t.Errorf("slack missing classification:\n%s", text)
+	}
+	mail := string(emailMessage(config.Email{From: "a@b", To: []string{"c@d"}}, p))
+	if !strings.Contains(mail, want) {
+		t.Errorf("email missing classification:\n%s", mail)
+	}
+
+	// Non-amplification vectors omit the port note.
+	p.Classification = &engine.Classification{Type: engine.AttackSYNFlood, Confidence: 0.8}
+	if text := formatTelegram(p); !strings.Contains(text, "Type: syn_flood (80% confidence)") {
+		t.Errorf("telegram syn classification wrong:\n%s", text)
 	}
 }

@@ -69,6 +69,10 @@ type attacksResp struct {
 				SrcPort uint16 `json:"src_port"`
 			} `json:"flows"`
 		} `json:"sample"`
+		Classification *struct {
+			Type    string `json:"type"`
+			SrcPort uint16 `json:"src_port"`
+		} `json:"classification"`
 	} `json:"active"`
 }
 
@@ -170,6 +174,10 @@ func TestEndToEndNTPAmplification(t *testing.T) {
 					t.Errorf("active attack has no sample")
 				} else if len(at.Sample.TopSrcPorts) == 0 || at.Sample.TopSrcPorts[0].Key != "123" {
 					t.Errorf("sample top src port = %+v, want 123 (NTP)", at.Sample.TopSrcPorts)
+				}
+				// And be classified as NTP amplification.
+				if at.Classification == nil || at.Classification.Type != "ntp_amplification" {
+					t.Errorf("classification = %+v, want ntp_amplification", at.Classification)
 				}
 				return true
 			}
