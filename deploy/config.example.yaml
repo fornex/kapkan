@@ -1,0 +1,78 @@
+# Kapkan production configuration example.
+# Copy to /etc/kapkan/config.yaml and adjust for your network.
+#
+# SAFETY: dry_run defaults to true. Leave it true until you have verified, via
+# the logs and /api/v1/attacks, that detection fires on the right prefixes and
+# that the would-be blackhole routes look correct. Only then set dry_run: false.
+
+dry_run: true
+
+listen:
+  sflow: ":6343"
+  netflow: ":2055" # NetFlow v5/v9 + IPFIX share this socket
+
+sampling:
+  default_rate: 1000 # used only when an exporter does not report its own rate
+
+networks: # detection applies ONLY to destinations inside these prefixes
+  - "203.0.113.0/24"
+  - "2001:db8::/32"
+
+protected_whitelist: # these addresses are never banned, regardless of traffic
+  - "203.0.113.1" # gateway / router
+  - "203.0.113.2" # authoritative nameserver
+
+thresholds: # per destination host, after sampling correction
+  pps: 80000 # packets/sec
+  mbps: 1000 # megabits/sec
+  flows_per_sec: 35000 # flows/sec
+
+# Optional: group prefixes under their own thresholds and mitigation policy.
+# Hosts not matched by any group use the global thresholds above. The most
+# specific (longest) prefix wins. Group prefixes must lie inside `networks`.
+#
+# hostgroups:
+#   - name: web # per-host detection with tighter limits
+#     networks:
+#       - "203.0.113.0/26"
+#     thresholds: # omit to inherit the global thresholds
+#       pps: 20000
+#       mbps: 500
+#       flows_per_sec: 10000
+#   - name: customers-no-rtbh # detect and notify, but never auto-blackhole
+#     networks:
+#       - "203.0.113.64/26"
+#     ban: false
+#   - name: dns-pool # alert on the pool's TOTAL traffic; never auto-bans
+#     networks:
+#       - "203.0.113.128/26"
+#     calculation: total
+#     thresholds:
+#       pps: 300000
+#       mbps: 4000
+#       flows_per_sec: 150000
+
+ban:
+  ttl_seconds: 600 # every ban auto-withdraws after this (no permanent bans)
+  unban_hysteresis_seconds: 120 # traffic must stay below threshold this long to unban
+  max_active_bans: 50 # refuse new bans past this cap (never blackhole half the net)
+
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1" # must be an IPv4 dotted-quad
+  next_hop: "192.0.2.1" # IPv4 blackhole (discard) next-hop
+  next_hop6: "100::1" # IPv6 blackhole next-hop (RFC 6666 discard prefix)
+  community: "65000:666" # RTBH community your upstream honors
+  neighbors:
+    - address: "10.0.0.254"
+      remote_asn: 65000
+
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN" # token is read from this env var, never the file
+    chat_id: "-1001234567890"
+  webhook:
+    url: "" # optional: generic JSON POST on every attack start/end
+
+api:
+  listen: "127.0.0.1:8080"

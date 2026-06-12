@@ -1,0 +1,37 @@
+[Unit]
+Description=Kapkan DDoS detection and RTBH mitigation
+Documentation=https://github.com/kapkan-io/kapkan
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kapkan
+Group=kapkan
+ExecStart=/usr/local/bin/kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# The Telegram bot token is read from the environment, never the config file.
+# Put it in /etc/kapkan/kapkan.env as KAPKAN_TG_TOKEN=... (chmod 600).
+EnvironmentFile=-/etc/kapkan/kapkan.env
+
+# Hardening. kapkan needs no special privileges in dry-run or when peering
+# from a high local port; if you bind BGP to port 179, add the capability:
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/etc/kapkan
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
