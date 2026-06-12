@@ -1,0 +1,61 @@
+dry_run: true
+
+listen:
+  sflow: ":6343"
+  netflow: ":2055"   # NetFlow v5/v9 + IPFIX on the same socket
+
+sampling:
+  default_rate: 1000   # used when the exporter does not report its rate
+
+networks:              # prefixes we protect; detection applies only to these
+  - "203.0.113.0/24"
+  - "2001:db8::/32"
+
+protected_whitelist:   # never ban these, ever
+  - "203.0.113.1"
+
+thresholds:            # per destination host, after sampling correction
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 35000
+
+hostgroups:            # optional per-prefix policies; longest prefix wins
+  - name: web          # tighter per-host thresholds for this /26
+    networks:
+      - "203.0.113.0/26"
+    thresholds:
+      pps: 20000
+      mbps: 500
+      flows_per_sec: 10000
+  - name: dns-pool     # alert on the pool's total traffic; never auto-bans
+    networks:
+      - "203.0.113.128/26"
+    calculation: total
+    thresholds:
+      pps: 300000
+      mbps: 4000
+      flows_per_sec: 150000
+
+ban:
+  ttl_seconds: 600
+  unban_hysteresis_seconds: 120
+  max_active_bans: 50
+
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"
+  next_hop: "192.0.2.1"          # blackhole next-hop
+  community: "65000:666"          # RTBH community
+  neighbors:
+    - address: "10.0.0.254"
+      remote_asn: 65000
+
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"  # read token from env, never from file
+    chat_id: "-1001234567890"
+  webhook:
+    url: ""                       # optional generic JSON POST
+
+api:
+  listen: "127.0.0.1:8080"

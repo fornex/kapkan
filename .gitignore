@@ -1,0 +1,8 @@
+/kapkan
+/bin/
+/dist/
+*.test
+*.out
+*.prof
+.DS_Store
+files.zip

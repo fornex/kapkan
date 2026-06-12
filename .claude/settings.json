@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"suppressOutput\":true,\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"Karpathy — Surgical Changes: трогай только то, что требует задача; не рефактори и не переформатируй соседний код; держись существующего стиля; каждая изменённая строка должна прямо следовать из запроса.\"}}'",
+            "statusMessage": "Karpathy: surgical-changes check"
+          }
+        ]
+      }
+    ]
+  }
+}
