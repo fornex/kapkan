@@ -502,3 +502,97 @@ func TestOutgoingValidationErrors(t *testing.T) {
 		t.Errorf("empty group outgoing block: error = %v, want thresholds_outgoing rejection", err)
 	}
 }
+
+func TestSampleSettings(t *testing.T) {
+	// Defaults with no block.
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	want := SampleSettings{Enabled: true, BufferFlows: 65536, FlowsPerAttack: 20}
+	if cfg.SampleCfg != want {
+		t.Errorf("default SampleCfg = %+v, want %+v", cfg.SampleCfg, want)
+	}
+
+	// Explicit values.
+	cfg, err = Parse([]byte(validYAML + "\nsamples:\n  buffer_flows: 1024\n  flows_per_attack: 50\n"))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.SampleCfg.BufferFlows != 1024 || cfg.SampleCfg.FlowsPerAttack != 50 || !cfg.SampleCfg.Enabled {
+		t.Errorf("SampleCfg = %+v, want 1024/50/enabled", cfg.SampleCfg)
+	}
+
+	// Disabled skips size validation.
+	cfg, err = Parse([]byte(validYAML + "\nsamples:\n  enabled: false\n  buffer_flows: 8\n"))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.SampleCfg.Enabled {
+		t.Error("SampleCfg.Enabled = true, want false")
+	}
+
+	// Errors.
+	if _, err := Parse([]byte(validYAML + "\nsamples:\n  buffer_flows: 8\n")); err == nil {
+		t.Error("tiny buffer_flows accepted, want error")
+	}
+	if _, err := Parse([]byte(validYAML + "\nsamples:\n  flows_per_attack: 1000\n")); err == nil {
+		t.Error("oversized flows_per_attack accepted, want error")
+	}
+}
+
+func TestReloadRejectsSampleChanges(t *testing.T) {
+	path := writeTemp(t, validYAML)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	store := NewStore(path, cfg)
+	if err := os.WriteFile(path, []byte(validYAML+"\nsamples:\n  buffer_flows: 1024\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reload(); err == nil || !strings.Contains(err.Error(), "samples") {
+		t.Errorf("Reload() with samples change: error = %v, want samples-change rejection", err)
+	}
+}
+
+func TestReloadAcceptsUnchangedAndDisabledSampleEdits(t *testing.T) {
+	// Unchanged samples block (with explicit enabled pointer) must reload
+	// fine — the guard compares resolved settings, not raw pointers.
+	withSamples := validYAML + "\nsamples:\n  enabled: true\n  buffer_flows: 1024\n"
+	path := writeTemp(t, withSamples)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	store := NewStore(path, cfg)
+	if err := os.WriteFile(path, []byte(withSamples), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reload(); err != nil {
+		t.Errorf("Reload() with unchanged samples block: error = %v, want success", err)
+	}
+
+	// Editing sizes while sampling stays disabled changes nothing at
+	// runtime and must not demand a restart.
+	disabledA := validYAML + "\nsamples:\n  enabled: false\n  buffer_flows: 1024\n"
+	disabledB := validYAML + "\nsamples:\n  enabled: false\n  buffer_flows: 2048\n"
+	path2 := writeTemp(t, disabledA)
+	cfg2, err := Load(path2)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	store2 := NewStore(path2, cfg2)
+	if err := os.WriteFile(path2, []byte(disabledB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store2.Reload(); err != nil {
+		t.Errorf("Reload() editing sizes while disabled: error = %v, want success", err)
+	}
+}
+
+func TestBufferFlowsUpperBound(t *testing.T) {
+	if _, err := Parse([]byte(validYAML + "\nsamples:\n  buffer_flows: 16777216\n")); err == nil || !strings.Contains(err.Error(), "buffer_flows") {
+		t.Errorf("oversized buffer_flows: error = %v, want bound rejection", err)
+	}
+}

@@ -31,6 +31,7 @@ type Config struct {
 	// not even counted.
 	ThresholdsOutgoing *Thresholds `yaml:"thresholds_outgoing"`
 	Hostgroups         []Hostgroup `yaml:"hostgroups"`
+	Samples            Samples     `yaml:"samples"`
 	Ban                Ban         `yaml:"ban"`
 	BGP                BGP         `yaml:"bgp"`
 	Notify             Notify      `yaml:"notify"`
@@ -45,6 +46,9 @@ type Config struct {
 	// OutgoingEnabled reports whether any group has outgoing thresholds, so
 	// the engine can skip outgoing accounting entirely when unused.
 	OutgoingEnabled bool `yaml:"-"`
+	// SampleCfg is the resolved (defaults applied) form of Samples. It is
+	// comparable so reload can detect changes that require a restart.
+	SampleCfg SampleSettings `yaml:"-"`
 	// groupRoutes maps prefixes to Groups indexes, longest prefix first.
 	groupRoutes []groupRoute
 }
@@ -84,6 +88,28 @@ type Thresholds struct {
 
 // Zero reports whether no threshold is set at all.
 func (t Thresholds) Zero() bool { return t == Thresholds{} }
+
+// Samples configures the traffic buffer used to attach flow samples to
+// attack events. Fields mirror the YAML shape; the resolved form (defaults
+// applied) lives in Config.SampleCfg.
+type Samples struct {
+	// Enabled defaults to true; set false to disable the buffer entirely.
+	Enabled *bool `yaml:"enabled"`
+	// BufferFlows is the total capacity of the recent-flows ring across the
+	// engine (default 65536, max 1048576). More flows = better samples at
+	// high rates, at roughly 120 bytes per slot of fixed memory.
+	BufferFlows int `yaml:"buffer_flows"`
+	// FlowsPerAttack caps the raw flow records attached to one attack
+	// event (default 20).
+	FlowsPerAttack int `yaml:"flows_per_attack"`
+}
+
+// SampleSettings is the resolved, comparable form of Samples.
+type SampleSettings struct {
+	Enabled        bool
+	BufferFlows    int
+	FlowsPerAttack int
+}
 
 // CalcMethod selects how a hostgroup's thresholds are applied.
 type CalcMethod string
@@ -285,6 +311,9 @@ func (c *Config) validate() error {
 	if err := c.validateHostgroups(); err != nil {
 		return err
 	}
+	if err := c.validateSamples(); err != nil {
+		return err
+	}
 
 	if c.Ban.TTLSeconds <= 0 {
 		return fmt.Errorf("ban.ttl_seconds must be > 0, got %d", c.Ban.TTLSeconds)
@@ -418,6 +447,39 @@ func (c *Config) validateHostgroups() error {
 	sort.SliceStable(c.groupRoutes, func(i, j int) bool {
 		return c.groupRoutes[i].prefix.Bits() > c.groupRoutes[j].prefix.Bits()
 	})
+	return nil
+}
+
+// validateSamples resolves the samples block into SampleCfg with defaults.
+func (c *Config) validateSamples() error {
+	s := SampleSettings{
+		Enabled:        c.Samples.Enabled == nil || *c.Samples.Enabled,
+		BufferFlows:    c.Samples.BufferFlows,
+		FlowsPerAttack: c.Samples.FlowsPerAttack,
+	}
+	if !s.Enabled {
+		// Sizes are meaningless while disabled; normalize them so reload
+		// does not demand a restart for edits that change nothing.
+		c.SampleCfg = SampleSettings{}
+		return nil
+	}
+	if s.BufferFlows == 0 {
+		s.BufferFlows = 65536
+	}
+	if s.FlowsPerAttack == 0 {
+		s.FlowsPerAttack = 20
+	}
+	if s.BufferFlows < 256 || s.BufferFlows > 1<<20 {
+		// Lower bound: one slot per shard. Upper bound: ~120 MB of fixed
+		// memory, and sample collection cost scales linearly with ring
+		// size while shard locks are held — an unbounded value lets a
+		// config typo OOM the daemon or stall the evaluation loop.
+		return fmt.Errorf("samples.buffer_flows must be in 256..1048576, got %d", s.BufferFlows)
+	}
+	if s.FlowsPerAttack < 1 || s.FlowsPerAttack > 500 {
+		return fmt.Errorf("samples.flows_per_attack must be in 1..500, got %d", s.FlowsPerAttack)
+	}
+	c.SampleCfg = s
 	return nil
 }
 
@@ -556,6 +618,9 @@ func (s *Store) Reload() (*Config, error) {
 	}
 	if next.API.Listen != prev.API.Listen {
 		return nil, fmt.Errorf("reload: api.listen cannot change at runtime (restart required)")
+	}
+	if next.SampleCfg != prev.SampleCfg {
+		return nil, fmt.Errorf("reload: samples settings cannot change at runtime (restart required)")
 	}
 	s.cur.Store(next)
 	return next, nil
