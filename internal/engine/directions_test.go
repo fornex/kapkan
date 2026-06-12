@@ -194,6 +194,11 @@ func TestOutgoingDetection(t *testing.T) {
 	if !ev.BanEnabled {
 		t.Error("BanEnabled = false, want true (default policy)")
 	}
+	// Outgoing attacks are classified too — here a plain UDP flood the
+	// compromised host originates.
+	if ev.Classification == nil || ev.Classification.Type != AttackUDPFlood {
+		t.Errorf("outgoing classification = %+v, want udp_flood", ev.Classification)
+	}
 }
 
 // TestOutgoingDisabledCostsNothing: without thresholds_outgoing the engine

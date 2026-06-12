@@ -144,4 +144,7 @@ type Event struct {
 	// enabled: dominant sources/ports/protocols plus raw flow records
 	// captured in the window before the threshold tripped.
 	Sample *AttackSample `json:"sample,omitempty"`
+	// Classification is the attack vector inferred at detection time
+	// (AttackStarted only).
+	Classification *Classification `json:"classification,omitempty"`
 }

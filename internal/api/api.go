@@ -42,6 +42,8 @@ type Attack struct {
 	EndedAt   time.Time         `json:"ended_at,omitempty"`
 	// Sample is the flow sample captured when the attack was detected.
 	Sample *engine.AttackSample `json:"sample,omitempty"`
+	// Classification is the attack vector inferred at detection time.
+	Classification *engine.Classification `json:"classification,omitempty"`
 }
 
 // attackKey identifies an attack in the active table: host attacks by
@@ -85,17 +87,18 @@ func New(store *config.Store, eng *engine.Engine, mit *mitigate.Mitigator, log *
 // endpoint. ban may be nil.
 func (s *Server) RecordAttackStarted(ev engine.Event, ban *mitigate.Ban) {
 	a := &Attack{
-		Scope:     ev.Scope,
-		Target:    ev.Target,
-		Group:     ev.Group,
-		Direction: ev.Direction,
-		Metric:    ev.Metric,
-		Rate:      ev.Rate,
-		Threshold: ev.Threshold,
-		Rates:     ev.Rates,
-		Active:    true,
-		StartedAt: ev.At,
-		Sample:    ev.Sample,
+		Scope:          ev.Scope,
+		Target:         ev.Target,
+		Group:          ev.Group,
+		Direction:      ev.Direction,
+		Metric:         ev.Metric,
+		Rate:           ev.Rate,
+		Threshold:      ev.Threshold,
+		Rates:          ev.Rates,
+		Active:         true,
+		StartedAt:      ev.At,
+		Sample:         ev.Sample,
+		Classification: ev.Classification,
 	}
 	if ban != nil {
 		a.BanState = ban.State

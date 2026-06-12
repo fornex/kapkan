@@ -20,7 +20,8 @@ is logged and exposed via the API but never announced to your routers.
 - **Detect** per-destination volumetric attacks using sampling-corrected pps / Mbps / flows-per-second thresholds over a sliding window. ≥20M flows/sec/core on the hot path.
 - **Mitigate** by announcing `/32` and `/128` blackhole routes via an embedded [GoBGP](https://github.com/osrg/gobgp) speaker, with your RTBH community and discard next-hop.
 - **Safe by construction** — see [Safety model](#safety-model).
-- **Observe** through a REST API, Prometheus `/metrics`, and Telegram + webhook notifications.
+- **Classify** each attack from its flow sample and per-protocol rates — amplification (NTP/DNS/CLDAP/memcached/SSDP/chargen), SYN/UDP/TCP/ICMP/fragment floods — with the inferred vector in events, notifications and the API.
+- **Observe** through a REST API, Prometheus `/metrics`, and Telegram, Slack, email, webhook and exec-hook notifications.
 
 ## Quickstart
 
