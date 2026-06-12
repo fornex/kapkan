@@ -249,19 +249,23 @@ func TestSimultaneousInOutAttacks(t *testing.T) {
 		t.Error("missing outgoing attack event")
 	}
 
-	// Both end after quiet + hysteresis, independently.
+	// Both end after quiet + hysteresis, independently. Ticks drive the
+	// simulated clock; the timed receive (instead of a non-blocking poll)
+	// gives the drain goroutine time to forward events emitted by a tick,
+	// otherwise an already-emitted AttackEnded can be missed.
 	var ends int
 	for i := 0; i < 12 && ends < 2; i++ {
 		runTick(e, clk)
-		for drained := false; !drained; {
+	recv:
+		for ends < 2 {
 			select {
 			case ev := <-events:
 				if ev.Kind != AttackEnded {
 					t.Fatalf("event = %v, want AttackEnded", ev.Kind)
 				}
 				ends++
-			default:
-				drained = true
+			case <-time.After(20 * time.Millisecond):
+				break recv
 			}
 		}
 	}
