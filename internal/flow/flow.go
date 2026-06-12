@@ -55,6 +55,10 @@ type Flow struct {
 	// IPProto is the IP protocol number (6 TCP, 17 UDP, ...).
 	IPProto  uint8
 	TCPFlags uint8
+	// Fragment marks non-first IP fragments (fragment offset > 0). First
+	// fragments are not detectable from flow telemetry alone, so fragment
+	// counters undercount by one packet per fragmented datagram.
+	Fragment bool
 	// Wire is the telemetry protocol this record arrived over.
 	Wire Proto
 }

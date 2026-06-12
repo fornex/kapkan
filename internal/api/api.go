@@ -29,6 +29,7 @@ type Attack struct {
 	Scope     engine.Scope      `json:"scope"`
 	Target    netip.Addr        `json:"target"`
 	Group     string            `json:"group,omitempty"`
+	Direction engine.Direction  `json:"direction"`
 	Metric    engine.Metric     `json:"metric"`
 	Rate      float64           `json:"rate"`
 	Threshold float64           `json:"threshold"`
@@ -42,13 +43,15 @@ type Attack struct {
 }
 
 // attackKey identifies an attack in the active table: host attacks by
-// address, group attacks by group name, so simultaneous group attacks never
-// collide on the invalid target address.
+// address, group attacks by group name (so simultaneous group attacks never
+// collide on the invalid target address), each per direction (a host can be
+// attacked and attacking at once).
 func attackKey(ev engine.Event) string {
+	k := ev.Target.String()
 	if ev.Scope == engine.ScopeGroup {
-		return "group:" + ev.Group
+		k = "group:" + ev.Group
 	}
-	return ev.Target.String()
+	return k + "|" + string(ev.Direction)
 }
 
 // Server serves the REST API and tracks attack history.
@@ -83,6 +86,7 @@ func (s *Server) RecordAttackStarted(ev engine.Event, ban *mitigate.Ban) {
 		Scope:     ev.Scope,
 		Target:    ev.Target,
 		Group:     ev.Group,
+		Direction: ev.Direction,
 		Metric:    ev.Metric,
 		Rate:      ev.Rate,
 		Threshold: ev.Threshold,
@@ -116,6 +120,7 @@ func (s *Server) RecordAttackEnded(ev engine.Event, ban *mitigate.Ban) {
 			Scope:     ev.Scope,
 			Target:    ev.Target,
 			Group:     ev.Group,
+			Direction: ev.Direction,
 			Metric:    ev.Metric,
 			Rate:      ev.Rate,
 			Threshold: ev.Threshold,

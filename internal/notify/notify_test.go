@@ -237,3 +237,20 @@ func TestHostEventInGroupNamesGroup(t *testing.T) {
 		t.Errorf("telegram text must not mention the implicit global group:\n%s", text)
 	}
 }
+
+// TestOutgoingEventFlagged: outgoing attacks are marked in the payload and
+// loudly flagged in the Telegram text.
+func TestOutgoingEventFlagged(t *testing.T) {
+	ev := sampleEvent()
+	ev.Scope = engine.ScopeHost
+	ev.Direction = engine.DirOutgoing
+	n := New(storeFrom(t, yamlWith("")), discardLogger())
+	p := n.buildPayload("attack_started", ev, nil)
+	if p.Direction != "outgoing" {
+		t.Errorf("payload direction = %q, want outgoing", p.Direction)
+	}
+	text := formatTelegram(p)
+	if !strings.Contains(text, "OUTGOING") {
+		t.Errorf("telegram text does not flag the outgoing direction:\n%s", text)
+	}
+}

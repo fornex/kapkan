@@ -46,9 +46,12 @@ type Payload struct {
 	Event string `json:"event"` // "attack_started" | "attack_ended"
 	// Scope is "host" or "group". Target is empty for group-scoped events;
 	// Group names the hostgroup whose total traffic is under attack.
-	Scope       string    `json:"scope"`
-	Target      string    `json:"target,omitempty"`
-	Group       string    `json:"group,omitempty"`
+	Scope  string `json:"scope"`
+	Target string `json:"target,omitempty"`
+	Group  string `json:"group,omitempty"`
+	// Direction is "incoming" for attacks on the target, "outgoing" when
+	// the target originates the attack (compromised host).
+	Direction   string    `json:"direction,omitempty"`
 	Metric      string    `json:"metric,omitempty"`
 	Rate        float64   `json:"rate,omitempty"`
 	Threshold   float64   `json:"threshold,omitempty"`
@@ -77,6 +80,7 @@ func (n *Notifier) buildPayload(event string, ev engine.Event, ban *mitigate.Ban
 		Event:       event,
 		Scope:       string(ev.Scope),
 		Group:       ev.Group,
+		Direction:   string(ev.Direction),
 		Metric:      string(ev.Metric),
 		Rate:        ev.Rate,
 		Threshold:   ev.Threshold,
@@ -195,6 +199,9 @@ func formatTelegram(p Payload) string {
 		if p.Group != "" && p.Group != "global" {
 			msg += fmt.Sprintf("Group: %s\n", p.Group)
 		}
+	}
+	if p.Direction == "outgoing" {
+		msg += "⚠️ OUTGOING attack — the host is attacking others (likely compromised)\n"
 	}
 	if p.Metric != "" {
 		msg += fmt.Sprintf("Trigger: %s = %.0f (threshold %.0f)\n", p.Metric, p.Rate, p.Threshold)
