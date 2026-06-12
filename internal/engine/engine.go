@@ -117,6 +117,11 @@ func (hs *hostState) inAnyAttack() bool {
 type shard struct {
 	mu    sync.Mutex
 	hosts map[netip.Addr]*hostState
+	// ring buffers the most recent flows recorded in this shard so an
+	// attack sample is ready the moment a threshold trips. nil when
+	// sampling is disabled. pos is the next write slot.
+	ring []sampleEntry
+	pos  int
 }
 
 // groupState tracks the per-direction attack lifecycle of one
@@ -133,6 +138,10 @@ type Engine struct {
 	shards    [numShards]*shard
 	windowSec int64
 	ringSize  int
+	// sampleFlows caps raw flow records per attack sample (0 = sampling
+	// disabled). Sample buffer sizing is fixed at construction; changing it
+	// requires a restart, which config reload enforces.
+	sampleFlows int
 
 	// groups holds total-group attack state. It is touched only by evalTick,
 	// which runs on the single Run goroutine, so it needs no lock.
@@ -197,8 +206,20 @@ func New(store *config.Store, opts ...Option) *Engine {
 		o(e)
 	}
 	e.ringSize = int(e.windowSec) + 1
+	sampleCfg := store.Get().SampleCfg
+	perShard := 0
+	if sampleCfg.Enabled {
+		e.sampleFlows = sampleCfg.FlowsPerAttack
+		// Round up so the actual total capacity is never below the
+		// configured buffer_flows.
+		perShard = (sampleCfg.BufferFlows + numShards - 1) / numShards
+	}
 	for i := range e.shards {
-		e.shards[i] = &shard{hosts: make(map[netip.Addr]*hostState)}
+		sh := &shard{hosts: make(map[netip.Addr]*hostState)}
+		if perShard > 0 {
+			sh.ring = make([]sampleEntry, perShard)
+		}
+		e.shards[i] = sh
 	}
 	return e
 }
@@ -281,6 +302,13 @@ func (e *Engine) record(addr netip.Addr, dir int, f flow.Flow, rate uint64, epoc
 	if f.Fragment {
 		c.bytes[clFrag] += bytes
 		c.packets[clFrag] += packets
+	}
+	if sh.ring != nil {
+		sh.ring[sh.pos] = sampleEntry{f: f, epoch: epoch, dir: int8(dir)}
+		sh.pos++
+		if sh.pos == len(sh.ring) {
+			sh.pos = 0
+		}
 	}
 	hs.lastSeen = epoch
 	sh.mu.Unlock()
@@ -452,6 +480,7 @@ func (e *Engine) evalTick(now time.Time) {
 							Threshold:  threshold,
 							Rates:      rates[d],
 							At:         now,
+							Sample:     e.collectHostSample(sh, addr, d, nowSec-e.windowSec),
 						})
 					}
 					st.belowSince = time.Time{}
@@ -533,6 +562,9 @@ func (e *Engine) evalGroups(cfg *config.Config, totals [][2]Rates, hysteresis ti
 						Threshold: threshold,
 						Rates:     totals[gi][d],
 						At:        now,
+						// evalGroups runs outside all shard locks, which
+						// collectGroupSample requires.
+						Sample: e.collectGroupSample(cfg, gi, d, now.Unix()-e.windowSec),
 					})
 				}
 				st.belowSince = time.Time{}

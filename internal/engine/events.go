@@ -130,4 +130,8 @@ type Event struct {
 	At         time.Time `json:"at"`
 	// StartedAt is set on AttackEnded so consumers can compute duration.
 	StartedAt time.Time `json:"started_at"`
+	// Sample is attached to AttackStarted when the traffic buffer is
+	// enabled: dominant sources/ports/protocols plus raw flow records
+	// captured in the window before the threshold tripped.
+	Sample *AttackSample `json:"sample,omitempty"`
 }

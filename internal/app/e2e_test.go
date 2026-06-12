@@ -61,6 +61,14 @@ type attacksResp struct {
 		Target string `json:"target"`
 		Metric string `json:"metric"`
 		DryRun bool   `json:"dry_run"`
+		Sample *struct {
+			TopSrcPorts []struct {
+				Key string `json:"key"`
+			} `json:"top_src_ports"`
+			Flows []struct {
+				SrcPort uint16 `json:"src_port"`
+			} `json:"flows"`
+		} `json:"sample"`
 	} `json:"active"`
 }
 
@@ -155,6 +163,13 @@ func TestEndToEndNTPAmplification(t *testing.T) {
 			if at.Target == victim.String() {
 				if at.Metric == "" {
 					t.Errorf("active attack has empty metric")
+				}
+				// The attack must carry a flow sample showing the NTP
+				// amplification signature (source port 123).
+				if at.Sample == nil {
+					t.Errorf("active attack has no sample")
+				} else if len(at.Sample.TopSrcPorts) == 0 || at.Sample.TopSrcPorts[0].Key != "123" {
+					t.Errorf("sample top src port = %+v, want 123 (NTP)", at.Sample.TopSrcPorts)
 				}
 				return true
 			}

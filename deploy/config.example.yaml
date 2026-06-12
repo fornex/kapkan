@@ -42,6 +42,15 @@ thresholds: # per destination host, after sampling correction
 #   pps: 50000
 #   udp_pps: 20000
 
+# Attack samples: recent flows are buffered continuously so detections carry
+# their dominant sources/ports/protocols instantly. ~120 bytes per buffered
+# flow; sizing changes require a restart.
+#
+# samples:
+#   enabled: true
+#   buffer_flows: 65536    # total ring capacity across the engine
+#   flows_per_attack: 20   # raw flow records attached to one attack
+
 # Optional: group prefixes under their own thresholds and mitigation policy.
 # Hosts not matched by any group use the global thresholds above. The most
 # specific (longest) prefix wins. Group prefixes must lie inside `networks`.
