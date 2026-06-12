@@ -97,6 +97,22 @@ notify:
     chat_id: "-1001234567890"
   webhook:
     url: "" # optional: generic JSON POST on every attack start/end
+    # payload schema: docs/callback-schema.json (check schema_version)
+  slack:
+    webhook_url: "" # optional: Slack incoming webhook
+  email: # optional: SMTP; credentials from env vars
+    smtp_host: "" # "mail.example.com:587"; empty disables
+    from: ""
+    to: [] # ["ops@example.com"]
+    username_env: "KAPKAN_SMTP_USER"
+    password_env: "KAPKAN_SMTP_PASS"
+    require_tls: false # STARTTLS is auto-required when credentials are set
+  exec: # optional: hook run on every attack event (no shell)
+    # Absolute path to an existing executable; payload JSON on stdin, event
+    # name as $1. Runs with a minimal environment (no daemon secrets); the
+    # whole process group is killed on timeout.
+    command: ""
+    timeout_seconds: 10
 
 api:
   listen: "127.0.0.1:8080"
