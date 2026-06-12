@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
@@ -62,6 +63,8 @@ type Payload struct {
 	Route       string    `json:"route,omitempty"`
 	DryRun      bool      `json:"dry_run"`
 	At          time.Time `json:"at"`
+	// Sample carries the attack's flow sample (attack_started only).
+	Sample *engine.AttackSample `json:"sample,omitempty"`
 }
 
 // NotifyAttackStarted dispatches start notifications for ev and the resulting
@@ -88,6 +91,7 @@ func (n *Notifier) buildPayload(event string, ev engine.Event, ban *mitigate.Ban
 		Mbps:        ev.Rates.Mbps,
 		FlowsPerSec: ev.Rates.FlowsPerSec,
 		At:          ev.At,
+		Sample:      ev.Sample,
 	}
 	if ev.Target.IsValid() {
 		p.Target = ev.Target.String()
@@ -207,6 +211,9 @@ func formatTelegram(p Payload) string {
 		msg += fmt.Sprintf("Trigger: %s = %.0f (threshold %.0f)\n", p.Metric, p.Rate, p.Threshold)
 	}
 	msg += fmt.Sprintf("Rates: %.0f pps / %.1f Mbps / %.0f fps\n", p.PPS, p.Mbps, p.FlowsPerSec)
+	if s := formatSample(p.Sample); s != "" {
+		msg += s
+	}
 	if p.BanState != "" {
 		msg += fmt.Sprintf("Ban: %s", p.BanState)
 		if p.Route != "" {
@@ -214,4 +221,34 @@ func formatTelegram(p Payload) string {
 		}
 	}
 	return msg
+}
+
+// formatSample renders a compact one-line summary of the attack sample for
+// Telegram: protocol mix, dominant sources and the busiest destination port.
+func formatSample(s *engine.AttackSample) string {
+	if s == nil {
+		return ""
+	}
+	var parts []string
+	if len(s.Protocols) > 0 {
+		parts = append(parts, s.Protocols[0].Key)
+	}
+	if len(s.TopSources) > 0 {
+		n := len(s.TopSources)
+		if n > 3 {
+			n = 3
+		}
+		srcs := make([]string, 0, n)
+		for _, c := range s.TopSources[:n] {
+			srcs = append(srcs, c.Key)
+		}
+		parts = append(parts, "top src "+strings.Join(srcs, ", "))
+	}
+	if len(s.TopDstPorts) > 0 {
+		parts = append(parts, "dst port "+s.TopDstPorts[0].Key)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Sample: " + strings.Join(parts, " | ") + "\n"
 }

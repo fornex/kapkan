@@ -78,11 +78,16 @@ func runProcessBench(b *testing.B, yaml string, srcInside bool) {
 }
 
 // BenchmarkProcess measures the hot-path per-flow cost with incoming-only
-// detection (the default). The target is >= 200k flows/sec on 8 cores;
-// ns/op here translates directly (e.g. 100 ns/op single-thread => 10M
-// flows/sec single-thread).
+// detection and the default-enabled sample buffer. The target is >= 200k
+// flows/sec on 8 cores; ns/op here translates directly (e.g. 100 ns/op
+// single-thread => 10M flows/sec single-thread).
 func BenchmarkProcess(b *testing.B) {
 	runProcessBench(b, baseYAML, false)
+}
+
+// BenchmarkProcessNoSamples isolates the sample buffer's hot-path cost.
+func BenchmarkProcessNoSamples(b *testing.B) {
+	runProcessBench(b, baseYAML+"\nsamples:\n  enabled: false\n", false)
 }
 
 // BenchmarkProcessOutgoing measures the worst case for direction split:

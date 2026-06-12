@@ -40,6 +40,8 @@ type Attack struct {
 	DryRun    bool              `json:"dry_run"`
 	StartedAt time.Time         `json:"started_at"`
 	EndedAt   time.Time         `json:"ended_at,omitempty"`
+	// Sample is the flow sample captured when the attack was detected.
+	Sample *engine.AttackSample `json:"sample,omitempty"`
 }
 
 // attackKey identifies an attack in the active table: host attacks by
@@ -93,6 +95,7 @@ func (s *Server) RecordAttackStarted(ev engine.Event, ban *mitigate.Ban) {
 		Rates:     ev.Rates,
 		Active:    true,
 		StartedAt: ev.At,
+		Sample:    ev.Sample,
 	}
 	if ban != nil {
 		a.BanState = ban.State

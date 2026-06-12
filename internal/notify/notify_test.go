@@ -254,3 +254,54 @@ func TestOutgoingEventFlagged(t *testing.T) {
 		t.Errorf("telegram text does not flag the outgoing direction:\n%s", text)
 	}
 }
+
+// TestSampleInPayloadAndTelegram: the attack sample flows through to the
+// webhook payload untouched and is summarized in the Telegram text.
+func TestSampleInPayloadAndTelegram(t *testing.T) {
+	ev := sampleEvent()
+	ev.Sample = &engine.AttackSample{
+		Flows: []engine.SampleFlow{{Src: "198.51.100.7", Dst: "203.0.113.50", SrcPort: 123, DstPort: 53, Proto: "udp"}},
+		TopSources: []engine.Counter{
+			{Key: "198.51.100.7", Packets: 150000},
+			{Key: "198.51.100.8", Packets: 50000},
+		},
+		TopSrcPorts: []engine.Counter{{Key: "123", Packets: 200000}},
+		TopDstPorts: []engine.Counter{{Key: "53", Packets: 200000}},
+		Protocols:   []engine.Counter{{Key: "udp", Packets: 200000}},
+	}
+	n := New(storeFrom(t, yamlWith("")), discardLogger())
+	p := n.buildPayload("attack_started", ev, nil)
+	if p.Sample == nil || len(p.Sample.TopSources) != 2 {
+		t.Fatalf("payload sample = %+v, want the event's sample", p.Sample)
+	}
+
+	text := formatTelegram(p)
+	for _, want := range []string{"Sample:", "udp", "198.51.100.7", "dst port 53"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("telegram text missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// TestTelegramSampleTruncatesSources: at most three sources appear in the
+// one-line Telegram summary even when the sample carries five.
+func TestTelegramSampleTruncatesSources(t *testing.T) {
+	s := &engine.AttackSample{
+		TopSources: []engine.Counter{
+			{Key: "198.51.100.1"}, {Key: "198.51.100.2"}, {Key: "198.51.100.3"},
+			{Key: "198.51.100.4"}, {Key: "198.51.100.5"},
+		},
+		Protocols: []engine.Counter{{Key: "udp"}},
+	}
+	text := formatSample(s)
+	for _, want := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("summary missing %q: %s", want, text)
+		}
+	}
+	for _, banned := range []string{"198.51.100.4", "198.51.100.5"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("summary must truncate to 3 sources, found %q: %s", banned, text)
+		}
+	}
+}
