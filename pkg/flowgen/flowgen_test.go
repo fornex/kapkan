@@ -121,7 +121,11 @@ func TestSFlowV5RoundTrip(t *testing.T) {
 	if d.samplingRate != 1024 {
 		t.Errorf("samplingRate = %d, want 1024", d.samplingRate)
 	}
-	// sFlow producer sets Bytes from FrameLength and Packets = 1.
+	// sFlow producer sets Bytes from FrameLength — the record's on-wire
+	// size, not the truncated captured header — and Packets = 1.
+	if d.bytes != 1400 {
+		t.Errorf("bytes = %d, want 1400 (FrameLength must carry Record.Bytes)", d.bytes)
+	}
 	if d.packets != 1 {
 		t.Errorf("packets = %d, want 1", d.packets)
 	}

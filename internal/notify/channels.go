@@ -53,6 +53,9 @@ func formatSlack(p Payload) string {
 	if p.Direction == "outgoing" {
 		b.WriteString(":warning: OUTGOING attack — the host is attacking others (likely compromised)\n")
 	}
+	if c := formatClassification(p.Classification); c != "" {
+		b.WriteString(c)
+	}
 	if p.Metric != "" {
 		fmt.Fprintf(&b, "Trigger: %s = %.0f (threshold %.0f)\n", p.Metric, p.Rate, p.Threshold)
 	}
@@ -198,6 +201,9 @@ func emailMessage(cfg config.Email, p Payload) []byte {
 	}
 	if p.Direction != "" {
 		fmt.Fprintf(&b, "Direction: %s\r\n", p.Direction)
+	}
+	if c := formatClassification(p.Classification); c != "" {
+		b.WriteString(strings.ReplaceAll(c, "\n", "\r\n"))
 	}
 	if p.Metric != "" {
 		fmt.Fprintf(&b, "Trigger: %s = %.0f (threshold %.0f)\r\n", p.Metric, p.Rate, p.Threshold)

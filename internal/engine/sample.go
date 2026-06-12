@@ -55,6 +55,10 @@ type AttackSample struct {
 	TopSrcPorts []Counter    `json:"top_src_ports,omitempty"`
 	TopDstPorts []Counter    `json:"top_dst_ports,omitempty"`
 	Protocols   []Counter    `json:"protocols,omitempty"`
+	// TotalPackets is the untruncated sampling-corrected packet total of
+	// every matched flow — the denominator for shares, since the top-K
+	// lists above drop lighter keys.
+	TotalPackets uint64 `json:"total_packets"`
 }
 
 // protoName renders an IP protocol number for samples.
@@ -75,12 +79,13 @@ func protoName(p uint8) string {
 
 // sampleAggregator accumulates matching flows into an AttackSample.
 type sampleAggregator struct {
-	maxFlows  int
-	flows     []SampleFlow
-	sources   map[string]*Counter
-	srcPorts  map[string]*Counter
-	dstPorts  map[string]*Counter
-	protocols map[string]*Counter
+	maxFlows     int
+	flows        []SampleFlow
+	sources      map[string]*Counter
+	srcPorts     map[string]*Counter
+	dstPorts     map[string]*Counter
+	protocols    map[string]*Counter
+	totalPackets uint64
 }
 
 func newSampleAggregator(maxFlows int) *sampleAggregator {
@@ -115,6 +120,7 @@ func (a *sampleAggregator) add(f *flow.Flow, dir int8, capture bool) {
 	packets := f.Packets * rate
 	bytes := f.Bytes * rate
 
+	a.totalPackets += packets
 	remote := f.SrcAddr
 	if dir == dirOut {
 		remote = f.DstAddr
@@ -164,11 +170,12 @@ func (a *sampleAggregator) sample() *AttackSample {
 		return nil
 	}
 	return &AttackSample{
-		Flows:       a.flows,
-		TopSources:  top(a.sources, topK),
-		TopSrcPorts: top(a.srcPorts, topK),
-		TopDstPorts: top(a.dstPorts, topK),
-		Protocols:   top(a.protocols, topK),
+		Flows:        a.flows,
+		TopSources:   top(a.sources, topK),
+		TopSrcPorts:  top(a.srcPorts, topK),
+		TopDstPorts:  top(a.dstPorts, topK),
+		Protocols:    top(a.protocols, topK),
+		TotalPackets: a.totalPackets,
 	}
 }
 

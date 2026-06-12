@@ -263,12 +263,19 @@ func BuildSFlowV5(recs []Record, opts SFlowOptions) []byte {
 func buildFlowSample(seq, rate uint32, r Record) []byte {
 	header := buildRawHeader(r)
 
-	// Raw packet header record (data_format = 1).
+	// Raw packet header record (data_format = 1). FrameLength is the
+	// original on-wire frame length (what real exporters report and what
+	// the producer maps to Bytes); the captured header that follows is
+	// usually shorter (HeaderLength), exactly as a real sampler truncates.
+	frameLen := r.Bytes
+	if frameLen < uint32(len(header)) {
+		frameLen = uint32(len(header))
+	}
 	recBody := &bytes.Buffer{}
 	beU32(recBody, 1)                   // Protocol = 1 (Ethernet) — required for parsing
-	beU32(recBody, uint32(len(header))) // FrameLength -> Bytes
+	beU32(recBody, frameLen)            // FrameLength -> Bytes
 	beU32(recBody, 0)                   // Stripped
-	beU32(recBody, uint32(len(header))) // OriginalLength
+	beU32(recBody, uint32(len(header))) // HeaderLength (captured bytes)
 	recBody.Write(header)
 	if pad := (4 - len(header)%4) % 4; pad > 0 {
 		recBody.Write(make([]byte, pad)) // XDR 4-byte alignment (mandatory)

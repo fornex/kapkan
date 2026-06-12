@@ -60,6 +60,24 @@
     },
     "dry_run": { "type": "boolean" },
     "at": { "type": "string", "format": "date-time" },
+    "classification": {
+      "type": "object",
+      "description": "Attack vector inferred at detection time (attack_started only).",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ntp_amplification", "dns_amplification", "cldap_amplification", "memcached_amplification", "ssdp_amplification", "chargen_amplification", "syn_flood", "fragment_flood", "icmp_flood", "udp_flood", "tcp_flood", "mixed"]
+        },
+        "confidence": {
+          "type": "number",
+          "description": "Share (0..1) of the attack traffic matching the winning signature; 0 for mixed (no signature matched)."
+        },
+        "src_port": {
+          "type": "integer",
+          "description": "Reflected service port, set for amplification vectors."
+        }
+      }
+    },
     "sample": {
       "type": "object",
       "description": "Flow sample captured in the window before the threshold tripped (attack_started only, when the traffic buffer is enabled). Counter packets/bytes are sampling-corrected totals; raw flow records carry the exporter's pre-correction numbers plus sampling_rate.",
@@ -85,7 +103,11 @@
         "top_sources": { "$ref": "#/$defs/counters" },
         "top_src_ports": { "$ref": "#/$defs/counters" },
         "top_dst_ports": { "$ref": "#/$defs/counters" },
-        "protocols": { "$ref": "#/$defs/counters" }
+        "protocols": { "$ref": "#/$defs/counters" },
+        "total_packets": {
+          "type": "integer",
+          "description": "Untruncated sampling-corrected packet total of all matched flows; denominator for shares (the top-K lists drop lighter keys)."
+        }
       }
     }
   },

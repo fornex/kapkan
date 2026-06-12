@@ -89,6 +89,8 @@ type Payload struct {
 	At          time.Time `json:"at"`
 	// Sample carries the attack's flow sample (attack_started only).
 	Sample *engine.AttackSample `json:"sample,omitempty"`
+	// Classification is the inferred attack vector (attack_started only).
+	Classification *engine.Classification `json:"classification,omitempty"`
 }
 
 // NotifyAttackStarted dispatches start notifications for ev and the resulting
@@ -104,19 +106,20 @@ func (n *Notifier) NotifyAttackEnded(ctx context.Context, ev engine.Event, ban *
 
 func (n *Notifier) buildPayload(event string, ev engine.Event, ban *mitigate.Ban) Payload {
 	p := Payload{
-		SchemaVersion: SchemaVersion,
-		Event:         event,
-		Scope:         string(ev.Scope),
-		Group:         ev.Group,
-		Direction:     string(ev.Direction),
-		Metric:        string(ev.Metric),
-		Rate:          ev.Rate,
-		Threshold:     ev.Threshold,
-		PPS:           ev.Rates.PPS,
-		Mbps:          ev.Rates.Mbps,
-		FlowsPerSec:   ev.Rates.FlowsPerSec,
-		At:            ev.At,
-		Sample:        ev.Sample,
+		SchemaVersion:  SchemaVersion,
+		Event:          event,
+		Scope:          string(ev.Scope),
+		Group:          ev.Group,
+		Direction:      string(ev.Direction),
+		Metric:         string(ev.Metric),
+		Rate:           ev.Rate,
+		Threshold:      ev.Threshold,
+		PPS:            ev.Rates.PPS,
+		Mbps:           ev.Rates.Mbps,
+		FlowsPerSec:    ev.Rates.FlowsPerSec,
+		At:             ev.At,
+		Sample:         ev.Sample,
+		Classification: ev.Classification,
 	}
 	if ev.Target.IsValid() {
 		p.Target = ev.Target.String()
@@ -262,6 +265,9 @@ func formatTelegram(p Payload) string {
 	if p.Direction == "outgoing" {
 		msg += "⚠️ OUTGOING attack — the host is attacking others (likely compromised)\n"
 	}
+	if c := formatClassification(p.Classification); c != "" {
+		msg += c
+	}
 	if p.Metric != "" {
 		msg += fmt.Sprintf("Trigger: %s = %.0f (threshold %.0f)\n", p.Metric, p.Rate, p.Threshold)
 	}
@@ -276,6 +282,23 @@ func formatTelegram(p Payload) string {
 		}
 	}
 	return msg
+}
+
+// formatClassification renders the inferred attack vector line shared by
+// the chat and email texts.
+func formatClassification(c *engine.Classification) string {
+	if c == nil {
+		return ""
+	}
+	if c.Confidence == 0 {
+		// mixed: no signature matched, a percentage would mislead.
+		return fmt.Sprintf("Type: %s\n", c.Type)
+	}
+	s := fmt.Sprintf("Type: %s (%.0f%% confidence", c.Type, c.Confidence*100)
+	if c.SrcPort != 0 {
+		s += fmt.Sprintf(", reflected from port %d", c.SrcPort)
+	}
+	return s + ")\n"
 }
 
 // formatSample renders a compact one-line summary of the attack sample for
