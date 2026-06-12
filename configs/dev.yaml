@@ -18,6 +18,11 @@ thresholds:            # per destination host, after sampling correction
   pps: 80000
   mbps: 1000
   flows_per_sec: 35000
+  tcp_syn_pps: 10000   # per-protocol limits are optional; 0/absent = off
+  udp_pps: 60000
+
+thresholds_outgoing:   # detect compromised hosts attacking outward
+  pps: 50000
 
 hostgroups:            # optional per-prefix policies; longest prefix wins
   - name: web          # tighter per-host thresholds for this /26

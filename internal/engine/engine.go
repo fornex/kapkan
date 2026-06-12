@@ -1,8 +1,9 @@
 // Package engine is the detection core. It consumes normalized flows on a
 // performance-critical hot path, accumulates sampling-corrected per-second
-// counters per destination host in sharded maps, and once per second
-// evaluates a sliding window against the configured thresholds, emitting
-// AttackStarted / AttackEnded events.
+// counters per host in sharded maps — split by direction (incoming/outgoing)
+// and protocol class (total/tcp/udp/icmp/tcp-syn/fragments) — and once per
+// second evaluates a sliding window against the configured thresholds,
+// emitting AttackStarted / AttackEnded events.
 //
 // Sampling correction: every flow contributes f.Bytes*rate bytes,
 // f.Packets*rate packets, and rate flows, where rate is the flow's
@@ -25,26 +26,92 @@ import (
 // numShards is the fixed shard count. Power of two so the index is a mask.
 const numShards = 256
 
-// bucket is one second of sampling-corrected traffic for a host. epoch is
-// the Unix second it represents; a bucket whose epoch does not match the
-// second being read is stale and counts as empty.
-type bucket struct {
-	epoch   int64
-	bytes   uint64
-	packets uint64
+// protoClass indexes the per-protocol counter arrays. clTotal aggregates
+// everything; the others are carved out by IP protocol (plus the pure-SYN
+// and fragment signatures, which overlap their base class).
+type protoClass int
+
+// Counter classes.
+const (
+	clTotal protoClass = iota
+	clTCP
+	clUDP
+	clICMP
+	clTCPSYN
+	clFrag
+	numClasses
+)
+
+// counters is one second of sampling-corrected traffic for one direction.
+// Flows are counted for the total class only; per-protocol thresholds are
+// expressed in pps/mbps, mirroring the config.
+type counters struct {
+	bytes   [numClasses]uint64
+	packets [numClasses]uint64
 	flows   uint64
 }
 
-// hostState tracks the rolling counters and attack lifecycle for one
-// destination host. It is only accessed under its owning shard's lock.
-type hostState struct {
-	ring       []bucket
-	lastSeen   int64 // Unix second of the most recent flow
+// add accumulates o into c.
+func (c *counters) add(o *counters) {
+	for i := range c.bytes {
+		c.bytes[i] += o.bytes[i]
+		c.packets[i] += o.packets[i]
+	}
+	c.flows += o.flows
+}
+
+// rates converts window-summed counters into per-second averages over a
+// window of w seconds.
+func (c *counters) rates(w float64) Rates {
+	pps := func(i protoClass) float64 { return float64(c.packets[i]) / w }
+	mbps := func(i protoClass) float64 { return float64(c.bytes[i]) * 8 / 1e6 / w }
+	return Rates{
+		PPS:         pps(clTotal),
+		Mbps:        mbps(clTotal),
+		FlowsPerSec: float64(c.flows) / w,
+		TCPPPS:      pps(clTCP),
+		TCPMbps:     mbps(clTCP),
+		UDPPPS:      pps(clUDP),
+		UDPMbps:     mbps(clUDP),
+		ICMPPPS:     pps(clICMP),
+		ICMPMbps:    mbps(clICMP),
+		TCPSYNPPS:   pps(clTCPSYN),
+		TCPSYNMbps:  mbps(clTCPSYN),
+		FragPPS:     pps(clFrag),
+		FragMbps:    mbps(clFrag),
+	}
+}
+
+// bucket is one second of traffic for a host, both directions. epoch is the
+// Unix second it represents; a bucket whose epoch does not match the second
+// being read is stale and counts as empty.
+type bucket struct {
+	epoch int64
+	dirs  [2]counters
+}
+
+// attackState is the lifecycle of one (host or group, direction) attack.
+// The threshold crossed at attack start is stored so the ended event stays
+// truthful even if a reload changed the thresholds mid-attack.
+type attackState struct {
 	inAttack   bool
 	metric     Metric
+	threshold  float64
 	startedAt  time.Time
 	belowSince time.Time // zero while currently above any threshold
-	lastRates  Rates
+}
+
+// hostState tracks the rolling counters and per-direction attack lifecycle
+// for one host. It is only accessed under its owning shard's lock.
+type hostState struct {
+	ring     []bucket
+	lastSeen int64 // Unix second of the most recent flow
+	attacks  [2]attackState
+}
+
+// inAnyAttack reports whether either direction is mid-attack.
+func (hs *hostState) inAnyAttack() bool {
+	return hs.attacks[dirIn].inAttack || hs.attacks[dirOut].inAttack
 }
 
 type shard struct {
@@ -52,16 +119,11 @@ type shard struct {
 	hosts map[netip.Addr]*hostState
 }
 
-// groupState tracks the attack lifecycle of one calculation:total hostgroup.
-// The threshold crossed at attack start is stored so the ended event stays
-// truthful even if a reload changed (or removed) the group mid-attack.
+// groupState tracks the per-direction attack lifecycle of one
+// calculation:total hostgroup.
 type groupState struct {
-	inAttack   bool
-	metric     Metric
-	threshold  float64
-	startedAt  time.Time
-	belowSince time.Time
-	lastRates  Rates
+	attacks   [2]attackState
+	lastRates [2]Rates
 }
 
 // Engine is the detection core. Construct with New, feed flows with Process
@@ -158,43 +220,68 @@ func (e *Engine) shardFor(addr netip.Addr) *shard {
 }
 
 // Process records a single flow. It is safe for concurrent use and is the
-// hot path: no allocation occurs for an already-tracked destination.
+// hot path: no allocation occurs for an already-tracked host.
 //
-// Only the destination matters for detection, and only destinations inside
-// the configured networks are tracked at all; everything else returns
-// immediately so unmonitored traffic costs nothing beyond the lookup.
+// A flow is recorded as incoming for its destination when the destination is
+// inside the configured networks, and additionally as outgoing for its
+// source when outgoing detection is enabled and the source is inside the
+// networks. Everything else returns immediately so unmonitored traffic costs
+// nothing beyond the prefix lookups.
 func (e *Engine) Process(f flow.Flow) {
-	dst := f.DstAddr
-	if !dst.IsValid() {
-		return
-	}
 	cfg := e.store.Get()
-	if !cfg.InNetworks(dst) {
-		return
-	}
 	rate := f.SamplingRate
 	if rate == 0 {
 		rate = 1
 	}
 	epoch := e.now().Unix()
 
-	sh := e.shardFor(dst)
+	if f.DstAddr.IsValid() && cfg.InNetworks(f.DstAddr) {
+		e.record(f.DstAddr, dirIn, f, rate, epoch)
+	}
+	if cfg.OutgoingEnabled && f.SrcAddr.IsValid() && cfg.InNetworks(f.SrcAddr) {
+		e.record(f.SrcAddr, dirOut, f, rate, epoch)
+	}
+}
+
+// record accumulates one flow into addr's bucket for the given direction.
+func (e *Engine) record(addr netip.Addr, dir int, f flow.Flow, rate uint64, epoch int64) {
+	sh := e.shardFor(addr)
 	sh.mu.Lock()
-	hs := sh.hosts[dst]
+	hs := sh.hosts[addr]
 	if hs == nil {
 		hs = &hostState{ring: make([]bucket, e.ringSize)}
-		sh.hosts[dst] = hs
+		sh.hosts[addr] = hs
 	}
 	b := &hs.ring[epoch%int64(e.ringSize)]
 	if b.epoch != epoch {
-		b.epoch = epoch
-		b.bytes = 0
-		b.packets = 0
-		b.flows = 0
+		*b = bucket{epoch: epoch}
 	}
-	b.bytes += f.Bytes * rate
-	b.packets += f.Packets * rate
-	b.flows += rate
+	c := &b.dirs[dir]
+	bytes := f.Bytes * rate
+	packets := f.Packets * rate
+	c.bytes[clTotal] += bytes
+	c.packets[clTotal] += packets
+	c.flows += rate
+	switch f.IPProto {
+	case 6: // TCP
+		c.bytes[clTCP] += bytes
+		c.packets[clTCP] += packets
+		// Pure SYN (SYN set, ACK clear): the classic flood signature.
+		if f.TCPFlags&0x12 == 0x02 {
+			c.bytes[clTCPSYN] += bytes
+			c.packets[clTCPSYN] += packets
+		}
+	case 17: // UDP
+		c.bytes[clUDP] += bytes
+		c.packets[clUDP] += packets
+	case 1, 58: // ICMP, ICMPv6
+		c.bytes[clICMP] += bytes
+		c.packets[clICMP] += packets
+	}
+	if f.Fragment {
+		c.bytes[clFrag] += bytes
+		c.packets[clFrag] += packets
+	}
 	hs.lastSeen = epoch
 	sh.mu.Unlock()
 }
@@ -227,27 +314,31 @@ func (e *Engine) Run(ctx context.Context) {
 }
 
 // windowedRates sums the window's completed seconds [now-window, now-1] for
-// host hs and returns the sampling-corrected per-second averages. The
-// current (in-progress) second is excluded so a partially filled bucket
-// never dilutes the average. ok is false when the window holds no data.
-func (e *Engine) windowedRates(hs *hostState, nowSec int64) (Rates, bool) {
-	var sumBytes, sumPackets, sumFlows uint64
-	var any bool
+// host hs and returns the sampling-corrected per-second averages for both
+// directions. The current (in-progress) second is excluded so a partially
+// filled bucket never dilutes the average. ok is false when the window holds
+// no data.
+func (e *Engine) windowedRates(hs *hostState, nowSec int64) (in, out Rates, ok bool) {
+	var cin, cout counters
 	for s := nowSec - e.windowSec; s <= nowSec-1; s++ {
 		b := &hs.ring[s%int64(e.ringSize)]
 		if b.epoch == s {
-			sumBytes += b.bytes
-			sumPackets += b.packets
-			sumFlows += b.flows
-			any = true
+			cin.add(&b.dirs[dirIn])
+			cout.add(&b.dirs[dirOut])
+			ok = true
 		}
 	}
 	w := float64(e.windowSec)
-	return Rates{
-		PPS:         float64(sumPackets) / w,
-		Mbps:        float64(sumBytes) * 8 / 1e6 / w,
-		FlowsPerSec: float64(sumFlows) / w,
-	}, any
+	return cin.rates(w), cout.rates(w), ok
+}
+
+// thresholdsFor returns the group's threshold set for a direction; nil means
+// detection is disabled for that direction.
+func thresholdsFor(g *config.Group, dir int) *config.Thresholds {
+	if dir == dirOut {
+		return g.OutThresholds
+	}
+	return &g.Thresholds
 }
 
 // evalTick evaluates every tracked host once. now is the wall clock at the
@@ -261,33 +352,41 @@ func (e *Engine) evalTick(now time.Time) {
 	nowSec := now.Unix()
 	staleBefore := nowSec - e.windowSec
 
-	// Running sums for total groups, indexed like cfg.Groups. Built fresh
-	// each tick — once per second, not on the hot path.
-	totals := make([]Rates, len(cfg.Groups))
+	// Running per-direction sums for total groups, indexed like cfg.Groups.
+	// Built fresh each tick — once per second, not on the hot path.
+	totals := make([][2]Rates, len(cfg.Groups))
 
 	var active int
 	var tracked int
 	for _, sh := range e.shards {
 		sh.mu.Lock()
 		for addr, hs := range sh.hosts {
-			rates, ok := e.windowedRates(hs, nowSec)
-			hs.lastRates = rates
+			in, out, ok := e.windowedRates(hs, nowSec)
+			rates := [2]Rates{in, out}
 
 			evictOrTrack := func() {
-				if !hs.inAttack && !ok && hs.lastSeen < staleBefore {
+				if !hs.inAnyAttack() && !ok && hs.lastSeen < staleBefore {
 					delete(sh.hosts, addr)
 				} else {
 					tracked++
 				}
 			}
 
-			// Hosts that left the monitored networks after a reload are
-			// never acted on; end a mid-attack state explicitly so
-			// mitigation withdraws the route instead of waiting for TTL.
-			if !cfg.InNetworks(addr) {
-				if hs.inAttack {
-					e.endAttack(addr, hs, rates, cfg.GroupFor(addr), now, "policy change")
+			// endBoth closes out any mid-attack state in both directions —
+			// used when policy no longer applies to the host at all.
+			endBoth := func(g *config.Group) {
+				for d := range hs.attacks {
+					if hs.attacks[d].inAttack {
+						e.endAttack(addr, hs, d, rates[d], g, now, "policy change")
+					}
 				}
+			}
+
+			// Hosts that left the monitored networks after a reload are
+			// never acted on; end mid-attack state explicitly so mitigation
+			// withdraws the route instead of waiting for TTL.
+			if !cfg.InNetworks(addr) {
+				endBoth(cfg.GroupFor(addr))
 				evictOrTrack()
 				continue
 			}
@@ -295,17 +394,14 @@ func (e *Engine) evalTick(now time.Time) {
 			gi := cfg.GroupIndexFor(addr)
 			g := &cfg.Groups[gi]
 
-			// Members of a total group only feed the group's sum — including
+			// Members of a total group only feed the group's sums — including
 			// whitelisted hosts, since group totals are informational and
 			// never ban. A host mid-attack that a reload moved into a total
-			// group has its per-host attack closed out.
+			// group has its per-host attacks closed out.
 			if g.Calc == config.CalcTotal {
-				totals[gi].PPS += rates.PPS
-				totals[gi].Mbps += rates.Mbps
-				totals[gi].FlowsPerSec += rates.FlowsPerSec
-				if hs.inAttack {
-					e.endAttack(addr, hs, rates, g, now, "policy change")
-				}
+				totals[gi][dirIn] = addRates(totals[gi][dirIn], in)
+				totals[gi][dirOut] = addRates(totals[gi][dirOut], out)
+				endBoth(g)
 				evictOrTrack()
 				continue
 			}
@@ -313,52 +409,62 @@ func (e *Engine) evalTick(now time.Time) {
 			// Whitelisted hosts are never acted on (safety rule), even when
 			// a reload whitelists one mid-attack.
 			if cfg.IsWhitelisted(addr) {
-				if hs.inAttack {
-					e.endAttack(addr, hs, rates, g, now, "policy change")
-				}
+				endBoth(g)
 				evictOrTrack()
 				continue
 			}
 
-			metric, rate, threshold, exceeded := evaluate(rates, g.Thresholds)
+			for d := range hs.attacks {
+				st := &hs.attacks[d]
+				th := thresholdsFor(g, d)
+				if th == nil {
+					// Direction disabled (e.g. outgoing block removed by a
+					// reload mid-attack).
+					if st.inAttack {
+						e.endAttack(addr, hs, d, rates[d], g, now, "policy change")
+					}
+					continue
+				}
 
-			if exceeded {
-				if !hs.inAttack {
-					hs.inAttack = true
-					hs.metric = metric
-					hs.startedAt = now
+				metric, rate, threshold, exceeded := evaluate(rates[d], *th)
+				if exceeded {
+					if !st.inAttack {
+						st.inAttack = true
+						st.metric = metric
+						st.threshold = threshold
+						st.startedAt = now
+						metrics.AttacksTotal.Inc()
+						e.log.Warn("attack detected",
+							"target", addr.String(), "group", g.Name,
+							"direction", string(dirName(d)), "metric", string(metric),
+							"rate", rate, "threshold", threshold,
+							"pps", rates[d].PPS, "mbps", rates[d].Mbps,
+							"flows_per_sec", rates[d].FlowsPerSec)
+						e.emit(Event{
+							Kind:       AttackStarted,
+							Scope:      ScopeHost,
+							Target:     addr,
+							Group:      g.Name,
+							Direction:  dirName(d),
+							BanEnabled: g.BanEnabled,
+							Metric:     metric,
+							Rate:       rate,
+							Threshold:  threshold,
+							Rates:      rates[d],
+							At:         now,
+						})
+					}
+					st.belowSince = time.Time{}
 					active++
-					metrics.AttacksTotal.Inc()
-					e.log.Warn("attack detected",
-						"target", addr.String(), "group", g.Name,
-						"metric", string(metric),
-						"rate", rate, "threshold", threshold,
-						"pps", rates.PPS, "mbps", rates.Mbps,
-						"flows_per_sec", rates.FlowsPerSec)
-					e.emit(Event{
-						Kind:       AttackStarted,
-						Scope:      ScopeHost,
-						Target:     addr,
-						Group:      g.Name,
-						BanEnabled: g.BanEnabled,
-						Metric:     metric,
-						Rate:       rate,
-						Threshold:  threshold,
-						Rates:      rates,
-						At:         now,
-					})
-				} else {
-					active++
-				}
-				hs.belowSince = time.Time{}
-			} else if hs.inAttack {
-				if hs.belowSince.IsZero() {
-					hs.belowSince = now
-				}
-				if now.Sub(hs.belowSince) >= hysteresis {
-					e.endAttack(addr, hs, rates, g, now, "below threshold")
-				} else {
-					active++ // still considered active during hysteresis
+				} else if st.inAttack {
+					if st.belowSince.IsZero() {
+						st.belowSince = now
+					}
+					if now.Sub(st.belowSince) >= hysteresis {
+						e.endAttack(addr, hs, d, rates[d], g, now, "below threshold")
+					} else {
+						active++ // still considered active during hysteresis
+					}
 				}
 			}
 
@@ -373,10 +479,11 @@ func (e *Engine) evalTick(now time.Time) {
 	metrics.TrackedHosts.Set(float64(tracked))
 }
 
-// evalGroups runs the attack lifecycle for every calculation:total group on
-// its summed rates and closes out state for groups a reload removed. It
-// returns the number of currently active group attacks.
-func (e *Engine) evalGroups(cfg *config.Config, totals []Rates, hysteresis time.Duration, now time.Time) int {
+// evalGroups runs the per-direction attack lifecycle for every
+// calculation:total group on its summed rates and closes out state for
+// groups a reload removed. It returns the number of currently active group
+// attacks.
+func (e *Engine) evalGroups(cfg *config.Config, totals [][2]Rates, hysteresis time.Duration, now time.Time) int {
 	var active int
 	current := make(map[string]bool, len(e.groups))
 	for gi := range cfg.Groups {
@@ -390,43 +497,55 @@ func (e *Engine) evalGroups(cfg *config.Config, totals []Rates, hysteresis time.
 			gs = &groupState{}
 			e.groups[g.Name] = gs
 		}
-		rates := totals[gi]
-		gs.lastRates = rates
+		gs.lastRates = totals[gi]
 
-		metric, rate, threshold, exceeded := evaluate(rates, g.Thresholds)
-		if exceeded {
-			if !gs.inAttack {
-				gs.inAttack = true
-				gs.metric = metric
-				gs.threshold = threshold
-				gs.startedAt = now
-				metrics.AttacksTotal.Inc()
-				e.log.Warn("group attack detected",
-					"group", g.Name, "metric", string(metric),
-					"rate", rate, "threshold", threshold,
-					"pps", rates.PPS, "mbps", rates.Mbps,
-					"flows_per_sec", rates.FlowsPerSec)
-				e.emit(Event{
-					Kind:      AttackStarted,
-					Scope:     ScopeGroup,
-					Group:     g.Name,
-					Metric:    metric,
-					Rate:      rate,
-					Threshold: threshold,
-					Rates:     rates,
-					At:        now,
-				})
+		for d := range gs.attacks {
+			st := &gs.attacks[d]
+			th := thresholdsFor(g, d)
+			if th == nil {
+				if st.inAttack {
+					e.endGroupAttack(g.Name, gs, d, totals[gi][d], now, "policy change")
+				}
+				continue
 			}
-			gs.belowSince = time.Time{}
-			active++
-		} else if gs.inAttack {
-			if gs.belowSince.IsZero() {
-				gs.belowSince = now
-			}
-			if now.Sub(gs.belowSince) >= hysteresis {
-				e.endGroupAttack(g.Name, gs, rates, now, "below threshold")
-			} else {
+
+			metric, rate, threshold, exceeded := evaluate(totals[gi][d], *th)
+			if exceeded {
+				if !st.inAttack {
+					st.inAttack = true
+					st.metric = metric
+					st.threshold = threshold
+					st.startedAt = now
+					metrics.AttacksTotal.Inc()
+					e.log.Warn("group attack detected",
+						"group", g.Name, "direction", string(dirName(d)),
+						"metric", string(metric),
+						"rate", rate, "threshold", threshold,
+						"pps", totals[gi][d].PPS, "mbps", totals[gi][d].Mbps,
+						"flows_per_sec", totals[gi][d].FlowsPerSec)
+					e.emit(Event{
+						Kind:      AttackStarted,
+						Scope:     ScopeGroup,
+						Group:     g.Name,
+						Direction: dirName(d),
+						Metric:    metric,
+						Rate:      rate,
+						Threshold: threshold,
+						Rates:     totals[gi][d],
+						At:        now,
+					})
+				}
+				st.belowSince = time.Time{}
 				active++
+			} else if st.inAttack {
+				if st.belowSince.IsZero() {
+					st.belowSince = now
+				}
+				if now.Sub(st.belowSince) >= hysteresis {
+					e.endGroupAttack(g.Name, gs, d, totals[gi][d], now, "below threshold")
+				} else {
+					active++
+				}
 			}
 		}
 	}
@@ -437,98 +556,136 @@ func (e *Engine) evalGroups(cfg *config.Config, totals []Rates, hysteresis time.
 		if current[name] {
 			continue
 		}
-		if gs.inAttack {
-			e.endGroupAttack(name, gs, gs.lastRates, now, "policy change")
+		for d := range gs.attacks {
+			if gs.attacks[d].inAttack {
+				e.endGroupAttack(name, gs, d, gs.lastRates[d], now, "policy change")
+			}
 		}
 		delete(e.groups, name)
 	}
 	return active
 }
 
-// endGroupAttack clears one total group's attack state and emits AttackEnded.
-func (e *Engine) endGroupAttack(name string, gs *groupState, rates Rates, now time.Time, reason string) {
-	gs.inAttack = false
-	gs.belowSince = time.Time{}
-	e.log.Info("group attack ended",
-		"group", name, "metric", string(gs.metric),
-		"reason", reason, "duration", now.Sub(gs.startedAt).String(),
-		"pps", rates.PPS, "mbps", rates.Mbps, "flows_per_sec", rates.FlowsPerSec)
-	e.emit(Event{
-		Kind:      AttackEnded,
-		Scope:     ScopeGroup,
-		Group:     name,
-		Metric:    gs.metric,
-		Rate:      rateFor(rates, gs.metric),
-		Threshold: gs.threshold,
-		Rates:     rates,
-		At:        now,
-		StartedAt: gs.startedAt,
-	})
-}
-
-// endAttack clears the attack state of one host and emits AttackEnded
-// carrying the last measurement, the original trigger metric, and the
-// owning group's configured threshold. Callers hold the owning shard's lock.
-func (e *Engine) endAttack(addr netip.Addr, hs *hostState, rates Rates, g *config.Group, now time.Time, reason string) {
-	hs.inAttack = false
-	hs.belowSince = time.Time{}
+// endAttack clears the attack state of one (host, direction) and emits
+// AttackEnded carrying the last measurement, the original trigger metric and
+// the threshold recorded at attack start. Callers hold the owning shard's
+// lock.
+func (e *Engine) endAttack(addr netip.Addr, hs *hostState, dir int, rates Rates, g *config.Group, now time.Time, reason string) {
+	st := &hs.attacks[dir]
+	st.inAttack = false
+	st.belowSince = time.Time{}
 	e.log.Info("attack ended",
-		"target", addr.String(), "group", g.Name, "metric", string(hs.metric),
-		"reason", reason, "duration", now.Sub(hs.startedAt).String(),
+		"target", addr.String(), "group", g.Name,
+		"direction", string(dirName(dir)), "metric", string(st.metric),
+		"reason", reason, "duration", now.Sub(st.startedAt).String(),
 		"pps", rates.PPS, "mbps", rates.Mbps, "flows_per_sec", rates.FlowsPerSec)
 	e.emit(Event{
 		Kind:       AttackEnded,
 		Scope:      ScopeHost,
 		Target:     addr,
 		Group:      g.Name,
+		Direction:  dirName(dir),
 		BanEnabled: g.BanEnabled,
-		Metric:     hs.metric,
-		Rate:       rateFor(rates, hs.metric),
-		Threshold:  thresholdFor(g.Thresholds, hs.metric),
+		Metric:     st.metric,
+		Rate:       rateFor(rates, st.metric),
+		Threshold:  st.threshold,
 		Rates:      rates,
 		At:         now,
-		StartedAt:  hs.startedAt,
+		StartedAt:  st.startedAt,
 	})
+}
+
+// endGroupAttack clears one (total group, direction) attack state and emits
+// AttackEnded.
+func (e *Engine) endGroupAttack(name string, gs *groupState, dir int, rates Rates, now time.Time, reason string) {
+	st := &gs.attacks[dir]
+	st.inAttack = false
+	st.belowSince = time.Time{}
+	e.log.Info("group attack ended",
+		"group", name, "direction", string(dirName(dir)),
+		"metric", string(st.metric), "reason", reason,
+		"duration", now.Sub(st.startedAt).String(),
+		"pps", rates.PPS, "mbps", rates.Mbps, "flows_per_sec", rates.FlowsPerSec)
+	e.emit(Event{
+		Kind:      AttackEnded,
+		Scope:     ScopeGroup,
+		Group:     name,
+		Direction: dirName(dir),
+		Metric:    st.metric,
+		Rate:      rateFor(rates, st.metric),
+		Threshold: st.threshold,
+		Rates:     rates,
+		At:        now,
+		StartedAt: st.startedAt,
+	})
+}
+
+// metricTable defines the evaluation order: total metrics first (matching
+// the original pps → mbps → flows_per_sec order), then per-protocol pairs.
+// A zero threshold disables its metric.
+var metricTable = []struct {
+	metric Metric
+	rate   func(*Rates) float64
+	limit  func(*config.Thresholds) uint64
+}{
+	{MetricPPS, func(r *Rates) float64 { return r.PPS }, func(t *config.Thresholds) uint64 { return t.PPS }},
+	{MetricMbps, func(r *Rates) float64 { return r.Mbps }, func(t *config.Thresholds) uint64 { return t.Mbps }},
+	{MetricFPS, func(r *Rates) float64 { return r.FlowsPerSec }, func(t *config.Thresholds) uint64 { return t.FlowsPerSec }},
+	{MetricTCPPPS, func(r *Rates) float64 { return r.TCPPPS }, func(t *config.Thresholds) uint64 { return t.TCPPPS }},
+	{MetricTCPMbps, func(r *Rates) float64 { return r.TCPMbps }, func(t *config.Thresholds) uint64 { return t.TCPMbps }},
+	{MetricUDPPPS, func(r *Rates) float64 { return r.UDPPPS }, func(t *config.Thresholds) uint64 { return t.UDPPPS }},
+	{MetricUDPMbps, func(r *Rates) float64 { return r.UDPMbps }, func(t *config.Thresholds) uint64 { return t.UDPMbps }},
+	{MetricICMPPPS, func(r *Rates) float64 { return r.ICMPPPS }, func(t *config.Thresholds) uint64 { return t.ICMPPPS }},
+	{MetricICMPMbps, func(r *Rates) float64 { return r.ICMPMbps }, func(t *config.Thresholds) uint64 { return t.ICMPMbps }},
+	{MetricTCPSYNPPS, func(r *Rates) float64 { return r.TCPSYNPPS }, func(t *config.Thresholds) uint64 { return t.TCPSYNPPS }},
+	{MetricTCPSYNMbps, func(r *Rates) float64 { return r.TCPSYNMbps }, func(t *config.Thresholds) uint64 { return t.TCPSYNMbps }},
+	{MetricFragPPS, func(r *Rates) float64 { return r.FragPPS }, func(t *config.Thresholds) uint64 { return t.FragPPS }},
+	{MetricFragMbps, func(r *Rates) float64 { return r.FragMbps }, func(t *config.Thresholds) uint64 { return t.FragMbps }},
+}
+
+// evaluate compares rates against thresholds and reports the first metric
+// crossed in metricTable order. A zero threshold is disabled.
+func evaluate(r Rates, th config.Thresholds) (Metric, float64, float64, bool) {
+	for i := range metricTable {
+		m := &metricTable[i]
+		lim := m.limit(&th)
+		if lim == 0 {
+			continue
+		}
+		if rate := m.rate(&r); rate > float64(lim) {
+			return m.metric, rate, float64(lim), true
+		}
+	}
+	return "", 0, 0, false
 }
 
 // rateFor returns the component of r selected by m.
 func rateFor(r Rates, m Metric) float64 {
-	switch m {
-	case MetricMbps:
-		return r.Mbps
-	case MetricFPS:
-		return r.FlowsPerSec
-	default:
-		return r.PPS
+	for i := range metricTable {
+		if metricTable[i].metric == m {
+			return metricTable[i].rate(&r)
+		}
 	}
+	return r.PPS
 }
 
-// thresholdFor returns the configured threshold selected by m.
-func thresholdFor(th config.Thresholds, m Metric) float64 {
-	switch m {
-	case MetricMbps:
-		return float64(th.Mbps)
-	case MetricFPS:
-		return float64(th.FlowsPerSec)
-	default:
-		return float64(th.PPS)
+// addRates returns the field-wise sum of two measurements.
+func addRates(a, b Rates) Rates {
+	return Rates{
+		PPS:         a.PPS + b.PPS,
+		Mbps:        a.Mbps + b.Mbps,
+		FlowsPerSec: a.FlowsPerSec + b.FlowsPerSec,
+		TCPPPS:      a.TCPPPS + b.TCPPPS,
+		TCPMbps:     a.TCPMbps + b.TCPMbps,
+		UDPPPS:      a.UDPPPS + b.UDPPPS,
+		UDPMbps:     a.UDPMbps + b.UDPMbps,
+		ICMPPPS:     a.ICMPPPS + b.ICMPPPS,
+		ICMPMbps:    a.ICMPMbps + b.ICMPMbps,
+		TCPSYNPPS:   a.TCPSYNPPS + b.TCPSYNPPS,
+		TCPSYNMbps:  a.TCPSYNMbps + b.TCPSYNMbps,
+		FragPPS:     a.FragPPS + b.FragPPS,
+		FragMbps:    a.FragMbps + b.FragMbps,
 	}
-}
-
-// evaluate compares rates against thresholds and reports the first metric
-// crossed (pps, then mbps, then flows_per_sec). A zero threshold is treated
-// as disabled, though validation forbids that in practice.
-func evaluate(r Rates, th config.Thresholds) (Metric, float64, float64, bool) {
-	if th.PPS > 0 && r.PPS > float64(th.PPS) {
-		return MetricPPS, r.PPS, float64(th.PPS), true
-	}
-	if th.Mbps > 0 && r.Mbps > float64(th.Mbps) {
-		return MetricMbps, r.Mbps, float64(th.Mbps), true
-	}
-	if th.FlowsPerSec > 0 && r.FlowsPerSec > float64(th.FlowsPerSec) {
-		return MetricFPS, r.FlowsPerSec, float64(th.FlowsPerSec), true
-	}
-	return "", 0, 0, false
 }
 
 // emit delivers an event without blocking the evaluation loop. If the
@@ -544,13 +701,18 @@ func (e *Engine) emit(ev Event) {
 	}
 }
 
-// HostStat is a read-only snapshot of one tracked host for the API.
+// HostStat is a read-only snapshot of one tracked host for the API. Rates
+// are incoming; OutRates are only nonzero when outgoing detection is on.
+// Metric/Direction describe the active attack (incoming reported first when
+// both directions are under attack).
 type HostStat struct {
-	Target   netip.Addr `json:"target"`
-	Group    string     `json:"group"`
-	Rates    Rates      `json:"rates"`
-	InAttack bool       `json:"in_attack"`
-	Metric   Metric     `json:"metric,omitempty"`
+	Target    netip.Addr `json:"target"`
+	Group     string     `json:"group"`
+	Rates     Rates      `json:"rates"`
+	OutRates  Rates      `json:"rates_out"`
+	InAttack  bool       `json:"in_attack"`
+	Metric    Metric     `json:"metric,omitempty"`
+	Direction Direction  `json:"direction,omitempty"`
 }
 
 // Snapshot returns the current windowed rates for every tracked host. It is
@@ -562,15 +724,20 @@ func (e *Engine) Snapshot() []HostStat {
 	for _, sh := range e.shards {
 		sh.mu.Lock()
 		for addr, hs := range sh.hosts {
-			rates, _ := e.windowedRates(hs, nowSec)
+			in, outRates, _ := e.windowedRates(hs, nowSec)
 			st := HostStat{
 				Target:   addr,
 				Group:    cfg.GroupFor(addr).Name,
-				Rates:    rates,
-				InAttack: hs.inAttack,
+				Rates:    in,
+				OutRates: outRates,
+				InAttack: hs.inAnyAttack(),
 			}
-			if hs.inAttack {
-				st.Metric = hs.metric
+			for d := range hs.attacks {
+				if hs.attacks[d].inAttack {
+					st.Metric = hs.attacks[d].metric
+					st.Direction = dirName(d)
+					break
+				}
 			}
 			out = append(out, st)
 		}

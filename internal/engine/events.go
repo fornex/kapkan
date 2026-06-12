@@ -10,18 +10,66 @@ import (
 type Metric string
 
 // Threshold metrics evaluated once per second for every destination host.
+// The per-protocol metrics mirror the per-protocol threshold keys.
 const (
-	MetricPPS  Metric = "pps"
-	MetricMbps Metric = "mbps"
-	MetricFPS  Metric = "flows_per_sec"
+	MetricPPS        Metric = "pps"
+	MetricMbps       Metric = "mbps"
+	MetricFPS        Metric = "flows_per_sec"
+	MetricTCPPPS     Metric = "tcp_pps"
+	MetricTCPMbps    Metric = "tcp_mbps"
+	MetricUDPPPS     Metric = "udp_pps"
+	MetricUDPMbps    Metric = "udp_mbps"
+	MetricICMPPPS    Metric = "icmp_pps"
+	MetricICMPMbps   Metric = "icmp_mbps"
+	MetricTCPSYNPPS  Metric = "tcp_syn_pps"
+	MetricTCPSYNMbps Metric = "tcp_syn_mbps"
+	MetricFragPPS    Metric = "frag_pps"
+	MetricFragMbps   Metric = "frag_mbps"
 )
 
+// Direction distinguishes traffic toward a protected host from traffic the
+// host originates. Outgoing detection catches compromised machines inside
+// the protected networks.
+type Direction string
+
+// Traffic directions.
+const (
+	DirIncoming Direction = "incoming"
+	DirOutgoing Direction = "outgoing"
+)
+
+// Internal direction indexes (bucket and state arrays).
+const (
+	dirIn  = 0
+	dirOut = 1
+)
+
+// dirName maps an internal direction index to its public name.
+func dirName(d int) Direction {
+	if d == dirOut {
+		return DirOutgoing
+	}
+	return DirIncoming
+}
+
 // Rates is one sampling-corrected per-second measurement for a single
-// destination host, averaged over the engine's sliding window.
+// destination host (one direction), averaged over the engine's sliding
+// window. Per-protocol components omit zeros in JSON.
 type Rates struct {
 	PPS         float64 `json:"pps"`
 	Mbps        float64 `json:"mbps"`
 	FlowsPerSec float64 `json:"flows_per_sec"`
+
+	TCPPPS     float64 `json:"tcp_pps,omitempty"`
+	TCPMbps    float64 `json:"tcp_mbps,omitempty"`
+	UDPPPS     float64 `json:"udp_pps,omitempty"`
+	UDPMbps    float64 `json:"udp_mbps,omitempty"`
+	ICMPPPS    float64 `json:"icmp_pps,omitempty"`
+	ICMPMbps   float64 `json:"icmp_mbps,omitempty"`
+	TCPSYNPPS  float64 `json:"tcp_syn_pps,omitempty"`
+	TCPSYNMbps float64 `json:"tcp_syn_mbps,omitempty"`
+	FragPPS    float64 `json:"frag_pps,omitempty"`
+	FragMbps   float64 `json:"frag_mbps,omitempty"`
 }
 
 // Scope distinguishes per-host attacks from hostgroup-total attacks.
@@ -65,6 +113,9 @@ type Event struct {
 	// hostgroup's total traffic (Group). Target is invalid for ScopeGroup.
 	Scope  Scope      `json:"scope"`
 	Target netip.Addr `json:"target"`
+	// Direction is incoming for attacks ON the target, outgoing when the
+	// target itself originates the attack (compromised host).
+	Direction Direction `json:"direction"`
 	// Group is the owning hostgroup's name. It is always set: the implicit
 	// "global" group when no configured hostgroup matched the target.
 	Group string `json:"group"`
