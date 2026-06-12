@@ -27,6 +27,16 @@ const (
 	MetricFragMbps   Metric = "frag_mbps"
 )
 
+// Metrics lists every defined threshold metric in evaluation order. Used by
+// consumers that need the complete set (schema checks, future UI/API).
+func Metrics() []Metric {
+	out := make([]Metric, len(metricTable))
+	for i := range metricTable {
+		out[i] = metricTable[i].metric
+	}
+	return out
+}
+
 // Direction distinguishes traffic toward a protected host from traffic the
 // host originates. Outgoing detection catches compromised machines inside
 // the protected networks.

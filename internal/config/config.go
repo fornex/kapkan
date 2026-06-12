@@ -5,8 +5,12 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
+	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,6 +133,10 @@ const (
 // top-level thresholds to hosts not matched by any configured hostgroup.
 const GlobalGroup = "global"
 
+// groupNameRe restricts hostgroup names to a log-, JSON- and header-safe
+// charset.
+var groupNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
 // Hostgroup groups prefixes under a shared threshold set and mitigation
 // policy. Fields mirror the YAML shape; the resolved form lives in
 // Config.Groups.
@@ -208,7 +216,47 @@ type Neighbor struct {
 type Notify struct {
 	Telegram Telegram `yaml:"telegram"`
 	Webhook  Webhook  `yaml:"webhook"`
+	Slack    Slack    `yaml:"slack"`
+	Email    Email    `yaml:"email"`
+	Exec     Exec     `yaml:"exec"`
 }
+
+// Slack posts notifications to a Slack incoming webhook.
+type Slack struct {
+	WebhookURL string `yaml:"webhook_url"`
+}
+
+// Email sends notifications over SMTP. Credentials are read from the named
+// environment variables, never from the config file. With no credentials
+// the message is sent unauthenticated (e.g. a local relay). STARTTLS is
+// used whenever the server offers it.
+type Email struct {
+	// SMTPHost is "host:port" of the SMTP server; empty disables email.
+	SMTPHost    string   `yaml:"smtp_host"`
+	From        string   `yaml:"from"`
+	To          []string `yaml:"to"`
+	UsernameEnv string   `yaml:"username_env"`
+	PasswordEnv string   `yaml:"password_env"`
+	// RequireTLS refuses to send unless the server offers STARTTLS,
+	// protecting against active downgrade. It is implied whenever
+	// credentials are configured; without it, plaintext delivery to a
+	// non-loopback host is loudly logged.
+	RequireTLS bool `yaml:"require_tls"`
+}
+
+// Exec runs an operator-provided hook on every attack event. The payload
+// JSON (docs/callback-schema.json, versioned via its schema_version field)
+// is written to the hook's stdin; the event name is passed as argv[1]. The
+// command runs directly, without a shell.
+type Exec struct {
+	// Command is the absolute path of the executable; empty disables.
+	Command string `yaml:"command"`
+	// TimeoutSeconds bounds one invocation (default 10).
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+}
+
+// Timeout returns the exec hook timeout as a duration.
+func (e Exec) Timeout() time.Duration { return time.Duration(e.TimeoutSeconds) * time.Second }
 
 // Telegram notification settings. The bot token is read from the
 // environment variable named in TokenEnv, never from the config file.
@@ -329,6 +377,10 @@ func (c *Config) validate() error {
 		return err
 	}
 
+	if err := c.validateNotify(); err != nil {
+		return err
+	}
+
 	if c.API.Listen == "" {
 		return fmt.Errorf("api.listen must be set")
 	}
@@ -358,6 +410,13 @@ func (c *Config) validateHostgroups() error {
 	for i, hg := range c.Hostgroups {
 		if hg.Name == "" {
 			return fmt.Errorf("hostgroups[%d]: name is required", i)
+		}
+		// Group names travel into logs, JSON payloads, chat messages and
+		// email headers; a restricted charset closes injection vectors
+		// (CRLF into RFC 5322 headers, mrkdwn/HTML metacharacters) at the
+		// single central point.
+		if !groupNameRe.MatchString(hg.Name) {
+			return fmt.Errorf("hostgroups[%d]: name %q must match %s", i, hg.Name, groupNameRe)
 		}
 		if hg.Name == GlobalGroup {
 			return fmt.Errorf("hostgroups[%d]: name %q is reserved for the implicit fallback group", i, GlobalGroup)
@@ -537,6 +596,67 @@ func (c *Config) validateBGP() error {
 	return nil
 }
 
+// validateNotify checks the optional notification channels and applies the
+// exec hook's default timeout.
+func (c *Config) validateNotify() error {
+	n := &c.Notify
+	if n.Slack.WebhookURL != "" {
+		u, err := url.ParseRequestURI(n.Slack.WebhookURL)
+		if err != nil {
+			return fmt.Errorf("notify.slack.webhook_url: invalid URL %q", n.Slack.WebhookURL)
+		}
+		// Slack webhooks are https-only and the path is a bearer secret;
+		// plain http would leak it. The loopback exception exists for
+		// local relays and tests.
+		if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {
+			return fmt.Errorf("notify.slack.webhook_url must be https (or http to a loopback address), got %q", n.Slack.WebhookURL)
+		}
+	}
+
+	if n.Email.SMTPHost != "" {
+		host, portStr, err := net.SplitHostPort(n.Email.SMTPHost)
+		if err != nil || host == "" {
+			return fmt.Errorf("notify.email.smtp_host must be host:port, got %q", n.Email.SMTPHost)
+		}
+		if port, err := strconv.Atoi(portStr); err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("notify.email.smtp_host: bad port %q", portStr)
+		}
+		if n.Email.From == "" {
+			return fmt.Errorf("notify.email.from is required when smtp_host is set")
+		}
+		if len(n.Email.To) == 0 {
+			return fmt.Errorf("notify.email.to needs at least one recipient when smtp_host is set")
+		}
+		for i, rcpt := range n.Email.To {
+			if rcpt == "" {
+				return fmt.Errorf("notify.email.to[%d] is empty", i)
+			}
+		}
+	}
+
+	if n.Exec.Command != "" {
+		if !filepath.IsAbs(n.Exec.Command) {
+			return fmt.Errorf("notify.exec.command must be an absolute path, got %q", n.Exec.Command)
+		}
+		// Fail at config load, not at the first attack: a typo'd hook
+		// path discovered mid-incident means silently lost notifications.
+		fi, err := os.Stat(n.Exec.Command)
+		if err != nil {
+			return fmt.Errorf("notify.exec.command: %w", err)
+		}
+		if fi.IsDir() || fi.Mode()&0o111 == 0 {
+			return fmt.Errorf("notify.exec.command %q is not an executable file", n.Exec.Command)
+		}
+	}
+	if n.Exec.TimeoutSeconds == 0 {
+		n.Exec.TimeoutSeconds = 10
+	}
+	if n.Exec.TimeoutSeconds < 1 || n.Exec.TimeoutSeconds > 300 {
+		return fmt.Errorf("notify.exec.timeout_seconds must be in 1..300, got %d", n.Exec.TimeoutSeconds)
+	}
+	return nil
+}
+
 // ParseCommunity parses an "ASN:value" BGP community string into its uint32
 // wire representation.
 func ParseCommunity(s string) (uint32, error) {
@@ -573,6 +693,15 @@ func (c *Config) IsWhitelisted(addr netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// isLoopbackHost reports whether host names the local machine.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.IsLoopback()
 }
 
 // normalizeListen turns ":6343" into a parseable "0.0.0.0:6343".

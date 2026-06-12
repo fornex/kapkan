@@ -596,3 +596,65 @@ func TestBufferFlowsUpperBound(t *testing.T) {
 		t.Errorf("oversized buffer_flows: error = %v, want bound rejection", err)
 	}
 }
+
+func TestNotifyChannelValidation(t *testing.T) {
+	add := func(block string) string { return strings.Replace(validYAML, "notify:\n", "notify:\n"+block, 1) }
+
+	// Valid: all three channels configured (/bin/sh exists and is executable).
+	good := add("  slack:\n    webhook_url: \"https://hooks.slack.com/services/T0/B0/x\"\n" +
+		"  email:\n    smtp_host: \"mail.example.com:587\"\n    from: \"kapkan@example.com\"\n    to: [\"ops@example.com\"]\n" +
+		"  exec:\n    command: \"/bin/sh\"\n")
+	cfg, err := Parse([]byte(good))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.Notify.Exec.TimeoutSeconds != 10 {
+		t.Errorf("exec timeout default = %d, want 10", cfg.Notify.Exec.TimeoutSeconds)
+	}
+
+	// http to loopback is allowed (local relays, tests).
+	if _, err := Parse([]byte(add("  slack:\n    webhook_url: \"http://127.0.0.1:9000/hook\"\n"))); err != nil {
+		t.Errorf("loopback http slack URL rejected: %v", err)
+	}
+
+	nonExec := filepath.Join(t.TempDir(), "data.txt")
+	if err := os.WriteFile(nonExec, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name, block, wantErr string
+	}{
+		{"bad slack url", "  slack:\n    webhook_url: \"not a url\"\n", "slack.webhook_url"},
+		{"plain http slack url", "  slack:\n    webhook_url: \"http://hooks.example.com/x\"\n", "must be https"},
+		{"email without port", "  email:\n    smtp_host: \"mail.example.com\"\n    from: \"a@b\"\n    to: [\"c@d\"]\n", "smtp_host"},
+		{"email without from", "  email:\n    smtp_host: \"mail.example.com:587\"\n    to: [\"c@d\"]\n", "email.from"},
+		{"email without recipients", "  email:\n    smtp_host: \"mail.example.com:587\"\n    from: \"a@b\"\n", "email.to"},
+		{"relative exec path", "  exec:\n    command: \"hook.sh\"\n", "absolute path"},
+		{"missing exec file", "  exec:\n    command: \"/nonexistent/kapkan-hook\"\n", "exec.command"},
+		{"non-executable exec file", "  exec:\n    command: \"" + nonExec + "\"\n", "not an executable"},
+		{"exec timeout out of range", "  exec:\n    command: \"/bin/sh\"\n    timeout_seconds: 9000\n", "timeout_seconds"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(add(tt.block)))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Parse() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestHostgroupNameCharset(t *testing.T) {
+	for _, bad := range []string{"web group", "web\r\nBcc: x@y", "web<b>", "тест", strings.Repeat("a", 65)} {
+		yaml := strings.Replace(hostgroupsYAML, "name: web\n", "name: \""+strings.ReplaceAll(bad, "\r\n", `\r\n`)+"\"\n", 1)
+		if _, err := Parse([]byte(yaml)); err == nil || !strings.Contains(err.Error(), "must match") {
+			t.Errorf("name %q: error = %v, want charset rejection", bad, err)
+		}
+	}
+	// The allowed charset keeps realistic names working.
+	yaml := strings.Replace(hostgroupsYAML, "name: web\n", "name: \"Web_pool.v2-east\"\n", 1)
+	if _, err := Parse([]byte(yaml)); err != nil {
+		t.Errorf("valid name rejected: %v", err)
+	}
+}
