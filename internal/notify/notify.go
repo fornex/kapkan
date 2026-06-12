@@ -6,6 +6,7 @@ package notify
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -21,30 +22,53 @@ import (
 	"github.com/kapkan-io/kapkan/internal/mitigate"
 )
 
+// maxConcurrentPerChannel bounds simultaneous deliveries per channel. A
+// carpet-bomb attack emits one event per attacked host; without a cap that
+// becomes an unbounded fork/connection storm on the detection host at the
+// exact moment it is busiest.
+const maxConcurrentPerChannel = 16
+
 // Notifier sends notifications for attack events. The zero value is not
 // usable; construct with New.
 type Notifier struct {
 	store  *config.Store
 	log    *slog.Logger
 	client *http.Client
+	// slots is the per-channel delivery semaphore (see launch).
+	slots map[string]chan struct{}
 	// tgAPIBase overrides the Telegram API base URL (tests).
 	tgAPIBase string
+	// smtpTLS overrides the STARTTLS client configuration (tests).
+	smtpTLS *tls.Config
 }
 
 // New creates a Notifier reading channel configuration from store.
 func New(store *config.Store, log *slog.Logger) *Notifier {
+	slots := make(map[string]chan struct{})
+	for _, ch := range []string{"telegram", "webhook", "slack", "email", "exec"} {
+		slots[ch] = make(chan struct{}, maxConcurrentPerChannel)
+	}
 	return &Notifier{
 		store:     store,
 		log:       log.With("component", "notify"),
 		client:    &http.Client{Timeout: 10 * time.Second},
+		slots:     slots,
 		tgAPIBase: "https://api.telegram.org",
 	}
 }
 
+// SchemaVersion identifies the payload shape for webhook and exec-hook
+// consumers. Bump it on any breaking change and update
+// docs/callback-schema.json accordingly.
+const SchemaVersion = 1
+
 // Payload is the structured notification body. It is the exact shape POSTed
-// to the generic webhook and the basis for the Telegram message text.
+// to the generic webhook and piped to the exec hook's stdin, documented in
+// docs/callback-schema.json, and the basis for the chat message texts.
 type Payload struct {
-	Event string `json:"event"` // "attack_started" | "attack_ended"
+	// SchemaVersion is always set; consumers should check it.
+	SchemaVersion int    `json:"schema_version"`
+	Event         string `json:"event"` // "attack_started" | "attack_ended"
 	// Scope is "host" or "group". Target is empty for group-scoped events;
 	// Group names the hostgroup whose total traffic is under attack.
 	Scope  string `json:"scope"`
@@ -80,18 +104,19 @@ func (n *Notifier) NotifyAttackEnded(ctx context.Context, ev engine.Event, ban *
 
 func (n *Notifier) buildPayload(event string, ev engine.Event, ban *mitigate.Ban) Payload {
 	p := Payload{
-		Event:       event,
-		Scope:       string(ev.Scope),
-		Group:       ev.Group,
-		Direction:   string(ev.Direction),
-		Metric:      string(ev.Metric),
-		Rate:        ev.Rate,
-		Threshold:   ev.Threshold,
-		PPS:         ev.Rates.PPS,
-		Mbps:        ev.Rates.Mbps,
-		FlowsPerSec: ev.Rates.FlowsPerSec,
-		At:          ev.At,
-		Sample:      ev.Sample,
+		SchemaVersion: SchemaVersion,
+		Event:         event,
+		Scope:         string(ev.Scope),
+		Group:         ev.Group,
+		Direction:     string(ev.Direction),
+		Metric:        string(ev.Metric),
+		Rate:          ev.Rate,
+		Threshold:     ev.Threshold,
+		PPS:           ev.Rates.PPS,
+		Mbps:          ev.Rates.Mbps,
+		FlowsPerSec:   ev.Rates.FlowsPerSec,
+		At:            ev.At,
+		Sample:        ev.Sample,
 	}
 	if ev.Target.IsValid() {
 		p.Target = ev.Target.String()
@@ -107,13 +132,43 @@ func (n *Notifier) buildPayload(event string, ev engine.Event, ban *mitigate.Ban
 }
 
 // dispatch sends the payload to every configured channel concurrently.
+// Deliveries are detached from the caller's context: graceful shutdown must
+// not abort a half-sent alert (every channel bounds itself with its own
+// timeout instead).
 func (n *Notifier) dispatch(ctx context.Context, p Payload) {
 	cfg := n.store.Get()
+	ctx = context.WithoutCancel(ctx)
 	if tok := telegramToken(cfg); tok != "" && cfg.Notify.Telegram.ChatID != "" {
-		go n.sendTelegram(ctx, cfg, tok, p)
+		n.launch("telegram", func() { n.sendTelegram(ctx, cfg, tok, p) })
 	}
 	if cfg.Notify.Webhook.URL != "" {
-		go n.sendWebhook(ctx, cfg.Notify.Webhook.URL, p)
+		n.launch("webhook", func() { n.sendWebhook(ctx, cfg.Notify.Webhook.URL, p) })
+	}
+	if cfg.Notify.Slack.WebhookURL != "" {
+		n.launch("slack", func() { n.sendSlack(ctx, cfg.Notify.Slack.WebhookURL, p) })
+	}
+	if cfg.Notify.Email.SMTPHost != "" {
+		n.launch("email", func() { n.sendEmail(cfg.Notify.Email, p) })
+	}
+	if cfg.Notify.Exec.Command != "" {
+		n.launch("exec", func() { n.runExec(ctx, cfg.Notify.Exec, p) })
+	}
+}
+
+// launch runs deliver on one of the channel's bounded worker slots. When
+// the channel is saturated the notification is dropped and counted:
+// notification backpressure must never reach detection, and an attack storm
+// must not pile up unbounded goroutines, sockets or hook processes.
+func (n *Notifier) launch(channel string, deliver func()) {
+	select {
+	case n.slots[channel] <- struct{}{}:
+		go func() {
+			defer func() { <-n.slots[channel] }()
+			deliver()
+		}()
+	default:
+		n.log.Warn("notification dropped: delivery slots saturated", "channel", channel)
+		metrics.NotificationsTotal.WithLabelValues(channel, "dropped").Inc()
 	}
 }
 

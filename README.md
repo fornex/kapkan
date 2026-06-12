@@ -69,7 +69,10 @@ The full schema:
 | `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | BGP identity, blackhole next-hops (v4/v6) and RTBH community (`ASN:value`). `router_id` must be IPv4. |
 | `bgp.neighbors[]` | eBGP peers: `address`, `remote_asn` (and optional `port` for testing). |
 | `notify.telegram.token_env` / `chat_id` | Telegram bot: the token is read from the named **environment variable**, never the file. |
-| `notify.webhook.url` | Optional generic JSON POST target for attack start/end. |
+| `notify.webhook.url` | Optional generic JSON POST target for attack start/end. Payload documented in [`docs/callback-schema.json`](docs/callback-schema.json) (versioned via `schema_version`). |
+| `notify.slack.webhook_url` | Optional Slack incoming webhook. |
+| `notify.email.smtp_host` / `from` / `to[]` / `username_env` / `password_env` / `require_tls` | Optional SMTP notifications. Credentials come from environment variables. STARTTLS is used when the server offers it and **required** when credentials are configured or `require_tls` is set; plaintext delivery to a non-loopback host is loudly logged. |
+| `notify.exec.command` / `timeout_seconds` | Optional hook executed on every attack event: payload JSON on stdin, event name as `argv[1]`, no shell. The command must exist and be executable at config load. On timeout (default 10s) the hook's whole process group is killed. The hook receives a **minimal environment** (PATH/HOME/TZ/LANG/USER/TMPDIR) — the daemon's secrets are not inherited. Same schema as the webhook. |
 | `api.listen` | REST API + metrics listen address. |
 
 Sampling: every rate is multiplied by the exporter's sampling rate (from the flow packet

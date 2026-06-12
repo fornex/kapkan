@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kapkan.io/schemas/callback/v1.json",
+  "title": "Kapkan notification payload (schema_version 1)",
+  "description": "The JSON object POSTed to notify.webhook.url and piped to notify.exec.command's stdin on every attack lifecycle event. The exec hook also receives the event name as argv[1]. Fields marked optional are omitted when empty. Consumers MUST check schema_version and SHOULD ignore unknown fields for forward compatibility.",
+  "type": "object",
+  "required": ["schema_version", "event", "scope", "pps", "mbps", "flows_per_sec", "dry_run", "at"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Payload shape version. Bumped on breaking changes."
+    },
+    "event": {
+      "type": "string",
+      "enum": ["attack_started", "attack_ended"]
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["host", "group"],
+      "description": "host: a single address is under attack (target set). group: a calculation:total hostgroup's summed traffic (group set, target absent)."
+    },
+    "target": {
+      "type": "string",
+      "description": "Attacked (or, for outgoing, attacking) host address. Absent for group-scoped events."
+    },
+    "group": {
+      "type": "string",
+      "description": "Owning hostgroup name; \"global\" for the implicit fallback group."
+    },
+    "direction": {
+      "type": "string",
+      "enum": ["incoming", "outgoing"],
+      "description": "outgoing means the target originates the attack (likely compromised)."
+    },
+    "metric": {
+      "type": "string",
+      "enum": ["pps", "mbps", "flows_per_sec", "tcp_pps", "tcp_mbps", "udp_pps", "udp_mbps", "icmp_pps", "icmp_mbps", "tcp_syn_pps", "tcp_syn_mbps", "frag_pps", "frag_mbps"],
+      "description": "The threshold that triggered the detection."
+    },
+    "rate": {
+      "type": "number",
+      "description": "Observed value of the triggering metric (sampling-corrected)."
+    },
+    "threshold": {
+      "type": "number",
+      "description": "Configured limit of the triggering metric at attack start."
+    },
+    "pps": { "type": "number" },
+    "mbps": { "type": "number" },
+    "flows_per_sec": { "type": "number" },
+    "ban_state": {
+      "type": "string",
+      "enum": ["active", "withdrawn", "rejected"],
+      "description": "RTBH ban state, when mitigation was consulted."
+    },
+    "route": {
+      "type": "string",
+      "description": "The (dry-run: would-be) blackhole route announcement."
+    },
+    "dry_run": { "type": "boolean" },
+    "at": { "type": "string", "format": "date-time" },
+    "sample": {
+      "type": "object",
+      "description": "Flow sample captured in the window before the threshold tripped (attack_started only, when the traffic buffer is enabled). Counter packets/bytes are sampling-corrected totals; raw flow records carry the exporter's pre-correction numbers plus sampling_rate.",
+      "properties": {
+        "flows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "src": { "type": "string" },
+              "dst": { "type": "string" },
+              "src_port": { "type": "integer" },
+              "dst_port": { "type": "integer" },
+              "proto": { "type": "string" },
+              "tcp_flags": { "type": "integer" },
+              "fragment": { "type": "boolean" },
+              "bytes": { "type": "integer" },
+              "packets": { "type": "integer" },
+              "sampling_rate": { "type": "integer" }
+            }
+          }
+        },
+        "top_sources": { "$ref": "#/$defs/counters" },
+        "top_src_ports": { "$ref": "#/$defs/counters" },
+        "top_dst_ports": { "$ref": "#/$defs/counters" },
+        "protocols": { "$ref": "#/$defs/counters" }
+      }
+    }
+  },
+  "$defs": {
+    "counters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "packets": { "type": "integer" },
+          "bytes": { "type": "integer" }
+        }
+      }
+    }
+  }
+}
