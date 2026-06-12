@@ -59,7 +59,9 @@ The full schema:
 | `networks` | Protected prefixes. Detection applies **only** to destinations inside these; they must not overlap. |
 | `protected_whitelist` | Addresses that are **never** banned, regardless of traffic. |
 | `thresholds.pps` / `.mbps` / `.flows_per_sec` | Per-destination thresholds, after sampling correction. All must be > 0. |
-| `hostgroups[]` | Optional named prefix groups with their own thresholds and mitigation policy (see [Hostgroups](#hostgroups)). |
+| `thresholds.tcp_pps` / `udp_pps` / `icmp_pps` / `tcp_syn_pps` / `frag_pps` (+ `_mbps` each) | Optional per-protocol thresholds; 0/absent disables. Any crossed threshold triggers (OR). `tcp_syn` counts pure SYNs (SYN set, ACK clear); `frag` counts non-first IP fragments. |
+| `thresholds_outgoing` | Optional. Enables detection of attacks **originated by** protected hosts (compromised machines). Same keys as `thresholds`, at least one must be set; absent, outgoing traffic is not even counted. |
+| `hostgroups[]` | Optional named prefix groups with their own thresholds and mitigation policy (see [Hostgroups](#hostgroups)). Each group may also set `thresholds_outgoing`. |
 | `ban.ttl_seconds` | Every announcement auto-withdraws after this. No permanent bans. |
 | `ban.unban_hysteresis_seconds` | Traffic must stay below threshold this long before withdrawing, to prevent flapping. |
 | `ban.max_active_bans` | Hard cap on simultaneous bans; new bans past the cap are refused. |
@@ -104,6 +106,26 @@ Rules:
   notifications and the API) and never trigger automatic bans — there is no single
   host to blackhole. `calculation: per_host` (the default) evaluates each host.
 - Hostgroups hot-reload with the rest of the config.
+
+### Outgoing detection
+
+```yaml
+thresholds_outgoing:
+  pps: 50000
+  udp_pps: 20000
+```
+
+With a `thresholds_outgoing` block (global or per hostgroup), kapkan also watches traffic
+**leaving** protected hosts and reports `direction: "outgoing"` attacks — the signature of
+a compromised machine inside your network. A host attacked and attacking at the same time
+holds two independent attack records but shares one RTBH route; the route is withdrawn
+only when the last of the two attacks ends. Without the block, outgoing traffic is not
+counted at all (zero hot-path cost).
+
+Note that an RTBH blackhole is destination-based: banning an outgoing attacker kills
+traffic *to* the host (taking it offline, which usually stops the abuse), and stops the
+outbound flood itself only where the edge also drops sources in blackholed prefixes
+(e.g. uRPF). Set `ban: false` on the hostgroup if you only want the alert.
 
 ### Going live
 

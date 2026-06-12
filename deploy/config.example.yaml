@@ -26,6 +26,21 @@ thresholds: # per destination host, after sampling correction
   pps: 80000 # packets/sec
   mbps: 1000 # megabits/sec
   flows_per_sec: 35000 # flows/sec
+  # Optional per-protocol limits, 0/absent = disabled. Any crossed limit
+  # triggers (OR). tcp_syn counts pure SYNs; frag counts non-first fragments.
+  # tcp_pps: 0
+  # udp_pps: 40000
+  # icmp_pps: 5000
+  # tcp_syn_pps: 5000
+  # frag_pps: 3000
+
+# Optional: watch traffic LEAVING protected hosts (compromised machines).
+# Same keys as `thresholds`; at least one required. Absent = outgoing
+# traffic is not counted at all.
+#
+# thresholds_outgoing:
+#   pps: 50000
+#   udp_pps: 20000
 
 # Optional: group prefixes under their own thresholds and mitigation policy.
 # Hosts not matched by any group use the global thresholds above. The most

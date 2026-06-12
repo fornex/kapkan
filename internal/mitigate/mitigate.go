@@ -51,6 +51,21 @@ type Ban struct {
 	ExpiresAt   time.Time     `json:"expires_at"`
 	WithdrawnAt time.Time     `json:"withdrawn_at,omitempty"`
 	Reason      string        `json:"reason,omitempty"`
+
+	// dirMask tracks which attack directions hold this ban (one RTBH route
+	// covers both). An incoming and an outgoing attack on the same host
+	// share the ban; it is withdrawn only when the last direction ends.
+	// Zero for manual bans.
+	dirMask uint8
+}
+
+// dirBit maps an event direction to its mask bit. Events without a
+// direction (older consumers, manual paths) count as incoming.
+func dirBit(d engine.Direction) uint8 {
+	if d == engine.DirOutgoing {
+		return 2
+	}
+	return 1
 }
 
 // announcer is the subset of BGP behavior the mitigator needs. It is an
@@ -157,20 +172,36 @@ func (m *Mitigator) OnAttackStarted(ev engine.Event) *Ban {
 		metric:    ev.Metric,
 		rate:      ev.Rate,
 		threshold: ev.Threshold,
+		dirMask:   dirBit(ev.Direction),
 		manual:    false,
 	})
 }
 
 // OnAttackEnded is called when the engine reports an attack ended. It
-// withdraws any active ban for the target and returns its final state. The
-// withdrawal is NOT gated on BanEnabled: a reload may have disabled banning
-// for a group while one of its hosts holds an active ban, and that route
-// must still come down when the attack ends.
+// releases the ending direction's hold on the ban and withdraws the route
+// once no direction holds it (a host attacked and attacking at once keeps
+// its ban until both attacks end). The withdrawal is NOT gated on
+// BanEnabled: a reload may have disabled banning for a group while one of
+// its hosts holds an active ban, and that route must still come down.
 func (m *Mitigator) OnAttackEnded(ev engine.Event) *Ban {
 	if ev.Scope == engine.ScopeGroup {
 		return nil
 	}
-	return m.unban(ev.Target, "attack ended", false)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.bans[ev.Target]
+	if !ok || b.State != BanActive {
+		return nil
+	}
+	b.dirMask &^= dirBit(ev.Direction)
+	if b.dirMask != 0 {
+		m.log.Info("attack ended in one direction; ban held by the other",
+			"target", ev.Target.String(), "ended", string(ev.Direction))
+		return copyBan(b)
+	}
+	m.withdrawLocked(b, "attack ended", false)
+	return copyBan(b)
 }
 
 // ManualBan bans target by operator request, respecting the whitelist and the
@@ -199,6 +230,7 @@ type banOpts struct {
 	metric    engine.Metric
 	rate      float64
 	threshold float64
+	dirMask   uint8
 	manual    bool
 }
 
@@ -237,7 +269,9 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 		// Already banned: refresh the TTL while the attack persists so the
 		// route is not withdrawn out from under an ongoing attack, but never
 		// beyond a fresh TTL from now (still bounded, no permanent ban).
+		// A second attack direction adds its hold on the shared route.
 		existing.ExpiresAt = now.Add(cfg.Ban.TTL())
+		existing.dirMask |= opts.dirMask
 		return copyBan(existing)
 	}
 
@@ -265,6 +299,7 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 		Manual:    opts.manual,
 		StartedAt: now,
 		ExpiresAt: now.Add(cfg.Ban.TTL()),
+		dirMask:   opts.dirMask,
 	}
 
 	if cfg.DryRun {

@@ -314,3 +314,43 @@ func TestGroupAttacksKeyedByName(t *testing.T) {
 		}
 	}
 }
+
+// TestInAndOutAttacksOnSameHostCoexist: per-direction keys keep both records.
+func TestInAndOutAttacksOnSameHostCoexist(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+	now := time.Now()
+	target := netip.MustParseAddr("203.0.113.50")
+
+	s.RecordAttackStarted(engine.Event{
+		Kind: engine.AttackStarted, Scope: engine.ScopeHost, Target: target,
+		Direction: engine.DirIncoming, Metric: engine.MetricPPS, At: now,
+	}, nil)
+	s.RecordAttackStarted(engine.Event{
+		Kind: engine.AttackStarted, Scope: engine.ScopeHost, Target: target,
+		Direction: engine.DirOutgoing, Metric: engine.MetricPPS, At: now,
+	}, nil)
+
+	rec := do(t, s.Handler(), http.MethodGet, "/api/v1/attacks", "")
+	var resp struct {
+		Active []Attack `json:"active"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Active) != 2 {
+		t.Fatalf("active = %d, want 2 (incoming + outgoing on one host)", len(resp.Active))
+	}
+
+	// Ending the outgoing attack leaves the incoming one active.
+	s.RecordAttackEnded(engine.Event{
+		Kind: engine.AttackEnded, Scope: engine.ScopeHost, Target: target,
+		Direction: engine.DirOutgoing, At: now,
+	}, nil)
+	rec = do(t, s.Handler(), http.MethodGet, "/api/v1/attacks", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Active) != 1 || resp.Active[0].Direction != engine.DirIncoming {
+		t.Fatalf("active = %+v, want only the incoming attack", resp.Active)
+	}
+}

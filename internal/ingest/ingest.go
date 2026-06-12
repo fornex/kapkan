@@ -236,6 +236,7 @@ func convert(pm *protoproducer.ProtoProducerMessage, defaultRate uint64) (flow.F
 		DstPort:      uint16(pm.DstPort),
 		IPProto:      uint8(pm.Proto),
 		TCPFlags:     uint8(pm.TcpFlags),
+		Fragment:     pm.FragmentOffset > 0,
 		Wire:         wireProto(pm.Type),
 	}, true
 }

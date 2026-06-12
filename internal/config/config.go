@@ -20,12 +20,16 @@ import (
 // shape exactly; parsed derivatives (prefixes, addresses, community value)
 // are populated during validation and must not be set by hand.
 type Config struct {
-	DryRun             bool        `yaml:"dry_run"`
-	Listen             Listen      `yaml:"listen"`
-	Sampling           Sampling    `yaml:"sampling"`
-	Networks           []string    `yaml:"networks"`
-	ProtectedWhitelist []string    `yaml:"protected_whitelist"`
-	Thresholds         Thresholds  `yaml:"thresholds"`
+	DryRun             bool       `yaml:"dry_run"`
+	Listen             Listen     `yaml:"listen"`
+	Sampling           Sampling   `yaml:"sampling"`
+	Networks           []string   `yaml:"networks"`
+	ProtectedWhitelist []string   `yaml:"protected_whitelist"`
+	Thresholds         Thresholds `yaml:"thresholds"`
+	// ThresholdsOutgoing enables detection of attacks ORIGINATED by
+	// protected hosts (compromised machines). Absent, outgoing traffic is
+	// not even counted.
+	ThresholdsOutgoing *Thresholds `yaml:"thresholds_outgoing"`
 	Hostgroups         []Hostgroup `yaml:"hostgroups"`
 	Ban                Ban         `yaml:"ban"`
 	BGP                BGP         `yaml:"bgp"`
@@ -38,6 +42,9 @@ type Config struct {
 	// Groups are the resolved hostgroups; Groups[0] is always the implicit
 	// global fallback group carrying the top-level thresholds.
 	Groups []Group `yaml:"-"`
+	// OutgoingEnabled reports whether any group has outgoing thresholds, so
+	// the engine can skip outgoing accounting entirely when unused.
+	OutgoingEnabled bool `yaml:"-"`
 	// groupRoutes maps prefixes to Groups indexes, longest prefix first.
 	groupRoutes []groupRoute
 }
@@ -54,13 +61,29 @@ type Sampling struct {
 	DefaultRate uint64 `yaml:"default_rate"`
 }
 
-// Thresholds are per-destination-host limits after sampling correction.
-// A value of zero is rejected by validation.
+// Thresholds are per-host limits after sampling correction. The base trio
+// (pps/mbps/flows_per_sec) must be > 0 in an incoming threshold set; the
+// per-protocol limits default to 0, which disables them. Any crossed
+// threshold triggers detection (they are OR-ed).
 type Thresholds struct {
 	PPS         uint64 `yaml:"pps" json:"pps"`
 	Mbps        uint64 `yaml:"mbps" json:"mbps"`
 	FlowsPerSec uint64 `yaml:"flows_per_sec" json:"flows_per_sec"`
+
+	TCPPPS     uint64 `yaml:"tcp_pps" json:"tcp_pps,omitempty"`
+	TCPMbps    uint64 `yaml:"tcp_mbps" json:"tcp_mbps,omitempty"`
+	UDPPPS     uint64 `yaml:"udp_pps" json:"udp_pps,omitempty"`
+	UDPMbps    uint64 `yaml:"udp_mbps" json:"udp_mbps,omitempty"`
+	ICMPPPS    uint64 `yaml:"icmp_pps" json:"icmp_pps,omitempty"`
+	ICMPMbps   uint64 `yaml:"icmp_mbps" json:"icmp_mbps,omitempty"`
+	TCPSYNPPS  uint64 `yaml:"tcp_syn_pps" json:"tcp_syn_pps,omitempty"`
+	TCPSYNMbps uint64 `yaml:"tcp_syn_mbps" json:"tcp_syn_mbps,omitempty"`
+	FragPPS    uint64 `yaml:"frag_pps" json:"frag_pps,omitempty"`
+	FragMbps   uint64 `yaml:"frag_mbps" json:"frag_mbps,omitempty"`
 }
+
+// Zero reports whether no threshold is set at all.
+func (t Thresholds) Zero() bool { return t == Thresholds{} }
 
 // CalcMethod selects how a hostgroup's thresholds are applied.
 type CalcMethod string
@@ -91,6 +114,9 @@ type Hostgroup struct {
 	// Thresholds override the global thresholds; when omitted the group
 	// inherits them.
 	Thresholds *Thresholds `yaml:"thresholds"`
+	// ThresholdsOutgoing overrides the global outgoing thresholds; when
+	// omitted the group inherits them (or stays disabled if there are none).
+	ThresholdsOutgoing *Thresholds `yaml:"thresholds_outgoing"`
 	// Ban controls automatic RTBH for the group's hosts (default true).
 	// Must not be set to true for total groups, which never auto-ban.
 	Ban *bool `yaml:"ban"`
@@ -101,7 +127,9 @@ type Group struct {
 	Name       string     `json:"name"`
 	Calc       CalcMethod `json:"calculation"`
 	Thresholds Thresholds `json:"thresholds"`
-	BanEnabled bool       `json:"ban"`
+	// OutThresholds is nil when outgoing detection is disabled for the group.
+	OutThresholds *Thresholds `json:"thresholds_outgoing,omitempty"`
+	BanEnabled    bool        `json:"ban"`
 }
 
 // groupRoute maps one prefix to its owning group for longest-prefix-match
@@ -250,6 +278,9 @@ func (c *Config) validate() error {
 	if c.Thresholds.PPS == 0 || c.Thresholds.Mbps == 0 || c.Thresholds.FlowsPerSec == 0 {
 		return fmt.Errorf("thresholds: pps, mbps and flows_per_sec must all be > 0")
 	}
+	if c.ThresholdsOutgoing != nil && c.ThresholdsOutgoing.Zero() {
+		return fmt.Errorf("thresholds_outgoing: set at least one threshold or remove the block")
+	}
 
 	if err := c.validateHostgroups(); err != nil {
 		return err
@@ -285,10 +316,11 @@ func (c *Config) validate() error {
 func (c *Config) validateHostgroups() error {
 	c.Groups = make([]Group, 0, len(c.Hostgroups)+1)
 	c.Groups = append(c.Groups, Group{
-		Name:       GlobalGroup,
-		Calc:       CalcPerHost,
-		Thresholds: c.Thresholds,
-		BanEnabled: true,
+		Name:          GlobalGroup,
+		Calc:          CalcPerHost,
+		Thresholds:    c.Thresholds,
+		OutThresholds: c.ThresholdsOutgoing,
+		BanEnabled:    true,
 	})
 	c.groupRoutes = nil
 
@@ -331,6 +363,14 @@ func (c *Config) validateHostgroups() error {
 			}
 		}
 
+		outTh := c.ThresholdsOutgoing
+		if hg.ThresholdsOutgoing != nil {
+			if hg.ThresholdsOutgoing.Zero() {
+				return fmt.Errorf("hostgroups[%q]: thresholds_outgoing: set at least one threshold or remove the block", hg.Name)
+			}
+			outTh = hg.ThresholdsOutgoing
+		}
+
 		if len(hg.Networks) == 0 {
 			return fmt.Errorf("hostgroups[%q]: at least one prefix is required", hg.Name)
 		}
@@ -359,11 +399,19 @@ func (c *Config) validateHostgroups() error {
 		}
 
 		c.Groups = append(c.Groups, Group{
-			Name:       hg.Name,
-			Calc:       calc,
-			Thresholds: th,
-			BanEnabled: banEnabled,
+			Name:          hg.Name,
+			Calc:          calc,
+			Thresholds:    th,
+			OutThresholds: outTh,
+			BanEnabled:    banEnabled,
 		})
+	}
+
+	for i := range c.Groups {
+		if c.Groups[i].OutThresholds != nil {
+			c.OutgoingEnabled = true
+			break
+		}
 	}
 
 	// Longest prefix first so GroupFor's first match is the most specific.

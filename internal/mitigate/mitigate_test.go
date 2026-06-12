@@ -476,3 +476,47 @@ func TestPolicyDisabledEventsNeverBan(t *testing.T) {
 		t.Errorf("active bans = %d, want 0", len(m.ActiveBans()))
 	}
 }
+
+// TestDirectionRefcountedBan: one host attacked (incoming) and attacking
+// (outgoing) shares one RTBH route; the route survives the first attack
+// ending and is withdrawn only when the last direction ends.
+func TestDirectionRefcountedBan(t *testing.T) {
+	rec := newRecorder()
+	m := newMitigator(t, liveYAML(), rec, nil)
+	target := "203.0.113.66"
+
+	in := startedEvent(target)
+	in.Direction = engine.DirIncoming
+	out := startedEvent(target)
+	out.Direction = engine.DirOutgoing
+
+	if ban := m.OnAttackStarted(in); ban.State != BanActive {
+		t.Fatalf("incoming ban state = %s, want active", ban.State)
+	}
+	if ban := m.OnAttackStarted(out); ban.State != BanActive {
+		t.Fatalf("outgoing ban state = %s, want active", ban.State)
+	}
+	if got := rec.announceCount(target + "/32"); got != 1 {
+		t.Fatalf("announce count = %d, want 1 (one shared route)", got)
+	}
+
+	// First direction ends: ban must stay up.
+	endIn := engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr(target), Direction: engine.DirIncoming, At: time.Now()}
+	if ban := m.OnAttackEnded(endIn); ban == nil || ban.State != BanActive {
+		t.Fatalf("ban after first direction ended = %+v, want still active", ban)
+	}
+	if got := rec.withdrawCount(target + "/32"); got != 0 {
+		t.Fatalf("withdraw count = %d, want 0 while outgoing attack persists", got)
+	}
+
+	// Second direction ends: now the route comes down.
+	endOut := engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr(target), Direction: engine.DirOutgoing, At: time.Now()}
+	if ban := m.OnAttackEnded(endOut); ban == nil || ban.State != BanWithdrawn {
+		t.Fatalf("ban after last direction ended = %+v, want withdrawn", ban)
+	}
+	if got := rec.withdrawCount(target + "/32"); got != 1 {
+		t.Errorf("withdraw count = %d, want 1", got)
+	}
+}

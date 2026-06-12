@@ -114,7 +114,7 @@ func TestWindowedRateMath(t *testing.T) {
 	}
 	// Now evaluate at the second after the 5 filled seconds.
 	hs := e.shardFor(netip.MustParseAddr(dst)).hosts[netip.MustParseAddr(dst)]
-	rates, ok := e.windowedRates(hs, clk.Now().Unix())
+	rates, _, ok := e.windowedRates(hs, clk.Now().Unix())
 	if !ok {
 		t.Fatal("windowedRates ok = false, want true")
 	}
@@ -140,7 +140,7 @@ func TestSamplingCorrection(t *testing.T) {
 		clk.Advance(time.Second)
 	}
 	hs := e.shardFor(dst).hosts[dst]
-	rates, _ := e.windowedRates(hs, clk.Now().Unix())
+	rates, _, _ := e.windowedRates(hs, clk.Now().Unix())
 	// corrected pps per second = 100*1000 = 100000.
 	if rates.PPS != 100000 {
 		t.Errorf("PPS = %v, want 100000 (sampling-corrected)", rates.PPS)
@@ -255,34 +255,34 @@ func TestHysteresisStateMachine(t *testing.T) {
 	flood()
 	runTick(e, clk)
 	hs := hostOf()
-	if hs == nil || !hs.inAttack {
+	if hs == nil || !hs.attacks[dirIn].inAttack {
 		t.Fatal("attack not established")
 	}
 
 	// Two quiet ticks: below threshold, counting down, not yet ended.
 	runTick(e, clk)
-	if !hs.inAttack {
+	if !hs.attacks[dirIn].inAttack {
 		t.Fatal("ended too early on first quiet tick")
 	}
-	first := hs.belowSince
+	first := hs.attacks[dirIn].belowSince
 	if first.IsZero() {
 		t.Fatal("belowSince must be set on the first below-threshold tick")
 	}
 	runTick(e, clk)
-	if !hs.inAttack {
+	if !hs.attacks[dirIn].inAttack {
 		t.Fatal("ended too early on second quiet tick")
 	}
-	if !hs.belowSince.Equal(first) {
+	if !hs.attacks[dirIn].belowSince.Equal(first) {
 		t.Fatal("belowSince must not move while continuously below")
 	}
 
 	// Resurge: must clear the countdown.
 	flood()
 	runTick(e, clk)
-	if !hs.inAttack {
+	if !hs.attacks[dirIn].inAttack {
 		t.Fatal("attack must remain active through a resurge")
 	}
-	if !hs.belowSince.IsZero() {
+	if !hs.attacks[dirIn].belowSince.IsZero() {
 		t.Fatal("resurge must reset the hysteresis countdown (belowSince cleared)")
 	}
 
@@ -290,18 +290,18 @@ func TestHysteresisStateMachine(t *testing.T) {
 	// starts at the next below tick; the end must be at least hysteresis
 	// seconds after that, proving the earlier below-period did not count.
 	runTick(e, clk)
-	restart := hs.belowSince
+	restart := hs.attacks[dirIn].belowSince
 	if restart.IsZero() {
 		t.Fatal("belowSince must be set again after going quiet post-resurge")
 	}
 	var endedAt time.Time
-	for i := 0; i < 6 && hs.inAttack; i++ {
+	for i := 0; i < 6 && hs.attacks[dirIn].inAttack; i++ {
 		runTick(e, clk)
-		if !hs.inAttack {
+		if !hs.attacks[dirIn].inAttack {
 			endedAt = clk.Now()
 		}
 	}
-	if hs.inAttack {
+	if hs.attacks[dirIn].inAttack {
 		t.Fatal("attack never ended after sustained quiet")
 	}
 	if d := endedAt.Sub(restart); d < hysteresis {
@@ -413,7 +413,7 @@ func TestReloadWhitelistEndsActiveAttack(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("no AttackEnded after target was whitelisted via reload")
 	}
-	if hs := e.shardFor(dst).hosts[dst]; hs != nil && hs.inAttack {
+	if hs := e.shardFor(dst).hosts[dst]; hs != nil && hs.attacks[dirIn].inAttack {
 		t.Error("host must not remain flagged in-attack after whitelisting")
 	}
 }

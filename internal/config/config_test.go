@@ -423,3 +423,82 @@ func TestStoreReload(t *testing.T) {
 		t.Errorf("Reload() with listen change: error = %v, want listen-change rejection", err)
 	}
 }
+
+const outgoingYAML = hostgroupsYAML + `
+thresholds_outgoing:
+  pps: 50000
+  udp_pps: 20000
+`
+
+func TestOutgoingThresholdsResolved(t *testing.T) {
+	cfg, err := Parse([]byte(outgoingYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !cfg.OutgoingEnabled {
+		t.Error("OutgoingEnabled = false, want true")
+	}
+	// Global group and groups without their own block inherit the global
+	// outgoing thresholds.
+	if got := cfg.Groups[0].OutThresholds; got == nil || got.PPS != 50000 || got.UDPPPS != 20000 {
+		t.Errorf("global group OutThresholds = %+v, want pps 50000 / udp_pps 20000", got)
+	}
+	if got := cfg.GroupFor(netip.MustParseAddr("203.0.113.20")).OutThresholds; got == nil || got.PPS != 50000 {
+		t.Errorf("web group OutThresholds = %+v, want inherited global outgoing", got)
+	}
+}
+
+func TestNoOutgoingMeansDisabled(t *testing.T) {
+	cfg, err := Parse([]byte(hostgroupsYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.OutgoingEnabled {
+		t.Error("OutgoingEnabled = true without any thresholds_outgoing block")
+	}
+	if cfg.Groups[0].OutThresholds != nil {
+		t.Error("global group OutThresholds must be nil when outgoing is not configured")
+	}
+}
+
+func TestGroupOutgoingOverride(t *testing.T) {
+	yaml := strings.Replace(outgoingYAML, "  - name: web\n", "  - name: web\n    thresholds_outgoing:\n      tcp_syn_pps: 5000\n", 1)
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	g := cfg.GroupFor(netip.MustParseAddr("203.0.113.20"))
+	if g.Name != "web" {
+		t.Fatalf("group = %q, want web", g.Name)
+	}
+	if g.OutThresholds == nil || g.OutThresholds.TCPSYNPPS != 5000 || g.OutThresholds.PPS != 0 {
+		t.Errorf("web OutThresholds = %+v, want only tcp_syn_pps 5000", g.OutThresholds)
+	}
+}
+
+func TestPerProtocolThresholdsParsed(t *testing.T) {
+	yaml := strings.Replace(validYAML, "  flows_per_sec: 35000\n",
+		"  flows_per_sec: 35000\n  udp_pps: 40000\n  tcp_syn_pps: 5000\n  frag_pps: 3000\n", 1)
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	th := cfg.Thresholds
+	if th.UDPPPS != 40000 || th.TCPSYNPPS != 5000 || th.FragPPS != 3000 {
+		t.Errorf("per-protocol thresholds = %+v, want udp 40000 / syn 5000 / frag 3000", th)
+	}
+	if th.TCPPPS != 0 {
+		t.Errorf("unset tcp_pps = %d, want 0 (disabled)", th.TCPPPS)
+	}
+}
+
+func TestOutgoingValidationErrors(t *testing.T) {
+	empty := validYAML + "\nthresholds_outgoing: {}\n"
+	if _, err := Parse([]byte(empty)); err == nil || !strings.Contains(err.Error(), "thresholds_outgoing") {
+		t.Errorf("empty global outgoing block: error = %v, want thresholds_outgoing rejection", err)
+	}
+	groupEmpty := strings.Replace(hostgroupsYAML, "  - name: web\n", "  - name: web\n    thresholds_outgoing: {}\n", 1)
+	if _, err := Parse([]byte(groupEmpty)); err == nil || !strings.Contains(err.Error(), "thresholds_outgoing") {
+		t.Errorf("empty group outgoing block: error = %v, want thresholds_outgoing rejection", err)
+	}
+}
