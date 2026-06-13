@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,12 @@ type Ban struct {
 	WithdrawnAt time.Time     `json:"withdrawn_at,omitempty"`
 	Reason      string        `json:"reason,omitempty"`
 
+	// Method is the mitigation method that produced this ban.
+	Method config.MitigationMethod `json:"method"`
+	// FlowSpec holds the generated FlowSpec rules when Method is flowspec
+	// (nil for blackhole). These rules, not Prefix, are what gets announced.
+	FlowSpec []FlowSpecRule `json:"flowspec,omitempty"`
+
 	// dirMask tracks which attack directions hold this ban (one RTBH route
 	// covers both). An incoming and an outgoing attack on the same host
 	// share the ban; it is withdrawn only when the last direction ends.
@@ -73,6 +80,8 @@ func dirBit(d engine.Direction) uint8 {
 type announcer interface {
 	Announce(ctx context.Context, prefix netip.Prefix, nextHop string, community uint32) error
 	Withdraw(ctx context.Context, prefix netip.Prefix) error
+	AnnounceFlowSpec(ctx context.Context, rule FlowSpecRule) error
+	WithdrawFlowSpec(ctx context.Context, rule FlowSpecRule) error
 }
 
 // Mitigator owns the ban table and the BGP speaker.
@@ -169,11 +178,14 @@ func (m *Mitigator) OnAttackStarted(ev engine.Event) *Ban {
 		return nil
 	}
 	return m.ban(ev.Target, banOpts{
-		metric:    ev.Metric,
-		rate:      ev.Rate,
-		threshold: ev.Threshold,
-		dirMask:   dirBit(ev.Direction),
-		manual:    false,
+		metric:         ev.Metric,
+		rate:           ev.Rate,
+		threshold:      ev.Threshold,
+		dirMask:        dirBit(ev.Direction),
+		direction:      ev.Direction,
+		classification: ev.Classification,
+		sample:         ev.Sample,
+		manual:         false,
 	})
 }
 
@@ -227,11 +239,14 @@ func (m *Mitigator) ManualUnban(target netip.Addr) (*Ban, error) {
 }
 
 type banOpts struct {
-	metric    engine.Metric
-	rate      float64
-	threshold float64
-	dirMask   uint8
-	manual    bool
+	metric         engine.Metric
+	rate           float64
+	threshold      float64
+	dirMask        uint8
+	direction      engine.Direction
+	classification *engine.Classification
+	sample         *engine.AttackSample
+	manual         bool
 }
 
 func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
@@ -255,21 +270,16 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	}
 
 	prefix := hostPrefix(target)
-	nextHop := cfg.BGP.NextHop
-	if target.Is6() {
-		nextHop = ipv6NextHop(cfg)
-	}
-	community := cfg.BGP.Community
-	route := fmt.Sprintf("%s next-hop %s community %s", prefix, nextHop, community)
+	group := cfg.GroupFor(target)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if existing, ok := m.bans[target]; ok && existing.State == BanActive {
 		// Already banned: refresh the TTL while the attack persists so the
-		// route is not withdrawn out from under an ongoing attack, but never
-		// beyond a fresh TTL from now (still bounded, no permanent ban).
-		// A second attack direction adds its hold on the shared route.
+		// route/rules are not withdrawn out from under an ongoing attack, but
+		// never beyond a fresh TTL from now (still bounded, no permanent ban).
+		// A second attack direction adds its hold on the shared mitigation.
 		existing.ExpiresAt = now.Add(cfg.Ban.TTL())
 		existing.dirMask |= opts.dirMask
 		return copyBan(existing)
@@ -291,9 +301,7 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 		Metric:    opts.metric,
 		Rate:      opts.rate,
 		Threshold: opts.threshold,
-		NextHop:   nextHop,
-		Community: community,
-		Route:     route,
+		Method:    group.Mitigation,
 		State:     BanActive,
 		DryRun:    cfg.DryRun,
 		Manual:    opts.manual,
@@ -301,24 +309,69 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 		ExpiresAt: now.Add(cfg.Ban.TTL()),
 		dirMask:   opts.dirMask,
 	}
-
-	if cfg.DryRun {
-		m.log.Warn("DRY-RUN: would announce blackhole route (not sent)",
-			"route", route, "target", target.String(),
-			"metric", string(opts.metric), "manual", opts.manual)
+	if group.Mitigation == config.MitigateFlowSpec {
+		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample, group.FlowSpecAction, group.FlowSpecRateBps)
+		b.Route = flowSpecSummary(b.FlowSpec)
 	} else {
-		if err := m.bgp.Announce(m.ctx, prefix, nextHop, cfg.BGP.CommunityValue); err != nil {
-			m.log.Error("BGP announce failed", "route", route, "err", err)
-			b.State = BanRejected
-			b.Reason = "bgp announce failed: " + err.Error()
-			return b
+		b.NextHop = cfg.BGP.NextHop
+		if target.Is6() {
+			b.NextHop = ipv6NextHop(cfg)
 		}
-		m.log.Warn("announced blackhole route", "route", route, "target", target.String())
+		b.Community = cfg.BGP.Community
+		b.Route = fmt.Sprintf("%s next-hop %s community %s", prefix, b.NextHop, b.Community)
+	}
+
+	if err := m.announceLocked(b, cfg); err != nil {
+		b.State = BanRejected
+		b.Reason = "bgp announce failed: " + err.Error()
+		return b
 	}
 
 	m.bans[target] = b
 	m.updateGaugeLocked(cfg.DryRun)
 	return copyBan(b)
+}
+
+// flowSpecSummary renders a one-line summary of a rule set for the Route
+// field, logs and notifications.
+func flowSpecSummary(rules []FlowSpecRule) string {
+	parts := make([]string, 0, len(rules))
+	for _, r := range rules {
+		parts = append(parts, r.String())
+	}
+	return "flowspec: " + strings.Join(parts, "; ")
+}
+
+// announceLocked installs a ban's mitigation per its method, honoring
+// dry-run (log only, never send). The caller holds m.mu. On the FlowSpec
+// path a partial failure withdraws the rules already installed so the RIB is
+// not left half-mitigated.
+func (m *Mitigator) announceLocked(b *Ban, cfg *config.Config) error {
+	if cfg.DryRun {
+		m.log.Warn("DRY-RUN: would announce mitigation (not sent)",
+			"method", string(b.Method), "route", b.Route, "target", b.Target.String(),
+			"metric", string(b.Metric), "manual", b.Manual)
+		return nil
+	}
+	if b.Method == config.MitigateFlowSpec {
+		for i, r := range b.FlowSpec {
+			if err := m.bgp.AnnounceFlowSpec(m.ctx, r); err != nil {
+				m.log.Error("FlowSpec announce failed; rolling back", "rule", r.String(), "err", err)
+				for _, done := range b.FlowSpec[:i] {
+					_ = m.bgp.WithdrawFlowSpec(m.ctx, done)
+				}
+				return err
+			}
+		}
+		m.log.Warn("announced flowspec rules", "route", b.Route, "target", b.Target.String())
+		return nil
+	}
+	if err := m.bgp.Announce(m.ctx, b.Prefix, b.NextHop, cfg.BGP.CommunityValue); err != nil {
+		m.log.Error("BGP announce failed", "route", b.Route, "err", err)
+		return err
+	}
+	m.log.Warn("announced blackhole route", "route", b.Route, "target", b.Target.String())
+	return nil
 }
 
 func (m *Mitigator) unban(target netip.Addr, reason string, manual bool) *Ban {
@@ -340,19 +393,27 @@ func copyBan(b *Ban) *Ban {
 	return &c
 }
 
-// withdrawLocked withdraws a ban. The caller holds m.mu.
+// withdrawLocked withdraws a ban per its method. The caller holds m.mu.
 func (m *Mitigator) withdrawLocked(b *Ban, reason string, manual bool) {
-	if !b.DryRun {
+	switch {
+	case b.DryRun:
+		m.log.Warn("DRY-RUN: would withdraw mitigation (not sent)",
+			"method", string(b.Method), "route", b.Route, "reason", reason)
+	case b.Method == config.MitigateFlowSpec:
+		// Withdraw every rule; log but proceed on error (a stuck "active"
+		// would misreport state and block re-bans).
+		for _, r := range b.FlowSpec {
+			if err := m.bgp.WithdrawFlowSpec(m.ctx, r); err != nil {
+				m.log.Error("FlowSpec withdraw failed", "rule", r.String(), "err", err)
+			}
+		}
+		m.log.Info("withdrew flowspec rules", "route", b.Route, "reason", reason)
+	default:
 		if err := m.bgp.Withdraw(m.ctx, b.Prefix); err != nil {
-			// Log but proceed to mark withdrawn; leaving it "active" would
-			// misreport state and block re-bans. Operators are alerted.
 			m.log.Error("BGP withdraw failed", "route", b.Route, "err", err)
 		} else {
 			m.log.Info("withdrew blackhole route", "route", b.Route, "reason", reason)
 		}
-	} else {
-		m.log.Warn("DRY-RUN: would withdraw blackhole route (not sent)",
-			"route", b.Route, "reason", reason)
 	}
 	b.State = BanWithdrawn
 	b.WithdrawnAt = m.now()
@@ -417,7 +478,17 @@ func (m *Mitigator) updateGaugeLocked(dryRun bool) {
 	if dryRun {
 		mode = "dry_run"
 	}
-	metrics.AnnouncedRoutes.WithLabelValues(mode).Set(float64(m.activeCountLocked()))
+	var bans, fsRules int
+	for _, b := range m.bans {
+		if b.State == BanActive {
+			bans++
+			fsRules += len(b.FlowSpec)
+		}
+	}
+	metrics.AnnouncedRoutes.WithLabelValues(mode).Set(float64(bans))
+	// FlowSpec bans can each carry several rules; surface the real RIB
+	// footprint so operators can alert before an upstream's rule limit.
+	metrics.FlowSpecRules.WithLabelValues(mode).Set(float64(fsRules))
 }
 
 // ActiveBans returns the currently active bans, sorted by target.

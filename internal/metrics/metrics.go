@@ -98,6 +98,17 @@ var (
 		Help:      "Ban requests refused because max_active_bans was reached.",
 	})
 
+	// FlowSpecRules is the number of FlowSpec rules currently announced (or,
+	// in dry-run, virtually so). A single ban can carry several rules, so
+	// this can exceed active bans — watch it against your upstream's
+	// FlowSpec route limit.
+	FlowSpecRules = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "mitigate",
+		Name:      "flowspec_rules",
+		Help:      "FlowSpec rules currently announced, by mode (real|dry_run).",
+	}, []string{"mode"})
+
 	// NotificationsTotal counts notification deliveries by channel and result.
 	NotificationsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",

@@ -90,6 +90,16 @@ thresholds: # per destination host, after sampling correction
 #       mbps: 4000
 #       flows_per_sec: 150000
 
+# Mitigation method (default: blackhole = RTBH /32 or /128). FlowSpec drops
+# only the attack vector and spares the victim's other traffic (RFC 8955/8956,
+# IPv4 and IPv6). Hostgroups can override `mitigation`. Always dry-run-first:
+# generated rules show in the API/notifications before you set dry_run: false.
+#
+# mitigation: flowspec
+# flowspec:
+#   action: discard      # or rate_limit
+#   rate_mbps: 100       # required for rate_limit
+
 ban:
   ttl_seconds: 600 # every ban auto-withdraws after this (no permanent bans)
   unban_hysteresis_seconds: 120 # traffic must stay below threshold this long to unban

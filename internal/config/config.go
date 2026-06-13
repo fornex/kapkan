@@ -37,7 +37,13 @@ type Config struct {
 	ThresholdsOutgoing *Thresholds `yaml:"thresholds_outgoing"`
 	// Baseline enables continuous per-host learned thresholds; static
 	// thresholds remain as floor/ceiling guards.
-	Baseline   *Baseline   `yaml:"baseline"`
+	Baseline *Baseline `yaml:"baseline"`
+	// Mitigation selects the default mitigation method (blackhole|flowspec);
+	// hostgroups may override it.
+	Mitigation string `yaml:"mitigation"`
+	// FlowSpec is the default FlowSpec action policy, used by groups whose
+	// method is flowspec.
+	FlowSpec   *FlowSpec   `yaml:"flowspec"`
 	Hostgroups []Hostgroup `yaml:"hostgroups"`
 	Samples    Samples     `yaml:"samples"`
 	Storage    Storage     `yaml:"storage"`
@@ -204,6 +210,41 @@ type BaselineSettings struct {
 	Floor         BaselineFloor `json:"floor"`
 }
 
+// MitigationMethod selects how an attack is mitigated.
+type MitigationMethod string
+
+// Mitigation methods.
+const (
+	// MitigateBlackhole announces an RTBH /32 or /128 — drops ALL traffic to
+	// the victim (the default; takes the victim offline).
+	MitigateBlackhole MitigationMethod = "blackhole"
+	// MitigateFlowSpec announces BGP FlowSpec rules matching the attack
+	// vector — surgical drops that can spare the victim's legitimate
+	// traffic. Requires upstreams that honor FlowSpec.
+	MitigateFlowSpec MitigationMethod = "flowspec"
+)
+
+// FlowSpecAction is the action attached to generated FlowSpec rules.
+type FlowSpecAction string
+
+// FlowSpec actions.
+const (
+	// FlowSpecDiscard drops every packet matching a rule (traffic-rate 0).
+	FlowSpecDiscard FlowSpecAction = "discard"
+	// FlowSpecRateLimit caps matching traffic at a configured rate.
+	FlowSpecRateLimit FlowSpecAction = "rate_limit"
+)
+
+// FlowSpec is the FlowSpec action policy. Fields mirror the YAML; the
+// resolved per-second byte rate lives in Group.FlowSpecRateBps.
+type FlowSpec struct {
+	// Action is "discard" (default) or "rate_limit".
+	Action string `yaml:"action"`
+	// RateMbps is the rate-limit ceiling in megabits/sec; required and used
+	// only when Action is rate_limit.
+	RateMbps float64 `yaml:"rate_mbps"`
+}
+
 // CalcMethod selects how a hostgroup's thresholds are applied.
 type CalcMethod string
 
@@ -246,6 +287,11 @@ type Hostgroup struct {
 	// Baseline overrides the global baseline block wholesale; when omitted
 	// the group inherits it (or stays static-only if there is none).
 	Baseline *Baseline `yaml:"baseline"`
+	// Mitigation overrides the default method (blackhole|flowspec) for this
+	// group; empty inherits the global default.
+	Mitigation string `yaml:"mitigation"`
+	// FlowSpec overrides the default FlowSpec action policy for this group.
+	FlowSpec *FlowSpec `yaml:"flowspec"`
 	// Ban controls automatic RTBH for the group's hosts (default true).
 	// Must not be set to true for total groups, which never auto-ban.
 	Ban *bool `yaml:"ban"`
@@ -259,8 +305,14 @@ type Group struct {
 	// OutThresholds is nil when outgoing detection is disabled for the group.
 	OutThresholds *Thresholds `json:"thresholds_outgoing,omitempty"`
 	// Baseline is nil when learned thresholds are disabled for the group.
-	Baseline   *BaselineSettings `json:"baseline,omitempty"`
-	BanEnabled bool              `json:"ban"`
+	Baseline *BaselineSettings `json:"baseline,omitempty"`
+	// Mitigation is the resolved method for this group.
+	Mitigation MitigationMethod `json:"mitigation"`
+	// FlowSpecAction and FlowSpecRateBps describe the action for generated
+	// FlowSpec rules (rate is per-second bytes; 0 for discard).
+	FlowSpecAction  FlowSpecAction `json:"flowspec_action,omitempty"`
+	FlowSpecRateBps float64        `json:"-"`
+	BanEnabled      bool           `json:"ban"`
 }
 
 // groupRoute maps one prefix to its owning group for longest-prefix-match
@@ -517,14 +569,22 @@ func (c *Config) validateHostgroups() error {
 		return fmt.Errorf("baseline: %w", err)
 	}
 
+	globalMethod, globalAction, globalRate, err := resolveMitigation(c.Mitigation, c.FlowSpec, MitigateBlackhole, nil)
+	if err != nil {
+		return fmt.Errorf("mitigation: %w", err)
+	}
+
 	c.Groups = make([]Group, 0, len(c.Hostgroups)+1)
 	c.Groups = append(c.Groups, Group{
-		Name:          GlobalGroup,
-		Calc:          CalcPerHost,
-		Thresholds:    c.Thresholds,
-		OutThresholds: c.ThresholdsOutgoing,
-		Baseline:      globalBaseline,
-		BanEnabled:    true,
+		Name:            GlobalGroup,
+		Calc:            CalcPerHost,
+		Thresholds:      c.Thresholds,
+		OutThresholds:   c.ThresholdsOutgoing,
+		Baseline:        globalBaseline,
+		Mitigation:      globalMethod,
+		FlowSpecAction:  globalAction,
+		FlowSpecRateBps: globalRate,
+		BanEnabled:      true,
 	})
 	c.groupRoutes = nil
 
@@ -590,6 +650,20 @@ func (c *Config) validateHostgroups() error {
 			}
 		}
 
+		method, action, rate, err := resolveMitigation(hg.Mitigation, hg.FlowSpec, globalMethod, c.FlowSpec)
+		if err != nil {
+			return fmt.Errorf("hostgroups[%q]: mitigation: %w", hg.Name, err)
+		}
+		// A total group has no single victim to write a dst-match rule for.
+		// An explicit flowspec choice is an error; an inherited one (from the
+		// global default) silently falls back to blackhole — like ban does.
+		if calc == CalcTotal && method == MitigateFlowSpec {
+			if hg.Mitigation == string(MitigateFlowSpec) {
+				return fmt.Errorf("hostgroups[%q]: mitigation: flowspec is not valid with calculation: total (no single victim prefix)", hg.Name)
+			}
+			method, action, rate = MitigateBlackhole, "", 0
+		}
+
 		if len(hg.Networks) == 0 {
 			return fmt.Errorf("hostgroups[%q]: at least one prefix is required", hg.Name)
 		}
@@ -618,12 +692,15 @@ func (c *Config) validateHostgroups() error {
 		}
 
 		c.Groups = append(c.Groups, Group{
-			Name:          hg.Name,
-			Calc:          calc,
-			Thresholds:    th,
-			OutThresholds: outTh,
-			Baseline:      groupBaseline,
-			BanEnabled:    banEnabled,
+			Name:            hg.Name,
+			Calc:            calc,
+			Thresholds:      th,
+			OutThresholds:   outTh,
+			Baseline:        groupBaseline,
+			Mitigation:      method,
+			FlowSpecAction:  action,
+			FlowSpecRateBps: rate,
+			BanEnabled:      banEnabled,
 		})
 	}
 
@@ -683,6 +760,50 @@ func resolveBaseline(b *Baseline) (*BaselineSettings, error) {
 // dbNameRe restricts the ClickHouse database/table identifiers we
 // interpolate into DDL to a safe charset (no injection surface).
 var dbNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// resolveMitigation resolves a (method, flowspec) pair against a fallback
+// default. methodStr empty inherits defMethod; the flowspec block falls back
+// to defFlow (the global flowspec policy) when the group omits its own. It
+// returns the resolved method, action, and rate-limit ceiling in bytes/sec
+// (0 for discard or for the blackhole method).
+func resolveMitigation(methodStr string, flow *FlowSpec, defMethod MitigationMethod, defFlow *FlowSpec) (MitigationMethod, FlowSpecAction, float64, error) {
+	method := defMethod
+	if methodStr != "" {
+		method = MitigationMethod(methodStr)
+		if method != MitigateBlackhole && method != MitigateFlowSpec {
+			return "", "", 0, fmt.Errorf("method must be %q or %q, got %q", MitigateBlackhole, MitigateFlowSpec, methodStr)
+		}
+	}
+	if method != MitigateFlowSpec {
+		return method, "", 0, nil
+	}
+
+	// FlowSpec method: resolve the action policy (own block, else default).
+	fs := flow
+	if fs == nil {
+		fs = defFlow
+	}
+	action := FlowSpecDiscard
+	var rateMbps float64
+	if fs != nil {
+		if fs.Action != "" {
+			action = FlowSpecAction(fs.Action)
+		}
+		rateMbps = fs.RateMbps
+	}
+	switch action {
+	case FlowSpecDiscard:
+		return method, action, 0, nil
+	case FlowSpecRateLimit:
+		if rateMbps <= 0 {
+			return "", "", 0, fmt.Errorf("flowspec.rate_mbps must be > 0 for the rate_limit action")
+		}
+		// Mbit/s → bytes/s for the FlowSpec traffic-rate extended community.
+		return method, action, rateMbps * 1e6 / 8, nil
+	default:
+		return "", "", 0, fmt.Errorf("flowspec.action must be %q or %q, got %q", FlowSpecDiscard, FlowSpecRateLimit, fs.Action)
+	}
+}
 
 // validateStorage resolves the storage block into StorageCfg with defaults.
 // A nil/empty URL leaves persistence disabled with no further checks.
