@@ -53,17 +53,29 @@ type Ban struct {
 	WithdrawnAt time.Time     `json:"withdrawn_at,omitempty"`
 	Reason      string        `json:"reason,omitempty"`
 
-	// Method is the mitigation method that produced this ban.
+	// Method is the mitigation method currently applied to this ban; it
+	// changes as the escalation ladder advances ("" while at an alert-only
+	// stage).
 	Method config.MitigationMethod `json:"method"`
-	// FlowSpec holds the generated FlowSpec rules when Method is flowspec
-	// (nil for blackhole). These rules, not Prefix, are what gets announced.
+	// FlowSpec holds the generated FlowSpec rules for this ban's flowspec
+	// stage(s). They are announced while Method is flowspec.
 	FlowSpec []FlowSpecRule `json:"flowspec,omitempty"`
+	// Escalation is the resolved ladder and EscalationStep the current rung;
+	// for a simple single-method ban the ladder has one rung at 0s.
+	Escalation     []config.EscalationStage `json:"escalation,omitempty"`
+	EscalationStep int                      `json:"escalation_step"`
 
-	// dirMask tracks which attack directions hold this ban (one RTBH route
+	// dirMask tracks which attack directions hold this ban (one mitigation
 	// covers both). An incoming and an outgoing attack on the same host
 	// share the ban; it is withdrawn only when the last direction ends.
 	// Zero for manual bans.
 	dirMask uint8
+	// communityValue is the parsed BGP community frozen at ban time. The
+	// blackhole next-hop (NextHop) is already frozen; the community must be
+	// too, so a config reload between this ban's creation and a later
+	// escalation to its blackhole rung cannot announce a frozen next-hop
+	// paired with a different, live community.
+	communityValue uint32
 }
 
 // dirBit maps an event direction to its mask bit. Events without a
@@ -212,6 +224,14 @@ func (m *Mitigator) OnAttackEnded(ev engine.Event) *Ban {
 			"target", ev.Target.String(), "ended", string(ev.Direction))
 		return copyBan(b)
 	}
+	if b.Manual {
+		// A manual ban is held by the operator, not by traffic. An automatic
+		// attack that overlapped it (and set a direction bit on the shared
+		// ban) ending must not release it — only ManualUnban or the TTL does.
+		m.log.Info("automatic attack ended but ban is manual; keeping it until manual unban or TTL",
+			"target", ev.Target.String(), "ended", string(ev.Direction))
+		return copyBan(b)
+	}
 	m.withdrawLocked(b, "attack ended", false)
 	return copyBan(b)
 }
@@ -296,32 +316,38 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	}
 
 	b := &Ban{
-		Target:    target,
-		Prefix:    prefix,
-		Metric:    opts.metric,
-		Rate:      opts.rate,
-		Threshold: opts.threshold,
-		Method:    group.Mitigation,
-		State:     BanActive,
-		DryRun:    cfg.DryRun,
-		Manual:    opts.manual,
-		StartedAt: now,
-		ExpiresAt: now.Add(cfg.Ban.TTL()),
-		dirMask:   opts.dirMask,
+		Target:     target,
+		Prefix:     prefix,
+		Metric:     opts.metric,
+		Rate:       opts.rate,
+		Threshold:  opts.threshold,
+		State:      BanActive,
+		DryRun:     cfg.DryRun,
+		Manual:     opts.manual,
+		StartedAt:  now,
+		ExpiresAt:  now.Add(cfg.Ban.TTL()),
+		dirMask:    opts.dirMask,
+		Escalation: group.Escalation,
 	}
-	if group.Mitigation == config.MitigateFlowSpec {
-		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample, group.FlowSpecAction, group.FlowSpecRateBps)
-		b.Route = flowSpecSummary(b.FlowSpec)
-	} else {
+	// Precompute the announcement inputs for whatever stages the ladder uses:
+	// the blackhole next-hop/community if any rung blackholes, and the
+	// generated FlowSpec rules if any rung is flowspec. A ladder that never
+	// blackholes carries no next-hop, so the API/notifications don't show a
+	// next-hop that will never be used.
+	if ladderUsesBlackhole(group.Escalation) {
 		b.NextHop = cfg.BGP.NextHop
 		if target.Is6() {
 			b.NextHop = ipv6NextHop(cfg)
 		}
 		b.Community = cfg.BGP.Community
-		b.Route = fmt.Sprintf("%s next-hop %s community %s", prefix, b.NextHop, b.Community)
+		b.communityValue = cfg.BGP.CommunityValue
+	}
+	if ladderUsesFlowSpec(group.Escalation) {
+		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample, group.FlowSpecAction, group.FlowSpecRateBps)
 	}
 
-	if err := m.announceLocked(b, cfg); err != nil {
+	// Apply the first rung. On announce failure the ban is rejected.
+	if err := m.applyStageLocked(b, 0, cfg); err != nil {
 		b.State = BanRejected
 		b.Reason = "bgp announce failed: " + err.Error()
 		return b
@@ -330,6 +356,56 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	m.bans[target] = b
 	m.updateGaugeLocked(cfg.DryRun)
 	return copyBan(b)
+}
+
+// ladderUsesFlowSpec reports whether any rung announces FlowSpec.
+func ladderUsesFlowSpec(stages []config.EscalationStage) bool {
+	for _, s := range stages {
+		if s.Action == config.EscalateFlowSpec {
+			return true
+		}
+	}
+	return false
+}
+
+// ladderUsesBlackhole reports whether any rung announces an RTBH route.
+func ladderUsesBlackhole(stages []config.EscalationStage) bool {
+	for _, s := range stages {
+		if s.Action == config.EscalateBlackhole {
+			return true
+		}
+	}
+	return false
+}
+
+// stageMethodRoute maps a ladder stage to the mitigation method and the
+// human-readable Route string it would announce, without mutating the ban.
+// Used both to install the initial rung and to escalate (where we must know
+// the new rung's method before committing to it). EscalateNone maps to the
+// empty method (alert only — no route announced).
+func (m *Mitigator) stageMethodRoute(b *Ban, stage config.EscalationStage) (config.MitigationMethod, string) {
+	switch stage.Action {
+	case config.EscalateFlowSpec:
+		return config.MitigateFlowSpec, flowSpecSummary(b.FlowSpec)
+	case config.EscalateBlackhole:
+		return config.MitigateBlackhole, fmt.Sprintf("%s next-hop %s community %s", b.Prefix, b.NextHop, b.Community)
+	default: // EscalateNone
+		return "", "alert only"
+	}
+}
+
+// applyStageLocked installs the initial ladder rung (idx, with no prior rung
+// to withdraw): it announces the stage's action and, only on success, records
+// the rung on the ban. A "none" rung announces nothing. The caller holds m.mu.
+func (m *Mitigator) applyStageLocked(b *Ban, idx int, cfg *config.Config) error {
+	method, route := m.stageMethodRoute(b, b.Escalation[idx])
+	if err := m.announceMethodLocked(b, method, route, cfg); err != nil {
+		return err
+	}
+	b.EscalationStep = idx
+	b.Method = method
+	b.Route = route
+	return nil
 }
 
 // flowSpecSummary renders a one-line summary of a rule set for the Route
@@ -342,35 +418,50 @@ func flowSpecSummary(rules []FlowSpecRule) string {
 	return "flowspec: " + strings.Join(parts, "; ")
 }
 
-// announceLocked installs a ban's mitigation per its method, honoring
-// dry-run (log only, never send). The caller holds m.mu. On the FlowSpec
-// path a partial failure withdraws the rules already installed so the RIB is
-// not left half-mitigated.
-func (m *Mitigator) announceLocked(b *Ban, cfg *config.Config) error {
+// announceMethodLocked installs the given mitigation method for a ban,
+// honoring dry-run (log only, never send). It announces the method passed in
+// rather than reading b.Method, so an escalation can announce the next rung
+// while the ban still records the current (working) rung — make-before-break.
+// The caller holds m.mu. On the FlowSpec path a partial failure withdraws the
+// rules already installed so the RIB is not left half-mitigated.
+func (m *Mitigator) announceMethodLocked(b *Ban, method config.MitigationMethod, route string, cfg *config.Config) error {
+	if method == "" { // alert-only rung: nothing to announce
+		m.log.Info("escalation: alert-only stage (no route announced)",
+			"target", b.Target.String())
+		return nil
+	}
 	if cfg.DryRun {
 		m.log.Warn("DRY-RUN: would announce mitigation (not sent)",
-			"method", string(b.Method), "route", b.Route, "target", b.Target.String(),
+			"method", string(method), "route", route, "target", b.Target.String(),
 			"metric", string(b.Metric), "manual", b.Manual)
 		return nil
 	}
-	if b.Method == config.MitigateFlowSpec {
+	if method == config.MitigateFlowSpec {
 		for i, r := range b.FlowSpec {
 			if err := m.bgp.AnnounceFlowSpec(m.ctx, r); err != nil {
 				m.log.Error("FlowSpec announce failed; rolling back", "rule", r.String(), "err", err)
+				// Best-effort rollback of every rule already installed. Keep
+				// going past a failed withdraw (stopping would orphan the
+				// remaining rules), but never swallow it: a failed rollback
+				// leaves a rule on the RIB that ban state no longer tracks, so
+				// the operator must see it.
 				for _, done := range b.FlowSpec[:i] {
-					_ = m.bgp.WithdrawFlowSpec(m.ctx, done)
+					if werr := m.bgp.WithdrawFlowSpec(m.ctx, done); werr != nil {
+						m.log.Error("FlowSpec rollback withdraw failed; rule may be orphaned on the RIB",
+							"rule", done.String(), "err", werr)
+					}
 				}
 				return err
 			}
 		}
-		m.log.Warn("announced flowspec rules", "route", b.Route, "target", b.Target.String())
+		m.log.Warn("announced flowspec rules", "route", route, "target", b.Target.String())
 		return nil
 	}
-	if err := m.bgp.Announce(m.ctx, b.Prefix, b.NextHop, cfg.BGP.CommunityValue); err != nil {
-		m.log.Error("BGP announce failed", "route", b.Route, "err", err)
+	if err := m.bgp.Announce(m.ctx, b.Prefix, b.NextHop, b.communityValue); err != nil {
+		m.log.Error("BGP announce failed", "route", route, "err", err)
 		return err
 	}
-	m.log.Warn("announced blackhole route", "route", b.Route, "target", b.Target.String())
+	m.log.Warn("announced blackhole route", "route", route, "target", b.Target.String())
 	return nil
 }
 
@@ -393,13 +484,19 @@ func copyBan(b *Ban) *Ban {
 	return &c
 }
 
-// withdrawLocked withdraws a ban per its method. The caller holds m.mu.
-func (m *Mitigator) withdrawLocked(b *Ban, reason string, manual bool) {
+// withdrawMethodLocked removes the routes announced by the given method
+// without changing ban state. It takes the method explicitly (rather than
+// reading b.Method) so an escalation can withdraw the old rung after the new
+// one is already up — make-before-break. A "" (alert-only) method or dry-run
+// announced nothing, so there is nothing to remove. The caller holds m.mu.
+func (m *Mitigator) withdrawMethodLocked(b *Ban, method config.MitigationMethod, route, reason string) {
 	switch {
+	case method == "":
+		// Alert-only rung: nothing was announced.
 	case b.DryRun:
 		m.log.Warn("DRY-RUN: would withdraw mitigation (not sent)",
-			"method", string(b.Method), "route", b.Route, "reason", reason)
-	case b.Method == config.MitigateFlowSpec:
+			"method", string(method), "route", route, "reason", reason)
+	case method == config.MitigateFlowSpec:
 		// Withdraw every rule; log but proceed on error (a stuck "active"
 		// would misreport state and block re-bans).
 		for _, r := range b.FlowSpec {
@@ -407,14 +504,20 @@ func (m *Mitigator) withdrawLocked(b *Ban, reason string, manual bool) {
 				m.log.Error("FlowSpec withdraw failed", "rule", r.String(), "err", err)
 			}
 		}
-		m.log.Info("withdrew flowspec rules", "route", b.Route, "reason", reason)
+		m.log.Info("withdrew flowspec rules", "route", route, "reason", reason)
 	default:
 		if err := m.bgp.Withdraw(m.ctx, b.Prefix); err != nil {
-			m.log.Error("BGP withdraw failed", "route", b.Route, "err", err)
+			m.log.Error("BGP withdraw failed", "route", route, "err", err)
 		} else {
-			m.log.Info("withdrew blackhole route", "route", b.Route, "reason", reason)
+			m.log.Info("withdrew blackhole route", "route", route, "reason", reason)
 		}
 	}
+}
+
+// withdrawLocked ends a ban: removes its currently-announced routes and marks
+// it withdrawn. The caller holds m.mu.
+func (m *Mitigator) withdrawLocked(b *Ban, reason string, manual bool) {
+	m.withdrawMethodLocked(b, b.Method, b.Route, reason)
 	b.State = BanWithdrawn
 	b.WithdrawnAt = m.now()
 	b.Reason = reason
@@ -422,7 +525,56 @@ func (m *Mitigator) withdrawLocked(b *Ban, reason string, manual bool) {
 	m.updateGaugeLocked(b.DryRun)
 }
 
-// sweepLoop withdraws bans whose TTL has expired (no permanent bans, ever).
+// escalateLocked advances a still-active ban up its ladder. It jumps straight
+// to the highest rung whose delay has elapsed (skipping any intermediate rungs
+// so a long-running attack does not waste a tick announcing a rung it would
+// immediately supersede) and switches to it make-before-break: the new rung is
+// announced FIRST, and only once that succeeds is the old rung withdrawn and
+// the step advanced. If the announce fails the ban stays on its current
+// (working) rung and the next tick retries. The caller holds m.mu.
+func (m *Mitigator) escalateLocked(b *Ban, now time.Time, cfg *config.Config) {
+	// Highest rung that is due now.
+	target := b.EscalationStep
+	elapsed := now.Sub(b.StartedAt)
+	for next := b.EscalationStep + 1; next < len(b.Escalation); next++ {
+		if elapsed < time.Duration(b.Escalation[next].AfterSeconds)*time.Second {
+			break
+		}
+		target = next
+	}
+	if target == b.EscalationStep {
+		return // nothing new is due
+	}
+
+	newMethod, newRoute := m.stageMethodRoute(b, b.Escalation[target])
+	if newMethod == b.Method {
+		// Same method as the current rung (e.g. two flowspec rungs): the
+		// routes are identical, so there is nothing to re-announce or
+		// withdraw. Just record that we've climbed to the higher rung.
+		b.EscalationStep = target
+		return
+	}
+
+	// Make-before-break: bring the new rung up before tearing the old one down
+	// so the victim is never briefly unprotected during the switch.
+	if err := m.announceMethodLocked(b, newMethod, newRoute, cfg); err != nil {
+		m.log.Error("escalation announce failed; staying on current rung",
+			"target", b.Target.String(), "from", string(b.Method),
+			"to", string(newMethod), "step", target, "err", err)
+		return
+	}
+	oldMethod, oldRoute := b.Method, b.Route
+	m.withdrawMethodLocked(b, oldMethod, oldRoute, "escalation")
+	b.Method = newMethod
+	b.Route = newRoute
+	b.EscalationStep = target
+	m.log.Warn("escalated mitigation", "target", b.Target.String(),
+		"step", target, "from", string(oldMethod), "method", string(newMethod), "route", newRoute)
+	m.updateGaugeLocked(cfg.DryRun)
+}
+
+// sweepLoop advances escalation ladders and withdraws bans whose TTL has
+// expired (no permanent bans, ever).
 func (m *Mitigator) sweepLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -459,7 +611,11 @@ func (m *Mitigator) sweepExpired() {
 			m.log.Warn("ban target no longer in configured networks; auto-withdrawing",
 				"route", b.Route, "target", b.Target.String())
 			m.withdrawLocked(b, "target left configured networks", false)
+			continue
 		}
+		// Still active and protected: advance its escalation ladder if a
+		// later rung's delay has now elapsed.
+		m.escalateLocked(b, now, cfg)
 	}
 }
 
@@ -480,8 +636,14 @@ func (m *Mitigator) updateGaugeLocked(dryRun bool) {
 	}
 	var bans, fsRules int
 	for _, b := range m.bans {
-		if b.State == BanActive {
-			bans++
+		if b.State != BanActive || b.Method == "" {
+			// Withdrawn/rejected bans and alert-only rungs announce no route.
+			continue
+		}
+		bans++
+		// Count rules only for bans CURRENTLY on FlowSpec; a ban that merely
+		// precomputed rules for a future rung has not announced them yet.
+		if b.Method == config.MitigateFlowSpec {
 			fsRules += len(b.FlowSpec)
 		}
 	}

@@ -71,16 +71,27 @@ type recorder struct {
 	withdrawn map[string]int
 	fsUp      map[string]int
 	fsDown    map[string]int
+	// lastCommunity records the community value passed to the most recent
+	// blackhole Announce, so a test can assert it is frozen at ban time
+	// rather than read live at a (possibly post-reload) escalation.
+	lastCommunity uint32
+	// events records every announce/withdraw in call order so a test can
+	// assert make-before-break: the new rung goes up before the old comes
+	// down. Entries: "announce <prefix>", "withdraw <prefix>",
+	// "fs-announce", "fs-withdraw".
+	events []string
 }
 
 func newRecorder() *recorder {
 	return &recorder{announced: map[string]int{}, withdrawn: map[string]int{}, fsUp: map[string]int{}, fsDown: map[string]int{}}
 }
 
-func (r *recorder) Announce(_ context.Context, prefix netip.Prefix, _ string, _ uint32) error {
+func (r *recorder) Announce(_ context.Context, prefix netip.Prefix, _ string, community uint32) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.announced[prefix.String()]++
+	r.lastCommunity = community
+	r.events = append(r.events, "announce "+prefix.String())
 	return nil
 }
 
@@ -88,7 +99,22 @@ func (r *recorder) Withdraw(_ context.Context, prefix netip.Prefix) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.withdrawn[prefix.String()]++
+	r.events = append(r.events, "withdraw "+prefix.String())
 	return nil
+}
+
+// eventLog returns a copy of the ordered announce/withdraw event log.
+func (r *recorder) eventLog() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+// community returns the community value of the most recent blackhole announce.
+func (r *recorder) community() uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastCommunity
 }
 
 func (r *recorder) announceCount(p string) int {
@@ -107,6 +133,7 @@ func (r *recorder) AnnounceFlowSpec(_ context.Context, rule FlowSpecRule) error 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.fsUp[rule.String()]++
+	r.events = append(r.events, "fs-announce")
 	return nil
 }
 
@@ -114,6 +141,7 @@ func (r *recorder) WithdrawFlowSpec(_ context.Context, rule FlowSpecRule) error 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.fsDown[rule.String()]++
+	r.events = append(r.events, "fs-withdraw")
 	return nil
 }
 
@@ -155,7 +183,11 @@ func (c *mockClock) Advance(d time.Duration) {
 
 func newMitigator(t *testing.T, yaml string, rec announcer, clk *mockClock) *Mitigator {
 	t.Helper()
-	store := storeFrom(t, yaml)
+	return newMitigatorStore(t, storeFrom(t, yaml), rec, clk)
+}
+
+func newMitigatorStore(t *testing.T, store *config.Store, rec announcer, clk *mockClock) *Mitigator {
+	t.Helper()
 	opts := []Option{withAnnouncer(rec)}
 	if clk != nil {
 		opts = append(opts, WithClock(clk.Now))
@@ -412,23 +444,13 @@ func fileStore(t *testing.T, yaml string) (*config.Store, string) {
 	return config.NewStore(path, cfg), path
 }
 
-func newMitigatorStore(t *testing.T, store *config.Store, rec announcer) *Mitigator {
-	t.Helper()
-	m, err := New(store, slog.New(slog.NewTextHandler(testWriter{t}, nil)), withAnnouncer(rec))
-	if err != nil {
-		t.Fatalf("New mitigator: %v", err)
-	}
-	m.ctx = context.Background()
-	return m
-}
-
 // TestNetworksShrinkWithdrawsBan verifies that when a config reload removes
 // the prefix an active ban belongs to, the sweep auto-withdraws it instead
 // of leaving a route up for space we no longer protect.
 func TestNetworksShrinkWithdrawsBan(t *testing.T) {
 	store, path := fileStore(t, liveYAML())
 	rec := newRecorder()
-	m := newMitigatorStore(t, store, rec)
+	m := newMitigatorStore(t, store, rec, nil)
 
 	if ban := m.OnAttackStarted(startedEvent("203.0.113.66")); ban.State != BanActive {
 		t.Fatalf("ban state = %s, want active", ban.State)
@@ -457,7 +479,7 @@ func TestNetworksShrinkWithdrawsBan(t *testing.T) {
 func TestDryRunReloadDoesNotStrandLiveBan(t *testing.T) {
 	store, path := fileStore(t, liveYAML()) // dry_run: false
 	rec := newRecorder()
-	m := newMitigatorStore(t, store, rec)
+	m := newMitigatorStore(t, store, rec, nil)
 
 	ban := m.OnAttackStarted(startedEvent("203.0.113.66"))
 	if ban.DryRun {
@@ -687,5 +709,460 @@ func TestFlowSpecPartialAnnounceRollback(t *testing.T) {
 	}
 	if len(m.ActiveBans()) != 0 {
 		t.Errorf("active bans = %d, want 0 (rejected ban not tracked)", len(m.ActiveBans()))
+	}
+}
+
+// escalationYAML builds a live config with a global none → flowspec →
+// blackhole ladder.
+func escalationYAML() string {
+	return strings.Replace(liveYAML(), "thresholds:",
+		"flowspec:\n  action: discard\nescalation:\n"+
+			"  - {after_seconds: 0, action: none}\n"+
+			"  - {after_seconds: 5, action: flowspec}\n"+
+			"  - {after_seconds: 10, action: blackhole}\n"+
+			"thresholds:", 1)
+}
+
+func TestEscalationLadderProgression(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	rec := newRecorder()
+	m := newMitigator(t, escalationYAML(), rec, clk)
+
+	// Rung 0 (t=0): alert only — nothing announced.
+	ban := m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	if ban == nil || ban.State != BanActive {
+		t.Fatalf("ban = %+v, want active", ban)
+	}
+	if ban.Method != "" || ban.EscalationStep != 0 {
+		t.Errorf("initial method/step = %q/%d, want alert-only at step 0", ban.Method, ban.EscalationStep)
+	}
+	if len(rec.flowSpecUp()) != 0 || rec.announceCount("203.0.113.66/32") != 0 {
+		t.Error("rung 0 (none) announced something")
+	}
+
+	// t=6s: escalate to flowspec.
+	clk.Advance(6 * time.Second)
+	m.sweepExpired()
+	if up := rec.flowSpecUp(); len(up) != 1 {
+		t.Fatalf("after 6s: flowspec announces = %v, want 1", up)
+	}
+	if rec.announceCount("203.0.113.66/32") != 0 {
+		t.Error("blackhole announced too early")
+	}
+
+	// t=11s: escalate to blackhole — flowspec withdrawn, RTBH announced.
+	clk.Advance(5 * time.Second)
+	m.sweepExpired()
+	if rec.announceCount("203.0.113.66/32") != 1 {
+		t.Errorf("after 11s: blackhole announces = %d, want 1", rec.announceCount("203.0.113.66/32"))
+	}
+	if rec.flowSpecDownTotal() != 1 {
+		t.Errorf("flowspec not withdrawn on escalation to blackhole: down=%d", rec.flowSpecDownTotal())
+	}
+	bans := m.ActiveBans()
+	if len(bans) != 1 || bans[0].Method != config.MitigateBlackhole || bans[0].EscalationStep != 2 {
+		t.Errorf("final ban = %+v, want blackhole at step 2", bans)
+	}
+
+	// Attack ends: blackhole withdrawn.
+	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr("203.0.113.66"), Direction: engine.DirIncoming, At: clk.Now()})
+	if rec.withdrawCount("203.0.113.66/32") != 1 {
+		t.Errorf("blackhole not withdrawn on attack end: %d", rec.withdrawCount("203.0.113.66/32"))
+	}
+}
+
+// TestEscalationEndsMidLadder: an attack that ends while at the flowspec rung
+// withdraws the flowspec rules and never reaches blackhole.
+func TestEscalationEndsMidLadder(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	rec := newRecorder()
+	m := newMitigator(t, escalationYAML(), rec, clk)
+
+	m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	clk.Advance(6 * time.Second)
+	m.sweepExpired() // → flowspec
+	if len(rec.flowSpecUp()) != 1 {
+		t.Fatal("expected flowspec rung")
+	}
+	// End before the blackhole rung's 10s.
+	clk.Advance(1 * time.Second)
+	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr("203.0.113.66"), Direction: engine.DirIncoming, At: clk.Now()})
+	if rec.flowSpecDownTotal() != 1 {
+		t.Errorf("flowspec not withdrawn on mid-ladder end: %d", rec.flowSpecDownTotal())
+	}
+	if rec.announceCount("203.0.113.66/32") != 0 {
+		t.Error("blackhole reached despite ending at the flowspec rung")
+	}
+}
+
+// TestEscalationTTLStops: a TTL shorter than the ladder withdraws the ban
+// before it can escalate further.
+func TestEscalationTTLStops(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	yaml := strings.Replace(escalationYAML(), "ttl_seconds: 600", "ttl_seconds: 7", 1)
+	rec := newRecorder()
+	m := newMitigator(t, yaml, rec, clk)
+
+	m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	clk.Advance(6 * time.Second)
+	m.sweepExpired() // → flowspec at 6s
+	if len(rec.flowSpecUp()) != 1 {
+		t.Fatal("expected flowspec rung at 6s")
+	}
+	// TTL (7s) fires before the 10s blackhole rung.
+	clk.Advance(2 * time.Second) // t=8s > ttl 7s
+	m.sweepExpired()
+	if len(m.ActiveBans()) != 0 {
+		t.Error("ban should have TTL-expired before reaching blackhole")
+	}
+	if rec.flowSpecDownTotal() != 1 {
+		t.Errorf("flowspec not withdrawn on TTL expiry: %d", rec.flowSpecDownTotal())
+	}
+	if rec.announceCount("203.0.113.66/32") != 0 {
+		t.Error("blackhole reached despite TTL expiring first")
+	}
+}
+
+// TestEscalationMakeBeforeBreak: escalating flowspec → blackhole must bring
+// the blackhole route UP before tearing the flowspec rules DOWN, so the victim
+// is never momentarily unprotected during the switch.
+func TestEscalationMakeBeforeBreak(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	rec := newRecorder()
+	m := newMitigator(t, escalationYAML(), rec, clk)
+
+	m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	clk.Advance(6 * time.Second)
+	m.sweepExpired() // → flowspec
+	clk.Advance(5 * time.Second)
+	m.sweepExpired() // → blackhole
+
+	log := rec.eventLog()
+	annIdx, wdIdx := -1, -1
+	for i, e := range log {
+		if e == "announce 203.0.113.66/32" && annIdx == -1 {
+			annIdx = i
+		}
+		if e == "fs-withdraw" {
+			wdIdx = i
+		}
+	}
+	if annIdx == -1 || wdIdx == -1 {
+		t.Fatalf("expected a blackhole announce and a flowspec withdraw; log=%v", log)
+	}
+	if annIdx > wdIdx {
+		t.Errorf("make-before-break violated: blackhole announced at idx %d AFTER flowspec withdrawn at idx %d; log=%v", annIdx, wdIdx, log)
+	}
+}
+
+// TestEscalationSkipsIntermediateRung: when several rungs come due before a
+// single sweep (a long-running attack, or the daemon catching up), the ban
+// jumps straight to the highest due rung and never announces the rungs it
+// skips past.
+func TestEscalationSkipsIntermediateRung(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	rec := newRecorder()
+	m := newMitigator(t, escalationYAML(), rec, clk)
+
+	m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	// Jump past BOTH the 5s flowspec rung and the 10s blackhole rung at once.
+	clk.Advance(12 * time.Second)
+	m.sweepExpired()
+
+	if len(rec.flowSpecUp()) != 0 {
+		t.Errorf("intermediate flowspec rung announced during catch-up: %v", rec.flowSpecUp())
+	}
+	if rec.flowSpecDownTotal() != 0 {
+		t.Errorf("skipped flowspec rung was withdrawn (it was never up): %d", rec.flowSpecDownTotal())
+	}
+	if rec.announceCount("203.0.113.66/32") != 1 {
+		t.Errorf("blackhole announces = %d, want 1 (jumped straight to it)", rec.announceCount("203.0.113.66/32"))
+	}
+	bans := m.ActiveBans()
+	if len(bans) != 1 || bans[0].EscalationStep != 2 || bans[0].Method != config.MitigateBlackhole {
+		t.Errorf("ban = %+v, want blackhole at step 2", bans)
+	}
+}
+
+// TestEscalationBoundaryDueTime: a rung fires at exactly its after_seconds,
+// neither a tick early nor a tick late.
+func TestEscalationBoundaryDueTime(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	rec := newRecorder()
+	m := newMitigator(t, escalationYAML(), rec, clk)
+
+	m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+
+	// Just before the 5s flowspec rung: nothing yet.
+	clk.Advance(4*time.Second + 999*time.Millisecond)
+	m.sweepExpired()
+	if len(rec.flowSpecUp()) != 0 {
+		t.Errorf("flowspec fired before its 5s due time: %v", rec.flowSpecUp())
+	}
+	// Exactly at 5s: it fires.
+	clk.Advance(1 * time.Millisecond)
+	m.sweepExpired()
+	if len(rec.flowSpecUp()) != 1 {
+		t.Errorf("flowspec did not fire at exactly 5s: %v", rec.flowSpecUp())
+	}
+}
+
+// TestEscalationStopsAfterAttackEnds: once the attack ends and the ban is
+// withdrawn, later rungs never fire even as their delays elapse — the ladder
+// only advances while the ban is still active.
+func TestEscalationStopsAfterAttackEnds(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	rec := newRecorder()
+	m := newMitigator(t, escalationYAML(), rec, clk)
+
+	m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	clk.Advance(6 * time.Second)
+	m.sweepExpired() // → flowspec
+	clk.Advance(1 * time.Second)
+	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr("203.0.113.66"), Direction: engine.DirIncoming, At: clk.Now()})
+
+	// Time marches past the 10s blackhole rung, but the ban is gone.
+	clk.Advance(10 * time.Second)
+	m.sweepExpired()
+	if rec.announceCount("203.0.113.66/32") != 0 {
+		t.Errorf("blackhole announced after the attack already ended: %d", rec.announceCount("203.0.113.66/32"))
+	}
+}
+
+// hostgroupEscalationYAML gives the "web" group its own flowspec → blackhole
+// ladder while the global config keeps the default single-rung blackhole.
+func hostgroupEscalationYAML() string {
+	return strings.Replace(liveYAML(), "thresholds:",
+		"flowspec:\n  action: discard\n"+
+			"hostgroups:\n"+
+			"  - name: web\n"+
+			"    networks:\n"+
+			"      - \"203.0.113.64/26\"\n"+
+			"    escalation:\n"+
+			"      - {after_seconds: 0, action: flowspec}\n"+
+			"      - {after_seconds: 5, action: blackhole}\n"+
+			"thresholds:", 1)
+}
+
+// TestEscalationPerHostgroupLadder: a hostgroup's own ladder is applied to
+// targets inside it, independent of the global policy.
+func TestEscalationPerHostgroupLadder(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	rec := newRecorder()
+	m := newMitigator(t, hostgroupEscalationYAML(), rec, clk)
+
+	// 203.0.113.66 is inside 203.0.113.64/26 → the "web" group, whose rung 0
+	// is flowspec (not the global blackhole default).
+	ban := m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	if ban == nil || ban.Method != config.MitigateFlowSpec || ban.EscalationStep != 0 {
+		t.Fatalf("ban = %+v, want flowspec at step 0 (group ladder)", ban)
+	}
+	if rec.announceCount("203.0.113.66/32") != 0 {
+		t.Error("group rung-0 is flowspec; no blackhole should be announced")
+	}
+	if len(rec.flowSpecUp()) != 1 {
+		t.Errorf("group rung-0 flowspec not announced: %v", rec.flowSpecUp())
+	}
+
+	// After 5s it climbs to the group's blackhole rung.
+	clk.Advance(6 * time.Second)
+	m.sweepExpired()
+	if rec.announceCount("203.0.113.66/32") != 1 || rec.flowSpecDownTotal() != 1 {
+		t.Errorf("group did not escalate to blackhole: ann=%d fsDown=%d",
+			rec.announceCount("203.0.113.66/32"), rec.flowSpecDownTotal())
+	}
+}
+
+// TestEscalationRateLimitFlowSpecRung: a flowspec rung honours a rate_limit
+// policy (not just discard).
+func TestEscalationRateLimitFlowSpecRung(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	yaml := strings.Replace(liveYAML(), "thresholds:",
+		"flowspec:\n  action: rate_limit\n  rate_mbps: 100\n"+
+			"escalation:\n"+
+			"  - {after_seconds: 0, action: none}\n"+
+			"  - {after_seconds: 5, action: flowspec}\n"+
+			"thresholds:", 1)
+	rec := newRecorder()
+	m := newMitigator(t, yaml, rec, clk)
+
+	m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	clk.Advance(6 * time.Second)
+	m.sweepExpired() // → flowspec rate_limit
+
+	bans := m.ActiveBans()
+	if len(bans) != 1 || bans[0].Method != config.MitigateFlowSpec {
+		t.Fatalf("ban = %+v, want flowspec", bans)
+	}
+	if len(bans[0].FlowSpec) != 1 || bans[0].FlowSpec[0].Action != config.FlowSpecRateLimit {
+		t.Errorf("rule = %+v, want a single rate_limit rule", bans[0].FlowSpec)
+	}
+	if len(rec.flowSpecUp()) != 1 {
+		t.Errorf("rate_limit flowspec rule not announced: %v", rec.flowSpecUp())
+	}
+}
+
+// TestEscalationDryRunAdvances: in dry-run the ladder still advances (state and
+// method change) but nothing is ever announced to BGP.
+func TestEscalationDryRunAdvances(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	// baseYAML defaults to dry_run: true.
+	yaml := strings.Replace(baseYAML(), "thresholds:",
+		"flowspec:\n  action: discard\nescalation:\n"+
+			"  - {after_seconds: 0, action: none}\n"+
+			"  - {after_seconds: 5, action: flowspec}\n"+
+			"  - {after_seconds: 10, action: blackhole}\n"+
+			"thresholds:", 1)
+	rec := newRecorder()
+	m := newMitigator(t, yaml, rec, clk)
+
+	ban := m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	if ban == nil || !ban.DryRun {
+		t.Fatalf("ban = %+v, want active dry-run", ban)
+	}
+	clk.Advance(11 * time.Second)
+	m.sweepExpired() // jumps straight to blackhole in dry-run
+
+	bans := m.ActiveBans()
+	if len(bans) != 1 || bans[0].EscalationStep != 2 || bans[0].Method != config.MitigateBlackhole {
+		t.Errorf("dry-run ban = %+v, want blackhole at step 2", bans)
+	}
+	if len(rec.flowSpecUp()) != 0 || rec.announceCount("203.0.113.66/32") != 0 {
+		t.Errorf("dry-run announced to BGP: fsUp=%v rtbh=%d", rec.flowSpecUp(), rec.announceCount("203.0.113.66/32"))
+	}
+	if len(rec.eventLog()) != 0 {
+		t.Errorf("dry-run emitted BGP events: %v", rec.eventLog())
+	}
+}
+
+// TestManualBanSurvivesAutoAttackEnd: a manual ban is held by the operator,
+// not by traffic. An overlapping automatic attack ending must not release it —
+// only ManualUnban or the TTL does. (Regression: the dirMask reaching 0 must
+// not auto-withdraw a manual ban.)
+func TestManualBanSurvivesAutoAttackEnd(t *testing.T) {
+	rec := newRecorder()
+	m := newMitigator(t, liveYAML(), rec, nil)
+
+	mb, err := m.ManualBan(netip.MustParseAddr("203.0.113.66"))
+	if err != nil || mb.State != BanActive {
+		t.Fatalf("manual ban = %+v err=%v, want active", mb, err)
+	}
+	// An automatic incoming attack overlaps the manual ban, then ends.
+	m.OnAttackStarted(startedEvent("203.0.113.66"))
+	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr("203.0.113.66"), Direction: engine.DirIncoming, At: time.Now()})
+
+	if len(m.ActiveBans()) != 1 {
+		t.Fatalf("active bans = %d, want 1 (manual ban must survive the auto-attack ending)", len(m.ActiveBans()))
+	}
+	if rec.withdrawCount("203.0.113.66/32") != 0 {
+		t.Errorf("manual ban withdrawn on auto-attack end: %d", rec.withdrawCount("203.0.113.66/32"))
+	}
+	// ManualUnban still takes it down.
+	if _, err := m.ManualUnban(netip.MustParseAddr("203.0.113.66")); err != nil {
+		t.Errorf("ManualUnban err = %v", err)
+	}
+	if rec.withdrawCount("203.0.113.66/32") != 1 {
+		t.Errorf("manual unban withdraw = %d, want 1", rec.withdrawCount("203.0.113.66/32"))
+	}
+}
+
+// TestEscalationFreezesCommunityAcrossReload: the BGP community is frozen at
+// ban time alongside the next-hop. A config reload that changes the community
+// between ban creation and a delayed escalation to the blackhole rung must NOT
+// change the community the ban announces. (Regression: announce used the live
+// cfg community while the next-hop was frozen.)
+func TestEscalationFreezesCommunityAcrossReload(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	base := strings.Replace(liveYAML(), "thresholds:",
+		"escalation:\n"+
+			"  - {after_seconds: 0, action: none}\n"+
+			"  - {after_seconds: 5, action: blackhole}\n"+
+			"thresholds:", 1)
+	store, path := fileStore(t, base)
+	rec := newRecorder()
+	m := newMitigatorStore(t, store, rec, clk)
+
+	// Ban starts at the alert-only rung; community 65000:666 is frozen in.
+	m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+
+	// Operator reloads with a DIFFERENT community before the blackhole rung.
+	reloaded := strings.Replace(base, `community: "65000:666"`, `community: "65000:999"`, 1)
+	if err := os.WriteFile(path, []byte(reloaded), 0o600); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+	if _, err := store.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	// Escalate to blackhole: it must announce with the ORIGINAL community.
+	clk.Advance(6 * time.Second)
+	m.sweepExpired()
+	if rec.announceCount("203.0.113.66/32") != 1 {
+		t.Fatalf("blackhole not announced on escalation")
+	}
+	want, err := config.ParseCommunity("65000:666")
+	if err != nil {
+		t.Fatalf("ParseCommunity: %v", err)
+	}
+	if got := rec.community(); got != want {
+		t.Errorf("announced community = %d, want %d (frozen at ban time, not the reloaded 65000:999)", got, want)
+	}
+}
+
+// flakyRollback announces the first two FlowSpec rules, fails the third, and
+// fails EVERY withdraw — to lock in that rollback is best-effort: it attempts
+// to withdraw every already-installed rule even when a withdraw errors (it must
+// not break on the first failure, which would orphan the rest).
+type flakyRollback struct {
+	mu           sync.Mutex
+	announce     int
+	downAttempts int
+}
+
+func (f *flakyRollback) Announce(context.Context, netip.Prefix, string, uint32) error { return nil }
+func (f *flakyRollback) Withdraw(context.Context, netip.Prefix) error                 { return nil }
+func (f *flakyRollback) AnnounceFlowSpec(_ context.Context, _ FlowSpecRule) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.announce++
+	if f.announce >= 3 {
+		return fmt.Errorf("flowspec session down")
+	}
+	return nil
+}
+func (f *flakyRollback) WithdrawFlowSpec(_ context.Context, _ FlowSpecRule) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.downAttempts++
+	return fmt.Errorf("withdraw failed too")
+}
+
+// TestFlowSpecRollbackWithdrawFailureBestEffort: a failed rollback withdraw
+// does not stop the rollback — every already-installed rule is still attempted.
+func TestFlowSpecRollbackWithdrawFailureBestEffort(t *testing.T) {
+	rec := &flakyRollback{}
+	m := newMitigator(t, flowSpecYAML(), rec, nil)
+
+	// Mixed-vector attack with two reflector ports → 3 rules (dst-only +
+	// udp/123 + udp/53); the 3rd announce fails after the first two install.
+	ev := fsEvent("203.0.113.66", engine.AttackMixed)
+	ev.Sample = &engine.AttackSample{TopSrcPorts: []engine.Counter{
+		{Key: "123", Packets: 100}, {Key: "53", Packets: 50},
+	}}
+	ban := m.OnAttackStarted(ev)
+	if ban == nil || ban.State != BanRejected {
+		t.Fatalf("ban = %+v, want rejected on announce failure", ban)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.downAttempts != 2 {
+		t.Errorf("rollback withdraw attempts = %d, want 2 (best-effort continues past a failed withdraw)", rec.downAttempts)
+	}
+	if len(m.ActiveBans()) != 0 {
+		t.Errorf("active bans = %d, want 0", len(m.ActiveBans()))
 	}
 }
