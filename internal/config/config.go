@@ -177,6 +177,9 @@ const GlobalGroup = "global"
 // charset.
 var groupNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// envNameRe matches a POSIX-ish environment variable name.
+var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // Hostgroup groups prefixes under a shared threshold set and mitigation
 // policy. Fields mirror the YAML shape; the resolved form lives in
 // Config.Groups.
@@ -318,7 +321,19 @@ type Webhook struct {
 // API configures the REST API listener.
 type API struct {
 	Listen string `yaml:"listen"`
+	// Dashboard serves the embedded web UI on the API listener. Defaults to
+	// true; set false to expose only the JSON API and metrics.
+	Dashboard *bool `yaml:"dashboard"`
+	// TokenEnv names an environment variable holding a bearer token. When
+	// set, every /api/v1 request must carry "Authorization: Bearer <token>".
+	// The token is read from the environment, never from the config file.
+	// Unset (default) leaves the API open — safe only on a trusted listener
+	// such as the default 127.0.0.1 bind.
+	TokenEnv string `yaml:"token_env"`
 }
+
+// DashboardEnabled reports whether the embedded UI should be served.
+func (a API) DashboardEnabled() bool { return a.Dashboard == nil || *a.Dashboard }
 
 // Load reads, parses and validates the configuration file at path.
 func Load(path string) (*Config, error) {
@@ -431,6 +446,11 @@ func (c *Config) validate() error {
 	}
 	if _, err := netip.ParseAddrPort(normalizeListen(c.API.Listen)); err != nil {
 		return fmt.Errorf("api.listen: invalid address %q: %w", c.API.Listen, err)
+	}
+	if c.API.TokenEnv != "" {
+		if !envNameRe.MatchString(c.API.TokenEnv) {
+			return fmt.Errorf("api.token_env %q is not a valid environment variable name", c.API.TokenEnv)
+		}
 	}
 	return nil
 }

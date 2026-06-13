@@ -194,8 +194,10 @@ All endpoints are served on `api.listen`.
 
 | Method & path | Description |
 | --- | --- |
-| `GET /api/v1/status` | Mode, uptime, protected networks, thresholds, active attack/ban counts. |
-| `GET /api/v1/attacks` | Currently active attacks plus the last 100 that ended. |
+| `GET /api/v1/status` | Mode, uptime, protected networks, thresholds, hostgroups, active attack/ban counts. |
+| `GET /api/v1/attacks` | Currently active attacks plus the last 100 that ended (with samples and classification). |
+| `GET /api/v1/hosts` | Tracked-host snapshot: per-direction rates, learned baselines, attack state (top-talkers data). |
+| `GET /api/v1/bans` | All bans, active and historical. |
 | `POST /api/v1/ban` | Manually ban an address: `{"ip":"203.0.113.66"}`. Respects the whitelist, the cap, and the `networks` scope. |
 | `POST /api/v1/unban` | Manually withdraw a ban: `{"ip":"203.0.113.66"}`. |
 | `POST /api/v1/config/reload` | Re-read the config file (same as `SIGHUP`). |
@@ -203,7 +205,36 @@ All endpoints are served on `api.listen`.
 
 Manual bans honour every safety rule: a whitelisted target returns `409` and is never
 announced; a target outside the configured `networks` returns `409`; exceeding
-`max_active_bans` returns `409`.
+`max_active_bans` returns `409`. POST endpoints require `Content-Type: application/json`.
+
+### Dashboard
+
+A self-contained web UI (no build step, no external assets — embedded in the binary via
+`go:embed`) is served on the same `api.listen` address at `/`. It polls the API and shows
+the live mode, active and recent attacks with their classification and flow samples,
+top talkers with learned baselines, hostgroups, and the ban table — plus manual ban/unban
+and config-reload controls. It works fully on live data alone (no database required), the
+free answer to FastNetMon's per-user paid LiveView. Set `api.dashboard: false` to serve
+only the JSON API and metrics.
+
+### Authentication
+
+By default the API and dashboard are **unauthenticated** — safe only because the default
+`api.listen` binds to `127.0.0.1`. **Before exposing the listener beyond localhost, set a
+token:**
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  token_env: "KAPKAN_API_TOKEN"   # token read from this env var, never the file
+```
+
+Every `/api/v1` request must then carry `Authorization: Bearer <token>` (constant-time
+compared); the dashboard prompts for it and keeps it in `sessionStorage`. `/metrics` and
+the static UI shell stay open (the data behind the UI does not). POST endpoints also
+require the JSON content type, which — together with the token living in a header — blocks
+cross-site request forgery. Single-token auth is intentionally minimal; per-user roles are
+a later milestone.
 
 ## Metrics
 

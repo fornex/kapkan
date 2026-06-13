@@ -129,4 +129,8 @@ notify:
     timeout_seconds: 10
 
 api:
-  listen: "127.0.0.1:8080"
+  listen: "127.0.0.1:8080" # default localhost bind needs no auth
+  dashboard: true # embedded web UI at / on this listener; false = JSON API only
+  # token_env: "KAPKAN_API_TOKEN" # REQUIRED before exposing beyond localhost:
+  #   when set, every /api/v1 request needs "Authorization: Bearer <token>".
+  #   The token is read from this env var, never the file.

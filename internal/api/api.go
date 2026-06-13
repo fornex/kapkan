@@ -5,11 +5,14 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,15 +151,57 @@ func (s *Server) RecordAttackEnded(ev engine.Event, ban *mitigate.Ban) {
 }
 
 // Handler builds the HTTP routes. Exposed for httptest-based testing.
+//
+// All /api/v1 routes pass through requireToken, which enforces the bearer
+// token when api.token_env is configured. /metrics (Prometheus scraping)
+// and the dashboard assets (the HTML shell is not secret; the data it loads
+// is, via the guarded API) are served without the token.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/status", s.handleStatus)
-	mux.HandleFunc("GET /api/v1/attacks", s.handleAttacks)
-	mux.HandleFunc("POST /api/v1/ban", s.handleBan)
-	mux.HandleFunc("POST /api/v1/unban", s.handleUnban)
-	mux.HandleFunc("POST /api/v1/config/reload", s.handleReload)
+	api := func(pattern string, h http.HandlerFunc) {
+		mux.Handle(pattern, s.requireToken(h))
+	}
+	api("GET /api/v1/status", s.handleStatus)
+	api("GET /api/v1/attacks", s.handleAttacks)
+	api("GET /api/v1/hosts", s.handleHosts)
+	api("GET /api/v1/bans", s.handleBans)
+	api("POST /api/v1/ban", s.handleBan)
+	api("POST /api/v1/unban", s.handleUnban)
+	api("POST /api/v1/config/reload", s.handleReload)
 	mux.Handle("GET /metrics", promhttp.Handler())
+	s.registerDashboard(mux)
 	return mux
+}
+
+// requireToken enforces the configured bearer token (constant-time compare)
+// and, for mutating methods, an application/json content type — a
+// cross-site request cannot set that header without a CORS preflight, which
+// we never grant, so the token-in-header plus JSON requirement closes CSRF.
+// Whether auth is required is read per request, so a reload that sets or
+// clears api.token_env takes effect without a restart.
+func (s *Server) requireToken(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.store.Get()
+		if env := cfg.API.TokenEnv; env != "" {
+			want := os.Getenv(env)
+			// Require the exact "Bearer " scheme; a raw header value must
+			// not authenticate. want=="" (token_env set but the env var is
+			// empty) fails closed rather than accepting an empty token.
+			got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if want == "" || !ok || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+				return
+			}
+		}
+		if r.Method == http.MethodPost {
+			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+				writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+				return
+			}
+		}
+		next(w, r)
+	})
 }
 
 // ListenAndServe runs the HTTP server until ctx is cancelled, then shuts it
@@ -219,6 +264,14 @@ func (s *Server) handleAttacks(w http.ResponseWriter, _ *http.Request) {
 		"active": active,
 		"recent": recent,
 	})
+}
+
+func (s *Server) handleHosts(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": s.eng.Snapshot()})
+}
+
+func (s *Server) handleBans(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"bans": s.mit.Snapshot()})
 }
 
 type ipRequest struct {

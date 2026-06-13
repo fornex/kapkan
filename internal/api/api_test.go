@@ -13,6 +13,7 @@ import (
 
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/engine"
+	"github.com/kapkan-io/kapkan/internal/flow"
 	"github.com/kapkan-io/kapkan/internal/mitigate"
 
 	"log/slog"
@@ -83,6 +84,11 @@ func do(t *testing.T, h http.Handler, method, path, body string) *httptest.Respo
 		r = httptest.NewRequest(method, path, bytes.NewBufferString(body))
 	} else {
 		r = httptest.NewRequest(method, path, nil)
+	}
+	// Real clients (and the dashboard) POST JSON; the CSRF guard requires
+	// it, so the default test request mirrors that.
+	if method == http.MethodPost {
+		r.Header.Set("Content-Type", "application/json")
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)
@@ -352,5 +358,235 @@ func TestInAndOutAttacksOnSameHostCoexist(t *testing.T) {
 	}
 	if len(resp.Active) != 1 || resp.Active[0].Direction != engine.DirIncoming {
 		t.Fatalf("active = %+v, want only the incoming attack", resp.Active)
+	}
+}
+
+func TestHostsAndBansEndpoints(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+	h := s.Handler()
+
+	// Feed a flow so the engine actually tracks a host; the endpoint must
+	// surface it (not just return an empty/null list).
+	s.eng.Process(flow.Flow{
+		SrcAddr:      netip.MustParseAddr("198.51.100.7"),
+		DstAddr:      netip.MustParseAddr("203.0.113.20"),
+		IPProto:      17,
+		Bytes:        100,
+		Packets:      1,
+		SamplingRate: 1000,
+	})
+
+	rec := do(t, h, http.MethodGet, "/api/v1/hosts", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("hosts status = %d, want 200", rec.Code)
+	}
+	var hostsResp struct {
+		Hosts []engine.HostStat `json:"hosts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &hostsResp); err != nil {
+		t.Fatalf("hosts body: %v", err)
+	}
+	found := false
+	for _, hst := range hostsResp.Hosts {
+		if hst.Target.String() == "203.0.113.20" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("hosts = %+v, want the tracked 203.0.113.20", hostsResp.Hosts)
+	}
+
+	// A manual ban then shows up in /bans.
+	if rec := do(t, h, http.MethodPost, "/api/v1/ban", `{"ip":"203.0.113.66"}`); rec.Code != http.StatusOK {
+		t.Fatalf("ban status = %d, want 200", rec.Code)
+	}
+	rec = do(t, h, http.MethodGet, "/api/v1/bans", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bans status = %d, want 200", rec.Code)
+	}
+	var bansResp struct {
+		Bans []mitigate.Ban `json:"bans"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bansResp); err != nil {
+		t.Fatalf("bans body: %v", err)
+	}
+	if len(bansResp.Bans) != 1 || bansResp.Bans[0].Target.String() != "203.0.113.66" {
+		t.Errorf("bans = %+v, want one ban on 203.0.113.66", bansResp.Bans)
+	}
+}
+
+func tokenYAML() string {
+	return strings.Replace(apiYAML, "  listen: \"127.0.0.1:8080\"\n",
+		"  listen: \"127.0.0.1:8080\"\n  token_env: \"KAPKAN_TEST_API_TOKEN\"\n", 1)
+}
+
+// reqWith issues a request with optional bearer token and content type.
+func reqWith(h http.Handler, method, path, body, bearer, ctype string) *httptest.ResponseRecorder {
+	var r *http.Request
+	if body != "" {
+		r = httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	} else {
+		r = httptest.NewRequest(method, path, nil)
+	}
+	if bearer != "" {
+		r.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	if ctype != "" {
+		r.Header.Set("Content-Type", ctype)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	return rec
+}
+
+func TestBearerTokenGuard(t *testing.T) {
+	t.Setenv("KAPKAN_TEST_API_TOKEN", "s3cr3t")
+	s := testServer(t, storeFromYAML(t, tokenYAML()))
+	h := s.Handler()
+
+	// No token: 401 on the API.
+	if rec := reqWith(h, http.MethodGet, "/api/v1/status", "", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
+	}
+	// Wrong token: 401.
+	if rec := reqWith(h, http.MethodGet, "/api/v1/status", "", "nope", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("wrong token: status = %d, want 401", rec.Code)
+	}
+	// Right token: 200.
+	if rec := reqWith(h, http.MethodGet, "/api/v1/status", "", "s3cr3t", ""); rec.Code != http.StatusOK {
+		t.Errorf("right token: status = %d, want 200", rec.Code)
+	}
+	// Mutating endpoint guarded too.
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"203.0.113.9"}`, "", "application/json"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ban without token: status = %d, want 401", rec.Code)
+	}
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"203.0.113.9"}`, "s3cr3t", "application/json"); rec.Code != http.StatusOK {
+		t.Errorf("ban with token: status = %d, want 200", rec.Code)
+	}
+	// /metrics and the dashboard stay open even with a token configured.
+	if rec := reqWith(h, http.MethodGet, "/metrics", "", "", ""); rec.Code != http.StatusOK {
+		t.Errorf("metrics: status = %d, want 200 (unguarded)", rec.Code)
+	}
+	if rec := reqWith(h, http.MethodGet, "/", "", "", ""); rec.Code != http.StatusOK {
+		t.Errorf("dashboard: status = %d, want 200 (unguarded shell)", rec.Code)
+	}
+
+	// CSRF guard is enforced in token mode too: a valid token but a non-JSON
+	// content type is still refused (415). This is the case that matters once
+	// the listener is exposed beyond localhost.
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"203.0.113.9"}`, "s3cr3t", "text/plain"); rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("ban with token but non-JSON: status = %d, want 415", rec.Code)
+	}
+	// Token is checked before content type: a request failing both (no token,
+	// non-JSON) gets 401, not 415 — auth must not leak endpoint validity.
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"203.0.113.9"}`, "", "text/plain"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ban failing both checks: status = %d, want 401 (token wins)", rec.Code)
+	}
+	// A raw token without the "Bearer " scheme must not authenticate.
+	raw := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	raw.Header.Set("Authorization", "s3cr3t")
+	rawRec := httptest.NewRecorder()
+	h.ServeHTTP(rawRec, raw)
+	if rawRec.Code != http.StatusUnauthorized {
+		t.Errorf("raw token without Bearer scheme: status = %d, want 401", rawRec.Code)
+	}
+}
+
+// TestEmptyConfiguredTokenFailsClosed: api.token_env is set but the env var
+// is empty/unset — auth must fail closed (401), never accept an empty token.
+func TestEmptyConfiguredTokenFailsClosed(t *testing.T) {
+	t.Setenv("KAPKAN_TEST_API_TOKEN", "") // configured but blank
+	s := testServer(t, storeFromYAML(t, tokenYAML()))
+	h := s.Handler()
+
+	if rec := reqWith(h, http.MethodGet, "/api/v1/status", "", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no auth header: status = %d, want 401", rec.Code)
+	}
+	// An explicit empty bearer must not match the empty configured secret.
+	if rec := reqWith(h, http.MethodGet, "/api/v1/status", "", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("empty bearer: status = %d, want 401", rec.Code)
+	}
+	empty := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	empty.Header.Set("Authorization", "Bearer ")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, empty)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("Bearer with empty token: status = %d, want 401", rec.Code)
+	}
+}
+
+func TestCSRFContentTypeGuard(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML)) // no token
+	h := s.Handler()
+	// POST without application/json is refused even without auth — a
+	// cross-site form (text/plain, form-encoded) cannot reach the action.
+	for _, ct := range []string{"", "text/plain", "application/x-www-form-urlencoded"} {
+		rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"203.0.113.9"}`, "", ct)
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("ban with content-type %q: status = %d, want 415", ct, rec.Code)
+		}
+	}
+}
+
+func TestDashboardServing(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+	h := s.Handler()
+
+	rec := reqWith(h, http.MethodGet, "/", "", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("index status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("index content-type = %q, want text/html", ct)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
+		t.Errorf("missing strict CSP, got %q", csp)
+	}
+	if !strings.Contains(rec.Body.String(), "Kapkan") {
+		t.Error("index body does not look like the dashboard")
+	}
+	// Assets serve with their content type and hardening headers.
+	for _, a := range []struct{ path, ctype string }{
+		{"/app.js", "text/javascript"},
+		{"/style.css", "text/css"},
+	} {
+		rec := reqWith(h, http.MethodGet, a.path, "", "", "")
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s status = %d, want 200", a.path, rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, a.ctype) {
+			t.Errorf("%s content-type = %q, want %s", a.path, ct, a.ctype)
+		}
+		if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s missing X-Content-Type-Options: nosniff", a.path)
+		}
+		if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
+			t.Errorf("%s missing strict CSP", a.path)
+		}
+	}
+
+	// The explicit 3-file allowlist (not an http.FileServer) means only the
+	// named routes exist: /index.html is NOT served (a FileServer would
+	// serve or redirect to it), and unknown paths 404.
+	if rec := reqWith(h, http.MethodGet, "/index.html", "", "", ""); rec.Code == http.StatusOK || rec.Code == http.StatusMovedPermanently {
+		t.Errorf("/index.html status = %d, want not served (allowlist, not FileServer)", rec.Code)
+	}
+	if rec := reqWith(h, http.MethodGet, "/static/index.html", "", "", ""); rec.Code == http.StatusOK {
+		t.Error("/static/index.html served; embed tree must not be exposed")
+	}
+	if rec := reqWith(h, http.MethodGet, "/nope.txt", "", "", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown asset status = %d, want 404", rec.Code)
+	}
+
+	// Disabled: index 404s but the API still works.
+	disabled := strings.Replace(apiYAML, "  listen: \"127.0.0.1:8080\"\n",
+		"  listen: \"127.0.0.1:8080\"\n  dashboard: false\n", 1)
+	s2 := testServer(t, storeFromYAML(t, disabled))
+	h2 := s2.Handler()
+	if rec := reqWith(h2, http.MethodGet, "/", "", "", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("disabled dashboard index = %d, want 404", rec.Code)
+	}
+	if rec := reqWith(h2, http.MethodGet, "/api/v1/status", "", "", ""); rec.Code != http.StatusOK {
+		t.Errorf("api with dashboard disabled = %d, want 200", rec.Code)
 	}
 }
