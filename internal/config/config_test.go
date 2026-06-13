@@ -812,3 +812,50 @@ func TestStorageResolution(t *testing.T) {
 		})
 	}
 }
+
+func TestMitigationResolution(t *testing.T) {
+	// Default: blackhole everywhere.
+	cfg, err := Parse([]byte(hostgroupsYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	for _, g := range cfg.Groups {
+		if g.Mitigation != MitigateBlackhole {
+			t.Errorf("group %q method = %q, want blackhole default", g.Name, g.Mitigation)
+		}
+	}
+
+	// Global flowspec/discard, one group overriding to rate_limit.
+	y := strings.Replace(hostgroupsYAML, "hostgroups:",
+		"mitigation: flowspec\nflowspec:\n  action: discard\nhostgroups:", 1)
+	y = strings.Replace(y, "  - name: web\n",
+		"  - name: web\n    mitigation: flowspec\n    flowspec:\n      action: rate_limit\n      rate_mbps: 100\n", 1)
+	cfg, err = Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if g := cfg.Groups[0]; g.Mitigation != MitigateFlowSpec || g.FlowSpecAction != FlowSpecDiscard || g.FlowSpecRateBps != 0 {
+		t.Errorf("global group = %+v, want flowspec/discard/0", g)
+	}
+	web := cfg.GroupFor(netip.MustParseAddr("203.0.113.20"))
+	if web.Name != "web" || web.Mitigation != MitigateFlowSpec || web.FlowSpecAction != FlowSpecRateLimit {
+		t.Fatalf("web group = %+v, want flowspec/rate_limit", web)
+	}
+	if web.FlowSpecRateBps != 100*1e6/8 {
+		t.Errorf("web rate = %v bytes/s, want %v (100 Mbit/s)", web.FlowSpecRateBps, 100*1e6/8)
+	}
+
+	tests := []struct{ name, mut, wantErr string }{
+		{"bad method", strings.Replace(hostgroupsYAML, "hostgroups:", "mitigation: nope\nhostgroups:", 1), "method"},
+		{"rate_limit without rate", strings.Replace(hostgroupsYAML, "hostgroups:", "mitigation: flowspec\nflowspec:\n  action: rate_limit\nhostgroups:", 1), "rate_mbps"},
+		{"bad action", strings.Replace(hostgroupsYAML, "hostgroups:", "mitigation: flowspec\nflowspec:\n  action: bogus\nhostgroups:", 1), "action"},
+		{"flowspec on total group", strings.Replace(hostgroupsYAML, "    calculation: total\n", "    calculation: total\n    mitigation: flowspec\n", 1), "total"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse([]byte(tt.mut)); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Parse() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}

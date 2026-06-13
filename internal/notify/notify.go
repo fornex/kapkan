@@ -84,6 +84,7 @@ type Payload struct {
 	Mbps        float64   `json:"mbps"`
 	FlowsPerSec float64   `json:"flows_per_sec"`
 	BanState    string    `json:"ban_state,omitempty"`
+	Method      string    `json:"method,omitempty"`
 	Route       string    `json:"route,omitempty"`
 	DryRun      bool      `json:"dry_run"`
 	At          time.Time `json:"at"`
@@ -126,6 +127,7 @@ func (n *Notifier) buildPayload(event string, ev engine.Event, ban *mitigate.Ban
 	}
 	if ban != nil {
 		p.BanState = string(ban.State)
+		p.Method = string(ban.Method)
 		p.Route = ban.Route
 		p.DryRun = ban.DryRun
 	} else {

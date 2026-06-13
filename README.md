@@ -18,7 +18,7 @@ is logged and exposed via the API but never announced to your routers.
 
 - **Ingest** sFlow v5, NetFlow v5/v9 and IPFIX over UDP via [goflow2](https://github.com/netsampler/goflow2), in library mode (no sidecar).
 - **Detect** per-destination volumetric attacks using sampling-corrected pps / Mbps / flows-per-second thresholds over a sliding window. ≥20M flows/sec/core on the hot path.
-- **Mitigate** by announcing `/32` and `/128` blackhole routes via an embedded [GoBGP](https://github.com/osrg/gobgp) speaker, with your RTBH community and discard next-hop.
+- **Mitigate** by announcing `/32` and `/128` blackhole routes via an embedded [GoBGP](https://github.com/osrg/gobgp) speaker, or — surgically — **BGP FlowSpec** rules (RFC 8955/8956) that drop only the attack vector and spare the victim's other traffic, IPv4 and IPv6 at parity.
 - **Safe by construction** — see [Safety model](#safety-model).
 - **Classify** each attack from its flow sample and per-protocol rates — amplification (NTP/DNS/CLDAP/memcached/SSDP/chargen), SYN/UDP/TCP/ICMP/fragment floods — with the inferred vector in events, notifications and the API.
 - **Observe** through a REST API, Prometheus `/metrics`, and Telegram, Slack, email, webhook and exec-hook notifications.
@@ -180,6 +180,56 @@ Learned levels are visible per host in the API (`baseline` / `baseline_out` in t
 hosts snapshot). Hostgroups inherit the global block or override it wholesale
 (`baseline: { enabled: false }` opts a group out).
 
+### FlowSpec (surgical mitigation)
+
+RTBH blackholing takes the whole victim offline — it trades the attack for an outage.
+BGP FlowSpec (RFC 8955 for IPv4, RFC 8956 for IPv6) instead distributes a rule that drops
+only the matching attack traffic, so the victim keeps serving everything else.
+
+```yaml
+mitigation: flowspec            # default method for all groups (default: blackhole)
+flowspec:
+  action: discard               # or rate_limit
+  rate_mbps: 100                # required for rate_limit
+hostgroups:
+  - name: web
+    networks: ["203.0.113.0/26"]
+    mitigation: blackhole       # per-group override
+```
+
+On an attack, kapkan derives a **minimal rule set** (≤8) from the attack's classification
+and flow sample, matching the victim as destination plus the vector:
+
+| Attack | Generated FlowSpec match |
+| --- | --- |
+| NTP/DNS/CLDAP/memcached/SSDP/chargen amplification | `dst=victim, proto=udp, src-port=<reflected port>` |
+| SYN flood | `dst=victim, proto=tcp, tcp-flags=SYN` |
+| Fragment flood | `dst=victim, fragment` |
+| ICMP / UDP / TCP flood | `dst=victim, proto=<icmp/udp/tcp>` |
+| mixed / unknown | `dst=victim` (plus a rule per dominant reflector port in the sample) |
+
+For an **outgoing** attack (a compromised host flooding outward) the rule instead matches
+the host as **source** (RFC 8955/8956 source-prefix), so it actually drops the outbound
+flood — unlike a destination-based RTBH blackhole, which only kills traffic *to* the host.
+
+Two caveats worth knowing: the `tcp-flags` match for SYN floods is a bitmask that also
+matches SYN-ACK, so a `discard` action drops the victim's outbound-initiated connections too
+— prefer `rate_limit` for TCP vectors. And `max_active_bans` caps *bans*, not rules: a
+FlowSpec ban can carry up to 8 rules, so N bans can mean up to 8N rules in your upstream's
+RIB — watch the `mitigate_flowspec_rules` metric against your routers' FlowSpec route limit.
+
+Rules carry a traffic-rate extended community: `discard` (rate 0) or a `rate_limit`
+ceiling. Everything is **dry-run-first** — the generated rules appear in `/api/v1/attacks`
+(`method`, `flowspec`) and `/api/v1/bans` and the notifications before you ever set
+`dry_run: false`, so you can confirm them against your upstream's FlowSpec support. The
+victim is always matched as a `/32` (v4) or `/128` (v6) — **IPv6 FlowSpec is at full parity
+with IPv4**, where FastNetMon's own roadmap still lists IPv6 FlowSpec as unsupported.
+
+FlowSpec rides the same BGP neighbors as RTBH (the FlowSpec AFI/SAFI is advertised
+additively; a peer that doesn't support it simply won't negotiate it). It is not valid for
+`calculation: total` groups (no single victim prefix to match). Rules share the same TTL,
+hysteresis, and `max_active_bans` lifecycle as blackhole bans.
+
 ### Going live
 
 1. Run in dry-run and confirm in the logs / `/api/v1/attacks` that detection fires on the
@@ -242,8 +292,9 @@ Prometheus metrics under the `kapkan_` namespace, including: `ingest_flows_total
 protocol), `ingest_packets_total` (by exporter/protocol), `ingest_decode_errors_total`,
 `engine_active_attacks`, `engine_attacks_total`, `engine_process_latency_seconds`,
 `engine_tracked_hosts`, `mitigate_announced_routes` (by `real`/`dry_run` mode),
-`mitigate_bans_rejected_total`, `notify_notifications_total` (by channel/result), and
-`storage_rows_total` (by table and `written`/`dropped`/`error`).
+`mitigate_flowspec_rules` (by mode), `mitigate_bans_rejected_total`,
+`notify_notifications_total` (by channel/result), and `storage_rows_total` (by table and
+`written`/`dropped`/`error`).
 
 ## Storage (optional)
 
