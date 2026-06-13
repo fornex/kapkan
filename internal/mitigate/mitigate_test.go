@@ -63,15 +63,18 @@ func storeFrom(t *testing.T, yaml string) *config.Store {
 	return config.NewStore("", cfg)
 }
 
-// recorder is a test announcer capturing AddPath/DeletePath calls.
+// recorder is a test announcer capturing AddPath/DeletePath calls for both
+// RTBH (keyed by prefix) and FlowSpec (keyed by rule string).
 type recorder struct {
 	mu        sync.Mutex
 	announced map[string]int
 	withdrawn map[string]int
+	fsUp      map[string]int
+	fsDown    map[string]int
 }
 
 func newRecorder() *recorder {
-	return &recorder{announced: map[string]int{}, withdrawn: map[string]int{}}
+	return &recorder{announced: map[string]int{}, withdrawn: map[string]int{}, fsUp: map[string]int{}, fsDown: map[string]int{}}
 }
 
 func (r *recorder) Announce(_ context.Context, prefix netip.Prefix, _ string, _ uint32) error {
@@ -98,6 +101,40 @@ func (r *recorder) withdrawCount(p string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.withdrawn[p]
+}
+
+func (r *recorder) AnnounceFlowSpec(_ context.Context, rule FlowSpecRule) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fsUp[rule.String()]++
+	return nil
+}
+
+func (r *recorder) WithdrawFlowSpec(_ context.Context, rule FlowSpecRule) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fsDown[rule.String()]++
+	return nil
+}
+
+func (r *recorder) flowSpecUp() map[string]int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[string]int{}
+	for k, v := range r.fsUp {
+		out[k] = v
+	}
+	return out
+}
+
+func (r *recorder) flowSpecDownTotal() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, v := range r.fsDown {
+		n += v
+	}
+	return n
 }
 
 type mockClock struct {
@@ -319,6 +356,10 @@ func (failingAnnouncer) Announce(context.Context, netip.Prefix, string, uint32) 
 	return fmt.Errorf("bgp session down")
 }
 func (failingAnnouncer) Withdraw(context.Context, netip.Prefix) error { return nil }
+func (failingAnnouncer) AnnounceFlowSpec(context.Context, FlowSpecRule) error {
+	return fmt.Errorf("bgp session down")
+}
+func (failingAnnouncer) WithdrawFlowSpec(context.Context, FlowSpecRule) error { return nil }
 
 func TestBGPAnnounceFailureRejectsBan(t *testing.T) {
 	m := newMitigator(t, liveYAML(), failingAnnouncer{}, nil)
@@ -518,5 +559,133 @@ func TestDirectionRefcountedBan(t *testing.T) {
 	}
 	if got := rec.withdrawCount(target + "/32"); got != 1 {
 		t.Errorf("withdraw count = %d, want 1", got)
+	}
+}
+
+// fsEvent builds an attack-started event for a flowspec mitigation test.
+func fsEvent(target string, typ engine.AttackType) engine.Event {
+	return engine.Event{
+		Kind: engine.AttackStarted, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr(target), Group: "global", BanEnabled: true,
+		Direction: engine.DirIncoming, Metric: engine.MetricUDPPPS, Rate: 30000, Threshold: 20000,
+		Classification: &engine.Classification{Type: typ, SrcPort: 123},
+		At:             time.Now(),
+	}
+}
+
+func flowSpecYAML() string {
+	return strings.Replace(liveYAML(), "thresholds:",
+		"mitigation: flowspec\nflowspec:\n  action: discard\nthresholds:", 1)
+}
+
+func TestFlowSpecMitigationLifecycle(t *testing.T) {
+	rec := newRecorder()
+	m := newMitigator(t, flowSpecYAML(), rec, nil)
+
+	ban := m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	if ban == nil || ban.State != BanActive {
+		t.Fatalf("ban = %+v, want active", ban)
+	}
+	if ban.Method != config.MitigateFlowSpec {
+		t.Errorf("method = %q, want flowspec", ban.Method)
+	}
+	if len(ban.FlowSpec) != 1 {
+		t.Fatalf("rules = %+v, want 1 (ntp)", ban.FlowSpec)
+	}
+	r := ban.FlowSpec[0]
+	if r.Proto != 17 || r.SrcPort != 123 || r.Action != config.FlowSpecDiscard {
+		t.Errorf("rule = %+v, want udp src-port 123 discard", r)
+	}
+	if up := rec.flowSpecUp(); up[r.String()] != 1 {
+		t.Errorf("flowspec announce count for %q = %d, want 1; got %v", r.String(), up[r.String()], up)
+	}
+	// No RTBH /32 was announced for a flowspec ban.
+	if rec.announceCount("203.0.113.66/32") != 0 {
+		t.Error("flowspec ban must not announce an RTBH route")
+	}
+
+	// Ending the attack withdraws the rule.
+	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr("203.0.113.66"), Direction: engine.DirIncoming, At: time.Now()})
+	if rec.flowSpecDownTotal() != 1 {
+		t.Errorf("flowspec withdraw total = %d, want 1", rec.flowSpecDownTotal())
+	}
+}
+
+func TestFlowSpecDryRunNeverSends(t *testing.T) {
+	rec := newRecorder()
+	// baseYAML() defaults to dry_run true; add flowspec policy.
+	yaml := strings.Replace(baseYAML(), "thresholds:",
+		"mitigation: flowspec\nflowspec:\n  action: discard\nthresholds:", 1)
+	m := newMitigator(t, yaml, rec, nil)
+
+	ban := m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	if ban == nil || ban.State != BanActive || !ban.DryRun {
+		t.Fatalf("ban = %+v, want active dry-run", ban)
+	}
+	if len(ban.FlowSpec) != 1 {
+		t.Errorf("dry-run ban should still carry generated rules, got %+v", ban.FlowSpec)
+	}
+	if len(rec.flowSpecUp()) != 0 {
+		t.Errorf("dry-run announced flowspec rules: %v", rec.flowSpecUp())
+	}
+}
+
+// flakyFS announces the first FlowSpec rule, then fails — to exercise the
+// partial-announce rollback. It tracks announces and withdraws.
+type flakyFS struct {
+	mu       sync.Mutex
+	announce int
+	up       []string
+	down     []string
+}
+
+func (f *flakyFS) Announce(context.Context, netip.Prefix, string, uint32) error { return nil }
+func (f *flakyFS) Withdraw(context.Context, netip.Prefix) error                 { return nil }
+func (f *flakyFS) AnnounceFlowSpec(_ context.Context, r FlowSpecRule) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.announce++
+	if f.announce >= 2 {
+		return fmt.Errorf("flowspec session down")
+	}
+	f.up = append(f.up, r.String())
+	return nil
+}
+func (f *flakyFS) WithdrawFlowSpec(_ context.Context, r FlowSpecRule) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.down = append(f.down, r.String())
+	return nil
+}
+
+// TestFlowSpecPartialAnnounceRollback: when a later rule in the set fails to
+// announce, the rules already installed are withdrawn (no half-mitigated
+// RIB) and the ban is rejected.
+func TestFlowSpecPartialAnnounceRollback(t *testing.T) {
+	rec := &flakyFS{}
+	m := newMitigator(t, flowSpecYAML(), rec, nil)
+
+	// A mixed-vector attack with two known reflector ports → 3 rules
+	// (dst-only + udp/123 + udp/53), so the 2nd announce fails.
+	ev := fsEvent("203.0.113.66", engine.AttackMixed)
+	ev.Sample = &engine.AttackSample{TopSrcPorts: []engine.Counter{
+		{Key: "123", Packets: 100}, {Key: "53", Packets: 50},
+	}}
+	ban := m.OnAttackStarted(ev)
+	if ban == nil || ban.State != BanRejected {
+		t.Fatalf("ban = %+v, want rejected on announce failure", ban)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	// Rule 0 announced, rule 1 failed, rule 2 never attempted → rule 0 rolled back.
+	if len(rec.up) != 1 || len(rec.down) != 1 {
+		t.Errorf("announced %d / withdrew %d, want 1 announced then 1 rolled back", len(rec.up), len(rec.down))
+	}
+	if len(rec.up) == 1 && len(rec.down) == 1 && rec.up[0] != rec.down[0] {
+		t.Errorf("rolled-back rule %q != announced rule %q", rec.down[0], rec.up[0])
+	}
+	if len(m.ActiveBans()) != 0 {
+		t.Errorf("active bans = %d, want 0 (rejected ban not tracked)", len(m.ActiveBans()))
 	}
 }

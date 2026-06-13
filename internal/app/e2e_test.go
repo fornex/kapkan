@@ -359,3 +359,97 @@ func TestEndToEndStorage(t *testing.T) {
 			fake.count("attack_events"), fake.count("traffic"))
 	}
 }
+
+// TestEndToEndFlowSpec replays an NTP-amplification attack against a dry-run
+// instance whose global mitigation method is flowspec, and asserts the API
+// surfaces generated FlowSpec rules (surgical drops) instead of a blackhole.
+func TestEndToEndFlowSpec(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping end-to-end test in -short mode")
+	}
+	sflowPort := freeUDPPort(t)
+	apiPort := freeTCPPort(t)
+	yaml := strings.Replace(e2eYAML(sflowPort, apiPort), "thresholds:",
+		"mitigation: flowspec\nflowspec:\n  action: discard\nthresholds:", 1)
+
+	cfg, err := config.Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	store := config.NewStore("", cfg)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	application, err := New(store, log)
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := application.Start(ctx); err != nil {
+		t.Fatalf("app.Start: %v", err)
+	}
+	defer application.Stop()
+	time.Sleep(500 * time.Millisecond)
+
+	victim := netip.MustParseAddr("203.0.113.66")
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := net.Dial("udp", fmt.Sprintf("127.0.0.1:%d", sflowPort))
+		if err != nil {
+			t.Errorf("dial: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		payload := flowgen.BuildSFlowV5(flowgen.PatternParams{
+			Pattern: flowgen.NTPAmplification, Victim: victim, Records: 40,
+		}.Build(), flowgen.SFlowOptions{AgentIP: netip.MustParseAddr("198.51.100.1"), SamplingRate: 1000})
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				_, _ = conn.Write(payload)
+			}
+		}
+	}()
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+	ok := waitFor(t, 20*time.Second, func() bool {
+		var a struct {
+			Active []struct {
+				Target   string `json:"target"`
+				Method   string `json:"method"`
+				FlowSpec []struct {
+					Proto   uint8  `json:"proto"`
+					SrcPort uint16 `json:"src_port"`
+				} `json:"flowspec"`
+			} `json:"active"`
+		}
+		if !getJSON(t, base+"/api/v1/attacks", &a) {
+			return false
+		}
+		for _, at := range a.Active {
+			if at.Target != victim.String() {
+				continue
+			}
+			if at.Method != "flowspec" {
+				t.Errorf("method = %q, want flowspec", at.Method)
+			}
+			// NTP amplification → a UDP src-port 123 rule.
+			for _, r := range at.FlowSpec {
+				if r.Proto == 17 && r.SrcPort == 123 {
+					return true
+				}
+			}
+		}
+		return false
+	})
+	close(stop)
+	<-done
+	if !ok {
+		t.Fatal("API never surfaced the expected FlowSpec rule for the attack")
+	}
+}

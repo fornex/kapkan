@@ -357,7 +357,7 @@ func TestPayloadMatchesPublishedSchema(t *testing.T) {
 	}
 	ev.Classification = &engine.Classification{Type: engine.AttackNTPAmplification, Confidence: 0.9, SrcPort: 123}
 	n := New(storeFrom(t, yamlWith("")), discardLogger())
-	ban := &mitigate.Ban{State: mitigate.BanActive, Route: "203.0.113.50/32 next-hop 192.0.2.1", DryRun: true}
+	ban := &mitigate.Ban{State: mitigate.BanActive, Method: "blackhole", Route: "203.0.113.50/32 next-hop 192.0.2.1", DryRun: true}
 	body, err := json.Marshal(n.buildPayload("attack_started", ev, ban))
 	if err != nil {
 		t.Fatal(err)

@@ -29,20 +29,23 @@ const maxRecentAttacks = 100
 // Attack is the API view of one detected attack (active or historical).
 // Group-scoped attacks (a hostgroup's total traffic) carry no target.
 type Attack struct {
-	Scope     engine.Scope      `json:"scope"`
-	Target    netip.Addr        `json:"target"`
-	Group     string            `json:"group,omitempty"`
-	Direction engine.Direction  `json:"direction"`
-	Metric    engine.Metric     `json:"metric"`
-	Rate      float64           `json:"rate"`
-	Threshold float64           `json:"threshold"`
-	Rates     engine.Rates      `json:"rates"`
-	Active    bool              `json:"active"`
-	BanState  mitigate.BanState `json:"ban_state,omitempty"`
-	Route     string            `json:"route,omitempty"`
-	DryRun    bool              `json:"dry_run"`
-	StartedAt time.Time         `json:"started_at"`
-	EndedAt   time.Time         `json:"ended_at,omitempty"`
+	Scope     engine.Scope            `json:"scope"`
+	Target    netip.Addr              `json:"target"`
+	Group     string                  `json:"group,omitempty"`
+	Direction engine.Direction        `json:"direction"`
+	Metric    engine.Metric           `json:"metric"`
+	Rate      float64                 `json:"rate"`
+	Threshold float64                 `json:"threshold"`
+	Rates     engine.Rates            `json:"rates"`
+	Active    bool                    `json:"active"`
+	BanState  mitigate.BanState       `json:"ban_state,omitempty"`
+	Method    config.MitigationMethod `json:"method,omitempty"`
+	Route     string                  `json:"route,omitempty"`
+	// FlowSpec holds the generated FlowSpec rules when the method is flowspec.
+	FlowSpec  []mitigate.FlowSpecRule `json:"flowspec,omitempty"`
+	DryRun    bool                    `json:"dry_run"`
+	StartedAt time.Time               `json:"started_at"`
+	EndedAt   time.Time               `json:"ended_at,omitempty"`
 	// Sample is the flow sample captured when the attack was detected.
 	Sample *engine.AttackSample `json:"sample,omitempty"`
 	// Classification is the attack vector inferred at detection time.
@@ -105,7 +108,9 @@ func (s *Server) RecordAttackStarted(ev engine.Event, ban *mitigate.Ban) {
 	}
 	if ban != nil {
 		a.BanState = ban.State
+		a.Method = ban.Method
 		a.Route = ban.Route
+		a.FlowSpec = ban.FlowSpec
 		a.DryRun = ban.DryRun
 	} else {
 		a.DryRun = s.store.Get().DryRun

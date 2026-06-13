@@ -11,6 +11,8 @@ import (
 	"github.com/kapkan-io/kapkan/internal/config"
 
 	api "github.com/osrg/gobgp/v3/api"
+	"github.com/osrg/gobgp/v3/pkg/apiutil"
+	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
 	"github.com/osrg/gobgp/v3/pkg/server"
 	apb "google.golang.org/protobuf/types/known/anypb"
 )
@@ -28,6 +30,9 @@ type bgpSpeaker struct {
 var (
 	familyV4 = &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST}
 	familyV6 = &api.Family{Afi: api.Family_AFI_IP6, Safi: api.Family_SAFI_UNICAST}
+
+	familyV4FS = &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_FLOW_SPEC_UNICAST}
+	familyV6FS = &api.Family{Afi: api.Family_AFI_IP6, Safi: api.Family_SAFI_FLOW_SPEC_UNICAST}
 )
 
 // newBGPSpeaker builds (but does not start) the embedded speaker. No gRPC
@@ -99,11 +104,14 @@ func (b *bgpSpeaker) addPeer(ctx context.Context, n config.Neighbor) error {
 			ConnectRetry:           5,
 			IdleHoldTimeAfterReset: 5,
 		}},
-		// Negotiate both v4 and v6 unicast so /128 blackholes can ride an
-		// IPv4 session; without explicit AfiSafis a v4 neighbor is v4-only.
+		// Negotiate v4/v6 unicast (so /128 blackholes can ride an IPv4
+		// session) and v4/v6 FlowSpec unicast. A peer that does not support
+		// a family simply won't negotiate it; advertising costs nothing.
 		AfiSafis: []*api.AfiSafi{
 			{Config: &api.AfiSafiConfig{Family: familyV4, Enabled: true}},
 			{Config: &api.AfiSafiConfig{Family: familyV6, Enabled: true}},
+			{Config: &api.AfiSafiConfig{Family: familyV4FS, Enabled: true}},
+			{Config: &api.AfiSafiConfig{Family: familyV6FS, Enabled: true}},
 		},
 	}
 	return b.srv.AddPeer(ctx, &api.AddPeerRequest{Peer: peer})
@@ -180,6 +188,140 @@ func (b *bgpSpeaker) Withdraw(ctx context.Context, prefix netip.Prefix) error {
 	family := familyV4
 	if prefix.Addr().Is6() {
 		family = familyV6
+	}
+	return b.srv.DeletePath(ctx, &api.DeletePathRequest{Path: &api.Path{
+		Family:     family,
+		Nlri:       nlri,
+		IsWithdraw: true,
+	}})
+}
+
+// flowSpecNLRI builds the gobgp FlowSpec NLRI (and its family) for a rule.
+// Match components are appended in ascending RFC 8955 component-type order
+// (dst-prefix 1, ip-proto 3, dst-port 5, src-port 6, tcp-flag 9,
+// fragment 12). gobgp computes the operator length/eol bytes from the
+// values via NewFlowSpecComponentItem.
+func flowSpecNLRI(rule FlowSpecRule) (*apb.Any, *api.Family, error) {
+	// Exactly one of Dst/Src anchors the rule on the victim. Source-anchored
+	// rules (RFC 8955 type 2 / RFC 8956 type 2) carry an outgoing attacker's
+	// own address so the rule matches its outbound flood.
+	anchor, source := rule.Dst, false
+	if rule.Src.IsValid() {
+		anchor, source = rule.Src, true
+	}
+	addr := anchor.Addr()
+	bits := uint8(anchor.Bits())
+	var comps []bgp.FlowSpecComponentInterface
+	family := familyV4FS
+	switch {
+	case addr.Is6():
+		family = familyV6FS
+		// The trailing 0 is the RFC 8956 IPv6 prefix offset (match from bit 0).
+		p := bgp.NewIPv6AddrPrefix(bits, addr.String())
+		if source {
+			comps = append(comps, bgp.NewFlowSpecSourcePrefix6(p, 0))
+		} else {
+			comps = append(comps, bgp.NewFlowSpecDestinationPrefix6(p, 0))
+		}
+	default:
+		p := bgp.NewIPAddrPrefix(bits, addr.String())
+		if source {
+			comps = append(comps, bgp.NewFlowSpecSourcePrefix(p))
+		} else {
+			comps = append(comps, bgp.NewFlowSpecDestinationPrefix(p))
+		}
+	}
+
+	numEq := func(t bgp.BGPFlowSpecType, v uint64) {
+		comps = append(comps, bgp.NewFlowSpecComponent(t,
+			[]*bgp.FlowSpecComponentItem{bgp.NewFlowSpecComponentItem(bgp.DEC_NUM_OP_EQ|bgp.DEC_NUM_OP_END, v)}))
+	}
+	bitMatch := func(t bgp.BGPFlowSpecType, v uint64) {
+		comps = append(comps, bgp.NewFlowSpecComponent(t,
+			[]*bgp.FlowSpecComponentItem{bgp.NewFlowSpecComponentItem(bgp.BITMASK_FLAG_OP_MATCH|bgp.BITMASK_FLAG_OP_END, v)}))
+	}
+
+	if rule.Proto != 0 {
+		numEq(bgp.FLOW_SPEC_TYPE_IP_PROTO, uint64(rule.Proto))
+	}
+	if rule.DstPort != 0 {
+		numEq(bgp.FLOW_SPEC_TYPE_DST_PORT, uint64(rule.DstPort))
+	}
+	if rule.SrcPort != 0 {
+		numEq(bgp.FLOW_SPEC_TYPE_SRC_PORT, uint64(rule.SrcPort))
+	}
+	if rule.TCPFlags != 0 {
+		bitMatch(bgp.FLOW_SPEC_TYPE_TCP_FLAG, uint64(rule.TCPFlags))
+	}
+	if rule.Fragment {
+		bitMatch(bgp.FLOW_SPEC_TYPE_FRAGMENT, uint64(bgp.FRAG_FLAG_IS))
+	}
+
+	rules, err := apiutil.MarshalFlowSpecRules(comps)
+	if err != nil {
+		return nil, nil, err
+	}
+	nlri, err := apb.New(&api.FlowSpecNLRI{Rules: rules})
+	if err != nil {
+		return nil, nil, err
+	}
+	return nlri, family, nil
+}
+
+// AnnounceFlowSpec installs a FlowSpec path for rule. The action rides a
+// traffic-rate extended community: rate 0 means discard, a positive rate
+// (bytes/sec) means rate-limit.
+func (b *bgpSpeaker) AnnounceFlowSpec(ctx context.Context, rule FlowSpecRule) error {
+	nlri, family, err := flowSpecNLRI(rule)
+	if err != nil {
+		return err
+	}
+	origin, err := apb.New(&api.OriginAttribute{Origin: 2}) // INCOMPLETE
+	if err != nil {
+		return err
+	}
+	var rate float32
+	if rule.Action == "rate_limit" {
+		rate = float32(rule.RateBytes)
+	}
+	trafficRate, err := apb.New(&api.TrafficRateExtended{Asn: 0, Rate: rate})
+	if err != nil {
+		return err
+	}
+	extComms, err := apb.New(&api.ExtendedCommunitiesAttribute{Communities: []*apb.Any{trafficRate}})
+	if err != nil {
+		return err
+	}
+	// FlowSpec is a non-unicast AFI/SAFI, so the NLRI rides MP_REACH_NLRI.
+	// The next-hop is semantically irrelevant for FlowSpec (the action lives
+	// in the extended community) but gobgp requires one whose family matches
+	// the NLRI's — derive it from the resolved family, not the rule's Dst
+	// (which is empty for source-anchored outgoing rules).
+	nextHop := "0.0.0.0"
+	if family == familyV6FS {
+		nextHop = "::"
+	}
+	mp, err := apb.New(&api.MpReachNLRIAttribute{
+		Family:   family,
+		NextHops: []string{nextHop},
+		Nlris:    []*apb.Any{nlri},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = b.srv.AddPath(ctx, &api.AddPathRequest{Path: &api.Path{
+		Family: family,
+		Nlri:   nlri,
+		Pattrs: []*apb.Any{origin, mp, extComms},
+	}})
+	return err
+}
+
+// WithdrawFlowSpec removes the FlowSpec path for rule, identified by NLRI.
+func (b *bgpSpeaker) WithdrawFlowSpec(ctx context.Context, rule FlowSpecRule) error {
+	nlri, family, err := flowSpecNLRI(rule)
+	if err != nil {
+		return err
 	}
 	return b.srv.DeletePath(ctx, &api.DeletePathRequest{Path: &api.Path{
 		Family:     family,

@@ -52,11 +52,16 @@
     "ban_state": {
       "type": "string",
       "enum": ["active", "withdrawn", "rejected"],
-      "description": "RTBH ban state, when mitigation was consulted."
+      "description": "Mitigation state, when mitigation was consulted."
+    },
+    "method": {
+      "type": "string",
+      "enum": ["blackhole", "flowspec"],
+      "description": "Mitigation method that produced the ban."
     },
     "route": {
       "type": "string",
-      "description": "The (dry-run: would-be) blackhole route announcement."
+      "description": "The (dry-run: would-be) announcement: a blackhole route, or a 'flowspec: ...' summary of the generated rules."
     },
     "dry_run": { "type": "boolean" },
     "at": { "type": "string", "format": "date-time" },
