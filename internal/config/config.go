@@ -43,14 +43,17 @@ type Config struct {
 	Mitigation string `yaml:"mitigation"`
 	// FlowSpec is the default FlowSpec action policy, used by groups whose
 	// method is flowspec.
-	FlowSpec   *FlowSpec   `yaml:"flowspec"`
-	Hostgroups []Hostgroup `yaml:"hostgroups"`
-	Samples    Samples     `yaml:"samples"`
-	Storage    Storage     `yaml:"storage"`
-	Ban        Ban         `yaml:"ban"`
-	BGP        BGP         `yaml:"bgp"`
-	Notify     Notify      `yaml:"notify"`
-	API        API         `yaml:"api"`
+	FlowSpec *FlowSpec `yaml:"flowspec"`
+	// Escalation is the default mitigation ladder; when set it supersedes
+	// the single `mitigation` method. Hostgroups may override it.
+	Escalation []EscalationStep `yaml:"escalation"`
+	Hostgroups []Hostgroup      `yaml:"hostgroups"`
+	Samples    Samples          `yaml:"samples"`
+	Storage    Storage          `yaml:"storage"`
+	Ban        Ban              `yaml:"ban"`
+	BGP        BGP              `yaml:"bgp"`
+	Notify     Notify           `yaml:"notify"`
+	API        API              `yaml:"api"`
 
 	// Parsed forms, populated by validate().
 	NetworkPrefixes []netip.Prefix `yaml:"-"`
@@ -235,6 +238,34 @@ const (
 	FlowSpecRateLimit FlowSpecAction = "rate_limit"
 )
 
+// EscalationAction is one rung of a mitigation ladder.
+type EscalationAction string
+
+// Escalation actions.
+const (
+	// EscalateNone alerts only — no route is announced at this stage.
+	EscalateNone EscalationAction = "none"
+	// EscalateFlowSpec announces FlowSpec rules at this stage.
+	EscalateFlowSpec EscalationAction = "flowspec"
+	// EscalateBlackhole announces an RTBH route at this stage.
+	EscalateBlackhole EscalationAction = "blackhole"
+)
+
+// EscalationStep is one configured rung of the ladder (YAML shape).
+type EscalationStep struct {
+	// AfterSeconds is the delay from attack start at which this rung
+	// applies, provided the attack is still active. The first rung must be 0.
+	AfterSeconds int `yaml:"after_seconds"`
+	// Action is none | flowspec | blackhole.
+	Action string `yaml:"action"`
+}
+
+// EscalationStage is one resolved rung used by the mitigator.
+type EscalationStage struct {
+	AfterSeconds int              `json:"after_seconds"`
+	Action       EscalationAction `json:"action"`
+}
+
 // FlowSpec is the FlowSpec action policy. Fields mirror the YAML; the
 // resolved per-second byte rate lives in Group.FlowSpecRateBps.
 type FlowSpec struct {
@@ -292,6 +323,9 @@ type Hostgroup struct {
 	Mitigation string `yaml:"mitigation"`
 	// FlowSpec overrides the default FlowSpec action policy for this group.
 	FlowSpec *FlowSpec `yaml:"flowspec"`
+	// Escalation overrides the default mitigation ladder for this group;
+	// when set it supersedes the group's `mitigation` method.
+	Escalation []EscalationStep `yaml:"escalation"`
 	// Ban controls automatic RTBH for the group's hosts (default true).
 	// Must not be set to true for total groups, which never auto-ban.
 	Ban *bool `yaml:"ban"`
@@ -312,7 +346,10 @@ type Group struct {
 	// FlowSpec rules (rate is per-second bytes; 0 for discard).
 	FlowSpecAction  FlowSpecAction `json:"flowspec_action,omitempty"`
 	FlowSpecRateBps float64        `json:"-"`
-	BanEnabled      bool           `json:"ban"`
+	// Escalation is the resolved mitigation ladder; always at least one
+	// stage (synthesized from Mitigation when not explicitly configured).
+	Escalation []EscalationStage `json:"escalation,omitempty"`
+	BanEnabled bool              `json:"ban"`
 }
 
 // groupRoute maps one prefix to its owning group for longest-prefix-match
@@ -573,6 +610,17 @@ func (c *Config) validateHostgroups() error {
 	if err != nil {
 		return fmt.Errorf("mitigation: %w", err)
 	}
+	globalStages, err := resolveEscalation(c.Escalation, globalMethod)
+	if err != nil {
+		return err
+	}
+	// A FlowSpec stage needs an action policy even if the single `mitigation`
+	// method is blackhole (e.g. escalation: none → flowspec).
+	if usesFlowSpec(globalStages) && globalAction == "" {
+		if globalAction, globalRate, err = resolveFlowSpecPolicy(c.FlowSpec, nil); err != nil {
+			return fmt.Errorf("flowspec: %w", err)
+		}
+	}
 
 	c.Groups = make([]Group, 0, len(c.Hostgroups)+1)
 	c.Groups = append(c.Groups, Group{
@@ -584,6 +632,7 @@ func (c *Config) validateHostgroups() error {
 		Mitigation:      globalMethod,
 		FlowSpecAction:  globalAction,
 		FlowSpecRateBps: globalRate,
+		Escalation:      globalStages,
 		BanEnabled:      true,
 	})
 	c.groupRoutes = nil
@@ -664,6 +713,32 @@ func (c *Config) validateHostgroups() error {
 			method, action, rate = MitigateBlackhole, "", 0
 		}
 
+		// Resolve the mitigation ladder: the group's own escalation, else the
+		// global one, else a single rung synthesized from the method.
+		escSteps, escExplicit := hg.Escalation, hg.Escalation != nil
+		if escSteps == nil {
+			escSteps = c.Escalation
+		}
+		stages, err := resolveEscalation(escSteps, method)
+		if err != nil {
+			return fmt.Errorf("hostgroups[%q]: %w", hg.Name, err)
+		}
+		if calc == CalcTotal && usesFlowSpec(stages) {
+			if escExplicit {
+				return fmt.Errorf("hostgroups[%q]: escalation: a flowspec stage is not valid with calculation: total (no single victim prefix)", hg.Name)
+			}
+			for i := range stages {
+				if stages[i].Action == EscalateFlowSpec {
+					stages[i].Action = EscalateBlackhole // inherited; degrade like the method case
+				}
+			}
+		}
+		if usesFlowSpec(stages) && action == "" {
+			if action, rate, err = resolveFlowSpecPolicy(hg.FlowSpec, c.FlowSpec); err != nil {
+				return fmt.Errorf("hostgroups[%q]: flowspec: %w", hg.Name, err)
+			}
+		}
+
 		if len(hg.Networks) == 0 {
 			return fmt.Errorf("hostgroups[%q]: at least one prefix is required", hg.Name)
 		}
@@ -700,6 +775,7 @@ func (c *Config) validateHostgroups() error {
 			Mitigation:      method,
 			FlowSpecAction:  action,
 			FlowSpecRateBps: rate,
+			Escalation:      stages,
 			BanEnabled:      banEnabled,
 		})
 	}
@@ -777,8 +853,14 @@ func resolveMitigation(methodStr string, flow *FlowSpec, defMethod MitigationMet
 	if method != MitigateFlowSpec {
 		return method, "", 0, nil
 	}
+	action, rate, err := resolveFlowSpecPolicy(flow, defFlow)
+	return method, action, rate, err
+}
 
-	// FlowSpec method: resolve the action policy (own block, else default).
+// resolveFlowSpecPolicy resolves the FlowSpec action policy (own block, else
+// the default), returning the action and the rate-limit ceiling in bytes/sec
+// (0 for discard).
+func resolveFlowSpecPolicy(flow, defFlow *FlowSpec) (FlowSpecAction, float64, error) {
 	fs := flow
 	if fs == nil {
 		fs = defFlow
@@ -793,16 +875,94 @@ func resolveMitigation(methodStr string, flow *FlowSpec, defMethod MitigationMet
 	}
 	switch action {
 	case FlowSpecDiscard:
-		return method, action, 0, nil
+		return action, 0, nil
 	case FlowSpecRateLimit:
 		if rateMbps <= 0 {
-			return "", "", 0, fmt.Errorf("flowspec.rate_mbps must be > 0 for the rate_limit action")
+			return "", 0, fmt.Errorf("flowspec.rate_mbps must be > 0 for the rate_limit action")
 		}
 		// Mbit/s → bytes/s for the FlowSpec traffic-rate extended community.
-		return method, action, rateMbps * 1e6 / 8, nil
+		return action, rateMbps * 1e6 / 8, nil
 	default:
-		return "", "", 0, fmt.Errorf("flowspec.action must be %q or %q, got %q", FlowSpecDiscard, FlowSpecRateLimit, fs.Action)
+		return "", 0, fmt.Errorf("flowspec.action must be %q or %q, got %q", FlowSpecDiscard, FlowSpecRateLimit, fs.Action)
 	}
+}
+
+// maxEscalationStages bounds a mitigation ladder.
+const maxEscalationStages = 5
+
+// methodAction maps a single mitigation method to its ladder action.
+func methodAction(m MitigationMethod) EscalationAction {
+	if m == MitigateFlowSpec {
+		return EscalateFlowSpec
+	}
+	return EscalateBlackhole
+}
+
+// resolveEscalation resolves a mitigation ladder. An empty steps slice
+// synthesizes a single rung from method (the back-compatible behavior).
+// Otherwise the ladder must start at 0, strictly increase, and use valid
+// actions.
+func resolveEscalation(steps []EscalationStep, method MitigationMethod) ([]EscalationStage, error) {
+	if len(steps) == 0 {
+		return []EscalationStage{{AfterSeconds: 0, Action: methodAction(method)}}, nil
+	}
+	if len(steps) > maxEscalationStages {
+		return nil, fmt.Errorf("escalation: at most %d stages, got %d", maxEscalationStages, len(steps))
+	}
+	stages := make([]EscalationStage, len(steps))
+	prev := -1
+	prevSev := -1
+	for i, s := range steps {
+		act := EscalationAction(s.Action)
+		switch act {
+		case EscalateNone, EscalateFlowSpec, EscalateBlackhole:
+		default:
+			return nil, fmt.Errorf("escalation[%d].action must be none|flowspec|blackhole, got %q", i, s.Action)
+		}
+		if i == 0 && s.AfterSeconds != 0 {
+			return nil, fmt.Errorf("escalation[0].after_seconds must be 0 (the initial stage)")
+		}
+		if s.AfterSeconds <= prev {
+			return nil, fmt.Errorf("escalation[%d].after_seconds (%d) must be greater than the previous stage (%d)", i, s.AfterSeconds, prev)
+		}
+		if s.AfterSeconds > 86400 {
+			return nil, fmt.Errorf("escalation[%d].after_seconds must be <= 86400, got %d", i, s.AfterSeconds)
+		}
+		// A ladder may only hold or strengthen the response. De-escalating
+		// (e.g. blackhole then flowspec) is a configuration error: an
+		// escalation ladder climbs, it does not back off.
+		sev := escalationSeverity(act)
+		if sev < prevSev {
+			return nil, fmt.Errorf("escalation[%d].action (%q) de-escalates from the previous stage; a ladder may only hold or strengthen the response", i, s.Action)
+		}
+		prevSev = sev
+		prev = s.AfterSeconds
+		stages[i] = EscalationStage{AfterSeconds: s.AfterSeconds, Action: act}
+	}
+	return stages, nil
+}
+
+// escalationSeverity ranks ladder actions so a ladder can be validated as
+// non-decreasing: none < flowspec < blackhole.
+func escalationSeverity(a EscalationAction) int {
+	switch a {
+	case EscalateBlackhole:
+		return 2
+	case EscalateFlowSpec:
+		return 1
+	default: // EscalateNone
+		return 0
+	}
+}
+
+// usesFlowSpec reports whether any stage announces FlowSpec.
+func usesFlowSpec(stages []EscalationStage) bool {
+	for _, s := range stages {
+		if s.Action == EscalateFlowSpec {
+			return true
+		}
+	}
+	return false
 }
 
 // validateStorage resolves the storage block into StorageCfg with defaults.
