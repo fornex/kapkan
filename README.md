@@ -242,7 +242,40 @@ Prometheus metrics under the `kapkan_` namespace, including: `ingest_flows_total
 protocol), `ingest_packets_total` (by exporter/protocol), `ingest_decode_errors_total`,
 `engine_active_attacks`, `engine_attacks_total`, `engine_process_latency_seconds`,
 `engine_tracked_hosts`, `mitigate_announced_routes` (by `real`/`dry_run` mode),
-`mitigate_bans_rejected_total`, and `notify_notifications_total` (by channel/result).
+`mitigate_bans_rejected_total`, `notify_notifications_total` (by channel/result), and
+`storage_rows_total` (by table and `written`/`dropped`/`error`).
+
+## Storage (optional)
+
+Point kapkan at a ClickHouse server to keep attack and traffic history — the answer to
+"what hit us last Tuesday":
+
+```yaml
+storage:
+  clickhouse:
+    url: "http://127.0.0.1:8123"   # empty/absent disables persistence
+    database: "kapkan"             # created if absent
+    username_env: "KAPKAN_CH_USER" # optional; credentials come from the env
+    password_env: "KAPKAN_CH_PASS"
+    ttl_days: 7                    # rows auto-expire (per-row TTL)
+```
+
+kapkan talks to ClickHouse's **HTTP interface** with the standard library — no driver
+dependency; the only external dependency is the ClickHouse server itself. On start it
+creates two MergeTree tables (idempotently): `attack_events` (every start/end with type,
+direction, rates, sample top-sources, ban state) and `traffic` (periodic per-host rate and
+baseline snapshots). Both carry a `ttl_days` TTL so retention is bounded without operator
+intervention.
+
+Persistence is **best-effort and never blocks detection**: rows go onto a bounded queue
+(`queue_size`) with a non-blocking send and are flushed in batches (`batch_size` /
+`flush_interval_seconds`); a slow or down ClickHouse drops rows (counted in
+`storage_rows_total{result="dropped"}`) rather than stalling the engine. Without the block,
+kapkan runs entirely in-process on live data.
+
+> Note: the `traffic` table currently persists per-host snapshots only. Per-ASN aggregation
+> is not persisted (kapkan does not resolve ASNs from flows), and per-hostgroup totals are
+> not yet snapshotted — both are candidates for a follow-up.
 
 ## Safety model
 
