@@ -106,3 +106,16 @@ var (
 		Help:      "Notification attempts, by channel and result.",
 	}, []string{"channel", "result"})
 )
+
+// Storage metrics.
+var (
+	// StorageRowsTotal counts rows by destination table and result
+	// (written|dropped|error). "dropped" means the bounded queue was full —
+	// storage never blocks detection.
+	StorageRowsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "storage",
+		Name:      "rows_total",
+		Help:      "Storage rows, by table and result (written|dropped|error).",
+	}, []string{"table", "result"})
+)
