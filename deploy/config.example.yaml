@@ -42,6 +42,20 @@ thresholds: # per destination host, after sampling correction
 #   pps: 50000
 #   udp_pps: 20000
 
+# Continuous learned thresholds: detection tightens to each host's normal
+# level × factor, bounded by `floor` below and the static thresholds above.
+# Attack traffic never trains the baseline; learning input is clamped so a
+# slow attacker ramp cannot quickly inflate it.
+#
+# baseline:
+#   factor: 3
+#   half_life_seconds: 3600
+#   warmup_seconds: 600
+#   floor:
+#     pps: 5000
+#     mbps: 50
+#     flows_per_sec: 2000
+
 # Attack samples: recent flows are buffered continuously so detections carry
 # their dominant sources/ports/protocols instantly. ~120 bytes per buffered
 # flow; sizing changes require a restart.
