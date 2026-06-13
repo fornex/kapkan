@@ -64,6 +64,7 @@ The full schema:
 | `thresholds_outgoing` | Optional. Enables detection of attacks **originated by** protected hosts (compromised machines). Same keys as `thresholds`, at least one must be set; absent, outgoing traffic is not even counted. |
 | `hostgroups[]` | Optional named prefix groups with their own thresholds and mitigation policy (see [Hostgroups](#hostgroups)). Each group may also set `thresholds_outgoing`. |
 | `samples.enabled` / `buffer_flows` / `flows_per_attack` | Traffic buffer for attack samples (defaults: on / 65536 / 20). Recent flows are buffered continuously so the moment a threshold trips, the attack's dominant sources, ports and protocols are already attached to the event, the notification and the API — no post-detection capture delay. Sizing changes require a restart. |
+| `baseline` | Continuous learned per-host thresholds (see [Baselines](#baselines)). Optional; per-hostgroup overridable. |
 | `ban.ttl_seconds` | Every announcement auto-withdraws after this. No permanent bans. |
 | `ban.unban_hysteresis_seconds` | Traffic must stay below threshold this long before withdrawing, to prevent flapping. |
 | `ban.max_active_bans` | Hard cap on simultaneous bans; new bans past the cap are refused. |
@@ -131,6 +132,53 @@ Note that an RTBH blackhole is destination-based: banning an outgoing attacker k
 traffic *to* the host (taking it offline, which usually stops the abuse), and stops the
 outbound flood itself only where the edge also drops sources in blackholed prefixes
 (e.g. uRPF). Set `ban: false` on the hostgroup if you only want the alert.
+
+### Baselines
+
+```yaml
+baseline:
+  factor: 3              # attack = traffic above learned_normal × factor
+  half_life_seconds: 3600
+  warmup_seconds: 600
+  floor: { pps: 5000, mbps: 50, flows_per_sec: 2000 }
+```
+
+With a `baseline` block kapkan continuously learns every host's normal traffic level
+(EWMA per host, per direction; per-group totals for `calculation: total` groups) and
+tightens the effective thresholds to `learned_normal × factor` — so a host that
+normally does 10k pps is flagged at 30k instead of waiting for the global 80k. This is
+the "stop tuning thresholds by hand" mode: FastNetMon's automated baseline is an
+offline calculator you run and copy numbers from; kapkan's is online and follows your
+traffic continuously.
+
+The static thresholds stay as guards, and the design is poisoning-aware:
+
+- **Ceiling**: traffic above the static thresholds always triggers — a poisoned or
+  fast-grown baseline can never raise the bar above what you configured.
+- **Floor**: the effective threshold never drops below `floor` — quiet hosts don't
+  become hair-triggers.
+- **Frozen under attack**: attack traffic (including the hysteresis tail) never trains
+  the baseline.
+- **Clamped learning**: outside attacks, each sample is capped at `baseline × factor`,
+  so a slow attacker ramp raises the baseline by at most `2^(factor−1)` per half-life
+  (e.g. 4× per hour at the defaults factor 3 / half-life 3600s — hours to reach the
+  static ceiling from a normal level, and never past it). Aggressive settings (large
+  factor, short half-life) shrink that window: pick them deliberately.
+- **Learning only on real traffic**: a direction with no traffic in the window never
+  trains its baseline (so an incoming-only host keeps its static outgoing threshold,
+  and an empty `total` group never warms up to a zero baseline).
+- **Warm-up**: a freshly observed host is protected by static thresholds only for
+  `warmup_seconds`, counted from its first real traffic. Note the warm-up traffic
+  itself trains the initial baseline — a host that is *already* under a sub-static
+  flood when kapkan first sees it learns that flood as "normal" (bounded by the static
+  ceiling); there is no clean reference for a host attacked from first sight. An
+  evicted (long-quiet) host re-warms up when it returns. Set `warmup_seconds` to at
+  least a few multiples of `half_life_seconds` so the baseline converges before it
+  gates.
+
+Learned levels are visible per host in the API (`baseline` / `baseline_out` in the
+hosts snapshot). Hostgroups inherit the global block or override it wholesale
+(`baseline: { enabled: false }` opts a group out).
 
 ### Going live
 

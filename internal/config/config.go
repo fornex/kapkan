@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"net/url"
@@ -34,12 +35,15 @@ type Config struct {
 	// protected hosts (compromised machines). Absent, outgoing traffic is
 	// not even counted.
 	ThresholdsOutgoing *Thresholds `yaml:"thresholds_outgoing"`
-	Hostgroups         []Hostgroup `yaml:"hostgroups"`
-	Samples            Samples     `yaml:"samples"`
-	Ban                Ban         `yaml:"ban"`
-	BGP                BGP         `yaml:"bgp"`
-	Notify             Notify      `yaml:"notify"`
-	API                API         `yaml:"api"`
+	// Baseline enables continuous per-host learned thresholds; static
+	// thresholds remain as floor/ceiling guards.
+	Baseline   *Baseline   `yaml:"baseline"`
+	Hostgroups []Hostgroup `yaml:"hostgroups"`
+	Samples    Samples     `yaml:"samples"`
+	Ban        Ban         `yaml:"ban"`
+	BGP        BGP         `yaml:"bgp"`
+	Notify     Notify      `yaml:"notify"`
+	API        API         `yaml:"api"`
 
 	// Parsed forms, populated by validate().
 	NetworkPrefixes []netip.Prefix `yaml:"-"`
@@ -115,6 +119,42 @@ type SampleSettings struct {
 	FlowsPerAttack int
 }
 
+// Baseline configures continuous EWMA-learned per-host thresholds. Fields
+// mirror the YAML shape; the resolved form lives in BaselineSettings.
+type Baseline struct {
+	// Enabled defaults to true when the block is present.
+	Enabled *bool `yaml:"enabled"`
+	// Factor multiplies the learned baseline into the effective threshold
+	// (default 3): traffic above baseline*factor is an attack.
+	Factor float64 `yaml:"factor"`
+	// HalfLifeSeconds is the EWMA half-life (default 3600): how long until
+	// a sustained change moves the baseline halfway to the new level.
+	HalfLifeSeconds int `yaml:"half_life_seconds"`
+	// WarmupSeconds is how long a host must be observed before its
+	// baseline gates detection (default 600). Until then only the static
+	// thresholds apply.
+	WarmupSeconds int `yaml:"warmup_seconds"`
+	// Floor is the minimum effective threshold per metric — a quiet host's
+	// tiny baseline must not make detection hair-trigger. Required.
+	Floor BaselineFloor `yaml:"floor"`
+}
+
+// BaselineFloor bounds the effective thresholds from below.
+type BaselineFloor struct {
+	PPS         uint64 `yaml:"pps" json:"pps"`
+	Mbps        uint64 `yaml:"mbps" json:"mbps"`
+	FlowsPerSec uint64 `yaml:"flows_per_sec" json:"flows_per_sec"`
+}
+
+// BaselineSettings is the resolved form of Baseline used by the engine.
+type BaselineSettings struct {
+	Factor float64 `json:"factor"`
+	// Alpha is the derived per-second EWMA weight: 1 - 2^(-1/half_life).
+	Alpha         float64       `json:"-"`
+	WarmupSeconds int           `json:"warmup_seconds"`
+	Floor         BaselineFloor `json:"floor"`
+}
+
 // CalcMethod selects how a hostgroup's thresholds are applied.
 type CalcMethod string
 
@@ -151,6 +191,9 @@ type Hostgroup struct {
 	// ThresholdsOutgoing overrides the global outgoing thresholds; when
 	// omitted the group inherits them (or stays disabled if there are none).
 	ThresholdsOutgoing *Thresholds `yaml:"thresholds_outgoing"`
+	// Baseline overrides the global baseline block wholesale; when omitted
+	// the group inherits it (or stays static-only if there is none).
+	Baseline *Baseline `yaml:"baseline"`
 	// Ban controls automatic RTBH for the group's hosts (default true).
 	// Must not be set to true for total groups, which never auto-ban.
 	Ban *bool `yaml:"ban"`
@@ -163,7 +206,9 @@ type Group struct {
 	Thresholds Thresholds `json:"thresholds"`
 	// OutThresholds is nil when outgoing detection is disabled for the group.
 	OutThresholds *Thresholds `json:"thresholds_outgoing,omitempty"`
-	BanEnabled    bool        `json:"ban"`
+	// Baseline is nil when learned thresholds are disabled for the group.
+	Baseline   *BaselineSettings `json:"baseline,omitempty"`
+	BanEnabled bool              `json:"ban"`
 }
 
 // groupRoute maps one prefix to its owning group for longest-prefix-match
@@ -395,12 +440,18 @@ func (c *Config) validate() error {
 // networks and thresholds sections have been validated, so it can rely on
 // NetworkPrefixes and on the global thresholds being sane.
 func (c *Config) validateHostgroups() error {
+	globalBaseline, err := resolveBaseline(c.Baseline)
+	if err != nil {
+		return fmt.Errorf("baseline: %w", err)
+	}
+
 	c.Groups = make([]Group, 0, len(c.Hostgroups)+1)
 	c.Groups = append(c.Groups, Group{
 		Name:          GlobalGroup,
 		Calc:          CalcPerHost,
 		Thresholds:    c.Thresholds,
 		OutThresholds: c.ThresholdsOutgoing,
+		Baseline:      globalBaseline,
 		BanEnabled:    true,
 	})
 	c.groupRoutes = nil
@@ -459,6 +510,14 @@ func (c *Config) validateHostgroups() error {
 			outTh = hg.ThresholdsOutgoing
 		}
 
+		groupBaseline := globalBaseline
+		if hg.Baseline != nil {
+			groupBaseline, err = resolveBaseline(hg.Baseline)
+			if err != nil {
+				return fmt.Errorf("hostgroups[%q]: baseline: %w", hg.Name, err)
+			}
+		}
+
 		if len(hg.Networks) == 0 {
 			return fmt.Errorf("hostgroups[%q]: at least one prefix is required", hg.Name)
 		}
@@ -491,6 +550,7 @@ func (c *Config) validateHostgroups() error {
 			Calc:          calc,
 			Thresholds:    th,
 			OutThresholds: outTh,
+			Baseline:      groupBaseline,
 			BanEnabled:    banEnabled,
 		})
 	}
@@ -507,6 +567,45 @@ func (c *Config) validateHostgroups() error {
 		return c.groupRoutes[i].prefix.Bits() > c.groupRoutes[j].prefix.Bits()
 	})
 	return nil
+}
+
+// resolveBaseline validates one baseline block and applies defaults. A nil
+// block (or enabled: false) resolves to nil — static thresholds only.
+func resolveBaseline(b *Baseline) (*BaselineSettings, error) {
+	if b == nil || (b.Enabled != nil && !*b.Enabled) {
+		return nil, nil
+	}
+	s := &BaselineSettings{
+		Factor:        b.Factor,
+		WarmupSeconds: b.WarmupSeconds,
+		Floor:         b.Floor,
+	}
+	half := b.HalfLifeSeconds
+	if half == 0 {
+		half = 3600
+	}
+	if s.Factor == 0 {
+		s.Factor = 3
+	}
+	if b.WarmupSeconds == 0 {
+		s.WarmupSeconds = 600
+	}
+	if !(s.Factor >= 1.5 && s.Factor <= 100) {
+		// Negated form rejects NaN too (NaN fails every comparison). Below
+		// 1.5, normal jitter around the learned level trips constantly.
+		return nil, fmt.Errorf("factor must be in 1.5..100, got %g", s.Factor)
+	}
+	if half < 10 || half > 7*86400 {
+		return nil, fmt.Errorf("half_life_seconds must be in 10..604800, got %d", half)
+	}
+	if s.WarmupSeconds < 0 || s.WarmupSeconds > 86400 {
+		return nil, fmt.Errorf("warmup_seconds must be in 0..86400, got %d", b.WarmupSeconds)
+	}
+	if s.Floor.PPS == 0 || s.Floor.Mbps == 0 || s.Floor.FlowsPerSec == 0 {
+		return nil, fmt.Errorf("floor: pps, mbps and flows_per_sec must all be > 0 (hair-trigger guard)")
+	}
+	s.Alpha = 1 - math.Exp2(-1/float64(half))
+	return s, nil
 }
 
 // validateSamples resolves the samples block into SampleCfg with defaults.

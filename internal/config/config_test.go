@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -656,5 +657,78 @@ func TestHostgroupNameCharset(t *testing.T) {
 	yaml := strings.Replace(hostgroupsYAML, "name: web\n", "name: \"Web_pool.v2-east\"\n", 1)
 	if _, err := Parse([]byte(yaml)); err != nil {
 		t.Errorf("valid name rejected: %v", err)
+	}
+}
+
+func TestBaselineResolution(t *testing.T) {
+	// No block: baselines off everywhere.
+	cfg, err := Parse([]byte(hostgroupsYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	for _, g := range cfg.Groups {
+		if g.Baseline != nil {
+			t.Errorf("group %q has baselines without a baseline block", g.Name)
+		}
+	}
+
+	// Global block with defaults applied; groups inherit.
+	withBase := hostgroupsYAML + "\nbaseline:\n  floor:\n    pps: 5000\n    mbps: 50\n    flows_per_sec: 2000\n"
+	cfg, err = Parse([]byte(withBase))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	bs := cfg.Groups[0].Baseline
+	if bs == nil {
+		t.Fatal("global group baseline = nil, want resolved settings")
+	}
+	if bs.Factor != 3 || bs.WarmupSeconds != 600 {
+		t.Errorf("defaults = factor %g / warmup %d, want 3 / 600", bs.Factor, bs.WarmupSeconds)
+	}
+	// alpha = 1 - 2^(-1/half_life), pinned exactly: a 1/half_life
+	// approximation differs by ~44% and must not pass.
+	wantAlpha := 1 - math.Exp2(-1.0/3600)
+	if math.Abs(bs.Alpha-wantAlpha) > 1e-12 {
+		t.Errorf("alpha = %.10g, want %.10g (1 - 2^(-1/half_life))", bs.Alpha, wantAlpha)
+	}
+	if g := cfg.GroupFor(netip.MustParseAddr("203.0.113.20")); g.Baseline != bs {
+		t.Error("hostgroup did not inherit the global baseline settings")
+	}
+
+	// Per-group override and per-group opt-out.
+	override := strings.Replace(withBase, "  - name: web\n",
+		"  - name: web\n    baseline:\n      factor: 5\n      floor:\n        pps: 1000\n        mbps: 10\n        flows_per_sec: 500\n", 1)
+	override = strings.Replace(override, "  - name: web-special\n",
+		"  - name: web-special\n    baseline:\n      enabled: false\n", 1)
+	cfg, err = Parse([]byte(override))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if g := cfg.GroupFor(netip.MustParseAddr("203.0.113.20")); g.Baseline == nil || g.Baseline.Factor != 5 {
+		t.Errorf("web override = %+v, want factor 5", g.Baseline)
+	}
+	if g := cfg.GroupFor(netip.MustParseAddr("203.0.113.5")); g.Baseline != nil {
+		t.Errorf("web-special opted out but Baseline = %+v", g.Baseline)
+	}
+}
+
+func TestBaselineValidation(t *testing.T) {
+	base := validYAML + "\nbaseline:\n  floor:\n    pps: 5000\n    mbps: 50\n    flows_per_sec: 2000\n"
+	tests := []struct {
+		name, yaml, wantErr string
+	}{
+		{"missing floor", validYAML + "\nbaseline:\n  factor: 3\n", "floor"},
+		{"tiny factor", strings.Replace(base, "baseline:\n", "baseline:\n  factor: 1.1\n", 1), "factor"},
+		{"nan factor", strings.Replace(base, "baseline:\n", "baseline:\n  factor: .nan\n", 1), "factor"},
+		{"bad half life", strings.Replace(base, "baseline:\n", "baseline:\n  half_life_seconds: 5\n", 1), "half_life"},
+		{"bad warmup", strings.Replace(base, "baseline:\n", "baseline:\n  warmup_seconds: 90000\n", 1), "warmup"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.yaml))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Parse() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
 	}
 }

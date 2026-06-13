@@ -94,19 +94,28 @@ type bucket struct {
 // The threshold crossed at attack start is stored so the ended event stays
 // truthful even if a reload changed the thresholds mid-attack.
 type attackState struct {
-	inAttack   bool
-	metric     Metric
-	threshold  float64
-	startedAt  time.Time
-	belowSince time.Time // zero while currently above any threshold
+	inAttack  bool
+	metric    Metric
+	threshold float64
+	// effThresholds is the full effective threshold set frozen at attack
+	// start and used for the whole attack's end decision. Freezing it
+	// keeps the lifecycle consistent: an attack that began on the static
+	// thresholds (baseline not yet warmed) is not silently re-tightened to
+	// the learned thresholds when warm-up elapses mid-attack.
+	effThresholds config.Thresholds
+	startedAt     time.Time
+	belowSince    time.Time // zero while currently above any threshold
 }
 
-// hostState tracks the rolling counters and per-direction attack lifecycle
-// for one host. It is only accessed under its owning shard's lock.
+// hostState tracks the rolling counters, per-direction attack lifecycle and
+// learned baselines for one host. It is only accessed under its owning
+// shard's lock. Eviction discards the baselines with the rest of the state;
+// a returning host re-warms up.
 type hostState struct {
-	ring     []bucket
-	lastSeen int64 // Unix second of the most recent flow
-	attacks  [2]attackState
+	ring      []bucket
+	lastSeen  int64 // Unix second of the most recent flow
+	attacks   [2]attackState
+	baselines [2]baselineState
 }
 
 // inAnyAttack reports whether either direction is mid-attack.
@@ -124,10 +133,11 @@ type shard struct {
 	pos  int
 }
 
-// groupState tracks the per-direction attack lifecycle of one
-// calculation:total hostgroup.
+// groupState tracks the per-direction attack lifecycle and learned
+// baselines of one calculation:total hostgroup.
 type groupState struct {
 	attacks   [2]attackState
+	baselines [2]baselineState
 	lastRates [2]Rates
 }
 
@@ -454,12 +464,20 @@ func (e *Engine) evalTick(now time.Time) {
 					continue
 				}
 
-				metric, rate, threshold, exceeded := evaluate(rates[d], *th)
+				// While an attack is active its end is judged against the
+				// thresholds frozen at its start; otherwise against the
+				// current (possibly baseline-tightened) thresholds.
+				eff := st.effThresholds
+				if !st.inAttack {
+					eff = effectiveThresholds(*th, &hs.baselines[d], g.Baseline, nowSec)
+				}
+				metric, rate, threshold, exceeded := evaluate(rates[d], eff)
 				if exceeded {
 					if !st.inAttack {
 						st.inAttack = true
 						st.metric = metric
 						st.threshold = threshold
+						st.effThresholds = eff
 						st.startedAt = now
 						metrics.AttacksTotal.Inc()
 						sample := e.collectHostSample(sh, addr, d, nowSec-e.windowSec)
@@ -498,6 +516,15 @@ func (e *Engine) evalTick(now time.Time) {
 					} else {
 						active++ // still considered active during hysteresis
 					}
+				}
+
+				// Learn only outside attacks (including the hysteresis tail,
+				// where st.inAttack is still true) and only from a real
+				// observation: a direction with no traffic this window must
+				// not train its baseline toward zero, and warm-up must not
+				// advance on empty seconds.
+				if g.Baseline != nil && !st.inAttack && rates[d].PPS > 0 {
+					hs.baselines[d].learn(rates[d], g.Baseline, nowSec)
 				}
 			}
 
@@ -542,12 +569,17 @@ func (e *Engine) evalGroups(cfg *config.Config, totals [][2]Rates, hysteresis ti
 				continue
 			}
 
-			metric, rate, threshold, exceeded := evaluate(totals[gi][d], *th)
+			eff := st.effThresholds
+			if !st.inAttack {
+				eff = effectiveThresholds(*th, &gs.baselines[d], g.Baseline, now.Unix())
+			}
+			metric, rate, threshold, exceeded := evaluate(totals[gi][d], eff)
 			if exceeded {
 				if !st.inAttack {
 					st.inAttack = true
 					st.metric = metric
 					st.threshold = threshold
+					st.effThresholds = eff
 					st.startedAt = now
 					metrics.AttacksTotal.Inc()
 					// evalGroups runs outside all shard locks, which
@@ -586,6 +618,15 @@ func (e *Engine) evalGroups(cfg *config.Config, totals [][2]Rates, hysteresis ti
 				} else {
 					active++
 				}
+			}
+
+			// Learn only outside attacks and only when the group actually
+			// carried traffic this tick: an empty (zero-member) total group
+			// must not warm up on empty seconds and pin its baseline at
+			// zero, which would floor-collapse its threshold and false-alert
+			// the first time members scale in.
+			if g.Baseline != nil && !st.inAttack && totals[gi][d].PPS > 0 {
+				gs.baselines[d].learn(totals[gi][d], g.Baseline, now.Unix())
 			}
 		}
 	}
@@ -753,6 +794,10 @@ type HostStat struct {
 	InAttack  bool       `json:"in_attack"`
 	Metric    Metric     `json:"metric,omitempty"`
 	Direction Direction  `json:"direction,omitempty"`
+	// Baseline / OutBaseline are the learned normal levels (base trio
+	// only), present once the host has been observed with baselines on.
+	Baseline    *Rates `json:"baseline,omitempty"`
+	OutBaseline *Rates `json:"baseline_out,omitempty"`
 }
 
 // Snapshot returns the current windowed rates for every tracked host. It is
@@ -765,12 +810,20 @@ func (e *Engine) Snapshot() []HostStat {
 		sh.mu.Lock()
 		for addr, hs := range sh.hosts {
 			in, outRates, _ := e.windowedRates(hs, nowSec)
+			g := cfg.GroupFor(addr)
 			st := HostStat{
 				Target:   addr,
-				Group:    cfg.GroupFor(addr).Name,
+				Group:    g.Name,
 				Rates:    in,
 				OutRates: outRates,
 				InAttack: hs.inAnyAttack(),
+			}
+			// Only surface learned baselines while baselines are actually
+			// configured for the host's group; otherwise the values are
+			// stale leftovers from before a reload disabled them.
+			if g.Baseline != nil {
+				st.Baseline = hs.baselines[dirIn].rates()
+				st.OutBaseline = hs.baselines[dirOut].rates()
 			}
 			for d := range hs.attacks {
 				if hs.attacks[d].inAttack {
