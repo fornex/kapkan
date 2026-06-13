@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const validYAML = `
@@ -765,5 +766,49 @@ func TestAPIDashboardAndToken(t *testing.T) {
 		"  listen: \"127.0.0.1:8080\"\n  token_env: \"bad name!\"\n", 1)
 	if _, err := Parse([]byte(bad)); err == nil || !strings.Contains(err.Error(), "token_env") {
 		t.Errorf("bad token_env: error = %v, want rejection", err)
+	}
+}
+
+func TestStorageResolution(t *testing.T) {
+	// Absent: disabled.
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.StorageCfg.Enabled {
+		t.Error("storage enabled without a clickhouse url")
+	}
+
+	// Configured with defaults.
+	y := validYAML + "\nstorage:\n  clickhouse:\n    url: \"http://127.0.0.1:8123/\"\n"
+	cfg, err = Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	s := cfg.StorageCfg
+	if !s.Enabled || s.URL != "http://127.0.0.1:8123" || s.Database != "kapkan" {
+		t.Errorf("storage = %+v, want enabled, trimmed url, default db", s)
+	}
+	if s.TTLDays != 7 || s.BatchSize != 1000 || s.QueueSize != 100000 {
+		t.Errorf("defaults = %+v, want 7/1000/100000", s)
+	}
+	if s.FlushInterval != 5*time.Second || s.TrafficInterval != 10*time.Second {
+		t.Errorf("interval defaults = %v/%v, want 5s/10s", s.FlushInterval, s.TrafficInterval)
+	}
+
+	tests := []struct{ name, block, wantErr string }{
+		{"bad url", "  clickhouse:\n    url: \"ftp://x\"\n", "url"},
+		{"bad db", "  clickhouse:\n    url: \"http://x:8123\"\n    database: \"bad-name\"\n", "database"},
+		{"ttl out of range", "  clickhouse:\n    url: \"http://x:8123\"\n    ttl_days: 9999\n", "ttl_days"},
+		{"batch over queue", "  clickhouse:\n    url: \"http://x:8123\"\n    batch_size: 50\n    queue_size: 10\n", "batch_size"},
+		{"bad username env", "  clickhouse:\n    url: \"http://x:8123\"\n    username_env: \"no good\"\n", "username_env"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(validYAML + "\nstorage:\n" + tt.block))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Parse() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
 	}
 }

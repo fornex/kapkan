@@ -40,6 +40,7 @@ type Config struct {
 	Baseline   *Baseline   `yaml:"baseline"`
 	Hostgroups []Hostgroup `yaml:"hostgroups"`
 	Samples    Samples     `yaml:"samples"`
+	Storage    Storage     `yaml:"storage"`
 	Ban        Ban         `yaml:"ban"`
 	BGP        BGP         `yaml:"bgp"`
 	Notify     Notify      `yaml:"notify"`
@@ -57,6 +58,8 @@ type Config struct {
 	// SampleCfg is the resolved (defaults applied) form of Samples. It is
 	// comparable so reload can detect changes that require a restart.
 	SampleCfg SampleSettings `yaml:"-"`
+	// StorageCfg is the resolved ClickHouse configuration.
+	StorageCfg StorageSettings `yaml:"-"`
 	// groupRoutes maps prefixes to Groups indexes, longest prefix first.
 	groupRoutes []groupRoute
 }
@@ -117,6 +120,52 @@ type SampleSettings struct {
 	Enabled        bool
 	BufferFlows    int
 	FlowsPerAttack int
+}
+
+// Storage configures optional long-term persistence. ClickHouse is the only
+// backend; absent, kapkan keeps everything in-process (live data only).
+type Storage struct {
+	ClickHouse ClickHouse `yaml:"clickhouse"`
+}
+
+// ClickHouse configures the optional ClickHouse writer. kapkan talks to the
+// server's HTTP interface with the standard library — no driver dependency.
+// Credentials are read from the environment, never the config file.
+type ClickHouse struct {
+	// URL is the ClickHouse HTTP endpoint, e.g. "http://127.0.0.1:8123".
+	// Empty disables persistence entirely.
+	URL         string `yaml:"url"`
+	Database    string `yaml:"database"`
+	UsernameEnv string `yaml:"username_env"`
+	PasswordEnv string `yaml:"password_env"`
+	// TTLDays is how long rows are retained (default 7).
+	TTLDays int `yaml:"ttl_days"`
+	// FlushIntervalSeconds bounds how long a batch waits before being sent
+	// (default 5).
+	FlushIntervalSeconds int `yaml:"flush_interval_seconds"`
+	// BatchSize flushes early once this many rows are queued (default 1000).
+	BatchSize int `yaml:"batch_size"`
+	// QueueSize bounds the in-memory row buffer; rows are dropped (and
+	// counted) when it is full so storage never blocks detection (default
+	// 100000).
+	QueueSize int `yaml:"queue_size"`
+	// TrafficIntervalSeconds is how often a per-host/per-group traffic
+	// snapshot is persisted (default 10).
+	TrafficIntervalSeconds int `yaml:"traffic_interval_seconds"`
+}
+
+// StorageSettings is the resolved ClickHouse configuration.
+type StorageSettings struct {
+	Enabled         bool
+	URL             string
+	Database        string
+	UsernameEnv     string
+	PasswordEnv     string
+	TTLDays         int
+	FlushInterval   time.Duration
+	BatchSize       int
+	QueueSize       int
+	TrafficInterval time.Duration
 }
 
 // Baseline configures continuous EWMA-learned per-host thresholds. Fields
@@ -422,6 +471,9 @@ func (c *Config) validate() error {
 	if err := c.validateSamples(); err != nil {
 		return err
 	}
+	if err := c.validateStorage(); err != nil {
+		return err
+	}
 
 	if c.Ban.TTLSeconds <= 0 {
 		return fmt.Errorf("ban.ttl_seconds must be > 0, got %d", c.Ban.TTLSeconds)
@@ -626,6 +678,79 @@ func resolveBaseline(b *Baseline) (*BaselineSettings, error) {
 	}
 	s.Alpha = 1 - math.Exp2(-1/float64(half))
 	return s, nil
+}
+
+// dbNameRe restricts the ClickHouse database/table identifiers we
+// interpolate into DDL to a safe charset (no injection surface).
+var dbNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateStorage resolves the storage block into StorageCfg with defaults.
+// A nil/empty URL leaves persistence disabled with no further checks.
+func (c *Config) validateStorage() error {
+	ch := c.Storage.ClickHouse
+	if ch.URL == "" {
+		c.StorageCfg = StorageSettings{}
+		return nil
+	}
+	u, err := url.ParseRequestURI(ch.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("storage.clickhouse.url must be an http(s) URL, got %q", ch.URL)
+	}
+	s := StorageSettings{
+		Enabled:         true,
+		URL:             strings.TrimRight(ch.URL, "/"),
+		Database:        ch.Database,
+		UsernameEnv:     ch.UsernameEnv,
+		PasswordEnv:     ch.PasswordEnv,
+		TTLDays:         ch.TTLDays,
+		BatchSize:       ch.BatchSize,
+		QueueSize:       ch.QueueSize,
+		FlushInterval:   time.Duration(ch.FlushIntervalSeconds) * time.Second,
+		TrafficInterval: time.Duration(ch.TrafficIntervalSeconds) * time.Second,
+	}
+	if s.Database == "" {
+		s.Database = "kapkan"
+	}
+	if !dbNameRe.MatchString(s.Database) {
+		return fmt.Errorf("storage.clickhouse.database %q must match %s", s.Database, dbNameRe)
+	}
+	for env, name := range map[string]string{ch.UsernameEnv: "username_env", ch.PasswordEnv: "password_env"} {
+		if env != "" && !envNameRe.MatchString(env) {
+			return fmt.Errorf("storage.clickhouse.%s %q is not a valid environment variable name", name, env)
+		}
+	}
+	if s.TTLDays == 0 {
+		s.TTLDays = 7
+	}
+	if s.BatchSize == 0 {
+		s.BatchSize = 1000
+	}
+	if s.QueueSize == 0 {
+		s.QueueSize = 100000
+	}
+	if s.FlushInterval == 0 {
+		s.FlushInterval = 5 * time.Second
+	}
+	if s.TrafficInterval == 0 {
+		s.TrafficInterval = 10 * time.Second
+	}
+	if s.TTLDays < 1 || s.TTLDays > 365 {
+		return fmt.Errorf("storage.clickhouse.ttl_days must be in 1..365, got %d", s.TTLDays)
+	}
+	if s.BatchSize < 1 || s.BatchSize > s.QueueSize {
+		return fmt.Errorf("storage.clickhouse.batch_size must be in 1..queue_size (%d), got %d", s.QueueSize, s.BatchSize)
+	}
+	if s.QueueSize < 1 || s.QueueSize > 10_000_000 {
+		return fmt.Errorf("storage.clickhouse.queue_size must be in 1..10000000, got %d", s.QueueSize)
+	}
+	if s.FlushInterval < time.Second || s.FlushInterval > time.Hour {
+		return fmt.Errorf("storage.clickhouse.flush_interval_seconds must be in 1..3600, got %d", ch.FlushIntervalSeconds)
+	}
+	if s.TrafficInterval < time.Second || s.TrafficInterval > time.Hour {
+		return fmt.Errorf("storage.clickhouse.traffic_interval_seconds must be in 1..3600, got %d", ch.TrafficIntervalSeconds)
+	}
+	c.StorageCfg = s
+	return nil
 }
 
 // validateSamples resolves the samples block into SampleCfg with defaults.
@@ -869,6 +994,9 @@ func (s *Store) Reload() (*Config, error) {
 	}
 	if next.SampleCfg != prev.SampleCfg {
 		return nil, fmt.Errorf("reload: samples settings cannot change at runtime (restart required)")
+	}
+	if next.StorageCfg != prev.StorageCfg {
+		return nil, fmt.Errorf("reload: storage settings cannot change at runtime (restart required)")
 	}
 	s.cur.Store(next)
 	return next, nil

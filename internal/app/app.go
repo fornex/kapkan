@@ -8,7 +8,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/kapkan-io/kapkan/internal/api"
 	"github.com/kapkan-io/kapkan/internal/config"
@@ -16,6 +18,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/ingest"
 	"github.com/kapkan-io/kapkan/internal/mitigate"
 	"github.com/kapkan-io/kapkan/internal/notify"
+	"github.com/kapkan-io/kapkan/internal/storage"
 )
 
 // App holds the wired components and their lifecycle handles.
@@ -26,11 +29,13 @@ type App struct {
 	Mitigate *mitigate.Mitigator
 	Notify   *notify.Notifier
 	API      *api.Server
+	Storage  storage.Writer
 
-	log    *slog.Logger
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	apiErr chan error
+	log         *slog.Logger
+	cancel      context.CancelFunc
+	storeCancel context.CancelFunc
+	wg          sync.WaitGroup
+	apiErr      chan error
 }
 
 // New builds all components from the configuration store. It does not bind
@@ -55,6 +60,7 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	a.Ingest = ing
 
 	a.API = api.New(store, a.Engine, mit, log)
+	a.Storage = storage.NewWriter(store.Get().StorageCfg, log)
 	return a, nil
 }
 
@@ -73,12 +79,20 @@ func (a *App) Start(ctx context.Context) error {
 		cancel()
 		return fmt.Errorf("start ingest: %w", err)
 	}
+	// Storage gets its own context, cancelled only in Stop after every
+	// producer goroutine has joined — so its shutdown drain runs strictly
+	// last and captures the final attack/traffic rows instead of racing the
+	// producers for them.
+	storeCtx, storeCancel := context.WithCancel(context.Background())
+	a.storeCancel = storeCancel
+	a.Storage.Start(storeCtx)
 
 	go func() { a.apiErr <- a.API.ListenAndServe(runCtx) }()
 
-	a.wg.Add(2)
+	a.wg.Add(3)
 	go func() { defer a.wg.Done(); a.Engine.Run(runCtx) }()
 	go func() { defer a.wg.Done(); a.consumeEvents(runCtx) }()
+	go func() { defer a.wg.Done(); a.persistTraffic(runCtx) }()
 	return nil
 }
 
@@ -87,14 +101,20 @@ func (a *App) Start(ctx context.Context) error {
 func (a *App) APIError() <-chan error { return a.apiErr }
 
 // Stop tears down ingest, the engine loop and the BGP speaker in the safe
-// order: stop accepting flows first, then drain.
+// order: stop accepting flows first, then drain. Storage is torn down last,
+// and only after every producer goroutine has joined, so its final drain
+// truly captures the last attack/traffic rows they enqueued.
 func (a *App) Stop() {
 	a.Ingest.Stop()
 	if a.cancel != nil {
 		a.cancel()
 	}
-	a.wg.Wait()
+	a.wg.Wait() // engine, consumeEvents and persistTraffic have stopped producing
 	a.Mitigate.Stop()
+	if a.storeCancel != nil {
+		a.storeCancel() // now trigger the storage drain+flush
+	}
+	a.Storage.Stop()
 }
 
 // consumeEvents bridges engine attack events to mitigation, the API attack
@@ -110,11 +130,108 @@ func (a *App) consumeEvents(ctx context.Context) {
 				ban := a.Mitigate.OnAttackStarted(ev)
 				a.API.RecordAttackStarted(ev, ban)
 				a.Notify.NotifyAttackStarted(ctx, ev, ban)
+				a.Storage.WriteAttack(attackRow(ev, ban))
 			case engine.AttackEnded:
 				ban := a.Mitigate.OnAttackEnded(ev)
 				a.API.RecordAttackEnded(ev, ban)
 				a.Notify.NotifyAttackEnded(ctx, ev, ban)
+				a.Storage.WriteAttack(attackRow(ev, ban))
 			}
 		}
 	}
+}
+
+// chTimeFormat is ClickHouse's DateTime literal layout (UTC).
+const chTimeFormat = "2006-01-02 15:04:05"
+
+// attackRow maps an engine event (and its resulting ban) to a storage row.
+func attackRow(ev engine.Event, ban *mitigate.Ban) storage.AttackRow {
+	r := storage.AttackRow{
+		EventTime: ev.At.UTC().Format(chTimeFormat),
+		Kind:      ev.Kind.String(),
+		Scope:     string(ev.Scope),
+		Group:     ev.Group,
+		Direction: string(ev.Direction),
+		Metric:    string(ev.Metric),
+		Rate:      ev.Rate,
+		Threshold: ev.Threshold,
+		PPS:       ev.Rates.PPS,
+		Mbps:      ev.Rates.Mbps,
+		FlowsPS:   ev.Rates.FlowsPerSec,
+	}
+	if ev.Target.IsValid() {
+		r.Target = ev.Target.String()
+	}
+	if ev.Classification != nil {
+		r.AttackType = string(ev.Classification.Type)
+	}
+	if ev.Sample != nil {
+		keys := make([]string, 0, len(ev.Sample.TopSources))
+		for _, c := range ev.Sample.TopSources {
+			keys = append(keys, c.Key)
+		}
+		r.TopSources = strings.Join(keys, ",")
+	}
+	if ban != nil {
+		r.BanState = string(ban.State)
+		if ban.DryRun {
+			r.DryRun = 1
+		}
+	}
+	return r
+}
+
+// persistTraffic snapshots per-host rates to storage on a fixed interval so
+// the dashboard and reports can show traffic over time. engine.Snapshot is
+// O(tracked hosts) and runs off the hot path; the rows are enqueued
+// non-blocking, so a slow ClickHouse only drops snapshots. (Per-hostgroup
+// totals are not yet snapshotted — the engine does not expose group state.)
+func (a *App) persistTraffic(ctx context.Context) {
+	interval := a.Store.Get().StorageCfg.TrafficInterval
+	if interval <= 0 {
+		return // storage disabled
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.snapshotTraffic()
+		}
+	}
+}
+
+func (a *App) snapshotTraffic() {
+	hosts := a.Engine.Snapshot()
+	if len(hosts) == 0 {
+		return
+	}
+	ts := time.Now().UTC().Format(chTimeFormat)
+	rows := make([]storage.TrafficRow, 0, len(hosts))
+	for _, h := range hosts {
+		rows = append(rows, trafficRow(h, ts))
+	}
+	a.Storage.WriteTraffic(rows)
+}
+
+// trafficRow maps one host snapshot to a storage row.
+func trafficRow(h engine.HostStat, ts string) storage.TrafficRow {
+	row := storage.TrafficRow{
+		TS:      ts,
+		Scope:   "host",
+		Key:     h.Target.String(),
+		Group:   h.Group,
+		PPS:     h.Rates.PPS,
+		Mbps:    h.Rates.Mbps,
+		FlowsPS: h.Rates.FlowsPerSec,
+	}
+	if h.InAttack {
+		row.InAttack = 1
+	}
+	if h.Baseline != nil {
+		row.BaselinePPS = h.Baseline.PPS
+	}
+	return row
 }
