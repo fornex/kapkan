@@ -99,6 +99,15 @@ thresholds: # per destination host, after sampling correction
 # flowspec:
 #   action: discard      # or rate_limit
 #   rate_mbps: 100       # required for rate_limit
+#
+# Or an escalation ladder (supersedes `mitigation`): step the response up the
+# longer an attack lasts. Each rung fires after the given seconds IF the
+# attack is still active. First rung must be at 0; per-hostgroup overridable.
+#
+# escalation:
+#   - {after_seconds: 0,   action: none}        # alert only
+#   - {after_seconds: 30,  action: flowspec}    # then surgical drop
+#   - {after_seconds: 120, action: blackhole}   # then blackhole if it persists
 
 ban:
   ttl_seconds: 600 # every ban auto-withdraws after this (no permanent bans)

@@ -230,6 +230,39 @@ additively; a peer that doesn't support it simply won't negotiate it). It is not
 `calculation: total` groups (no single victim prefix to match). Rules share the same TTL,
 hysteresis, and `max_active_bans` lifecycle as blackhole bans.
 
+### Escalation ladders
+
+A single `mitigation` method fires the same response the instant an attack is detected.
+An escalation ladder instead steps the response up the longer an attack persists —
+declaratively, where FastNetMon makes you write a callback script:
+
+```yaml
+escalation:                         # supersedes `mitigation` when present
+  - { after_seconds: 0,   action: none }       # alert only at first
+  - { after_seconds: 30,  action: flowspec }   # still under attack after 30s → surgical drop
+  - { after_seconds: 120, action: blackhole }  # still under attack after 120s → blackhole
+flowspec:
+  action: discard
+```
+
+Each rung's `after_seconds` is measured from the attack's start; a rung applies once that
+much time has elapsed **and the attack is still active** (no end event yet — i.e. traffic
+is still above threshold through the unban hysteresis). Climbing to a rung is
+**make-before-break**: the new rung is announced first and the previous one is withdrawn
+only after that succeeds, so the victim is never momentarily unprotected mid-switch; if the
+announce fails the ban holds the working rung and retries on the next tick. A ladder may
+only hold or strengthen the response (`none` < `flowspec` < `blackhole`) — de-escalating
+between rungs is a config error. If several rungs come due at once (a long-running attack,
+or the daemon catching up after a pause) the ban jumps straight to the highest due rung and
+never announces the rungs it skips. The first rung must be at `0s`; `action` is `none`
+(alert only), `flowspec`, or `blackhole`.
+
+The ladder is per-hostgroup overridable and shares the rest of the ban lifecycle: TTL
+auto-withdrawal, the `max_active_bans` cap, whitelist-never, and dry-run (which advances
+the ladder and logs each rung but never announces). When no `escalation` block is set, the
+single `mitigation` method behaves exactly as a one-rung ladder at `0s` — full backward
+compatibility. The current rung and method are visible per ban in `/api/v1/bans`.
+
 ### Going live
 
 1. Run in dry-run and confirm in the logs / `/api/v1/attacks` that detection fires on the

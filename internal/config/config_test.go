@@ -859,3 +859,83 @@ func TestMitigationResolution(t *testing.T) {
 		})
 	}
 }
+
+func TestEscalationResolution(t *testing.T) {
+	// No escalation block: synthesized single rung from the method.
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	g := cfg.Groups[0]
+	if len(g.Escalation) != 1 || g.Escalation[0].AfterSeconds != 0 || g.Escalation[0].Action != EscalateBlackhole {
+		t.Errorf("default ladder = %+v, want one blackhole rung at 0", g.Escalation)
+	}
+
+	// Global ladder none → flowspec → blackhole; flowspec policy resolved
+	// even though the single `mitigation` is the default blackhole.
+	y := validYAML + "\nflowspec:\n  action: discard\nescalation:\n" +
+		"  - {after_seconds: 0, action: none}\n" +
+		"  - {after_seconds: 30, action: flowspec}\n" +
+		"  - {after_seconds: 120, action: blackhole}\n"
+	cfg, err = Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	g = cfg.Groups[0]
+	if len(g.Escalation) != 3 {
+		t.Fatalf("ladder = %+v, want 3 rungs", g.Escalation)
+	}
+	want := []EscalationStage{{0, EscalateNone}, {30, EscalateFlowSpec}, {120, EscalateBlackhole}}
+	for i, s := range want {
+		if g.Escalation[i] != s {
+			t.Errorf("rung %d = %+v, want %+v", i, g.Escalation[i], s)
+		}
+	}
+	if g.FlowSpecAction != FlowSpecDiscard {
+		t.Errorf("flowspec policy not resolved for a flowspec stage: action=%q", g.FlowSpecAction)
+	}
+
+	tests := []struct{ name, esc, wantErr string }{
+		{"first not zero", "  - {after_seconds: 5, action: blackhole}\n", "after_seconds must be 0"},
+		{"not increasing", "  - {after_seconds: 0, action: none}\n  - {after_seconds: 0, action: blackhole}\n", "greater than"},
+		{"bad action", "  - {after_seconds: 0, action: nuke}\n", "action must be"},
+		{"too many", "  - {after_seconds: 0, action: none}\n  - {after_seconds: 1, action: none}\n  - {after_seconds: 2, action: none}\n  - {after_seconds: 3, action: none}\n  - {after_seconds: 4, action: none}\n  - {after_seconds: 5, action: none}\n", "at most"},
+		{"de-escalate blackhole→flowspec", "  - {after_seconds: 0, action: blackhole}\n  - {after_seconds: 5, action: flowspec}\n", "de-escalates"},
+		{"de-escalate flowspec→none", "  - {after_seconds: 0, action: flowspec}\n  - {after_seconds: 5, action: none}\n", "de-escalates"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse([]byte(validYAML + "\nescalation:\n" + tt.esc)); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Parse() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEscalationTotalGroup(t *testing.T) {
+	// Explicit flowspec stage on a total group is an error.
+	y := strings.Replace(hostgroupsYAML, "    calculation: total\n",
+		"    calculation: total\n    escalation:\n      - {after_seconds: 0, action: flowspec}\n", 1)
+	if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "total") {
+		t.Errorf("explicit flowspec stage on total group: error = %v, want total-group rejection", err)
+	}
+
+	// Inherited global flowspec stage degrades to blackhole on the total group.
+	y = hostgroupsYAML + "\nflowspec:\n  action: discard\nescalation:\n  - {after_seconds: 0, action: flowspec}\n"
+	cfg, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	tot := cfg.GroupFor(netip.MustParseAddr("203.0.113.70")) // dns-total
+	if tot.Calc != CalcTotal {
+		t.Fatalf("group = %+v, want the total group", tot)
+	}
+	if tot.Escalation[0].Action != EscalateBlackhole {
+		t.Errorf("total group inherited stage = %q, want degraded to blackhole", tot.Escalation[0].Action)
+	}
+	// A per_host group keeps the inherited flowspec stage.
+	web := cfg.GroupFor(netip.MustParseAddr("203.0.113.20"))
+	if web.Escalation[0].Action != EscalateFlowSpec {
+		t.Errorf("web group stage = %q, want flowspec inherited", web.Escalation[0].Action)
+	}
+}
