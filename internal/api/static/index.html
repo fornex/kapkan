@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kapkan</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Kapkan</h1>
+    <div id="status-bar" class="status-bar"></div>
+    <div class="actions">
+      <button id="reload-btn" type="button">Reload config</button>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>Active attacks <span id="active-count" class="count"></span></h2>
+      <table id="active-attacks">
+        <thead><tr>
+          <th>Target</th><th>Scope</th><th>Dir</th><th>Type</th>
+          <th>Metric</th><th>Rate</th><th>Threshold</th><th>Top sources</th><th>Ban</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty" id="active-empty">No active attacks.</p>
+    </section>
+
+    <section>
+      <h2>Manual mitigation</h2>
+      <form id="ban-form" class="inline-form">
+        <input id="ban-ip" type="text" placeholder="203.0.113.66" autocomplete="off">
+        <button type="submit" data-action="ban">Ban</button>
+        <button type="submit" data-action="unban">Unban</button>
+        <span id="ban-result" class="result"></span>
+      </form>
+    </section>
+
+    <section>
+      <h2>Active bans <span id="bans-count" class="count"></span></h2>
+      <table id="bans">
+        <thead><tr>
+          <th>Target</th><th>Route</th><th>State</th><th>Mode</th><th>Expires</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty" id="bans-empty">No active bans.</p>
+    </section>
+
+    <section>
+      <h2>Top talkers</h2>
+      <table id="hosts">
+        <thead><tr>
+          <th>Host</th><th>Group</th><th>pps</th><th>Mbps</th><th>fps</th>
+          <th>Baseline pps</th><th>In attack</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty" id="hosts-empty">No tracked hosts.</p>
+    </section>
+
+    <section>
+      <h2>Recent attacks</h2>
+      <table id="recent-attacks">
+        <thead><tr>
+          <th>Target</th><th>Dir</th><th>Type</th><th>Metric</th>
+          <th>Peak rate</th><th>Started</th><th>Ended</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty" id="recent-empty">No recent attacks.</p>
+    </section>
+
+    <section>
+      <h2>Hostgroups</h2>
+      <table id="hostgroups">
+        <thead><tr>
+          <th>Name</th><th>Calc</th><th>pps</th><th>Mbps</th><th>fps</th><th>Ban</th><th>Baseline</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <footer id="footer"></footer>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -732,3 +732,38 @@ func TestBaselineValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestAPIDashboardAndToken(t *testing.T) {
+	// Defaults: dashboard on, no token.
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !cfg.API.DashboardEnabled() {
+		t.Error("dashboard should default to enabled")
+	}
+	if cfg.API.TokenEnv != "" {
+		t.Errorf("token_env = %q, want empty by default", cfg.API.TokenEnv)
+	}
+
+	// Explicit disable + token.
+	y := strings.Replace(validYAML, "  listen: \"127.0.0.1:8080\"\n",
+		"  listen: \"127.0.0.1:8080\"\n  dashboard: false\n  token_env: \"KAPKAN_API_TOKEN\"\n", 1)
+	cfg, err = Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.API.DashboardEnabled() {
+		t.Error("dashboard: false not honored")
+	}
+	if cfg.API.TokenEnv != "KAPKAN_API_TOKEN" {
+		t.Errorf("token_env = %q, want KAPKAN_API_TOKEN", cfg.API.TokenEnv)
+	}
+
+	// Bad token env name.
+	bad := strings.Replace(validYAML, "  listen: \"127.0.0.1:8080\"\n",
+		"  listen: \"127.0.0.1:8080\"\n  token_env: \"bad name!\"\n", 1)
+	if _, err := Parse([]byte(bad)); err == nil || !strings.Contains(err.Error(), "token_env") {
+		t.Errorf("bad token_env: error = %v, want rejection", err)
+	}
+}
