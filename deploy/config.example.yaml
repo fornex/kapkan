@@ -103,11 +103,24 @@ thresholds: # per destination host, after sampling correction
 # Or an escalation ladder (supersedes `mitigation`): step the response up the
 # longer an attack lasts. Each rung fires after the given seconds IF the
 # attack is still active. First rung must be at 0; per-hostgroup overridable.
+# Actions may only strengthen: none < flowspec < divert < blackhole.
 #
 # escalation:
 #   - {after_seconds: 0,   action: none}        # alert only
 #   - {after_seconds: 30,  action: flowspec}    # then surgical drop
-#   - {after_seconds: 120, action: blackhole}   # then blackhole if it persists
+#   - {after_seconds: 90,  action: divert}      # then divert to a scrubber
+#   - {after_seconds: 300, action: blackhole}   # then blackhole if it persists
+
+# Traffic diversion (scrubbing): the `divert` action announces the victim host
+# route toward a scrubbing center instead of dropping it. Required to use the
+# divert action / method. Per-hostgroup overridable via a group `scrubbing:`
+# block (same shape as the per-group `bgp:` block).
+#
+# scrubbing:
+#   next_hop: "192.0.2.100"   # scrubbing center next-hop (v4)
+#   next_hop6: "100::100"     # required when IPv6 space is protected
+#   community: "65000:200"    # optional divert community
+#   local_pref: 200           # often raised so the divert route wins selection
 
 ban:
   ttl_seconds: 600 # every ban auto-withdraws after this (no permanent bans)

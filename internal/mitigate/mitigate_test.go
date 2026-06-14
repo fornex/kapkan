@@ -13,6 +13,9 @@ import (
 
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/engine"
+	"github.com/kapkan-io/kapkan/internal/metrics"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"log/slog"
 )
@@ -1232,5 +1235,208 @@ func TestFlowSpecRollbackWithdrawFailureBestEffort(t *testing.T) {
 	}
 	if len(m.ActiveBans()) != 0 {
 		t.Errorf("active bans = %d, want 0", len(m.ActiveBans()))
+	}
+}
+
+// scrubBlock is a global scrubbing target with both v4 and v6 next-hops (the
+// test base config protects IPv6 space, so divert requires next_hop6).
+func scrubBlock() string {
+	return "scrubbing:\n  next_hop: \"192.0.2.200\"\n  next_hop6: \"100::200\"\n  community: \"65000:300\"\n  local_pref: 200\n"
+}
+
+// TestDivertMitigation: a single-method divert ban announces the victim host
+// route toward the scrubbing next-hop with the divert community, and withdraws
+// it on attack end.
+func TestDivertMitigation(t *testing.T) {
+	rec := newRecorder()
+	yaml := strings.Replace(liveYAML(), "thresholds:", scrubBlock()+"mitigation: divert\nthresholds:", 1)
+	m := newMitigator(t, yaml, rec, nil)
+
+	ban := m.OnAttackStarted(startedEvent("203.0.113.66"))
+	if ban.State != BanActive || ban.Method != config.MitigateDivert {
+		t.Fatalf("ban = %+v, want active divert", ban)
+	}
+	if ban.NextHop != "192.0.2.200" {
+		t.Errorf("next-hop = %q, want scrubbing 192.0.2.200", ban.NextHop)
+	}
+	if !strings.Contains(ban.Route, "divert") || !strings.Contains(ban.Route, "192.0.2.200") {
+		t.Errorf("route = %q, want divert via scrubbing next-hop", ban.Route)
+	}
+	if rec.announceCount("203.0.113.66/32") != 1 {
+		t.Errorf("divert announces = %d, want 1", rec.announceCount("203.0.113.66/32"))
+	}
+	if got := rec.communities(); len(got) != 1 || got[0] != 65000<<16|300 {
+		t.Errorf("announced communities = %v, want scrub [65000:300]", got)
+	}
+	if rec.localPref() != 200 {
+		t.Errorf("local-pref = %d, want 200", rec.localPref())
+	}
+
+	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr("203.0.113.66"), Direction: engine.DirIncoming, At: time.Now()})
+	if rec.withdrawCount("203.0.113.66/32") != 1 {
+		t.Errorf("divert host route not withdrawn on end: %d", rec.withdrawCount("203.0.113.66/32"))
+	}
+}
+
+// TestEscalationDivertToBlackhole: divert → blackhole share the host-route
+// NLRI, so escalating re-announces the SAME /32 with blackhole attributes
+// (gobgp implicit-withdraw replaces it atomically). No explicit withdraw fires
+// during the transition.
+func TestEscalationDivertToBlackhole(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	rec := newRecorder()
+	yaml := strings.Replace(liveYAML(), "thresholds:",
+		scrubBlock()+"escalation:\n"+
+			"  - {after_seconds: 0, action: none}\n"+
+			"  - {after_seconds: 5, action: divert}\n"+
+			"  - {after_seconds: 10, action: blackhole}\n"+
+			"thresholds:", 1)
+	m := newMitigator(t, yaml, rec, clk)
+
+	m.OnAttackStarted(startedEvent("203.0.113.66"))
+	// t=6 → divert via the scrubbing next-hop.
+	clk.Advance(6 * time.Second)
+	m.sweepExpired()
+	if bans := m.ActiveBans(); len(bans) != 1 || bans[0].Method != config.MitigateDivert || bans[0].NextHop != "192.0.2.200" {
+		t.Fatalf("after 6s ban = %+v, want divert via 192.0.2.200", bans)
+	}
+	if rec.announceCount("203.0.113.66/32") != 1 {
+		t.Errorf("divert announces = %d, want 1", rec.announceCount("203.0.113.66/32"))
+	}
+
+	// t=11 → blackhole: same /32 re-announced with blackhole attrs, NO withdraw.
+	clk.Advance(5 * time.Second)
+	m.sweepExpired()
+	bans := m.ActiveBans()
+	if len(bans) != 1 || bans[0].Method != config.MitigateBlackhole || bans[0].NextHop != "192.0.2.1" {
+		t.Fatalf("after 11s ban = %+v, want blackhole via 192.0.2.1", bans)
+	}
+	if rec.announceCount("203.0.113.66/32") != 2 {
+		t.Errorf("announces = %d, want 2 (divert then blackhole re-announce)", rec.announceCount("203.0.113.66/32"))
+	}
+	if rec.withdrawCount("203.0.113.66/32") != 0 {
+		t.Errorf("withdraws = %d, want 0 (same-NLRI atomic replace)", rec.withdrawCount("203.0.113.66/32"))
+	}
+	if got := rec.communities(); len(got) != 1 || got[0] != 65000<<16|666 {
+		t.Errorf("blackhole communities = %v, want [65000:666]", got)
+	}
+
+	// Attack ends → the host route is withdrawn exactly once.
+	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr("203.0.113.66"), Direction: engine.DirIncoming, At: clk.Now()})
+	if rec.withdrawCount("203.0.113.66/32") != 1 {
+		t.Errorf("withdraws after end = %d, want 1", rec.withdrawCount("203.0.113.66/32"))
+	}
+}
+
+// TestEscalationFlowSpecToDivert: flowspec → divert is a cross-family switch
+// (flowspec NLRI vs host route), so it is make-before-break: the divert route
+// goes up before the flowspec rules come down.
+func TestEscalationFlowSpecToDivert(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	rec := newRecorder()
+	yaml := strings.Replace(liveYAML(), "thresholds:",
+		scrubBlock()+"flowspec:\n  action: discard\nescalation:\n"+
+			"  - {after_seconds: 0, action: flowspec}\n"+
+			"  - {after_seconds: 5, action: divert}\n"+
+			"thresholds:", 1)
+	m := newMitigator(t, yaml, rec, clk)
+
+	m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	if len(rec.flowSpecUp()) != 1 {
+		t.Fatal("rung 0 flowspec not announced")
+	}
+	clk.Advance(6 * time.Second)
+	m.sweepExpired()
+	if rec.announceCount("203.0.113.66/32") != 1 {
+		t.Errorf("divert host route announces = %d, want 1", rec.announceCount("203.0.113.66/32"))
+	}
+	if rec.flowSpecDownTotal() != 1 {
+		t.Errorf("flowspec not withdrawn on cross-family escalation: %d", rec.flowSpecDownTotal())
+	}
+	log := rec.eventLog()
+	ann, wd := -1, -1
+	for i, e := range log {
+		if e == "announce 203.0.113.66/32" && ann == -1 {
+			ann = i
+		}
+		if e == "fs-withdraw" {
+			wd = i
+		}
+	}
+	if ann == -1 || wd == -1 || ann > wd {
+		t.Errorf("make-before-break violated: divert announce idx %d, flowspec withdraw idx %d; log=%v", ann, wd, log)
+	}
+}
+
+// TestEscalationFreezesScrubAttrsAcrossReload: the divert (scrubbing) attribute
+// set is frozen on the ban at creation, like the blackhole set. A reload that
+// changes the scrubbing target before the divert rung fires must not change the
+// ban's announced next-hop/community.
+func TestEscalationFreezesScrubAttrsAcrossReload(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	base := strings.Replace(liveYAML(), "thresholds:",
+		scrubBlock()+"escalation:\n  - {after_seconds: 0, action: none}\n  - {after_seconds: 5, action: divert}\nthresholds:", 1)
+	store, path := fileStore(t, base)
+	rec := newRecorder()
+	m := newMitigatorStore(t, store, rec, clk)
+
+	m.OnAttackStarted(startedEvent("203.0.113.66")) // alert-only rung; scrub attrs frozen
+
+	reloaded := strings.Replace(base, "192.0.2.200", "192.0.2.250", 1)
+	reloaded = strings.Replace(reloaded, "65000:300", "65000:999", 1)
+	if err := os.WriteFile(path, []byte(reloaded), 0o600); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+	if _, err := store.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	clk.Advance(6 * time.Second)
+	m.sweepExpired() // → divert with the FROZEN scrubbing attrs
+	if bans := m.ActiveBans(); len(bans) != 1 || bans[0].NextHop != "192.0.2.200" {
+		t.Errorf("divert next-hop = %v, want frozen 192.0.2.200 (not reloaded 192.0.2.250)", m.ActiveBans())
+	}
+	want, err := config.ParseCommunity("65000:300")
+	if err != nil {
+		t.Fatalf("ParseCommunity: %v", err)
+	}
+	if got := rec.communities(); len(got) != 1 || got[0] != want {
+		t.Errorf("divert communities = %v, want frozen [65000:300]", got)
+	}
+}
+
+// TestGaugeBucketsBansByOwnDryRun: each ban is counted in the gauge bucket
+// matching its OWN frozen DryRun, not the daemon's current mode. A reload that
+// flips dry_run must not move a live ban's count into the dry_run bucket.
+func TestGaugeBucketsBansByOwnDryRun(t *testing.T) {
+	base := liveYAML() // dry_run: false
+	store, path := fileStore(t, base)
+	rec := newRecorder()
+	m := newMitigatorStore(t, store, rec, nil)
+
+	// A live ban → "real" bucket.
+	m.OnAttackStarted(startedEvent("203.0.113.10"))
+	if got := testutil.ToFloat64(metrics.AnnouncedRoutes.WithLabelValues("real")); got != 1 {
+		t.Fatalf("real announced = %v, want 1", got)
+	}
+
+	// Reload flips the daemon to dry-run; the next ban is frozen as dry-run.
+	dry := strings.Replace(base, "dry_run: false", "dry_run: true", 1)
+	if err := os.WriteFile(path, []byte(dry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	m.OnAttackStarted(startedEvent("203.0.113.11"))
+
+	// The live ban stays in "real"; only the post-reload ban lands in "dry_run".
+	if got := testutil.ToFloat64(metrics.AnnouncedRoutes.WithLabelValues("real")); got != 1 {
+		t.Errorf("real announced = %v, want 1 (the live ban stays real)", got)
+	}
+	if got := testutil.ToFloat64(metrics.AnnouncedRoutes.WithLabelValues("dry_run")); got != 1 {
+		t.Errorf("dry_run announced = %v, want 1 (the post-reload ban)", got)
 	}
 }

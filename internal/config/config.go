@@ -52,8 +52,11 @@ type Config struct {
 	Storage    Storage          `yaml:"storage"`
 	Ban        Ban              `yaml:"ban"`
 	BGP        BGP              `yaml:"bgp"`
-	Notify     Notify           `yaml:"notify"`
-	API        API              `yaml:"api"`
+	// Scrubbing is the default traffic-diversion target (scrubbing center
+	// next-hops + divert community), used by groups whose ladder diverts.
+	Scrubbing Scrubbing `yaml:"scrubbing"`
+	Notify    Notify    `yaml:"notify"`
+	API       API       `yaml:"api"`
 
 	// Parsed forms, populated by validate().
 	NetworkPrefixes []netip.Prefix `yaml:"-"`
@@ -225,6 +228,10 @@ const (
 	// vector — surgical drops that can spare the victim's legitimate
 	// traffic. Requires upstreams that honor FlowSpec.
 	MitigateFlowSpec MitigationMethod = "flowspec"
+	// MitigateDivert announces the victim host route toward a scrubbing center
+	// (the scrubbing.next_hop + divert community) so traffic is cleaned and
+	// reinjected rather than dropped. Shares the RTBH host-route NLRI.
+	MitigateDivert MitigationMethod = "divert"
 )
 
 // FlowSpecAction is the action attached to generated FlowSpec rules.
@@ -247,7 +254,12 @@ const (
 	EscalateNone EscalationAction = "none"
 	// EscalateFlowSpec announces FlowSpec rules at this stage.
 	EscalateFlowSpec EscalationAction = "flowspec"
-	// EscalateBlackhole announces an RTBH route at this stage.
+	// EscalateDivert announces the victim /32-/128 toward a scrubbing center
+	// (its next-hop + divert community) so the traffic is cleaned rather than
+	// dropped. Less destructive than a blackhole, stronger than flowspec.
+	EscalateDivert EscalationAction = "divert"
+	// EscalateBlackhole announces an RTBH route at this stage (drops all of the
+	// victim's traffic) — the last-resort rung.
 	EscalateBlackhole EscalationAction = "blackhole"
 )
 
@@ -329,6 +341,10 @@ type Hostgroup struct {
 	// BGP overrides the blackhole BGP attributes (next-hop, communities,
 	// local-pref) for this group; omitted fields inherit the global bgp block.
 	BGP *BGPOverride `yaml:"bgp"`
+	// Scrubbing overrides the divert target (scrubbing next-hop, communities,
+	// local-pref) for this group; omitted fields inherit the global scrubbing
+	// block.
+	Scrubbing *BGPOverride `yaml:"scrubbing"`
 	// Ban controls automatic RTBH for the group's hosts (default true).
 	// Must not be set to true for total groups, which never auto-ban.
 	Ban *bool `yaml:"ban"`
@@ -362,7 +378,14 @@ type Group struct {
 	BlackholeCommunities  []uint32 `json:"-"`
 	BlackholeCommunityStr string   `json:"blackhole_communities,omitempty"`
 	LocalPref             uint32   `json:"blackhole_local_pref,omitempty"`
-	BanEnabled            bool     `json:"ban"`
+	// Resolved divert/scrubbing BGP attributes (defaults inherited from the
+	// global scrubbing block). Populated only when the group's ladder diverts.
+	ScrubNextHop      string   `json:"scrub_next_hop,omitempty"`
+	ScrubNextHop6     string   `json:"scrub_next_hop6,omitempty"`
+	ScrubCommunities  []uint32 `json:"-"`
+	ScrubCommunityStr string   `json:"scrub_communities,omitempty"`
+	ScrubLocalPref    uint32   `json:"scrub_local_pref,omitempty"`
+	BanEnabled        bool     `json:"ban"`
 }
 
 // groupRoute maps one prefix to its owning group for longest-prefix-match
@@ -416,12 +439,29 @@ type BGP struct {
 
 // BGPOverride overrides the global blackhole BGP attributes for a hostgroup.
 // Any field left empty/nil inherits the global bgp value, so a group can set
-// just its community while sharing the global next-hop, etc.
+// just its community while sharing the global next-hop, etc. Reused for the
+// per-group scrubbing override.
 type BGPOverride struct {
 	NextHop     string   `yaml:"next_hop"`
 	NextHop6    string   `yaml:"next_hop6"`
 	Communities []string `yaml:"communities"`
 	LocalPref   *uint32  `yaml:"local_pref"`
+}
+
+// Scrubbing is the default traffic-diversion target: the scrubbing center's
+// BGP next-hops, the divert community (optional — the next-hop does the
+// rerouting), and an optional LOCAL_PREF. Required (next-hop) only when a
+// ladder actually diverts.
+type Scrubbing struct {
+	NextHop     string   `yaml:"next_hop"`
+	NextHop6    string   `yaml:"next_hop6"`
+	Community   string   `yaml:"community"`
+	Communities []string `yaml:"communities"`
+	LocalPref   uint32   `yaml:"local_pref"`
+
+	// Parsed forms, populated by validate().
+	CommunityValues []uint32 `yaml:"-"`
+	CommunityStr    string   `yaml:"-"`
 }
 
 // Neighbor is one BGP peer.
@@ -588,9 +628,13 @@ func (c *Config) validate() error {
 		return fmt.Errorf("thresholds_outgoing: set at least one threshold or remove the block")
 	}
 
-	// BGP is validated before hostgroups so the global blackhole community set
-	// and next-hops are parsed and available as per-group resolution defaults.
+	// BGP and scrubbing are validated before hostgroups so the global blackhole
+	// and scrubbing attribute sets are parsed and available as per-group
+	// resolution defaults.
 	if err := c.validateBGP(); err != nil {
+		return err
+	}
+	if err := c.validateScrubbing(); err != nil {
 		return err
 	}
 
@@ -658,9 +702,18 @@ func (c *Config) validateHostgroups() error {
 		}
 	}
 
-	globalBGP, err := resolveBGPAttrs(nil, &c.BGP)
+	globalBGP, err := resolveBGPAttrs(nil, c.BGP.defaults())
 	if err != nil {
 		return fmt.Errorf("bgp: %w", err)
+	}
+	globalScrub, err := resolveBGPAttrs(nil, c.Scrubbing.defaults())
+	if err != nil {
+		return fmt.Errorf("scrubbing: %w", err)
+	}
+	if usesDivert(globalStages) {
+		if err := validateDivertTarget(GlobalGroup, globalScrub, c.hasV6Networks()); err != nil {
+			return err
+		}
 	}
 
 	c.Groups = make([]Group, 0, len(c.Hostgroups)+1)
@@ -679,6 +732,11 @@ func (c *Config) validateHostgroups() error {
 		BlackholeCommunities:  globalBGP.communities,
 		BlackholeCommunityStr: globalBGP.commStr,
 		LocalPref:             globalBGP.localPref,
+		ScrubNextHop:          globalScrub.nextHop,
+		ScrubNextHop6:         globalScrub.nextHop6,
+		ScrubCommunities:      globalScrub.communities,
+		ScrubCommunityStr:     globalScrub.commStr,
+		ScrubLocalPref:        globalScrub.localPref,
 		BanEnabled:            true,
 	})
 	c.groupRoutes = nil
@@ -769,12 +827,15 @@ func (c *Config) validateHostgroups() error {
 		if err != nil {
 			return fmt.Errorf("hostgroups[%q]: %w", hg.Name, err)
 		}
-		if calc == CalcTotal && usesFlowSpec(stages) {
+		// A total group has no single victim prefix to write a flowspec/divert
+		// rule for. An explicit such stage is an error; an inherited one
+		// degrades to blackhole, like the method case.
+		if calc == CalcTotal && (usesFlowSpec(stages) || usesDivert(stages)) {
 			if escExplicit {
-				return fmt.Errorf("hostgroups[%q]: escalation: a flowspec stage is not valid with calculation: total (no single victim prefix)", hg.Name)
+				return fmt.Errorf("hostgroups[%q]: escalation: a flowspec/divert stage is not valid with calculation: total (no single victim prefix)", hg.Name)
 			}
 			for i := range stages {
-				if stages[i].Action == EscalateFlowSpec {
+				if stages[i].Action == EscalateFlowSpec || stages[i].Action == EscalateDivert {
 					stages[i].Action = EscalateBlackhole // inherited; degrade like the method case
 				}
 			}
@@ -785,21 +846,29 @@ func (c *Config) validateHostgroups() error {
 			}
 		}
 
-		groupBGP, err := resolveBGPAttrs(hg.BGP, &c.BGP)
+		groupBGP, err := resolveBGPAttrs(hg.BGP, c.BGP.defaults())
 		if err != nil {
 			return fmt.Errorf("hostgroups[%q]: bgp: %w", hg.Name, err)
+		}
+		groupScrub, err := resolveBGPAttrs(hg.Scrubbing, c.Scrubbing.defaults())
+		if err != nil {
+			return fmt.Errorf("hostgroups[%q]: scrubbing: %w", hg.Name, err)
 		}
 
 		if len(hg.Networks) == 0 {
 			return fmt.Errorf("hostgroups[%q]: at least one prefix is required", hg.Name)
 		}
 		groupIdx := len(c.Groups)
+		groupHasV6 := false
 		for _, s := range hg.Networks {
 			p, err := netip.ParsePrefix(s)
 			if err != nil {
 				return fmt.Errorf("hostgroups[%q]: invalid CIDR %q: %w", hg.Name, s, err)
 			}
 			p = p.Masked()
+			if p.Addr().Is6() {
+				groupHasV6 = true
+			}
 			if owner, dup := seen[p]; dup {
 				return fmt.Errorf("hostgroups[%q]: prefix %s already belongs to group %q", hg.Name, p, owner)
 			}
@@ -817,6 +886,12 @@ func (c *Config) validateHostgroups() error {
 			c.groupRoutes = append(c.groupRoutes, groupRoute{prefix: p, group: groupIdx})
 		}
 
+		if usesDivert(stages) {
+			if err := validateDivertTarget(hg.Name, groupScrub, groupHasV6); err != nil {
+				return err
+			}
+		}
+
 		c.Groups = append(c.Groups, Group{
 			Name:                  hg.Name,
 			Calc:                  calc,
@@ -832,6 +907,11 @@ func (c *Config) validateHostgroups() error {
 			BlackholeCommunities:  groupBGP.communities,
 			BlackholeCommunityStr: groupBGP.commStr,
 			LocalPref:             groupBGP.localPref,
+			ScrubNextHop:          groupScrub.nextHop,
+			ScrubNextHop6:         groupScrub.nextHop6,
+			ScrubCommunities:      groupScrub.communities,
+			ScrubCommunityStr:     groupScrub.commStr,
+			ScrubLocalPref:        groupScrub.localPref,
 			BanEnabled:            banEnabled,
 		})
 	}
@@ -902,8 +982,8 @@ func resolveMitigation(methodStr string, flow *FlowSpec, defMethod MitigationMet
 	method := defMethod
 	if methodStr != "" {
 		method = MitigationMethod(methodStr)
-		if method != MitigateBlackhole && method != MitigateFlowSpec {
-			return "", "", 0, fmt.Errorf("method must be %q or %q, got %q", MitigateBlackhole, MitigateFlowSpec, methodStr)
+		if method != MitigateBlackhole && method != MitigateFlowSpec && method != MitigateDivert {
+			return "", "", 0, fmt.Errorf("method must be %q, %q or %q, got %q", MitigateBlackhole, MitigateFlowSpec, MitigateDivert, methodStr)
 		}
 	}
 	if method != MitigateFlowSpec {
@@ -948,10 +1028,14 @@ const maxEscalationStages = 5
 
 // methodAction maps a single mitigation method to its ladder action.
 func methodAction(m MitigationMethod) EscalationAction {
-	if m == MitigateFlowSpec {
+	switch m {
+	case MitigateFlowSpec:
 		return EscalateFlowSpec
+	case MitigateDivert:
+		return EscalateDivert
+	default:
+		return EscalateBlackhole
 	}
-	return EscalateBlackhole
 }
 
 // resolveEscalation resolves a mitigation ladder. An empty steps slice
@@ -971,9 +1055,9 @@ func resolveEscalation(steps []EscalationStep, method MitigationMethod) ([]Escal
 	for i, s := range steps {
 		act := EscalationAction(s.Action)
 		switch act {
-		case EscalateNone, EscalateFlowSpec, EscalateBlackhole:
+		case EscalateNone, EscalateFlowSpec, EscalateDivert, EscalateBlackhole:
 		default:
-			return nil, fmt.Errorf("escalation[%d].action must be none|flowspec|blackhole, got %q", i, s.Action)
+			return nil, fmt.Errorf("escalation[%d].action must be none|flowspec|divert|blackhole, got %q", i, s.Action)
 		}
 		if i == 0 && s.AfterSeconds != 0 {
 			return nil, fmt.Errorf("escalation[0].after_seconds must be 0 (the initial stage)")
@@ -999,10 +1083,13 @@ func resolveEscalation(steps []EscalationStep, method MitigationMethod) ([]Escal
 }
 
 // escalationSeverity ranks ladder actions so a ladder can be validated as
-// non-decreasing: none < flowspec < blackhole.
+// non-decreasing: none < flowspec < divert < blackhole. Divert (scrub) keeps
+// the victim reachable, so it sits below the all-dropping blackhole.
 func escalationSeverity(a EscalationAction) int {
 	switch a {
 	case EscalateBlackhole:
+		return 3
+	case EscalateDivert:
 		return 2
 	case EscalateFlowSpec:
 		return 1
@@ -1015,6 +1102,16 @@ func escalationSeverity(a EscalationAction) int {
 func usesFlowSpec(stages []EscalationStage) bool {
 	for _, s := range stages {
 		if s.Action == EscalateFlowSpec {
+			return true
+		}
+	}
+	return false
+}
+
+// usesDivert reports whether any stage diverts to a scrubbing center.
+func usesDivert(stages []EscalationStage) bool {
+	for _, s := range stages {
+		if s.Action == EscalateDivert {
 			return true
 		}
 	}
@@ -1193,6 +1290,45 @@ func (c *Config) validateBGP() error {
 	return nil
 }
 
+// validateScrubbing validates the optional scrubbing (traffic-diversion)
+// target and resolves its community set. The next-hops are only REQUIRED when a
+// ladder actually diverts; that per-group check happens in validateHostgroups.
+// Here we just parse what is present so the values are ready as defaults.
+func (c *Config) validateScrubbing() error {
+	s := &c.Scrubbing
+	if s.NextHop != "" {
+		a, err := netip.ParseAddr(s.NextHop)
+		if err != nil || !a.Is4() {
+			return fmt.Errorf("scrubbing.next_hop must be a valid IPv4 address, got %q", s.NextHop)
+		}
+	}
+	if s.NextHop6 != "" {
+		a, err := netip.ParseAddr(s.NextHop6)
+		if err != nil || !a.Is6() || a.Is4In6() {
+			return fmt.Errorf("scrubbing.next_hop6 must be a valid IPv6 address, got %q", s.NextHop6)
+		}
+	}
+	// The divert community is optional (the next-hop does the rerouting): an
+	// explicit list, else the single `community`, else no community at all.
+	switch {
+	case len(s.Communities) > 0:
+		vals, str, err := parseCommunities(s.Communities)
+		if err != nil {
+			return fmt.Errorf("scrubbing.communities: %w", err)
+		}
+		s.CommunityValues, s.CommunityStr = vals, str
+	case s.Communities != nil:
+		return fmt.Errorf("scrubbing.communities: provide at least one community, or omit it")
+	case s.Community != "":
+		v, err := ParseCommunity(s.Community)
+		if err != nil {
+			return fmt.Errorf("scrubbing.community: %w", err)
+		}
+		s.CommunityValues, s.CommunityStr = []uint32{v}, s.Community
+	}
+	return nil
+}
+
 // validateNotify checks the optional notification channels and applies the
 // exec hook's default timeout.
 func (c *Config) validateNotify() error {
@@ -1271,24 +1407,59 @@ func parseCommunities(list []string) ([]uint32, string, error) {
 	return vals, strings.Join(list, " "), nil
 }
 
-// resolvedBGP is a group's resolved blackhole BGP attributes.
+// hasV6Networks reports whether any protected network is IPv6.
+func (c *Config) hasV6Networks() bool {
+	for _, p := range c.NetworkPrefixes {
+		if p.Addr().Is6() {
+			return true
+		}
+	}
+	return false
+}
+
+// validateDivertTarget checks that a group whose ladder diverts has a usable
+// scrubbing next-hop: an IPv4 next-hop always, plus an IPv6 next-hop when the
+// group protects IPv6 space (there is no safe discard-style fallback for
+// diversion — traffic must reach a real scrubber).
+func validateDivertTarget(group string, scrub resolvedBGP, hasV6 bool) error {
+	if scrub.nextHop == "" {
+		return fmt.Errorf("group %q: divert requires scrubbing.next_hop (the scrubbing center's IPv4 next-hop)", group)
+	}
+	if hasV6 && scrub.nextHop6 == "" {
+		return fmt.Errorf("group %q: divert requires scrubbing.next_hop6 because the group protects IPv6 space", group)
+	}
+	return nil
+}
+
+// resolvedBGP is a group's resolved BGP attribute set (blackhole or scrubbing).
 type resolvedBGP struct {
 	nextHop, nextHop6, commStr string
 	communities                []uint32
 	localPref                  uint32
 }
 
-// resolveBGPAttrs resolves a group's blackhole BGP attributes, inheriting any
-// field the override leaves unset from the (already-validated) global bgp
-// block. A nil override inherits everything.
-func resolveBGPAttrs(ov *BGPOverride, b *BGP) (resolvedBGP, error) {
-	r := resolvedBGP{
-		nextHop:     b.NextHop,
-		nextHop6:    b.NextHop6,
-		commStr:     b.CommunityStr,
-		communities: b.CommunityValues,
-		localPref:   b.LocalPref,
+// defaults returns the global blackhole attribute set as a resolution default.
+func (b *BGP) defaults() resolvedBGP {
+	return resolvedBGP{
+		nextHop: b.NextHop, nextHop6: b.NextHop6,
+		commStr: b.CommunityStr, communities: b.CommunityValues, localPref: b.LocalPref,
 	}
+}
+
+// defaults returns the global scrubbing attribute set as a resolution default.
+func (s *Scrubbing) defaults() resolvedBGP {
+	return resolvedBGP{
+		nextHop: s.NextHop, nextHop6: s.NextHop6,
+		commStr: s.CommunityStr, communities: s.CommunityValues, localPref: s.LocalPref,
+	}
+}
+
+// resolveBGPAttrs resolves a group's BGP attributes, inheriting any field the
+// override leaves unset from the (already-validated) default set. A nil
+// override inherits everything. Used for both the blackhole and scrubbing
+// attribute sets.
+func resolveBGPAttrs(ov *BGPOverride, def resolvedBGP) (resolvedBGP, error) {
+	r := def
 	if ov == nil {
 		return r, nil
 	}
