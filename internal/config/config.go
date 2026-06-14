@@ -540,8 +540,56 @@ type API struct {
 	// set, every /api/v1 request must carry "Authorization: Bearer <token>".
 	// The token is read from the environment, never from the config file.
 	// Unset (default) leaves the API open — safe only on a trusted listener
-	// such as the default 127.0.0.1 bind.
+	// such as the default 127.0.0.1 bind. Shorthand for a single operator
+	// token; use `tokens` for role-based access. Mutually exclusive with it.
 	TokenEnv string `yaml:"token_env"`
+	// Tokens is the role-based token set: each names an env var holding its
+	// secret and a role (viewer = read-only, operator = read + ban/unban/
+	// reload). When set it supersedes token_env.
+	Tokens []APIToken `yaml:"tokens"`
+
+	// TokenSpecs is the resolved token set (env names + roles, never secrets),
+	// populated by validate(). Empty leaves the API open.
+	TokenSpecs []TokenSpec `yaml:"-"`
+}
+
+// APIToken is one configured API credential (YAML shape).
+type APIToken struct {
+	Name     string `yaml:"name"`
+	TokenEnv string `yaml:"token_env"`
+	Role     string `yaml:"role"`
+}
+
+// Role is an API access level.
+type Role string
+
+// API roles, in ascending privilege.
+const (
+	// RoleViewer may read (status, attacks, hosts, bans, metrics).
+	RoleViewer Role = "viewer"
+	// RoleOperator may read and mutate (manual ban/unban, config reload).
+	RoleOperator Role = "operator"
+)
+
+// Rank orders roles so a check is "presented rank >= required rank".
+func (r Role) Rank() int {
+	switch r {
+	case RoleOperator:
+		return 2
+	case RoleViewer:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// TokenSpec is one resolved credential: the env var holding its secret and the
+// role it grants. The secret itself is read from the environment per request,
+// never stored here.
+type TokenSpec struct {
+	Name string
+	Env  string
+	Role Role
 }
 
 // DashboardEnabled reports whether the embedded UI should be served.
@@ -668,10 +716,8 @@ func (c *Config) validate() error {
 	if _, err := netip.ParseAddrPort(normalizeListen(c.API.Listen)); err != nil {
 		return fmt.Errorf("api.listen: invalid address %q: %w", c.API.Listen, err)
 	}
-	if c.API.TokenEnv != "" {
-		if !envNameRe.MatchString(c.API.TokenEnv) {
-			return fmt.Errorf("api.token_env %q is not a valid environment variable name", c.API.TokenEnv)
-		}
+	if err := c.validateAPITokens(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1325,6 +1371,48 @@ func (c *Config) validateScrubbing() error {
 			return fmt.Errorf("scrubbing.community: %w", err)
 		}
 		s.CommunityValues, s.CommunityStr = []uint32{v}, s.Community
+	}
+	return nil
+}
+
+// validateAPITokens resolves the API credential set into API.TokenSpecs. A
+// lone token_env is a single operator token (back-compat); a tokens list is
+// role-based and supersedes it; setting both is an error. An empty result
+// leaves the API open (safe only on a trusted listener).
+func (c *Config) validateAPITokens() error {
+	a := &c.API
+	a.TokenSpecs = nil
+
+	if len(a.Tokens) > 0 {
+		if a.TokenEnv != "" {
+			return fmt.Errorf("api: set either token_env (single token) or tokens (role-based list), not both")
+		}
+		names := make(map[string]bool, len(a.Tokens))
+		for i, tk := range a.Tokens {
+			if tk.Name == "" {
+				return fmt.Errorf("api.tokens[%d]: name is required", i)
+			}
+			if names[tk.Name] {
+				return fmt.Errorf("api.tokens[%d]: duplicate name %q", i, tk.Name)
+			}
+			names[tk.Name] = true
+			if !envNameRe.MatchString(tk.TokenEnv) {
+				return fmt.Errorf("api.tokens[%q]: token_env %q is not a valid environment variable name", tk.Name, tk.TokenEnv)
+			}
+			role := Role(tk.Role)
+			if role != RoleViewer && role != RoleOperator {
+				return fmt.Errorf("api.tokens[%q]: role must be %q or %q, got %q", tk.Name, RoleViewer, RoleOperator, tk.Role)
+			}
+			a.TokenSpecs = append(a.TokenSpecs, TokenSpec{Name: tk.Name, Env: tk.TokenEnv, Role: role})
+		}
+		return nil
+	}
+
+	if a.TokenEnv != "" {
+		if !envNameRe.MatchString(a.TokenEnv) {
+			return fmt.Errorf("api.token_env %q is not a valid environment variable name", a.TokenEnv)
+		}
+		a.TokenSpecs = []TokenSpec{{Name: "default", Env: a.TokenEnv, Role: RoleOperator}}
 	}
 	return nil
 }
