@@ -1036,3 +1036,104 @@ func TestBGPAttributesResolution(t *testing.T) {
 		t.Errorf("global empty communities: error = %v, want rejection", err)
 	}
 }
+
+func TestDivertScrubbingResolution(t *testing.T) {
+	scrub := "scrubbing:\n  next_hop: \"192.0.2.200\"\n  next_hop6: \"100::200\"\n  community: \"65000:300\"\n  local_pref: 200\n"
+
+	// A full none → flowspec → divert → blackhole ladder resolves, and the
+	// scrubbing attributes land on the group.
+	y := validYAML + scrub + "flowspec:\n  action: discard\nescalation:\n" +
+		"  - {after_seconds: 0, action: none}\n" +
+		"  - {after_seconds: 10, action: flowspec}\n" +
+		"  - {after_seconds: 30, action: divert}\n" +
+		"  - {after_seconds: 60, action: blackhole}\n"
+	cfg, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	g := cfg.Groups[0]
+	if len(g.Escalation) != 4 || g.Escalation[2].Action != EscalateDivert {
+		t.Fatalf("ladder = %+v, want divert at index 2", g.Escalation)
+	}
+	if g.ScrubNextHop != "192.0.2.200" || g.ScrubNextHop6 != "100::200" {
+		t.Errorf("scrub next-hops = %q / %q", g.ScrubNextHop, g.ScrubNextHop6)
+	}
+	if len(g.ScrubCommunities) != 1 || g.ScrubCommunities[0] != 65000<<16|300 || g.ScrubCommunityStr != "65000:300" {
+		t.Errorf("scrub communities = %v / %q", g.ScrubCommunities, g.ScrubCommunityStr)
+	}
+	if g.ScrubLocalPref != 200 {
+		t.Errorf("scrub local-pref = %d, want 200", g.ScrubLocalPref)
+	}
+
+	// mitigation: divert (single method) synthesizes a one-rung divert ladder.
+	cfg, err = Parse([]byte(validYAML + scrub + "mitigation: divert\n"))
+	if err != nil {
+		t.Fatalf("Parse() mitigation: divert error = %v", err)
+	}
+	if cfg.Groups[0].Escalation[0].Action != EscalateDivert {
+		t.Errorf("mitigation: divert → ladder = %+v", cfg.Groups[0].Escalation)
+	}
+
+	// A per-group scrubbing override applies to targets in that group.
+	pg := validYAML + scrub + "mitigation: divert\nhostgroups:\n" +
+		"  - name: customer-a\n    networks: [\"203.0.113.64/26\"]\n" +
+		"    scrubbing:\n      next_hop: \"192.0.2.250\"\n      communities: [\"65000:400\"]\n"
+	cfg, err = Parse([]byte(pg))
+	if err != nil {
+		t.Fatalf("Parse() per-group scrubbing error = %v", err)
+	}
+	ca := cfg.GroupFor(netip.MustParseAddr("203.0.113.66"))
+	if ca.Name != "customer-a" || ca.ScrubNextHop != "192.0.2.250" || ca.ScrubCommunityStr != "65000:400" {
+		t.Errorf("per-group scrub = %q / %q / %q", ca.Name, ca.ScrubNextHop, ca.ScrubCommunityStr)
+	}
+	// The v6 next-hop is inherited from the global scrubbing block.
+	if ca.ScrubNextHop6 != "100::200" {
+		t.Errorf("inherited scrub v6 = %q, want 100::200", ca.ScrubNextHop6)
+	}
+
+	bad := []struct{ name, yaml, wantErr string }{
+		{"divert without scrubbing next-hop",
+			validYAML + "mitigation: divert\n", "divert requires scrubbing.next_hop"},
+		{"divert v6 without next_hop6",
+			validYAML + "scrubbing:\n  next_hop: \"192.0.2.200\"\n  community: \"65000:300\"\nmitigation: divert\n", "scrubbing.next_hop6"},
+		{"de-escalate divert→flowspec",
+			validYAML + scrub + "flowspec:\n  action: discard\nescalation:\n  - {after_seconds: 0, action: divert}\n  - {after_seconds: 5, action: flowspec}\n", "de-escalates"},
+		{"de-escalate blackhole→divert",
+			validYAML + scrub + "escalation:\n  - {after_seconds: 0, action: blackhole}\n  - {after_seconds: 5, action: divert}\n", "de-escalates"},
+		{"unknown action label",
+			validYAML + "escalation:\n  - {after_seconds: 0, action: scrub}\n", "none|flowspec|divert|blackhole"},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse([]byte(tt.yaml)); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Parse() error = %v, want contains %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDivertTotalGroupDegrades(t *testing.T) {
+	scrub := "scrubbing:\n  next_hop: \"192.0.2.200\"\n  next_hop6: \"100::200\"\n  community: \"65000:300\"\n"
+	// An explicit divert stage on a total group is an error.
+	explicit := validYAML + scrub + "hostgroups:\n" +
+		"  - name: pool\n    networks: [\"203.0.113.64/26\"]\n    calculation: total\n" +
+		"    escalation:\n      - {after_seconds: 0, action: divert}\n"
+	if _, err := Parse([]byte(explicit)); err == nil || !strings.Contains(err.Error(), "total") {
+		t.Errorf("explicit divert on total group: error = %v, want total-group rejection", err)
+	}
+
+	// An inherited (global) divert stage degrades to blackhole on a total group.
+	inherited := validYAML + scrub + "mitigation: divert\nhostgroups:\n" +
+		"  - name: pool\n    networks: [\"203.0.113.64/26\"]\n    calculation: total\n"
+	cfg, err := Parse([]byte(inherited))
+	if err != nil {
+		t.Fatalf("Parse() inherited divert on total group error = %v", err)
+	}
+	pool := cfg.GroupFor(netip.MustParseAddr("203.0.113.70"))
+	if pool.Calc != CalcTotal {
+		t.Fatalf("group = %+v, want total", pool)
+	}
+	if pool.Escalation[0].Action != EscalateBlackhole {
+		t.Errorf("total group inherited divert = %q, want degraded to blackhole", pool.Escalation[0].Action)
+	}
+}
