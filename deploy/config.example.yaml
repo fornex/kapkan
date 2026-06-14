@@ -120,9 +120,23 @@ bgp:
   next_hop: "192.0.2.1" # IPv4 blackhole (discard) next-hop
   next_hop6: "100::1" # IPv6 blackhole next-hop (RFC 6666 discard prefix)
   community: "65000:666" # RTBH community your upstream honors
+  # communities: ["65000:666", "65000:777"] # full set (overrides `community`)
+  # local_pref: 100      # optional LOCAL_PREF on blackholes (iBGP peers); 0 = omit
   neighbors:
     - address: "10.0.0.254"
       remote_asn: 65000
+
+# Hostgroups can override the blackhole BGP attributes so different customers
+# signal their own upstreams. Each unset field inherits the global bgp block;
+# the resolved attributes are frozen per ban (a reload only affects new bans).
+#
+# hostgroups:
+#   - name: customer-a
+#     networks: ["203.0.113.64/26"]
+#     bgp:
+#       communities: ["65000:100", "65001:200"]
+#       next_hop: "192.0.2.50"
+#       local_pref: 250
 
 notify:
   telegram:

@@ -68,7 +68,7 @@ The full schema:
 | `ban.ttl_seconds` | Every announcement auto-withdraws after this. No permanent bans. |
 | `ban.unban_hysteresis_seconds` | Traffic must stay below threshold this long before withdrawing, to prevent flapping. |
 | `ban.max_active_bans` | Hard cap on simultaneous bans; new bans past the cap are refused. |
-| `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | BGP identity, blackhole next-hops (v4/v6) and RTBH community (`ASN:value`). `router_id` must be IPv4. |
+| `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | BGP identity, blackhole next-hops (v4/v6) and RTBH community (`ASN:value`). `router_id` must be IPv4. Optional `communities` (list, overrides `community`) and `local_pref`; both overridable per hostgroup via a group `bgp:` block. |
 | `bgp.neighbors[]` | eBGP peers: `address`, `remote_asn` (and optional `port` for testing). |
 | `notify.telegram.token_env` / `chat_id` | Telegram bot: the token is read from the named **environment variable**, never the file. |
 | `notify.webhook.url` | Optional generic JSON POST target for attack start/end. Payload documented in [`docs/callback-schema.json`](docs/callback-schema.json) (versioned via `schema_version`). |
@@ -262,6 +262,36 @@ auto-withdrawal, the `max_active_bans` cap, whitelist-never, and dry-run (which 
 the ladder and logs each rung but never announces). When no `escalation` block is set, the
 single `mitigation` method behaves exactly as a one-rung ladder at `0s` — full backward
 compatibility. The current rung and method are visible per ban in `/api/v1/bans`.
+
+### Per-hostgroup BGP attributes
+
+The global `bgp` block sets the default blackhole next-hops and RTBH community. A hostgroup
+can override any of them so different customers signal their own upstreams — where
+FastNetMon ties you to one community set:
+
+```yaml
+bgp:
+  next_hop: "192.0.2.1"
+  community: "65000:666"        # the default RTBH community
+  # communities: ["65000:666", "65000:777"]   # or a full set (overrides `community`)
+  # local_pref: 100                            # optional LOCAL_PREF for iBGP peers
+
+hostgroups:
+  - name: customer-a
+    networks: ["203.0.113.64/26"]
+    bgp:
+      communities: ["65000:100", "65001:200"]  # customer-A's own blackhole signal
+      next_hop: "192.0.2.50"                    # and discard next-hop
+      local_pref: 250
+```
+
+Each field left unset inherits the global `bgp` value, so a group can override just its
+community while sharing the global next-hop. `local_pref` (default 0 = omit) attaches a
+`LOCAL_PREF` path attribute, which is meaningful to iBGP peers. The resolved attributes are
+**frozen on each ban when it is created**: a config reload changes only future bans, never
+the route a live ban already announced. The per-ban `next_hop`, `community`, and `local_pref`
+are visible in `/api/v1/bans` and in the `route` field. FlowSpec rungs are unaffected (their
+action lives in a traffic-rate extended community, configured via the `flowspec` block).
 
 ### Going live
 
