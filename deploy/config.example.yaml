@@ -194,6 +194,11 @@ notify:
 api:
   listen: "127.0.0.1:8080" # default localhost bind needs no auth
   dashboard: true # embedded web UI at / on this listener; false = JSON API only
-  # token_env: "KAPKAN_API_TOKEN" # REQUIRED before exposing beyond localhost:
-  #   when set, every /api/v1 request needs "Authorization: Bearer <token>".
-  #   The token is read from this env var, never the file.
+  # AUTH — REQUIRED before exposing beyond localhost. Secrets come from env
+  # vars, never the file. Use ONE of:
+  #
+  # token_env: "KAPKAN_API_TOKEN" # a single operator token (read + mutate)
+  #
+  # tokens: # or role-based: viewer = read-only, operator = read + ban/reload
+  #   - {name: dashboard,  token_env: "KAPKAN_API_RO", role: viewer}
+  #   - {name: automation, token_env: "KAPKAN_API_RW", role: operator}

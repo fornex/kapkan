@@ -515,6 +515,45 @@ func TestEmptyConfiguredTokenFailsClosed(t *testing.T) {
 	}
 }
 
+func apiTokensYAML() string {
+	return strings.Replace(apiYAML, "  listen: \"127.0.0.1:8080\"\n",
+		"  listen: \"127.0.0.1:8080\"\n  tokens:\n"+
+			"    - {name: ro, token_env: KAPKAN_TEST_RO, role: viewer}\n"+
+			"    - {name: rw, token_env: KAPKAN_TEST_RW, role: operator}\n", 1)
+}
+
+// TestRoleBasedTokens: a viewer token may read but not mutate (403); an
+// operator token may do both; an unknown token is 401 (not 403).
+func TestRoleBasedTokens(t *testing.T) {
+	t.Setenv("KAPKAN_TEST_RO", "view-secret")
+	t.Setenv("KAPKAN_TEST_RW", "op-secret")
+	s := testServer(t, storeFromYAML(t, apiTokensYAML()))
+	h := s.Handler()
+
+	// Viewer: read OK, write forbidden.
+	if rec := reqWith(h, http.MethodGet, "/api/v1/status", "", "view-secret", ""); rec.Code != http.StatusOK {
+		t.Errorf("viewer read: status = %d, want 200", rec.Code)
+	}
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"203.0.113.9"}`, "view-secret", "application/json"); rec.Code != http.StatusForbidden {
+		t.Errorf("viewer write: status = %d, want 403", rec.Code)
+	}
+	// Operator: read and write OK.
+	if rec := reqWith(h, http.MethodGet, "/api/v1/bans", "", "op-secret", ""); rec.Code != http.StatusOK {
+		t.Errorf("operator read: status = %d, want 200", rec.Code)
+	}
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"203.0.113.9"}`, "op-secret", "application/json"); rec.Code != http.StatusOK {
+		t.Errorf("operator write: status = %d, want 200", rec.Code)
+	}
+	// Unknown token: 401 (authentication failed, not a role problem).
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"203.0.113.9"}`, "bogus", "application/json"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("unknown token write: status = %d, want 401", rec.Code)
+	}
+	// No token: 401.
+	if rec := reqWith(h, http.MethodGet, "/api/v1/status", "", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token read: status = %d, want 401", rec.Code)
+	}
+}
+
 func TestCSRFContentTypeGuard(t *testing.T) {
 	s := testServer(t, storeFromYAML(t, apiYAML)) // no token
 	h := s.Handler()

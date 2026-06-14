@@ -157,45 +157,69 @@ func (s *Server) RecordAttackEnded(ev engine.Event, ban *mitigate.Ban) {
 
 // Handler builds the HTTP routes. Exposed for httptest-based testing.
 //
-// All /api/v1 routes pass through requireToken, which enforces the bearer
-// token when api.token_env is configured. /metrics (Prometheus scraping)
-// and the dashboard assets (the HTML shell is not secret; the data it loads
-// is, via the guarded API) are served without the token.
+// Read routes require the viewer role, mutating routes the operator role; both
+// pass through requireRole, which enforces the configured tokens. /metrics
+// (Prometheus scraping) and the dashboard assets (the HTML shell is not secret;
+// the data it loads is, via the guarded API) are served without a token.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	api := func(pattern string, h http.HandlerFunc) {
-		mux.Handle(pattern, s.requireToken(h))
+	read := func(pattern string, h http.HandlerFunc) {
+		mux.Handle(pattern, s.requireRole(config.RoleViewer, h))
 	}
-	api("GET /api/v1/status", s.handleStatus)
-	api("GET /api/v1/attacks", s.handleAttacks)
-	api("GET /api/v1/hosts", s.handleHosts)
-	api("GET /api/v1/bans", s.handleBans)
-	api("POST /api/v1/ban", s.handleBan)
-	api("POST /api/v1/unban", s.handleUnban)
-	api("POST /api/v1/config/reload", s.handleReload)
+	write := func(pattern string, h http.HandlerFunc) {
+		mux.Handle(pattern, s.requireRole(config.RoleOperator, h))
+	}
+	read("GET /api/v1/status", s.handleStatus)
+	read("GET /api/v1/attacks", s.handleAttacks)
+	read("GET /api/v1/hosts", s.handleHosts)
+	read("GET /api/v1/bans", s.handleBans)
+	write("POST /api/v1/ban", s.handleBan)
+	write("POST /api/v1/unban", s.handleUnban)
+	write("POST /api/v1/config/reload", s.handleReload)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	s.registerDashboard(mux)
 	return mux
 }
 
-// requireToken enforces the configured bearer token (constant-time compare)
-// and, for mutating methods, an application/json content type — a
-// cross-site request cannot set that header without a CORS preflight, which
-// we never grant, so the token-in-header plus JSON requirement closes CSRF.
-// Whether auth is required is read per request, so a reload that sets or
-// clears api.token_env takes effect without a restart.
-func (s *Server) requireToken(next http.HandlerFunc) http.Handler {
+// requireRole enforces the configured API tokens and the route's minimum role.
+// When no tokens are configured the API is open (safe only on a trusted
+// listener such as the default 127.0.0.1 bind). Otherwise the presented bearer
+// token is matched (constant-time) against every configured token's current env
+// value — an empty value never matches, so the API fails closed — and the
+// highest matching role is taken: no match is 401, a role below the route's
+// requirement is 403. Tokens and roles are read per request, so a reload takes
+// effect without a restart.
+//
+// For mutating methods an application/json content type is also required: a
+// cross-site request cannot set that header without a CORS preflight (never
+// granted), so token-in-header plus JSON closes CSRF.
+func (s *Server) requireRole(required config.Role, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg := s.store.Get()
-		if env := cfg.API.TokenEnv; env != "" {
-			want := os.Getenv(env)
-			// Require the exact "Bearer " scheme; a raw header value must
-			// not authenticate. want=="" (token_env set but the env var is
-			// empty) fails closed rather than accepting an empty token.
+		tokens := s.store.Get().API.TokenSpecs
+		if len(tokens) > 0 {
+			// Require the exact "Bearer " scheme; a raw header value must not
+			// authenticate. Compare against every token without an early exit,
+			// taking the highest matching role.
 			got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if want == "" || !ok || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			rank := 0
+			if ok {
+				for _, tk := range tokens {
+					want := os.Getenv(tk.Env)
+					if want == "" {
+						continue // env unset/empty → never matches (fail closed)
+					}
+					if subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 && tk.Role.Rank() > rank {
+						rank = tk.Role.Rank()
+					}
+				}
+			}
+			if rank == 0 {
 				w.Header().Set("WWW-Authenticate", "Bearer")
 				writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+				return
+			}
+			if rank < required.Rank() {
+				writeError(w, http.StatusForbidden, "this token's role may not perform this action")
 				return
 			}
 		}

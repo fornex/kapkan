@@ -1137,3 +1137,53 @@ func TestDivertTotalGroupDegrades(t *testing.T) {
 		t.Errorf("total group inherited divert = %q, want degraded to blackhole", pool.Escalation[0].Action)
 	}
 }
+
+func TestAPITokensResolution(t *testing.T) {
+	withAPI := func(block string) string {
+		return strings.Replace(validYAML, "  listen: \"127.0.0.1:8080\"\n",
+			"  listen: \"127.0.0.1:8080\"\n"+block, 1)
+	}
+
+	// No api auth configured → no token specs (open).
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(cfg.API.TokenSpecs) != 0 {
+		t.Errorf("no tokens configured → specs = %+v, want empty", cfg.API.TokenSpecs)
+	}
+
+	// Lone token_env → a single operator token named "default".
+	cfg, err = Parse([]byte(withAPI("  token_env: \"K_SINGLE\"\n")))
+	if err != nil {
+		t.Fatalf("Parse() token_env error = %v", err)
+	}
+	if s := cfg.API.TokenSpecs; len(s) != 1 || s[0].Name != "default" || s[0].Env != "K_SINGLE" || s[0].Role != RoleOperator {
+		t.Errorf("lone token_env → %+v, want one operator 'default'", cfg.API.TokenSpecs)
+	}
+
+	// Role-based list resolves to specs in order.
+	cfg, err = Parse([]byte(withAPI("  tokens:\n    - {name: ro, token_env: K_RO, role: viewer}\n    - {name: rw, token_env: K_RW, role: operator}\n")))
+	if err != nil {
+		t.Fatalf("Parse() tokens error = %v", err)
+	}
+	s := cfg.API.TokenSpecs
+	if len(s) != 2 || s[0].Role != RoleViewer || s[1].Role != RoleOperator || s[0].Env != "K_RO" || s[1].Name != "rw" {
+		t.Errorf("token specs = %+v", s)
+	}
+
+	bad := []struct{ name, block, wantErr string }{
+		{"both token_env and tokens", "  token_env: \"K\"\n  tokens:\n    - {name: a, token_env: K2, role: viewer}\n", "not both"},
+		{"bad role", "  tokens:\n    - {name: a, token_env: K, role: admin}\n", "role must be"},
+		{"duplicate name", "  tokens:\n    - {name: a, token_env: K1, role: viewer}\n    - {name: a, token_env: K2, role: operator}\n", "duplicate name"},
+		{"empty name", "  tokens:\n    - {name: \"\", token_env: K, role: viewer}\n", "name is required"},
+		{"bad env name", "  tokens:\n    - {name: a, token_env: \"bad env!\", role: viewer}\n", "valid environment variable"},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse([]byte(withAPI(tt.block))); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Parse() error = %v, want contains %q", err, tt.wantErr)
+			}
+		})
+	}
+}
