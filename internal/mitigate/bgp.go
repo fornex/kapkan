@@ -135,10 +135,6 @@ func (b *bgpSpeaker) Announce(ctx context.Context, prefix netip.Prefix, attrs bl
 	if err != nil {
 		return err
 	}
-	comms, err := apb.New(&api.CommunitiesAttribute{Communities: attrs.communities})
-	if err != nil {
-		return err
-	}
 	nlri, err := apb.New(&api.IPAddressPrefix{
 		Prefix:    prefix.Addr().String(),
 		PrefixLen: uint32(prefix.Bits()),
@@ -147,7 +143,7 @@ func (b *bgpSpeaker) Announce(ctx context.Context, prefix netip.Prefix, attrs bl
 		return err
 	}
 
-	var pattrs []*apb.Any
+	pattrs := []*apb.Any{origin}
 	family := familyV4
 	if prefix.Addr().Is6() {
 		family = familyV6
@@ -159,13 +155,23 @@ func (b *bgpSpeaker) Announce(ctx context.Context, prefix netip.Prefix, attrs bl
 		if err != nil {
 			return err
 		}
-		pattrs = []*apb.Any{origin, mp, comms}
+		pattrs = append(pattrs, mp)
 	} else {
 		nh, err := apb.New(&api.NextHopAttribute{NextHop: attrs.nextHop})
 		if err != nil {
 			return err
 		}
-		pattrs = []*apb.Any{origin, nh, comms}
+		pattrs = append(pattrs, nh)
+	}
+
+	// Attach COMMUNITIES only when non-empty; a divert route may carry none
+	// (the next-hop does the rerouting), and an empty attribute is malformed.
+	if len(attrs.communities) > 0 {
+		comms, err := apb.New(&api.CommunitiesAttribute{Communities: attrs.communities})
+		if err != nil {
+			return err
+		}
+		pattrs = append(pattrs, comms)
 	}
 
 	// LOCAL_PREF is meaningful to iBGP peers; attach it only when configured.

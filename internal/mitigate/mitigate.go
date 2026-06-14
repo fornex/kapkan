@@ -71,12 +71,14 @@ type Ban struct {
 	// share the ban; it is withdrawn only when the last direction ends.
 	// Zero for manual bans.
 	dirMask uint8
-	// communities is the parsed BGP community set frozen at ban time. The
-	// blackhole next-hop (NextHop), community set, and LocalPref are all frozen
-	// together, so a config reload between this ban's creation and a later
-	// escalation to its blackhole rung cannot announce a stale mix of a frozen
-	// next-hop and a different, live community/local-pref.
-	communities []uint32
+	// bhAttrs and divAttrs are the blackhole and divert (scrubbing) BGP
+	// attribute sets, frozen at ban time and only populated for the actions the
+	// ladder actually uses. Freezing them (next-hop, community set, local-pref
+	// together) means a config reload between this ban's creation and a later
+	// rung cannot announce a stale mix of attributes. The exported
+	// NextHop/Community/LocalPref mirror the CURRENTLY-applied rung's set.
+	bhAttrs  blackholeAttrs
+	divAttrs blackholeAttrs
 }
 
 // dirBit maps an event direction to its mask bit. Events without a
@@ -88,12 +90,15 @@ func dirBit(d engine.Direction) uint8 {
 	return 1
 }
 
-// blackholeAttrs are the BGP path attributes for one RTBH announcement. They
-// are frozen on the ban at creation so a config reload cannot change a live
-// ban's route (see the Ban fields below).
+// blackholeAttrs are the BGP path attributes for one host-route announcement
+// (blackhole or divert). They are frozen on the ban at creation so a config
+// reload cannot change a live ban's route (see the Ban fields below). commStr
+// is the human-readable community set for the route string / API; the BGP
+// speaker uses only nextHop, communities, and localPref.
 type blackholeAttrs struct {
 	nextHop     string
 	communities []uint32
+	commStr     string
 	localPref   uint32 // 0 = omit the LOCAL_PREF attribute
 }
 
@@ -339,20 +344,16 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 		dirMask:    opts.dirMask,
 		Escalation: group.Escalation,
 	}
-	// Precompute the announcement inputs for whatever stages the ladder uses:
-	// the blackhole next-hop/community/local-pref if any rung blackholes (taken
-	// from the group's resolved BGP attributes, which inherit the global bgp
-	// block), and the generated FlowSpec rules if any rung is flowspec. A
-	// ladder that never blackholes carries no next-hop, so the API and
-	// notifications don't show a next-hop that will never be used.
+	// Precompute and FREEZE the announcement inputs for whatever stages the
+	// ladder uses: the blackhole and/or divert attribute sets (from the group's
+	// resolved BGP/scrubbing attributes, which inherit the global blocks) and
+	// the generated FlowSpec rules if any rung is flowspec. A ladder that never
+	// uses an action carries no attributes for it.
 	if ladderUsesBlackhole(group.Escalation) {
-		b.NextHop = group.BlackholeNextHop
-		if target.Is6() {
-			b.NextHop = groupNextHop6(group)
-		}
-		b.Community = group.BlackholeCommunityStr
-		b.communities = group.BlackholeCommunities
-		b.LocalPref = group.LocalPref
+		b.bhAttrs = groupBlackholeAttrs(group, target)
+	}
+	if ladderUsesDivert(group.Escalation) {
+		b.divAttrs = groupDivertAttrs(group, target)
 	}
 	if ladderUsesFlowSpec(group.Escalation) {
 		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample, group.FlowSpecAction, group.FlowSpecRateBps)
@@ -366,7 +367,7 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	}
 
 	m.bans[target] = b
-	m.updateGaugeLocked(cfg.DryRun)
+	m.updateGaugeLocked()
 	return copyBan(b)
 }
 
@@ -390,37 +391,122 @@ func ladderUsesBlackhole(stages []config.EscalationStage) bool {
 	return false
 }
 
-// stageMethodRoute maps a ladder stage to the mitigation method and the
-// human-readable Route string it would announce, without mutating the ban.
-// Used both to install the initial rung and to escalate (where we must know
-// the new rung's method before committing to it). EscalateNone maps to the
-// empty method (alert only — no route announced).
-func (m *Mitigator) stageMethodRoute(b *Ban, stage config.EscalationStage) (config.MitigationMethod, string) {
+// ladderUsesDivert reports whether any rung diverts to a scrubbing center.
+func ladderUsesDivert(stages []config.EscalationStage) bool {
+	for _, s := range stages {
+		if s.Action == config.EscalateDivert {
+			return true
+		}
+	}
+	return false
+}
+
+// groupBlackholeAttrs builds the frozen blackhole attribute set for target from
+// the group's resolved attributes, picking the next-hop by address family.
+func groupBlackholeAttrs(g *config.Group, target netip.Addr) blackholeAttrs {
+	nh := g.BlackholeNextHop
+	if target.Is6() {
+		nh = groupNextHop6(g)
+	}
+	return blackholeAttrs{
+		nextHop:     nh,
+		communities: g.BlackholeCommunities,
+		commStr:     g.BlackholeCommunityStr,
+		localPref:   g.LocalPref,
+	}
+}
+
+// groupDivertAttrs builds the frozen divert (scrubbing) attribute set for
+// target. Config validation guarantees the scrubbing next-hop for target's
+// family is present whenever the ladder diverts.
+func groupDivertAttrs(g *config.Group, target netip.Addr) blackholeAttrs {
+	nh := g.ScrubNextHop
+	if target.Is6() {
+		nh = g.ScrubNextHop6
+	}
+	return blackholeAttrs{
+		nextHop:     nh,
+		communities: g.ScrubCommunities,
+		commStr:     g.ScrubCommunityStr,
+		localPref:   g.ScrubLocalPref,
+	}
+}
+
+// stageView is everything needed to apply and announce one ladder stage,
+// computed without mutating the ban (so an escalation can evaluate the next
+// rung before committing to it). attrs is the zero value for none/flowspec.
+type stageView struct {
+	method config.MitigationMethod
+	route  string
+	attrs  blackholeAttrs
+}
+
+// route families group the methods by the NLRI they announce, so an escalation
+// knows whether switching rungs needs an explicit withdraw of the old NLRI.
+const (
+	rfNone = iota
+	rfFlowSpec
+	rfUnicast // blackhole and divert share the host-route /32-/128 NLRI
+)
+
+func routeFamilyOf(method config.MitigationMethod) int {
+	switch method {
+	case config.MitigateFlowSpec:
+		return rfFlowSpec
+	case config.MitigateBlackhole, config.MitigateDivert:
+		return rfUnicast
+	default:
+		return rfNone
+	}
+}
+
+// stageView maps a ladder stage to its method, route string, and frozen BGP
+// attribute set. EscalateNone maps to the empty method (alert only).
+func (m *Mitigator) stageView(b *Ban, stage config.EscalationStage) stageView {
 	switch stage.Action {
 	case config.EscalateFlowSpec:
-		return config.MitigateFlowSpec, flowSpecSummary(b.FlowSpec)
+		return stageView{method: config.MitigateFlowSpec, route: flowSpecSummary(b.FlowSpec)}
 	case config.EscalateBlackhole:
-		route := fmt.Sprintf("%s next-hop %s community %s", b.Prefix, b.NextHop, b.Community)
-		if b.LocalPref > 0 {
-			route += fmt.Sprintf(" local-pref %d", b.LocalPref)
-		}
-		return config.MitigateBlackhole, route
+		return stageView{method: config.MitigateBlackhole, route: unicastRoute("blackhole", b.Prefix, b.bhAttrs), attrs: b.bhAttrs}
+	case config.EscalateDivert:
+		return stageView{method: config.MitigateDivert, route: unicastRoute("divert", b.Prefix, b.divAttrs), attrs: b.divAttrs}
 	default: // EscalateNone
-		return "", "alert only"
+		return stageView{route: "alert only"}
 	}
+}
+
+// unicastRoute renders the host-route summary for a blackhole/divert rung.
+func unicastRoute(verb string, prefix netip.Prefix, a blackholeAttrs) string {
+	route := fmt.Sprintf("%s %s next-hop %s", verb, prefix, a.nextHop)
+	if a.commStr != "" {
+		route += " community " + a.commStr
+	}
+	if a.localPref > 0 {
+		route += fmt.Sprintf(" local-pref %d", a.localPref)
+	}
+	return route
+}
+
+// setActiveStage records the applied rung on the ban and mirrors its BGP
+// attributes onto the exported fields (for the API and notifications).
+func setActiveStage(b *Ban, idx int, v stageView) {
+	b.EscalationStep = idx
+	b.Method = v.method
+	b.Route = v.route
+	b.NextHop = v.attrs.nextHop
+	b.Community = v.attrs.commStr
+	b.LocalPref = v.attrs.localPref
 }
 
 // applyStageLocked installs the initial ladder rung (idx, with no prior rung
 // to withdraw): it announces the stage's action and, only on success, records
 // the rung on the ban. A "none" rung announces nothing. The caller holds m.mu.
 func (m *Mitigator) applyStageLocked(b *Ban, idx int, cfg *config.Config) error {
-	method, route := m.stageMethodRoute(b, b.Escalation[idx])
-	if err := m.announceMethodLocked(b, method, route, cfg); err != nil {
+	v := m.stageView(b, b.Escalation[idx])
+	if err := m.announceMethodLocked(b, v.method, v.route, v.attrs, cfg); err != nil {
 		return err
 	}
-	b.EscalationStep = idx
-	b.Method = method
-	b.Route = route
+	setActiveStage(b, idx, v)
 	return nil
 }
 
@@ -435,12 +521,14 @@ func flowSpecSummary(rules []FlowSpecRule) string {
 }
 
 // announceMethodLocked installs the given mitigation method for a ban,
-// honoring dry-run (log only, never send). It announces the method passed in
-// rather than reading b.Method, so an escalation can announce the next rung
-// while the ban still records the current (working) rung — make-before-break.
-// The caller holds m.mu. On the FlowSpec path a partial failure withdraws the
-// rules already installed so the RIB is not left half-mitigated.
-func (m *Mitigator) announceMethodLocked(b *Ban, method config.MitigationMethod, route string, cfg *config.Config) error {
+// honoring dry-run (log only, never send). It takes the method, route, and
+// attribute set explicitly rather than reading b.*, so an escalation can
+// announce the next rung while the ban still records the current (working) one
+// — make-before-break. Blackhole and divert share this host-route path; only
+// the frozen attribute set differs. The caller holds m.mu. On the FlowSpec
+// path a partial failure withdraws the rules already installed so the RIB is
+// not left half-mitigated.
+func (m *Mitigator) announceMethodLocked(b *Ban, method config.MitigationMethod, route string, attrs blackholeAttrs, cfg *config.Config) error {
 	if method == "" { // alert-only rung: nothing to announce
 		m.log.Info("escalation: alert-only stage (no route announced)",
 			"target", b.Target.String())
@@ -473,15 +561,12 @@ func (m *Mitigator) announceMethodLocked(b *Ban, method config.MitigationMethod,
 		m.log.Warn("announced flowspec rules", "route", route, "target", b.Target.String())
 		return nil
 	}
-	if err := m.bgp.Announce(m.ctx, b.Prefix, blackholeAttrs{
-		nextHop:     b.NextHop,
-		communities: b.communities,
-		localPref:   b.LocalPref,
-	}); err != nil {
-		m.log.Error("BGP announce failed", "route", route, "err", err)
+	// Blackhole or divert: a host route carrying the rung's frozen attributes.
+	if err := m.bgp.Announce(m.ctx, b.Prefix, attrs); err != nil {
+		m.log.Error("BGP announce failed", "method", string(method), "route", route, "err", err)
 		return err
 	}
-	m.log.Warn("announced blackhole route", "route", route, "target", b.Target.String())
+	m.log.Warn("announced host route", "method", string(method), "route", route, "target", b.Target.String())
 	return nil
 }
 
@@ -525,11 +610,11 @@ func (m *Mitigator) withdrawMethodLocked(b *Ban, method config.MitigationMethod,
 			}
 		}
 		m.log.Info("withdrew flowspec rules", "route", route, "reason", reason)
-	default:
+	default: // blackhole or divert: a single host route, withdrawn by prefix
 		if err := m.bgp.Withdraw(m.ctx, b.Prefix); err != nil {
-			m.log.Error("BGP withdraw failed", "route", route, "err", err)
+			m.log.Error("BGP withdraw failed", "method", string(method), "route", route, "err", err)
 		} else {
-			m.log.Info("withdrew blackhole route", "route", route, "reason", reason)
+			m.log.Info("withdrew host route", "method", string(method), "route", route, "reason", reason)
 		}
 	}
 }
@@ -542,7 +627,7 @@ func (m *Mitigator) withdrawLocked(b *Ban, reason string, manual bool) {
 	b.WithdrawnAt = m.now()
 	b.Reason = reason
 	b.Manual = b.Manual || manual
-	m.updateGaugeLocked(b.DryRun)
+	m.updateGaugeLocked()
 }
 
 // escalateLocked advances a still-active ban up its ladder. It jumps straight
@@ -566,31 +651,36 @@ func (m *Mitigator) escalateLocked(b *Ban, now time.Time, cfg *config.Config) {
 		return // nothing new is due
 	}
 
-	newMethod, newRoute := m.stageMethodRoute(b, b.Escalation[target])
-	if newMethod == b.Method {
+	v := m.stageView(b, b.Escalation[target])
+	if v.method == b.Method {
 		// Same method as the current rung (e.g. two flowspec rungs): the
-		// routes are identical, so there is nothing to re-announce or
-		// withdraw. Just record that we've climbed to the higher rung.
+		// route is identical, so there is nothing to re-announce or withdraw.
+		// Just record that we've climbed to the higher rung.
 		b.EscalationStep = target
 		return
 	}
 
 	// Make-before-break: bring the new rung up before tearing the old one down
 	// so the victim is never briefly unprotected during the switch.
-	if err := m.announceMethodLocked(b, newMethod, newRoute, cfg); err != nil {
+	if err := m.announceMethodLocked(b, v.method, v.route, v.attrs, cfg); err != nil {
 		m.log.Error("escalation announce failed; staying on current rung",
 			"target", b.Target.String(), "from", string(b.Method),
-			"to", string(newMethod), "step", target, "err", err)
+			"to", string(v.method), "step", target, "err", err)
 		return
 	}
+	// Withdraw the old rung only if it lives on a DIFFERENT NLRI family. A
+	// same-family unicast transition (divert→blackhole) was already replaced
+	// atomically by the announce above (gobgp implicit-withdraw on the shared
+	// host-route NLRI), so withdrawing by prefix now would tear down the route
+	// we just installed.
 	oldMethod, oldRoute := b.Method, b.Route
-	m.withdrawMethodLocked(b, oldMethod, oldRoute, "escalation")
-	b.Method = newMethod
-	b.Route = newRoute
-	b.EscalationStep = target
+	if oldMethod != "" && routeFamilyOf(oldMethod) != routeFamilyOf(v.method) {
+		m.withdrawMethodLocked(b, oldMethod, oldRoute, "escalation")
+	}
+	setActiveStage(b, target, v)
 	m.log.Warn("escalated mitigation", "target", b.Target.String(),
-		"step", target, "from", string(oldMethod), "method", string(newMethod), "route", newRoute)
-	m.updateGaugeLocked(cfg.DryRun)
+		"step", target, "from", string(oldMethod), "method", string(v.method), "route", v.route)
+	m.updateGaugeLocked()
 }
 
 // sweepLoop advances escalation ladders and withdraws bans whose TTL has
@@ -649,28 +739,39 @@ func (m *Mitigator) activeCountLocked() int {
 	return n
 }
 
-func (m *Mitigator) updateGaugeLocked(dryRun bool) {
-	mode := "real"
-	if dryRun {
-		mode = "dry_run"
-	}
-	var bans, fsRules int
+// updateGaugeLocked recomputes the announced-route and FlowSpec-rule gauges.
+// Each ban is counted into its OWN mode bucket (real|dry_run) using the DryRun
+// frozen on it at creation — never a caller-supplied mode — so a config reload
+// that flips dry_run cannot misfile a live ban, and a mix of real and dry-run
+// bans (possible across such a reload) is reported correctly. Both buckets are
+// always set so a flip leaves no stale value behind.
+func (m *Mitigator) updateGaugeLocked() {
+	var realBans, realFS, dryBans, dryFS int
 	for _, b := range m.bans {
 		if b.State != BanActive || b.Method == "" {
 			// Withdrawn/rejected bans and alert-only rungs announce no route.
 			continue
 		}
-		bans++
 		// Count rules only for bans CURRENTLY on FlowSpec; a ban that merely
 		// precomputed rules for a future rung has not announced them yet.
+		fs := 0
 		if b.Method == config.MitigateFlowSpec {
-			fsRules += len(b.FlowSpec)
+			fs = len(b.FlowSpec)
+		}
+		if b.DryRun {
+			dryBans++
+			dryFS += fs
+		} else {
+			realBans++
+			realFS += fs
 		}
 	}
-	metrics.AnnouncedRoutes.WithLabelValues(mode).Set(float64(bans))
+	metrics.AnnouncedRoutes.WithLabelValues("real").Set(float64(realBans))
+	metrics.AnnouncedRoutes.WithLabelValues("dry_run").Set(float64(dryBans))
 	// FlowSpec bans can each carry several rules; surface the real RIB
 	// footprint so operators can alert before an upstream's rule limit.
-	metrics.FlowSpecRules.WithLabelValues(mode).Set(float64(fsRules))
+	metrics.FlowSpecRules.WithLabelValues("real").Set(float64(realFS))
+	metrics.FlowSpecRules.WithLabelValues("dry_run").Set(float64(dryFS))
 }
 
 // ActiveBans returns the currently active bans, sorted by target.

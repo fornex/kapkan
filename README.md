@@ -240,9 +240,13 @@ declaratively, where FastNetMon makes you write a callback script:
 escalation:                         # supersedes `mitigation` when present
   - { after_seconds: 0,   action: none }       # alert only at first
   - { after_seconds: 30,  action: flowspec }   # still under attack after 30s → surgical drop
-  - { after_seconds: 120, action: blackhole }  # still under attack after 120s → blackhole
+  - { after_seconds: 90,  action: divert }     # still under attack after 90s → scrub
+  - { after_seconds: 300, action: blackhole }  # still under attack after 300s → blackhole
 flowspec:
   action: discard
+scrubbing:
+  next_hop: "192.0.2.100"   # scrubbing center; see "Traffic diversion" below
+  community: "65000:200"
 ```
 
 Each rung's `after_seconds` is measured from the attack's start; a rung applies once that
@@ -250,12 +254,14 @@ much time has elapsed **and the attack is still active** (no end event yet — i
 is still above threshold through the unban hysteresis). Climbing to a rung is
 **make-before-break**: the new rung is announced first and the previous one is withdrawn
 only after that succeeds, so the victim is never momentarily unprotected mid-switch; if the
-announce fails the ban holds the working rung and retries on the next tick. A ladder may
-only hold or strengthen the response (`none` < `flowspec` < `blackhole`) — de-escalating
-between rungs is a config error. If several rungs come due at once (a long-running attack,
-or the daemon catching up after a pause) the ban jumps straight to the highest due rung and
-never announces the rungs it skips. The first rung must be at `0s`; `action` is `none`
-(alert only), `flowspec`, or `blackhole`.
+announce fails the ban holds the working rung and retries on the next tick. (The one
+exception is `divert → blackhole`: both ride the same host-route NLRI, so the blackhole
+re-announce atomically replaces the divert route — no withdraw, no gap.) A ladder may only
+hold or strengthen the response (`none` < `flowspec` < `divert` < `blackhole`) —
+de-escalating between rungs is a config error. If several rungs come due at once (a
+long-running attack, or the daemon catching up after a pause) the ban jumps straight to the
+highest due rung and never announces the rungs it skips. The first rung must be at `0s`;
+`action` is `none` (alert only), `flowspec`, `divert`, or `blackhole`.
 
 The ladder is per-hostgroup overridable and shares the rest of the ban lifecycle: TTL
 auto-withdrawal, the `max_active_bans` cap, whitelist-never, and dry-run (which advances
@@ -292,6 +298,33 @@ community while sharing the global next-hop. `local_pref` (default 0 = omit) att
 the route a live ban already announced. The per-ban `next_hop`, `community`, and `local_pref`
 are visible in `/api/v1/bans` and in the `route` field. FlowSpec rungs are unaffected (their
 action lives in a traffic-rate extended community, configured via the `flowspec` block).
+
+### Traffic diversion (scrubbing)
+
+A blackhole completes the attacker's job — it drops *all* of the victim's traffic. The
+`divert` action instead announces the victim's host route toward a **scrubbing center**
+(its BGP next-hop, plus an optional divert community) so the traffic is cleaned and
+reinjected rather than dropped. It is the natural rung between `flowspec` (surgical drops)
+and `blackhole` (last resort):
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"      # scrubbing center BGP next-hop (v4); required to divert
+  next_hop6: "100::100"        # required when IPv6 space is protected
+  community: "65000:200"       # optional divert community (the next-hop does the rerouting)
+  # communities: ["65000:200", "65000:201"]   # or a full set
+  local_pref: 200              # often raised so the divert route wins selection
+
+mitigation: divert             # or use `divert` as an escalation rung (above)
+```
+
+Diversion reuses the host-route machinery: the route is withdrawn on attack end / TTL like
+any ban, and the scrubbing attributes are **frozen per ban** exactly like the blackhole
+ones. Hostgroups override the target with their own `scrubbing:` block (same shape as the
+per-group `bgp:` block) — different customers, different scrubbers. Reinjection of cleaned
+traffic (GRE, a VRF, a separate routing context) is the scrubber's job, outside kapkan's
+BGP signaling. Total groups cannot divert (no single victim route); an inherited divert
+stage degrades to blackhole there, an explicit one is a config error.
 
 ### Going live
 
