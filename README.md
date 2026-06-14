@@ -76,6 +76,7 @@ The full schema:
 | `notify.email.smtp_host` / `from` / `to[]` / `username_env` / `password_env` / `require_tls` | Optional SMTP notifications. Credentials come from environment variables. STARTTLS is used when the server offers it and **required** when credentials are configured or `require_tls` is set; plaintext delivery to a non-loopback host is loudly logged. |
 | `notify.exec.command` / `timeout_seconds` | Optional hook executed on every attack event: payload JSON on stdin, event name as `argv[1]`, no shell. The command must exist and be executable at config load. On timeout (default 10s) the hook's whole process group is killed. The hook receives a **minimal environment** (PATH/HOME/TZ/LANG/USER/TMPDIR) — the daemon's secrets are not inherited. Same schema as the webhook. |
 | `api.listen` | REST API + metrics listen address. |
+| `api.token_env` / `api.tokens` | API auth: a single operator token (`token_env`) or a role-based `tokens` list (`viewer`/`operator`); secrets come from the named env vars. See Authentication. |
 
 Sampling: every rate is multiplied by the exporter's sampling rate (from the flow packet
 when present, else `sampling.default_rate`) so thresholds are expressed in real,
@@ -352,6 +353,8 @@ All endpoints are served on `api.listen`.
 Manual bans honour every safety rule: a whitelisted target returns `409` and is never
 announced; a target outside the configured `networks` returns `409`; exceeding
 `max_active_bans` returns `409`. POST endpoints require `Content-Type: application/json`.
+The `GET` routes need the **viewer** role; the mutating routes (`ban`, `unban`,
+`config/reload`) need the **operator** role (see Authentication).
 
 ### Dashboard
 
@@ -367,7 +370,7 @@ only the JSON API and metrics.
 
 By default the API and dashboard are **unauthenticated** — safe only because the default
 `api.listen` binds to `127.0.0.1`. **Before exposing the listener beyond localhost, set a
-token:**
+token.** The shorthand is one operator token:
 
 ```yaml
 api:
@@ -375,12 +378,28 @@ api:
   token_env: "KAPKAN_API_TOKEN"   # token read from this env var, never the file
 ```
 
-Every `/api/v1` request must then carry `Authorization: Bearer <token>` (constant-time
-compared); the dashboard prompts for it and keeps it in `sessionStorage`. `/metrics` and
-the static UI shell stay open (the data behind the UI does not). POST endpoints also
-require the JSON content type, which — together with the token living in a header — blocks
-cross-site request forgery. Single-token auth is intentionally minimal; per-user roles are
-a later milestone.
+For role-based access use `tokens` instead — each names the env var holding its secret and
+a role: **viewer** (read-only: status, attacks, hosts, bans, metrics) or **operator**
+(read plus manual ban/unban and config reload):
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  tokens:
+    - { name: dashboard, token_env: "KAPKAN_API_RO", role: viewer }
+    - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
+```
+
+`token_env` and `tokens` are mutually exclusive; `token_env` is exactly a single operator
+token. Every `/api/v1` request must carry `Authorization: Bearer <token>`; the presented
+token is matched constant-time against every configured secret (an empty/unset env var
+never matches — fail closed), and the highest matching role applies. A read with a viewer
+token works; a mutation with a viewer token returns `403`; an unknown token returns `401`.
+Tokens are read from the environment per request, so rotating a secret or changing the set
+takes effect on reload without a restart. The dashboard prompts for a token and keeps it in
+`sessionStorage`. `/metrics` and the static UI shell stay open (the data behind the UI does
+not). POST endpoints also require the JSON content type, which — together with the token
+living in a header — blocks cross-site request forgery.
 
 ## Metrics
 
