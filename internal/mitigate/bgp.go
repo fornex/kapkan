@@ -127,14 +127,15 @@ func (b *bgpSpeaker) stop() {
 	}
 }
 
-// Announce installs a blackhole path for prefix with the given next-hop and
-// community. Origin INCOMPLETE is required by gobgp on every path.
-func (b *bgpSpeaker) Announce(ctx context.Context, prefix netip.Prefix, nextHop string, community uint32) error {
+// Announce installs a blackhole path for prefix with the given next-hop,
+// community set, and optional LOCAL_PREF. Origin INCOMPLETE is required by
+// gobgp on every path.
+func (b *bgpSpeaker) Announce(ctx context.Context, prefix netip.Prefix, attrs blackholeAttrs) error {
 	origin, err := apb.New(&api.OriginAttribute{Origin: 2}) // 2 = INCOMPLETE
 	if err != nil {
 		return err
 	}
-	comms, err := apb.New(&api.CommunitiesAttribute{Communities: []uint32{community}})
+	comms, err := apb.New(&api.CommunitiesAttribute{Communities: attrs.communities})
 	if err != nil {
 		return err
 	}
@@ -152,7 +153,7 @@ func (b *bgpSpeaker) Announce(ctx context.Context, prefix netip.Prefix, nextHop 
 		family = familyV6
 		mp, err := apb.New(&api.MpReachNLRIAttribute{
 			Family:   familyV6,
-			NextHops: []string{nextHop},
+			NextHops: []string{attrs.nextHop},
 			Nlris:    []*apb.Any{nlri},
 		})
 		if err != nil {
@@ -160,11 +161,20 @@ func (b *bgpSpeaker) Announce(ctx context.Context, prefix netip.Prefix, nextHop 
 		}
 		pattrs = []*apb.Any{origin, mp, comms}
 	} else {
-		nh, err := apb.New(&api.NextHopAttribute{NextHop: nextHop})
+		nh, err := apb.New(&api.NextHopAttribute{NextHop: attrs.nextHop})
 		if err != nil {
 			return err
 		}
 		pattrs = []*apb.Any{origin, nh, comms}
+	}
+
+	// LOCAL_PREF is meaningful to iBGP peers; attach it only when configured.
+	if attrs.localPref > 0 {
+		lp, err := apb.New(&api.LocalPrefAttribute{LocalPref: attrs.localPref})
+		if err != nil {
+			return err
+		}
+		pattrs = append(pattrs, lp)
 	}
 
 	_, err = b.srv.AddPath(ctx, &api.AddPathRequest{Path: &api.Path{

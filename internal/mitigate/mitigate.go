@@ -44,6 +44,7 @@ type Ban struct {
 	Threshold   float64       `json:"threshold,omitempty"`
 	NextHop     string        `json:"next_hop"`
 	Community   string        `json:"community"`
+	LocalPref   uint32        `json:"local_pref,omitempty"`
 	Route       string        `json:"route"`
 	State       BanState      `json:"state"`
 	DryRun      bool          `json:"dry_run"`
@@ -70,12 +71,12 @@ type Ban struct {
 	// share the ban; it is withdrawn only when the last direction ends.
 	// Zero for manual bans.
 	dirMask uint8
-	// communityValue is the parsed BGP community frozen at ban time. The
-	// blackhole next-hop (NextHop) is already frozen; the community must be
-	// too, so a config reload between this ban's creation and a later
-	// escalation to its blackhole rung cannot announce a frozen next-hop
-	// paired with a different, live community.
-	communityValue uint32
+	// communities is the parsed BGP community set frozen at ban time. The
+	// blackhole next-hop (NextHop), community set, and LocalPref are all frozen
+	// together, so a config reload between this ban's creation and a later
+	// escalation to its blackhole rung cannot announce a stale mix of a frozen
+	// next-hop and a different, live community/local-pref.
+	communities []uint32
 }
 
 // dirBit maps an event direction to its mask bit. Events without a
@@ -87,10 +88,19 @@ func dirBit(d engine.Direction) uint8 {
 	return 1
 }
 
+// blackholeAttrs are the BGP path attributes for one RTBH announcement. They
+// are frozen on the ban at creation so a config reload cannot change a live
+// ban's route (see the Ban fields below).
+type blackholeAttrs struct {
+	nextHop     string
+	communities []uint32
+	localPref   uint32 // 0 = omit the LOCAL_PREF attribute
+}
+
 // announcer is the subset of BGP behavior the mitigator needs. It is an
 // interface so tests can substitute a recorder for the real gobgp speaker.
 type announcer interface {
-	Announce(ctx context.Context, prefix netip.Prefix, nextHop string, community uint32) error
+	Announce(ctx context.Context, prefix netip.Prefix, attrs blackholeAttrs) error
 	Withdraw(ctx context.Context, prefix netip.Prefix) error
 	AnnounceFlowSpec(ctx context.Context, rule FlowSpecRule) error
 	WithdrawFlowSpec(ctx context.Context, rule FlowSpecRule) error
@@ -330,17 +340,19 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 		Escalation: group.Escalation,
 	}
 	// Precompute the announcement inputs for whatever stages the ladder uses:
-	// the blackhole next-hop/community if any rung blackholes, and the
-	// generated FlowSpec rules if any rung is flowspec. A ladder that never
-	// blackholes carries no next-hop, so the API/notifications don't show a
-	// next-hop that will never be used.
+	// the blackhole next-hop/community/local-pref if any rung blackholes (taken
+	// from the group's resolved BGP attributes, which inherit the global bgp
+	// block), and the generated FlowSpec rules if any rung is flowspec. A
+	// ladder that never blackholes carries no next-hop, so the API and
+	// notifications don't show a next-hop that will never be used.
 	if ladderUsesBlackhole(group.Escalation) {
-		b.NextHop = cfg.BGP.NextHop
+		b.NextHop = group.BlackholeNextHop
 		if target.Is6() {
-			b.NextHop = ipv6NextHop(cfg)
+			b.NextHop = groupNextHop6(group)
 		}
-		b.Community = cfg.BGP.Community
-		b.communityValue = cfg.BGP.CommunityValue
+		b.Community = group.BlackholeCommunityStr
+		b.communities = group.BlackholeCommunities
+		b.LocalPref = group.LocalPref
 	}
 	if ladderUsesFlowSpec(group.Escalation) {
 		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample, group.FlowSpecAction, group.FlowSpecRateBps)
@@ -388,7 +400,11 @@ func (m *Mitigator) stageMethodRoute(b *Ban, stage config.EscalationStage) (conf
 	case config.EscalateFlowSpec:
 		return config.MitigateFlowSpec, flowSpecSummary(b.FlowSpec)
 	case config.EscalateBlackhole:
-		return config.MitigateBlackhole, fmt.Sprintf("%s next-hop %s community %s", b.Prefix, b.NextHop, b.Community)
+		route := fmt.Sprintf("%s next-hop %s community %s", b.Prefix, b.NextHop, b.Community)
+		if b.LocalPref > 0 {
+			route += fmt.Sprintf(" local-pref %d", b.LocalPref)
+		}
+		return config.MitigateBlackhole, route
 	default: // EscalateNone
 		return "", "alert only"
 	}
@@ -457,7 +473,11 @@ func (m *Mitigator) announceMethodLocked(b *Ban, method config.MitigationMethod,
 		m.log.Warn("announced flowspec rules", "route", route, "target", b.Target.String())
 		return nil
 	}
-	if err := m.bgp.Announce(m.ctx, b.Prefix, b.NextHop, b.communityValue); err != nil {
+	if err := m.bgp.Announce(m.ctx, b.Prefix, blackholeAttrs{
+		nextHop:     b.NextHop,
+		communities: b.communities,
+		localPref:   b.LocalPref,
+	}); err != nil {
 		m.log.Error("BGP announce failed", "route", route, "err", err)
 		return err
 	}
@@ -691,11 +711,12 @@ func hostPrefix(addr netip.Addr) netip.Prefix {
 	return netip.PrefixFrom(addr, 128)
 }
 
-// ipv6NextHop returns the configured IPv6 blackhole next-hop, falling back to
-// the RFC 6666 discard prefix (100::/64) when unset.
-func ipv6NextHop(cfg *config.Config) string {
-	if cfg.BGP.NextHop6 != "" {
-		return cfg.BGP.NextHop6
+// groupNextHop6 returns the group's resolved IPv6 blackhole next-hop, falling
+// back to the RFC 6666 discard prefix (100::/64) when neither the group nor the
+// global bgp block configured one.
+func groupNextHop6(g *config.Group) string {
+	if g.BlackholeNextHop6 != "" {
+		return g.BlackholeNextHop6
 	}
 	return "100::1"
 }

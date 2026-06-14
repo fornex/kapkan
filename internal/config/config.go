@@ -326,6 +326,9 @@ type Hostgroup struct {
 	// Escalation overrides the default mitigation ladder for this group;
 	// when set it supersedes the group's `mitigation` method.
 	Escalation []EscalationStep `yaml:"escalation"`
+	// BGP overrides the blackhole BGP attributes (next-hop, communities,
+	// local-pref) for this group; omitted fields inherit the global bgp block.
+	BGP *BGPOverride `yaml:"bgp"`
 	// Ban controls automatic RTBH for the group's hosts (default true).
 	// Must not be set to true for total groups, which never auto-ban.
 	Ban *bool `yaml:"ban"`
@@ -349,7 +352,17 @@ type Group struct {
 	// Escalation is the resolved mitigation ladder; always at least one
 	// stage (synthesized from Mitigation when not explicitly configured).
 	Escalation []EscalationStage `json:"escalation,omitempty"`
-	BanEnabled bool              `json:"ban"`
+	// Resolved blackhole BGP attributes (defaults inherited from the global
+	// bgp block). BlackholeNextHop6 is "" when no IPv6 next-hop is configured;
+	// the mitigator falls back to its IPv6 discard default. BlackholeCommunities
+	// is the parsed community set, BlackholeCommunityStr its display form, and
+	// LocalPref the LOCAL_PREF to attach (0 = omit).
+	BlackholeNextHop      string   `json:"blackhole_next_hop,omitempty"`
+	BlackholeNextHop6     string   `json:"blackhole_next_hop6,omitempty"`
+	BlackholeCommunities  []uint32 `json:"-"`
+	BlackholeCommunityStr string   `json:"blackhole_communities,omitempty"`
+	LocalPref             uint32   `json:"blackhole_local_pref,omitempty"`
+	BanEnabled            bool     `json:"ban"`
 }
 
 // groupRoute maps one prefix to its owning group for longest-prefix-match
@@ -376,18 +389,39 @@ func (b Ban) UnbanHysteresis() time.Duration {
 
 // BGP configures the embedded BGP speaker.
 type BGP struct {
-	LocalASN  uint32     `yaml:"local_asn"`
-	RouterID  string     `yaml:"router_id"`
-	NextHop   string     `yaml:"next_hop"`
-	NextHop6  string     `yaml:"next_hop6"`
-	Community string     `yaml:"community"`
+	LocalASN  uint32 `yaml:"local_asn"`
+	RouterID  string `yaml:"router_id"`
+	NextHop   string `yaml:"next_hop"`
+	NextHop6  string `yaml:"next_hop6"`
+	Community string `yaml:"community"`
+	// Communities optionally sets the full blackhole community set (overriding
+	// the single `community`). When empty the set is just [community].
+	Communities []string `yaml:"communities"`
+	// LocalPref optionally attaches a LOCAL_PREF to blackhole announcements
+	// (meaningful to iBGP peers). 0 (default) omits the attribute.
+	LocalPref uint32     `yaml:"local_pref"`
 	Neighbors []Neighbor `yaml:"neighbors"`
 	// ListenPort is the local BGP listen port; -1 (default) disables
 	// listening so kapkan only dials out. Used by tests.
 	ListenPort int32 `yaml:"listen_port"`
 
-	// CommunityValue is the parsed Community, populated by validate().
+	// CommunityValue is the parsed single Community, populated by validate()
+	// (kept for back-compat / single-community callers).
 	CommunityValue uint32 `yaml:"-"`
+	// CommunityValues is the parsed default blackhole community set and
+	// CommunityStr its human-readable form, populated by validate().
+	CommunityValues []uint32 `yaml:"-"`
+	CommunityStr    string   `yaml:"-"`
+}
+
+// BGPOverride overrides the global blackhole BGP attributes for a hostgroup.
+// Any field left empty/nil inherits the global bgp value, so a group can set
+// just its community while sharing the global next-hop, etc.
+type BGPOverride struct {
+	NextHop     string   `yaml:"next_hop"`
+	NextHop6    string   `yaml:"next_hop6"`
+	Communities []string `yaml:"communities"`
+	LocalPref   *uint32  `yaml:"local_pref"`
 }
 
 // Neighbor is one BGP peer.
@@ -554,6 +588,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("thresholds_outgoing: set at least one threshold or remove the block")
 	}
 
+	// BGP is validated before hostgroups so the global blackhole community set
+	// and next-hops are parsed and available as per-group resolution defaults.
+	if err := c.validateBGP(); err != nil {
+		return err
+	}
+
 	if err := c.validateHostgroups(); err != nil {
 		return err
 	}
@@ -572,10 +612,6 @@ func (c *Config) validate() error {
 	}
 	if c.Ban.MaxActiveBans <= 0 {
 		return fmt.Errorf("ban.max_active_bans must be > 0, got %d", c.Ban.MaxActiveBans)
-	}
-
-	if err := c.validateBGP(); err != nil {
-		return err
 	}
 
 	if err := c.validateNotify(); err != nil {
@@ -622,18 +658,28 @@ func (c *Config) validateHostgroups() error {
 		}
 	}
 
+	globalBGP, err := resolveBGPAttrs(nil, &c.BGP)
+	if err != nil {
+		return fmt.Errorf("bgp: %w", err)
+	}
+
 	c.Groups = make([]Group, 0, len(c.Hostgroups)+1)
 	c.Groups = append(c.Groups, Group{
-		Name:            GlobalGroup,
-		Calc:            CalcPerHost,
-		Thresholds:      c.Thresholds,
-		OutThresholds:   c.ThresholdsOutgoing,
-		Baseline:        globalBaseline,
-		Mitigation:      globalMethod,
-		FlowSpecAction:  globalAction,
-		FlowSpecRateBps: globalRate,
-		Escalation:      globalStages,
-		BanEnabled:      true,
+		Name:                  GlobalGroup,
+		Calc:                  CalcPerHost,
+		Thresholds:            c.Thresholds,
+		OutThresholds:         c.ThresholdsOutgoing,
+		Baseline:              globalBaseline,
+		Mitigation:            globalMethod,
+		FlowSpecAction:        globalAction,
+		FlowSpecRateBps:       globalRate,
+		Escalation:            globalStages,
+		BlackholeNextHop:      globalBGP.nextHop,
+		BlackholeNextHop6:     globalBGP.nextHop6,
+		BlackholeCommunities:  globalBGP.communities,
+		BlackholeCommunityStr: globalBGP.commStr,
+		LocalPref:             globalBGP.localPref,
+		BanEnabled:            true,
 	})
 	c.groupRoutes = nil
 
@@ -739,6 +785,11 @@ func (c *Config) validateHostgroups() error {
 			}
 		}
 
+		groupBGP, err := resolveBGPAttrs(hg.BGP, &c.BGP)
+		if err != nil {
+			return fmt.Errorf("hostgroups[%q]: bgp: %w", hg.Name, err)
+		}
+
 		if len(hg.Networks) == 0 {
 			return fmt.Errorf("hostgroups[%q]: at least one prefix is required", hg.Name)
 		}
@@ -767,16 +818,21 @@ func (c *Config) validateHostgroups() error {
 		}
 
 		c.Groups = append(c.Groups, Group{
-			Name:            hg.Name,
-			Calc:            calc,
-			Thresholds:      th,
-			OutThresholds:   outTh,
-			Baseline:        groupBaseline,
-			Mitigation:      method,
-			FlowSpecAction:  action,
-			FlowSpecRateBps: rate,
-			Escalation:      stages,
-			BanEnabled:      banEnabled,
+			Name:                  hg.Name,
+			Calc:                  calc,
+			Thresholds:            th,
+			OutThresholds:         outTh,
+			Baseline:              groupBaseline,
+			Mitigation:            method,
+			FlowSpecAction:        action,
+			FlowSpecRateBps:       rate,
+			Escalation:            stages,
+			BlackholeNextHop:      groupBGP.nextHop,
+			BlackholeNextHop6:     groupBGP.nextHop6,
+			BlackholeCommunities:  groupBGP.communities,
+			BlackholeCommunityStr: groupBGP.commStr,
+			LocalPref:             groupBGP.localPref,
+			BanEnabled:            banEnabled,
 		})
 	}
 
@@ -1110,6 +1166,22 @@ func (c *Config) validateBGP() error {
 		return fmt.Errorf("bgp.community: %w", err)
 	}
 	b.CommunityValue = val
+	// The default blackhole community set is the explicit list when given,
+	// otherwise just the single `community`. An explicit but empty list is a
+	// mistake (reject it rather than silently fall back to `community`).
+	switch {
+	case b.Communities == nil:
+		b.CommunityValues = []uint32{val}
+		b.CommunityStr = b.Community
+	case len(b.Communities) == 0:
+		return fmt.Errorf("bgp.communities: provide at least one community, or omit it to use bgp.community")
+	default:
+		vals, str, err := parseCommunities(b.Communities)
+		if err != nil {
+			return fmt.Errorf("bgp.communities: %w", err)
+		}
+		b.CommunityValues, b.CommunityStr = vals, str
+	}
 	for i, n := range b.Neighbors {
 		if _, err := netip.ParseAddr(n.Address); err != nil {
 			return fmt.Errorf("bgp.neighbors[%d]: invalid address %q: %w", i, n.Address, err)
@@ -1180,6 +1252,77 @@ func (c *Config) validateNotify() error {
 		return fmt.Errorf("notify.exec.timeout_seconds must be in 1..300, got %d", n.Exec.TimeoutSeconds)
 	}
 	return nil
+}
+
+// parseCommunities parses a non-empty list of "ASN:value" communities into
+// their wire values plus a space-joined display string.
+func parseCommunities(list []string) ([]uint32, string, error) {
+	if len(list) == 0 {
+		return nil, "", fmt.Errorf("at least one community is required")
+	}
+	vals := make([]uint32, len(list))
+	for i, s := range list {
+		v, err := ParseCommunity(s)
+		if err != nil {
+			return nil, "", err
+		}
+		vals[i] = v
+	}
+	return vals, strings.Join(list, " "), nil
+}
+
+// resolvedBGP is a group's resolved blackhole BGP attributes.
+type resolvedBGP struct {
+	nextHop, nextHop6, commStr string
+	communities                []uint32
+	localPref                  uint32
+}
+
+// resolveBGPAttrs resolves a group's blackhole BGP attributes, inheriting any
+// field the override leaves unset from the (already-validated) global bgp
+// block. A nil override inherits everything.
+func resolveBGPAttrs(ov *BGPOverride, b *BGP) (resolvedBGP, error) {
+	r := resolvedBGP{
+		nextHop:     b.NextHop,
+		nextHop6:    b.NextHop6,
+		commStr:     b.CommunityStr,
+		communities: b.CommunityValues,
+		localPref:   b.LocalPref,
+	}
+	if ov == nil {
+		return r, nil
+	}
+	if ov.NextHop != "" {
+		a, err := netip.ParseAddr(ov.NextHop)
+		if err != nil || !a.Is4() {
+			return resolvedBGP{}, fmt.Errorf("next_hop must be a valid IPv4 address, got %q", ov.NextHop)
+		}
+		r.nextHop = ov.NextHop
+	}
+	if ov.NextHop6 != "" {
+		a, err := netip.ParseAddr(ov.NextHop6)
+		if err != nil || !a.Is6() || a.Is4In6() {
+			return resolvedBGP{}, fmt.Errorf("next_hop6 must be a valid IPv6 address, got %q", ov.NextHop6)
+		}
+		r.nextHop6 = ov.NextHop6
+	}
+	// An omitted communities key (nil) inherits the global set. An explicit but
+	// empty list is a mistake — reject it rather than silently inherit, so the
+	// operator does not believe an ineffective override took effect.
+	if ov.Communities != nil {
+		if len(ov.Communities) == 0 {
+			return resolvedBGP{}, fmt.Errorf("communities: provide at least one community, or omit the field to inherit the global set")
+		}
+		vals, str, err := parseCommunities(ov.Communities)
+		if err != nil {
+			return resolvedBGP{}, fmt.Errorf("communities: %w", err)
+		}
+		r.communities, r.commStr = vals, str
+	}
+	if ov.LocalPref != nil {
+		r.localPref = *ov.LocalPref
+	}
+	return r, nil
 }
 
 // ParseCommunity parses an "ASN:value" BGP community string into its uint32

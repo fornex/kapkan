@@ -939,3 +939,100 @@ func TestEscalationTotalGroup(t *testing.T) {
 		t.Errorf("web group stage = %q, want flowspec inherited", web.Escalation[0].Action)
 	}
 }
+
+func TestBGPAttributesResolution(t *testing.T) {
+	// Global defaults flow into the implicit global group.
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	g := cfg.Groups[0]
+	if g.BlackholeNextHop != "192.0.2.1" || g.BlackholeCommunityStr != "65000:666" {
+		t.Errorf("global next-hop/community = %q/%q", g.BlackholeNextHop, g.BlackholeCommunityStr)
+	}
+	if len(g.BlackholeCommunities) != 1 || g.BlackholeCommunities[0] != 65000<<16|666 {
+		t.Errorf("global communities = %v", g.BlackholeCommunities)
+	}
+	if g.LocalPref != 0 {
+		t.Errorf("global local-pref = %d, want 0 (unset)", g.LocalPref)
+	}
+
+	// Per-group override: own communities, next-hops, and local-pref.
+	override := hostgroupsYAML + `
+  - name: customer-a
+    networks:
+      - "203.0.113.128/26"
+    bgp:
+      next_hop: "192.0.2.50"
+      next_hop6: "100::50"
+      communities: ["65000:100", "65001:200"]
+      local_pref: 250
+`
+	cfg, err = Parse([]byte(override))
+	if err != nil {
+		t.Fatalf("Parse() with bgp override error = %v", err)
+	}
+	ca := cfg.GroupFor(netip.MustParseAddr("203.0.113.130"))
+	if ca.Name != "customer-a" {
+		t.Fatalf("GroupFor(.130) = %q, want customer-a", ca.Name)
+	}
+	if ca.BlackholeNextHop != "192.0.2.50" || ca.BlackholeNextHop6 != "100::50" {
+		t.Errorf("override next-hops = %q / %q", ca.BlackholeNextHop, ca.BlackholeNextHop6)
+	}
+	want := []uint32{65000<<16 | 100, 65001<<16 | 200}
+	if len(ca.BlackholeCommunities) != 2 || ca.BlackholeCommunities[0] != want[0] || ca.BlackholeCommunities[1] != want[1] {
+		t.Errorf("override communities = %v, want %v", ca.BlackholeCommunities, want)
+	}
+	if ca.BlackholeCommunityStr != "65000:100 65001:200" {
+		t.Errorf("override community str = %q", ca.BlackholeCommunityStr)
+	}
+	if ca.LocalPref != 250 {
+		t.Errorf("override local-pref = %d, want 250", ca.LocalPref)
+	}
+
+	// A group with no bgp override inherits the global attributes.
+	web := cfg.GroupFor(netip.MustParseAddr("203.0.113.32")) // "web", no bgp block
+	if web.Name != "web" {
+		t.Fatalf("GroupFor(.32) = %q, want web", web.Name)
+	}
+	if web.BlackholeNextHop != "192.0.2.1" || web.BlackholeCommunityStr != "65000:666" || web.LocalPref != 0 {
+		t.Errorf("inherited attrs = %q / %q / %d", web.BlackholeNextHop, web.BlackholeCommunityStr, web.LocalPref)
+	}
+
+	// Global multi-community + local-pref defaults propagate to groups without
+	// an override.
+	gy := strings.Replace(validYAML, "  community: \"65000:666\"\n",
+		"  community: \"65000:666\"\n  communities: [\"65000:1\", \"65000:2\"]\n  local_pref: 120\n", 1)
+	cfg, err = Parse([]byte(gy))
+	if err != nil {
+		t.Fatalf("Parse() global communities error = %v", err)
+	}
+	g = cfg.Groups[0]
+	if len(g.BlackholeCommunities) != 2 || g.LocalPref != 120 || g.BlackholeCommunityStr != "65000:1 65000:2" {
+		t.Errorf("global multi-community/local-pref = %v / %d / %q", g.BlackholeCommunities, g.LocalPref, g.BlackholeCommunityStr)
+	}
+
+	// Invalid per-group overrides are rejected.
+	bad := []struct{ name, block, wantErr string }{
+		{"bad community", "      communities: [\"nope\"]\n", "communities"},
+		{"empty community list", "      communities: []\n", "at least one community"},
+		{"next_hop wrong family", "      next_hop: \"2001:db8::1\"\n", "next_hop must be a valid IPv4"},
+		{"next_hop6 wrong family", "      next_hop6: \"192.0.2.9\"\n", "next_hop6 must be a valid IPv6"},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			y := hostgroupsYAML + "\n  - name: c\n    networks:\n      - \"203.0.113.200/29\"\n    bgp:\n" + tt.block
+			if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Parse() error = %v, want contains %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	// An explicitly-empty global communities list is rejected too (rather than
+	// silently falling back to the single community).
+	ge := strings.Replace(validYAML, "  community: \"65000:666\"\n",
+		"  community: \"65000:666\"\n  communities: []\n", 1)
+	if _, err := Parse([]byte(ge)); err == nil || !strings.Contains(err.Error(), "at least one community") {
+		t.Errorf("global empty communities: error = %v, want rejection", err)
+	}
+}

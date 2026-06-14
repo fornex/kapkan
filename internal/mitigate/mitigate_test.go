@@ -71,10 +71,11 @@ type recorder struct {
 	withdrawn map[string]int
 	fsUp      map[string]int
 	fsDown    map[string]int
-	// lastCommunity records the community value passed to the most recent
-	// blackhole Announce, so a test can assert it is frozen at ban time
-	// rather than read live at a (possibly post-reload) escalation.
-	lastCommunity uint32
+	// lastCommunities / lastLocalPref record the BGP attributes of the most
+	// recent blackhole Announce, so a test can assert they are frozen at ban
+	// time rather than read live at a (possibly post-reload) escalation.
+	lastCommunities []uint32
+	lastLocalPref   uint32
 	// events records every announce/withdraw in call order so a test can
 	// assert make-before-break: the new rung goes up before the old comes
 	// down. Entries: "announce <prefix>", "withdraw <prefix>",
@@ -86,11 +87,12 @@ func newRecorder() *recorder {
 	return &recorder{announced: map[string]int{}, withdrawn: map[string]int{}, fsUp: map[string]int{}, fsDown: map[string]int{}}
 }
 
-func (r *recorder) Announce(_ context.Context, prefix netip.Prefix, _ string, community uint32) error {
+func (r *recorder) Announce(_ context.Context, prefix netip.Prefix, attrs blackholeAttrs) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.announced[prefix.String()]++
-	r.lastCommunity = community
+	r.lastCommunities = append([]uint32(nil), attrs.communities...)
+	r.lastLocalPref = attrs.localPref
 	r.events = append(r.events, "announce "+prefix.String())
 	return nil
 }
@@ -110,11 +112,18 @@ func (r *recorder) eventLog() []string {
 	return append([]string(nil), r.events...)
 }
 
-// community returns the community value of the most recent blackhole announce.
-func (r *recorder) community() uint32 {
+// communities returns the community set of the most recent blackhole announce.
+func (r *recorder) communities() []uint32 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.lastCommunity
+	return append([]uint32(nil), r.lastCommunities...)
+}
+
+// localPref returns the local-pref of the most recent blackhole announce.
+func (r *recorder) localPref() uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastLocalPref
 }
 
 func (r *recorder) announceCount(p string) int {
@@ -384,7 +393,7 @@ func TestManualUnbanUnknown(t *testing.T) {
 // failingAnnouncer fails every announce, to exercise the BGP-error path.
 type failingAnnouncer struct{}
 
-func (failingAnnouncer) Announce(context.Context, netip.Prefix, string, uint32) error {
+func (failingAnnouncer) Announce(context.Context, netip.Prefix, blackholeAttrs) error {
 	return fmt.Errorf("bgp session down")
 }
 func (failingAnnouncer) Withdraw(context.Context, netip.Prefix) error { return nil }
@@ -662,7 +671,7 @@ type flakyFS struct {
 	down     []string
 }
 
-func (f *flakyFS) Announce(context.Context, netip.Prefix, string, uint32) error { return nil }
+func (f *flakyFS) Announce(context.Context, netip.Prefix, blackholeAttrs) error { return nil }
 func (f *flakyFS) Withdraw(context.Context, netip.Prefix) error                 { return nil }
 func (f *flakyFS) AnnounceFlowSpec(_ context.Context, r FlowSpecRule) error {
 	f.mu.Lock()
@@ -1070,6 +1079,64 @@ func TestManualBanSurvivesAutoAttackEnd(t *testing.T) {
 	}
 }
 
+// TestPerGroupBGPAttributesAnnounced: a hostgroup's BGP override (next-hop,
+// next-hop6, communities, local-pref) is frozen on the ban and announced;
+// hosts outside the group use the global defaults.
+func TestPerGroupBGPAttributesAnnounced(t *testing.T) {
+	rec := newRecorder()
+	yaml := strings.Replace(liveYAML(), "thresholds:",
+		"hostgroups:\n"+
+			"  - name: customer-a\n"+
+			"    networks:\n"+
+			"      - \"203.0.113.64/26\"\n"+
+			"      - \"2001:db8:1::/48\"\n"+
+			"    bgp:\n"+
+			"      next_hop: \"192.0.2.50\"\n"+
+			"      next_hop6: \"100::50\"\n"+
+			"      communities: [\"65000:100\", \"65001:200\"]\n"+
+			"      local_pref: 250\n"+
+			"thresholds:", 1)
+	m := newMitigator(t, yaml, rec, nil)
+
+	// IPv4 host inside customer-a: blackhole carries the group's attributes.
+	ban := m.OnAttackStarted(startedEvent("203.0.113.66"))
+	if ban.State != BanActive || ban.Method != config.MitigateBlackhole {
+		t.Fatalf("ban = %+v, want active blackhole", ban)
+	}
+	if ban.NextHop != "192.0.2.50" || ban.LocalPref != 250 {
+		t.Errorf("ban next-hop/local-pref = %q/%d, want 192.0.2.50/250", ban.NextHop, ban.LocalPref)
+	}
+	if !strings.Contains(ban.Route, "local-pref 250") || !strings.Contains(ban.Route, "65000:100 65001:200") {
+		t.Errorf("route = %q, want community set + local-pref 250", ban.Route)
+	}
+	want := []uint32{65000<<16 | 100, 65001<<16 | 200}
+	if got := rec.communities(); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("announced communities = %v, want %v", got, want)
+	}
+	if rec.localPref() != 250 {
+		t.Errorf("announced local-pref = %d, want 250", rec.localPref())
+	}
+
+	// IPv6 host inside customer-a uses the group's IPv6 next-hop override.
+	ban6 := m.OnAttackStarted(startedEvent("2001:db8:1::99"))
+	if ban6.NextHop != "100::50" {
+		t.Errorf("v6 ban next-hop = %q, want 100::50 (group override)", ban6.NextHop)
+	}
+
+	// A host outside the group uses the global defaults: single community, no
+	// local-pref attached.
+	ban2 := m.OnAttackStarted(startedEvent("203.0.113.10"))
+	if ban2.NextHop != "192.0.2.1" || ban2.LocalPref != 0 {
+		t.Errorf("global ban next-hop/local-pref = %q/%d, want 192.0.2.1/0", ban2.NextHop, ban2.LocalPref)
+	}
+	if strings.Contains(ban2.Route, "local-pref") {
+		t.Errorf("global ban route must omit local-pref: %q", ban2.Route)
+	}
+	if got := rec.communities(); len(got) != 1 || got[0] != 65000<<16|666 {
+		t.Errorf("global announced communities = %v, want [65000:666]", got)
+	}
+}
+
 // TestEscalationFreezesCommunityAcrossReload: the BGP community is frozen at
 // ban time alongside the next-hop. A config reload that changes the community
 // between ban creation and a delayed escalation to the blackhole rung must NOT
@@ -1108,8 +1175,9 @@ func TestEscalationFreezesCommunityAcrossReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseCommunity: %v", err)
 	}
-	if got := rec.community(); got != want {
-		t.Errorf("announced community = %d, want %d (frozen at ban time, not the reloaded 65000:999)", got, want)
+	got := rec.communities()
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("announced communities = %v, want [%d] (frozen at ban time, not the reloaded 65000:999)", got, want)
 	}
 }
 
@@ -1123,7 +1191,7 @@ type flakyRollback struct {
 	downAttempts int
 }
 
-func (f *flakyRollback) Announce(context.Context, netip.Prefix, string, uint32) error { return nil }
+func (f *flakyRollback) Announce(context.Context, netip.Prefix, blackholeAttrs) error { return nil }
 func (f *flakyRollback) Withdraw(context.Context, netip.Prefix) error                 { return nil }
 func (f *flakyRollback) AnnounceFlowSpec(_ context.Context, _ FlowSpecRule) error {
 	f.mu.Lock()
