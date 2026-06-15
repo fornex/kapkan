@@ -1195,3 +1195,64 @@ func TestAPITokensResolution(t *testing.T) {
 		})
 	}
 }
+
+func TestTenantResolution(t *testing.T) {
+	withTokens := strings.Replace(validYAML, "  listen: \"127.0.0.1:8080\"\n",
+		"  listen: \"127.0.0.1:8080\"\n  tokens:\n"+
+			"    - {name: admin, token_env: K_ADMIN, role: operator}\n"+
+			"    - {name: a-portal, token_env: K_A, role: viewer, tenant: custA}\n", 1)
+	groups := "tenant: \"house\"\nhostgroups:\n" +
+		"  - name: a-web\n    tenant: \"custA\"\n    networks: [\"203.0.113.0/26\"]\n" +
+		"  - name: b-web\n    tenant: \"custB\"\n    networks: [\"203.0.113.64/26\"]\n" +
+		"  - name: shared\n    networks: [\"203.0.113.128/26\"]\n"
+	cfg, err := Parse([]byte(withTokens + groups))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	// Global/fallback group carries the top-level tenant; per-group tenants
+	// resolve onto the group; an unlabeled group has tenant "".
+	if cfg.Groups[0].Name != GlobalGroup || cfg.Groups[0].Tenant != "house" {
+		t.Errorf("global group tenant = %q, want house", cfg.Groups[0].Tenant)
+	}
+	for addr, want := range map[string]string{
+		"203.0.113.5":   "custA",
+		"203.0.113.70":  "custB",
+		"203.0.113.130": "",      // shared (unlabeled)
+		"198.51.100.1":  "house", // falls to the global group
+	} {
+		if g := cfg.GroupFor(netip.MustParseAddr(addr)); g.Tenant != want {
+			t.Errorf("GroupFor(%s).Tenant = %q (group %q), want %q", addr, g.Tenant, g.Name, want)
+		}
+	}
+
+	// Token tenant scope resolves; the unscoped admin has tenant "".
+	byName := map[string]TokenSpec{}
+	for _, s := range cfg.API.TokenSpecs {
+		byName[s.Name] = s
+	}
+	if byName["admin"].Tenant != "" {
+		t.Errorf("admin token tenant = %q, want unscoped", byName["admin"].Tenant)
+	}
+	if byName["a-portal"].Tenant != "custA" {
+		t.Errorf("a-portal token tenant = %q, want custA", byName["a-portal"].Tenant)
+	}
+
+	bad := []struct{ name, yaml, wantErr string }{
+		{"bad group tenant charset",
+			validYAML + "hostgroups:\n  - name: a\n    tenant: \"bad tenant!\"\n    networks: [\"203.0.113.0/26\"]\n", "tenant"},
+		{"bad global tenant charset", validYAML + "tenant: \"a/b\"\n", "tenant"},
+		{"token scoped to unknown tenant",
+			strings.Replace(validYAML, "  listen: \"127.0.0.1:8080\"\n",
+				"  listen: \"127.0.0.1:8080\"\n  tokens:\n    - {name: x, token_env: K_X, role: viewer, tenant: ghost}\n", 1) +
+				"hostgroups:\n  - name: a\n    tenant: \"custA\"\n    networks: [\"203.0.113.0/26\"]\n",
+			"not used by any hostgroup"},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse([]byte(tt.yaml)); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Parse() error = %v, want contains %q", err, tt.wantErr)
+			}
+		})
+	}
+}

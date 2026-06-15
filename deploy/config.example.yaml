@@ -89,6 +89,18 @@ thresholds: # per destination host, after sampling correction
 #       pps: 300000
 #       mbps: 4000
 #       flows_per_sec: 150000
+#   - name: customerA # multi-tenant: scope this group to a tenant (see api.tokens)
+#     networks:
+#       - "198.51.100.0/24"
+#     tenant: "customerA"
+
+# Multi-tenancy: label hostgroups with a `tenant` (above) and scope API tokens
+# to a tenant (api.tokens[].tenant below). A scoped token sees and may mutate
+# only its own tenant's attacks/bans/hosts; unscoped tokens are admin (all
+# tenants). An unlabeled group is admin-only. Optionally label the global
+# fallback group with a top-level `tenant:` here:
+#
+# tenant: "house"
 
 # Mitigation method (default: blackhole = RTBH /32 or /128). FlowSpec drops
 # only the attack vector and spares the victim's other traffic (RFC 8955/8956,
@@ -208,3 +220,5 @@ api:
   # tokens: # or role-based: viewer = read-only, operator = read + ban/reload
   #   - {name: dashboard,  token_env: "KAPKAN_API_RO", role: viewer}
   #   - {name: automation, token_env: "KAPKAN_API_RW", role: operator}
+  #   # add `tenant: "<name>"` to scope a token to one tenant (multi-tenancy):
+  #   - {name: custA, token_env: "KAPKAN_API_CUSTA", role: viewer, tenant: "customerA"}
