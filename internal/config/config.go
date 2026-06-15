@@ -513,7 +513,21 @@ type Exec struct {
 	Command string `yaml:"command"`
 	// TimeoutSeconds bounds one invocation (default 10).
 	TimeoutSeconds int `yaml:"timeout_seconds"`
+	// Format selects the invocation convention: "kapkan" (default) passes the
+	// event name as argv[1] and the JSON payload on stdin; "fastnetmon" mimics
+	// FastNetMon's notify_script — argv is "<ip> <direction> <pps> <action>"
+	// with a plain-text attack summary on stdin — so existing FastNetMon notify
+	// scripts run unchanged.
+	Format string `yaml:"format"`
 }
+
+// Exec formats.
+const (
+	// ExecFormatKapkan is the native convention: event name argv + JSON stdin.
+	ExecFormatKapkan = "kapkan"
+	// ExecFormatFastNetMon mimics FastNetMon's notify_script contract.
+	ExecFormatFastNetMon = "fastnetmon"
+)
 
 // Timeout returns the exec hook timeout as a duration.
 func (e Exec) Timeout() time.Duration { return time.Duration(e.TimeoutSeconds) * time.Second }
@@ -1468,6 +1482,13 @@ func (c *Config) validateNotify() error {
 		if fi.IsDir() || fi.Mode()&0o111 == 0 {
 			return fmt.Errorf("notify.exec.command %q is not an executable file", n.Exec.Command)
 		}
+	}
+	switch n.Exec.Format {
+	case "":
+		n.Exec.Format = ExecFormatKapkan
+	case ExecFormatKapkan, ExecFormatFastNetMon:
+	default:
+		return fmt.Errorf("notify.exec.format must be %q or %q, got %q", ExecFormatKapkan, ExecFormatFastNetMon, n.Exec.Format)
 	}
 	if n.Exec.TimeoutSeconds == 0 {
 		n.Exec.TimeoutSeconds = 10

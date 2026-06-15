@@ -613,6 +613,13 @@ func TestNotifyChannelValidation(t *testing.T) {
 	if cfg.Notify.Exec.TimeoutSeconds != 10 {
 		t.Errorf("exec timeout default = %d, want 10", cfg.Notify.Exec.TimeoutSeconds)
 	}
+	if cfg.Notify.Exec.Format != ExecFormatKapkan {
+		t.Errorf("exec format default = %q, want %q", cfg.Notify.Exec.Format, ExecFormatKapkan)
+	}
+	// The fastnetmon format is accepted.
+	if _, err := Parse([]byte(add("  exec:\n    command: \"/bin/sh\"\n    format: \"fastnetmon\"\n"))); err != nil {
+		t.Errorf("fastnetmon exec format rejected: %v", err)
+	}
 
 	// http to loopback is allowed (local relays, tests).
 	if _, err := Parse([]byte(add("  slack:\n    webhook_url: \"http://127.0.0.1:9000/hook\"\n"))); err != nil {
@@ -636,6 +643,7 @@ func TestNotifyChannelValidation(t *testing.T) {
 		{"missing exec file", "  exec:\n    command: \"/nonexistent/kapkan-hook\"\n", "exec.command"},
 		{"non-executable exec file", "  exec:\n    command: \"" + nonExec + "\"\n", "not an executable"},
 		{"exec timeout out of range", "  exec:\n    command: \"/bin/sh\"\n    timeout_seconds: 9000\n", "timeout_seconds"},
+		{"bad exec format", "  exec:\n    command: \"/bin/sh\"\n    format: \"syslog\"\n", "exec.format"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
