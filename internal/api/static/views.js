@@ -5,6 +5,9 @@
   "use strict";
   var K = w.K, I = w.I18N, h = K.h;
 
+  /* keyboard activation for click-only rows (Enter / Space) */
+  function keyAct(fn) { return function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(e); } }; }
+
   /* ===== shared building blocks ===== */
   function viewHead(title, sub, actions) {
     return h("div", { class: "view-head" }, [
@@ -168,7 +171,7 @@
 
   function recentMini(ctx) {
     var rows = ctx.attacks.recent.slice(0, 4).map(function (r) {
-      return h("tr", { class: "is-clickable", onclick: function () { ctx.actions.openDrawer(r); } }, [
+      return h("tr", { class: "is-clickable", tabindex: "0", role: "button", onclick: function () { ctx.actions.openDrawer(r); }, onkeydown: keyAct(function () { ctx.actions.openDrawer(r); }) }, [
         h("td", { class: "target-cell", text: r.scope === "group" ? r.group : r.target }),
         h("td", {}, K.dirBadge(r.direction)),
         h("td", { class: "td-muted", text: I.label("attackType", r.classification.type) }),
@@ -230,7 +233,7 @@
 
     var recentRows = recent.map(function (r) {
       var dur = r.ended_at ? Math.round((new Date(r.ended_at) - new Date(r.started_at)) / 1000) : 0;
-      return h("tr", { class: "is-clickable", onclick: function () { ctx.actions.openDrawer(r); } }, [
+      return h("tr", { class: "is-clickable", tabindex: "0", role: "button", onclick: function () { ctx.actions.openDrawer(r); }, onkeydown: keyAct(function () { ctx.actions.openDrawer(r); }) }, [
         h("td", { class: "target-cell", text: r.scope === "group" ? r.group : r.target }),
         h("td", {}, K.dirBadge(r.direction)),
         h("td", { class: "td-muted", text: I.label("attackType", r.classification.type) }),
@@ -377,7 +380,7 @@
         : h("div", { class: "host-mult" }, [h("div", { class: "host-mult__x", style: { color: "var(--muted)", fontSize: "var(--t-md)" }, text: "—" }), h("div", { class: "host-mult__lbl", text: I.t("ho.nobaseline") })]);
 
       var row = h("div", { class: "host-row" + (it.attacked ? " is-attack" : "") + (host.direction === "outgoing" && dir === "outgoing" ? " is-outgoing" : "") + (expanded ? " is-open" : ""),
-        onclick: function () { ctx.actions.toggleHost(host.target); } }, [
+        tabindex: "0", role: "button", onclick: function () { ctx.actions.toggleHost(host.target); }, onkeydown: keyAct(function () { ctx.actions.toggleHost(host.target); }) }, [
         h("div", { class: "host-id" }, [
           h("div", { class: "host-id__ip" }, [
             w.icon(expanded ? "chevron-down" : "chevron-right"),

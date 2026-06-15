@@ -18,6 +18,7 @@
       else if (k === "html") e.innerHTML = v;                  // trusted constants only
       else if (k === "dataset") for (var d in v) e.dataset[d] = v[d];
       else if (k === "style") for (var s in v) e.style[s] = v[s];
+      else if (k === "attrs") { for (var an in v) if (v[an] != null) e.setAttribute(an, v[an]); }
       else if (k.indexOf("on") === 0 && typeof v === "function") e.addEventListener(k.slice(2).toLowerCase(), v);
       else e.setAttribute(k, v);
     }

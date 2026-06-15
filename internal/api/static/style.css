@@ -19,7 +19,7 @@
   --text:        #d6dde6;
   --text-strong: #f2f6fb;
   --muted:       #8b97a5;
-  --faint:       #5e6a78;
+  --faint:       #828e9c;  /* meets WCAG AA (>=4.5:1) on base/surface */
 
   /* --- Brand accent --- */
   --accent:      #4ea1ff;
@@ -296,7 +296,7 @@ button { font-family: inherit; }
 .btn--primary:hover { background: var(--accent-2); }
 .btn--ghost { background: var(--surface); border-color: var(--border); color: var(--text); }
 .btn--ghost:hover { border-color: var(--border-strong); }
-.btn--danger { background: var(--active); color: #fff; }
+.btn--danger { background: #d83b3b; color: #fff; }  /* darker red so white label meets AA */
 .btn--danger:hover { filter: brightness(1.08); }
 .btn--sm { padding: 5px 10px; font-size: var(--t-sm); }
 .btn:disabled, .btn[aria-disabled="true"] { opacity: .4; cursor: not-allowed; pointer-events: none; }

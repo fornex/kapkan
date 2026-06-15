@@ -173,10 +173,13 @@
 
   /* ---------- drawer ---------- */
   function openDrawer(a) {
-    state.drawer = { open: true, live: !!a.active, key: a.id || a.target, attack: a };
+    state.drawer = { open: true, live: !!a.active, key: a.id || a.target, attack: a, returnFocus: document.activeElement };
     renderDrawer();
     document.getElementById("scrim").classList.add("is-open");
-    var d = document.getElementById("drawer"); d.classList.add("is-open"); d.setAttribute("aria-hidden", "false");
+    var d = document.getElementById("drawer");
+    d.classList.add("is-open"); d.removeAttribute("inert"); d.setAttribute("aria-hidden", "false");
+    var f = d.querySelector("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+    (f || d).focus();
   }
   function renderDrawer() {
     if (!state.drawer.open) return;
@@ -188,9 +191,13 @@
     var nb = d.querySelector(".drawer__body"); if (nb) nb.scrollTop = sc;
   }
   function closeDrawer() {
+    if (!state.drawer.open) return;
+    var rf = state.drawer.returnFocus;
     state.drawer.open = false;
     document.getElementById("scrim").classList.remove("is-open");
-    var d = document.getElementById("drawer"); d.classList.remove("is-open"); d.setAttribute("aria-hidden", "true");
+    var d = document.getElementById("drawer");
+    d.classList.remove("is-open"); d.setAttribute("inert", ""); d.setAttribute("aria-hidden", "true");
+    if (rf && typeof rf.focus === "function") { try { rf.focus(); } catch (e) {} }
   }
 
   /* ---------- live region ---------- */
@@ -271,7 +278,9 @@
     renderShellDynamic(ctx);
     if (!userBusy()) {
       renderView(ctx);
-      if (state.drawer.open) renderDrawer();
+      /* don't re-mount the drawer out from under keyboard focus inside it */
+      var dr = document.getElementById("drawer");
+      if (state.drawer.open && !dr.contains(document.activeElement)) renderDrawer();
     }
     announceRung(ctx);
   }
@@ -297,7 +306,19 @@
     if (state.localeOpen && !document.getElementById("localeMenu").contains(e.target)) { state.localeOpen = false; buildLocaleMenu(); }
   });
   document.getElementById("scrim").addEventListener("click", closeDrawer);
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") { closeDrawer(); K.closeConfirm(); if (state.localeOpen) { state.localeOpen = false; buildLocaleMenu(); } } });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { closeDrawer(); K.closeConfirm(); if (state.localeOpen) { state.localeOpen = false; buildLocaleMenu(); } return; }
+    /* trap Tab within the open drawer (skip while a confirm popover is up) */
+    if (e.key === "Tab" && state.drawer.open && !document.getElementById("__confirm")) {
+      var d = document.getElementById("drawer");
+      var f = d.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+      if (!f.length) return;
+      var first = f[0], last = f[f.length - 1];
+      if (!d.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
 
   /* ---------- boot ---------- */
   function boot() {
