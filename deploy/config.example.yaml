@@ -168,11 +168,17 @@ notify:
     password_env: "KAPKAN_SMTP_PASS"
     require_tls: false # STARTTLS is auto-required when credentials are set
   exec: # optional: hook run on every attack event (no shell)
-    # Absolute path to an existing executable; payload JSON on stdin, event
-    # name as $1. Runs with a minimal environment (no daemon secrets); the
-    # whole process group is killed on timeout.
+    # Absolute path to an existing executable. Runs with a minimal environment
+    # (no daemon secrets); the whole process group is killed on timeout.
     command: ""
     timeout_seconds: 10
+    # format: kapkan (default) passes the event name as $1 and the JSON payload
+    # on stdin. format: fastnetmon mimics FastNetMon's notify_script — argv is
+    # "<ip> <direction> <pps> <action>" (action: ban|unban|attack_details) with
+    # a text summary on stdin — so existing FastNetMon scripts run unchanged.
+    # In dry-run kapkan only ever emits attack_details (never ban/unban), so a
+    # FastNetMon ban script cannot block a host you are only validating.
+    # format: fastnetmon
 
 # Optional ClickHouse history (forensics + dashboard graphs). kapkan uses
 # the HTTP interface — no driver dependency. Absent = live data only.
