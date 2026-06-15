@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"sync"
 
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/flow"
@@ -68,10 +69,10 @@ func New(store *config.Store, sink SinkFunc, log *slog.Logger) (*Ingester, error
 	// Wrap: our converter, then the panic guard so malformed packets that
 	// trip the packet parser become errors instead of crashing the process.
 	var prod producer.ProducerInterface = &flowProducer{
-		inner:        inner,
-		sink:         sink,
-		store:        store,
-		defaultRateF: func() uint64 { return store.Get().Sampling.DefaultRate },
+		inner:     inner,
+		sink:      sink,
+		store:     store,
+		exporters: newExporterLabeler(),
 	}
 	prod = debug.WrapPanicProducer(prod)
 	ing.prod = prod
@@ -173,27 +174,31 @@ func (i *Ingester) Stop() {
 // them to the sink. It wraps the proto producer and returns the original
 // message set so the proto producer can recycle its pooled messages.
 type flowProducer struct {
-	inner        producer.ProducerInterface
-	sink         SinkFunc
-	store        *config.Store
-	defaultRateF func() uint64
+	inner     producer.ProducerInterface
+	sink      SinkFunc
+	store     *config.Store
+	exporters *exporterLabeler
 }
 
 func (p *flowProducer) Produce(msg interface{}, args *producer.ProduceArgs) ([]producer.ProducerMessage, error) {
 	set, err := p.inner.Produce(msg, args)
-	defaultRate := p.defaultRateF()
+	cfg := p.store.Get()
 	for _, m := range set {
 		pm, ok := m.(*protoproducer.ProtoProducerMessage)
 		if !ok {
 			continue
 		}
-		f, ok := convert(pm, defaultRate)
+		f, ok := convert(pm, cfg.Sampling.DefaultRate)
 		if !ok {
 			continue
 		}
 		metrics.FlowsTotal.WithLabelValues(f.Wire.String()).Inc()
 		if f.Exporter.IsValid() {
-			metrics.PacketsTotal.WithLabelValues(f.Exporter.String(), f.Wire.String()).Inc()
+			// The exporter is the telemetry UDP source address, which is
+			// unauthenticated and trivially spoofable, so the metric label is
+			// cardinality-bounded to keep a flood of spoofed sources from
+			// exhausting memory. See exporterLabeler.
+			metrics.PacketsTotal.WithLabelValues(p.exporters.label(f.Exporter, cfg.FlowSourceSet), f.Wire.String()).Inc()
 		}
 		p.sink(f)
 	}
@@ -204,6 +209,68 @@ func (p *flowProducer) Produce(msg interface{}, args *producer.ProduceArgs) ([]p
 
 func (p *flowProducer) Commit(set []producer.ProducerMessage) { p.inner.Commit(set) }
 func (p *flowProducer) Close()                                { p.inner.Close() }
+
+const (
+	// maxExporterLabels bounds the number of distinct exporter addresses that
+	// receive their own "exporter" label on the packets_total metric when no
+	// flow_sources allowlist is configured. Telemetry arrives over
+	// unauthenticated UDP, so the exporter (source) address is attacker-
+	// spoofable; without a bound a flood of distinct spoofed sources would
+	// create unbounded Prometheus time series and exhaust the daemon's memory
+	// — exactly during the attack it must survive. Real deployments have far
+	// fewer exporters than this; operators wanting exact, spoof-proof
+	// attribution should set flow_sources.
+	maxExporterLabels = 1024
+	// otherExporter is the bucket label for exporters beyond the cap, or
+	// outside a configured flow_sources allowlist.
+	otherExporter = "other"
+)
+
+// exporterLabeler maps an exporter address to a bounded-cardinality metric
+// label value. It is safe for concurrent use by the decode workers.
+type exporterLabeler struct {
+	mu   sync.RWMutex
+	seen map[netip.Addr]string // capped cache of exporter -> label string
+}
+
+func newExporterLabeler() *exporterLabeler {
+	return &exporterLabeler{seen: make(map[netip.Addr]string)}
+}
+
+// label returns the metric label for exporter. When allow is non-empty only
+// addresses in it are labeled individually and every other (incl. spoofed)
+// source buckets under otherExporter — so an allowlisted exporter is never
+// displaced by a flood. When allow is empty the first maxExporterLabels
+// distinct exporters seen are labeled and the rest bucket under otherExporter.
+func (l *exporterLabeler) label(exporter netip.Addr, allow map[netip.Addr]struct{}) string {
+	if len(allow) > 0 {
+		if _, ok := allow[exporter]; ok {
+			return exporter.String()
+		}
+		return otherExporter
+	}
+	l.mu.RLock()
+	s, known := l.seen[exporter]
+	full := len(l.seen) >= maxExporterLabels
+	l.mu.RUnlock()
+	if known {
+		return s
+	}
+	if full {
+		return otherExporter
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if s, ok := l.seen[exporter]; ok { // re-check after upgrading the lock
+		return s
+	}
+	if len(l.seen) >= maxExporterLabels {
+		return otherExporter
+	}
+	s = exporter.String()
+	l.seen[exporter] = s
+	return s
+}
 
 // convert deep-copies the aliased fields of a proto message into a flow.Flow.
 // It returns ok=false for messages without a usable destination address.
@@ -279,9 +346,9 @@ func newDecodeProducer(store *config.Store, sink SinkFunc) producer.ProducerInte
 	cfg, _ := (&protoproducer.ProducerConfig{}).Compile()
 	inner, _ := protoproducer.CreateProtoProducer(cfg, protoproducer.CreateSamplingSystem)
 	return debug.WrapPanicProducer(&flowProducer{
-		inner:        inner,
-		sink:         sink,
-		store:        store,
-		defaultRateF: func() uint64 { return store.Get().Sampling.DefaultRate },
+		inner:     inner,
+		sink:      sink,
+		store:     store,
+		exporters: newExporterLabeler(),
 	})
 }

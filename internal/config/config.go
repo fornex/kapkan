@@ -25,9 +25,17 @@ import (
 // shape exactly; parsed derivatives (prefixes, addresses, community value)
 // are populated during validation and must not be set by hand.
 type Config struct {
-	DryRun             bool       `yaml:"dry_run"`
-	Listen             Listen     `yaml:"listen"`
-	Sampling           Sampling   `yaml:"sampling"`
+	DryRun   bool     `yaml:"dry_run"`
+	Listen   Listen   `yaml:"listen"`
+	Sampling Sampling `yaml:"sampling"`
+	// FlowSources optionally allowlists the trusted flow-exporter source
+	// addresses. Telemetry arrives over unauthenticated UDP, so the exporter
+	// (source) address is spoofable; when this list is set, only telemetry
+	// from a listed source is labeled by exporter on the packets_total metric
+	// and everything else is bucketed under "other", bounding metric
+	// cardinality. When empty a hard cap on distinct exporter labels provides
+	// the same protection automatically. It does not affect detection.
+	FlowSources        []string   `yaml:"flow_sources"`
 	Networks           []string   `yaml:"networks"`
 	ProtectedWhitelist []string   `yaml:"protected_whitelist"`
 	Thresholds         Thresholds `yaml:"thresholds"`
@@ -65,6 +73,9 @@ type Config struct {
 	// Parsed forms, populated by validate().
 	NetworkPrefixes []netip.Prefix `yaml:"-"`
 	WhitelistAddrs  []netip.Addr   `yaml:"-"`
+	// FlowSourceSet is the parsed FlowSources allowlist. Empty/nil means no
+	// allowlist is configured (the exporter-label cardinality cap applies).
+	FlowSourceSet map[netip.Addr]struct{} `yaml:"-"`
 	// Groups are the resolved hostgroups; Groups[0] is always the implicit
 	// global fallback group carrying the top-level thresholds.
 	Groups []Group `yaml:"-"`
@@ -698,6 +709,17 @@ func (c *Config) validate() error {
 			return fmt.Errorf("protected_whitelist: invalid IP %q: %w", s, err)
 		}
 		c.WhitelistAddrs = append(c.WhitelistAddrs, a)
+	}
+
+	if len(c.FlowSources) > 0 {
+		c.FlowSourceSet = make(map[netip.Addr]struct{}, len(c.FlowSources))
+		for _, s := range c.FlowSources {
+			a, err := netip.ParseAddr(s)
+			if err != nil {
+				return fmt.Errorf("flow_sources: invalid IP %q: %w", s, err)
+			}
+			c.FlowSourceSet[a.Unmap()] = struct{}{}
+		}
 	}
 
 	if c.Thresholds.PPS == 0 || c.Thresholds.Mbps == 0 || c.Thresholds.FlowsPerSec == 0 {
