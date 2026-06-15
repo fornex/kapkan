@@ -70,10 +70,10 @@
 
   <!-- drawer + scrim -->
   <div class="scrim" id="scrim"></div>
-  <aside class="drawer" id="drawer" aria-hidden="true" aria-label="Attack detail"></aside>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="Attack detail" aria-hidden="true" tabindex="-1" inert></aside>
 
   <!-- aria-live region for new-attack announcements -->
-  <div class="sr-only" role="status" aria-live="assertive" id="liveRegion"></div>
+  <div class="sr-only" role="status" aria-live="polite" id="liveRegion"></div>
 
   <!-- toasts -->
   <div class="toasts" id="toasts"></div>
