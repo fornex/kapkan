@@ -1,0 +1,81 @@
+export const metadata = {
+  title: "Panel de control",
+  description:
+    "La interfaz web integrada y sin compilación que se sirve en el listener de la API: ataques en vivo, principales emisores (top talkers), hostgroups y controles de bloqueo.",
+};
+
+# Panel de control
+
+Kapkan incluye una interfaz web autónoma incrustada directamente en el binario mediante `go:embed`.
+No hay paso de compilación, ni bundler, ni recursos externos que descargar: el mismo binario estático `kapkan`
+sirve el panel de control junto con la API JSON y las métricas de Prometheus. Es JavaScript puro que
+sondea la API REST, no una aplicación React, así que funciona por completo a partir de datos en vivo
+sin necesidad de base de datos.
+
+<Callout type="info" title="Un binario, un listener">
+El panel de control, la API JSON y `/metrics` los sirve todos el mismo proceso en la misma
+dirección. No hay un servicio web separado que desplegar o mantener sincronizado.
+</Callout>
+
+## Dónde reside
+
+El panel de control se sirve en `/` en la misma dirección que la API REST: el valor `api.listen`
+de tu configuración. Con el valor predeterminado `127.0.0.1:8080`, lo abres en
+[http://localhost:8080](http://localhost:8080).
+
+Para servir únicamente la API JSON y las métricas sin la interfaz, desactívalo:
+
+```yaml
+api:
+  listen: "127.0.0.1:8080"
+  dashboard: false   # serve the JSON API and /metrics only
+```
+
+Con `api.dashboard: false`, los endpoints `/api/v1` y `/metrics` siguen funcionando: solo deja de
+servirse el shell de la interfaz incrustada.
+
+## Qué muestra
+
+El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea en memoria:
+
+- **Modo en vivo** — si la instancia se ejecuta en dry-run o en vivo, para que veas de un
+  vistazo si un ataque detectado se anunciaría realmente.
+- **Ataques activos y recientes** — los ataques que están en curso más los que han terminado
+  recientemente, cada uno con su clasificación (vectores de amplificación como NTP / DNS / CLDAP / memcached /
+  SSDP / chargen, e inundaciones SYN / UDP / TCP / ICMP / de fragmentos) y las fuentes,
+  puertos y protocolos dominantes capturados de las muestras de flow.
+- **Top talkers (principales emisores)** — la instantánea de hosts rastreados con tasas por dirección y
+  baselines aprendidos, para que veas quién genera más tráfico y cómo se compara con lo normal.
+- **Hostgroups** — tus grupos de prefijos con nombre y su estado.
+- **Tabla de bloqueos** — todos los bloqueos, activos e históricos.
+
+También expone los mismos endpoints de control que ofrece la API: **bloqueo / desbloqueo manual** de una
+dirección y **recarga de configuración** (el equivalente a `SIGHUP`). Toda la vista funciona solo con datos
+en vivo: no se necesita ClickHouse ni ninguna otra base de datos para nada de ello.
+
+<Callout type="success" title="No se requiere base de datos">
+El panel de control se construye por completo a partir del estado en memoria del motor. El almacenamiento
+histórico de flows es una función separada y opcional: no es necesaria para ver ataques en vivo, top talkers o bloqueos.
+</Callout>
+
+## Autenticación
+
+De forma predeterminada, la API y el panel de control no están autenticados, lo cual es seguro únicamente porque el valor
+predeterminado de `api.listen` enlaza con `127.0.0.1`. Cuando estableces un token de API, el panel de control se adapta: el
+shell estático de la interfaz se sigue cargando, pero los datos que hay detrás de él no lo hacen hasta que proporcionas el token.
+
+Cuando la autenticación está habilitada, el panel de control solicita el token y lo guarda en el
+`sessionStorage` del navegador, adjuntándolo como cabecera bearer en cada solicitud que hace a la API. Cada
+solicitud a `/api/v1` se autoriza con `Authorization: Bearer <token>`; `/metrics` y el
+shell estático permanecen abiertos, pero los datos en vivo y los controles de bloqueo / recarga no.
+
+<Callout type="warning" title="Establece un token antes de exponer el listener">
+Antes de enlazar `api.listen` con cualquier cosa que no sea `127.0.0.1`, configura un token de API. Consulta
+[Autenticación](/docs/authentication) para saber cómo establecer `api.token_env` y cómo se verifican las
+solicitudes.
+</Callout>
+
+## Relacionado
+
+- [API REST](/docs/api) — los endpoints que sondea el panel de control y las acciones de control que invoca.
+- [Autenticación](/docs/authentication) — cómo proteger la API y el panel de control con un token.

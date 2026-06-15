@@ -1,0 +1,342 @@
+export const metadata = {
+  title: "API REST",
+  description:
+    "La API REST de Kapkan: estado, ataques, hosts, baneos, baneo/desbaneo manual y recarga de configuración, con las formas de las respuestas.",
+};
+
+# API REST
+
+Kapkan expone una pequeña API REST en JSON para observar la detección y accionar la mitigación manual.
+Se sirve en la dirección indicada en `api.listen`, cuyo valor por defecto es `127.0.0.1:8080`. El mismo
+listener también sirve el [panel](/docs/dashboard) integrado y el endpoint
+[`/metrics`](/docs/metrics) de Prometheus.
+
+La API es mayormente de lectura: el estado, los ataques activos y recientes, la instantánea de hosts
+monitorizados y la tabla de baneos son todos `GET`. Tres endpoints `POST` modifican el estado: baneo manual,
+desbaneo manual y recarga de configuración.
+
+<Callout type="warning" title="Autentícala antes de exponerla">
+El valor por defecto de `api.listen` enlaza con `127.0.0.1`, por lo que la API solo es segura sin autenticación en
+localhost. Antes de enlazarla más allá del loopback, configura un token bearer. Consulta [Autenticación](/docs/authentication).
+</Callout>
+
+Todas las rutas `/api/v1` pasan por la comprobación del token cuando la autenticación está configurada; una vez configurada,
+toda petición debe llevar `Authorization: Bearer <token>`. Los tokens llevan un **rol**: las rutas `GET`
+necesitan el rol **viewer**, y las rutas que modifican el estado (`ban`, `unban`, `config/reload`)
+necesitan el rol **operator**. Una lectura con un token viewer funciona; una modificación con un token viewer
+devuelve `403`; un token desconocido devuelve `401`. Los endpoints `POST` requieren además un
+tipo de contenido JSON: envía `Content-Type: application/json`. Ten en cuenta que `/metrics` y el
+armazón estático del panel se sirven sin token; los datos que el panel carga se obtienen
+a través de la API protegida. Consulta [Autenticación](/docs/authentication) para conocer los roles de los tokens.
+
+Un token también puede estar **acotado a un tenant**: en ese caso solo ve las filas de su tenant en cada endpoint
+de lectura (`/status` se reconstruye con sus propios hostgroups y recuentos), y solo puede hacer `ban`/`unban`
+dentro de su tenant — un objetivo fuera del tenant devuelve un `403` uniforme. Consulta
+[Multi-tenencia](/docs/multi-tenancy).
+
+## Endpoints
+
+| Método | Ruta | Descripción |
+| --- | --- | --- |
+| GET | `/api/v1/status` | Modo, tiempo de actividad, redes protegidas, umbrales, hostgroups, recuento de ataques/baneos activos. |
+| GET | `/api/v1/attacks` | Ataques activos más los últimos 100 que finalizaron, con muestras y clasificación. |
+| GET | `/api/v1/hosts` | Instantánea de hosts monitorizados: tasas por dirección, baselines aprendidos, estado de ataque. |
+| GET | `/api/v1/bans` | Todos los baneos, activos e históricos. |
+| POST | `/api/v1/ban` | Banear una dirección manualmente. |
+| POST | `/api/v1/unban` | Retirar un baneo manualmente. |
+| POST | `/api/v1/config/reload` | Releer el archivo de configuración (igual que `SIGHUP`). |
+| GET | `/metrics` | Métricas de Prometheus. |
+
+Todas las respuestas son JSON. Los errores devuelven un objeto con la forma `{"error": "..."}` con el
+estado HTTP apropiado.
+
+### GET /api/v1/status
+
+Devuelve el modo de operación actual y un resumen de lo que Kapkan está protegiendo.
+
+```json
+{
+  "dry_run": true,
+  "uptime_seconds": 8123,
+  "networks": ["203.0.113.0/24", "198.51.100.0/24"],
+  "active_attacks": 1,
+  "active_bans": 1,
+  "thresholds": {
+    "pps": 80000,
+    "mbps": 1000,
+    "flows_per_sec": 20000
+  },
+  "hostgroups": [
+    { "name": "web", "calculation": "per_host", "mitigation": "blackhole", "ban": true }
+  ]
+}
+```
+
+`dry_run` indica el modo global: cuando es `true`, no se anuncia ningún blackhole a tus routers.
+`thresholds` y `hostgroups` reflejan la configuración activa; consulta
+[Detección](/docs/detection) y [Hostgroups](/docs/hostgroups) para conocer su forma completa.
+
+### GET /api/v1/attacks
+
+Devuelve los ataques actualmente activos más los últimos 100 que finalizaron (los más recientes primero). Ambos arrays
+contienen objetos `Attack`.
+
+| Campo | Tipo | Notas |
+| --- | --- | --- |
+| `scope` | string | `host` o `group`. Los ataques con alcance de grupo no llevan `target`. |
+| `target` | string | La dirección atacada (alcance de host). |
+| `group` | string | Nombre del hostgroup (alcance de grupo, o el grupo del host). |
+| `tenant` | string | El tenant del grupo propietario, cuando hay uno etiquetado (consulta [Multi-tenencia](/docs/multi-tenancy)). |
+| `direction` | string | `incoming` o `outgoing`. |
+| `metric` | string | La métrica que se disparó, p. ej. `pps`, `mbps`, `tcp_syn_pps`. |
+| `rate` | number | La tasa observada en el momento de la detección, en la unidad de la métrica. |
+| `threshold` | number | El umbral que se cruzó. |
+| `rates` | object | Desglose completo de tasas por protocolo (ver más abajo). |
+| `active` | bool | `true` mientras está en curso. |
+| `ban_state` | string | `active`, `withdrawn` o `rejected`. Se omite cuando no hay baneo. |
+| `method` | string | Método de mitigación: `blackhole`, `flowspec` o `divert`. Se omite cuando no hay baneo. |
+| `route` | string | La cadena de ruta (`blackhole …` / `divert …`), o un resumen `flowspec: ...`, cuando existe un baneo. |
+| `flowspec` | array | Las reglas [FlowSpec](/docs/flowspec) generadas, cuando `method` es `flowspec`. |
+| `dry_run` | bool | Si el baneo fue virtual. |
+| `started_at` | string | Marca de tiempo RFC 3339. |
+| `ended_at` | string | Marca de tiempo RFC 3339; se omite mientras está activo. |
+| `sample` | object | Muestra de flow capturada en la detección; se omite cuando el muestreo está desactivado. |
+| `classification` | object | Vector de ataque inferido; se omite cuando no está clasificado. |
+
+```json
+{
+  "active": [
+    {
+      "scope": "host",
+      "target": "203.0.113.66",
+      "group": "web",
+      "direction": "incoming",
+      "metric": "pps",
+      "rate": 412000,
+      "threshold": 80000,
+      "rates": {
+        "pps": 412000,
+        "mbps": 3100,
+        "flows_per_sec": 9800,
+        "udp_pps": 405000,
+        "udp_mbps": 3080
+      },
+      "active": true,
+      "ban_state": "active",
+      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "dry_run": false,
+      "started_at": "2026-06-13T09:41:07Z",
+      "sample": {
+        "top_sources": [
+          { "key": "198.51.100.23", "packets": 1240000, "bytes": 1612000000 }
+        ],
+        "top_src_ports": [
+          { "key": "123", "packets": 1180000, "bytes": 1534000000 }
+        ],
+        "top_dst_ports": [
+          { "key": "443", "packets": 1240000, "bytes": 1612000000 }
+        ],
+        "protocols": [
+          { "key": "udp", "packets": 1240000, "bytes": 1612000000 }
+        ],
+        "total_packets": 1240000
+      },
+      "classification": {
+        "type": "ntp_amplification",
+        "confidence": 0.95,
+        "src_port": 123
+      }
+    }
+  ],
+  "recent": []
+}
+```
+
+El objeto `rates` lleva el trío base (`pps`, `mbps`, `flows_per_sec`) más los
+campos por protocolo que sean distintos de cero: `tcp_pps`, `tcp_mbps`, `udp_pps`, `udp_mbps`,
+`icmp_pps`, `icmp_mbps`, `tcp_syn_pps`, `tcp_syn_mbps`, `frag_pps`, `frag_mbps`. El
+objeto `sample` resume los flows almacenados en buffer detrás de la detección: `top_sources`,
+`top_src_ports`, `top_dst_ports`, `protocols` (cada uno una lista de contadores `{key, packets, bytes}`),
+una lista opcional de `flows` en bruto, y `total_packets`. El `type` de la
+`classification` es uno de los vectores documentados en [Detección](/docs/detection); `confidence`
+es la proporción (`0..1`) del tráfico de ataque que coincide con la firma ganadora, y `src_port`
+es el puerto del servicio reflejado para los vectores de amplificación.
+
+### GET /api/v1/hosts
+
+Devuelve una instantánea de cada host monitorizado: los datos de los top-talkers. Cada entrada es un `HostStat`.
+
+| Campo | Tipo | Notas |
+| --- | --- | --- |
+| `target` | string | La dirección del host. |
+| `group` | string | El nombre del hostgroup del host. |
+| `rates` | object | Tasas entrantes actuales por ventana. |
+| `rates_out` | object | Tasas salientes; solo distintas de cero cuando la detección de salida está activa. |
+| `in_attack` | bool | Si el host está en algún ataque activo. |
+| `metric` | string | La métrica del ataque activo; se omite cuando no está en ataque. |
+| `direction` | string | La dirección del ataque activo; se omite cuando no está en ataque. |
+| `baseline` | object | Baseline entrante aprendido; presente cuando hay baselines configurados. |
+| `baseline_out` | object | Baseline saliente aprendido; presente cuando hay baselines configurados. |
+
+```json
+{
+  "hosts": [
+    {
+      "target": "203.0.113.66",
+      "group": "web",
+      "rates": {
+        "pps": 412000,
+        "mbps": 3100,
+        "flows_per_sec": 9800,
+        "udp_pps": 405000
+      },
+      "rates_out": {
+        "pps": 120,
+        "mbps": 2
+      },
+      "in_attack": true,
+      "metric": "pps",
+      "direction": "incoming",
+      "baseline": {
+        "pps": 950,
+        "mbps": 7,
+        "flows_per_sec": 60
+      },
+      "baseline_out": {
+        "pps": 110,
+        "mbps": 2,
+        "flows_per_sec": 14
+      }
+    }
+  ]
+}
+```
+
+Los objetos `baseline` y `baseline_out` llevan el trío base de normalidad aprendida (`pps`,
+`mbps`, `flows_per_sec`) y aparecen solo mientras hay baselines EWMA configurados para el grupo del
+host. Consulta [Baselines](/docs/baselines).
+
+### GET /api/v1/bans
+
+Devuelve la tabla completa de baneos: activos e históricos. Cada entrada es un `Ban`.
+
+| Campo | Tipo | Notas |
+| --- | --- | --- |
+| `target` | string | La dirección baneada. |
+| `prefix` | string | El prefijo blackhole (`/32` o `/128`). |
+| `metric` | string | La métrica que disparó el baneo; se omite en baneos manuales. |
+| `rate` | number | Tasa observada en el momento del baneo; se omite cuando es cero. |
+| `threshold` | number | Umbral cruzado; se omite cuando es cero. |
+| `next_hop` | string | El next-hop de descarte. |
+| `community` | string | La community RTBH. |
+| `local_pref` | number | El `LOCAL_PREF` adjunto a la ruta; se omite cuando es cero. |
+| `route` | string | La cadena de ruta completa, o un resumen `flowspec: ...` para baneos FlowSpec. |
+| `state` | string | `active`, `withdrawn` o `rejected`. |
+| `dry_run` | bool | Si el baneo fue virtual. |
+| `manual` | bool | `true` para baneos solicitados por el operador. |
+| `started_at` | string | Marca de tiempo RFC 3339. |
+| `expires_at` | string | Expiración del TTL; los baneos nunca son permanentes. |
+| `withdrawn_at` | string | Cuándo se retiró la ruta; se omite mientras está activo. |
+| `reason` | string | Por qué se rechazó o retiró un baneo; se omite en otro caso. |
+| `method` | string | Método de mitigación: `blackhole`, `flowspec` o `divert`. |
+| `flowspec` | array | Las reglas [FlowSpec](/docs/flowspec) generadas, cuando `method` es `flowspec`. |
+| `escalation` | array | La [escalera de escalado](/docs/escalation) configurada, cuando hay una establecida. |
+| `escalation_step` | number | Índice del peldaño actual de la escalera. |
+
+```json
+{
+  "bans": [
+    {
+      "target": "203.0.113.66",
+      "prefix": "203.0.113.66/32",
+      "metric": "pps",
+      "rate": 412000,
+      "threshold": 80000,
+      "next_hop": "192.0.2.1",
+      "community": "65000:666",
+      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "state": "active",
+      "dry_run": false,
+      "manual": false,
+      "started_at": "2026-06-13T09:41:07Z",
+      "expires_at": "2026-06-13T10:41:07Z"
+    }
+  ]
+}
+```
+
+Consulta [Mitigación](/docs/mitigation) para ver cómo el TTL, la histéresis y el límite de baneos dan forma a este
+ciclo de vida.
+
+### POST /api/v1/ban
+
+Aplica un blackhole a una dirección manualmente. El cuerpo es una sola IP:
+
+```http
+POST /api/v1/ban
+Content-Type: application/json
+
+{"ip": "203.0.113.66"}
+```
+
+La respuesta es el objeto `Ban` resultante. Un baneo manual respeta todas las reglas de seguridad que respeta un
+baneo automático:
+
+- Un objetivo en la **lista blanca** se rechaza con HTTP `409 Conflict` y `reason: "whitelisted"`; nunca se anuncia.
+- Un objetivo **fuera de las `networks` configuradas** se rechaza con HTTP `409` y `reason: "outside configured networks"`.
+- Una petición que excedería **`max_active_bans`** se rechaza con HTTP `409` y `reason: "max_active_bans reached"`.
+
+En cada caso de `409`, el cuerpo sigue siendo un objeto `Ban` con `state: "rejected"` y el
+campo `reason` establecido. Una IP no válida o no analizable devuelve HTTP `400`.
+
+<Callout type="warning" title="El dry-run sigue aplicándose">
+Un baneo manual respeta el modo global. Mientras `dry_run` es `true`, el baneo se registra y
+se devuelve con `dry_run: true` pero no se anuncia ninguna ruta. Consulta el [modelo de seguridad](/docs/safety).
+</Callout>
+
+### POST /api/v1/unban
+
+Retira un baneo activo para la dirección dada. El cuerpo tiene la misma forma `{"ip": "..."}`
+y se requiere el mismo tipo de contenido JSON:
+
+```http
+POST /api/v1/unban
+Content-Type: application/json
+
+{"ip": "203.0.113.66"}
+```
+
+Si tiene éxito, devuelve el `Ban` retirado. Si no hay un baneo activo para la dirección,
+devuelve HTTP `404`.
+
+### POST /api/v1/config/reload
+
+Relee el archivo de configuración desde disco y lo aplica: el mismo efecto que enviar `SIGHUP`.
+El cuerpo está vacío; el tipo de contenido JSON sigue siendo obligatorio.
+
+```json
+{
+  "reloaded": true,
+  "dry_run": false,
+  "thresholds": {
+    "pps": 80000,
+    "mbps": 1000,
+    "flows_per_sec": 20000
+  }
+}
+```
+
+Si la nueva configuración no se analiza o no se valida, la configuración en ejecución se mantiene intacta y el
+endpoint devuelve HTTP `400` con el error. Consulta [Configuración](/docs/configuration).
+
+### GET /metrics
+
+Sirve las métricas de Prometheus en el formato de exposición de texto estándar. Este endpoint no está
+bajo `/api/v1` y se sirve sin el token bearer para que un scraper pueda alcanzarlo. Consulta
+[Métricas](/docs/metrics) para conocer la lista completa de métricas.
+
+## Relacionado
+
+- [Autenticación](/docs/authentication) — configura un token bearer antes de exponer el listener.
+- [Panel](/docs/dashboard) — la interfaz web integrada servida en la misma dirección.
+- [Métricas](/docs/metrics) — el endpoint `/metrics` de Prometheus.

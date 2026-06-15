@@ -1,0 +1,98 @@
+export const metadata = {
+  title: "Sicherheitsmodell",
+  description:
+    "Die sechs nicht verhandelbaren Sicherheitsregeln, die Kapkan im Code durchsetzt, damit niemals das Falsche per Blackhole geroutet werden kann.",
+};
+
+# Sicherheitsmodell
+
+Eine Route per Blackhole zu entfernen ist ein grobes Werkzeug: Eine fehlerhafte oder
+außer Kontrolle geratene Ankündigung kann Ihre eigene Infrastruktur schneller offline nehmen
+als jeder Angriff. Kapkan ist so gebaut, dass das nicht versehentlich passieren kann. Die sechs
+Regeln unten sind im Code durchgesetzt und durch Tests abgedeckt — es sind keine
+Konfigurationsoptionen, die man zu setzen vergessen könnte, und sie sind nicht verhandelbar.
+
+Jede einzelne von ihnen gilt gleichermaßen für **automatische**, durch Erkennung ausgelöste
+Sperren wie auch für **manuelle** Sperren, die über die API angefordert werden. Es gibt keinen
+Pfad, der sie umgeht.
+
+## 1. Dry-run standardmäßig
+
+Kapkan kündigt eine Blackhole-Route nur an, wenn die Konfiguration ausdrücklich
+`dry_run: false` setzt. Ein fehlender `dry_run`-Schlüssel wird als `true` behandelt. Im
+Dry-run wird jede potenzielle Ankündigung protokolliert und über die API und die Metriken
+sichtbar gemacht — aber **niemals** an Ihre Router gesendet. Sie können Kapkan gegen
+Live-Produktionstelemetrie betreiben, die Erkennung auslösen sehen und jede Route prüfen, die
+es ankündigen *würde*, bevor sie auch nur ein einziges Präfix berühren kann.
+
+<Callout type="warning" title="Sie entscheiden sich aktiv für die Mitigation, niemals dagegen">
+Da ein fehlender `dry_run`-Schlüssel Dry-run bedeutet, besteht die einzige Möglichkeit, mit dem
+Ankündigen von Routen zu beginnen, darin, bewusst `dry_run: false` zu schreiben und neu zu laden.
+Ein Tippfehler, eine abgeschnittene Datei oder ein vergessener Schlüssel verhalten sich allesamt
+ausfallsicher. Siehe [Live gehen](/docs/going-live) für die Validierungs-Checkliste, bevor Sie
+umschalten.
+</Callout>
+
+## 2. Keine dauerhaften Sperren
+
+Jede Ankündigung trägt eine TTL (`ban.ttl_seconds`) und wird automatisch zurückgezogen, wenn sie
+abläuft — selbst wenn der Angriff noch andauert. Es gibt keinen Code-Pfad, der eine Route ohne
+Ablaufzeit erzeugt. Ein hängengebliebener Prozess, eine verlorene Benachrichtigung oder ein
+Operator, der sich entfernt, können einen Host niemals für immer per Blackhole entfernt lassen;
+im schlimmsten Fall wird der Datenverkehr für ein TTL-Fenster verworfen und danach neu bewertet.
+
+## 3. Unban-Hysterese
+
+Eine Sperre wird erst zurückgezogen, nachdem der Datenverkehr des Ziels für
+`ban.unban_hysteresis_seconds` unter dem Schwellenwert geblieben ist, nicht in dem Moment, in
+dem ein einzelnes Fenster darunter fällt. Das verhindert das Flattern zwischen Ankündigung und
+Rückzug, das andernfalls am Rand eines Angriffs auftreten würde, wo der Datenverkehr knapp über
+und unter dem Limit oszilliert und BGP bei jedem Fenster aufwirbeln würde.
+
+## 4. Harte Obergrenze für Sperren
+
+`ban.max_active_bans` ist eine absolute Obergrenze für die Anzahl gleichzeitiger Sperren. Sobald
+sie erreicht ist, werden neue Sperren verweigert und die Ablehnung wird lautstark als Alarm
+gemeldet, statt angekündigt zu werden. Das ist der Schutzschalter gegen eine Fehlkonfiguration
+oder einen Erkennungssturm: Kapkan wird niemals Ihr halbes Netzwerk per Blackhole entfernen, weil
+ein Schwellenwert zu niedrig gesetzt wurde oder ein Angreifer sich über Tausende von Zielen
+verteilt hat. Eine manuelle Sperre, die die Obergrenze überschreiten würde, wird ebenfalls
+verweigert (siehe unten).
+
+## 5. Whitelist ist absolut
+
+Adressen, die in `protected_whitelist` aufgeführt sind — Ihre Router, Nameserver und andere
+kritische Infrastruktur — werden niemals angekündigt, unabhängig davon, wie viel Datenverkehr sie
+anziehen und unabhängig davon, wer es verlangt. Die Whitelist hat Vorrang vor der Erkennung und
+sie hat Vorrang vor manuellen Sperranfragen. Es gibt kein Flag, das sie umgeht.
+
+## 6. Eingegrenzte Erkennung
+
+Kapkan handelt nur bei Zielen innerhalb der konfigurierten `networks`-Präfixe. Datenverkehr zu
+Adressen außerhalb Ihrer geschützten Bereiche wird zwar weiterhin in den Metriken gezählt, kann
+aber niemals eine Sperre auslösen. Sie können nicht versehentlich ein Präfix per Blackhole
+entfernen, das Ihnen nicht gehört, selbst wenn eine Flut zufällig Ihr Netzwerk auf dem Weg
+woandershin durchquert.
+
+## Wie manuelle Sperren jede Regel erben
+
+Der Endpunkt `POST /api/v1/ban` ist keine Hintertür. Eine manuelle Sperranfrage wird gegen
+dieselben Schutzmechanismen geprüft wie die automatische Erkennung, und eine Anfrage, die einen
+davon verletzt, wird mit HTTP `409` abgelehnt, statt stillschweigend angekündigt zu werden:
+
+| Manuelle Sperranfrage | Ergebnis |
+| --- | --- |
+| Ziel befindet sich in `protected_whitelist` | `409` — niemals angekündigt |
+| Ziel liegt außerhalb des konfigurierten `networks`-Bereichs | `409` — außerhalb des Bereichs |
+| Das Sperren des Ziels würde `max_active_bans` überschreiten | `409` — Obergrenze erreicht |
+
+Eine manuelle Sperre, die alle drei besteht, beachtet weiterhin die TTL- und Hysterese-Regeln:
+Sie läuft automatisch ab wie jede andere Ankündigung. Die einzige Regel, die manuelle Sperren
+umgehen, ist der *Erkennungsschwellenwert* selbst — das ist der ganze Sinn einer manuellen Sperre
+—, aber niemals die Sicherheitsmechanismen rund um die Ankündigung.
+
+## Verwandte Themen
+
+- [Mitigation & RTBH](/docs/mitigation) — wie Ankündigungen, TTLs, Hysterese und die Obergrenze von Anfang bis Ende zusammenwirken.
+- [Live gehen](/docs/going-live) — Erkennung im Dry-run validieren und sie dann sicher abschalten.
+- [Konfigurationsreferenz](/docs/configuration) — die Schlüssel `dry_run`, `ban`, `protected_whitelist` und `networks`.

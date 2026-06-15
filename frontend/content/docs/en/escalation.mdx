@@ -1,0 +1,67 @@
+export const metadata = {
+  title: "Escalation ladders",
+  description:
+    "Step the mitigation response up the longer an attack persists — declaratively, from alert to FlowSpec to blackhole.",
+};
+
+# Escalation ladders
+
+A single `mitigation` method fires the same response the instant an attack is detected. An
+escalation ladder instead **steps the response up the longer an attack persists** —
+declaratively, where FastNetMon makes you write a callback script.
+
+```yaml
+escalation:                         # supersedes `mitigation` when present
+  - { after_seconds: 0,   action: none }       # alert only at first
+  - { after_seconds: 30,  action: flowspec }   # still under attack after 30s → surgical drop
+  - { after_seconds: 90,  action: divert }     # still under attack after 90s → scrub
+  - { after_seconds: 300, action: blackhole }  # still under attack after 300s → blackhole
+flowspec:
+  action: discard
+scrubbing:
+  next_hop: "192.0.2.100"   # scrubbing center; see Traffic diversion
+  community: "65000:200"
+```
+
+## How rungs apply
+
+Each rung's `after_seconds` is measured from the attack's start. A rung applies once that
+much time has elapsed **and the attack is still active** — no end event yet, i.e. traffic is
+still above threshold through the unban hysteresis.
+
+- The first rung must be at `0` seconds.
+- `action` is `none` (alert only), `flowspec`, `divert` ([scrubbing](/docs/scrubbing)), or
+  `blackhole`.
+- A ladder may only **hold or strengthen** the response: `none` < `flowspec` < `divert` <
+  `blackhole`. De-escalating between rungs is a config error.
+
+## Make-before-break
+
+Climbing to a rung is make-before-break: the new rung is announced first, and the previous
+one is withdrawn only after that succeeds — so the victim is never momentarily unprotected
+mid-switch. If the announce fails, the ban holds the working rung and retries on the next
+tick. If several rungs come due at once (a long-running attack, or the daemon catching up
+after a pause), the ban jumps straight to the highest due rung and never announces the
+rungs it skips.
+
+The one exception is `divert → blackhole`: both ride the same host-route NLRI, so the
+blackhole re-announcement atomically replaces the divert route — no separate withdraw, no
+gap. Cross-family switches (FlowSpec rules to a host route, or back) are the make-before-break
+case above.
+
+## Lifecycle and compatibility
+
+The ladder is **per-hostgroup overridable** and shares the rest of the ban lifecycle: TTL
+auto-withdrawal, the `max_active_bans` cap, the absolute whitelist, and dry-run (which
+advances the ladder and logs each rung but never announces).
+
+When no `escalation` block is set, the single `mitigation` method behaves exactly as a
+one-rung ladder at `0` seconds — full backward compatibility. The current rung and method
+are visible per ban in `/api/v1/bans` (`escalation`, `escalation_step`).
+
+## Related
+
+- [RTBH mitigation](/docs/mitigation) — the blackhole method.
+- [FlowSpec mitigation](/docs/flowspec) — the surgical method a ladder can step through.
+- [Traffic diversion](/docs/scrubbing) — the `divert` rung that scrubs instead of dropping.
+- [Configuration reference](/docs/configuration) · [REST API](/docs/api)

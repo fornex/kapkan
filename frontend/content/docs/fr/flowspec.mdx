@@ -1,0 +1,91 @@
+export const metadata = {
+  title: "Atténuation FlowSpec",
+  description:
+    "Atténuation chirurgicale par BGP FlowSpec (RFC 8955/8956) qui ne supprime que le vecteur d'attaque tout en épargnant le reste du trafic de la victime.",
+};
+
+# Atténuation FlowSpec
+
+Le blackholing RTBH met toute la victime hors ligne : il échange l'attaque contre une coupure de
+service. BGP FlowSpec (RFC 8955 pour IPv4, RFC 8956 pour IPv6) diffuse au contraire une règle qui
+ne supprime que le trafic d'attaque correspondant, de sorte que la victime continue de servir tout
+le reste.
+
+<Callout type="info" title="Le dry-run d'abord">
+Les règles générées apparaissent dans `/api/v1/attacks` (`method`, `flowspec`), dans `/api/v1/bans`
+et dans les notifications **avant** même que vous ne définissiez `dry_run: false` — vous pouvez
+ainsi d'abord les vérifier par rapport à la prise en charge de FlowSpec par votre upstream. Voir
+[Mise en production](/docs/going-live).
+</Callout>
+
+## Activer FlowSpec
+
+Définissez la méthode d'atténuation sur `flowspec`. La méthode par défaut est `blackhole` (RTBH).
+
+```yaml
+mitigation: flowspec            # default method for all groups (default: blackhole)
+flowspec:
+  action: discard               # or rate_limit
+  rate_mbps: 100                # required for rate_limit
+hostgroups:
+  - name: web
+    networks: ["203.0.113.0/26"]
+    mitigation: blackhole       # per-group override
+```
+
+`mitigation` est surchargeable par [hostgroup](/docs/hostgroups), ce qui vous permet d'utiliser
+FlowSpec de manière globale et de basculer sur le blackhole pour un ensemble de préfixes précis
+(ou l'inverse).
+
+## Règles générées
+
+Lors d'une attaque, Kapkan dérive un **ensemble minimal de règles** (au plus 8) à partir de la
+[classification](/docs/detection) de l'attaque et de l'échantillon de flow, en faisant correspondre
+la victime comme destination ainsi que le vecteur :
+
+| Attaque | Correspondance FlowSpec générée |
+| --- | --- |
+| Amplification NTP / DNS / CLDAP / memcached / SSDP / chargen | `dst=victim, proto=udp, src-port=<reflected port>` |
+| SYN flood | `dst=victim, proto=tcp, tcp-flags=SYN` |
+| Fragment flood | `dst=victim, fragment` |
+| Flood ICMP / UDP / TCP | `dst=victim, proto=<icmp/udp/tcp>` |
+| mixte / inconnu | `dst=victim` (plus une règle par port de réflecteur dominant dans l'échantillon) |
+
+La victime est toujours mise en correspondance en `/32` (IPv4) ou `/128` (IPv6). **FlowSpec IPv6 est
+à parité complète avec IPv4** — là où la propre feuille de route de FastNetMon liste encore FlowSpec
+IPv6 comme non pris en charge.
+
+## Attaques sortantes
+
+Pour une [attaque sortante](/docs/detection) — un hôte compromis qui inonde vers l'extérieur — la
+règle fait correspondre l'hôte comme **source** (le préfixe source de la RFC 8955/8956), de sorte
+qu'elle supprime réellement le flood sortant. Cela diffère d'un blackhole RTBH basé sur la
+destination, qui ne supprime que le trafic *vers* l'hôte.
+
+## Mises en garde
+
+- La correspondance `tcp-flags` pour les SYN floods est un masque de bits qui correspond aussi à
+  SYN-ACK, de sorte qu'une action `discard` supprime également les connexions sortantes initiées par
+  la victime — préférez `rate_limit` pour les vecteurs TCP.
+- `max_active_bans` plafonne les **bannissements**, pas les règles : un bannissement FlowSpec peut
+  porter jusqu'à 8 règles, donc N bannissements peuvent représenter jusqu'à 8N règles dans la RIB de
+  votre upstream. Surveillez la [métrique](/docs/metrics) `mitigate_flowspec_rules` par rapport à la
+  limite de routes FlowSpec de vos routeurs.
+
+## Action de règle et cycle de vie
+
+Chaque règle porte une communauté étendue de débit de trafic (traffic-rate) : `discard` (débit 0) ou
+un plafond `rate_limit`. Les bannissements FlowSpec partagent le même TTL, la même hystérésis de
+débannissement et le même cycle de vie `max_active_bans` que les bannissements blackhole — voir
+[Atténuation RTBH](/docs/mitigation).
+
+FlowSpec circule sur les **mêmes voisins BGP** que RTBH : l'AFI/SAFI FlowSpec est annoncé de manière
+additive, et un pair qui ne le prend pas en charge ne le négociera simplement pas. FlowSpec n'est
+**pas valide pour les hostgroups `calculation: total`** — il n'y a pas de préfixe de victime unique
+à faire correspondre.
+
+## Voir aussi
+
+- [Atténuation RTBH](/docs/mitigation) — la méthode blackhole et le cycle de vie de bannissement partagé.
+- [Échelles d'escalade](/docs/escalation) — montez en puissance de l'alerte vers FlowSpec puis vers le blackhole au fil du temps.
+- [Référence de configuration](/docs/configuration) · [Métriques](/docs/metrics) · [API REST](/docs/api)

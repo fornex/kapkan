@@ -1,0 +1,114 @@
+export const metadata = {
+  title: "Multi-tenencia",
+  description:
+    "Ejecuta una instancia de kapkan para muchos clientes — el token de API de cada tenant ve y modifica solo sus propios ataques, baneos y hosts.",
+};
+
+# Multi-tenencia
+
+Una instancia de Kapkan puede atender a muchos clientes (un caso de uso de MSP o IDC) y dar a
+cada uno un token que ve y modifica **solo sus propios** ataques, baneos y hosts. Un tenant es
+solo una etiqueta opcional en un [hostgroup](/docs/hostgroups) — no hay ningún objeto nuevo de
+nivel superior, ni un registro de tenants aparte, y el camino crítico de detección permanece
+intacto.
+
+```yaml
+tenant: "house"                 # optional: label the global/fallback group
+
+hostgroups:
+  - name: custA-web
+    tenant: "customerA"         # this group belongs to customerA
+    networks: ["203.0.113.0/26"]
+  - name: custA-dns
+    tenant: "customerA"         # a tenant can span several groups
+    networks: ["203.0.113.64/26"]
+  - name: custB
+    tenant: "customerB"
+    networks: ["198.51.100.0/24"]
+  - name: shared-infra          # no tenant → visible only to admin tokens
+    networks: ["192.0.2.0/24"]
+
+api:
+  tokens:
+    - { name: admin,    token_env: KAPKAN_ADMIN, role: operator }
+    - { name: a-portal, token_env: KAPKAN_A,     role: viewer,   tenant: "customerA" }
+    - { name: b-ops,    token_env: KAPKAN_B,     role: operator, tenant: "customerB" }
+```
+
+## El modelo
+
+"Qué tenant es dueño de esta IP" se responde mediante la **misma** búsqueda de hostgroup por
+prefijo más largo que el motor y el mitigador ya usan para atribuir el tráfico — hay una única
+fuente de verdad para la propiedad de las IP, y la resolución nunca se ejecuta en el camino de
+detección por flow. Un tenant puede abarcar varios hostgroups (un cliente con grupos separados
+de web y DNS). El grupo global/de respaldo implícito puede llevar un `tenant` de nivel superior
+para que el tráfico catch-all se atribuya a un tenant house; un hostgroup **sin** `tenant` está
+sin etiquetar y solo es visible para los tokens de administrador.
+
+Una etiqueta de tenant **no** es una unidad de política de mitigación — los umbrales, los
+atributos BGP y el escalado siguen siendo por hostgroup. Es puramente una etiqueta de propiedad
+usada para acotar el alcance de la API.
+
+## Alcance del token
+
+Un [token de API](/docs/authentication) gana un `tenant` opcional, que se apoya en su rol:
+
+| Token | Ve | Puede modificar |
+| --- | --- | --- |
+| sin alcance (sin `tenant`) | todos los tenants (admin) | según su rol |
+| `tenant: customerA`, `role: viewer` | solo customerA | nada |
+| `tenant: customerA`, `role: operator` | solo customerA | solo customerA |
+
+Un token sin alcance es un administrador — el comportamiento por defecto, totalmente
+retrocompatible. Un token acotado a un tenant que ningún hostgroup usa se rechaza al cargar la
+configuración (de lo contrario, una errata vería silenciosamente nada).
+
+## Aplicación
+
+El acotamiento es **deny por defecto para los tokens con alcance** en un único punto de
+estrangulamiento: el tenant de la solicitud se deriva una sola vez durante la autenticación, y
+un único predicado de visibilidad decide cada fila. Un nuevo endpoint de lectura que olvide
+filtrar devolvería, para un token con alcance, nada — nunca los datos de otro tenant.
+
+- **Lecturas** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` devuelven solo las filas cuyo
+  grupo propietario lleva el tenant de quien llama. `/status` se reconstruye por alcance: un
+  token con alcance obtiene solo sus propios hostgroups y conteos, nunca las redes protegidas
+  globales, los umbrales globales ni el grupo de respaldo de todo el despliegue — de modo que un
+  tenant nunca conoce los prefijos ni la postura BGP de otro.
+- **Mutaciones** — un operator con alcance puede hacer `ban`/`unban` solo dentro de sus propios
+  prefijos. Un objetivo fuera del tenant devuelve un `403` uniforme exista o no un baneo, de
+  modo que un tenant no puede sondear el estado de baneo de otro. `POST /api/v1/config/reload`
+  es **solo para administradores** — un reload reescribe la política de cada tenant y el propio
+  conjunto de tokens.
+- **La ambigüedad falla cerrada** — si un secreto bearer coincide con tokens de distinto rol o
+  tenant (un secreto reutilizado), la solicitud se rechaza en lugar de resolverse al alcance más
+  amplio.
+
+<Callout type="info" title="/metrics y el panel de control">
+`/metrics` no está acotado por tenant — sigue siendo una superficie de scrape para
+administrador/operator. El armazón del panel de control es compartido (no contiene datos
+propios); cada llamada de datos que realiza se filtra por el token pegado en él, de modo que el
+token viewer de un tenant muestra solo los datos de ese tenant.
+</Callout>
+
+<Callout type="warning" title="La propiedad sigue la configuración actual">
+La visibilidad de un token con alcance se calcula contra la configuración en vivo: re-asignar
+el tenant de un prefijo (un reload solo para administradores) entrega sus ataques y baneos en
+curso al **nuevo** propietario de inmediato. Esto es deliberado — el control sigue a la
+propiedad actual — pero significa que un reload equivocado puede mover brevemente filas entre
+tenants.
+</Callout>
+
+## Retrocompatibilidad
+
+Ningún tenant configurado en ninguna parte = comportamiento single-tenant, byte por byte: cada
+grupo está sin etiquetar, cada token es un administrador sin alcance, y la API devuelve todo
+como antes. La tenencia es opcional y no puedes obtener aislamiento en una API abierta (sin
+token) — no hay ningún principal al que acotar.
+
+## Relacionado
+
+- [Grupos de hosts](/docs/hostgroups) — los grupos de prefijos que un tenant etiqueta.
+- [Autenticación](/docs/authentication) — los roles de token sobre los que se apoya el alcance del tenant.
+- [API REST](/docs/api) — los endpoints que se filtran por tenant.
+- [Referencia de configuración](/docs/configuration)

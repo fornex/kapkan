@@ -1,0 +1,90 @@
+export const metadata = {
+  title: "Mitigación FlowSpec",
+  description:
+    "Mitigación quirúrgica mediante BGP FlowSpec (RFC 8955/8956) que descarta únicamente el vector de ataque y preserva el resto del tráfico de la víctima.",
+};
+
+# Mitigación FlowSpec
+
+El blackholing RTBH deja a toda la víctima fuera de línea: cambia el ataque por una caída del
+servicio. BGP FlowSpec (RFC 8955 para IPv4, RFC 8956 para IPv6) distribuye en su lugar una regla
+que descarta solo el tráfico de ataque coincidente, de modo que la víctima sigue sirviendo todo
+lo demás.
+
+<Callout type="info" title="Primero en dry-run">
+Las reglas generadas aparecen en `/api/v1/attacks` (`method`, `flowspec`), en `/api/v1/bans` y
+en las notificaciones **antes** de que llegues a establecer `dry_run: false`, de modo que puedes
+confirmarlas frente al soporte de FlowSpec de tu upstream primero. Consulta
+[Puesta en producción](/docs/going-live).
+</Callout>
+
+## Habilitar FlowSpec
+
+Establece el método de mitigación en `flowspec`. El método predeterminado es `blackhole` (RTBH).
+
+```yaml
+mitigation: flowspec            # default method for all groups (default: blackhole)
+flowspec:
+  action: discard               # or rate_limit
+  rate_mbps: 100                # required for rate_limit
+hostgroups:
+  - name: web
+    networks: ["203.0.113.0/26"]
+    mitigation: blackhole       # per-group override
+```
+
+`mitigation` es anulable por [hostgroup](/docs/hostgroups), de modo que puedes ejecutar FlowSpec
+de forma global y recurrir a blackhole para un conjunto de prefijos concreto (o viceversa).
+
+## Reglas generadas
+
+Ante un ataque, Kapkan deriva un **conjunto mínimo de reglas** (como máximo 8) a partir de la
+[clasificación](/docs/detection) del ataque y de la muestra de flujo, haciendo coincidir a la
+víctima como destino más el vector:
+
+| Ataque | Coincidencia FlowSpec generada |
+| --- | --- |
+| Amplificación NTP / DNS / CLDAP / memcached / SSDP / chargen | `dst=victim, proto=udp, src-port=<reflected port>` |
+| SYN flood | `dst=victim, proto=tcp, tcp-flags=SYN` |
+| Fragment flood | `dst=victim, fragment` |
+| ICMP / UDP / TCP flood | `dst=victim, proto=<icmp/udp/tcp>` |
+| mixto / desconocido | `dst=victim` (más una regla por cada puerto de reflector dominante en la muestra) |
+
+La víctima siempre se hace coincidir como un `/32` (IPv4) o un `/128` (IPv6). **FlowSpec para IPv6
+está a plena paridad con IPv4**, mientras que la propia hoja de ruta de FastNetMon todavía lista
+FlowSpec para IPv6 como no soportado.
+
+## Ataques salientes
+
+Para un [ataque saliente](/docs/detection) —un host comprometido que inunda hacia el exterior— la
+regla hace coincidir al host como **origen** (el source-prefix de RFC 8955/8956), de modo que
+realmente descarta la inundación saliente. Esto difiere de un blackhole RTBH basado en destino,
+que solo elimina el tráfico *hacia* el host.
+
+## Advertencias
+
+- La coincidencia `tcp-flags` para los SYN floods es una máscara de bits que también coincide con
+  SYN-ACK, por lo que una acción `discard` descarta también las conexiones iniciadas de forma
+  saliente por la víctima; prefiere `rate_limit` para los vectores TCP.
+- `max_active_bans` limita los **bans**, no las reglas: un ban de FlowSpec puede transportar hasta
+  8 reglas, así que N bans pueden suponer hasta 8N reglas en el RIB de tu upstream. Vigila la
+  [métrica](/docs/metrics) `mitigate_flowspec_rules` frente al límite de rutas FlowSpec de tus
+  routers.
+
+## Acción y ciclo de vida de las reglas
+
+Cada regla transporta una comunidad extendida de traffic-rate: `discard` (rate 0) o un techo de
+`rate_limit`. Los bans de FlowSpec comparten el mismo TTL, la misma histéresis de des-baneo y el
+mismo ciclo de vida de `max_active_bans` que los bans de blackhole; consulta
+[Mitigación RTBH](/docs/mitigation).
+
+FlowSpec circula sobre los **mismos vecinos BGP** que RTBH: el AFI/SAFI de FlowSpec se anuncia de
+forma aditiva, y un par que no lo soporte simplemente no lo negociará. FlowSpec **no es válido para
+los hostgroups con `calculation: total`**: no hay un único prefijo de víctima al que hacer
+coincidir.
+
+## Relacionado
+
+- [Mitigación RTBH](/docs/mitigation) — el método blackhole y el ciclo de vida de bans compartido.
+- [Escaleras de escalado](/docs/escalation) — escala desde la alerta hasta FlowSpec y hasta blackhole con el tiempo.
+- [Referencia de configuración](/docs/configuration) · [Métricas](/docs/metrics) · [API REST](/docs/api)

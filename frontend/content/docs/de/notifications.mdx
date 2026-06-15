@@ -1,0 +1,278 @@
+export const metadata = {
+  title: "Benachrichtigungen",
+  description:
+    "Alarmierung bei Angriffsbeginn und -ende über Telegram, Slack, E-Mail, Webhook und einen Exec-Hook — mit einem versionierten JSON-Payload-Schema.",
+};
+
+# Benachrichtigungen
+
+Kapkan löst bei jedem Ereignis im Lebenszyklus eines Angriffs eine Benachrichtigung
+aus — wenn ein Angriff erstmals erkannt wird (`attack_started`) und wenn er abklingt
+(`attack_ended`). Jedes Ereignis wird an jeden konfigurierten Kanal zugestellt:
+Telegram, Slack, E-Mail, einen generischen JSON-Webhook und einen Exec-Hook.
+
+Die Zustellung erfolgt nach dem Best-Effort-Prinzip und asynchron. Ein langsamer oder
+fehlschlagender Kanal blockiert niemals die Erkennung oder Mitigation, und jeder Kanal
+ist durch seinen eigenen Worker-Pool begrenzt — bei einem Carpet-Bomb-Angriff, der pro
+Host ein Ereignis erzeugt, werden überzählige Benachrichtigungen verworfen und gezählt,
+anstatt sich unbegrenzt als Verbindungen oder Hook-Prozesse anzusammeln.
+
+<Callout type="info" title="Geheimnisse stammen aus der Umgebung">
+Bot-Tokens und SMTP-Zugangsdaten werden aus benannten Umgebungsvariablen gelesen,
+niemals aus der Konfigurationsdatei. Die Datei enthält nur den Namen der Variable (zum
+Beispiel `token_env: "KAPKAN_TG_TOKEN"`), sodass Sie die Konfiguration in git halten
+können.
+</Callout>
+
+## Kanäle
+
+### Telegram
+
+Setzen Sie `notify.telegram.token_env` auf den Namen der Umgebungsvariable, die Ihr
+Bot-Token enthält, und `notify.telegram.chat_id` auf den Ziel-Chat. Das Token wird zum
+Sendezeitpunkt aus dieser Variable gelesen; es wird niemals in der Datei gespeichert.
+Nachrichten werden als HTML gesendet und enthalten das Angriffsziel, die Klassifizierung,
+die auslösende Metrik und den Sperrstatus.
+
+### Slack
+
+Setzen Sie `notify.slack.webhook_url` auf die URL eines Slack-
+[Incoming-Webhooks](https://api.slack.com/messaging/webhooks). Kapkan sendet bei jedem
+Ereignis per POST eine formatierte Nachricht dorthin. Lassen Sie das Feld leer, um den
+Kanal zu deaktivieren.
+
+### E-Mail (SMTP)
+
+Konfigurieren Sie `notify.email`, um SMTP-Mail zu versenden. Setzen Sie `smtp_host` auf
+`host:port` (ein leerer Wert deaktiviert den Kanal), `from` auf den Envelope-Absender und
+`to` auf eine Liste von Empfängern. Die Zugangsdaten werden über `username_env` und
+`password_env` aus der Umgebung gelesen.
+
+| Schlüssel | Bedeutung |
+| --- | --- |
+| `smtp_host` | SMTP-Server als `host:port`; leer deaktiviert E-Mail. |
+| `from` | Absenderadresse für Envelope und Header. |
+| `to` | Liste der Empfängeradressen. |
+| `username_env` | Umgebungsvariable mit dem SMTP-Benutzernamen (aktiviert AUTH PLAIN). |
+| `password_env` | Umgebungsvariable mit dem SMTP-Passwort. |
+| `require_tls` | STARTTLS auch ohne Zugangsdaten erzwingen. |
+
+Kapkan verwendet STARTTLS, sobald der Server es anbietet. STARTTLS ist **erforderlich**,
+wenn Zugangsdaten konfiguriert sind (ein nicht leeres `username_env`) oder wenn
+`require_tls: true` gesetzt ist — in diesem Fall wird ein Server, der kein STARTTLS
+anbietet, mit einem deutlichen Fehler abgelehnt, anstatt auf Klartext zurückzufallen, was
+einen aktiven Downgrade-Angriff in einen sichtbaren Fehler verwandelt. Wird TLS weder
+angeboten noch verlangt, läuft die Zustellung an einen Nicht-Loopback-Host im Klartext ab
+und wird deutlich protokolliert.
+
+<Callout type="warning" title="Klartext an entfernte Hosts wird protokolliert, nicht blockiert">
+Wenn Ihr SMTP-Server kein STARTTLS anbietet und Sie weder Zugangsdaten noch `require_tls`
+setzen, versendet Kapkan Mail im Klartext an einen Nicht-Loopback-Host und gibt eine
+Warnung aus. Setzen Sie `require_tls: true`, damit dieser Fall stattdessen fehlschlägt.
+</Callout>
+
+### Webhook
+
+Setzen Sie `notify.webhook.url` auf einen beliebigen HTTPS-Endpunkt. Kapkan sendet bei
+jedem Angriffsbeginn und -ende ein HTTP-`POST` mit einem `Content-Type: application/json`-Body
+— dem unten beschriebenen [Callback-Payload](#callback-payload-schema). Nicht-2xx-Antworten
+werden als Zustellfehler behandelt und gezählt. Die Anfrage trägt ein begrenztes Timeout,
+sodass ein hängender Empfänger keinen Zustell-Slot blockieren kann.
+
+```http
+POST /your/endpoint HTTP/1.1
+Content-Type: application/json
+```
+
+### Exec-Hook
+
+Setzen Sie `notify.exec.command` auf den absoluten Pfad einer vorhandenen ausführbaren
+Datei. Bei jedem Ereignis führt Kapkan diese direkt aus — **ohne Shell** — mit:
+
+- Dem [Callback-Payload](#callback-payload-schema) als JSON auf **stdin**.
+- Dem Ereignisnamen (`attack_started` oder `attack_ended`) als **`argv[1]`**.
+- Einer **minimalen Umgebung**: nur `PATH`, `HOME`, `TZ`, `LANG`, `USER` und `TMPDIR`
+  werden durchgereicht. Die Geheimnisse des Daemons (Bot-Tokens, SMTP-Zugangsdaten) werden
+  niemals an den Hook oder dessen Kindprozesse vererbt.
+
+Der Befehl muss beim Laden der Konfiguration vorhanden und ausführbar sein.
+`timeout_seconds` (Standard `10`) begrenzt jeden Lauf; bei einem Timeout beendet Kapkan
+die **gesamte Prozessgruppe** des Hooks, damit Enkelprozesse nicht als Waisen
+weiterleben können. Der Hook erhält dasselbe Schema wie der Webhook, sodass ein einziges
+Skript beide Kanäle bedienen kann.
+
+Die Aufrufkonvention wird über `notify.exec.format` gewählt: `kapkan` (der Standard,
+oben beschrieben) oder `fastnetmon` (siehe unten).
+
+<Callout type="danger" title="Der Hook läuft als Daemon-Benutzer">
+Der Exec-Befehl läuft mit den Rechten des Kapkan-Prozesses. Behandeln Sie das Skript als
+Teil Ihrer vertrauenswürdigen Basis, halten Sie es auf einem Pfad, in den nur root
+schreiben kann, und lesen Sie niemals nicht vertrauenswürdige, von Angreifern
+kontrollierte Felder zurück in eine Shell.
+</Callout>
+
+### FastNetMon-kompatibler Modus
+
+Sie migrieren von FastNetMon? Setzen Sie `notify.exec.format: fastnetmon`, und Kapkan ruft
+den Hook genau so auf, wie es FastNetMons `notify_script` tut — sodass Ihre vorhandenen
+Notify-Skripte unverändert laufen:
+
+- **`argv`** ist `<ip> <direction> <pps> <action>`.
+- **stdin** trägt eine Klartext-Angriffszusammenfassung (FastNetMons `attack_details`-Body).
+
+```yaml
+notify:
+  exec:
+    command: "/usr/local/bin/notify_about_attack.sh"
+    format: fastnetmon
+```
+
+`action` ist einer von `ban`, `unban` oder `attack_details`, abgeleitet aus dem
+Kapkan-Ereignis:
+
+| Kapkan-Ereignis | `action` |
+| --- | --- |
+| Angriff begonnen, Host blackholed oder umgeleitet | `ban` |
+| Angriff begonnen, nur Alarm (keine Sperre) | `attack_details` |
+| Angriff beendet, eine Sperre wurde zurückgenommen | `unban` |
+| **jedes Ereignis, während `dry_run` true ist** | `attack_details` |
+
+<Callout type="warning" title="Dry-Run gibt niemals ban/unban aus">
+Im Dry-Run kündigt Kapkan nichts an — aber ein FastNetMon-Ban-Skript *würde* den Host
+per Firewall sperren. Daher wird im Dry-Run jedes Ereignis auf das informative
+`attack_details` herabgestuft, niemals auf `ban`/`unban`, und ein FastNetMon-Skript kann
+keinen Host sperren, den Sie nur validieren. Group-scoped-Angriffe (`calculation: total`)
+haben keinen einzelnen Host und werden in diesem Modus übersprungen.
+</Callout>
+
+## Konfiguration
+
+Ein vollständiger `notify`-Block. Jeder Kanal ist optional — ein leeres `smtp_host`,
+`url`, `webhook_url` oder `command` deaktiviert den jeweiligen Kanal.
+
+```yaml
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"   # token is read from this env var, never the file
+    chat_id: "-1001234567890"
+  webhook:
+    url: ""                        # generic JSON POST on every attack start/end
+    # payload schema: docs/callback-schema.json (check schema_version)
+  slack:
+    webhook_url: ""                # Slack incoming webhook
+  email:                           # SMTP; credentials from env vars
+    smtp_host: ""                  # "mail.example.com:587"; empty disables
+    from: ""
+    to: []                         # ["ops@example.com"]
+    username_env: "KAPKAN_SMTP_USER"
+    password_env: "KAPKAN_SMTP_PASS"
+    require_tls: false             # STARTTLS is auto-required when credentials are set
+  exec:                            # hook run on every attack event (no shell)
+    command: ""                    # absolute path to an existing executable
+    timeout_seconds: 10
+    format: kapkan                 # or "fastnetmon" for FastNetMon-style argv/stdin
+```
+
+## Callback-Payload-Schema
+
+Der Webhook-Body und die stdin des Exec-Hooks tragen dasselbe JSON-Objekt. Es ist über
+`schema_version` versioniert, derzeit `1`. Die maßgebliche Definition befindet sich in
+[`docs/callback-schema.json`](https://github.com/kapkan-io/kapkan/blob/main/docs/callback-schema.json).
+
+<Callout type="info" title="Vorwärtskompatibilität">
+Konsumenten MÜSSEN `schema_version` prüfen und SOLLTEN unbekannte Felder ignorieren. Die
+Version wird nur bei Breaking Changes erhöht, sodass neue Felder hinzugefügt werden können,
+ohne Sie zu beeinträchtigen.
+</Callout>
+
+| Feld | Typ | Hinweise |
+| --- | --- | --- |
+| `schema_version` | integer | In diesem Release immer `1`. |
+| `event` | string | `attack_started` oder `attack_ended`. |
+| `scope` | string | `host` (ein einzelnes `target` wird angegriffen) oder `group` (der summierte Traffic einer Hostgroup mit `calculation: total`; `group` gesetzt, `target` fehlt). |
+| `target` | string | Angegriffener Host — oder, bei ausgehenden Angriffen, der angreifende Host. Bei Ereignissen mit Group-Scope nicht vorhanden. |
+| `group` | string | Name der zugehörigen Hostgroup; `global` für die implizite Fallback-Gruppe. |
+| `direction` | string | `incoming`, oder `outgoing`, wenn das Ziel den Angriff selbst ausgeht (wahrscheinlich kompromittiert). |
+| `metric` | string | Der überschrittene Schwellwert (zum Beispiel `pps`, `mbps`, `udp_pps`, `tcp_syn_pps`, `frag_pps`). |
+| `rate` | number | Beobachteter Wert der auslösenden Metrik, sampling-korrigiert. |
+| `threshold` | number | Konfiguriertes Limit dieser Metrik bei Angriffsbeginn. |
+| `pps` | number | Sampling-korrigierte Pakete pro Sekunde. |
+| `mbps` | number | Sampling-korrigierte Megabit pro Sekunde. |
+| `flows_per_sec` | number | Sampling-korrigierte Flows pro Sekunde. |
+| `ban_state` | string | `active`, `withdrawn` oder `rejected`, wenn die Mitigation konsultiert wurde. |
+| `route` | string | Die angekündigte Blackhole-Route (die potenzielle Route im Dry-Run). |
+| `dry_run` | boolean | Ob die Mitigation für dieses Ereignis im Dry-Run-Modus war. |
+| `at` | string | RFC-3339-Zeitstempel des Ereignisses. |
+| `classification` | object | Abgeleiteter Angriffsvektor — nur bei `attack_started`. |
+| `sample` | object | Flow-Sample, das erfasst wurde, bevor der Schwellwert überschritten wurde — nur bei `attack_started`, wenn der Traffic-Puffer aktiviert ist. |
+
+Das `classification`-Objekt trägt den abgeleiteten `type` (zum Beispiel `ntp_amplification`,
+`syn_flood`, `udp_flood` oder `mixed`, wenn keine Signatur passte), einen `confidence`-Anteil
+von `0` bis `1` sowie `src_port` für Amplification-Vektoren. Das `sample`-Objekt trägt
+gekürzte `flows` sowie Top-K-Zähler `top_sources`, `top_src_ports`, `top_dst_ports` und
+`protocols` und einen Nenner `total_packets`.
+
+### Beispiel-Payload
+
+Ein realistisches `attack_started`-Ereignis für einen NTP-Amplification-Flood, im Dry-Run
+erkannt:
+
+```json
+{
+  "schema_version": 1,
+  "event": "attack_started",
+  "scope": "host",
+  "target": "203.0.113.45",
+  "group": "customers",
+  "direction": "incoming",
+  "metric": "mbps",
+  "rate": 8421.5,
+  "threshold": 500,
+  "pps": 612000,
+  "mbps": 8421.5,
+  "flows_per_sec": 9400,
+  "ban_state": "active",
+  "route": "203.0.113.45/32",
+  "dry_run": true,
+  "at": "2026-06-13T14:22:07Z",
+  "classification": {
+    "type": "ntp_amplification",
+    "confidence": 0.94,
+    "src_port": 123
+  },
+  "sample": {
+    "flows": [
+      {
+        "src": "198.51.100.7",
+        "dst": "203.0.113.45",
+        "src_port": 123,
+        "dst_port": 51344,
+        "proto": "udp",
+        "fragment": false,
+        "bytes": 4800,
+        "packets": 10,
+        "sampling_rate": 1024
+      }
+    ],
+    "top_sources": [
+      { "key": "198.51.100.7", "packets": 184320, "bytes": 88473600 }
+    ],
+    "top_src_ports": [
+      { "key": "123", "packets": 611000, "bytes": 293280000 }
+    ],
+    "top_dst_ports": [
+      { "key": "51344", "packets": 611000, "bytes": 293280000 }
+    ],
+    "protocols": [
+      { "key": "udp", "packets": 611500, "bytes": 293520000 }
+    ],
+    "total_packets": 612000
+  }
+}
+```
+
+## Verwandte Themen
+
+- [REST-API](/docs/api) — aktive und kürzliche Angriffe programmatisch abfragen.
+- [Metriken](/docs/metrics) — `notify_notifications_total` nach Kanal und Ergebnis.
+- [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.

@@ -1,0 +1,129 @@
+export const metadata = {
+  title: "Authentifizierung",
+  description:
+    "Sichern Sie die API und das Dashboard mit einem Bearer-Token ab, bevor Sie den Listener über localhost hinaus verfügbar machen.",
+};
+
+# Authentifizierung
+
+Standardmäßig sind die Kapkan-API und das Dashboard **nicht authentifiziert**. Das ist nur
+deshalb sicher, weil der Standardwert von `api.listen` an `127.0.0.1` bindet — der Listener
+ist also nur vom Host selbst aus erreichbar, sodass kein Token erforderlich ist, um den
+Status abzurufen, Angriffe aufzulisten oder manuelle Sperren auszulösen. In dem Moment, in
+dem Sie den Listener an eine routbare Adresse binden, verschwindet dieser Schutz.
+
+<Callout type="danger" title="Setzen Sie ein Token, bevor Sie den Listener verfügbar machen">
+Wenn Sie `api.listen` auf etwas anderes als localhost ändern — zum Beispiel `0.0.0.0:8080`
+oder eine bestimmte Schnittstelle — konfigurieren Sie zuerst ein Token. Ein nicht
+authentifizierter Listener auf einer routbaren Adresse erlaubt es jedem, die [API](/docs/api)
+zu erreichen, einschließlich der Endpunkte zum manuellen Sperren und Entsperren.
+</Callout>
+
+## Ein Token setzen
+
+Die Kurzform ist ein einzelnes Operator-Token. Fügen Sie `token_env` zum `api`-Block hinzu —
+es benennt die Umgebungsvariable, die das Token enthält; das Geheimnis selbst wird pro
+Anfrage aus der Prozessumgebung gelesen, niemals aus der Konfigurationsdatei:
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  token_env: "KAPKAN_API_TOKEN"   # token read from this env var, never the file
+```
+
+Stellen Sie den Wert anschließend außerhalb der Konfiguration bereit, zum Beispiel über die
+Umgebung Ihres Service-Managers oder eine Secrets-Datei:
+
+```sh
+export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
+./kapkan -config configs/prod.yaml
+```
+
+Das Token in einer Umgebungsvariablen statt in der YAML aufzubewahren bedeutet, dass die
+Konfiguration sicher in Git committet und zusammen mit dem Rest Ihrer
+[Konfiguration](/docs/configuration) verglichen werden kann.
+
+## Rollen
+
+Für rollenbasierten Zugriff verwenden Sie `tokens` anstelle von `token_env` — eine Liste, in
+der jeder Eintrag die Umgebungsvariable benennt, die sein Geheimnis enthält, sowie eine Rolle:
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  tokens:
+    - { name: dashboard,  token_env: "KAPKAN_API_RO", role: viewer }
+    - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
+```
+
+| Rolle | Darf |
+| --- | --- |
+| `viewer` | Nur lesen: Status, Angriffe, Hosts, Sperren, Metriken. |
+| `operator` | Alles, was ein viewer darf, plus manuelles Sperren/Entsperren und Neuladen der Konfiguration. |
+
+`token_env` und `tokens` schließen sich **gegenseitig aus** — `token_env` ist genau ein
+Operator-Token. Eine Anfrage wird gegen jedes konfigurierte Token abgeglichen (in konstanter
+Zeit); es gilt die höchste passende Rolle. Ein Lesezugriff mit einem viewer-Token
+funktioniert; eine Mutation mit einem viewer-Token wird mit `403 Forbidden` abgelehnt; eine
+Anfrage ohne gültiges Token ergibt `401 Unauthorized`. Eine leere oder nicht gesetzte
+Umgebungsvariable passt niemals, sodass ein fehlkonfiguriertes Geheimnis fail-closed ist.
+
+Tokens und Rollen werden bei jeder Anfrage aus der Umgebung gelesen, sodass das Rotieren eines
+Geheimnisses oder das Ändern des Token-Satzes beim nächsten [Neuladen der Konfiguration](/docs/api)
+wirksam wird — ohne Neustart.
+
+Ein Token kann außerdem einen optionalen `tenant` tragen, der es auf die Daten eines einzelnen
+Kunden eingrenzt. Das ist die Funktion [Mandantenfähigkeit](/docs/multi-tenancy), aufgesetzt
+auf die hier beschriebenen Rollen.
+
+## Was es schützt
+
+Ist ein Token gesetzt, muss jede `/api/v1`-Anfrage es in einem `Authorization`-Header gemäß
+dem Bearer-Schema mitführen:
+
+```http
+GET /api/v1/status HTTP/1.1
+Host: kapkan.internal:8080
+Authorization: Bearer <token>
+```
+
+Das übermittelte Token wird in **konstanter Zeit** mit dem konfigurierten verglichen, sodass
+der Vergleich selbst das Geheimnis nicht über das Zeitverhalten preisgibt.
+
+Was offen bleibt und was geschützt wird:
+
+| Pfad | Bei gesetztem Token |
+| --- | --- |
+| `GET /api/v1/*` | Erfordert ein **viewer**- (oder operator-) Token |
+| `POST /api/v1/*` | Erfordert ein **operator**-Token **und** einen JSON-Content-Type |
+| `GET /metrics` | Offen — der Prometheus-Scrape bleibt nicht authentifiziert |
+| Statische UI-Shell (`/`) | Offen — die dahinterliegenden Daten jedoch nicht |
+
+Die statische UI-Shell des Dashboards bleibt erreichbar, damit ein Browser sie laden kann,
+aber sie verfügt über keine eigenen Daten: Sie fragt `/api/v1` ab, fordert daher zur Eingabe
+des Tokens auf und bewahrt es im `sessionStorage` auf. `/metrics` bleibt ebenso offen für
+Ihren Prometheus-Scraper. Auf der Seite zum [Dashboard](/docs/dashboard) erfahren Sie, wie
+die UI die Token-Abfrage handhabt.
+
+## CSRF
+
+POST-Endpunkte erfordern zusätzlich zum Token `Content-Type: application/json`. Ein Browser,
+der eine seitenübergreifende Anfrage ausführt, kann ohne einen CORS-Preflight keinen
+benutzerdefinierten `Authorization`-Header setzen, und ein einfacher Formular-Post kann den
+JSON-Content-Type nicht senden. Indem beides erforderlich ist — das Token in einem
+Anfrage-Header und der JSON-Content-Type — wird Cross-Site Request Forgery gegen die
+Endpunkte zum manuellen Sperren, Entsperren und Neuladen der Konfiguration blockiert.
+
+<Callout type="info" title="Rollen und Mandanten sind verschiedene Achsen">
+Eine Rolle grenzt ein, was ein Token *tun* darf (lesen vs. mutieren). Der optionale `tenant`
+eines Tokens grenzt ein, welche Daten es *sehen und anfassen* darf. Sie ergänzen sich: ein
+viewer kann ungebunden sein (alle Mandanten) oder auf einen eingegrenzt. Siehe
+[Mandantenfähigkeit](/docs/multi-tenancy).
+</Callout>
+
+## Verwandte Themen
+
+- [Mandantenfähigkeit](/docs/multi-tenancy) — ein Token auf die Daten eines einzelnen Kunden eingrenzen.
+- [REST API](/docs/api) — die Endpunkte, die das Token schützt.
+- [Dashboard](/docs/dashboard) — wie die eingebettete UI zur Eingabe des Tokens auffordert und es speichert.
+- [Deployment](/docs/deployment) — den Listener binden und das Token in der Produktion bereitstellen.

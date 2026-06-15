@@ -1,0 +1,113 @@
+export const metadata = {
+  title: "Multi-tenant",
+  description:
+    "Exploitez une seule instance kapkan pour de nombreux clients — le token API de chaque tenant ne voit et ne touche que ses propres attaques, bannissements et hôtes.",
+};
+
+# Multi-tenant
+
+Une seule instance Kapkan peut servir de nombreux clients (cas d'usage MSP ou IDC) et donner à
+chacun un token qui ne voit et ne touche **que les siens** : attaques, bannissements et hôtes. Un
+tenant n'est qu'une étiquette optionnelle sur un [hostgroup](/docs/hostgroups) — il n'y a pas de
+nouvel objet de premier niveau, pas de registre de tenants distinct, et le chemin critique de
+détection reste intact.
+
+```yaml
+tenant: "house"                 # optional: label the global/fallback group
+
+hostgroups:
+  - name: custA-web
+    tenant: "customerA"         # this group belongs to customerA
+    networks: ["203.0.113.0/26"]
+  - name: custA-dns
+    tenant: "customerA"         # a tenant can span several groups
+    networks: ["203.0.113.64/26"]
+  - name: custB
+    tenant: "customerB"
+    networks: ["198.51.100.0/24"]
+  - name: shared-infra          # no tenant → visible only to admin tokens
+    networks: ["192.0.2.0/24"]
+
+api:
+  tokens:
+    - { name: admin,    token_env: KAPKAN_ADMIN, role: operator }
+    - { name: a-portal, token_env: KAPKAN_A,     role: viewer,   tenant: "customerA" }
+    - { name: b-ops,    token_env: KAPKAN_B,     role: operator, tenant: "customerB" }
+```
+
+## Le modèle
+
+« Quel tenant possède cette IP » est résolu par **la même** recherche de hostgroup par préfixe
+le plus long que le moteur et le mitigateur utilisent déjà pour attribuer le trafic — il y a une
+seule source de vérité pour la propriété des IP, et la résolution ne s'exécute jamais sur le
+chemin de détection par flow. Un tenant peut s'étendre sur plusieurs hostgroups (un client avec
+des groupes web et DNS séparés). Le groupe global/de repli implicite peut porter un `tenant` de
+premier niveau afin que le trafic fourre-tout soit attribué à un tenant house ; un hostgroup
+**sans** `tenant` est non étiqueté et visible uniquement par les tokens admin.
+
+Une étiquette de tenant n'est **pas** une unité de politique de mitigation — les seuils, les
+attributs BGP et l'escalade restent par hostgroup. C'est purement une étiquette de propriété
+utilisée pour cadrer l'API.
+
+## Portée du token
+
+Un [token API](/docs/authentication) gagne un `tenant` optionnel, qui s'appuie sur son rôle :
+
+| Token | Voit | Peut modifier |
+| --- | --- | --- |
+| sans portée (pas de `tenant`) | tous les tenants (admin) | selon son rôle |
+| `tenant: customerA`, `role: viewer` | uniquement customerA | rien |
+| `tenant: customerA`, `role: operator` | uniquement customerA | uniquement customerA |
+
+Un token sans portée est un admin — le comportement par défaut, entièrement rétrocompatible. Un
+token cadré sur un tenant qu'aucun hostgroup n'utilise est rejeté au chargement de la config (une
+faute de frappe ne verrait sinon silencieusement rien).
+
+## Application
+
+Le cadrage est **par défaut en refus pour les tokens cadrés** à un point d'étranglement unique :
+le tenant de la requête est dérivé une seule fois lors de l'authentification, et un unique
+prédicat de visibilité décide de chaque ligne. Un nouvel endpoint de lecture qui oublierait de
+filtrer renverrait, pour un token cadré, rien du tout — jamais les données d'un autre tenant.
+
+- **Lectures** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` ne renvoient que les lignes dont
+  le groupe propriétaire porte le tenant de l'appelant. `/status` est reconstruit par portée : un
+  token cadré n'obtient que ses propres hostgroups et compteurs, jamais les réseaux protégés
+  globaux, les seuils globaux ni le groupe de repli à l'échelle du déploiement — ainsi un tenant
+  n'apprend jamais les préfixes ou la posture BGP d'un autre.
+- **Mutations** — un operator cadré ne peut `ban`/`unban` que dans ses propres préfixes. Une cible
+  hors du tenant renvoie un `403` uniforme, qu'un bannissement existe ou non, de sorte qu'un
+  tenant ne peut pas sonder l'état de bannissement d'un autre. `POST /api/v1/config/reload` est
+  **réservé aux admins** — un reload réécrit la politique de chaque tenant ainsi que l'ensemble
+  des tokens lui-même.
+- **L'ambiguïté échoue de façon sûre** — si un même secret bearer correspond à des tokens de rôle
+  ou de tenant différents (un secret réutilisé), la requête est refusée plutôt que résolue vers la
+  portée la plus large.
+
+<Callout type="info" title="/metrics et le tableau de bord">
+`/metrics` n'est pas cadré par tenant — il reste une surface de scrape admin/operator. La coquille
+du tableau de bord est partagée (elle ne détient aucune donnée propre) ; chaque appel de données
+qu'elle effectue est filtré par le token qui y est collé, de sorte que le token viewer d'un tenant
+n'affiche que les données de ce tenant.
+</Callout>
+
+<Callout type="warning" title="La propriété suit la config courante">
+La visibilité d'un token cadré est calculée par rapport à la config en direct : re-tenanter un
+préfixe (un reload réservé aux admins) transfère immédiatement ses attaques et bannissements en
+cours au **nouveau** propriétaire. C'est délibéré — le contrôle suit la propriété courante — mais
+cela signifie qu'un reload erroné peut brièvement déplacer des lignes entre tenants.
+</Callout>
+
+## Rétrocompatibilité
+
+Aucun tenant configuré nulle part = comportement mono-tenant, à l'octet près : chaque groupe est
+non étiqueté, chaque token est un admin sans portée, et l'API renvoie tout comme avant. La
+multi-tenancy est opt-in et vous ne pouvez pas obtenir d'isolation sur une API ouverte (sans
+token) — il n'y a aucun principal à cadrer.
+
+## Voir aussi
+
+- [Groupes d'hôtes](/docs/hostgroups) — les groupes de préfixes qu'un tenant étiquette.
+- [Authentification](/docs/authentication) — les rôles de token sur lesquels s'appuie la portée du tenant.
+- [API REST](/docs/api) — les endpoints filtrés par tenant.
+- [Référence de configuration](/docs/configuration)

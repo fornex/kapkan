@@ -1,0 +1,85 @@
+export const metadata = {
+  title: "FlowSpec-Mitigation",
+  description:
+    "Chirurgisch präzise BGP-FlowSpec-Mitigation (RFC 8955/8956), die nur den Angriffsvektor verwirft und den übrigen Datenverkehr des Opfers verschont.",
+};
+
+# FlowSpec-Mitigation
+
+Ein RTBH-Blackhole nimmt das gesamte Opfer vom Netz — es tauscht den Angriff gegen einen Ausfall ein.
+BGP FlowSpec (RFC 8955 für IPv4, RFC 8956 für IPv6) verteilt stattdessen eine Regel, die nur den
+passenden Angriffsverkehr verwirft, sodass das Opfer alles Übrige weiter ausliefert.
+
+<Callout type="info" title="Erst der Trockenlauf">
+Die generierten Regeln erscheinen in `/api/v1/attacks` (`method`, `flowspec`), in `/api/v1/bans`
+und in Benachrichtigungen, **bevor** Sie jemals `dry_run: false` setzen — so können Sie sie zunächst
+gegen die FlowSpec-Unterstützung Ihres Upstreams überprüfen. Siehe [Inbetriebnahme](/docs/going-live).
+</Callout>
+
+## FlowSpec aktivieren
+
+Setzen Sie die Mitigation-Methode auf `flowspec`. Die Standardmethode ist `blackhole` (RTBH).
+
+```yaml
+mitigation: flowspec            # default method for all groups (default: blackhole)
+flowspec:
+  action: discard               # or rate_limit
+  rate_mbps: 100                # required for rate_limit
+hostgroups:
+  - name: web
+    networks: ["203.0.113.0/26"]
+    mitigation: blackhole       # per-group override
+```
+
+`mitigation` ist pro [Hostgroup](/docs/hostgroups) überschreibbar, sodass Sie FlowSpec global
+betreiben und für eine bestimmte Präfixmenge auf blackhole zurückfallen können (oder umgekehrt).
+
+## Generierte Regeln
+
+Bei einem Angriff leitet Kapkan aus der [Klassifizierung](/docs/detection) des Angriffs und der
+Flow-Stichprobe einen **minimalen Regelsatz** (höchstens 8) ab, der das Opfer als Ziel sowie den
+Vektor abgleicht:
+
+| Angriff | Generierter FlowSpec-Match |
+| --- | --- |
+| NTP- / DNS- / CLDAP- / memcached- / SSDP- / chargen-Amplification | `dst=victim, proto=udp, src-port=<reflected port>` |
+| SYN-Flood | `dst=victim, proto=tcp, tcp-flags=SYN` |
+| Fragment-Flood | `dst=victim, fragment` |
+| ICMP- / UDP- / TCP-Flood | `dst=victim, proto=<icmp/udp/tcp>` |
+| gemischt / unbekannt | `dst=victim` (plus eine Regel pro dominantem Reflektor-Port in der Stichprobe) |
+
+Das Opfer wird stets als `/32` (IPv4) bzw. `/128` (IPv6) abgeglichen. **IPv6-FlowSpec ist vollständig
+gleichwertig mit IPv4** — wohingegen FastNetMons eigene Roadmap IPv6-FlowSpec nach wie vor als nicht
+unterstützt aufführt.
+
+## Ausgehende Angriffe
+
+Bei einem [ausgehenden Angriff](/docs/detection) — einem kompromittierten Host, der nach außen flutet —
+gleicht die Regel den Host als **Quelle** ab (das RFC-8955/8956-Quellpräfix), sodass die ausgehende
+Flut tatsächlich verworfen wird. Das unterscheidet sich von einem zielbasierten RTBH-Blackhole, das nur
+den Datenverkehr *zum* Host vernichtet.
+
+## Einschränkungen
+
+- Der `tcp-flags`-Match für SYN-Floods ist eine Bitmaske, die auch auf SYN-ACK passt, sodass eine
+  `discard`-Aktion auch die vom Opfer ausgehend initiierten Verbindungen verwirft — bevorzugen Sie
+  `rate_limit` für TCP-Vektoren.
+- `max_active_bans` begrenzt **Bans**, nicht Regeln: Ein FlowSpec-Ban kann bis zu 8 Regeln tragen,
+  sodass N Bans bis zu 8N Regeln in der RIB Ihres Upstreams bedeuten können. Beobachten Sie die
+  Metrik `mitigate_flowspec_rules` ([Metric](/docs/metrics)) gegen das FlowSpec-Routenlimit Ihrer Router.
+
+## Regelaktion und Lebenszyklus
+
+Jede Regel trägt eine Traffic-Rate-Extended-Community: `discard` (Rate 0) oder eine `rate_limit`-Obergrenze.
+FlowSpec-Bans teilen sich denselben TTL-, Unban-Hysterese- und `max_active_bans`-Lebenszyklus wie
+Blackhole-Bans — siehe [RTBH-Mitigation](/docs/mitigation).
+
+FlowSpec läuft über **dieselben BGP-Nachbarn** wie RTBH: Die FlowSpec-AFI/SAFI wird additiv angekündigt,
+und ein Peer, der sie nicht unterstützt, wird sie schlicht nicht aushandeln. FlowSpec ist **nicht gültig
+für Hostgroups mit `calculation: total`** — es gibt kein einzelnes Opfer-Präfix zum Abgleichen.
+
+## Verwandte Themen
+
+- [RTBH-Mitigation](/docs/mitigation) — die Blackhole-Methode und der gemeinsame Ban-Lebenszyklus.
+- [Eskalationsstufen](/docs/escalation) — schrittweise von der Warnung über FlowSpec bis zum Blackhole über die Zeit.
+- [Konfigurationsreferenz](/docs/configuration) · [Metriken](/docs/metrics) · [REST-API](/docs/api)

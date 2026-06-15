@@ -1,0 +1,74 @@
+export const metadata = {
+  title: "Introducción",
+  description:
+    "Qué es Kapkan, para quién está pensado, qué hace y cómo se mantiene seguro de forma predeterminada.",
+};
+
+# Introducción
+
+**Kapkan es una solución gratuita y de código abierto de detección de DDoS y mitigación mediante RTBH para ISP y proveedores de hosting.**
+
+Es un único binario en Go que ingiere telemetría de flujos — NetFlow v5/v9, IPFIX y sFlow v5 —
+desde tus routers, detecta en segundos los ataques volumétricos contra los prefijos que proteges
+y activa una mitigación BGP RTBH (remotely-triggered blackhole, agujero negro activado de forma
+remota) automatizada. Incluye una API REST, un panel web integrado, métricas de Prometheus y
+notificaciones por Telegram / Slack / email / webhook / exec-hook.
+
+Kapkan es un reemplazo gratuito de las funciones por las que cobran los productos comerciales de DDoS basados en flow.
+
+<Callout type="warning" title="Dry-run de forma predeterminada">
+Hasta que establezcas explícitamente `dry_run: false`, cada posible blackhole se registra y se expone
+a través de la API, pero **nunca se anuncia** a tus routers. Puedes ejecutar Kapkan contra
+telemetría de producción y validar la detección antes de que pueda tocar una sola ruta. Consulta el
+[Modelo de seguridad](/docs/safety).
+</Callout>
+
+## Qué hace
+
+- **Ingiere** — sFlow v5, NetFlow v5/v9 e IPFIX sobre UDP, en modo biblioteca (sin sidecar),
+  mediante [goflow2](https://github.com/netsampler/goflow2).
+- **Detecta** — ataques volumétricos por destino utilizando umbrales de pps / Mbps /
+  flows por segundo corregidos por muestreo sobre una ventana deslizante, además de límites
+  opcionales por protocolo y detección de ataques salientes.
+- **Clasifica** — cada ataque se etiqueta a partir de su muestra de flow: amplificación
+  (NTP / DNS / CLDAP / memcached / SSDP / chargen), inundaciones SYN / UDP / TCP / ICMP / de fragmentos.
+- **Mitiga** — anuncia rutas blackhole `/32` y `/128` mediante un speaker
+  [GoBGP](https://github.com/osrg/gobgp) integrado, o descarta únicamente el vector de ataque con
+  reglas quirúrgicas de [BGP FlowSpec](/docs/flowspec) (RFC 8955/8956), escaladas opcionalmente
+  con el tiempo mediante [escalado progresivo](/docs/escalation).
+- **Observa** — una API REST, un panel web integrado, `/metrics` de Prometheus y
+  notificaciones por Telegram, Slack, email, webhook y un exec hook.
+- **Persiste (opcional)** — conserva el historial de ataques y tráfico en
+  [ClickHouse](/docs/storage) para análisis forense y generación de informes.
+
+## Para quién está pensado
+
+Operadores de red — ISP, proveedores de hosting y cualquiera que ejecute BGP — que necesiten
+mitigación automatizada de ataques volumétricos sin una licencia comercial. Si actualmente usas FastNetMon
+Community, Kapkan está diseñado para que no pierdas nada y ganes una detección de nivel Advanced.
+
+## Por qué Kapkan
+
+| | Kapkan |
+| --- | --- |
+| **Licencia** | Apache 2.0, totalmente de código abierto — incluida la lógica de detección |
+| **Huella** | Un único binario estático en Go; sin MongoDB, sin servicio web aparte |
+| **Interfaz web** | Panel integrado incluido, no un complemento de pago |
+| **Configuración** | YAML declarativo que puedes guardar en git y comparar con diff |
+| **Seguridad** | Dry-run de forma predeterminada; TTL, histéresis y límites de baneo aplicados en el código |
+
+## Qué no hace (todavía)
+
+Esto está en la [hoja de ruta](https://github.com/kapkan-io/kapkan/blob/main/docs/ROADMAP.md)
+pero **no** en la versión actual:
+
+- Deduplicación de alta disponibilidad integrada entre instancias
+- Captura por port-mirror (SPAN / AF_PACKET / XDP) como fuente de ingesta
+- Enrutamiento de notificaciones por tenant (la acotación de la **API** por tenant ya está disponible, véase [Multi-tenencia](/docs/multi-tenancy))
+
+## Próximos pasos
+
+- [Inicio rápido](/docs/quickstart) — compila el binario y ve tu primera detección en unos minutos.
+- [Cómo funciona](/docs/how-it-works) — el pipeline de ingesta → motor → mitigación.
+- [Referencia de configuración](/docs/configuration) — cada clave del archivo YAML.
+- [Puesta en producción](/docs/going-live) — cómo desactivar el dry-run de forma segura.

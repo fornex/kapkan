@@ -1,0 +1,90 @@
+export const metadata = {
+  title: "Safety model",
+  description:
+    "The six non-negotiable safety rules Kapkan enforces in code so it can never blackhole the wrong thing.",
+};
+
+# Safety model
+
+Blackholing a route is a blunt instrument: a wrong or runaway announcement can take your
+own infrastructure offline faster than any attack. Kapkan is built so that cannot happen by
+accident. The six rules below are enforced in code and covered by tests — they are not
+configuration options you can forget to set, and they are non-negotiable.
+
+Every one of them applies to **automatic** detection-driven bans and to **manual** bans
+requested through the API alike. There is no path that skips them.
+
+## 1. Dry-run by default
+
+Kapkan announces a blackhole route only when the config explicitly sets `dry_run: false`.
+An absent `dry_run` key is treated as `true`. In dry-run, every would-be announcement is
+logged and exposed through the API and metrics — but **never sent** to your routers. You
+can run Kapkan against live production telemetry, watch detection fire, and inspect every
+route it *would* announce before it can touch a single prefix.
+
+<Callout type="warning" title="You opt in to mitigation, never out">
+Because a missing `dry_run` key means dry-run, the only way to start announcing routes is to
+deliberately write `dry_run: false` and reload. A typo, a truncated file, or a forgotten key
+all fail safe. See [Going live](/docs/going-live) for the validation checklist before you flip it.
+</Callout>
+
+## 2. No permanent bans
+
+Every announcement carries a TTL (`ban.ttl_seconds`) and is automatically withdrawn when it
+expires — even if the attack is still ongoing. There is no code path that produces a route
+without an expiry. A stuck process, a lost notification, or an operator who walks away can
+never leave a host blackholed forever; the worst case is that traffic is dropped for one TTL
+window and then re-evaluated.
+
+## 3. Unban hysteresis
+
+A ban is withdrawn only after the target's traffic has stayed below the threshold for
+`ban.unban_hysteresis_seconds`, not the instant a single window dips. This prevents the
+announce/withdraw flapping that would otherwise happen at the edge of an attack, where
+traffic oscillates just above and below the limit and would churn BGP on every window.
+
+## 4. Hard ban cap
+
+`ban.max_active_bans` is an absolute ceiling on the number of simultaneous bans. Once it is
+reached, new bans are refused and the rejection is alerted loudly rather than announced.
+This is the circuit breaker against a misconfiguration or a detection storm: Kapkan will
+never blackhole half your network because a threshold was set too low or an attacker spread
+across thousands of destinations. A manual ban that would exceed the cap is also refused
+(see below).
+
+## 5. Whitelist is absolute
+
+Addresses listed in `protected_whitelist` — your routers, name servers, and other critical
+infrastructure — are never announced, regardless of how much traffic they attract and
+regardless of who asks. The whitelist overrides detection and it overrides manual ban
+requests. There is no flag that bypasses it.
+
+## 6. Scoped detection
+
+Kapkan acts only on destinations inside the configured `networks` prefixes. Traffic to
+addresses outside your protected ranges is still counted in metrics, but it can never
+trigger a ban. You cannot accidentally blackhole a prefix you do not own, even if a flood
+happens to traverse your network on the way somewhere else.
+
+## How manual bans inherit every rule
+
+The `POST /api/v1/ban` endpoint is not an escape hatch. A manual ban request is checked
+against the same guards as automatic detection, and a request that violates one is rejected
+with HTTP `409` rather than silently announced:
+
+| Manual ban request | Result |
+| --- | --- |
+| Target is in `protected_whitelist` | `409` — never announced |
+| Target is outside the configured `networks` scope | `409` — out of scope |
+| Banning the target would exceed `max_active_bans` | `409` — cap reached |
+
+A manual ban that passes all three still respects the TTL and hysteresis rules: it
+auto-expires like any other announcement. The only rule manual bans bypass is the *detection
+threshold* itself — that is the entire point of a manual ban — but never the safety guards
+around the announcement.
+
+## Related
+
+- [Mitigation & RTBH](/docs/mitigation) — how announcements, TTLs, hysteresis and the cap work end to end.
+- [Going live](/docs/going-live) — validate detection in dry-run, then turn it off safely.
+- [Configuration reference](/docs/configuration) — the `dry_run`, `ban`, `protected_whitelist` and `networks` keys.

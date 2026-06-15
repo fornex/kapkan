@@ -1,0 +1,130 @@
+export const metadata = {
+  title: "Lignes de base",
+  description:
+    "Seuils appris en continu qui resserrent la détection au niveau de trafic normal de chaque hôte, avec des garde-fous contre l'empoisonnement.",
+};
+
+# Lignes de base
+
+Avec un bloc `baseline`, Kapkan apprend en continu le niveau de trafic normal de chaque hôte et
+y resserre la détection. Il maintient une EWMA (moyenne mobile à pondération exponentielle) du
+débit réel, corrigé de l'échantillonnage, **par hôte et par direction** — ainsi qu'un total par
+groupe pour les hostgroups en `calculation: total` — puis en dérive un seuil effectif de
+`learned_normal × factor`. Un hôte qui fait normalement 10k pps est signalé à environ 30k
+au lieu d'attendre le seuil global de 80k.
+
+C'est le mode « arrêter de régler les seuils à la main ». Là où la ligne de base automatisée de
+FastNetMon est un calculateur hors ligne que vous exécutez avant d'en recopier les chiffres, celle
+de Kapkan est en ligne : elle suit votre trafic en continu et redérive le seuil effectif à mesure
+que le niveau normal de l'hôte dérive.
+
+<Callout type="info" title="Les lignes de base resserrent, ne relâchent jamais">
+Vos [seuils](/docs/detection) statiques restent toujours en vigueur comme plafond strict. Une
+ligne de base ne peut que rendre la détection *plus* sensible pour un hôte — elle ne peut jamais
+relever la barre au-delà de ce que vous avez configuré.
+</Callout>
+
+## Exemple
+
+```yaml
+baseline:
+  factor: 3              # attack = traffic above learned_normal × factor
+  half_life_seconds: 3600
+  warmup_seconds: 600
+  floor:
+    pps: 5000
+    mbps: 50
+    flows_per_sec: 2000
+```
+
+Le bloc est facultatif. En son absence, Kapkan utilise vos seuils statiques seuls. Le seuil
+effectif pour chaque hôte et chaque métrique est :
+
+```text
+effective = clamp(learned_normal × factor, low = floor, high = static_threshold)
+```
+
+Autrement dit : `learned_normal × factor`, borné par le bas par `floor` et par le haut par les
+seuils statiques (le plafond).
+
+## Clés
+
+| Clé | Valeur par défaut | Signification |
+| --- | --- | --- |
+| `factor` | `3` | Multiplicateur sur le niveau normal appris. Le seuil effectif est `learned_normal × factor`. |
+| `half_life_seconds` | `3600` | Demi-vie de l'EWMA. La durée au bout de laquelle une ancienne observation perd la moitié de son poids ; des valeurs plus grandes rendent la ligne de base plus lente et plus stable. |
+| `warmup_seconds` | `600` | Un hôte fraîchement observé est encadré par les seuils statiques uniquement pendant cette durée, comptée à partir de son premier trafic réel. |
+| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | exemple `5000` / `50` / `2000` | Borne inférieure du seuil effectif par métrique, afin que les hôtes peu actifs ne deviennent jamais hypersensibles. |
+
+## Conception résistante à l'empoisonnement
+
+Une ligne de base apprise naïve est attaquable : alimentez un hôte avec un flood lent et croissant
+et il apprendra ce flood comme « normal », relevant la barre jusqu'à ce que les vraies attaques
+passent en dessous. La ligne de base de Kapkan est conçue pour y résister. Les seuils statiques
+restent en place comme garde-fous, et plusieurs règles bornent ce que la ligne de base peut
+faire à tout moment.
+
+- **Plafond.** Tout trafic supérieur aux seuils statiques déclenche toujours. Une ligne de base
+  empoisonnée ou trop vite montée ne peut jamais relever le seuil effectif au-delà de ce que vous
+  avez configuré.
+- **Plancher.** Le seuil effectif ne descend jamais sous `floor`, de sorte qu'un hôte normalement
+  peu actif ne devienne pas hypersensible et ne se déclenche pas au moindre petit pic.
+- **Gelée pendant une attaque.** Tant qu'un hôte est sous attaque — y compris pendant la traîne
+  `unban_hysteresis_seconds` après la chute du débit — sa ligne de base n'est pas du tout
+  entraînée. Le trafic d'attaque n'apprend jamais à l'hôte que l'attaque est normale.
+- **Apprentissage borné.** Hors attaques, chaque échantillon d'entraînement est plafonné à
+  `baseline × factor` avant de mettre à jour l'EWMA. Une montée progressive d'un attaquant ne peut
+  donc relever la ligne de base que de `2^(factor−1)` au plus par demi-vie — environ `4×` par heure
+  avec les valeurs par défaut (`factor: 3`, `half_life_seconds: 3600`). Cela représente des heures
+  pour passer d'un niveau normal au plafond statique, et jamais au-delà. Des réglages agressifs (un
+  `factor` élevé ou un `half_life_seconds` court) réduisent cette fenêtre, alors choisissez-les
+  délibérément.
+- **Apprentissage uniquement sur du trafic réel.** Une direction sans trafic dans la fenêtre
+  n'entraîne jamais sa ligne de base. Un hôte uniquement entrant conserve son seuil sortant
+  statique, et un groupe `total` vide ne se réchauffe jamais jusqu'à une ligne de base à zéro.
+- **Période de chauffe.** Un hôte fraîchement observé n'est protégé que par les seuils statiques
+  pendant `warmup_seconds`, comptés à partir de son premier trafic réel. Un hôte évincé (silencieux
+  depuis longtemps) refait sa période de chauffe à son retour.
+
+<Callout type="warning" title="Un hôte déjà inondé dès la première observation">
+Le trafic de la période de chauffe entraîne lui-même la ligne de base initiale. Un hôte qui est
+*déjà* sous un flood sous-statique la première fois que Kapkan le voit apprend ce flood comme
+« normal » — borné par le plafond statique, mais il n'existe aucune référence propre pour un hôte
+attaqué dès la première observation. Réglez `warmup_seconds` à au moins quelques multiples de
+`half_life_seconds` pour que la ligne de base converge avant de commencer à encadrer.
+</Callout>
+
+## Visibilité
+
+Les niveaux appris sont exposés par hôte dans l'[API REST](/docs/api). L'instantané
+`GET /api/v1/hosts` porte `baseline` (entrant) et `baseline_out` (sortant) aux côtés des débits
+par direction mesurés et de l'état d'attaque de chaque hôte. Le [tableau de bord](/docs/dashboard)
+affiche ces mêmes lignes de base apprises à côté des top talkers, afin que vous puissiez voir à
+quoi chaque hôte est contraint.
+
+## Par hostgroup
+
+Les lignes de base suivent la portée des [hostgroups](/docs/hostgroups). Un groupe hérite soit du
+bloc `baseline` global, soit le remplace en bloc — il n'y a pas de fusion partielle. Pour exclure
+entièrement un groupe des lignes de base tout en conservant le bloc global pour tous les autres,
+désactivez-la sur le groupe :
+
+```yaml
+hostgroups:
+  - name: dns-pool
+    networks: ["203.0.113.128/26"]
+    calculation: total
+    baseline: { enabled: false }   # this group uses static thresholds only
+```
+
+Pour les groupes `calculation: total`, la ligne de base apprend le trafic cumulé du groupe plutôt
+que les niveaux par hôte, et les mêmes règles de résistance à l'empoisonnement s'appliquent à ce
+total.
+
+## Voir aussi
+
+- [Détection et seuils](/docs/detection) — les seuils statiques à l'intérieur desquels s'inscrivent les lignes de base.
+- [Hostgroups](/docs/hostgroups) — seuils par groupe, totaux et substitutions de ligne de base.
+- [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.
+- [API REST](/docs/api) — l'instantané `/api/v1/hosts` et ses champs `baseline`.
+- [Mise en production](/docs/going-live) — validez la détection en dry-run avant d'annoncer.

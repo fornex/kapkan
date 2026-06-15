@@ -1,0 +1,237 @@
+export const metadata = {
+  title: "Detección y umbrales",
+  description:
+    "Cómo Kapkan detecta ataques volumétricos: umbrales por destino con ventana deslizante, límites por protocolo, corrección de muestreo y detección de ataques salientes.",
+};
+
+# Detección y umbrales
+
+Kapkan detecta ataques volumétricos **por host de destino** sobre una ventana de tiempo deslizante.
+Para cada dirección protegida mantiene contadores de tasa por ventana, y en el momento en que se
+cruza cualquier umbral configurado abre un ataque, adjunta una muestra de flow, clasifica el vector y
+entrega el evento a la mitigación, las notificaciones y la API.
+
+Cada tasa se evalúa en **unidades reales, sin muestrear**. Los exportadores de flow muestrean —
+informan un registro por cada N paquetes —, así que Kapkan multiplica cada tasa observada por la tasa
+de muestreo del exportador antes de compararla con un umbral. Los umbrales se configuran en el tráfico
+que el atacante envía realmente, no en registros muestreados.
+
+<Callout type="info" title="La detección es de solo lectura">
+Detectar un ataque nunca anuncia una ruta por sí mismo. La detección produce un registro de ataque y
+un evento; la mitigación es un paso aparte, en dry-run (modo de prueba) por defecto. Consulta
+[Mitigación](/docs/mitigation) y el [modelo de seguridad](/docs/safety).
+</Callout>
+
+## Umbrales principales
+
+El bloque `thresholds` de nivel superior define los límites de referencia aplicados a **cada host de
+destino** dentro de tus `networks` protegidas. Siempre se evalúan tres métricas principales:
+
+| Métrica | Unidad | Significado |
+| --- | --- | --- |
+| `pps` | paquetes/seg | Tasa total de paquetes entrantes hacia el host. |
+| `mbps` | megabits/seg | Tasa total de bits entrantes hacia el host. |
+| `flows_per_sec` | flows/seg | Registros de flow distintos por segundo hacia el host. |
+
+```yaml
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 40000
+```
+
+Los tres umbrales principales deben ser mayores que `0`. Un host pasa a estado "bajo ataque" en cuanto
+se supera cualquiera de ellos sobre la ventana deslizante.
+
+<Callout type="info" title="Anulaciones por grupo">
+Estos umbrales globales son el valor de reserva. Puedes asignar a prefijos específicos límites más
+estrictos o más laxos, o evaluar el tráfico sumado de un conjunto, con los
+[hostgroups](/docs/hostgroups). Kapkan también puede aprender el nivel normal de cada host y endurecer
+el umbral efectivo de forma automática; consulta [Líneas base](/docs/baselines).
+</Callout>
+
+## Corrección de muestreo
+
+La telemetría de flow muestreada subestima el tráfico por diseño: un exportador que muestrea 1 de cada
+1000 informa aproximadamente un registro por cada mil paquetes. Kapkan corrige esto para que tus
+umbrales sigan expresados en tráfico real.
+
+Cada tasa se multiplica por la tasa de muestreo del exportador:
+
+```text
+corrected_rate = observed_rate * sampling_rate
+```
+
+La tasa de muestreo proviene del propio paquete de flow cuando el exportador la informa; de lo
+contrario, Kapkan recurre al valor configurado en `sampling.default_rate`:
+
+```yaml
+sampling:
+  default_rate: 1000   # used only when a packet carries no sampling rate; must be >= 1
+```
+
+Como la corrección ocurre antes de la comparación con el umbral, un umbral `pps: 80000` significa
+80 000 paquetes reales por segundo, sin importar con cuánta agresividad muestreen tus routers.
+
+<Callout type="warning" title="Configura la tasa por defecto correcta">
+Si tus exportadores no anuncian su tasa de muestreo, `sampling.default_rate` debe coincidir con la que
+realmente muestrean. Un valor por defecto demasiado bajo subestima el tráfico y retrasa la detección;
+uno demasiado alto lo sobreestima y dispara la detección antes de tiempo.
+</Callout>
+
+## Umbrales por protocolo
+
+Más allá de los totales principales, puedes establecer límites opcionales por protocolo. Estos te
+permiten detectar un ataque que es grande para un protocolo pero invisible en el agregado; por ejemplo,
+un SYN flood cuya tasa de paquetes es alta pero cuya tasa de bits se mantiene por debajo del `mbps`
+global.
+
+Cada protocolo tiene una variante `pps` y una `mbps`. Los nombres de las métricas son exactamente:
+
+| Protocolo | métrica pps | métrica mbps | Cuenta |
+| --- | --- | --- | --- |
+| TCP | `tcp_pps` | `tcp_mbps` | Todos los paquetes TCP. |
+| UDP | `udp_pps` | `udp_mbps` | Todos los paquetes UDP. |
+| ICMP | `icmp_pps` | `icmp_mbps` | Todos los paquetes ICMP. |
+| TCP SYN | `tcp_syn_pps` | `tcp_syn_mbps` | Solo SYN puros (flag SYN activo, ACK desactivado). |
+| Fragmentos | `frag_pps` | `frag_mbps` | Fragmentos IP que no son el primero. |
+
+```yaml
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 40000
+  tcp_syn_pps: 50000
+  udp_mbps: 800
+  frag_pps: 30000
+```
+
+Algunas reglas rigen su comportamiento:
+
+- **Semántica OR.** Cualquier umbral cruzado por sí solo dispara la detección. Las métricas principales
+  y cada métrica por protocolo configurada se evalúan de forma independiente; la primera que supera su
+  límite abre el ataque, y la métrica que lo disparó queda registrada en el evento.
+- **`tcp_syn` es solo SYN.** Cuenta paquetes con el flag SYN activo y el flag ACK desactivado — los
+  paquetes semiabiertos de un SYN flood —, no todos los paquetes TCP.
+- **`frag` son fragmentos que no son el primero.** Cuenta los fragmentos finales de datagramas
+  fragmentados, el sello distintivo de un flood de fragmentación.
+- **`0` o ausente lo desactiva.** Una métrica por protocolo omitida de la configuración, o establecida
+  en `0`, simplemente no se evalúa y no tiene coste alguno.
+
+## Alcance
+
+La detección está **acotada a tus prefijos protegidos**. Solo se actúa sobre destinos dentro de las
+`networks` configuradas. El tráfico hacia cualquier otro destino sigue contándose en las métricas de
+Prometheus para tener visibilidad, pero nunca puede abrir un ataque ni disparar un bloqueo.
+
+```yaml
+networks:
+  - 203.0.113.0/24
+  - 2001:db8::/48
+```
+
+Esta es una de las reglas de seguridad impuestas: un destino fuera de `networks` queda por completo
+fuera del alcance de la mitigación. Los prefijos protegidos no deben solaparse. Consulta el
+[modelo de seguridad](/docs/safety) para ver la lista completa de garantías.
+
+## Detección saliente
+
+Por defecto, Kapkan vigila el tráfico que **llega a** tus hosts protegidos (`direction: incoming`).
+Añade un bloque `thresholds_outgoing` — de forma global o por hostgroup — y también vigilará el tráfico
+que **sale de** esos hosts, informando ataques con `direction: outgoing`. Esta es la firma de una
+máquina comprometida dentro de tu red que se está usando para atacar a otra persona.
+
+```yaml
+thresholds_outgoing:
+  pps: 50000
+  udp_pps: 20000
+```
+
+`thresholds_outgoing` admite las mismas claves que `thresholds`; debe establecerse al menos una. Hay
+algunos detalles que importan:
+
+- **Valores de dirección.** Los eventos de ataque llevan `direction: incoming` o `direction: outgoing`.
+  Saliente significa que el host de destino es el origen del flood.
+- **Ruta RTBH compartida.** Un host que está siendo atacado **y** atacando al mismo tiempo mantiene dos
+  registros de ataque independientes — uno por dirección —, pero comparte una única ruta RTBH. La ruta
+  se retira solo cuando termina el último de los dos ataques, de modo que despejar una dirección nunca
+  saca prematuramente del blackhole a un host que sigue activo en la otra.
+- **Coste nulo cuando está ausente.** Sin un bloque `thresholds_outgoing`, el tráfico saliente ni
+  siquiera se cuenta: no hay sobrecarga en la ruta crítica.
+
+<Callout type="warning" title="El RTBH se basa en el destino">
+Hacer blackhole de un atacante saliente descarta el tráfico hacia el host, lo que lo deja fuera de línea
+y normalmente detiene el abuso, pero solo detiene el flood saliente de forma directa cuando tu borde
+también descarta los orígenes en los prefijos en blackhole (por ejemplo, con uRPF). Establece
+`ban: false` en el hostgroup si quieres la alerta sin la ruta. Consulta [Mitigación](/docs/mitigation).
+</Callout>
+
+## Muestras de ataque
+
+Cuando se abre un ataque, Kapkan le adjunta de inmediato una muestra de flow — los principales orígenes,
+puertos de origen, puertos de destino y protocolos que impulsan el tráfico. Esto es posible porque
+Kapkan mantiene un **búfer de tráfico continuo**: los flows recientes se almacenan en búfer a medida que
+llegan, así que la ventana previa al cruce del umbral ya está disponible en el instante en que se dispara
+la detección. No hay retraso de captura posterior a la detección ni riesgo de perder el inicio del ataque.
+
+```yaml
+samples:
+  enabled: true        # default on
+  buffer_flows: 65536  # rolling buffer size
+  flows_per_attack: 20 # raw flow records kept per attack
+```
+
+Los totales de los contadores de la muestra (principales orígenes, puertos y protocolos) están
+corregidos por muestreo; los registros de flow en bruto llevan los números del exportador previos a la
+corrección, más su `sampling_rate`. El campo `total_packets` es el total de paquetes corregido sin
+truncar que se usa como denominador para las proporciones, ya que las listas top-K descartan las claves
+más ligeras. Las muestras aparecen en el evento `attack_started`, en las notificaciones y en la
+[API](/docs/api). Los cambios en el tamaño del búfer requieren un reinicio.
+
+## Clasificación
+
+Cada ataque se etiqueta con un **vector** inferido en el momento de la detección, calculado a partir de
+las tasas por protocolo de la ventana y de la muestra de flow. La clasificación lleva un `confidence` —
+la proporción (`0..1`) del tráfico del ataque que coincide con la firma ganadora — y, para los vectores
+de amplificación, el `src_port` del servicio reflejado.
+
+El clasificador reconoce estos valores de `type`:
+
+| Type | Vector |
+| --- | --- |
+| `ntp_amplification` | Respuestas NTP reflejadas (`src_port` 123). |
+| `dns_amplification` | Respuestas DNS reflejadas (`src_port` 53). |
+| `cldap_amplification` | Respuestas CLDAP reflejadas (`src_port` 389). |
+| `memcached_amplification` | Respuestas memcached reflejadas (`src_port` 11211). |
+| `ssdp_amplification` | Respuestas SSDP reflejadas (`src_port` 1900). |
+| `chargen_amplification` | Respuestas chargen reflejadas (`src_port` 19). |
+| `syn_flood` | Flood dominado por SYN de TCP. |
+| `fragment_flood` | Flood de fragmentos IP que no son el primero. |
+| `icmp_flood` | Flood dominado por ICMP. |
+| `udp_flood` | Flood dominado por UDP sin firma de amplificación. |
+| `tcp_flood` | Flood dominado por TCP. |
+| `mixed` | Ningún vector único domina. |
+
+Cómo se elige un vector:
+
+- Una firma necesita una **proporción dominante** — más de la mitad del tráfico de la ventana — para
+  ganar. Primero se comprueba la amplificación (la más específica), luego los SYN puros, después los
+  fragmentos, y finalmente los floods volumétricos ICMP, UDP y TCP.
+- Un vector de **amplificación** también requiere paquetes del tamaño de una respuesta procedentes del
+  puerto del servicio reflejado: el tamaño medio de paquete de ese puerto de origen debe ser lo bastante
+  grande como para interpretarse como una respuesta reflejada. Los paquetes del tamaño de una solicitud
+  procedentes de un puerto de servicio se clasifican, en cambio, como un flood normal.
+- Cuando ninguna firma alcanza la proporción dominante, el ataque se etiqueta como `mixed` y `confidence`
+  es `0`.
+
+<Callout type="info" title="confidence es una proporción, no una probabilidad">
+`confidence` es la fracción del tráfico del ataque que coincidió con la firma ganadora, en el rango
+`0..1`. Un valor de `0` significa que el ataque es `mixed`: no coincidió ninguna firma en absoluto.
+</Callout>
+
+## Relacionado
+
+- [Hostgroups](/docs/hostgroups) — umbrales por prefijo, cálculo total frente a por host y política por grupo.
+- [Líneas base](/docs/baselines) — umbrales por host aprendidos que endurecen los límites estáticos automáticamente.
+- [Mitigación](/docs/mitigation) — cómo un ataque detectado se convierte en una ruta RTBH.
+- [API REST](/docs/api) — consulta los ataques activos y recientes con sus muestras y su clasificación.

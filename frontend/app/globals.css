@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+/* Class-based dark mode (toggled on <html>), instead of Tailwind v4's
+   default prefers-color-scheme, so the theme switch can override the OS. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #ffffff;
+  --surface: #ffffff;
+  --muted: #f4f4f5;
+  --foreground: #18181b;
+  --muted-foreground: #52525b;
+  --border: #e4e4e7;
+  --accent: #2563eb;
+  --accent-foreground: #ffffff;
+}
+
+.dark {
+  --background: #0a0a0a;
+  --surface: #111113;
+  --muted: #18181b;
+  --foreground: #ededed;
+  --muted-foreground: #a1a1aa;
+  --border: #27272a;
+  --accent: #60a5fa;
+  --accent-foreground: #0a0a0a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-muted: var(--muted);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+:target {
+  scroll-margin-top: 5rem;
+}

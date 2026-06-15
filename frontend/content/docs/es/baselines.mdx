@@ -1,0 +1,131 @@
+export const metadata = {
+  title: "Líneas base",
+  description:
+    "Umbrales aprendidos de forma continua que ajustan la detección al nivel de tráfico normal de cada host, con protecciones frente al envenenamiento.",
+};
+
+# Líneas base
+
+Con un bloque `baseline`, Kapkan aprende de forma continua el nivel de tráfico normal de cada
+host y ajusta la detección a él. Mantiene una EWMA (media móvil ponderada exponencialmente) de
+la tasa real, corregida por muestreo, **por host y por dirección** — y un total por grupo para
+los hostgroups con `calculation: total` — y a partir de ahí deriva un umbral efectivo de
+`learned_normal × factor`. Un host que normalmente alcanza 10k pps se marca en torno a los 30k
+en lugar de esperar al umbral global de 80k.
+
+Este es el modo "deja de ajustar umbrales a mano". Mientras que la línea base automatizada de
+FastNetMon es una calculadora offline que ejecutas y de la que copias números, la de Kapkan es
+online: sigue tu tráfico de forma continua y vuelve a derivar el umbral efectivo a medida que el
+nivel normal del host se desplaza.
+
+<Callout type="info" title="Las líneas base ajustan hacia abajo, nunca aflojan">
+Tus [umbrales](/docs/detection) estáticos siempre se mantienen en vigor como techo absoluto. Una
+línea base solo puede hacer que la detección sea *más* sensible para un host — nunca puede elevar
+el listón por encima de lo que configuraste.
+</Callout>
+
+## Ejemplo
+
+```yaml
+baseline:
+  factor: 3              # attack = traffic above learned_normal × factor
+  half_life_seconds: 3600
+  warmup_seconds: 600
+  floor:
+    pps: 5000
+    mbps: 50
+    flows_per_sec: 2000
+```
+
+El bloque es opcional. Si está ausente, Kapkan usa únicamente tus umbrales estáticos. El umbral
+efectivo para cada host y métrica es:
+
+```text
+effective = clamp(learned_normal × factor, low = floor, high = static_threshold)
+```
+
+En palabras: `learned_normal × factor`, acotado inferiormente por `floor` y superiormente por los
+umbrales estáticos (el techo).
+
+## Claves
+
+| Clave | Predeterminado | Significado |
+| --- | --- | --- |
+| `factor` | `3` | Multiplicador sobre el nivel normal aprendido. El umbral efectivo es `learned_normal × factor`. |
+| `half_life_seconds` | `3600` | Semivida de la EWMA. El tiempo durante el cual una observación antigua pierde la mitad de su peso; valores mayores hacen que la línea base sea más lenta y estable. |
+| `warmup_seconds` | `600` | Un host recién observado se rige únicamente por los umbrales estáticos durante este tiempo, contado desde su primer tráfico real. |
+| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | ejemplo `5000` / `50` / `2000` | Cota inferior del umbral efectivo por métrica, para que los hosts tranquilos nunca se conviertan en gatillos hipersensibles. |
+
+## Diseño con protección frente al envenenamiento
+
+Una línea base aprendida de forma ingenua es atacable: alimenta un host con una inundación lenta
+y creciente y aprenderá esa inundación como "normal", elevando el listón hasta que los ataques
+reales pasen por debajo de él. La línea base de Kapkan está diseñada para resistir esto. Los
+umbrales estáticos permanecen como guardas, y varias reglas acotan lo que la línea base puede
+llegar a hacer.
+
+- **Techo.** El tráfico por encima de los umbrales estáticos siempre dispara. Una línea base
+  envenenada o de crecimiento rápido nunca puede elevar el umbral efectivo por encima de lo que
+  configuraste.
+- **Suelo (`floor`).** El umbral efectivo nunca cae por debajo de `floor`, de modo que un host
+  normalmente tranquilo no se convierte en un gatillo hipersensible que se dispara ante cualquier
+  ráfaga pequeña.
+- **Congelada bajo ataque.** Mientras un host está bajo ataque — incluida la cola de
+  `unban_hysteresis_seconds` posterior a la caída de la tasa — su línea base no se entrena en
+  absoluto. El tráfico de ataque nunca le enseña al host que el ataque es normal.
+- **Aprendizaje acotado.** Fuera de los ataques, cada muestra de entrenamiento se limita a
+  `baseline × factor` antes de actualizar la EWMA. Por lo tanto, una rampa lenta de un atacante
+  puede elevar la línea base, como mucho, en `2^(factor−1)` por semivida — alrededor de `4×` por
+  hora con los valores predeterminados (`factor: 3`, `half_life_seconds: 3600`). Eso supone horas
+  para escalar desde un nivel normal hasta el techo estático, y nunca por encima de él. Los ajustes
+  agresivos (un `factor` grande o un `half_life_seconds` corto) reducen esa ventana, así que
+  elígelos de forma deliberada.
+- **Aprendizaje solo sobre tráfico real.** Una dirección sin tráfico en la ventana nunca entrena
+  su línea base. Un host de solo entrada conserva su umbral estático de salida, y un grupo `total`
+  vacío nunca se calienta hasta una línea base de cero.
+- **Calentamiento (warm-up).** Un host recién observado queda protegido por los umbrales estáticos
+  solo durante `warmup_seconds`, contados desde su primer tráfico real. Un host expulsado (largo
+  tiempo en silencio) vuelve a calentarse cuando regresa.
+
+<Callout type="warning" title="Un host ya inundado a primera vista">
+El propio tráfico de calentamiento entrena la línea base inicial. Un host que *ya* está bajo una
+inundación por debajo del umbral estático la primera vez que Kapkan lo ve aprende esa inundación
+como "normal" — acotada por el techo estático, pero no hay una referencia limpia para un host
+atacado desde el primer instante. Configura `warmup_seconds` con al menos unos cuantos múltiplos de
+`half_life_seconds` para que la línea base converja antes de empezar a aplicar restricciones.
+</Callout>
+
+## Visibilidad
+
+Los niveles aprendidos se exponen por host en la [API REST](/docs/api). La instantánea de
+`GET /api/v1/hosts` incluye `baseline` (entrada) y `baseline_out` (salida) junto a las tasas
+medidas por dirección de cada host y su estado de ataque. El [panel](/docs/dashboard) muestra las
+mismas líneas base aprendidas junto a los top talkers, de modo que puedas ver a qué nivel se está
+limitando cada host.
+
+## Por hostgroup
+
+Las líneas base siguen el ámbito del [hostgroup](/docs/hostgroups). Un grupo o bien hereda el
+bloque `baseline` global, o lo sobrescribe por completo — no hay fusión parcial. Para excluir a un
+grupo de las líneas base por completo manteniendo el bloque global para todos los demás,
+desactívalo en el grupo:
+
+```yaml
+hostgroups:
+  - name: dns-pool
+    networks: ["203.0.113.128/26"]
+    calculation: total
+    baseline: { enabled: false }   # this group uses static thresholds only
+```
+
+Para los grupos con `calculation: total`, la línea base aprende el tráfico sumado del grupo en
+lugar de los niveles por host, y las mismas reglas de protección frente al envenenamiento se
+aplican a ese total.
+
+## Relacionado
+
+- [Detección y umbrales](/docs/detection) — los umbrales estáticos dentro de los cuales se sitúan las líneas base.
+- [Hostgroups](/docs/hostgroups) — umbrales por grupo, totales y sobrescrituras de la línea base.
+- [Referencia de configuración](/docs/configuration) — cada clave del archivo YAML.
+- [API REST](/docs/api) — la instantánea de `/api/v1/hosts` y sus campos `baseline`.
+- [Puesta en marcha](/docs/going-live) — valida la detección en dry-run antes de anunciar.

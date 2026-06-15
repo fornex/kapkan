@@ -1,0 +1,152 @@
+export const metadata = {
+  title: "Развёртывание в продакшене",
+  description:
+    "Разверните Kapkan как защищённый сервис systemd: размещение файлов, секреты и перезагрузка конфигурации.",
+};
+
+# Развёртывание в продакшене
+
+Защищённый юнит systemd и пример продакшен-конфигурации поставляются в каталоге
+[`deploy/`](https://github.com/kapkan-io/kapkan) репозитория: `deploy/kapkan.service`
+и `deploy/config.example.yaml`. На этой странице описано, как установить бинарный файл как
+системный сервис, где располагается каждый файл, как хранить секреты вне YAML и как
+перезагрузить конфигурацию без перезапуска.
+
+<Callout type="info" title="Сначала сборка">
+Шаги ниже предполагают, что у вас уже есть бинарный файл `kapkan`. Если вы ещё не собрали его,
+см. [Быстрый старт](/docs/quickstart) или [Сборку из исходного кода](#building-from-source).
+</Callout>
+
+## Install
+
+Выполните следующие команды от имени root из клона репозитория (чтобы каталог `deploy/` был
+доступен). Они устанавливают бинарный файл, создают непривилегированного системного пользователя,
+формируют структуру `/etc/kapkan`, устанавливают продакшен-конфигурацию, записывают файл с
+секретами с ограничительными правами, устанавливают юнит systemd и включают сервис.
+
+```sh
+sudo install -m 0755 kapkan /usr/local/bin/kapkan
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo install -d -o kapkan -g kapkan /etc/kapkan
+sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
+echo 'KAPKAN_TG_TOKEN=123456:abc' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
+```
+
+Юнит работает от имени пользователя `kapkan` с `ExecStart=/usr/local/bin/kapkan -config
+/etc/kapkan/config.yaml -log-format json -log-level info`, перезапускается при сбое и сильно
+изолирован: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
+`ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
+`MemoryDenyWriteExecute` и другие настройки.
+
+<Callout type="info" title="Привязка BGP к порту 179">
+Kapkan не требует особых привилегий в режиме dry-run или при пиринге с высокого локального порта.
+Если вы привязываете BGP-спикер к общеизвестному порту 179, предоставьте соответствующую
+возможность, добавив `AmbientCapabilities=CAP_NET_BIND_SERVICE` в секцию `[Service]` юнита.
+</Callout>
+
+После запуска проверьте статус и следите за логами:
+
+```sh
+sudo systemctl status kapkan
+sudo journalctl -u kapkan -f
+```
+
+## File layout
+
+| Путь | Режим | Назначение |
+| --- | --- | --- |
+| `/usr/local/bin/kapkan` | `0755` | Единственный статический бинарный файл демона. |
+| `/etc/kapkan/config.yaml` | `0640` | Конфигурация в YAML, владелец `kapkan:kapkan`. |
+| `/etc/kapkan/kapkan.env` | `0600` | Файл секретов в окружении (токены, учётные данные SMTP). |
+| `/etc/systemd/system/kapkan.service` | `0644` | Защищённый юнит systemd. |
+
+Весь каталог `/etc/kapkan` монтируется для процесса только для чтения через
+`ReadOnlyPaths=/etc/kapkan`, поэтому демон может читать свою конфигурацию и секреты, но не может
+их изменять.
+
+## Secrets
+
+Никакие учётные данные не должны находиться в `config.yaml`. YAML ссылается на каждый секрет по
+имени **переменной окружения**, а юнит загружает эти переменные из файла окружения через
+`EnvironmentFile=-/etc/kapkan/kapkan.env`. Держите этот файл в режиме `0600`.
+
+Ключи конфигурации, читающие значения из окружения, — это ключи `*_env`:
+
+- `notify.telegram.token_env` — например `KAPKAN_TG_TOKEN`, токен бота Telegram.
+- `notify.email.username_env` / `notify.email.password_env` — учётные данные SMTP.
+- `api.token_env` — bearer-токен API (см. [Аутентификацию](/docs/authentication)).
+- `storage.clickhouse.username_env` / `password_env` — учётные данные ClickHouse, если вы
+  включаете опциональное хранилище истории.
+
+Например, YAML задаёт имя переменной, а файл окружения предоставляет её значение:
+
+```yaml
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"   # name of the env var, never the token itself
+    chat_id: "-1001234567890"
+```
+
+```text
+# /etc/kapkan/kapkan.env  (mode 0600)
+KAPKAN_TG_TOKEN=123456:abcdef
+KAPKAN_API_TOKEN=a-long-random-string
+```
+
+<Callout type="success" title="Почему это важно">
+Поскольку секреты находятся только в окружении процесса, ваш `config.yaml` можно безопасно хранить
+в git и сравнивать через diff. Песочница systemd оставляет `/etc/kapkan` доступным только для
+чтения и запускает демон от имени непривилегированного пользователя, поэтому файл окружения никогда
+не доступен сервису для записи.
+</Callout>
+
+## Config reload
+
+Kapkan перезагружает конфигурацию «на лету» по сигналу `SIGHUP` — без перезапуска и без потери
+состояния flow. Юнит systemd настраивает это через `ExecReload=/bin/kill -HUP $MAINPID`, поэтому
+перезагрузка выполняется так:
+
+```sh
+sudo systemctl reload kapkan
+```
+
+Эквивалентно, ту же перезагрузку можно запустить через API:
+
+```sh
+curl -s -X POST localhost:8080/api/v1/config/reload
+```
+
+Большинство ключей перезагружается без перезапуска, включая `dry_run`, пороги, `networks`,
+hostgroups, базовые линии (baselines) и настройки уведомлений. Некоторые параметры размеров требуют
+перезапуска — в частности, размер кольцевых буферов `samples.buffer_flows` / `flows_per_attack`.
+
+## Building from source
+
+Для сборки требуется **Go 1.22 или новее**. `Makefile` предоставляет стандартные цели:
+
+```sh
+make build  # static binary
+make test   # go test -race ./...
+make lint   # golangci-lint run
+make bench  # engine hot-path benchmarks
+```
+
+`make build` создаёт единственный статический бинарный файл `kapkan`, который вы устанавливаете на
+шагах выше. Тесты используют синтетические датаграммы NetFlow/sFlow, формируемые `pkg/flowgen`
+(реальный формат на проводе), и внутрипроцессный пир GoBGP, поэтому к настоящим маршрутизаторам
+обращений никогда не происходит.
+
+<Callout type="warning" title="Прежде чем открывать доступ к Kapkan">
+Держите `dry_run: true`, пока не проверите детектирование на живой телеметрии — см.
+[Запуск в боевом режиме](/docs/going-live). И задайте токен API, прежде чем привязывать слушатель
+за пределами `127.0.0.1`, иначе API и дашборд будут доступны без аутентификации — см.
+[Аутентификацию](/docs/authentication).
+</Callout>
+
+## Related
+
+- [Справочник по конфигурации](/docs/configuration) — каждый ключ в файле YAML.
+- [Аутентификация](/docs/authentication) — задайте bearer-токен, прежде чем открывать доступ к API.
+- [Запуск в боевом режиме](/docs/going-live) — проверьте детектирование, затем отключите dry-run.

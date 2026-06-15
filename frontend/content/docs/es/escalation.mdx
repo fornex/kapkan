@@ -1,0 +1,69 @@
+export const metadata = {
+  title: "Escalado progresivo",
+  description:
+    "Intensifica la respuesta de mitigación cuanto más persiste un ataque, de forma declarativa: de la alerta a FlowSpec y al blackhole.",
+};
+
+# Escalado progresivo
+
+Un único método de `mitigation` dispara la misma respuesta en el instante en que se detecta un
+ataque. Un escalado progresivo, en cambio, **intensifica la respuesta cuanto más persiste un
+ataque**, de forma declarativa, mientras que FastNetMon te obliga a escribir un script de callback.
+
+```yaml
+escalation:                         # supersedes `mitigation` when present
+  - { after_seconds: 0,   action: none }       # alert only at first
+  - { after_seconds: 30,  action: flowspec }   # still under attack after 30s → surgical drop
+  - { after_seconds: 90,  action: divert }     # still under attack after 90s → scrub
+  - { after_seconds: 300, action: blackhole }  # still under attack after 300s → blackhole
+flowspec:
+  action: discard
+scrubbing:
+  next_hop: "192.0.2.100"   # scrubbing center; see Traffic diversion
+  community: "65000:200"
+```
+
+## Cómo se aplican los peldaños
+
+El valor `after_seconds` de cada peldaño se mide desde el inicio del ataque. Un peldaño se aplica
+una vez que ha transcurrido ese tiempo **y el ataque sigue activo**: todavía no hay un evento de
+finalización, es decir, el tráfico continúa por encima del umbral a lo largo de la histéresis de
+desbloqueo.
+
+- El primer peldaño debe estar en `0` segundos.
+- `action` es `none` (solo alerta), `flowspec`, `divert` ([scrubbing](/docs/scrubbing)) o
+  `blackhole`.
+- Un escalado solo puede **mantener o reforzar** la respuesta: `none` < `flowspec` < `divert` <
+  `blackhole`. Desescalar entre peldaños es un error de configuración.
+
+## Make-before-break
+
+Subir a un peldaño se hace con la estrategia make-before-break (establecer antes de cortar): primero
+se anuncia el nuevo peldaño y solo después de que eso tiene éxito se retira el anterior, de modo que
+la víctima nunca queda desprotegida ni por un instante durante el cambio. Si el anuncio falla, el
+bloqueo mantiene el peldaño en funcionamiento y reintenta en el siguiente ciclo. Si varios peldaños
+vencen a la vez (un ataque de larga duración, o el demonio poniéndose al día tras una pausa), el
+bloqueo salta directamente al peldaño vencido más alto y nunca anuncia los peldaños que omite.
+
+La única excepción es `divert → blackhole`: ambos viajan sobre el mismo NLRI de ruta de host, de modo
+que la reanunciación del blackhole reemplaza atómicamente la ruta de divert, sin retirada aparte y
+sin hueco. Los cambios entre familias (de reglas FlowSpec a una ruta de host, o a la inversa) son el
+caso de make-before-break descrito arriba.
+
+## Ciclo de vida y compatibilidad
+
+El escalado es **anulable por hostgroup** y comparte el resto del ciclo de vida del bloqueo: la
+retirada automática por TTL, el límite `max_active_bans`, la lista blanca absoluta y el dry-run (que
+avanza por el escalado y registra cada peldaño pero nunca anuncia).
+
+Cuando no se establece ningún bloque `escalation`, el método único de `mitigation` se comporta
+exactamente como un escalado de un solo peldaño en `0` segundos: compatibilidad total con versiones
+anteriores. El peldaño y el método actuales son visibles por cada bloqueo en `/api/v1/bans`
+(`escalation`, `escalation_step`).
+
+## Relacionado
+
+- [Mitigación RTBH](/docs/mitigation): el método de blackhole.
+- [Mitigación FlowSpec](/docs/flowspec): el método quirúrgico por el que puede avanzar un escalado.
+- [Desvío de tráfico](/docs/scrubbing): el peldaño `divert` que limpia (scrubbing) en lugar de descartar.
+- [Referencia de configuración](/docs/configuration) · [API REST](/docs/api)

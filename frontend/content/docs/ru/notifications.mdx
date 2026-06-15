@@ -1,0 +1,272 @@
+export const metadata = {
+  title: "Уведомления",
+  description:
+    "Оповещения о начале и завершении атаки через Telegram, Slack, электронную почту, webhook и exec-хук — с версионированной схемой JSON-payload.",
+};
+
+# Уведомления
+
+Kapkan отправляет уведомление на каждое событие жизненного цикла атаки — когда атака
+впервые обнаружена (`attack_started`) и когда она завершается (`attack_ended`). Каждое
+событие доставляется во все настроенные каналы: Telegram, Slack, электронную почту,
+универсальный JSON-webhook и exec-хук.
+
+Доставка выполняется по принципу best-effort и асинхронно. Медленный или сбоящий канал
+никогда не задерживает обнаружение или подавление атаки, а каждый канал ограничен
+собственным пулом воркеров — при ковровой атаке (carpet-bomb), которая порождает по
+одному событию на хост, избыточные уведомления отбрасываются и учитываются в счётчиках,
+а не накапливаются в виде неограниченного числа соединений или процессов-хуков.
+
+<Callout type="info" title="Секреты берутся из окружения">
+Токены ботов и учётные данные SMTP читаются из именованных переменных окружения, а не
+из файла конфигурации. В файле хранится только имя переменной (например,
+`token_env: "KAPKAN_TG_TOKEN"`), поэтому конфигурацию можно держать в git.
+</Callout>
+
+## Каналы
+
+### Telegram
+
+Задайте в `notify.telegram.token_env` имя переменной окружения, содержащей токен вашего
+бота, а в `notify.telegram.chat_id` — целевой чат. Токен читается из этой переменной в
+момент отправки; в файле он никогда не хранится. Сообщения отправляются в формате HTML и
+включают цель атаки, классификацию, сработавшую метрику и состояние блокировки.
+
+### Slack
+
+Задайте в `notify.slack.webhook_url` URL Slack
+[incoming webhook](https://api.slack.com/messaging/webhooks). Kapkan отправляет на него
+методом POST отформатированное сообщение при каждом событии. Оставьте поле пустым, чтобы
+отключить канал.
+
+### Электронная почта (SMTP)
+
+Настройте `notify.email` для отправки почты по SMTP. Задайте `smtp_host` в виде
+`host:port` (пустое значение отключает канал), `from` — отправитель в конверте, а `to` —
+список получателей. Учётные данные читаются из окружения через `username_env` и
+`password_env`.
+
+| Ключ | Значение |
+| --- | --- |
+| `smtp_host` | SMTP-сервер в формате `host:port`; пустое значение отключает почту. |
+| `from` | Адрес отправителя в конверте и заголовке. |
+| `to` | Список адресов получателей. |
+| `username_env` | Переменная окружения с именем пользователя SMTP (включает AUTH PLAIN). |
+| `password_env` | Переменная окружения с паролем SMTP. |
+| `require_tls` | Принудительно требовать STARTTLS даже без учётных данных. |
+
+Kapkan использует STARTTLS всякий раз, когда сервер его анонсирует. STARTTLS
+**обязателен**, если настроены учётные данные (непустой `username_env`) или если задано
+`require_tls: true` — в этом случае сервер, не предлагающий STARTTLS, отклоняется с явной
+ошибкой, вместо того чтобы откатиться на открытый текст; это превращает активную атаку
+понижения уровня (downgrade) в заметный сбой. Когда TLS не предлагается и не требуется,
+доставка на хост, не являющийся loopback, выполняется в открытом виде и явно
+протоколируется.
+
+<Callout type="warning" title="Открытый текст на удалённые хосты протоколируется, а не блокируется">
+Если ваш SMTP-сервер не предлагает STARTTLS, а вы не задали ни учётных данных, ни
+`require_tls`, Kapkan отправит почту в открытом виде на хост, не являющийся loopback, и
+выдаст предупреждение. Установите `require_tls: true`, чтобы в этом случае возникал сбой.
+</Callout>
+
+### Webhook
+
+Задайте в `notify.webhook.url` любой HTTPS-эндпоинт. Kapkan отправляет HTTP-запрос `POST`
+с телом `Content-Type: application/json` — [payload обратного вызова](#схема-payload-обратного-вызова),
+описанный ниже — при каждом начале и завершении атаки. Ответы с кодом, отличным от 2xx,
+считаются ошибкой доставки и учитываются в счётчиках. Запрос имеет ограниченный таймаут,
+поэтому зависший получатель не сможет занять слот доставки.
+
+```http
+POST /your/endpoint HTTP/1.1
+Content-Type: application/json
+```
+
+### Exec-хук
+
+Задайте в `notify.exec.command` абсолютный путь к существующему исполняемому файлу. На
+каждом событии Kapkan запускает его напрямую — **без shell** — со следующими параметрами:
+
+- JSON-[payload обратного вызова](#схема-payload-обратного-вызова) на **stdin**.
+- Имя события (`attack_started` или `attack_ended`) в качестве **`argv[1]`**.
+- **Минимальное окружение**: передаются только `PATH`, `HOME`, `TZ`, `LANG`, `USER` и
+  `TMPDIR`. Секреты демона (токены ботов, учётные данные SMTP) никогда не наследуются
+  хуком или его потомками.
+
+Команда должна существовать и быть исполняемой на момент загрузки конфигурации.
+`timeout_seconds` (по умолчанию `10`) ограничивает каждый запуск; при истечении таймаута
+Kapkan завершает **всю группу процессов** хука, чтобы его «внуки» не выжили в виде сирот.
+Хук получает ту же схему, что и webhook, поэтому один скрипт может обслуживать оба канала.
+
+Соглашение о вызове выбирается через `notify.exec.format`: `kapkan` (по умолчанию,
+описано выше) или `fastnetmon` (см. ниже).
+
+<Callout type="danger" title="Хук выполняется от имени пользователя демона">
+Exec-команда выполняется с привилегиями процесса Kapkan. Относитесь к скрипту как к части
+вашей доверенной базы, держите его на пути, доступном для записи только root, и никогда не
+передавайте недоверенные, контролируемые атакующим поля обратно в shell.
+</Callout>
+
+### Режим, совместимый с FastNetMon
+
+Переходите с FastNetMon? Задайте `notify.exec.format: fastnetmon`, и Kapkan будет вызывать
+хук точно так же, как это делает `notify_script` FastNetMon — поэтому ваши существующие
+скрипты уведомлений работают без изменений:
+
+- **`argv`** — это `<ip> <direction> <pps> <action>`.
+- **stdin** несёт текстовую сводку об атаке (тело `attack_details` FastNetMon).
+
+```yaml
+notify:
+  exec:
+    command: "/usr/local/bin/notify_about_attack.sh"
+    format: fastnetmon
+```
+
+`action` — одно из `ban`, `unban` или `attack_details`, отображённое из события Kapkan:
+
+| Событие Kapkan | `action` |
+| --- | --- |
+| атака началась, хост отправлен в blackhole или отведён | `ban` |
+| атака началась, только оповещение (без блокировки) | `attack_details` |
+| атака завершилась, блокировка снята | `unban` |
+| **любое событие, пока `dry_run` равно true** | `attack_details` |
+
+<Callout type="warning" title="Dry-run никогда не порождает ban/unban">
+В режиме dry-run Kapkan ничего не анонсирует — но скрипт блокировки FastNetMon *всё равно*
+поставил бы хост в firewall. Поэтому в dry-run каждое событие понижается до информационного
+`attack_details`, а не `ban`/`unban`, и скрипт FastNetMon не сможет заблокировать хост,
+который вы лишь проверяете. Атаки уровня группы (`calculation: total`) не имеют единственного
+хоста и в этом режиме пропускаются.
+</Callout>
+
+## Конфигурация
+
+Полный блок `notify`. Каждый канал опционален — пустое значение `smtp_host`, `url`,
+`webhook_url` или `command` отключает соответствующий канал.
+
+```yaml
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"   # token is read from this env var, never the file
+    chat_id: "-1001234567890"
+  webhook:
+    url: ""                        # generic JSON POST on every attack start/end
+    # payload schema: docs/callback-schema.json (check schema_version)
+  slack:
+    webhook_url: ""                # Slack incoming webhook
+  email:                           # SMTP; credentials from env vars
+    smtp_host: ""                  # "mail.example.com:587"; empty disables
+    from: ""
+    to: []                         # ["ops@example.com"]
+    username_env: "KAPKAN_SMTP_USER"
+    password_env: "KAPKAN_SMTP_PASS"
+    require_tls: false             # STARTTLS is auto-required when credentials are set
+  exec:                            # hook run on every attack event (no shell)
+    command: ""                    # absolute path to an existing executable
+    timeout_seconds: 10
+    format: kapkan                 # or "fastnetmon" for FastNetMon-style argv/stdin
+```
+
+## Схема payload обратного вызова
+
+Тело webhook и stdin exec-хука несут один и тот же JSON-объект. Он версионирован полем
+`schema_version`, в настоящее время — `1`. Авторитетное определение находится в файле
+[`docs/callback-schema.json`](https://github.com/kapkan-io/kapkan/blob/main/docs/callback-schema.json).
+
+<Callout type="info" title="Прямая совместимость">
+Потребители ОБЯЗАНЫ проверять `schema_version` и ДОЛЖНЫ игнорировать неизвестные поля.
+Версия повышается только при ломающих изменениях, поэтому новые поля могут добавляться,
+ничего у вас не ломая.
+</Callout>
+
+| Поле | Тип | Примечания |
+| --- | --- | --- |
+| `schema_version` | integer | В этом релизе всегда `1`. |
+| `event` | string | `attack_started` или `attack_ended`. |
+| `scope` | string | `host` (атакуется одна `target`) или `group` (суммарный трафик hostgroup с `calculation: total`; задано `group`, `target` отсутствует). |
+| `target` | string | Атакуемый хост — или, для исходящих атак, атакующий хост. Отсутствует для событий уровня группы. |
+| `group` | string | Имя владеющей hostgroup; `global` для неявной резервной группы. |
+| `direction` | string | `incoming` или `outgoing`, когда источником атаки является сама цель (вероятно, скомпрометирована). |
+| `metric` | string | Сработавший порог (например, `pps`, `mbps`, `udp_pps`, `tcp_syn_pps`, `frag_pps`). |
+| `rate` | number | Наблюдаемое значение сработавшей метрики, скорректированное на сэмплирование. |
+| `threshold` | number | Настроенный предел этой метрики на момент начала атаки. |
+| `pps` | number | Пакеты в секунду с поправкой на сэмплирование. |
+| `mbps` | number | Мегабиты в секунду с поправкой на сэмплирование. |
+| `flows_per_sec` | number | Flows в секунду с поправкой на сэмплирование. |
+| `ban_state` | string | `active`, `withdrawn` или `rejected`, когда выполнялась проверка подавления атаки. |
+| `route` | string | Анонс маршрута blackhole (предполагаемый маршрут в режиме dry-run). |
+| `dry_run` | boolean | Был ли механизм подавления в режиме dry-run для этого события. |
+| `at` | string | Временная метка события в формате RFC 3339. |
+| `classification` | object | Выведенный вектор атаки — только для `attack_started`. |
+| `sample` | object | Сэмпл flows, захваченный до срабатывания порога — только для `attack_started`, когда включён буфер трафика. |
+
+Объект `classification` несёт выведенный `type` (например, `ntp_amplification`,
+`syn_flood`, `udp_flood` или `mixed`, когда ни одна сигнатура не совпала), долю
+уверенности `confidence` от `0` до `1` и `src_port` для векторов усиления (amplification).
+Объект `sample` несёт усечённый набор `flows`, а также счётчики top-K — `top_sources`,
+`top_src_ports`, `top_dst_ports` и `protocols` — и знаменатель `total_packets`.
+
+### Пример payload
+
+Реалистичное событие `attack_started` для флуда с NTP-усилением, обнаруженного в режиме dry-run:
+
+```json
+{
+  "schema_version": 1,
+  "event": "attack_started",
+  "scope": "host",
+  "target": "203.0.113.45",
+  "group": "customers",
+  "direction": "incoming",
+  "metric": "mbps",
+  "rate": 8421.5,
+  "threshold": 500,
+  "pps": 612000,
+  "mbps": 8421.5,
+  "flows_per_sec": 9400,
+  "ban_state": "active",
+  "route": "203.0.113.45/32",
+  "dry_run": true,
+  "at": "2026-06-13T14:22:07Z",
+  "classification": {
+    "type": "ntp_amplification",
+    "confidence": 0.94,
+    "src_port": 123
+  },
+  "sample": {
+    "flows": [
+      {
+        "src": "198.51.100.7",
+        "dst": "203.0.113.45",
+        "src_port": 123,
+        "dst_port": 51344,
+        "proto": "udp",
+        "fragment": false,
+        "bytes": 4800,
+        "packets": 10,
+        "sampling_rate": 1024
+      }
+    ],
+    "top_sources": [
+      { "key": "198.51.100.7", "packets": 184320, "bytes": 88473600 }
+    ],
+    "top_src_ports": [
+      { "key": "123", "packets": 611000, "bytes": 293280000 }
+    ],
+    "top_dst_ports": [
+      { "key": "51344", "packets": 611000, "bytes": 293280000 }
+    ],
+    "protocols": [
+      { "key": "udp", "packets": 611500, "bytes": 293520000 }
+    ],
+    "total_packets": 612000
+  }
+}
+```
+
+## Связанные материалы
+
+- [REST API](/docs/api) — программный запрос активных и недавних атак.
+- [Метрики](/docs/metrics) — `notify_notifications_total` по каналам и результатам.
+- [Справочник по конфигурации](/docs/configuration) — каждый ключ в YAML-файле.

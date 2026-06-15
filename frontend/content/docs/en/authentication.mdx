@@ -1,0 +1,121 @@
+export const metadata = {
+  title: "Authentication",
+  description:
+    "Secure the API and dashboard with a bearer token before exposing the listener beyond localhost.",
+};
+
+# Authentication
+
+By default the Kapkan API and dashboard are **unauthenticated**. This is safe only because
+the default `api.listen` value binds to `127.0.0.1` — the listener is reachable only from
+the host itself, so no token is required to read status, list attacks, or issue manual
+bans. The moment you bind the listener to a routable address, that protection disappears.
+
+<Callout type="danger" title="Set a token before exposing the listener">
+If you change `api.listen` to anything other than localhost — for example `0.0.0.0:8080`
+or a specific interface — configure a token first. An unauthenticated listener on a
+routable address lets anyone reach the [API](/docs/api), including the manual ban and unban
+endpoints.
+</Callout>
+
+## Setting a token
+
+The shorthand is a single operator token. Add `token_env` to the `api` block — it names the
+environment variable that holds the token; the secret itself is read from the process
+environment per request, never from the config file:
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  token_env: "KAPKAN_API_TOKEN"   # token read from this env var, never the file
+```
+
+Then provide the value out of band, for example through your service manager's environment
+or a secrets file:
+
+```sh
+export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
+./kapkan -config configs/prod.yaml
+```
+
+Keeping the token in an environment variable rather than the YAML means the config remains
+safe to commit to git and diff alongside the rest of your [configuration](/docs/configuration).
+
+## Roles
+
+For role-based access use `tokens` instead of `token_env` — a list where each entry names the
+env var holding its secret and a role:
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  tokens:
+    - { name: dashboard,  token_env: "KAPKAN_API_RO", role: viewer }
+    - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
+```
+
+| Role | May do |
+| --- | --- |
+| `viewer` | Read only: status, attacks, hosts, bans, metrics. |
+| `operator` | Everything a viewer can, plus manual ban/unban and config reload. |
+
+`token_env` and `tokens` are **mutually exclusive** — `token_env` is exactly one operator
+token. A request is matched against every configured token (in constant time); the highest
+matching role applies. A read with a viewer token works; a mutation with a viewer token is
+refused with `403 Forbidden`; a request with no valid token is `401 Unauthorized`. An
+empty or unset env var never matches, so a misconfigured secret fails closed.
+
+Tokens and roles are read from the environment on every request, so rotating a secret or
+changing the token set takes effect on the next [config reload](/docs/api) — no restart.
+
+A token may also carry an optional `tenant`, scoping it to one customer's data. That is the
+[Multi-tenancy](/docs/multi-tenancy) feature, layered on the roles described here.
+
+## What it protects
+
+With a token set, every `/api/v1` request must carry it in an `Authorization` header using
+the bearer scheme:
+
+```http
+GET /api/v1/status HTTP/1.1
+Host: kapkan.internal:8080
+Authorization: Bearer <token>
+```
+
+The supplied token is compared to the configured one in **constant time**, so the
+comparison itself does not leak the secret through timing.
+
+What stays open and what becomes protected:
+
+| Path | With auth configured |
+| --- | --- |
+| `GET /api/v1/*` | Requires a **viewer** (or operator) token |
+| `POST /api/v1/*` | Requires an **operator** token **and** a JSON content type |
+| `GET /metrics` | Open — Prometheus scrape stays unauthenticated |
+| Static UI shell (`/`) | Open — but the data behind it is not |
+
+The dashboard's static UI shell remains reachable so a browser can load it, but it has no
+data of its own: it polls `/api/v1`, so it prompts for the token and keeps it in
+`sessionStorage`. `/metrics` likewise stays open for your Prometheus scraper. See the
+[dashboard](/docs/dashboard) page for how the UI handles the token prompt.
+
+## CSRF
+
+POST endpoints require `Content-Type: application/json` in addition to the token. A browser
+performing a cross-site request cannot set a custom `Authorization` header without a CORS
+preflight, and a simple form post cannot send the JSON content type. Requiring both — the
+token in a request header and the JSON content type — blocks cross-site request forgery
+against the manual ban, unban, and config-reload endpoints.
+
+<Callout type="info" title="Roles and tenants are different axes">
+A role scopes what a token may *do* (read vs. mutate). A token's optional `tenant` scopes
+which data it may *see and touch*. They compose: a viewer can be unscoped (all tenants) or
+scoped to one. See [Multi-tenancy](/docs/multi-tenancy).
+</Callout>
+
+## Related
+
+- [Multi-tenancy](/docs/multi-tenancy) — scope a token to one customer's data.
+- [REST API](/docs/api) — the endpoints the token protects.
+- [Dashboard](/docs/dashboard) — how the embedded UI prompts for and stores the token.
+- [Deployment](/docs/deployment) — binding the listener and supplying the token in production.

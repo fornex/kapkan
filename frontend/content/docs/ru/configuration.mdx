@@ -1,0 +1,191 @@
+export const metadata = {
+  title: "Справочник конфигурации",
+  description:
+    "Все ключи YAML-файла конфигурации Kapkan, со значениями по умолчанию и полным аннотированным примером.",
+};
+
+# Справочник конфигурации
+
+Kapkan настраивается одним YAML-файлом, который передаётся через `-config`. В репозитории есть
+две отправные точки: [`configs/dev.yaml`](/docs/quickstart) для локальной разработки (тестовые
+префиксы, привязка к loopback, `dry_run: true`) и [`deploy/config.example.yaml`](/docs/deployment)
+для production — в нём собраны авторитетные встроенные комментарии и значения по умолчанию.
+Скопируйте production-пример в `/etc/kapkan/config.yaml` и адаптируйте его под свою сеть.
+
+Файл можно перечитывать во время работы. Отправьте `SIGHUP` (`systemctl reload kapkan`) или
+`POST /api/v1/config/reload` — и Kapkan перечитает файл и применит новые пороги, сети,
+hostgroup, базовые линии (baseline) и настройки уведомлений, не прерывая приём flow-данных.
+Несколько ключей фиксируются при запуске — см. [Коррекция сэмплирования](#коррекция-сэмплирования) и
+примечание о размере `samples` ниже.
+
+<Callout type="warning" title="Dry-run по умолчанию включён">
+`dry_run` по умолчанию равен `true`, а отсутствие ключа `dry_run` трактуется как `true`. Оставляйте
+это значение, пока не проверите детекцию на живой телеметрии. См. [Запуск в боевом режиме](/docs/going-live).
+</Callout>
+
+## Секреты и переменные окружения
+
+Секреты никогда не пишутся в файл конфигурации. Каждый из них указывает на переменную окружения,
+и Kapkan читает значение из окружения процесса при загрузке:
+
+- `notify.telegram.token_env` — токен бота Telegram.
+- `notify.email.username_env` / `notify.email.password_env` — учётные данные SMTP.
+- `storage.clickhouse.username_env` / `password_env` — учётные данные ClickHouse.
+- `api.token_env` (или каждый `api.tokens[].token_env`) — bearer-токен(ы) REST API / панели управления.
+
+В systemd-юните они находятся в `EnvironmentFile`, например `/etc/kapkan/kapkan.env`,
+с правами `0600`:
+
+```sh
+KAPKAN_TG_TOKEN=123456:abc...
+KAPKAN_API_TOKEN=a-long-random-string
+```
+
+## Ключи верхнего уровня
+
+Каждый ключ верхнего уровня, его смысл и значение по умолчанию. Для более крупных подсистем
+однострочная сводка ведёт на отдельную страницу.
+
+| Ключ | Смысл |
+| --- | --- |
+| `dry_run` | Когда `true` (значение по умолчанию, в том числе при отсутствии ключа), blackhole логируются и отслеживаются, но **никогда не анонсируются**. |
+| `listen.sflow` / `listen.netflow` | UDP-адреса прослушивания. NetFlow v5/v9 и IPFIX используют общий сокет `netflow`. Нужен хотя бы один listener. См. [Как это работает](/docs/how-it-works). |
+| `sampling.default_rate` | Частота сэмплирования, применяемая, когда экспортёр не сообщает свою. Должна быть `>= 1`. |
+| `networks` | Защищаемые префиксы. Детекция применяется **только** к назначениям внутри них, и они не должны пересекаться. |
+| `protected_whitelist` | Адреса, которые **никогда** не банятся, независимо от трафика. См. [Модель безопасности](/docs/safety). |
+| `thresholds.pps` / `.mbps` / `.flows_per_sec` | Пороги на одно назначение после коррекции сэмплирования. Все должны быть `> 0`. См. [Детекция](/docs/detection). |
+| `thresholds.tcp_pps` / `udp_pps` / `icmp_pps` / `tcp_syn_pps` / `frag_pps` (и каждый вариант `_mbps`) | Опциональные лимиты по протоколам. Значение `0` или отсутствие ключа отключает этот лимит. Срабатывает любой превышенный порог (семантика OR). |
+| `thresholds_outgoing` | Опционально. Детектирует атаки, **исходящие от** защищаемых хостов (скомпрометированные машины). Те же ключи, что и у `thresholds`; должен быть задан хотя бы один. При отсутствии исходящий трафик не учитывается. См. [Детекция](/docs/detection). |
+| `hostgroups[]` | Опциональные именованные группы префиксов с собственными порогами и политикой смягчения, включая расчёт `per_host` или `total`. Каждая может нести метку `tenant`. См. [Hostgroups](/docs/hostgroups). |
+| `tenant` | Опциональная метка tenant для неявной глобальной/резервной группы. См. [Мультиарендность](/docs/multi-tenancy). |
+| `samples.enabled` / `buffer_flows` / `flows_per_attack` | Непрерывный буфер трафика для сэмплов атак (по умолчанию: `true` / `65536` / `20`). Изменение размеров требует перезапуска. |
+| `baseline` | Опциональные непрерывно обучаемые пороги на хост по EWMA, переопределяемые на уровне hostgroup. См. [Базовые линии](/docs/baselines). |
+| `ban.ttl_seconds` | Каждый анонс автоматически отзывается через указанное число секунд. Постоянных банов нет. |
+| `ban.unban_hysteresis_seconds` | Трафик должен оставаться ниже порога это время, прежде чем бан будет снят, что предотвращает «дребезг» (flapping). |
+| `ban.max_active_bans` | Жёсткий предел одновременных банов. Новые баны сверх лимита отклоняются. |
+| `mitigation` | Метод смягчения: `blackhole` (по умолчанию), `flowspec` или `divert`. Переопределяется на уровне hostgroup. См. [FlowSpec](/docs/flowspec) и [Отвод трафика](/docs/scrubbing). |
+| `flowspec.action` / `rate_mbps` | Действие правила FlowSpec: `discard` или `rate_limit` (с `rate_mbps`). См. [FlowSpec](/docs/flowspec). |
+| `escalation[]` | Опциональная лестница ступеней `{ after_seconds, action }` (`none` / `flowspec` / `divert` / `blackhole`), которая имеет приоритет над `mitigation`. См. [Лестницы эскалации](/docs/escalation). |
+| `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | Идентичность BGP, next-hop blackhole для IPv4/IPv6 и RTBH-community (`ASN:value`). `router_id` должен быть IPv4 в формате dotted-quad. См. [Смягчение](/docs/mitigation). |
+| `bgp.communities` / `local_pref` | Опциональный **список** community (переопределяет `community`) и `LOCAL_PREF` для iBGP-пиров. Все атрибуты `bgp` переопределяются на уровне hostgroup. |
+| `bgp.neighbors[]` | eBGP-пиры: `address`, `remote_asn` и опциональный `port` для тестирования. |
+| `scrubbing.next_hop` / `next_hop6` / `community` / `communities` / `local_pref` | Центр очистки (scrubbing), на который действие `divert` перенаправляет трафик. `next_hop` обязателен для отвода (`next_hop6` тоже, когда защищается IPv6); community опционально. Переопределяется на уровне hostgroup. См. [Отвод трафика](/docs/scrubbing). |
+| `notify.*` | Каналы Telegram, Slack, email, webhook и exec-hook. См. [Уведомления](/docs/notifications). |
+| `storage.clickhouse.*` | Опциональное сохранение в ClickHouse истории атак и трафика (`url`, `database`, `username_env`, `password_env`, `ttl_days`, …). См. [Хранилище](/docs/storage). |
+| `api.listen` | Адрес прослушивания REST API и метрик. По умолчанию `127.0.0.1:8080`. |
+| `api.dashboard` | Отдаёт встроенный веб-интерфейс на `/` по адресу listener API. По умолчанию `true`. См. [Панель управления](/docs/dashboard). |
+| `api.token_env` | Указывает переменную окружения с одним operator-bearer-токеном. Обязателен перед открытием listener за пределы localhost. См. [Аутентификация](/docs/authentication). |
+| `api.tokens[]` | Токены с ролями: у каждой записи есть `name`, `token_env`, `role` (`viewer` или `operator`) и опциональная область `tenant`. Имеет приоритет над `token_env` (взаимоисключающи). См. [Аутентификация](/docs/authentication) и [Мультиарендность](/docs/multi-tenancy). |
+
+### Подробнее о порогах
+
+Три базовых порога — `pps`, `mbps`, `flows_per_sec` — обязательны и все должны быть `> 0`.
+Лимиты по протоколам — это опциональные уточнения: `tcp_syn_pps` считает чистые SYN-пакеты (флаг
+SYN установлен, ACK снят), а `frag_pps` считает не-первые IP-фрагменты. Детекция использует
+семантику OR — срабатывание атаки вызывает любой отдельно превышенный порог. Все значения
+выражены в реальных, несэмплированных единицах (см. [Коррекция сэмплирования](#коррекция-сэмплирования)).
+
+## Полный пример
+
+Реалистичный production-конфиг, адаптированный из `deploy/config.example.yaml`:
+
+```yaml
+dry_run: true                       # keep until detection is validated
+
+listen:
+  sflow: ":6343"
+  netflow: ":2055"                  # NetFlow v5/v9 + IPFIX share this socket
+
+sampling:
+  default_rate: 1000                # used only when an exporter omits its own rate
+
+networks:                           # detection applies ONLY inside these prefixes
+  - "203.0.113.0/24"
+  - "2001:db8::/32"
+
+protected_whitelist:                # never banned, regardless of traffic
+  - "203.0.113.1"                   # gateway / router
+  - "203.0.113.2"                   # authoritative nameserver
+
+thresholds:                         # per destination host, after sampling correction
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 35000
+  tcp_syn_pps: 5000                 # optional per-protocol; 0/absent disables
+  udp_pps: 60000
+
+thresholds_outgoing:                # detect compromised hosts attacking outward
+  pps: 50000
+  udp_pps: 20000
+
+ban:
+  ttl_seconds: 600                  # every ban auto-withdraws after this
+  unban_hysteresis_seconds: 120     # stay below threshold this long before unban
+  max_active_bans: 50               # refuse new bans past this cap
+
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"             # must be an IPv4 dotted-quad
+  next_hop: "192.0.2.1"             # IPv4 blackhole (discard) next-hop
+  next_hop6: "100::1"               # IPv6 blackhole next-hop
+  community: "65000:666"            # RTBH community your upstream honors
+  neighbors:
+    - address: "10.0.0.254"
+      remote_asn: 65000
+
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"    # token read from this env var, never the file
+    chat_id: "-1001234567890"
+  slack:
+    webhook_url: ""                 # optional Slack incoming webhook
+  email:
+    smtp_host: ""                   # "mail.example.com:587"; empty disables
+    from: ""
+    to: []
+    username_env: "KAPKAN_SMTP_USER"
+    password_env: "KAPKAN_SMTP_PASS"
+    require_tls: false              # STARTTLS auto-required when credentials are set
+
+api:
+  listen: "127.0.0.1:8080"          # default localhost bind needs no auth
+  dashboard: true                   # embedded web UI at /; false = JSON API only
+  # token_env: "KAPKAN_API_TOKEN"   # REQUIRED before exposing beyond localhost
+```
+
+Блоки `hostgroups`, `baseline` и `samples` здесь опущены для краткости. Полные схемы
+смотрите на отдельных страницах:
+
+- [Hostgroups](/docs/hostgroups) — пороги на префикс, `ban: false` и `calculation: total`.
+- [Базовые линии](/docs/baselines) — `factor`, `half_life_seconds`, `warmup_seconds`, `floor`.
+- Блок `samples`: `enabled` (по умолчанию `true`), `buffer_flows` (по умолчанию `65536`) и
+  `flows_per_attack` (по умолчанию `20`). Они управляют непрерывным кольцом flow, которое
+  привязывает доминирующие источники, порты и протоколы к каждой атаке в момент её срабатывания.
+  Изменение размеров требует перезапуска.
+
+## Коррекция сэмплирования
+
+Flow-телеметрия сэмплируется — маршрутизатор экспортирует одну запись на каждые N пакетов.
+Kapkan умножает каждую наблюдаемую скорость на частоту сэмплирования экспортёра, чтобы пороги
+выражались в реальных, несэмплированных единицах трафика. Частота берётся из flow-пакета, когда
+экспортёр её сообщает, иначе — из `sampling.default_rate`.
+
+Это означает, что порог вроде `pps: 80000` — это реальная скорость атаки, на которую вы хотите
+реагировать, а не сэмплированный счётчик. Если ваш экспортёр сэмплирует с частотой `1:1000` и не
+объявляет её, задайте `sampling.default_rate: 1000`, чтобы один сэмплированный пакет в секунду
+корректно считался за 1000 реальных пакетов в секунду.
+
+<Callout type="warning" title="Настройте сэмплирование правильно до запуска в бой">
+Неверный `sampling.default_rate` масштабирует каждый порог на один и тот же коэффициент.
+Установите его в соответствии с тем, что реально экспортируют ваши маршрутизаторы, а затем
+убедитесь в режиме dry-run, что детекция срабатывает на ожидаемых скоростях.
+</Callout>
+
+## Связанные материалы
+
+- [Детекция и пороги](/docs/detection) — что считается атакой, лимиты по протоколам и детекция исходящего трафика.
+- [Hostgroups](/docs/hostgroups) — политики на префикс и группы суммарного трафика.
+- [Базовые линии](/docs/baselines) — непрерывно обучаемые пороги.
+- [Смягчение](/docs/mitigation) — BGP, RTBH, TTL и лимиты банов.
+- [Аутентификация](/docs/authentication) — защита API и панели управления.
+- [Запуск в боевом режиме](/docs/going-live) — проверьте, затем отключите dry-run.

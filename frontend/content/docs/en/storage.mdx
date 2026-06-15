@@ -1,0 +1,67 @@
+export const metadata = {
+  title: "Storage (ClickHouse)",
+  description:
+    "Optional ClickHouse persistence for attack and traffic history — forensics and dashboard graphs, never blocking detection.",
+};
+
+# Storage (ClickHouse)
+
+Point Kapkan at a ClickHouse server to keep attack and traffic history — the answer to
+"what hit us last Tuesday". Without it, Kapkan runs entirely in-process on live data.
+
+<Callout type="info" title="Best-effort, never blocks detection">
+Persistence runs off a bounded queue with a non-blocking send. A slow or down ClickHouse
+drops rows (counted in `storage_rows_total` with `result="dropped"`) rather than stalling
+the engine's hot path.
+</Callout>
+
+## Enabling
+
+```yaml
+storage:
+  clickhouse:
+    url: "http://127.0.0.1:8123"   # empty/absent disables persistence
+    database: "kapkan"             # created if absent
+    username_env: "KAPKAN_CH_USER" # optional; credentials come from the env
+    password_env: "KAPKAN_CH_PASS"
+    ttl_days: 7                    # rows auto-expire (per-row TTL)
+    flush_interval_seconds: 5
+    batch_size: 1000
+    queue_size: 100000
+    traffic_interval_seconds: 10
+```
+
+Credentials are read from the named environment variables (`username_env` / `password_env`),
+never from the config file.
+
+## How it works
+
+Kapkan talks to ClickHouse's **HTTP interface** with the Go standard library — no driver
+dependency. The only external dependency is the ClickHouse server itself.
+
+On start it idempotently creates two MergeTree tables:
+
+| Table | Contents |
+| --- | --- |
+| `attack_events` | Every attack start and end: type, direction, rates, the sample's top sources, and ban state. |
+| `traffic` | Periodic per-host rate and baseline snapshots (every `traffic_interval_seconds`). |
+
+Both carry a `ttl_days` per-row TTL, so retention is bounded without operator intervention.
+
+## Backpressure
+
+Rows go onto a bounded queue (`queue_size`) with a non-blocking send and are flushed in
+batches (`batch_size` / `flush_interval_seconds`). If ClickHouse is slow or down, rows are
+dropped — counted as `storage_rows_total` with `result="dropped"` — and the engine keeps
+running. See [Metrics](/docs/metrics).
+
+## What is and isn't persisted
+
+The `traffic` table currently persists per-host snapshots only. Per-ASN aggregation is not
+persisted (Kapkan does not resolve ASNs from flows), and per-hostgroup totals are not yet
+snapshotted — both are candidates for a follow-up.
+
+## Related
+
+- [Configuration reference](/docs/configuration) — the full `storage` key list.
+- [Metrics](/docs/metrics) — the `storage_rows_total` counter.
