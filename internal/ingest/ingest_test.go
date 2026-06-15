@@ -204,3 +204,52 @@ func TestSplitListen(t *testing.T) {
 		}
 	}
 }
+
+// TestExporterLabelerCapsCardinality proves that, with no flow_sources
+// allowlist, a flood of distinct (spoofed) exporter source addresses cannot
+// create unbounded metric labels: the number of distinct label values stays
+// within the cap plus the single "other" bucket.
+func TestExporterLabelerCapsCardinality(t *testing.T) {
+	l := newExporterLabeler()
+	labels := make(map[string]struct{})
+	// Feed four times the cap in distinct addresses (10.0.0.0/14-ish space).
+	for i := 0; i < maxExporterLabels*4; i++ {
+		a := netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+		labels[l.label(a, nil)] = struct{}{}
+	}
+	if len(labels) > maxExporterLabels+1 {
+		t.Fatalf("distinct exporter labels = %d, want <= %d", len(labels), maxExporterLabels+1)
+	}
+	if _, ok := labels[otherExporter]; !ok {
+		t.Errorf("expected the %q bucket once the cap is exceeded", otherExporter)
+	}
+	if len(l.seen) > maxExporterLabels {
+		t.Errorf("labeler retained %d entries, want <= %d", len(l.seen), maxExporterLabels)
+	}
+}
+
+// TestExporterLabelerAllowlist proves that with a flow_sources allowlist, a
+// trusted exporter is always labeled individually and is never displaced by a
+// flood of spoofed sources (which all collapse into "other").
+func TestExporterLabelerAllowlist(t *testing.T) {
+	l := newExporterLabeler()
+	trusted := netip.MustParseAddr("198.51.100.7")
+	allow := map[netip.Addr]struct{}{trusted: {}}
+
+	if got := l.label(trusted, allow); got != trusted.String() {
+		t.Fatalf("trusted exporter label = %q, want %q", got, trusted.String())
+	}
+	for i := 0; i < 10000; i++ {
+		a := netip.AddrFrom4([4]byte{203, 0, byte(i >> 8), byte(i)})
+		if got := l.label(a, allow); got != otherExporter {
+			t.Fatalf("spoofed exporter %v label = %q, want %q", a, got, otherExporter)
+		}
+	}
+	// The allowlist path never populates the cap cache, so it cannot grow.
+	if len(l.seen) != 0 {
+		t.Errorf("allowlist mode populated the cap cache (%d entries)", len(l.seen))
+	}
+	if got := l.label(trusted, allow); got != trusted.String() {
+		t.Errorf("after flood, trusted exporter label = %q, want %q", got, trusted.String())
+	}
+}
