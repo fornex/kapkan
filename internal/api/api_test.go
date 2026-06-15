@@ -629,3 +629,167 @@ func TestDashboardServing(t *testing.T) {
 		t.Errorf("api with dashboard disabled = %d, want 200", rec.Code)
 	}
 }
+
+func tenantAPIYAML() string {
+	y := strings.Replace(apiYAML, "  listen: \"127.0.0.1:8080\"\n",
+		"  listen: \"127.0.0.1:8080\"\n  tokens:\n"+
+			"    - {name: admin, token_env: K_ADMIN, role: operator}\n"+
+			"    - {name: a-view, token_env: K_A, role: viewer, tenant: custA}\n"+
+			"    - {name: b-op, token_env: K_B, role: operator, tenant: custB}\n", 1)
+	return y + "hostgroups:\n" +
+		"  - name: custA-web\n    tenant: custA\n    networks: [\"203.0.113.0/26\"]\n" +
+		"  - name: custB-web\n    tenant: custB\n    networks: [\"203.0.113.64/26\"]\n"
+}
+
+func attackTargets(t *testing.T, body []byte) map[string]bool {
+	t.Helper()
+	var resp struct {
+		Active []Attack `json:"active"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("attacks body: %v\n%s", err, body)
+	}
+	out := map[string]bool{}
+	for _, a := range resp.Active {
+		out[a.Target.String()] = true
+	}
+	return out
+}
+
+func banTargets(t *testing.T, body []byte) map[string]bool {
+	t.Helper()
+	var resp struct {
+		Bans []mitigate.Ban `json:"bans"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("bans body: %v\n%s", err, body)
+	}
+	out := map[string]bool{}
+	for _, b := range resp.Bans {
+		out[b.Target.String()] = true
+	}
+	return out
+}
+
+// TestTenantScoping is the core cross-tenant isolation test: a scoped token
+// sees and may mutate only its own tenant's data; an admin sees all.
+func TestTenantScoping(t *testing.T) {
+	t.Setenv("K_ADMIN", "admin-secret")
+	t.Setenv("K_A", "a-secret")
+	t.Setenv("K_B", "b-secret")
+	s := testServer(t, storeFromYAML(t, tenantAPIYAML()))
+	h := s.Handler()
+
+	const aIP, bIP = "203.0.113.10", "203.0.113.70" // custA, custB
+	s.RecordAttackStarted(engine.Event{Kind: engine.AttackStarted, Scope: engine.ScopeHost, Target: netip.MustParseAddr(aIP), Group: "custA-web", At: time.Now()}, nil)
+	s.RecordAttackStarted(engine.Event{Kind: engine.AttackStarted, Scope: engine.ScopeHost, Target: netip.MustParseAddr(bIP), Group: "custB-web", At: time.Now()}, nil)
+	if _, err := s.mit.ManualBan(netip.MustParseAddr(aIP)); err != nil { // dry-run virtual ban
+		t.Fatal(err)
+	}
+	if _, err := s.mit.ManualBan(netip.MustParseAddr(bIP)); err != nil {
+		t.Fatal(err)
+	}
+
+	// custA viewer sees only custA in attacks and bans.
+	at := attackTargets(t, reqWith(h, http.MethodGet, "/api/v1/attacks", "", "a-secret", "").Body.Bytes())
+	if !at[aIP] || at[bIP] {
+		t.Errorf("custA attacks = %v, want only %s", at, aIP)
+	}
+	bt := banTargets(t, reqWith(h, http.MethodGet, "/api/v1/bans", "", "a-secret", "").Body.Bytes())
+	if !bt[aIP] || bt[bIP] {
+		t.Errorf("custA bans = %v, want only %s", bt, aIP)
+	}
+
+	// custA status: only custA's hostgroup, and no global networks/thresholds.
+	var st map[string]any
+	_ = json.Unmarshal(reqWith(h, http.MethodGet, "/api/v1/status", "", "a-secret", "").Body.Bytes(), &st)
+	if _, ok := st["networks"]; ok {
+		t.Error("scoped status leaked global networks")
+	}
+	if _, ok := st["thresholds"]; ok {
+		t.Error("scoped status leaked global thresholds")
+	}
+	if groups, _ := st["hostgroups"].([]any); len(groups) != 1 {
+		t.Errorf("scoped status hostgroups = %v, want only custA-web", st["hostgroups"])
+	}
+
+	// admin sees both tenants and the global fields.
+	at = attackTargets(t, reqWith(h, http.MethodGet, "/api/v1/attacks", "", "admin-secret", "").Body.Bytes())
+	if !at[aIP] || !at[bIP] {
+		t.Errorf("admin attacks = %v, want both", at)
+	}
+	_ = json.Unmarshal(reqWith(h, http.MethodGet, "/api/v1/status", "", "admin-secret", "").Body.Bytes(), &st)
+	if _, ok := st["networks"]; !ok {
+		t.Error("admin status missing networks")
+	}
+
+	// Mutation scoping. A viewer cannot mutate at all (403).
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"`+aIP+`"}`, "a-secret", "application/json"); rec.Code != http.StatusForbidden {
+		t.Errorf("custA viewer ban = %d, want 403", rec.Code)
+	}
+	// custB operator may ban within custB...
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"`+bIP+`"}`, "b-secret", "application/json"); rec.Code != http.StatusOK {
+		t.Errorf("custB operator ban own = %d, want 200", rec.Code)
+	}
+	// ...but not a custA target (uniform 403, regardless of ban existence).
+	if rec := reqWith(h, http.MethodPost, "/api/v1/unban", `{"ip":"`+aIP+`"}`, "b-secret", "application/json"); rec.Code != http.StatusForbidden {
+		t.Errorf("custB operator unban custA = %d, want 403", rec.Code)
+	}
+	// A scoped operator cannot reload (admin-only).
+	if rec := reqWith(h, http.MethodPost, "/api/v1/config/reload", "", "b-secret", "application/json"); rec.Code != http.StatusForbidden {
+		t.Errorf("scoped operator reload = %d, want 403", rec.Code)
+	}
+	// admin passes the reload gate (in-memory test store has no file to re-read,
+	// so the reload returns 400 — what matters is it is NOT blocked by 403).
+	if rec := reqWith(h, http.MethodPost, "/api/v1/config/reload", "", "admin-secret", "application/json"); rec.Code == http.StatusForbidden {
+		t.Errorf("admin reload = 403, want it to pass the admin gate")
+	}
+}
+
+// TestTenantAmbiguousTokenFailsClosed: one bearer matching tokens of different
+// scope (a reused secret) is refused, never silently widened — including when a
+// HIGHER-rank operator token shares the secret (it must not clear the ambiguity
+// and grant operator/admin).
+func TestTenantAmbiguousTokenFailsClosed(t *testing.T) {
+	t.Setenv("K_A", "shared")
+	t.Setenv("K_B", "shared")     // same secret, different tenants — misconfig
+	t.Setenv("K_ADMIN", "shared") // and a higher-rank operator, same secret
+	y := strings.Replace(apiYAML, "  listen: \"127.0.0.1:8080\"\n",
+		"  listen: \"127.0.0.1:8080\"\n  tokens:\n"+
+			"    - {name: a, token_env: K_A, role: viewer, tenant: custA}\n"+
+			"    - {name: b, token_env: K_B, role: viewer, tenant: custB}\n"+
+			"    - {name: admin, token_env: K_ADMIN, role: operator}\n", 1) +
+		"hostgroups:\n  - name: ca\n    tenant: custA\n    networks: [\"203.0.113.0/26\"]\n" +
+		"  - name: cb\n    tenant: custB\n    networks: [\"203.0.113.64/26\"]\n"
+	s := testServer(t, storeFromYAML(t, y))
+	// Read AND mutate must both fail closed: the operator-rank match must not
+	// win once any ambiguity is present.
+	if rec := reqWith(s.Handler(), http.MethodGet, "/api/v1/status", "", "shared", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ambiguous token read = %d, want 401 (fail closed)", rec.Code)
+	}
+	if rec := reqWith(s.Handler(), http.MethodPost, "/api/v1/config/reload", "", "shared", "application/json"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ambiguous token reload = %d, want 401 (must not resolve to operator)", rec.Code)
+	}
+}
+
+// TestGlobalGroupNotLeakedToScopedToken: even when the global/fallback group is
+// labeled with a tenant, a scoped token of that tenant must not receive the
+// global group's deployment-wide config via /status.
+func TestGlobalGroupNotLeakedToScopedToken(t *testing.T) {
+	t.Setenv("K_A", "a-secret")
+	y := strings.Replace(apiYAML, "  listen: \"127.0.0.1:8080\"\n",
+		"  listen: \"127.0.0.1:8080\"\n  tokens:\n"+
+			"    - {name: a, token_env: K_A, role: viewer, tenant: custA}\n", 1) +
+		"tenant: \"custA\"\n" + // label the GLOBAL group with custA
+		"hostgroups:\n  - name: ca-web\n    tenant: custA\n    networks: [\"203.0.113.0/26\"]\n"
+	s := testServer(t, storeFromYAML(t, y))
+	var st map[string]any
+	_ = json.Unmarshal(reqWith(s.Handler(), http.MethodGet, "/api/v1/status", "", "a-secret", "").Body.Bytes(), &st)
+	groups, _ := st["hostgroups"].([]any)
+	if len(groups) != 1 { // only ca-web — never the global group, despite its label
+		t.Fatalf("scoped hostgroups = %v, want only ca-web (global group excluded)", st["hostgroups"])
+	}
+	if g, _ := groups[0].(map[string]any); g["name"] == config.GlobalGroup {
+		t.Errorf("scoped token received the global group: %v", g)
+	}
+}

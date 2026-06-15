@@ -29,9 +29,12 @@ const maxRecentAttacks = 100
 // Attack is the API view of one detected attack (active or historical).
 // Group-scoped attacks (a hostgroup's total traffic) carry no target.
 type Attack struct {
-	Scope     engine.Scope            `json:"scope"`
-	Target    netip.Addr              `json:"target"`
-	Group     string                  `json:"group,omitempty"`
+	Scope  engine.Scope `json:"scope"`
+	Target netip.Addr   `json:"target"`
+	Group  string       `json:"group,omitempty"`
+	// Tenant is the owning group's tenant, stamped at serialization for
+	// attribution (admin views); empty when the group is unlabeled.
+	Tenant    string                  `json:"tenant,omitempty"`
 	Direction engine.Direction        `json:"direction"`
 	Metric    engine.Metric           `json:"metric"`
 	Rate      float64                 `json:"rate"`
@@ -196,32 +199,52 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) requireRole(required config.Role, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokens := s.store.Get().API.TokenSpecs
+		// No tokens configured: open API (trusted-listener mode), caller is an
+		// unscoped admin — identical to pre-RBAC behavior.
+		cl := caller{role: config.RoleOperator, tenant: ""}
 		if len(tokens) > 0 {
 			// Require the exact "Bearer " scheme; a raw header value must not
 			// authenticate. Compare against every token without an early exit,
-			// taking the highest matching role.
+			// taking the highest matching role and its tenant scope.
 			got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			rank := 0
+			var match config.TokenSpec
+			matched := false
+			ambiguous := false
 			if ok {
 				for _, tk := range tokens {
 					want := os.Getenv(tk.Env)
 					if want == "" {
 						continue // env unset/empty → never matches (fail closed)
 					}
-					if subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 && tk.Role.Rank() > rank {
-						rank = tk.Role.Rank()
+					if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+						continue
+					}
+					switch {
+					case !matched:
+						match, matched = tk, true
+					case tk.Role != match.Role || tk.Tenant != match.Tenant:
+						// The same bearer matches tokens of DIFFERENT role or
+						// tenant (a reused secret): which principal is this?
+						// Fail closed rather than pick one — a reuse must never
+						// silently widen access. Checked against ALL matches, so
+						// a higher-rank token cannot clear the ambiguity.
+						ambiguous = true
 					}
 				}
 			}
-			if rank == 0 {
+			if !matched || ambiguous {
+				if ambiguous {
+					s.log.Error("ambiguous API token: one secret matches tokens of differing role/tenant; refusing")
+				}
 				w.Header().Set("WWW-Authenticate", "Bearer")
 				writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 				return
 			}
-			if rank < required.Rank() {
+			if match.Role.Rank() < required.Rank() {
 				writeError(w, http.StatusForbidden, "this token's role may not perform this action")
 				return
 			}
+			cl = caller{role: match.Role, tenant: match.Tenant}
 		}
 		if r.Method == http.MethodPost {
 			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
@@ -229,8 +252,62 @@ func (s *Server) requireRole(required config.Role, next http.HandlerFunc) http.H
 				return
 			}
 		}
-		next(w, r)
+		next(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, cl)))
 	})
+}
+
+// caller is the authenticated principal for a request: its role and its tenant
+// scope ("" = unscoped admin / all tenants). It is derived once in requireRole
+// and carried in the request context, so every handler shares one source of
+// truth for who is asking.
+type caller struct {
+	role   config.Role
+	tenant string
+}
+
+// unscoped reports whether the caller sees and may act on every tenant.
+func (c caller) unscoped() bool { return c.tenant == "" }
+
+type callerKey struct{}
+
+// callerFrom returns the caller established by requireRole. Every /api/v1 route
+// passes through requireRole, so this is always populated; the zero value (an
+// unscoped admin) is only a defensive fallback.
+func callerFrom(r *http.Request) caller {
+	c, _ := r.Context().Value(callerKey{}).(caller)
+	return c
+}
+
+// visibleAddr reports whether the caller may see/act on data owned by addr. An
+// unscoped caller sees everything; a scoped caller sees an address only when
+// its owning group (longest-prefix-match, the same lookup the engine and
+// mitigator trust) carries the caller's tenant — default-deny.
+func visibleAddr(c caller, cfg *config.Config, addr netip.Addr) bool {
+	return c.unscoped() || cfg.GroupFor(addr).Tenant == c.tenant
+}
+
+// visibleGroupName reports whether the caller may see a group-scoped item
+// (e.g. a total-group attack, which has no single address) identified by group
+// name. Unknown group → deny for a scoped caller.
+func visibleGroupName(c caller, cfg *config.Config, group string) bool {
+	if c.unscoped() {
+		return true
+	}
+	for i := range cfg.Groups {
+		if cfg.Groups[i].Name == group {
+			return cfg.Groups[i].Tenant == c.tenant
+		}
+	}
+	return false
+}
+
+// visibleAttack applies the right predicate by attack scope: host attacks by
+// address, group (total) attacks by group name.
+func visibleAttack(c caller, cfg *config.Config, a Attack) bool {
+	if a.Scope == engine.ScopeGroup {
+		return visibleGroupName(c, cfg, a.Group)
+	}
+	return visibleAddr(c, cfg, a.Target)
 }
 
 // ListenAndServe runs the HTTP server until ctx is cancelled, then shuts it
@@ -261,32 +338,83 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	c := callerFrom(r)
 	cfg := s.store.Get()
+
+	// Hostgroups visible to the caller (all for an admin; only matching ones
+	// for a scoped tenant — so a tenant never learns another's prefixes,
+	// thresholds or BGP posture). The implicit global/fallback group carries
+	// deployment-wide config (global thresholds, default BGP attributes), so it
+	// is admin-only even when labeled with a tenant.
+	groups := make([]config.Group, 0, len(cfg.Groups))
+	for _, g := range cfg.Groups {
+		switch {
+		case c.unscoped():
+			groups = append(groups, g)
+		case g.Name == config.GlobalGroup:
+			// deployment-wide config — never shown to a scoped token
+		case g.Tenant == c.tenant:
+			groups = append(groups, g)
+		}
+	}
+
+	// Counts recomputed over the caller's visible attacks/bans.
 	s.mu.Lock()
-	activeCount := len(s.active)
+	activeAttacks := 0
+	for _, a := range s.active {
+		if visibleAttack(c, cfg, *a) {
+			activeAttacks++
+		}
+	}
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{
+	activeBans := 0
+	for _, b := range s.mit.ActiveBans() {
+		if visibleAddr(c, cfg, b.Target) {
+			activeBans++
+		}
+	}
+
+	resp := map[string]any{
 		"dry_run":        cfg.DryRun,
 		"uptime_seconds": int64(time.Since(s.start).Seconds()),
-		"networks":       cfg.Networks,
-		"active_attacks": activeCount,
-		"active_bans":    len(s.mit.ActiveBans()),
-		"thresholds":     cfg.Thresholds,
-		"hostgroups":     cfg.Groups,
-	})
+		"active_attacks": activeAttacks,
+		"active_bans":    activeBans,
+		"hostgroups":     groups,
+	}
+	// Global protected networks and the global thresholds describe the whole
+	// deployment; reveal them only to an unscoped admin.
+	if c.unscoped() {
+		resp["networks"] = cfg.Networks
+		resp["thresholds"] = cfg.Thresholds
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) handleAttacks(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleAttacks(w http.ResponseWriter, r *http.Request) {
+	c := callerFrom(r)
+	cfg := s.store.Get()
+	stamp := func(a Attack) Attack {
+		if a.Scope == engine.ScopeGroup {
+			a.Tenant = groupTenant(cfg, a.Group)
+		} else {
+			a.Tenant = cfg.GroupFor(a.Target).Tenant
+		}
+		return a
+	}
 	s.mu.Lock()
 	active := make([]Attack, 0, len(s.active))
 	for _, a := range s.active {
-		active = append(active, *a)
+		if visibleAttack(c, cfg, *a) {
+			active = append(active, stamp(*a))
+		}
 	}
 	// Copy recent newest-first.
 	recent := make([]Attack, 0, len(s.recent))
 	for i := len(s.recent) - 1; i >= 0; i-- {
-		recent = append(recent, s.recent[i])
+		if visibleAttack(c, cfg, s.recent[i]) {
+			recent = append(recent, stamp(s.recent[i]))
+		}
 	}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -295,12 +423,40 @@ func (s *Server) handleAttacks(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *Server) handleHosts(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"hosts": s.eng.Snapshot()})
+func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
+	c := callerFrom(r)
+	cfg := s.store.Get()
+	all := s.eng.Snapshot()
+	hosts := make([]engine.HostStat, 0, len(all))
+	for _, h := range all {
+		if visibleAddr(c, cfg, h.Target) {
+			hosts = append(hosts, h)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts})
 }
 
-func (s *Server) handleBans(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"bans": s.mit.Snapshot()})
+func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
+	c := callerFrom(r)
+	cfg := s.store.Get()
+	all := s.mit.Snapshot()
+	bans := make([]mitigate.Ban, 0, len(all))
+	for _, b := range all {
+		if visibleAddr(c, cfg, b.Target) {
+			bans = append(bans, b)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bans": bans})
+}
+
+// groupTenant returns the tenant of the named group, or "" if not found.
+func groupTenant(cfg *config.Config, name string) string {
+	for i := range cfg.Groups {
+		if cfg.Groups[i].Name == name {
+			return cfg.Groups[i].Tenant
+		}
+	}
+	return ""
 }
 
 type ipRequest struct {
@@ -310,6 +466,13 @@ type ipRequest struct {
 func (s *Server) handleBan(w http.ResponseWriter, r *http.Request) {
 	addr, ok := s.parseIPBody(w, r)
 	if !ok {
+		return
+	}
+	if c := callerFrom(r); !visibleAddr(c, s.store.Get(), addr) {
+		// Uniform refusal: never reveal whether addr is banned, or even in a
+		// configured network, to a scoped operator targeting another tenant.
+		s.log.Warn("cross-tenant ban refused", "tenant", c.tenant, "target", addr.String())
+		writeError(w, http.StatusForbidden, "target is outside your tenant")
 		return
 	}
 	ban, err := s.mit.ManualBan(addr)
@@ -330,6 +493,14 @@ func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Check tenant ownership BEFORE consulting the mitigator, so an
+	// out-of-tenant target returns the same 403 whether or not a ban exists —
+	// no cross-tenant existence oracle on unban.
+	if c := callerFrom(r); !visibleAddr(c, s.store.Get(), addr) {
+		s.log.Warn("cross-tenant unban refused", "tenant", c.tenant, "target", addr.String())
+		writeError(w, http.StatusForbidden, "target is outside your tenant")
+		return
+	}
 	ban, err := s.mit.ManualUnban(addr)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
@@ -339,7 +510,14 @@ func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ban)
 }
 
-func (s *Server) handleReload(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
+	// A reload swaps the whole config — every tenant's policy and the token set
+	// itself — so it is admin-only; a scoped operator must not be able to
+	// disrupt other tenants or rewrite the tenant/token mapping.
+	if !callerFrom(r).unscoped() {
+		writeError(w, http.StatusForbidden, "config reload is restricted to unscoped (admin) tokens")
+		return
+	}
 	cfg, err := s.store.Reload()
 	if err != nil {
 		s.log.Error("config reload via API failed", "err", err)

@@ -62,7 +62,8 @@ The full schema:
 | `thresholds.pps` / `.mbps` / `.flows_per_sec` | Per-destination thresholds, after sampling correction. All must be > 0. |
 | `thresholds.tcp_pps` / `udp_pps` / `icmp_pps` / `tcp_syn_pps` / `frag_pps` (+ `_mbps` each) | Optional per-protocol thresholds; 0/absent disables. Any crossed threshold triggers (OR). `tcp_syn` counts pure SYNs (SYN set, ACK clear); `frag` counts non-first IP fragments. |
 | `thresholds_outgoing` | Optional. Enables detection of attacks **originated by** protected hosts (compromised machines). Same keys as `thresholds`, at least one must be set; absent, outgoing traffic is not even counted. |
-| `hostgroups[]` | Optional named prefix groups with their own thresholds and mitigation policy (see [Hostgroups](#hostgroups)). Each group may also set `thresholds_outgoing`. |
+| `hostgroups[]` | Optional named prefix groups with their own thresholds and mitigation policy (see [Hostgroups](#hostgroups)). Each group may also set `thresholds_outgoing` and a `tenant` label (see [Multi-tenancy](#multi-tenancy)). |
+| `tenant` | Optional tenant label for the implicit global/fallback group (top level). See [Multi-tenancy](#multi-tenancy). |
 | `samples.enabled` / `buffer_flows` / `flows_per_attack` | Traffic buffer for attack samples (defaults: on / 65536 / 20). Recent flows are buffered continuously so the moment a threshold trips, the attack's dominant sources, ports and protocols are already attached to the event, the notification and the API — no post-detection capture delay. Sizing changes require a restart. |
 | `baseline` | Continuous learned per-host thresholds (see [Baselines](#baselines)). Optional; per-hostgroup overridable. |
 | `ban.ttl_seconds` | Every announcement auto-withdraws after this. No permanent bans. |
@@ -76,7 +77,7 @@ The full schema:
 | `notify.email.smtp_host` / `from` / `to[]` / `username_env` / `password_env` / `require_tls` | Optional SMTP notifications. Credentials come from environment variables. STARTTLS is used when the server offers it and **required** when credentials are configured or `require_tls` is set; plaintext delivery to a non-loopback host is loudly logged. |
 | `notify.exec.command` / `timeout_seconds` / `format` | Optional hook executed on every attack event, no shell. The command must exist and be executable at config load. On timeout (default 10s) the hook's whole process group is killed. The hook receives a **minimal environment** (PATH/HOME/TZ/LANG/USER/TMPDIR) — the daemon's secrets are not inherited. `format` selects the convention: `kapkan` (default — event name as `argv[1]`, payload JSON on stdin, same schema as the webhook) or `fastnetmon` (see below). |
 | `api.listen` | REST API + metrics listen address. |
-| `api.token_env` / `api.tokens` | API auth: a single operator token (`token_env`) or a role-based `tokens` list (`viewer`/`operator`); secrets come from the named env vars. See Authentication. |
+| `api.token_env` / `api.tokens` | API auth: a single operator token (`token_env`) or a role-based `tokens` list (`viewer`/`operator`, each with an optional `tenant` scope); secrets come from the named env vars. See Authentication and [Multi-tenancy](#multi-tenancy). |
 
 Sampling: every rate is multiplied by the exporter's sampling rate (from the flow packet
 when present, else `sampling.default_rate`) so thresholds are expressed in real,
@@ -400,6 +401,55 @@ takes effect on reload without a restart. The dashboard prompts for a token and 
 `sessionStorage`. `/metrics` and the static UI shell stay open (the data behind the UI does
 not). POST endpoints also require the JSON content type, which — together with the token
 living in a header — blocks cross-site request forgery.
+
+## Multi-tenancy
+
+One kapkan instance can serve many customers (an MSP/IDC use case) and give each a token
+that sees and touches **only their own** attacks, bans and hosts. A tenant is just an
+optional label on a hostgroup — no new top-level object:
+
+```yaml
+tenant: "house"                 # optional: label the global/fallback group
+
+hostgroups:
+  - name: custA-web
+    tenant: "customerA"         # this group belongs to customerA
+    networks: ["203.0.113.0/26"]
+  - name: custA-dns
+    tenant: "customerA"         # a tenant can span several groups
+    networks: ["203.0.113.64/26"]
+  - name: custB
+    tenant: "customerB"
+    networks: ["198.51.100.0/24"]
+  - name: shared-infra          # no tenant → visible only to admin tokens
+    networks: ["192.0.2.0/24"]
+
+api:
+  tokens:
+    - { name: admin,    token_env: KAPKAN_ADMIN, role: operator }                    # unscoped: all tenants
+    - { name: a-portal, token_env: KAPKAN_A,     role: viewer,   tenant: "customerA" }
+    - { name: b-ops,    token_env: KAPKAN_B,     role: operator, tenant: "customerB" }
+```
+
+"Which tenant owns this IP" is answered by the **same** longest-prefix hostgroup lookup the
+engine and mitigator already use, so there is one source of truth and the detection hot path
+is untouched. A token's optional `tenant` scopes it; an unscoped token is an admin that sees
+everything (the default, fully back-compatible). Enforcement is **default-deny for scoped
+tokens** at a single choke point:
+
+- **Reads** (`/status`, `/attacks`, `/hosts`, `/bans`) return only rows whose owning group
+  carries the caller's tenant. `/status` is rebuilt per scope — a tenant never learns
+  another's prefixes, thresholds or BGP posture. Unlabeled groups are admin-only.
+- **Mutations**: a scoped operator may `ban`/`unban` only within its own prefixes; an
+  out-of-tenant target returns a uniform `403` whether or not a ban exists (no cross-tenant
+  probing). `config/reload` is admin-only (it rewrites every tenant's policy and the token
+  set itself).
+- A bearer that matches tokens of **different** tenants at the same role (a reused secret) is
+  refused — a misconfiguration never silently widens access.
+
+`/metrics` is **not** tenant-scoped (it stays an admin/operator scrape surface); the
+dashboard shell is shared but every data call it makes is filtered by the pasted token. No
+tenant configured anywhere = single-tenant behavior, unchanged.
 
 ## Metrics
 
