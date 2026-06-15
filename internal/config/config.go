@@ -47,11 +47,15 @@ type Config struct {
 	// Escalation is the default mitigation ladder; when set it supersedes
 	// the single `mitigation` method. Hostgroups may override it.
 	Escalation []EscalationStep `yaml:"escalation"`
-	Hostgroups []Hostgroup      `yaml:"hostgroups"`
-	Samples    Samples          `yaml:"samples"`
-	Storage    Storage          `yaml:"storage"`
-	Ban        Ban              `yaml:"ban"`
-	BGP        BGP              `yaml:"bgp"`
+	// Tenant optionally labels the implicit global/fallback group, attributing
+	// catch-all traffic to a tenant (see Hostgroup.Tenant). Empty = unlabeled
+	// (admin-only visibility).
+	Tenant     string      `yaml:"tenant"`
+	Hostgroups []Hostgroup `yaml:"hostgroups"`
+	Samples    Samples     `yaml:"samples"`
+	Storage    Storage     `yaml:"storage"`
+	Ban        Ban         `yaml:"ban"`
+	BGP        BGP         `yaml:"bgp"`
 	// Scrubbing is the default traffic-diversion target (scrubbing center
 	// next-hops + divert community), used by groups whose ladder diverts.
 	Scrubbing Scrubbing `yaml:"scrubbing"`
@@ -345,6 +349,10 @@ type Hostgroup struct {
 	// local-pref) for this group; omitted fields inherit the global scrubbing
 	// block.
 	Scrubbing *BGPOverride `yaml:"scrubbing"`
+	// Tenant optionally labels this group's owner. A tenant-scoped API token
+	// sees and may mutate only data whose group carries its tenant. Empty =
+	// unlabeled (visible only to unscoped/admin tokens).
+	Tenant string `yaml:"tenant"`
 	// Ban controls automatic RTBH for the group's hosts (default true).
 	// Must not be set to true for total groups, which never auto-ban.
 	Ban *bool `yaml:"ban"`
@@ -385,7 +393,11 @@ type Group struct {
 	ScrubCommunities  []uint32 `json:"-"`
 	ScrubCommunityStr string   `json:"scrub_communities,omitempty"`
 	ScrubLocalPref    uint32   `json:"scrub_local_pref,omitempty"`
-	BanEnabled        bool     `json:"ban"`
+	// Tenant is the resolved owner label (empty = unlabeled). Used only by the
+	// API to scope what a tenant-scoped token may see and mutate; never read on
+	// the hot path.
+	Tenant     string `json:"tenant,omitempty"`
+	BanEnabled bool   `json:"ban"`
 }
 
 // groupRoute maps one prefix to its owning group for longest-prefix-match
@@ -572,6 +584,9 @@ type APIToken struct {
 	Name     string `yaml:"name"`
 	TokenEnv string `yaml:"token_env"`
 	Role     string `yaml:"role"`
+	// Tenant optionally scopes this token: it then sees and may mutate only
+	// data whose hostgroup carries this tenant. Empty = unscoped (all tenants).
+	Tenant string `yaml:"tenant"`
 }
 
 // Role is an API access level.
@@ -604,6 +619,8 @@ type TokenSpec struct {
 	Name string
 	Env  string
 	Role Role
+	// Tenant scopes the token (empty = unscoped / all tenants).
+	Tenant string
 }
 
 // DashboardEnabled reports whether the embedded UI should be served.
@@ -746,6 +763,12 @@ func (c *Config) validateHostgroups() error {
 		return fmt.Errorf("baseline: %w", err)
 	}
 
+	// Tenant labels travel into logs, JSON and (via tokens) auth decisions; the
+	// same log/JSON/header-safe charset as group names closes injection vectors.
+	if c.Tenant != "" && !groupNameRe.MatchString(c.Tenant) {
+		return fmt.Errorf("tenant %q must match %s", c.Tenant, groupNameRe)
+	}
+
 	globalMethod, globalAction, globalRate, err := resolveMitigation(c.Mitigation, c.FlowSpec, MitigateBlackhole, nil)
 	if err != nil {
 		return fmt.Errorf("mitigation: %w", err)
@@ -797,6 +820,7 @@ func (c *Config) validateHostgroups() error {
 		ScrubCommunities:      globalScrub.communities,
 		ScrubCommunityStr:     globalScrub.commStr,
 		ScrubLocalPref:        globalScrub.localPref,
+		Tenant:                c.Tenant,
 		BanEnabled:            true,
 	})
 	c.groupRoutes = nil
@@ -813,6 +837,9 @@ func (c *Config) validateHostgroups() error {
 		// single central point.
 		if !groupNameRe.MatchString(hg.Name) {
 			return fmt.Errorf("hostgroups[%d]: name %q must match %s", i, hg.Name, groupNameRe)
+		}
+		if hg.Tenant != "" && !groupNameRe.MatchString(hg.Tenant) {
+			return fmt.Errorf("hostgroups[%q]: tenant %q must match %s", hg.Name, hg.Tenant, groupNameRe)
 		}
 		if hg.Name == GlobalGroup {
 			return fmt.Errorf("hostgroups[%d]: name %q is reserved for the implicit fallback group", i, GlobalGroup)
@@ -972,6 +999,7 @@ func (c *Config) validateHostgroups() error {
 			ScrubCommunities:      groupScrub.communities,
 			ScrubCommunityStr:     groupScrub.commStr,
 			ScrubLocalPref:        groupScrub.localPref,
+			Tenant:                hg.Tenant,
 			BanEnabled:            banEnabled,
 		})
 	}
@@ -1401,6 +1429,14 @@ func (c *Config) validateAPITokens() error {
 		if a.TokenEnv != "" {
 			return fmt.Errorf("api: set either token_env (single token) or tokens (role-based list), not both")
 		}
+		// Tenant labels actually in use, to reject a token scoped to a tenant
+		// that owns no prefixes (a typo would silently see nothing).
+		tenants := make(map[string]bool)
+		for _, g := range c.Groups {
+			if g.Tenant != "" {
+				tenants[g.Tenant] = true
+			}
+		}
 		names := make(map[string]bool, len(a.Tokens))
 		for i, tk := range a.Tokens {
 			if tk.Name == "" {
@@ -1417,7 +1453,10 @@ func (c *Config) validateAPITokens() error {
 			if role != RoleViewer && role != RoleOperator {
 				return fmt.Errorf("api.tokens[%q]: role must be %q or %q, got %q", tk.Name, RoleViewer, RoleOperator, tk.Role)
 			}
-			a.TokenSpecs = append(a.TokenSpecs, TokenSpec{Name: tk.Name, Env: tk.TokenEnv, Role: role})
+			if tk.Tenant != "" && !tenants[tk.Tenant] {
+				return fmt.Errorf("api.tokens[%q]: tenant %q is not used by any hostgroup", tk.Name, tk.Tenant)
+			}
+			a.TokenSpecs = append(a.TokenSpecs, TokenSpec{Name: tk.Name, Env: tk.TokenEnv, Role: role, Tenant: tk.Tenant})
 		}
 		return nil
 	}
