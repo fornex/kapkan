@@ -1,7 +1,7 @@
 # Kapkan Roadmap — Competing with FastNetMon Advanced
 
 Based on a full read of the FastNetMon Advanced documentation (fastnetmon.com/docs-fnm-advanced, June 2026).
-This document refines the phase plan in CLAUDE.md into concrete, prioritized feature work.
+This document lays out the phase plan as concrete, prioritized feature work.
 
 ## 1. Competitive thesis
 
@@ -94,7 +94,7 @@ detection. All in-memory, all in the existing engine.
    (publish the JSON schema in repo, versioned). Brings FNM's callback-script ecosystem over.
 6. **Email + Slack notifiers.** Trivial after webhook; closes the notification gap entirely.
 
-### Phase 2 — See: storage, UI, classification, baselines (per CLAUDE.md)
+### Phase 2 — See: storage, UI, classification, baselines
 
 Goal: kill LiveView's value proposition. FNM charges per-user for a UI that needs MongoDB —
 we ship a free dashboard embedded in the binary.
@@ -119,7 +119,7 @@ we ship a free dashboard embedded in the binary.
    published — FNM has no machine-readable schema; reflection endpoints are their substitute.
 7. **Grafana dashboards** shipped in `deploy/grafana/` for those who prefer Grafana over our UI.
 
-### Phase 3 — Act: FlowSpec and surgical mitigation (per CLAUDE.md)
+### Phase 3 — Act: FlowSpec and surgical mitigation
 
 Goal: surgical drops instead of blackholing the victim. FNM's FlowSpec is its strongest
 Advanced-only feature; their IPv6 gap is our opening.
@@ -139,7 +139,7 @@ Advanced-only feature; their IPv6 gap is our opening.
 5. **Selective blackhole & per-hostgroup BGP attributes.** Communities, next-hop, peer set
    per hostgroup.
 6. **Multi-tenant API.** Scoped tokens: a tenant sees/manages only its hostgroups. Foundation
-   for hosting-panel integration (billing hooks stay in Phase 3 per CLAUDE.md).
+   for hosting-panel integration (billing hooks stay in Phase 3).
 
 ### Phase 4 — Scale: HA, capture modes, ecosystem
 
