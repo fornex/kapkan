@@ -11,11 +11,13 @@ import (
 	"net/smtp"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/mitigate"
 )
 
 // sendSlack posts the payload to a Slack incoming webhook as mrkdwn text.
@@ -222,21 +224,44 @@ func emailMessage(cfg config.Email, p Payload) []byte {
 	return b.Bytes()
 }
 
-// runExec invokes the operator's hook with the payload JSON on stdin and
-// the event name as the only argument. The command runs directly (no
-// shell) and its whole process group is killed when the configured timeout
-// elapses.
+// runExec invokes the operator's hook. In the native "kapkan" format the
+// payload JSON is piped to stdin and the event name is argv[1]. In the
+// "fastnetmon" format the hook is called like FastNetMon's notify_script —
+// argv is "<ip> <direction> <pps> <action>" with a plain-text attack summary
+// on stdin — so existing FastNetMon scripts run unchanged. The command runs
+// directly (no shell) and its whole process group is killed when the
+// configured timeout elapses.
 func (n *Notifier) runExec(ctx context.Context, hook config.Exec, p Payload) {
-	body, err := json.Marshal(p)
-	if err != nil {
-		n.recordResult("exec", err)
-		return
+	var args []string
+	var stdin []byte
+	if hook.Format == config.ExecFormatFastNetMon {
+		action, ok := fastnetmonAction(p)
+		if !ok {
+			// This event has no FastNetMon equivalent (a group-scoped attack
+			// has no single host; an alert-only attack ending has nothing to
+			// unban). Skip the invocation rather than invent an action.
+			return
+		}
+		dir := p.Direction
+		if dir == "" {
+			dir = "incoming"
+		}
+		args = []string{p.Target, dir, strconv.Itoa(int(p.PPS)), action}
+		stdin = []byte(fastnetmonReport(p, action))
+	} else {
+		body, err := json.Marshal(p)
+		if err != nil {
+			n.recordResult("exec", err)
+			return
+		}
+		args = []string{p.Event}
+		stdin = body
 	}
 	runCtx, cancel := context.WithTimeout(ctx, hook.Timeout())
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, hook.Command, p.Event)
-	cmd.Stdin = bytes.NewReader(body)
+	cmd := exec.CommandContext(runCtx, hook.Command, args...)
+	cmd.Stdin = bytes.NewReader(stdin)
 	// The hook gets a minimal environment. The daemon's environment carries
 	// every notification secret (bot tokens, SMTP credentials, per the
 	// env-only secrets rule), which third-party hook scripts and their
@@ -260,7 +285,7 @@ func (n *Notifier) runExec(ctx context.Context, hook config.Exec, p Payload) {
 	cmd.Stdout = out
 	cmd.Stderr = out
 
-	err = cmd.Run()
+	err := cmd.Run()
 	if err != nil {
 		switch {
 		case errors.Is(runCtx.Err(), context.DeadlineExceeded):
@@ -272,6 +297,81 @@ func (n *Notifier) runExec(ctx context.Context, hook config.Exec, p Payload) {
 		}
 	}
 	n.recordResult("exec", err)
+}
+
+// fastnetmonAction maps a payload to FastNetMon's notify_script action
+// ("ban" | "unban" | "attack_details"), or ok=false when the event has no
+// FastNetMon equivalent (a group-scoped attack has no single host; an
+// alert-only attack ending has nothing to unban).
+//
+// Dry-run is the critical case: kapkan announces nothing for a dry-run ban, but
+// a FastNetMon ban script WOULD block the host at the firewall. So a dry-run
+// event is downgraded to the informational "attack_details" — never a real
+// "ban"/"unban" — preserving kapkan's dry-run guarantee even through a
+// third-party script.
+//
+// p.DryRun is the ban's FROZEN dry-run state (from ban.DryRun), not the
+// daemon's current mode — deliberately. The script's action must mirror what
+// kapkan actually did to the RIB, and the mitigator's announce/withdraw key on
+// the same frozen value: a ban really announced (DryRun=false) is really
+// withdrawn at attack-end even after a reload flips dry_run on, so its script
+// must get "unban" to drop the real firewall rule; a virtual ban
+// (DryRun=true) never touched the RIB and never the firewall. Using the live
+// config here instead would strand a real firewall block after such a flip.
+func fastnetmonAction(p Payload) (string, bool) {
+	if p.Scope == "group" || p.Target == "" {
+		return "", false
+	}
+	if p.DryRun {
+		return "attack_details", true
+	}
+	switch p.Event {
+	case "attack_started":
+		if p.BanState == string(mitigate.BanActive) {
+			return "ban", true
+		}
+		return "attack_details", true // alert-only or rejected: informational
+	case "attack_ended":
+		// Only unban once the ban has actually come DOWN. A host attacked both
+		// incoming and outgoing shares one ban (direction-refcounted): when the
+		// first direction ends, attack_ended fires but the ban stays BanActive,
+		// held by the other direction — the route (and the script's firewall
+		// rule) must stay. Unbanning then would drop protection mid-attack.
+		if p.BanState == string(mitigate.BanWithdrawn) {
+			return "unban", true
+		}
+		return "", false // still active (other direction) or alert-only: skip
+	}
+	return "", false
+}
+
+// fastnetmonReport renders the plain-text attack summary piped to a
+// FastNetMon-style script on stdin (its "attack_details" body).
+func fastnetmonReport(p Payload, action string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "IP: %s\n", p.Target)
+	fmt.Fprintf(&b, "Action: %s\n", action)
+	if p.Direction != "" {
+		fmt.Fprintf(&b, "Attack direction: %s\n", p.Direction)
+	}
+	if c := p.Classification; c != nil {
+		fmt.Fprintf(&b, "Attack type: %s\n", c.Type)
+	}
+	fmt.Fprintf(&b, "Attack power: %.0f pps / %.1f Mbps / %.0f flows\n", p.PPS, p.Mbps, p.FlowsPerSec)
+	if p.Metric != "" {
+		fmt.Fprintf(&b, "Trigger: %s = %.0f (threshold %.0f)\n", p.Metric, p.Rate, p.Threshold)
+	}
+	if p.BanState != "" {
+		fmt.Fprintf(&b, "Ban state: %s\n", p.BanState)
+	}
+	if p.DryRun {
+		b.WriteString("Mode: DRY-RUN (kapkan announced nothing)\n")
+	}
+	if s := formatSample(p.Sample); s != "" {
+		b.WriteString(s) // already terminated with a newline
+	}
+	fmt.Fprintf(&b, "Detected at: %s\n", p.At.Format(time.RFC3339))
+	return b.String()
 }
 
 // minimalEnv passes through only benign variables to hooks.

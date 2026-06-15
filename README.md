@@ -74,7 +74,7 @@ The full schema:
 | `notify.webhook.url` | Optional generic JSON POST target for attack start/end. Payload documented in [`docs/callback-schema.json`](docs/callback-schema.json) (versioned via `schema_version`). |
 | `notify.slack.webhook_url` | Optional Slack incoming webhook. |
 | `notify.email.smtp_host` / `from` / `to[]` / `username_env` / `password_env` / `require_tls` | Optional SMTP notifications. Credentials come from environment variables. STARTTLS is used when the server offers it and **required** when credentials are configured or `require_tls` is set; plaintext delivery to a non-loopback host is loudly logged. |
-| `notify.exec.command` / `timeout_seconds` | Optional hook executed on every attack event: payload JSON on stdin, event name as `argv[1]`, no shell. The command must exist and be executable at config load. On timeout (default 10s) the hook's whole process group is killed. The hook receives a **minimal environment** (PATH/HOME/TZ/LANG/USER/TMPDIR) — the daemon's secrets are not inherited. Same schema as the webhook. |
+| `notify.exec.command` / `timeout_seconds` / `format` | Optional hook executed on every attack event, no shell. The command must exist and be executable at config load. On timeout (default 10s) the hook's whole process group is killed. The hook receives a **minimal environment** (PATH/HOME/TZ/LANG/USER/TMPDIR) — the daemon's secrets are not inherited. `format` selects the convention: `kapkan` (default — event name as `argv[1]`, payload JSON on stdin, same schema as the webhook) or `fastnetmon` (see below). |
 | `api.listen` | REST API + metrics listen address. |
 | `api.token_env` / `api.tokens` | API auth: a single operator token (`token_env`) or a role-based `tokens` list (`viewer`/`operator`); secrets come from the named env vars. See Authentication. |
 
@@ -442,6 +442,34 @@ kapkan runs entirely in-process on live data.
 > Note: the `traffic` table currently persists per-host snapshots only. Per-ASN aggregation
 > is not persisted (kapkan does not resolve ASNs from flows), and per-hostgroup totals are
 > not yet snapshotted — both are candidates for a follow-up.
+
+## Migrating from FastNetMon
+
+Already running FastNetMon? Keep your existing notify scripts. Set the exec hook to the
+FastNetMon convention and kapkan invokes them exactly the way FastNetMon's `notify_script`
+does — argv `<ip> <direction> <pps> <action>`, with a plain-text attack summary on stdin:
+
+```yaml
+notify:
+  exec:
+    command: "/usr/local/bin/notify_about_attack.sh"
+    format: fastnetmon
+```
+
+`action` is `ban`, `unban`, or `attack_details`, matching FastNetMon. The mapping:
+
+| kapkan event | `action` |
+| --- | --- |
+| attack started, host blackholed/diverted | `ban` |
+| attack started, alert-only (no ban) | `attack_details` |
+| attack ended, a ban was withdrawn | `unban` |
+| **any event while `dry_run` is true** | `attack_details` |
+
+That last row is the safety rule that matters: in dry-run kapkan announces nothing, so it
+**never** emits `ban`/`unban` to your script — only the informational `attack_details` — so a
+FastNetMon ban script cannot firewall a host you are only validating. Group-scoped (total)
+attacks have no single host and are skipped in this mode. The default `format: kapkan`
+(event name + JSON payload) is unchanged.
 
 ## Safety model
 

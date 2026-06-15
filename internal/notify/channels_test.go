@@ -720,3 +720,86 @@ func TestClassificationInMessages(t *testing.T) {
 		t.Errorf("telegram syn classification wrong:\n%s", text)
 	}
 }
+
+// TestFastNetMonAction covers the event→action mapping, especially the
+// dry-run downgrade that keeps a FastNetMon ban script from blocking a host
+// kapkan only virtually banned.
+func TestFastNetMonAction(t *testing.T) {
+	mk := func(event, scope, target, banState string, dry bool) Payload {
+		return Payload{Event: event, Scope: scope, Target: target, BanState: banState, DryRun: dry}
+	}
+	cases := []struct {
+		name string
+		p    Payload
+		want string
+		ok   bool
+	}{
+		{"live start + ban", mk("attack_started", "host", "203.0.113.5", "active", false), "ban", true},
+		{"live start alert-only", mk("attack_started", "host", "203.0.113.5", "", false), "attack_details", true},
+		{"live start rejected", mk("attack_started", "host", "203.0.113.5", "rejected", false), "attack_details", true},
+		{"live end, ban withdrawn", mk("attack_ended", "host", "203.0.113.5", "withdrawn", false), "unban", true},
+		{"end but ban still active (other direction holds it)", mk("attack_ended", "host", "203.0.113.5", "active", false), "", false},
+		{"live end alert-only", mk("attack_ended", "host", "203.0.113.5", "", false), "", false},
+		{"dry-run start+ban downgrades", mk("attack_started", "host", "203.0.113.5", "active", true), "attack_details", true},
+		{"dry-run end downgrades", mk("attack_ended", "host", "203.0.113.5", "withdrawn", true), "attack_details", true},
+		{"group scope skipped", mk("attack_started", "group", "", "", false), "", false},
+		{"no target skipped", mk("attack_started", "host", "", "active", false), "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := fastnetmonAction(c.p)
+			if got != c.want || ok != c.ok {
+				t.Errorf("fastnetmonAction = (%q,%v), want (%q,%v)", got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
+// TestExecFastNetMonInvocation verifies the FastNetMon argv/stdin contract
+// end to end, including the dry-run safety downgrade.
+func TestExecFastNetMonInvocation(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fnm.sh")
+	out := filepath.Join(dir, "out")
+	// Capture "argv: $1 $2 $3 $4" then the stdin body.
+	body := "#!/bin/sh\necho \"argv: $1 $2 $3 $4\" > \"" + out + "\"\ncat >> \"" + out + "\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(storeFrom(t, yamlNotify("  exec:\n    command: \""+script+"\"\n    format: fastnetmon\n")), discardLogger())
+	hook := n.store.Get().Notify.Exec
+
+	base := Payload{
+		SchemaVersion: SchemaVersion, Event: "attack_started", Scope: "host",
+		Target: "203.0.113.50", Direction: "incoming", Metric: "pps",
+		Rate: 412000, Threshold: 80000, PPS: 412000, Mbps: 3100, FlowsPerSec: 9800,
+		BanState: "active", At: time.Now(),
+	}
+
+	// Live ban → action "ban", argv and stdin populated. runExec is synchronous.
+	n.runExec(context.Background(), hook, base)
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("hook did not run: %v", err)
+	}
+	s := string(got)
+	if !strings.Contains(s, "argv: 203.0.113.50 incoming 412000 ban\n") {
+		t.Errorf("argv line wrong: %q", s)
+	}
+	if !strings.Contains(s, "IP: 203.0.113.50") || !strings.Contains(s, "Action: ban") {
+		t.Errorf("stdin report missing fields:\n%s", s)
+	}
+
+	// Dry-run must downgrade to attack_details so the script never blocks.
+	dry := base
+	dry.DryRun = true
+	n.runExec(context.Background(), hook, dry)
+	got, _ = os.ReadFile(out)
+	s = string(got)
+	if !strings.Contains(s, "argv: 203.0.113.50 incoming 412000 attack_details\n") {
+		t.Errorf("dry-run argv should use attack_details, got: %q", s)
+	}
+	if !strings.Contains(s, "DRY-RUN") {
+		t.Errorf("dry-run report should note DRY-RUN:\n%s", s)
+	}
+}
