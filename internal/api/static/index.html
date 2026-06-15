@@ -1,90 +1,93 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kapkan</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kapkan — Operator Console</title>
+
+  <!-- ============================================================
+       PRODUCTION CSP (set as an HTTP header by the Go binary):
+       default-src 'none'; script-src 'self'; style-src 'self';
+       connect-src 'self'; img-src 'self'; base-uri 'none';
+       form-action 'none'; frame-ancestors 'none'
+       This prototype ships ZERO inline styles/scripts and ZERO external
+       resources, so it satisfies that policy as-is. The meta tag is left
+       commented in the dev preview only because the host editor injects
+       its own tooling; uncomment when embedding via go:embed.
+       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+       ============================================================ -->
+
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="components.css">
 </head>
 <body>
-  <header>
-    <h1>Kapkan</h1>
-    <div id="status-bar" class="status-bar"></div>
-    <div class="actions">
-      <button id="reload-btn" type="button">Reload config</button>
-    </div>
-  </header>
+  <div class="app" id="app">
+    <!-- ============ SIDEBAR ============ -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true" id="brandMark"></span>
+        <span class="brand__name">Kap<b>kan</b></span>
+      </div>
+      <nav class="nav" id="nav" aria-label="Primary"></nav>
+      <div class="sidebar__foot">
+        <div class="role" id="roleToggle" role="group" aria-label="Demo role"></div>
+      </div>
+    </aside>
 
-  <main>
-    <section>
-      <h2>Active attacks <span id="active-count" class="count"></span></h2>
-      <table id="active-attacks">
-        <thead><tr>
-          <th>Target</th><th>Scope</th><th>Dir</th><th>Type</th>
-          <th>Metric</th><th>Rate</th><th>Threshold</th><th>Top sources</th><th>Ban</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <p class="empty" id="active-empty">No active attacks.</p>
-    </section>
+    <!-- ============ TOP BAR ============ -->
+    <header class="topbar" id="topbar">
+      <div class="topbar__left">
+        <button class="icon-btn" id="collapseBtn" aria-label="Toggle sidebar"></button>
+        <span id="posturePill"></span>
+        <span id="modeBadge"></span>
+      </div>
+      <div class="topbar__spacer"></div>
+      <div class="counters" id="counters"></div>
+      <span class="counter__sep" aria-hidden="true"></span>
+      <div class="topbar__right">
+        <div class="live" id="liveInd">
+          <span class="live__dot"></span>
+          <span class="live__txt"></span>
+          <span class="live__time mono" id="lastUpdated">--:--:--</span>
+        </div>
+        <div class="menu" id="localeMenu"></div>
+        <div class="demo-ctl" id="demoCtl"></div>
+        <button class="btn btn--ghost btn--sm" id="reloadBtn" data-op="1"></button>
+      </div>
+    </header>
 
-    <section>
-      <h2>Manual mitigation</h2>
-      <form id="ban-form" class="inline-form">
-        <input id="ban-ip" type="text" placeholder="203.0.113.66" autocomplete="off">
-        <button type="submit" data-action="ban">Ban</button>
-        <button type="submit" data-action="unban">Unban</button>
-        <span id="ban-result" class="result"></span>
-      </form>
-    </section>
+    <!-- ============ MAIN ============ -->
+    <main class="main" id="main">
+      <section class="view" id="view-overview" data-screen-label="Overview"></section>
+      <section class="view" id="view-attacks" data-screen-label="Attacks" hidden></section>
+      <section class="view" id="view-bans" data-screen-label="Bans / Mitigation" hidden></section>
+      <section class="view" id="view-hosts" data-screen-label="Hosts" hidden></section>
+      <section class="view" id="view-hostgroups" data-screen-label="Hostgroups" hidden></section>
+      <section class="view" id="view-traffic" data-screen-label="Traffic / Reports" hidden></section>
+      <section class="view" id="view-settings" data-screen-label="Settings" hidden></section>
+    </main>
+  </div>
 
-    <section>
-      <h2>Active bans <span id="bans-count" class="count"></span></h2>
-      <table id="bans">
-        <thead><tr>
-          <th>Target</th><th>Route</th><th>State</th><th>Mode</th><th>Expires</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <p class="empty" id="bans-empty">No active bans.</p>
-    </section>
+  <!-- drawer + scrim -->
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true" aria-label="Attack detail"></aside>
 
-    <section>
-      <h2>Top talkers</h2>
-      <table id="hosts">
-        <thead><tr>
-          <th>Host</th><th>Group</th><th>pps</th><th>Mbps</th><th>fps</th>
-          <th>Baseline pps</th><th>In attack</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <p class="empty" id="hosts-empty">No tracked hosts.</p>
-    </section>
+  <!-- aria-live region for new-attack announcements -->
+  <div class="sr-only" role="status" aria-live="assertive" id="liveRegion"></div>
 
-    <section>
-      <h2>Recent attacks</h2>
-      <table id="recent-attacks">
-        <thead><tr>
-          <th>Target</th><th>Dir</th><th>Type</th><th>Metric</th>
-          <th>Peak rate</th><th>Started</th><th>Ended</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <p class="empty" id="recent-empty">No recent attacks.</p>
-    </section>
+  <!-- toasts -->
+  <div class="toasts" id="toasts"></div>
 
-    <section>
-      <h2>Hostgroups</h2>
-      <table id="hostgroups">
-        <thead><tr>
-          <th>Name</th><th>Calc</th><th>pps</th><th>Mbps</th><th>fps</th><th>Ban</th><th>Baseline</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-    </section>
-  </main>
-
-  <footer id="footer"></footer>
+  <!-- ===== scripts: order matters; all same-origin, no modules ===== -->
+  <script src="icons.js"></script>
+  <script src="i18n.js"></script>
+  <script src="locales/en.js"></script>
+  <script src="locales/de.js"></script>
+  <script src="locales/ru.js"></script>
+  <script src="api.js"></script>
+  <script src="components.js"></script>
+  <script src="views.js"></script>
+  <script src="views2.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

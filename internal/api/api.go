@@ -381,6 +381,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"active_attacks": activeAttacks,
 		"active_bans":    activeBans,
 		"hostgroups":     groups,
+		// role lets the dashboard gate operator-only affordances; unscoped marks
+		// an admin token (which also receives networks/thresholds below).
+		"role":     string(c.role),
+		"unscoped": c.unscoped(),
 	}
 	// Global protected networks and the global thresholds describe the whole
 	// deployment; reveal them only to an unscoped admin.
