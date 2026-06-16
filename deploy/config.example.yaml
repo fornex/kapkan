@@ -14,6 +14,17 @@ listen:
 sampling:
   default_rate: 1000 # used only when an exporter does not report its own rate
 
+# flow_sources: optional allowlist of trusted flow-exporter (router) source
+# addresses. Telemetry is unauthenticated UDP, so the source address is
+# spoofable; listing your exporters here keeps the per-exporter `packets_total`
+# metric labeled only for them (every other source is bucketed under "other"),
+# preventing a spoofed-source flood from blowing up metric cardinality. When
+# omitted, an internal cap bounds the labels automatically. Detection is
+# unaffected either way.
+# flow_sources:
+#   - "198.51.100.7"
+#   - "198.51.100.8"
+
 networks: # detection applies ONLY to destinations inside these prefixes
   - "203.0.113.0/24"
   - "2001:db8::/32"
