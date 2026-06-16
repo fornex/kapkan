@@ -220,6 +220,18 @@ notify:
 #     queue_size: 100000
 #     traffic_interval_seconds: 10
 
+# Optional GeoIP/ASN attribution of attack-sample sources ("from where / from
+# which AS"). Point at MaxMind GeoLite2 (or GeoIP2) .mmdb files; both are
+# optional and independent. When enabled, attack samples carry a per-source
+# ASN/country, the API/dashboard show a per-ASN top-talkers breakdown, and the
+# top ASNs are persisted alongside top sources in ClickHouse. Database-path
+# changes require a restart. Absent/disabled = no attribution.
+#
+# geoip:
+#   enabled: true
+#   asn_database: "/var/lib/kapkan/GeoLite2-ASN.mmdb"
+#   country_database: "/var/lib/kapkan/GeoLite2-Country.mmdb"
+
 api:
   listen: "127.0.0.1:8080" # default localhost bind needs no auth
   dashboard: true # embedded web UI at / on this listener; false = JSON API only

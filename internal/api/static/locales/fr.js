@@ -115,6 +115,7 @@
       "ac.mitigation": "Atténuation appliquée",
       "ac.sample": "Échantillon capturé",
       "ac.topsources": "Sources principales",
+      "ac.topasns": "Top ASN",
       "ac.topsrcports": "Ports source principaux",
       "ac.topdstports": "Ports destination principaux",
       "ac.protocols": "Protocoles",
