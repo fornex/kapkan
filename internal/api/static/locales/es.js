@@ -115,6 +115,7 @@
       "ac.mitigation": "Mitigación aplicada",
       "ac.sample": "Muestra capturada",
       "ac.topsources": "Fuentes principales",
+      "ac.topasns": "Top ASN",
       "ac.topsrcports": "Puertos de origen principales",
       "ac.topdstports": "Puertos de destino principales",
       "ac.protocols": "Protocolos",

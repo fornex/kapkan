@@ -101,7 +101,10 @@
               "fragment": { "type": "boolean" },
               "bytes": { "type": "integer" },
               "packets": { "type": "integer" },
-              "sampling_rate": { "type": "integer" }
+              "sampling_rate": { "type": "integer" },
+              "src_asn": { "type": "integer", "description": "Source autonomous system number; present only when a GeoIP ASN database is configured and the source resolved." },
+              "src_org": { "type": "string", "description": "Source AS organization name; present only with GeoIP ASN attribution." },
+              "src_country": { "type": "string", "description": "Source ISO 3166-1 alpha-2 country code; present only when a GeoIP country database is configured and the source resolved." }
             }
           }
         },
@@ -109,6 +112,10 @@
         "top_src_ports": { "$ref": "#/$defs/counters" },
         "top_dst_ports": { "$ref": "#/$defs/counters" },
         "protocols": { "$ref": "#/$defs/counters" },
+        "top_asns": {
+          "$ref": "#/$defs/counters",
+          "description": "Dominant source autonomous systems by sampling-corrected packets ('from which AS'). Present only when a GeoIP ASN database is configured; keys are 'AS<num> <org>' (or 'unknown' for sources the database could not place)."
+        },
         "total_packets": {
           "type": "integer",
           "description": "Untruncated sampling-corrected packet total of all matched flows; denominator for shares (the top-K lists drop lighter keys)."

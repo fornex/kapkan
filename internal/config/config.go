@@ -62,6 +62,7 @@ type Config struct {
 	Hostgroups []Hostgroup `yaml:"hostgroups"`
 	Samples    Samples     `yaml:"samples"`
 	Storage    Storage     `yaml:"storage"`
+	GeoIP      GeoIP       `yaml:"geoip"`
 	Ban        Ban         `yaml:"ban"`
 	BGP        BGP         `yaml:"bgp"`
 	// Scrubbing is the default traffic-diversion target (scrubbing center
@@ -87,6 +88,9 @@ type Config struct {
 	SampleCfg SampleSettings `yaml:"-"`
 	// StorageCfg is the resolved ClickHouse configuration.
 	StorageCfg StorageSettings `yaml:"-"`
+	// GeoIPCfg is the resolved GeoIP/ASN configuration. It is comparable so
+	// reload can detect database-path changes that require a restart.
+	GeoIPCfg GeoIPSettings `yaml:"-"`
 	// groupRoutes maps prefixes to Groups indexes, longest prefix first.
 	groupRoutes []groupRoute
 }
@@ -193,6 +197,27 @@ type StorageSettings struct {
 	BatchSize       int
 	QueueSize       int
 	TrafficInterval time.Duration
+}
+
+// GeoIP configures optional GeoIP/ASN attribution of attack-sample sources
+// against MaxMind GeoLite2 (or GeoIP2) databases. Both database paths are
+// optional and independent; the feature is off unless enabled with at least
+// one database. Fields mirror the YAML shape; the resolved form lives in
+// Config.GeoIPCfg.
+type GeoIP struct {
+	// Enabled turns ASN/country enrichment on. Default off.
+	Enabled bool `yaml:"enabled"`
+	// ASNDatabase is the path to a GeoLite2-ASN.mmdb file (AS number + org).
+	ASNDatabase string `yaml:"asn_database"`
+	// CountryDatabase is the path to a GeoLite2-Country.mmdb (or City) file.
+	CountryDatabase string `yaml:"country_database"`
+}
+
+// GeoIPSettings is the resolved, comparable form of GeoIP.
+type GeoIPSettings struct {
+	Enabled     bool
+	ASNPath     string
+	CountryPath string
 }
 
 // Baseline configures continuous EWMA-learned per-host thresholds. Fields
@@ -746,6 +771,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.validateStorage(); err != nil {
+		return err
+	}
+	if err := c.validateGeoIP(); err != nil {
 		return err
 	}
 
@@ -1330,6 +1358,40 @@ func (c *Config) validateSamples() error {
 	return nil
 }
 
+// validateGeoIP resolves the geoip block into GeoIPCfg. When enabled at least
+// one database path must be set and every set path must point at a readable
+// file, so a typo fails fast at load instead of silently disabling attribution.
+func (c *Config) validateGeoIP() error {
+	g := c.GeoIP
+	if !g.Enabled {
+		// Normalize when disabled so reload does not demand a restart for an
+		// edit that changes nothing the running engine observes.
+		c.GeoIPCfg = GeoIPSettings{}
+		return nil
+	}
+	if g.ASNDatabase == "" && g.CountryDatabase == "" {
+		return fmt.Errorf("geoip.enabled is true but neither asn_database nor country_database is set")
+	}
+	for name, path := range map[string]string{"asn_database": g.ASNDatabase, "country_database": g.CountryDatabase} {
+		if path == "" {
+			continue
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("geoip.%s %q: %w", name, path, err)
+		}
+		if fi.IsDir() {
+			return fmt.Errorf("geoip.%s %q is a directory, expected an .mmdb file", name, path)
+		}
+	}
+	c.GeoIPCfg = GeoIPSettings{
+		Enabled:     true,
+		ASNPath:     g.ASNDatabase,
+		CountryPath: g.CountryDatabase,
+	}
+	return nil
+}
+
 // GroupIndexFor returns the index into Groups of the group owning addr by
 // longest prefix match; 0 (the implicit global group) when no hostgroup
 // prefix matches.
@@ -1762,6 +1824,9 @@ func (s *Store) Reload() (*Config, error) {
 	}
 	if next.StorageCfg != prev.StorageCfg {
 		return nil, fmt.Errorf("reload: storage settings cannot change at runtime (restart required)")
+	}
+	if next.GeoIPCfg != prev.GeoIPCfg {
+		return nil, fmt.Errorf("reload: geoip settings cannot change at runtime (restart required)")
 	}
 	s.cur.Store(next)
 	return next, nil

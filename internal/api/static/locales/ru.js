@@ -106,6 +106,7 @@
       "ac.mitigation": "Применённая защита",
       "ac.sample": "Захваченная выборка",
       "ac.topsources": "Топ источников",
+      "ac.topasns": "Топ AS",
       "ac.topsrcports": "Топ исходящих портов",
       "ac.topdstports": "Топ портов назначения",
       "ac.protocols": "Протоколы",

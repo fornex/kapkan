@@ -15,6 +15,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/api"
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/engine"
+	"github.com/kapkan-io/kapkan/internal/geoip"
 	"github.com/kapkan-io/kapkan/internal/ingest"
 	"github.com/kapkan-io/kapkan/internal/mitigate"
 	"github.com/kapkan-io/kapkan/internal/notify"
@@ -30,6 +31,7 @@ type App struct {
 	Notify   *notify.Notifier
 	API      *api.Server
 	Storage  storage.Writer
+	GeoIP    *geoip.DB
 
 	log         *slog.Logger
 	cancel      context.CancelFunc
@@ -43,7 +45,23 @@ type App struct {
 func New(store *config.Store, log *slog.Logger) (*App, error) {
 	a := &App{Store: store, log: log, apiErr: make(chan error, 1)}
 
-	a.Engine = engine.New(store, engine.WithLogger(log))
+	// GeoIP/ASN enrichment is optional. Config validation already rejected a
+	// missing path or a directory at load time; a remaining open failure here
+	// (a corrupt/unreadable .mmdb, or one removed between load and open) is
+	// logged and the detector runs without attribution rather than refusing to
+	// start over a non-critical data file.
+	engineOpts := []engine.Option{engine.WithLogger(log)}
+	if gc := store.Get().GeoIPCfg; gc.Enabled {
+		db, err := geoip.Open(gc.ASNPath, gc.CountryPath)
+		if err != nil {
+			log.Warn("geoip disabled: could not open database", "err", err)
+		} else {
+			a.GeoIP = db
+			engineOpts = append(engineOpts, engine.WithGeoIP(db))
+			log.Info("geoip enabled", "asn_database", gc.ASNPath, "country_database", gc.CountryPath)
+		}
+	}
+	a.Engine = engine.New(store, engineOpts...)
 
 	mit, err := mitigate.New(store, log)
 	if err != nil {
@@ -116,6 +134,11 @@ func (a *App) Stop() {
 		a.storeCancel() // now trigger the storage drain+flush
 	}
 	a.Storage.Stop()
+	// The engine has stopped collecting samples (wg.Wait above), so the mmap
+	// is no longer read; release it last.
+	if a.GeoIP != nil {
+		_ = a.GeoIP.Close()
+	}
 }
 
 // consumeEvents bridges engine attack events to mitigation, the API attack
@@ -172,6 +195,14 @@ func attackRow(ev engine.Event, ban *mitigate.Ban) storage.AttackRow {
 			keys = append(keys, c.Key)
 		}
 		r.TopSources = strings.Join(keys, ",")
+		asns := make([]string, 0, len(ev.Sample.TopASNs))
+		for _, c := range ev.Sample.TopASNs {
+			asns = append(asns, c.Key)
+		}
+		// Pipe-joined, not comma: AS org names routinely contain commas
+		// ("DigitalOcean, LLC"), which would make a comma-joined field
+		// ambiguous to split.
+		r.TopASNs = strings.Join(asns, " | ")
 	}
 	if ban != nil {
 		r.BanState = string(ban.State)

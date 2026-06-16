@@ -324,6 +324,9 @@ func formatSample(s *engine.AttackSample) string {
 		}
 		parts = append(parts, "top src "+strings.Join(srcs, ", "))
 	}
+	if len(s.TopASNs) > 0 {
+		parts = append(parts, "top AS "+s.TopASNs[0].Key)
+	}
 	if len(s.TopDstPorts) > 0 {
 		parts = append(parts, "dst port "+s.TopDstPorts[0].Key)
 	}
