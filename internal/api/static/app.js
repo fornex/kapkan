@@ -26,7 +26,7 @@
     drawer: { open: false, live: false, key: null, attack: null },
     localeOpen: false,
     buf: { aggIn: [], aggOut: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {} },
-    traffic: { key: null, probed: false, available: false, points: [] },
+    traffic: { key: null, available: false, points: [], loading: false, fetchedAt: 0 },
     last: { rung: -1 }
   };
 
@@ -222,11 +222,14 @@
     setHostDir: function (d) { state.hostDir = d; renderView(); },
     toggleHost: function (ip) { if (state.expanded.has(ip)) state.expanded.delete(ip); else state.expanded.add(ip); renderView(); },
     loadTraffic: function (key) {
-      if (state.traffic.probed) return; /* one-shot per session */
-      state.traffic.probed = true; state.traffic.key = key;
+      var t = state.traffic;
+      if (t.loading) return;
+      if (t.key === key && t.fetchedAt && Date.now() - t.fetchedAt < 30000) return; /* fresh enough */
+      t.loading = true;
       var to = new Date(), from = new Date(Date.now() - 3600000);
       API.getTraffic(key, from.toISOString(), to.toISOString(), 60).then(function (r) {
-        state.traffic.available = r.available; state.traffic.points = r.points || [];
+        t.loading = false; t.key = key; t.fetchedAt = Date.now();
+        t.available = r.available; t.points = r.points || [];
         if (state.view === "traffic") renderView();
       });
     },

@@ -483,20 +483,44 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	to := time.Now()
 	from := to.Add(-time.Hour)
 	if v := q.Get("from"); v != "" {
-		if t, e := time.Parse(time.RFC3339, v); e == nil {
-			from = t
+		t, e := time.Parse(time.RFC3339, v)
+		if e != nil {
+			writeError(w, http.StatusBadRequest, "invalid from (expected RFC3339)")
+			return
 		}
+		from = t
 	}
 	if v := q.Get("to"); v != "" {
-		if t, e := time.Parse(time.RFC3339, v); e == nil {
-			to = t
+		t, e := time.Parse(time.RFC3339, v)
+		if e != nil {
+			writeError(w, http.StatusBadRequest, "invalid to (expected RFC3339)")
+			return
 		}
+		to = t
+	}
+	if !to.After(from) {
+		writeError(w, http.StatusBadRequest, "to must be after from")
+		return
+	}
+	const maxRange = 31 * 24 * time.Hour
+	if to.Sub(from) > maxRange {
+		writeError(w, http.StatusBadRequest, "time range too large (max 31 days)")
+		return
 	}
 	step := 60
 	if v := q.Get("step"); v != "" {
-		if n, e := strconv.Atoi(v); e == nil && n > 0 {
-			step = n
+		n, e := strconv.Atoi(v)
+		if e != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid step (positive integer seconds)")
+			return
 		}
+		step = n
+	}
+	// Bound the bucket count so a wide range with a tiny step can't force an
+	// oversized GROUP BY / response: raise step to keep buckets <= maxBuckets.
+	const maxBuckets = 5000
+	if span := int(to.Sub(from).Seconds()); span/step > maxBuckets {
+		step = (span + maxBuckets - 1) / maxBuckets
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()

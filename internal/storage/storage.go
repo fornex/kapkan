@@ -93,6 +93,9 @@ const (
 	tableTraffic = "traffic"
 	// chDateTime is ClickHouse's DateTime literal layout (UTC).
 	chDateTime = "2006-01-02 15:04:05"
+	// maxTrafficRows caps the read endpoint's result (SQL LIMIT + server-side
+	// max_result_rows) so a wide range / tiny step can't return a huge payload.
+	maxTrafficRows = 5001
 )
 
 // pending is a marshaled row tagged with its destination table.
@@ -347,12 +350,18 @@ func (c *ClickHouse) QueryTraffic(ctx context.Context, key string, from, to time
 		"avg(pps) AS pps, avg(mbps) AS mbps, avg(flows_per_sec) AS flows_per_sec, "+
 		"max(in_attack) AS in_attack, avg(baseline_pps) AS baseline_pps "+
 		"FROM %s.%s WHERE `key` = {key:String} AND ts BETWEEN {from:DateTime} AND {to:DateTime} "+
-		"GROUP BY ts ORDER BY ts FORMAT JSONEachRow",
-		stepSec, c.cfg.Database, tableTraffic)
+		"GROUP BY ts ORDER BY ts LIMIT %d FORMAT JSONEachRow",
+		stepSec, c.cfg.Database, tableTraffic, maxTrafficRows)
 	params := url.Values{}
 	params.Set("param_key", key)
 	params.Set("param_from", from.UTC().Format(chDateTime))
 	params.Set("param_to", to.UTC().Format(chDateTime))
+	// Read-path hardening: enforce read-only at the protocol level (the shared
+	// credential cannot write/DDL through this client) and cap server-side cost.
+	params.Set("readonly", "2")
+	params.Set("max_execution_time", "10")
+	params.Set("max_result_rows", fmt.Sprintf("%d", maxTrafficRows))
+	params.Set("result_overflow_mode", "throw")
 	body, err := c.queryRaw(ctx, sql, params)
 	if err != nil {
 		return nil, err
