@@ -665,8 +665,9 @@ func (s *Server) parseIPBody(w http.ResponseWriter, r *http.Request) (netip.Addr
 
 // buildVersion derives a version string from the embedded build info: the main
 // module version (a tag for released builds, else "(devel)") plus the short VCS
-// revision when the binary was built from a git checkout.
-func buildVersion() string {
+// revision when the binary was built from a git checkout. Build info is static
+// for the process lifetime, so it is computed once.
+var buildVersion = sync.OnceValue(func() string {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		return "unknown"
@@ -685,7 +686,7 @@ func buildVersion() string {
 		}
 	}
 	return v
-}
+})
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
