@@ -34,6 +34,24 @@ type Writer interface {
 	Stop()
 }
 
+// Querier reads persisted history for the dashboard's Traffic/Reports view.
+// It is nil when storage is disabled (the API then reports history as
+// unavailable rather than failing).
+type Querier interface {
+	QueryTraffic(ctx context.Context, key string, from, to time.Time, stepSec int) ([]TrafficPoint, error)
+}
+
+// TrafficPoint is one time-bucket of a host's persisted rates. JSON field
+// names are the SELECT aliases (ClickHouse JSONEachRow).
+type TrafficPoint struct {
+	TS          string  `json:"ts"` // bucket start, "2006-01-02 15:04:05" UTC
+	PPS         float64 `json:"pps"`
+	Mbps        float64 `json:"mbps"`
+	FlowsPS     float64 `json:"flows_per_sec"`
+	InAttack    uint8   `json:"in_attack"`
+	BaselinePPS float64 `json:"baseline_pps"`
+}
+
 // AttackRow is one attack lifecycle event persisted to the attack_events
 // table. JSON field names are the ClickHouse column names (JSONEachRow).
 type AttackRow struct {
@@ -73,6 +91,8 @@ type TrafficRow struct {
 const (
 	tableAttacks = "attack_events"
 	tableTraffic = "traffic"
+	// chDateTime is ClickHouse's DateTime literal layout (UTC).
+	chDateTime = "2006-01-02 15:04:05"
 )
 
 // pending is a marshaled row tagged with its destination table.
@@ -109,6 +129,27 @@ func NewWriter(cfg config.StorageSettings, log *slog.Logger) Writer {
 		log:   log.With("component", "storage"),
 		http:  &http.Client{Timeout: 30 * time.Second},
 		queue: make(chan pending, cfg.QueueSize),
+	}
+	if cfg.UsernameEnv != "" {
+		ch.user = os.Getenv(cfg.UsernameEnv)
+	}
+	if cfg.PasswordEnv != "" {
+		ch.pass = os.Getenv(cfg.PasswordEnv)
+	}
+	return ch
+}
+
+// NewQuerier builds a read-only ClickHouse client for the API's history
+// endpoint. It returns nil when storage is disabled, so the API can report
+// history as unavailable instead of erroring. No flush loop is started.
+func NewQuerier(cfg config.StorageSettings, log *slog.Logger) Querier {
+	if !cfg.Enabled {
+		return nil
+	}
+	ch := &ClickHouse{
+		cfg:  cfg,
+		log:  log.With("component", "storage-read"),
+		http: &http.Client{Timeout: 15 * time.Second},
 	}
 	if cfg.UsernameEnv != "" {
 		ch.user = os.Getenv(cfg.UsernameEnv)
@@ -290,6 +331,70 @@ func (c *ClickHouse) post(ctx context.Context, endpoint string, body *bytes.Buff
 		return fmt.Errorf("clickhouse status %d: %s", resp.StatusCode, bytes.TrimSpace(msg))
 	}
 	return nil
+}
+
+// QueryTraffic returns a host's persisted rates bucketed into stepSec windows
+// between from and to. key is bound as a query parameter (no SQL injection);
+// stepSec is clamped and embedded as an integer literal.
+func (c *ClickHouse) QueryTraffic(ctx context.Context, key string, from, to time.Time, stepSec int) ([]TrafficPoint, error) {
+	if stepSec < 1 {
+		stepSec = 60
+	}
+	if stepSec > 86400 {
+		stepSec = 86400
+	}
+	sql := fmt.Sprintf("SELECT toStartOfInterval(ts, INTERVAL %d SECOND) AS ts, "+
+		"avg(pps) AS pps, avg(mbps) AS mbps, avg(flows_per_sec) AS flows_per_sec, "+
+		"max(in_attack) AS in_attack, avg(baseline_pps) AS baseline_pps "+
+		"FROM %s.%s WHERE `key` = {key:String} AND ts BETWEEN {from:DateTime} AND {to:DateTime} "+
+		"GROUP BY ts ORDER BY ts FORMAT JSONEachRow",
+		stepSec, c.cfg.Database, tableTraffic)
+	params := url.Values{}
+	params.Set("param_key", key)
+	params.Set("param_from", from.UTC().Format(chDateTime))
+	params.Set("param_to", to.UTC().Format(chDateTime))
+	body, err := c.queryRaw(ctx, sql, params)
+	if err != nil {
+		return nil, err
+	}
+	var out []TrafficPoint
+	dec := json.NewDecoder(bytes.NewReader(body))
+	for dec.More() {
+		var p TrafficPoint
+		if err := dec.Decode(&p); err != nil {
+			return nil, fmt.Errorf("decode traffic row: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// queryRaw POSTs a read query (params bound via param_* in the URL) and
+// returns the raw response body. Read path only.
+func (c *ClickHouse) queryRaw(ctx context.Context, sql string, params url.Values) ([]byte, error) {
+	endpoint := c.cfg.URL + "/?" + params.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(sql))
+	if err != nil {
+		return nil, err
+	}
+	if c.user != "" {
+		req.Header.Set("X-ClickHouse-User", c.user)
+		req.Header.Set("X-ClickHouse-Key", c.pass)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		trunc := body
+		if len(trunc) > 512 {
+			trunc = trunc[:512]
+		}
+		return nil, fmt.Errorf("clickhouse status %d: %s", resp.StatusCode, bytes.TrimSpace(trunc))
+	}
+	return body, nil
 }
 
 // noop is the disabled-storage Writer.

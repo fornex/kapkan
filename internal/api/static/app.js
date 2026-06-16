@@ -26,6 +26,7 @@
     drawer: { open: false, live: false, key: null, attack: null },
     localeOpen: false,
     buf: { aggIn: [], aggOut: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {} },
+    traffic: { key: null, probed: false, available: false, points: [] },
     last: { rung: -1 }
   };
 
@@ -220,6 +221,15 @@
     setFilter: function (k, v) { state.filters[k] = v; renderView(); },
     setHostDir: function (d) { state.hostDir = d; renderView(); },
     toggleHost: function (ip) { if (state.expanded.has(ip)) state.expanded.delete(ip); else state.expanded.add(ip); renderView(); },
+    loadTraffic: function (key) {
+      if (state.traffic.probed) return; /* one-shot per session */
+      state.traffic.probed = true; state.traffic.key = key;
+      var to = new Date(), from = new Date(Date.now() - 3600000);
+      API.getTraffic(key, from.toISOString(), to.toISOString(), 60).then(function (r) {
+        state.traffic.available = r.available; state.traffic.points = r.points || [];
+        if (state.view === "traffic") renderView();
+      });
+    },
     openDrawer: openDrawer, closeDrawer: closeDrawer,
     withdraw: function (anchor, target) {
       K.confirm(anchor, { title: I.t("ac.withdraw"), text: I.t("ac.withdraw.confirm", { t: target }), danger: true, confirmLabel: I.t("ac.withdraw"),

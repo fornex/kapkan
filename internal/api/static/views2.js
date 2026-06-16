@@ -182,6 +182,21 @@
       ])])
     ]);
 
+    /* probe persisted history once; render a real chart if available, else the stub */
+    var st = ctx.state.traffic;
+    var topHost = ctx.hosts.slice().sort(function (x, y) { return y.rates.pps - x.rates.pps; })[0];
+    if (topHost) ctx.actions.loadTraffic(topHost.target);
+    var historyBlock;
+    if (st.available && st.points.length) {
+      var hvals = st.points.map(function (p) { return p.mbps; });
+      historyBlock = h("div", { class: "card mt-6" }, [
+        h("div", { class: "card__head" }, [h("div", { class: "card__title" }, [w.icon("history"), h("span", { text: I.t("tr.history.title") })]), K.badge("badge--accent", st.key)]),
+        h("div", { class: "card__body" }, h("div", { class: "tcard__chart", style: { height: "200px" } }, K.areaChart(hvals, { color: "var(--chart-in)", height: 200 })))
+      ]);
+    } else {
+      historyBlock = h("div", { class: "mt-6" }, ext);
+    }
+
     K.mount(root, [
       V.viewHead(I.t("nav.traffic"), I.t("tr.window", { n: b.aggIn.length })),
       h("div", { class: "card" }, [
@@ -192,7 +207,7 @@
         h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("server"), h("span", { text: I.t("tr.perhost") })])),
         h("div", { class: "card__body" }, h("div", { class: "cols-3" }, hostCards))
       ]),
-      h("div", { class: "mt-6" }, ext)
+      historyBlock
     ]);
   }
   function ghostChart() {
