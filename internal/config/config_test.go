@@ -543,6 +543,84 @@ func TestSampleSettings(t *testing.T) {
 	}
 }
 
+func TestGeoIPSettings(t *testing.T) {
+	// A real .mmdb is not parsed at config time — validateGeoIP only checks the
+	// paths exist and are files — so stand-in files suffice here.
+	dir := t.TempDir()
+	asn := filepath.Join(dir, "asn.mmdb")
+	country := filepath.Join(dir, "country.mmdb")
+	for _, p := range []string{asn, country} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Absent block: disabled, empty paths.
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.GeoIPCfg != (GeoIPSettings{}) {
+		t.Errorf("default GeoIPCfg = %+v, want zero (disabled)", cfg.GeoIPCfg)
+	}
+
+	// Enabled with both databases.
+	both := validYAML + "\ngeoip:\n  enabled: true\n  asn_database: \"" + asn + "\"\n  country_database: \"" + country + "\"\n"
+	cfg, err = Parse([]byte(both))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	want := GeoIPSettings{Enabled: true, ASNPath: asn, CountryPath: country}
+	if cfg.GeoIPCfg != want {
+		t.Errorf("GeoIPCfg = %+v, want %+v", cfg.GeoIPCfg, want)
+	}
+
+	// Enabled with only the ASN database is valid.
+	if _, err := Parse([]byte(validYAML + "\ngeoip:\n  enabled: true\n  asn_database: \"" + asn + "\"\n")); err != nil {
+		t.Errorf("asn-only geoip rejected: %v", err)
+	}
+
+	// Disabled with paths set: normalized to zero, no file check.
+	cfg, err = Parse([]byte(validYAML + "\ngeoip:\n  enabled: false\n  asn_database: \"/nope/missing.mmdb\"\n"))
+	if err != nil {
+		t.Fatalf("disabled geoip with a bogus path should not error: %v", err)
+	}
+	if cfg.GeoIPCfg != (GeoIPSettings{}) {
+		t.Errorf("disabled GeoIPCfg = %+v, want zero", cfg.GeoIPCfg)
+	}
+
+	// Errors: enabled with no path, a missing file, and a directory.
+	if _, err := Parse([]byte(validYAML + "\ngeoip:\n  enabled: true\n")); err == nil {
+		t.Error("enabled geoip with no database accepted, want error")
+	}
+	if _, err := Parse([]byte(validYAML + "\ngeoip:\n  enabled: true\n  asn_database: \"/nope/missing.mmdb\"\n")); err == nil {
+		t.Error("enabled geoip with a missing file accepted, want error")
+	}
+	if _, err := Parse([]byte(validYAML + "\ngeoip:\n  enabled: true\n  asn_database: \"" + dir + "\"\n")); err == nil {
+		t.Error("enabled geoip pointing at a directory accepted, want error")
+	}
+}
+
+func TestReloadRejectsGeoIPChanges(t *testing.T) {
+	dir := t.TempDir()
+	asn := filepath.Join(dir, "asn.mmdb")
+	if err := os.WriteFile(asn, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTemp(t, validYAML)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	store := NewStore(path, cfg)
+	if err := os.WriteFile(path, []byte(validYAML+"\ngeoip:\n  enabled: true\n  asn_database: \""+asn+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reload(); err == nil || !strings.Contains(err.Error(), "geoip") {
+		t.Errorf("Reload() with geoip change: error = %v, want geoip-change rejection", err)
+	}
+}
+
 func TestReloadRejectsSampleChanges(t *testing.T) {
 	path := writeTemp(t, validYAML)
 	cfg, err := Load(path)

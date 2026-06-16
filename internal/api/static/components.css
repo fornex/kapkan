@@ -293,6 +293,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
 .flows { font-family: var(--mono); font-size: var(--t-xs); }
 .flows td, .flows th { padding: 5px var(--s-3); }
 .flag { color: var(--elev); }
+.geo-tag { margin-left: 6px; padding: 0 5px; border-radius: var(--r-sm); background: #ffffff0f; border: 1px solid var(--border); color: var(--muted); font-size: var(--t-xs); letter-spacing: .04em; }
 
 /* ============================================================================
    States: loading skeleton, empty, error
