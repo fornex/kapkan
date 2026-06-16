@@ -60,6 +60,7 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	a.Ingest = ing
 
 	a.API = api.New(store, a.Engine, mit, log)
+	a.API.SetQuerier(storage.NewQuerier(store.Get().StorageCfg, log))
 	a.Storage = storage.NewWriter(store.Get().StorageCfg, log)
 	return a, nil
 }
