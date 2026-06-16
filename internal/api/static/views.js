@@ -199,12 +199,12 @@
     function sel(key, val, options, labelFn) {
       var s = h("select", { class: "select", id: "f-" + key, onchange: function (e) { ctx.actions.setFilter(key, e.target.value); } },
         [h("option", { value: "", text: I.t("filter." + key) })].concat(options.map(function (o) {
-          var opt = h("option", { value: o, text: labelFn ? labelFn(o) : o }); if (val === o) opt.selected = true; return opt;
+          return h("option", { value: o, text: labelFn ? labelFn(o) : o, attrs: (val === o ? { selected: "selected" } : {}) });
         })));
       return s;
     }
-    var search = h("input", { class: "input mono", id: "f-q", placeholder: I.t("filter.search"), value: f.q || "" });
-    search.addEventListener("input", function (e) { ctx.actions.setFilter("q", e.target.value); });
+    var search = h("input", { class: "input mono", id: "f-q", placeholder: I.t("filter.search"), value: f.q || "",
+      oninput: function (e) { ctx.actions.setFilter("q", e.target.value); } });
 
     var filters = h("div", { class: "filters" }, [
       h("span", { class: "row", style: { color: "var(--muted)" } }, [w.icon("sliders")]),
@@ -380,7 +380,7 @@
         : h("div", { class: "host-mult" }, [h("div", { class: "host-mult__x", style: { color: "var(--muted)", fontSize: "var(--t-md)" }, text: "—" }), h("div", { class: "host-mult__lbl", text: I.t("ho.nobaseline") })]);
 
       var row = h("div", { class: "host-row" + (it.attacked ? " is-attack" : "") + (host.direction === "outgoing" && dir === "outgoing" ? " is-outgoing" : "") + (expanded ? " is-open" : ""),
-        tabindex: "0", role: "button", onclick: function () { ctx.actions.toggleHost(host.target); }, onkeydown: keyAct(function () { ctx.actions.toggleHost(host.target); }) }, [
+        tabindex: "0", role: "button", "data-target": host.target, onclick: function () { ctx.actions.toggleHost(host.target); }, onkeydown: keyAct(function () { ctx.actions.toggleHost(host.target); }) }, [
         h("div", { class: "host-id" }, [
           h("div", { class: "host-id__ip" }, [
             w.icon(expanded ? "chevron-down" : "chevron-right"),
@@ -400,12 +400,17 @@
       return [row, detail];
     });
 
+    /* keep keyboard focus on the SAME host across the live re-sort (rows are
+       morphed by position, so re-focus the row matching the prior target). */
+    var af = document.activeElement;
+    var keepTarget = (af && af.classList && af.classList.contains("host-row")) ? af.getAttribute("data-target") : null;
     K.mount(root, [
       viewHead(I.t("nav.hosts"), I.t("ho.headline"), [dirSeg]),
       ctx.hosts.length
         ? h("div", { class: "card" }, h("div", {}, [].concat.apply([], rows)))
         : h("div", { class: "card" }, K.empty("server", I.t("ho.empty.title"), I.t("ho.empty.sub"), "muted"))
     ]);
+    if (keepTarget) { var rf = root.querySelector('.host-row[data-target="' + keepTarget + '"]'); if (rf) rf.focus(); }
   }
 
   function hostDetail(r, dir) {
