@@ -7,7 +7,23 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/flow"
+	"github.com/kapkan-io/kapkan/internal/geoip"
 )
+
+// fakeGeo is a static GeoIP resolver for tests: addresses absent from the map
+// are reported as unplaced, mirroring a real database miss. hasASN mirrors
+// whether an ASN database is loaded (false models a country-only deployment).
+type fakeGeo struct {
+	m      map[netip.Addr]geoip.Info
+	hasASN bool
+}
+
+func (f fakeGeo) Lookup(a netip.Addr) (geoip.Info, bool) {
+	i, ok := f.m[a]
+	return i, ok
+}
+
+func (f fakeGeo) HasASN() bool { return f.hasASN }
 
 // attackerFlow is a UDP flood record from a specific source/port pair.
 func attackerFlow(src, dst string, srcPort uint16, rate uint64) flow.Flow {
@@ -78,6 +94,155 @@ func TestAttackSampleAggregation(t *testing.T) {
 		if f.Dst != dst {
 			t.Errorf("sample flow dst = %q, want %q (only matching flows)", f.Dst, dst)
 		}
+	}
+}
+
+// TestAttackSampleASNEnrichment: with a GeoIP resolver attached, the sample
+// carries a per-ASN breakdown that aggregates across distinct source IPs in
+// the same AS, buckets unresolved sources under "unknown", and stamps each
+// captured raw flow with its source ASN/country.
+func TestAttackSampleASNEnrichment(t *testing.T) {
+	a7 := netip.MustParseAddr("198.51.100.7")
+	a8 := netip.MustParseAddr("198.51.100.8")
+	// a7 and a8 share AS64500; a9 is deliberately absent (→ "unknown").
+	geo := fakeGeo{hasASN: true, m: map[netip.Addr]geoip.Info{
+		a7: {ASN: 64500, Org: "Evil Corp", Country: "RU"},
+		a8: {ASN: 64500, Org: "Evil Corp", Country: "RU"},
+	}}
+	clk := newMockClock()
+	e := New(testStore(t), WithClock(clk.Now), WithWindow(1), WithGeoIP(geo))
+	events := drain(e)
+	dst := "203.0.113.20"
+
+	// Process the unknown source first and the dominant AS last so the newest
+	// (captured) raw flows belong to a resolved source.
+	for i := 0; i < 30; i++ {
+		e.Process(attackerFlow("198.51.100.9", dst, 4444, 1000))
+	}
+	for i := 0; i < 50; i++ {
+		e.Process(attackerFlow("198.51.100.8", dst, 222, 1000))
+	}
+	for i := 0; i < 150; i++ {
+		e.Process(attackerFlow("198.51.100.7", dst, 123, 1000))
+	}
+	runTick(e, clk)
+
+	var ev Event
+	select {
+	case ev = <-events:
+	case <-time.After(time.Second):
+		t.Fatal("no AttackStarted")
+	}
+	s := ev.Sample
+	if s == nil {
+		t.Fatal("AttackStarted.Sample = nil, want a sample")
+	}
+
+	if len(s.TopASNs) < 2 {
+		t.Fatalf("TopASNs = %+v, want at least the AS64500 and unknown buckets", s.TopASNs)
+	}
+	// AS64500 aggregates a7 (150k) + a8 (50k) = 200k, ahead of unknown (30k).
+	if s.TopASNs[0].Key != "AS64500 Evil Corp" {
+		t.Errorf("TopASNs[0].Key = %q, want \"AS64500 Evil Corp\"", s.TopASNs[0].Key)
+	}
+	if s.TopASNs[0].Packets != 200000 {
+		t.Errorf("TopASNs[0].Packets = %d, want 200000 (a7+a8, sampling-corrected)", s.TopASNs[0].Packets)
+	}
+	var unknown *Counter
+	for i := range s.TopASNs {
+		if s.TopASNs[i].Key == "unknown" {
+			unknown = &s.TopASNs[i]
+		}
+	}
+	if unknown == nil {
+		t.Fatalf("TopASNs has no \"unknown\" bucket: %+v", s.TopASNs)
+	}
+	if unknown.Packets != 30000 {
+		t.Errorf("unknown bucket packets = %d, want 30000 (a9)", unknown.Packets)
+	}
+
+	// Captured raw flows are newest-first → all from a7 (AS64500, RU).
+	if len(s.Flows) == 0 {
+		t.Fatal("no raw flows captured")
+	}
+	for _, f := range s.Flows {
+		if f.Src != "198.51.100.7" {
+			t.Fatalf("captured flow src = %q, want the newest source 198.51.100.7", f.Src)
+		}
+		if f.SrcASN != 64500 || f.SrcOrg != "Evil Corp" || f.SrcCountry != "RU" {
+			t.Errorf("flow geo = {ASN:%d Org:%q Country:%q}, want 64500/Evil Corp/RU", f.SrcASN, f.SrcOrg, f.SrcCountry)
+		}
+	}
+}
+
+// TestSampleNoASNWithoutResolver: without a resolver the sample carries no ASN
+// breakdown and raw flows carry no geo, so the feature is fully opt-in.
+func TestSampleNoASNWithoutResolver(t *testing.T) {
+	clk := newMockClock()
+	e := New(testStore(t), WithClock(clk.Now), WithWindow(1))
+	events := drain(e)
+
+	for i := 0; i < 150; i++ {
+		e.Process(attackerFlow("198.51.100.7", "203.0.113.20", 123, 1000))
+	}
+	runTick(e, clk)
+
+	select {
+	case ev := <-events:
+		if ev.Sample == nil {
+			t.Fatal("sample missing")
+		}
+		if ev.Sample.TopASNs != nil {
+			t.Errorf("TopASNs = %+v, want nil without a resolver", ev.Sample.TopASNs)
+		}
+		for _, f := range ev.Sample.Flows {
+			if f.SrcASN != 0 || f.SrcOrg != "" || f.SrcCountry != "" {
+				t.Errorf("flow carries geo without a resolver: %+v", f)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no AttackStarted")
+	}
+}
+
+// TestCountryOnlyNoASNBreakdown: a country-only GeoIP deployment (no ASN
+// database) enriches per-flow source country but emits no per-ASN breakdown,
+// rather than a degenerate all-"unknown" one.
+func TestCountryOnlyNoASNBreakdown(t *testing.T) {
+	a7 := netip.MustParseAddr("198.51.100.7")
+	geo := fakeGeo{hasASN: false, m: map[netip.Addr]geoip.Info{
+		a7: {Country: "RU"}, // country known, ASN unknown (no ASN DB)
+	}}
+	clk := newMockClock()
+	e := New(testStore(t), WithClock(clk.Now), WithWindow(1), WithGeoIP(geo))
+	events := drain(e)
+
+	for i := 0; i < 150; i++ {
+		e.Process(attackerFlow("198.51.100.7", "203.0.113.20", 123, 1000))
+	}
+	runTick(e, clk)
+
+	select {
+	case ev := <-events:
+		if ev.Sample == nil {
+			t.Fatal("sample missing")
+		}
+		if ev.Sample.TopASNs != nil {
+			t.Errorf("TopASNs = %+v, want nil in a country-only deployment", ev.Sample.TopASNs)
+		}
+		if len(ev.Sample.Flows) == 0 {
+			t.Fatal("no raw flows captured")
+		}
+		for _, f := range ev.Sample.Flows {
+			if f.SrcCountry != "RU" {
+				t.Errorf("flow SrcCountry = %q, want RU (country enrichment works without ASN)", f.SrcCountry)
+			}
+			if f.SrcASN != 0 {
+				t.Errorf("flow SrcASN = %d, want 0 (no ASN DB)", f.SrcASN)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no AttackStarted")
 	}
 }
 

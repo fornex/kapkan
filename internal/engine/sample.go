@@ -7,6 +7,7 @@ import (
 
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/flow"
+	"github.com/kapkan-io/kapkan/internal/geoip"
 )
 
 // topK is how many entries each aggregate in an attack sample keeps.
@@ -33,6 +34,12 @@ type SampleFlow struct {
 	Bytes        uint64 `json:"bytes"`
 	Packets      uint64 `json:"packets"`
 	SamplingRate uint64 `json:"sampling_rate"`
+	// SrcASN/SrcOrg/SrcCountry attribute the source address when a GeoIP
+	// database is configured; omitted (zero) when geo is off or the source
+	// could not be placed.
+	SrcASN     uint32 `json:"src_asn,omitempty"`
+	SrcOrg     string `json:"src_org,omitempty"`
+	SrcCountry string `json:"src_country,omitempty"`
 }
 
 // Counter is one aggregated key of an attack sample. Packets and Bytes are
@@ -55,6 +62,11 @@ type AttackSample struct {
 	TopSrcPorts []Counter    `json:"top_src_ports,omitempty"`
 	TopDstPorts []Counter    `json:"top_dst_ports,omitempty"`
 	Protocols   []Counter    `json:"protocols,omitempty"`
+	// TopASNs ranks the dominant source autonomous systems ("from which AS")
+	// by sampling-corrected packets. Populated only when a GeoIP/ASN database
+	// is configured; keys are "AS<num> <org>" (or "unknown" for sources the
+	// database could not place), so shares over all sources stay honest.
+	TopASNs []Counter `json:"top_asns,omitempty"`
 	// TotalPackets is the untruncated sampling-corrected packet total of
 	// every matched flow — the denominator for shares, since the top-K
 	// lists above drop lighter keys.
@@ -77,7 +89,11 @@ func protoName(p uint8) string {
 	}
 }
 
-// sampleAggregator accumulates matching flows into an AttackSample.
+// sampleAggregator accumulates matching flows into an AttackSample. When geo
+// is non-nil it enriches captured raw flows with source ASN/country, and when
+// an ASN database is loaded (asn) it also aggregates per-source-ASN counters;
+// memo caches lookups so a flood from one address (or /24) hits the database
+// once.
 type sampleAggregator struct {
 	maxFlows     int
 	flows        []SampleFlow
@@ -85,17 +101,33 @@ type sampleAggregator struct {
 	srcPorts     map[string]*Counter
 	dstPorts     map[string]*Counter
 	protocols    map[string]*Counter
+	asns         map[string]*Counter
 	totalPackets uint64
+
+	geo  geoip.Resolver
+	asn  bool // an ASN database is available: aggregate per-ASN
+	memo map[netip.Addr]geoip.Info
 }
 
-func newSampleAggregator(maxFlows int) *sampleAggregator {
-	return &sampleAggregator{
+func newSampleAggregator(maxFlows int, geo geoip.Resolver) *sampleAggregator {
+	a := &sampleAggregator{
 		maxFlows:  maxFlows,
 		sources:   make(map[string]*Counter),
 		srcPorts:  make(map[string]*Counter),
 		dstPorts:  make(map[string]*Counter),
 		protocols: make(map[string]*Counter),
+		geo:       geo,
 	}
+	if geo != nil {
+		a.memo = make(map[netip.Addr]geoip.Info)
+		// Only build a per-ASN breakdown when AS data exists; a country-only
+		// database would otherwise bucket every source under "unknown".
+		if geo.HasASN() {
+			a.asn = true
+			a.asns = make(map[string]*Counter)
+		}
+	}
+	return a
 }
 
 func bump(m map[string]*Counter, key string, packets, bytes uint64) {
@@ -106,6 +138,33 @@ func bump(m map[string]*Counter, key string, packets, bytes uint64) {
 	}
 	c.Packets += packets
 	c.Bytes += bytes
+}
+
+// lookup resolves addr through the configured database, memoizing the result
+// for the lifetime of this aggregation. Callers must only call it when geo is
+// set. The boolean (whether the address was placed) is recoverable from the
+// returned Info — a zero Info means unplaced.
+func (a *sampleAggregator) lookup(addr netip.Addr) geoip.Info {
+	if info, ok := a.memo[addr]; ok {
+		return info
+	}
+	info, _ := a.geo.Lookup(addr)
+	a.memo[addr] = info
+	return info
+}
+
+// asnKey renders one ASN bucket label for the top-ASN list. Sources the
+// database could not place fall into a single "unknown" bucket so percentage
+// shares cover all traffic, not just the resolvable part.
+func asnKey(info geoip.Info) string {
+	if info.ASN == 0 {
+		return "unknown"
+	}
+	k := "AS" + strconv.FormatUint(uint64(info.ASN), 10)
+	if info.Org != "" {
+		k += " " + info.Org
+	}
+	return k
 }
 
 // add accumulates one matching flow into the aggregates and, when capture
@@ -129,9 +188,14 @@ func (a *sampleAggregator) add(f *flow.Flow, dir int8, capture bool) {
 	bump(a.srcPorts, strconv.Itoa(int(f.SrcPort)), packets, bytes)
 	bump(a.dstPorts, strconv.Itoa(int(f.DstPort)), packets, bytes)
 	bump(a.protocols, protoName(f.IPProto), packets, bytes)
+	// Attribute the attribution endpoint (the same "source" as TopSources:
+	// the remote attacker for incoming, the victim for outgoing) to its ASN.
+	if a.asn {
+		bump(a.asns, asnKey(a.lookup(remote)), packets, bytes)
+	}
 
 	if capture && len(a.flows) < a.maxFlows {
-		a.flows = append(a.flows, SampleFlow{
+		sf := SampleFlow{
 			Src:          f.SrcAddr.String(),
 			Dst:          f.DstAddr.String(),
 			SrcPort:      f.SrcPort,
@@ -142,7 +206,16 @@ func (a *sampleAggregator) add(f *flow.Flow, dir int8, capture bool) {
 			Bytes:        f.Bytes,
 			Packets:      f.Packets,
 			SamplingRate: f.SamplingRate,
-		})
+		}
+		// Enrich the literal source address of the captured flow (the "src"
+		// column in the raw-flow view), independent of direction.
+		if a.geo != nil {
+			info := a.lookup(f.SrcAddr)
+			sf.SrcASN = info.ASN
+			sf.SrcOrg = info.Org
+			sf.SrcCountry = info.Country
+		}
+		a.flows = append(a.flows, sf)
 	}
 }
 
@@ -169,7 +242,7 @@ func (a *sampleAggregator) sample() *AttackSample {
 	if len(a.flows) == 0 && len(a.sources) == 0 {
 		return nil
 	}
-	return &AttackSample{
+	s := &AttackSample{
 		Flows:        a.flows,
 		TopSources:   top(a.sources, topK),
 		TopSrcPorts:  top(a.srcPorts, topK),
@@ -177,6 +250,10 @@ func (a *sampleAggregator) sample() *AttackSample {
 		Protocols:    top(a.protocols, topK),
 		TotalPackets: a.totalPackets,
 	}
+	if a.asn {
+		s.TopASNs = top(a.asns, topK)
+	}
+	return s
 }
 
 // scanRing walks one shard's ring newest-first, calling visit for every
@@ -216,7 +293,7 @@ func (e *Engine) collectHostSample(sh *shard, target netip.Addr, dir int, sinceE
 	if len(sh.ring) == 0 {
 		return nil
 	}
-	agg := newSampleAggregator(e.sampleFlows)
+	agg := newSampleAggregator(e.sampleFlows, e.geo)
 	d := int8(dir)
 	scanRing(sh, sinceEpoch, func(se *sampleEntry) {
 		if se.dir != d {
@@ -279,7 +356,7 @@ func (e *Engine) collectGroupSample(cfg *config.Config, gi int, dir int, sinceEp
 
 	quotas := groupQuotas(counts[:], total, e.sampleFlows)
 
-	agg := newSampleAggregator(e.sampleFlows)
+	agg := newSampleAggregator(e.sampleFlows, e.geo)
 	for i, sh := range e.shards {
 		if counts[i] == 0 {
 			continue
