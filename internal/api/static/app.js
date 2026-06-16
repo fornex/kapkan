@@ -169,7 +169,7 @@
     });
     var root = document.getElementById("view-" + state.view);
     var fn = V[state.view];
-    if (fn) preserveAround(document.getElementById("main"), function () { fn(root, ctx); });
+    if (fn) fn(root, ctx);
   }
 
   /* ---------- drawer ---------- */
@@ -186,10 +186,7 @@
     if (!state.drawer.open) return;
     var a = state.drawer.attack;
     if (state.drawer.live) { var live = API.getAttacks().active[0]; if (live) { a = live; state.drawer.attack = a; } }
-    var d = document.getElementById("drawer");
-    var bodyEl = d.querySelector(".drawer__body"), sc = bodyEl ? bodyEl.scrollTop : 0;
-    K.mount(d, V.attackDetail(a, buildCtx()));
-    var nb = d.querySelector(".drawer__body"); if (nb) nb.scrollTop = sc;
+    K.mount(document.getElementById("drawer"), V.attackDetail(a, buildCtx()));
   }
   function closeDrawer() {
     if (!state.drawer.open) return;
@@ -256,45 +253,15 @@
   function doUnban(ip) { API.unban(ip).then(function (r) { K.toast(r.ok ? I.t("bn.unban.ok", { t: ip }) : I.t("reject.label"), r.ok ? "ok" : "err"); poll(); }); }
 
   /* ---------- render + poll (3s) ---------- */
-  /* Skip the structural re-render while the user is mid-interaction so the 3s
-     poll never steals focus, wipes a draft, or closes an open menu/popover. */
-  function userBusy() {
-    if (document.getElementById("__confirm")) return true;
-    if (state.localeOpen) return true;
-    var a = document.activeElement;
-    return !!(a && (a.tagName === "INPUT" || a.tagName === "SELECT" || a.tagName === "TEXTAREA"));
-  }
-  /* Re-mount destroys nodes; capture+restore focus, caret, an uncontrolled
-     input's draft, and scroll so a re-render is visually/behaviorally seamless. */
-  function preserveAround(scrollEl, fn) {
-    var a = document.activeElement, fk = null;
-    if (a && a.id && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) {
-      fk = { id: a.id, value: a.value };
-      try { fk.start = a.selectionStart; fk.end = a.selectionEnd; } catch (e) {}
-    } else if (a && a.id && a.tagName === "SELECT") {
-      fk = { id: a.id };
-    }
-    var sc = scrollEl ? scrollEl.scrollTop : 0;
-    fn();
-    if (scrollEl) scrollEl.scrollTop = sc;
-    if (fk) {
-      var el = document.getElementById(fk.id);
-      if (el) {
-        if (fk.value != null && !el.value) el.value = fk.value;
-        try { el.focus(); if (fk.start != null && el.setSelectionRange) el.setSelectionRange(fk.start, fk.end); } catch (e) {}
-      }
-    }
-  }
+  /* Incremental reconcile (K.mount) keeps node identity, so the poll re-renders
+     unconditionally without stealing focus, wiping drafts, resetting scroll, or
+     restarting animations — no focus-skip / preserve workarounds needed. */
   function render() {
     var st = API.getStatus(); if (st && st.role) state.role = st.role;
     var ctx = buildCtx();
     renderShellDynamic(ctx);
-    if (!userBusy()) {
-      renderView(ctx);
-      /* don't re-mount the drawer out from under keyboard focus inside it */
-      var dr = document.getElementById("drawer");
-      if (state.drawer.open && !dr.contains(document.activeElement)) renderDrawer();
-    }
+    renderView(ctx);
+    if (state.drawer.open) renderDrawer();
     announceRung(ctx);
   }
   function poll() {
