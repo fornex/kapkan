@@ -147,6 +147,14 @@ func TestTrafficEndpoint(t *testing.T) {
 	if rec := do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=nope", ""); rec.Code != http.StatusBadRequest {
 		t.Errorf("bad key = %d, want 400", rec.Code)
 	}
+	// to before from → 400 (DoS-guard: no empty/inverted ranges)
+	if rec := do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=203.0.113.10&from=2024-01-02T00:00:00Z&to=2024-01-01T00:00:00Z", ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("to<from = %d, want 400", rec.Code)
+	}
+	// range too large → 400 (DoS-guard: capped at 31 days)
+	if rec := do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=203.0.113.10&from=2000-01-01T00:00:00Z&to=2024-01-01T00:00:00Z", ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("oversized range = %d, want 400", rec.Code)
+	}
 }
 
 func TestStatusEndpoint(t *testing.T) {
