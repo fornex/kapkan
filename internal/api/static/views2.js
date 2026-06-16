@@ -225,7 +225,7 @@
       h("div", { class: "card__body" }, h("dl", { class: "kv" }, [
         h("dt", { text: I.t("se.mode") }), h("dd", {}, K.modeBadge(s.dry_run)),
         h("dt", { text: I.t("se.uptime") }), h("dd", { class: "mono", text: I.duration(s.uptime_seconds) }),
-        h("dt", { text: I.t("se.version") }), h("dd", { class: "mono", text: "kapkan 2.4.0" })
+        h("dt", { text: I.t("se.version") }), h("dd", { class: "mono", text: s.version || I.t("common.na") })
       ]))
     ]);
 
@@ -245,14 +245,27 @@
       ]))
     ]);
 
+    var bgp = s.bgp, scrub = s.scrubbing || {}, notif = s.notify || {};
+    var bgpBody;
+    if (bgp) {
+      var notifOn = Object.keys(notif).filter(function (k) { return notif[k]; });
+      var rows = [
+        [h("dt", { text: I.t("se.routerid") }), h("dd", { class: "mono", text: bgp.router_id || I.t("common.na") })],
+        [h("dt", { text: I.t("se.localasn") }), h("dd", { class: "mono", text: bgp.local_asn != null ? String(bgp.local_asn) : I.t("common.na") })],
+        [h("dt", { text: I.t("hg.nexthop") }), h("dd", { class: "mono", text: bgp.next_hop || I.t("common.na") })],
+        [h("dt", { text: I.t("hg.community") }), h("dd", { class: "mono", text: bgp.community || I.t("common.na") })],
+        [h("dt", { text: I.t("hg.localpref") }), h("dd", { class: "mono", text: bgp.local_pref ? String(bgp.local_pref) : I.t("common.na") })],
+        [h("dt", { text: I.t("hg.scrub") }), h("dd", { class: "mono", text: scrub.next_hop || I.t("common.na") })],
+        [h("dt", { text: I.t("se.neighbors") }), h("dd", { class: "mono", text: (bgp.neighbors && bgp.neighbors.length) ? bgp.neighbors.join(", ") : I.t("common.none") })],
+        [h("dt", { text: I.t("se.notify") }), h("dd", { class: "row wrap", style: { gap: "6px" } }, notifOn.length ? notifOn.map(function (k) { return K.badge("badge--muted", k.charAt(0).toUpperCase() + k.slice(1)); }) : h("span", { class: "td-muted", text: I.t("common.none") }))]
+      ];
+      bgpBody = h("div", { class: "card__body" }, h("dl", { class: "kv" }, [].concat.apply([], rows)));
+    } else {
+      bgpBody = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("se.adminonly") }));
+    }
     var bgpCard = h("div", { class: "card" }, [
-      h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("shield"), h("span", { text: I.t("se.bgp") })])),
-      h("div", { class: "card__body" }, h("dl", { class: "kv" }, [
-        h("dt", { text: "RTBH next-hop" }), h("dd", { class: "mono", text: "192.0.2.1" }),
-        h("dt", { text: "RTBH community" }), h("dd", { class: "mono", text: "65000:666" }),
-        h("dt", { text: I.t("hg.scrub") }), h("dd", { class: "mono", text: "198.18.0.10" }),
-        h("dt", { text: I.t("se.notify") }), h("dd", { class: "mono", text: "webhook · slack#noc" })
-      ]))
+      h("div", { class: "card__head" }, [h("div", { class: "card__title" }, [w.icon("shield"), h("span", { text: I.t("se.bgp") })]), K.badge("badge--muted", I.t("se.adminonly"), "lock")]),
+      bgpBody
     ]);
 
     var reloadCard = h("div", { class: "card" }, [

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -394,12 +395,43 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// an admin token (which also receives networks/thresholds below).
 		"role":     string(c.role),
 		"unscoped": c.unscoped(),
+		// version is build info (not sensitive); shown in Settings to all roles.
+		"version": buildVersion(),
 	}
-	// Global protected networks and the global thresholds describe the whole
-	// deployment; reveal them only to an unscoped admin.
+	// Global protected networks, thresholds and the deployment's BGP/notify
+	// posture describe the whole deployment; reveal them only to an unscoped
+	// admin. The dashboard's Settings view renders these (read-only).
 	if c.unscoped() {
 		resp["networks"] = cfg.Networks
 		resp["thresholds"] = cfg.Thresholds
+		bgpCommunity := cfg.BGP.CommunityStr
+		if bgpCommunity == "" {
+			bgpCommunity = cfg.BGP.Community
+		}
+		neighbors := make([]string, 0, len(cfg.BGP.Neighbors))
+		for _, n := range cfg.BGP.Neighbors {
+			neighbors = append(neighbors, n.Address)
+		}
+		resp["bgp"] = map[string]any{
+			"local_asn": cfg.BGP.LocalASN, "router_id": cfg.BGP.RouterID,
+			"next_hop": cfg.BGP.NextHop, "next_hop6": cfg.BGP.NextHop6,
+			"community": bgpCommunity, "local_pref": cfg.BGP.LocalPref, "neighbors": neighbors,
+		}
+		scrubCommunity := cfg.Scrubbing.CommunityStr
+		if scrubCommunity == "" {
+			scrubCommunity = cfg.Scrubbing.Community
+		}
+		resp["scrubbing"] = map[string]any{
+			"next_hop": cfg.Scrubbing.NextHop, "next_hop6": cfg.Scrubbing.NextHop6, "community": scrubCommunity,
+		}
+		// Notify exposes only WHICH channels are enabled, never tokens/URLs.
+		resp["notify"] = map[string]any{
+			"telegram": cfg.Notify.Telegram.ChatID != "" || cfg.Notify.Telegram.TokenEnv != "",
+			"webhook":  cfg.Notify.Webhook.URL != "",
+			"slack":    cfg.Notify.Slack.WebhookURL != "",
+			"email":    cfg.Notify.Email.SMTPHost != "",
+			"exec":     cfg.Notify.Exec.Command != "",
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -629,6 +661,30 @@ func (s *Server) parseIPBody(w http.ResponseWriter, r *http.Request) (netip.Addr
 		return netip.Addr{}, false
 	}
 	return addr, true
+}
+
+// buildVersion derives a version string from the embedded build info: the main
+// module version (a tag for released builds, else "(devel)") plus the short VCS
+// revision when the binary was built from a git checkout.
+func buildVersion() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	v := bi.Main.Version
+	if v == "" {
+		v = "(devel)"
+	}
+	for _, s := range bi.Settings {
+		if s.Key == "vcs.revision" {
+			rev := s.Value
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			return v + " · " + rev
+		}
+	}
+	return v
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
