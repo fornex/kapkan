@@ -106,6 +106,7 @@
       "ac.mitigation": "Angewendete Abwehr",
       "ac.sample": "Erfasste Stichprobe",
       "ac.topsources": "Top-Quellen",
+      "ac.topasns": "Top-ASNs",
       "ac.topsrcports": "Top-Quellports",
       "ac.topdstports": "Top-Zielports",
       "ac.protocols": "Protokolle",

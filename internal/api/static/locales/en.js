@@ -116,6 +116,7 @@
       "ac.mitigation": "Applied mitigation",
       "ac.sample": "Captured sample",
       "ac.topsources": "Top sources",
+      "ac.topasns": "Top ASNs",
       "ac.topsrcports": "Top source ports",
       "ac.topdstports": "Top dest ports",
       "ac.protocols": "Protocols",

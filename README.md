@@ -62,6 +62,7 @@ The full schema:
 | `hostgroups[]` | Optional named prefix groups with their own thresholds and mitigation policy (see [Hostgroups](#hostgroups)). Each group may also set `thresholds_outgoing` and a `tenant` label (see [Multi-tenancy](#multi-tenancy)). |
 | `tenant` | Optional tenant label for the implicit global/fallback group (top level). See [Multi-tenancy](#multi-tenancy). |
 | `samples.enabled` / `buffer_flows` / `flows_per_attack` | Traffic buffer for attack samples (defaults: on / 65536 / 20). Recent flows are buffered continuously so the moment a threshold trips, the attack's dominant sources, ports and protocols are already attached to the event, the notification and the API — no post-detection capture delay. Sizing changes require a restart. |
+| `geoip.enabled` / `asn_database` / `country_database` | Optional GeoIP/ASN attribution of attack-sample sources against MaxMind GeoLite2 (or GeoIP2) `.mmdb` files. Both databases are optional and independent. When an ASN database is loaded the sample, API and dashboard carry a **per-ASN top-talkers** breakdown ("from which AS"); a country database stamps each sampled source with its country. Database-path changes require a restart. Default off. |
 | `baseline` | Continuous learned per-host thresholds (see [Baselines](#baselines)). Optional; per-hostgroup overridable. |
 | `ban.ttl_seconds` | Every announcement auto-withdraws after this. No permanent bans. |
 | `ban.unban_hysteresis_seconds` | Traffic must stay below threshold this long before withdrawing, to prevent flapping. |
@@ -476,9 +477,9 @@ storage:
 kapkan talks to ClickHouse's **HTTP interface** with the standard library — no driver
 dependency; the only external dependency is the ClickHouse server itself. On start it
 creates two MergeTree tables (idempotently): `attack_events` (every start/end with type,
-direction, rates, sample top-sources, ban state) and `traffic` (periodic per-host rate and
-baseline snapshots). Both carry a `ttl_days` TTL so retention is bounded without operator
-intervention.
+direction, rates, sample top-sources, top-ASNs when GeoIP is enabled, ban state) and
+`traffic` (periodic per-host rate and baseline snapshots). Both carry a `ttl_days` TTL so
+retention is bounded without operator intervention.
 
 Persistence is **best-effort and never blocks detection**: rows go onto a bounded queue
 (`queue_size`) with a non-blocking send and are flushed in batches (`batch_size` /
@@ -486,9 +487,9 @@ Persistence is **best-effort and never blocks detection**: rows go onto a bounde
 `storage_rows_total{result="dropped"}`) rather than stalling the engine. Without the block,
 kapkan runs entirely in-process on live data.
 
-> Note: the `traffic` table currently persists per-host snapshots only. Per-ASN aggregation
-> is not persisted (kapkan does not resolve ASNs from flows), and per-hostgroup totals are
-> not yet snapshotted — both are candidates for a follow-up.
+> Note: per-ASN top-talkers are persisted on `attack_events` (in the `top_asns` column) when
+> GeoIP is enabled; the `traffic` table itself still persists per-host snapshots only, and
+> per-hostgroup totals are not yet snapshotted — a candidate for a follow-up.
 
 ## Migrating from FastNetMon
 
