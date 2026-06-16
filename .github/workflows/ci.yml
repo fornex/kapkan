@@ -45,18 +45,40 @@ jobs:
           version: latest
 
   govulncheck:
-    name: govulncheck (report-only)
+    name: govulncheck
     runs-on: ubuntu-latest
-    # Report-only: a reachable advisory in the upstream gobgp BGP speaker
-    # (GO-2026-4736) has no fixed release yet, so govulncheck cannot pass while
-    # gobgp is a dependency. It still runs on every PR and surfaces findings in
-    # the logs. Flip continue-on-error to false once that advisory is fixed.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Run govulncheck (gate on reachable, non-accepted advisories)
+        # Enforced gate: fails on any *reachable* (symbol-level "called") advisory
+        # that is NOT in the accepted allowlist. Non-reachable findings (a vuln is
+        # imported/required but never called) are printed but do not fail the job.
+        #
+        # Accepted advisories — must have no upstream fix; revisit each release:
+        #   GO-2026-4736  gobgp DoS via a crafted NEXT_HOP path attribute. Only
+        #                 reachable from a *configured* BGP peer (the operator's
+        #                 own router), which is trusted in kapkan's threat model.
+        #                 No fixed gobgp release exists. Drop from ACCEPTED once
+        #                 a patched gobgp ships and is adopted.
+        env:
+          ACCEPTED: "GO-2026-4736"
+        run: |
+          set -euo pipefail
+          # Human-readable report in the logs (don't fail the step on findings).
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./... || true
+          # Machine-readable pass drives the actual gate (-format json exits 0).
+          go run golang.org/x/vuln/cmd/govulncheck@latest -format json ./... > govuln.json
+          reachable="$(jq -rs '[.[]|select(.finding.trace[0].function!=null)|.finding.osv]|unique[]' govuln.json)"
+          echo "Reachable advisories: ${reachable:-none}"
+          fail=0
+          for id in $reachable; do
+            case " $ACCEPTED " in
+              *" $id "*) echo "::warning::Reachable advisory accepted (no upstream fix): $id" ;;
+              *) echo "::error::Reachable vulnerability not in accepted allowlist: $id"; fail=1 ;;
+            esac
+          done
+          exit $fail
