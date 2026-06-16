@@ -203,8 +203,8 @@
         })));
       return s;
     }
-    var search = h("input", { class: "input mono", id: "f-q", placeholder: I.t("filter.search"), value: f.q || "" });
-    search.addEventListener("input", function (e) { ctx.actions.setFilter("q", e.target.value); });
+    var search = h("input", { class: "input mono", id: "f-q", placeholder: I.t("filter.search"), value: f.q || "",
+      oninput: function (e) { ctx.actions.setFilter("q", e.target.value); } });
 
     var filters = h("div", { class: "filters" }, [
       h("span", { class: "row", style: { color: "var(--muted)" } }, [w.icon("sliders")]),
