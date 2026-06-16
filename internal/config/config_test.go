@@ -1256,3 +1256,35 @@ func TestTenantResolution(t *testing.T) {
 		})
 	}
 }
+
+func TestFlowSourcesParsed(t *testing.T) {
+	yaml := validYAML + "flow_sources:\n  - \"198.51.100.7\"\n  - \"2001:db8::1\"\n"
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got := len(cfg.FlowSourceSet); got != 2 {
+		t.Fatalf("len(FlowSourceSet) = %d, want 2", got)
+	}
+	if _, ok := cfg.FlowSourceSet[netip.MustParseAddr("198.51.100.7")]; !ok {
+		t.Error("FlowSourceSet missing 198.51.100.7")
+	}
+	if _, ok := cfg.FlowSourceSet[netip.MustParseAddr("2001:db8::1")]; !ok {
+		t.Error("FlowSourceSet missing 2001:db8::1")
+	}
+
+	// Absent flow_sources leaves the set nil (the cardinality cap applies).
+	base, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse(base) error = %v", err)
+	}
+	if base.FlowSourceSet != nil {
+		t.Errorf("FlowSourceSet = %v, want nil when flow_sources is absent", base.FlowSourceSet)
+	}
+
+	// An invalid entry is rejected.
+	if _, err := Parse([]byte(validYAML + "flow_sources:\n  - \"not-an-ip\"\n")); err == nil ||
+		!strings.Contains(err.Error(), "flow_sources") {
+		t.Errorf("Parse(invalid flow_sources) error = %v, want contains \"flow_sources\"", err)
+	}
+}

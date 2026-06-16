@@ -18,12 +18,15 @@ var (
 		Help:      "Normalized flow records produced, by wire protocol.",
 	}, []string{"proto"})
 
-	// PacketsTotal counts received UDP datagrams per exporter address.
+	// PacketsTotal counts received UDP datagrams per exporter address. The
+	// exporter label is cardinality-bounded (the source address is spoofable):
+	// sources outside the configured flow_sources allowlist — or beyond an
+	// internal cap when none is set — are bucketed under "other".
 	PacketsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "ingest",
 		Name:      "packets_total",
-		Help:      "Telemetry UDP datagrams received, by exporter address and protocol.",
+		Help:      "Telemetry UDP datagrams received, by exporter address (cardinality-bounded; see flow_sources) and protocol.",
 	}, []string{"exporter", "proto"})
 
 	// DecodeErrorsTotal counts datagrams that failed to decode.
