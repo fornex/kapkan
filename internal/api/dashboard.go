@@ -9,7 +9,7 @@ import (
 // files (no build step, no framework) served from the API listener so the
 // whole product — detector and UI — ships as one binary.
 //
-//go:embed static/index.html static/app.js static/style.css
+//go:embed static/index.html static/*.js static/*.css static/locales/*.js
 var dashboardFS embed.FS
 
 // dashboardAsset describes one served file.
@@ -21,9 +21,21 @@ type dashboardAsset struct {
 // dashboardAssets is an explicit allowlist: serving named files (not an
 // http.FileServer over the FS) removes any path-traversal surface.
 var dashboardAssets = map[string]dashboardAsset{
-	"GET /{$}":       {"static/index.html", "text/html; charset=utf-8"},
-	"GET /app.js":    {"static/app.js", "text/javascript; charset=utf-8"},
-	"GET /style.css": {"static/style.css", "text/css; charset=utf-8"},
+	"GET /{$}":            {"static/index.html", "text/html; charset=utf-8"},
+	"GET /app.js":         {"static/app.js", "text/javascript; charset=utf-8"},
+	"GET /api.js":         {"static/api.js", "text/javascript; charset=utf-8"},
+	"GET /components.js":  {"static/components.js", "text/javascript; charset=utf-8"},
+	"GET /i18n.js":        {"static/i18n.js", "text/javascript; charset=utf-8"},
+	"GET /icons.js":       {"static/icons.js", "text/javascript; charset=utf-8"},
+	"GET /views.js":       {"static/views.js", "text/javascript; charset=utf-8"},
+	"GET /views2.js":      {"static/views2.js", "text/javascript; charset=utf-8"},
+	"GET /style.css":      {"static/style.css", "text/css; charset=utf-8"},
+	"GET /components.css": {"static/components.css", "text/css; charset=utf-8"},
+	"GET /locales/en.js":  {"static/locales/en.js", "text/javascript; charset=utf-8"},
+	"GET /locales/de.js":  {"static/locales/de.js", "text/javascript; charset=utf-8"},
+	"GET /locales/ru.js":  {"static/locales/ru.js", "text/javascript; charset=utf-8"},
+	"GET /locales/fr.js":  {"static/locales/fr.js", "text/javascript; charset=utf-8"},
+	"GET /locales/es.js":  {"static/locales/es.js", "text/javascript; charset=utf-8"},
 }
 
 // dashboardCSP locks the UI down: no inline scripts or styles execute (the

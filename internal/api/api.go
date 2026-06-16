@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/engine"
 	"github.com/kapkan-io/kapkan/internal/mitigate"
+	"github.com/kapkan-io/kapkan/internal/storage"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -69,11 +71,12 @@ func attackKey(ev engine.Event) string {
 
 // Server serves the REST API and tracks attack history.
 type Server struct {
-	store *config.Store
-	eng   *engine.Engine
-	mit   *mitigate.Mitigator
-	log   *slog.Logger
-	start time.Time
+	store   *config.Store
+	eng     *engine.Engine
+	mit     *mitigate.Mitigator
+	log     *slog.Logger
+	querier storage.Querier
+	start   time.Time
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -91,6 +94,11 @@ func New(store *config.Store, eng *engine.Engine, mit *mitigate.Mitigator, log *
 		active: make(map[string]*Attack),
 	}
 }
+
+// SetQuerier attaches the storage read path used by the traffic-history
+// endpoint. A nil querier (storage disabled) makes the endpoint report
+// history as unavailable rather than failing.
+func (s *Server) SetQuerier(q storage.Querier) { s.querier = q }
 
 // RecordAttackStarted records a newly detected attack for the attacks
 // endpoint. ban may be nil.
@@ -176,6 +184,7 @@ func (s *Server) Handler() http.Handler {
 	read("GET /api/v1/attacks", s.handleAttacks)
 	read("GET /api/v1/hosts", s.handleHosts)
 	read("GET /api/v1/bans", s.handleBans)
+	read("GET /api/v1/traffic", s.handleTraffic)
 	write("POST /api/v1/ban", s.handleBan)
 	write("POST /api/v1/unban", s.handleUnban)
 	write("POST /api/v1/config/reload", s.handleReload)
@@ -381,6 +390,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"active_attacks": activeAttacks,
 		"active_bans":    activeBans,
 		"hostgroups":     groups,
+		// role lets the dashboard gate operator-only affordances; unscoped marks
+		// an admin token (which also receives networks/thresholds below).
+		"role":     string(c.role),
+		"unscoped": c.unscoped(),
 	}
 	// Global protected networks and the global thresholds describe the whole
 	// deployment; reveal them only to an unscoped admin.
@@ -447,6 +460,77 @@ func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"bans": bans})
+}
+
+// handleTraffic serves persisted per-host rate history for the Traffic/Reports
+// view. When storage is disabled it returns available:false (not an error), so
+// the dashboard shows its extension-point panel instead of breaking.
+func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
+	if s.querier == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"available": false, "points": []storage.TrafficPoint{}})
+		return
+	}
+	q := r.URL.Query()
+	addr, err := netip.ParseAddr(q.Get("key"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "missing or invalid key (expected a host address)")
+		return
+	}
+	if c := callerFrom(r); !visibleAddr(c, s.store.Get(), addr) {
+		writeError(w, http.StatusForbidden, "target is outside your tenant")
+		return
+	}
+	to := time.Now()
+	from := to.Add(-time.Hour)
+	if v := q.Get("from"); v != "" {
+		t, e := time.Parse(time.RFC3339, v)
+		if e != nil {
+			writeError(w, http.StatusBadRequest, "invalid from (expected RFC3339)")
+			return
+		}
+		from = t
+	}
+	if v := q.Get("to"); v != "" {
+		t, e := time.Parse(time.RFC3339, v)
+		if e != nil {
+			writeError(w, http.StatusBadRequest, "invalid to (expected RFC3339)")
+			return
+		}
+		to = t
+	}
+	if !to.After(from) {
+		writeError(w, http.StatusBadRequest, "to must be after from")
+		return
+	}
+	const maxRange = 31 * 24 * time.Hour
+	if to.Sub(from) > maxRange {
+		writeError(w, http.StatusBadRequest, "time range too large (max 31 days)")
+		return
+	}
+	step := 60
+	if v := q.Get("step"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid step (positive integer seconds)")
+			return
+		}
+		step = n
+	}
+	// Bound the bucket count so a wide range with a tiny step can't force an
+	// oversized GROUP BY / response: raise step to keep buckets <= maxBuckets.
+	const maxBuckets = 5000
+	if span := int(to.Sub(from).Seconds()); span/step > maxBuckets {
+		step = (span + maxBuckets - 1) / maxBuckets
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	pts, err := s.querier.QueryTraffic(ctx, addr.String(), from, to, step)
+	if err != nil {
+		s.log.Warn("traffic query failed", "target", addr.String(), "err", err)
+		writeError(w, http.StatusBadGateway, "traffic history query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"available": true, "points": pts})
 }
 
 // groupTenant returns the tenant of the named group, or "" if not found.
