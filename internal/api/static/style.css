@@ -182,8 +182,8 @@ button { font-family: inherit; }
 .is-collapsed .nav__label { text-align: center; padding-left: 0; padding-right: 0; }
 
 .nav__item {
-  display: flex; align-items: center; gap: var(--s-3);
-  padding: var(--s-2) var(--s-3); height: 38px;
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-2); height: 38px;
   border-radius: var(--r-sm);
   color: var(--muted); text-decoration: none;
   background: none; border: 1px solid transparent; width: 100%; cursor: pointer;
@@ -194,10 +194,11 @@ button { font-family: inherit; }
 .nav__item:hover { background: #ffffff08; color: var(--text); }
 .nav__item.is-active { background: var(--accent-soft); color: var(--accent-2); border-color: var(--accent-line); }
 .nav__item .ico { flex: none; width: 18px; height: 18px; }
+.nav__item__txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .nav__count {
-  margin-left: auto; font-size: var(--t-xs); font-variant-numeric: tabular-nums;
+  margin-left: auto; flex: none; font-size: var(--t-xs); font-variant-numeric: tabular-nums;
   background: #ffffff14; color: var(--text); border-radius: var(--r-pill);
-  padding: 1px 7px; min-width: 20px; text-align: center;
+  padding: 1px 6px; min-width: 18px; text-align: center;
 }
 .nav__count.is-hot { background: var(--active); color: #fff; }
 .is-collapsed .nav__item__txt, .is-collapsed .nav__count { display: none; }
