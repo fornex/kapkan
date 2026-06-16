@@ -19,7 +19,7 @@
       else if (k === "dataset") for (var d in v) e.dataset[d] = v[d];
       else if (k === "style") for (var s in v) e.style[s] = v[s];
       else if (k === "attrs") { for (var an in v) if (v[an] != null) e.setAttribute(an, v[an]); }
-      else if (k.indexOf("on") === 0 && typeof v === "function") e.addEventListener(k.slice(2).toLowerCase(), v);
+      else if (k.indexOf("on") === 0 && typeof v === "function") e[k.toLowerCase()] = v;  // property, not addEventListener: lets reconcile() carry the fresh closure
       else e.setAttribute(k, v);
     }
     append(e, children);
@@ -32,7 +32,59 @@
     else e.appendChild(document.createTextNode(String(c)));
   }
   function clear(e) { while (e.firstChild) e.removeChild(e.firstChild); return e; }
-  function mount(e, children) { clear(e); append(e, children); return e; }
+
+  /* ---------- incremental DOM reconcile ----------
+     Morphs a parent's existing children to match a freshly-built node list,
+     mutating in place so untouched nodes keep their identity. That preserves
+     input focus/caret/value, scroll position, an open confirm popover's anchor,
+     and CSS animations on unchanged nodes (e.g. the posture pulse) — so the 3s
+     poll re-renders with no flicker and no focus-skip workarounds. mount() now
+     reconciles instead of clear+append. */
+  var EV_PROPS = ["onclick", "onchange", "oninput", "onkeydown", "onkeyup", "onsubmit", "onfocus", "onblur", "onmousedown", "onmouseup"];
+  function flattenNodes(c, out) {
+    if (c == null) return;
+    if (Array.isArray(c)) { c.forEach(function (x) { flattenNodes(x, out); }); return; }
+    out.push(c.nodeType ? c : document.createTextNode(String(c)));
+  }
+  function syncAttrs(oldEl, newEl) {
+    var na = newEl.attributes, oa = oldEl.attributes, i;
+    for (i = 0; i < na.length; i++) { if (oldEl.getAttribute(na[i].name) !== na[i].value) oldEl.setAttribute(na[i].name, na[i].value); }
+    for (i = oa.length - 1; i >= 0; i--) { if (!newEl.hasAttribute(oa[i].name)) oldEl.removeAttribute(oa[i].name); }
+  }
+  function morphNode(oldN, newN) {
+    if (oldN.nodeType !== newN.nodeType) return newN;
+    if (oldN.nodeType === 3) { if (oldN.nodeValue !== newN.nodeValue) oldN.nodeValue = newN.nodeValue; return oldN; }
+    if (oldN.nodeType !== 1 || oldN.tagName !== newN.tagName || oldN.namespaceURI !== newN.namespaceURI) return newN;
+    syncAttrs(oldN, newN);
+    /* carry event-handler closures (set as properties by h()) from the fresh tree */
+    for (var i = 0; i < EV_PROPS.length; i++) { var p = EV_PROPS[i]; if (oldN[p] !== newN[p]) oldN[p] = newN[p] || null; }
+    /* never write a focusable input's live value/caret — only its attributes get synced above */
+    reconcileChildren(oldN, newN);
+    return oldN;
+  }
+  function reconcileChildren(oldEl, newEl) {
+    var next = [], k = newEl.childNodes, i;
+    for (i = 0; i < k.length; i++) next.push(k[i]); /* snapshot: appending moves nodes out of newEl */
+    for (i = 0; i < next.length; i++) {
+      var on = oldEl.childNodes[i];
+      if (!on) { oldEl.appendChild(next[i]); continue; }
+      var m = morphNode(on, next[i]);
+      if (m !== on) oldEl.replaceChild(m, on);
+    }
+    while (oldEl.childNodes.length > next.length) oldEl.removeChild(oldEl.lastChild);
+  }
+  function reconcile(parent, children) {
+    var next = []; flattenNodes(children, next);
+    for (var i = 0; i < next.length; i++) {
+      var on = parent.childNodes[i];
+      if (!on) { parent.appendChild(next[i]); continue; }
+      var m = morphNode(on, next[i]);
+      if (m !== on) parent.replaceChild(m, on);
+    }
+    while (parent.childNodes.length > next.length) parent.removeChild(parent.lastChild);
+    return parent;
+  }
+  function mount(e, children) { return reconcile(e, children); }
 
   function svg(tag, attrs, children) {
     var e = document.createElementNS(SVGNS, tag);

@@ -224,7 +224,13 @@
         hostgroups: groups,
         networks: cache.networks,
         thresholds: status.thresholds || null,
-        role: status.role || "operator"
+        role: status.role || "operator",
+        unscoped: !!status.unscoped,
+        /* Settings view fields (admin-only ones are absent for scoped tokens) */
+        version: status.version || "",
+        bgp: status.bgp || null,
+        scrubbing: status.scrubbing || null,
+        notify: status.notify || null
       };
       cache.attacks = {
         active: (attacks.active || []).map(function (a) { return mapAttack(a, groups, bansRaw); }),
