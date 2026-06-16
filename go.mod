@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/netsampler/goflow2/v2 v2.2.6
+	github.com/oschwald/maxminddb-golang/v2 v2.4.0
 	github.com/osrg/gobgp/v3 v3.37.0
 	github.com/prometheus/client_golang v1.23.2
 	google.golang.org/protobuf v1.36.11

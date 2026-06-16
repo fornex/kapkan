@@ -91,13 +91,15 @@
       return {
         src: f.src, dst: f.dst, src_port: f.src_port, dst_port: f.dst_port,
         proto: f.proto, flags: flagsToString(f.tcp_flags), fragment: !!f.fragment,
-        bytes: f.bytes, packets: f.packets, sampling_rate: f.sampling_rate
+        bytes: f.bytes, packets: f.packets, sampling_rate: f.sampling_rate,
+        src_asn: f.src_asn || 0, src_org: f.src_org || "", src_country: f.src_country || ""
       };
     });
     return {
       flows: flows,
       top_sources: s.top_sources || [], top_src_ports: s.top_src_ports || [],
       top_dst_ports: s.top_dst_ports || [], protocols: s.protocols || [],
+      top_asns: s.top_asns || [],
       total_packets: s.total_packets || 0
     };
   }

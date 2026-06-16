@@ -51,6 +51,7 @@
       sample ? section("ac.sample", "target", h("div", {}, [
         h("div", { class: "shares" }, [
           K.shareGroup(I.t("ac.topsources"), sample.top_sources, { src: true }),
+          (sample.top_asns && sample.top_asns.length) ? K.shareGroup(I.t("ac.topasns"), sample.top_asns, { src: true }) : null,
           K.shareGroup(I.t("ac.protocols"), sample.protocols, {}),
           K.shareGroup(I.t("ac.topsrcports"), sample.top_src_ports, {}),
           K.shareGroup(I.t("ac.topdstports"), sample.top_dst_ports, {})
@@ -74,8 +75,10 @@
       return h("th", { text: label });
     }));
     var rows = flows.map(function (f) {
+      var srcCell = [h("span", { text: f.src }), h("span", { class: "td-muted", text: ":" + f.src_port })];
+      if (f.src_country) srcCell.push(h("span", { class: "geo-tag", title: f.src_org || "", text: f.src_country }));
       return h("tr", {}, [
-        h("td", {}, [h("span", { text: f.src }), h("span", { class: "td-muted", text: ":" + f.src_port })]),
+        h("td", {}, srcCell),
         h("td", { text: f.proto }),
         h("td", {}, [h("span", { text: f.dst }), h("span", { class: "td-muted", text: ":" + f.dst_port })]),
         h("td", { text: String(f.dst_port) }),

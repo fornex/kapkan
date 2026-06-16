@@ -20,6 +20,7 @@ import (
 
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/flow"
+	"github.com/kapkan-io/kapkan/internal/geoip"
 	"github.com/kapkan-io/kapkan/internal/metrics"
 )
 
@@ -157,6 +158,10 @@ type Engine struct {
 	// which runs on the single Run goroutine, so it needs no lock.
 	groups map[string]*groupState
 
+	// geo optionally attributes sample sources to ASN/country. nil disables
+	// enrichment; the resolver is read-only and safe for concurrent use.
+	geo geoip.Resolver
+
 	events chan Event
 	now    func() time.Time
 	log    *slog.Logger
@@ -199,6 +204,20 @@ func WithLogger(l *slog.Logger) Option {
 		if l != nil {
 			e.log = l
 		}
+	}
+}
+
+// WithGeoIP attaches a GeoIP/ASN resolver used to enrich attack samples with
+// per-source ASN/country attribution. A nil resolver leaves enrichment off.
+func WithGeoIP(r geoip.Resolver) Option {
+	return func(e *Engine) {
+		// Guard against a typed-nil resolver (a nil *geoip.DB wrapped in the
+		// interface) so callers can pass the result of an optional open
+		// unconditionally without the engine treating it as enabled.
+		if db, ok := r.(*geoip.DB); ok && db == nil {
+			return
+		}
+		e.geo = r
 	}
 }
 
