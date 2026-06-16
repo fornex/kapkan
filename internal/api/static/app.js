@@ -186,7 +186,14 @@
     if (!state.drawer.open) return;
     var a = state.drawer.attack;
     if (state.drawer.live) { var live = API.getAttacks().active[0]; if (live) { a = live; state.drawer.attack = a; } }
-    K.mount(document.getElementById("drawer"), V.attackDetail(a, buildCtx()));
+    var d = document.getElementById("drawer");
+    K.mount(d, V.attackDetail(a, buildCtx()));
+    /* if a re-render removed the focused control (e.g. attack ended → Withdraw
+       button gone), keep focus inside the modal instead of dropping to <body> */
+    if (document.activeElement === document.body) {
+      var f = d.querySelector("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+      if (f) f.focus();
+    }
   }
   function closeDrawer() {
     if (!state.drawer.open) return;

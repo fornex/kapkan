@@ -37,8 +37,9 @@
      Morphs a parent's existing children to match a freshly-built node list,
      mutating in place so untouched nodes keep their identity. That preserves
      input focus/caret/value, scroll position, an open confirm popover's anchor,
-     and any running CSS transition — so the 3s poll re-renders with no flicker
-     and no focus-skip workarounds. mount() now reconciles instead of clear+append. */
+     and CSS animations on unchanged nodes (e.g. the posture pulse) — so the 3s
+     poll re-renders with no flicker and no focus-skip workarounds. mount() now
+     reconciles instead of clear+append. */
   var EV_PROPS = ["onclick", "onchange", "oninput", "onkeydown", "onkeyup", "onsubmit", "onfocus", "onblur", "onmousedown", "onmouseup"];
   function flattenNodes(c, out) {
     if (c == null) return;
