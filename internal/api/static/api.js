@@ -248,6 +248,17 @@
     getBans: function () { return { active: cache.bansActive, history: rejections.concat(cache.bansHistory) }; },
     getHostgroups: function () { return cache.groups; },
     getNetworks: function () { return cache.networks; },
+    /* historical traffic for one host (Traffic/Reports view). Resolves to
+       {available:false} when the engine has no ClickHouse storage. */
+    getTraffic: function (key, fromISO, toISO, step) {
+      var qs = "key=" + encodeURIComponent(key);
+      if (fromISO) qs += "&from=" + encodeURIComponent(fromISO);
+      if (toISO) qs += "&to=" + encodeURIComponent(toISO);
+      if (step) qs += "&step=" + step;
+      return getJSON("/api/v1/traffic?" + qs)
+        .then(function (r) { return { available: !!r.available, points: r.points || [] }; })
+        .catch(function () { return { available: false, points: [] }; });
+    },
     aggregate: function () {
       var inM = 0, outM = 0, inP = 0, outP = 0;
       cache.hosts.forEach(function (hHost) {
