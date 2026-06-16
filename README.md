@@ -11,9 +11,6 @@ features commercial flow-DDoS products charge for.
 It is **dry-run by default**: until you explicitly flip the switch, every would-be blackhole
 is logged and exposed via the API but never announced to your routers.
 
-> Status: MVP. ClickHouse storage, a React dashboard, attack classification, dynamic
-> baselines and BGP FlowSpec are on the roadmap but not in this release.
-
 ## Features
 
 - **Ingest** sFlow v5, NetFlow v5/v9 and IPFIX over UDP via [goflow2](https://github.com/netsampler/goflow2), in library mode (no sidecar).
