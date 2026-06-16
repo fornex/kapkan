@@ -200,9 +200,9 @@
       "tr.perhost": "Top hosts — live rate",
       "tr.window": "Last {n} samples · 3s cadence",
       "tr.history.title": "Historical reports",
-      "tr.history.note": "Long-range bandwidth, pps and the attack timeline are stored in ClickHouse but not yet exposed over HTTP.",
-      "tr.history.endpoint": "Requires a future endpoint",
-      "tr.history.detail": "This view binds to {ep} once implemented (tables: {t1}, {t2}). No frontend change needed — the chart components below already accept time-series data.",
+      "tr.history.note": "Long-range bandwidth, pps and the attack timeline come from ClickHouse. Enable storage in the engine config to populate this view.",
+      "tr.history.endpoint": "Requires ClickHouse storage",
+      "tr.history.detail": "These charts read the ClickHouse tables {t1} and {t2}; they fill in once storage is enabled in the engine config.",
 
       /* settings */
       "se.status": "Engine status",

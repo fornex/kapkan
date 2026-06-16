@@ -199,9 +199,9 @@
       "tr.perhost": "Principaux hôtes — débit en direct",
       "tr.window": "{n} derniers échantillons · cadence 3 s",
       "tr.history.title": "Rapports historiques",
-      "tr.history.note": "Le débit longue durée, les pps et la chronologie des attaques sont stockés dans ClickHouse mais pas encore exposés via HTTP.",
-      "tr.history.endpoint": "Nécessite un futur point d'accès",
-      "tr.history.detail": "Cette vue se connecte à {ep} une fois implémenté (tables : {t1}, {t2}). Aucun changement côté frontend — les graphiques ci-dessous acceptent déjà des séries temporelles.",
+      "tr.history.note": "Le débit longue durée, les pps et la chronologie des attaques proviennent de ClickHouse. Activez le stockage dans la configuration du moteur pour remplir cette vue.",
+      "tr.history.endpoint": "Nécessite le stockage ClickHouse",
+      "tr.history.detail": "Ces graphiques lisent les tables ClickHouse {t1} et {t2} ; ils se remplissent une fois le stockage activé dans la configuration du moteur.",
 
       /* settings */
       "se.status": "État du moteur",

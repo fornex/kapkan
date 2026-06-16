@@ -199,9 +199,9 @@
       "tr.perhost": "Principales hosts — tasa en vivo",
       "tr.window": "Últimas {n} muestras · cadencia 3 s",
       "tr.history.title": "Informes históricos",
-      "tr.history.note": "El ancho de banda de largo plazo, los pps y la cronología de ataques se almacenan en ClickHouse pero aún no se exponen por HTTP.",
-      "tr.history.endpoint": "Requiere un punto de acceso futuro",
-      "tr.history.detail": "Esta vista se conecta a {ep} una vez implementado (tablas: {t1}, {t2}). No se necesita cambio en el frontend — los gráficos de abajo ya aceptan series temporales.",
+      "tr.history.note": "El ancho de banda de largo plazo, los pps y la cronología de ataques provienen de ClickHouse. Activa el almacenamiento en la configuración del motor para llenar esta vista.",
+      "tr.history.endpoint": "Requiere almacenamiento ClickHouse",
+      "tr.history.detail": "Estos gráficos leen las tablas de ClickHouse {t1} y {t2}; se llenan una vez que el almacenamiento está activado en la configuración del motor.",
 
       /* settings */
       "se.status": "Estado del motor",

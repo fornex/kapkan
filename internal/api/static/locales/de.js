@@ -185,9 +185,9 @@
       "tr.perhost": "Top-Hosts — Live-Rate",
       "tr.window": "Letzte {n} Stichproben · 3-Sek-Takt",
       "tr.history.title": "Historische Berichte",
-      "tr.history.note": "Langzeit-Bandbreite, pps und die Angriffs-Zeitleiste werden in ClickHouse gespeichert, sind aber noch nicht über HTTP verfügbar.",
-      "tr.history.endpoint": "Erfordert einen zukünftigen Endpunkt",
-      "tr.history.detail": "Diese Ansicht bindet sich an {ep}, sobald implementiert (Tabellen: {t1}, {t2}). Keine Frontend-Änderung nötig — die Diagramme unten akzeptieren bereits Zeitreihendaten.",
+      "tr.history.note": "Langzeit-Bandbreite, pps und die Angriffs-Zeitleiste stammen aus ClickHouse. Aktivieren Sie den Speicher in der Engine-Konfiguration, um diese Ansicht zu füllen.",
+      "tr.history.endpoint": "Erfordert ClickHouse-Speicher",
+      "tr.history.detail": "Diese Diagramme lesen die ClickHouse-Tabellen {t1} und {t2}; sie füllen sich, sobald der Speicher in der Engine-Konfiguration aktiviert ist.",
 
       "se.status": "Engine-Status",
       "se.mode": "Abwehrmodus",
