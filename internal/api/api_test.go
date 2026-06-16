@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/engine"
 	"github.com/kapkan-io/kapkan/internal/flow"
 	"github.com/kapkan-io/kapkan/internal/mitigate"
+	"github.com/kapkan-io/kapkan/internal/storage"
 
 	"log/slog"
 	"net/netip"
@@ -93,6 +95,66 @@ func do(t *testing.T, h http.Handler, method, path, body string) *httptest.Respo
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)
 	return rec
+}
+
+type fakeQuerier struct {
+	pts    []storage.TrafficPoint
+	err    error
+	gotKey string
+}
+
+func (f *fakeQuerier) QueryTraffic(_ context.Context, key string, _, _ time.Time, _ int) ([]storage.TrafficPoint, error) {
+	f.gotKey = key
+	return f.pts, f.err
+}
+
+func TestTrafficEndpoint(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+
+	// storage disabled (no querier) → available:false, never an error
+	rec := do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=203.0.113.10", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nil-querier traffic = %d, want 200", rec.Code)
+	}
+	var off map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &off)
+	if off["available"] != false {
+		t.Errorf("available = %v, want false", off["available"])
+	}
+
+	// with a querier → points are returned and the key is forwarded
+	fq := &fakeQuerier{pts: []storage.TrafficPoint{{TS: "2024-01-01 00:00:00", PPS: 123, Mbps: 4}}}
+	s.SetQuerier(fq)
+	rec = do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=203.0.113.10&step=10", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("traffic = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var on struct {
+		Available bool                   `json:"available"`
+		Points    []storage.TrafficPoint `json:"points"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &on); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !on.Available || len(on.Points) != 1 || on.Points[0].PPS != 123 {
+		t.Errorf("unexpected traffic body: %+v", on)
+	}
+	if fq.gotKey != "203.0.113.10" {
+		t.Errorf("querier key = %q, want 203.0.113.10", fq.gotKey)
+	}
+
+	// invalid key → 400
+	if rec := do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=nope", ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad key = %d, want 400", rec.Code)
+	}
+	// to before from → 400 (DoS-guard: no empty/inverted ranges)
+	if rec := do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=203.0.113.10&from=2024-01-02T00:00:00Z&to=2024-01-01T00:00:00Z", ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("to<from = %d, want 400", rec.Code)
+	}
+	// range too large → 400 (DoS-guard: capped at 31 days)
+	if rec := do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=203.0.113.10&from=2000-01-01T00:00:00Z&to=2024-01-01T00:00:00Z", ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("oversized range = %d, want 400", rec.Code)
+	}
 }
 
 func TestStatusEndpoint(t *testing.T) {
