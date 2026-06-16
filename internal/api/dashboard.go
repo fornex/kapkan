@@ -34,6 +34,8 @@ var dashboardAssets = map[string]dashboardAsset{
 	"GET /locales/en.js":  {"static/locales/en.js", "text/javascript; charset=utf-8"},
 	"GET /locales/de.js":  {"static/locales/de.js", "text/javascript; charset=utf-8"},
 	"GET /locales/ru.js":  {"static/locales/ru.js", "text/javascript; charset=utf-8"},
+	"GET /locales/fr.js":  {"static/locales/fr.js", "text/javascript; charset=utf-8"},
+	"GET /locales/es.js":  {"static/locales/es.js", "text/javascript; charset=utf-8"},
 }
 
 // dashboardCSP locks the UI down: no inline scripts or styles execute (the

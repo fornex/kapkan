@@ -110,7 +110,7 @@
     var btn = h("button", { class: "icon-btn", attrs: { "aria-haspopup": "true", "aria-expanded": String(state.localeOpen), title: I.t("locale.title") },
       onclick: function (e) { e.stopPropagation(); state.localeOpen = !state.localeOpen; buildLocaleMenu(); } },
       [w.icon("globe")]);
-    var loaded = { en: 1, de: 1, ru: 1 };
+    var loaded = { en: 1, de: 1, ru: 1, fr: 1, es: 1 };
     var items = I.available.map(function (l) {
       var on = l.code === I.locale, isLoaded = loaded[l.code];
       return h("button", { class: "menu__item" + (on ? " is-on" : ""), attrs: isLoaded ? {} : { disabled: "true", title: I.t("locale.soon.title") },
