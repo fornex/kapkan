@@ -46,6 +46,12 @@ SRC_HASH=""
 [ -f "$ROOT/scripts/site-hash.sh" ] && SRC_HASH="$(bash "$ROOT/scripts/site-hash.sh" "$ROOT" 2>/dev/null || true)"
 
 echo "==> Packaging frontend/out"
+# Next writes metadata-route outputs (favicon.ico, icon.svg, apple-icon.png,
+# opengraph-image.png, twitter-image.png) as mode 600. The nginx worker runs as
+# a different user, so those files 403 on the live host while world-readable
+# public/ assets serve fine. Normalize to a+rX before packaging so every file
+# is served, regardless of how the build wrote it.
+chmod -R a+rX "$ROOT/frontend/out"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 ZIP="$TMP/release.zip"
 ( cd "$ROOT/frontend/out" && zip -rqX "$ZIP" . )
