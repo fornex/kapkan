@@ -3,7 +3,8 @@
 export const site = {
   name: "Kapkan",
   tagline: "Free, open-source DDoS detection & RTBH mitigation",
-  // Derived from the Go module path (github.com/kapkan-io/kapkan). Update if
-  // the canonical repo URL differs.
-  repo: "https://github.com/kapkan-io/kapkan",
+  // Public GitHub repository. The Go module path is github.com/kapkan-io/kapkan
+  // (see go.mod), but the repo is published under fornex/kapkan — keep this in
+  // sync with the actual repository URL.
+  repo: "https://github.com/fornex/kapkan",
 } as const;

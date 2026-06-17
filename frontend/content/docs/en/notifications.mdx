@@ -169,7 +169,7 @@ notify:
 
 The webhook body and the exec hook's stdin carry the same JSON object. It is versioned
 by `schema_version`, currently `1`. The authoritative definition lives in
-[`docs/callback-schema.json`](https://github.com/kapkan-io/kapkan/blob/main/docs/callback-schema.json).
+[`docs/callback-schema.json`](https://github.com/fornex/kapkan/blob/main/docs/callback-schema.json).
 
 <Callout type="info" title="Forward compatibility">
 Consumers MUST check `schema_version` and SHOULD ignore unknown fields. The version is
