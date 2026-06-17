@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { site } from "@/lib/site";
+import { Logo } from "@/components/Logo";
 import { ThemeToggle } from "@/components/ThemeToggle";
 
 // Placeholder home page. The real landing comes with the design handoff —
@@ -8,7 +9,7 @@ export default function Home() {
   return (
     <div className="flex min-h-screen flex-col">
       <header className="flex h-14 items-center justify-between border-b border-border px-6">
-        <span className="font-mono text-sm font-semibold tracking-tight">{site.name}</span>
+        <Logo href="/" />
         <div className="flex items-center gap-4 text-sm">
           <Link href="/docs" className="text-muted-foreground hover:text-foreground">
             Docs

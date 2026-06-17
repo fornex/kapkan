@@ -13,6 +13,11 @@
   --border: #e4e4e7;
   --accent: #2563eb;
   --accent-foreground: #ffffff;
+
+  /* Kapkan wordmark — light backgrounds (AA-safe). The tile mark in <Logo>
+     stays constant on both themes; only the wordmark colors flip. */
+  --kapkan-word-front: #10151b;
+  --kapkan-word-tail: #1f6fd0;
 }
 
 .dark {
@@ -24,6 +29,10 @@
   --border: #27272a;
   --accent: #60a5fa;
   --accent-foreground: #0a0a0a;
+
+  /* Kapkan wordmark — dark backgrounds */
+  --kapkan-word-front: #f2f6fb;
+  --kapkan-word-tail: #9cccff;
 }
 
 @theme inline {
@@ -42,6 +51,24 @@
 body {
   background: var(--background);
   color: var(--foreground);
+}
+
+/* Kapkan logo lockup: gap scales with the lockup font-size (brand spec). */
+.kapkan-logo {
+  gap: 0.42em;
+}
+
+/* Kapkan wordmark: Poppins 600, lowercase, two-tone (kap → kan). */
+.kapkan-word {
+  font-family: var(--font-poppins), var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.kapkan-word .kw-front {
+  color: var(--kapkan-word-front);
+}
+.kapkan-word .kw-tail {
+  color: var(--kapkan-word-tail);
 }
 
 :target {

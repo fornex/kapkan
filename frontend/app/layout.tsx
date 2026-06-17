@@ -1,5 +1,5 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import { Geist, Geist_Mono, Poppins } from "next/font/google";
 import "./globals.css";
 import { site } from "@/lib/site";
 
@@ -13,13 +13,45 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// Brand wordmark face — Poppins 600, self-hosted by next/font. Used only by
+// the <Logo> lockup (see components/Logo.tsx + .kapkan-word in globals.css).
+const poppins = Poppins({
+  variable: "--font-poppins",
+  subsets: ["latin"],
+  weight: ["600"],
+});
+
+const description =
+  "Kapkan is a single Go binary that ingests NetFlow/IPFIX/sFlow telemetry, detects volumetric DDoS attacks in seconds, and triggers automated BGP RTBH mitigation. Free and open source.";
+
+// favicon.ico, icon.svg, apple-icon.png and opengraph-image/twitter-image live
+// in app/ as file-convention metadata — Next emits their <head> tags and
+// (with metadataBase) absolute social-card URLs automatically.
 export const metadata: Metadata = {
+  metadataBase: new URL("https://kapkan.io"),
   title: {
     default: `${site.name} — ${site.tagline}`,
     template: `%s — ${site.name}`,
   },
-  description:
-    "Kapkan is a single Go binary that ingests NetFlow/IPFIX/sFlow telemetry, detects volumetric DDoS attacks in seconds, and triggers automated BGP RTBH mitigation. Free and open source.",
+  description,
+  applicationName: site.name,
+  manifest: "/site.webmanifest",
+  openGraph: {
+    type: "website",
+    siteName: site.name,
+    url: "/",
+    title: `${site.name} — ${site.tagline}`,
+    description,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: `${site.name} — ${site.tagline}`,
+    description,
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0f1419",
 };
 
 // Set the theme class before paint to avoid a flash of the wrong theme.
@@ -34,7 +66,7 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${poppins.variable} h-full antialiased`}
     >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />

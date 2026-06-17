@@ -14,6 +14,7 @@ import {
   groupTitles,
   pageTitles,
 } from "@/lib/i18n";
+import { Logo } from "@/components/Logo";
 import { ThemeToggle } from "@/components/ThemeToggle";
 
 function SidebarNav({ lang, onNavigate }: { lang: Locale; onNavigate?: () => void }) {
@@ -141,10 +142,7 @@ export function DocsChrome({ lang, children }: { lang: Locale; children: React.R
               <path d="M3 6h18M3 12h18M3 18h18" />
             </svg>
           </button>
-          <Link href="/" className="flex items-baseline gap-2">
-            <span className="font-mono text-sm font-semibold tracking-tight">{site.name}</span>
-            <span className="text-sm text-muted-foreground">{docsLabel}</span>
-          </Link>
+          <Logo href="/" label={docsLabel} />
           <div className="ml-auto flex items-center gap-3 text-sm">
             <LanguageSwitcher lang={lang} />
             <a
@@ -176,9 +174,10 @@ export function DocsChrome({ lang, children }: { lang: Locale; children: React.R
             />
             <div className="absolute left-0 top-0 h-full w-72 overflow-y-auto border-r border-border bg-background px-4 py-6">
               <div className="mb-6 flex items-center justify-between">
-                <span className="font-mono text-sm font-semibold">
-                  {site.name} {docsLabel}
-                </span>
+                {/* Plain brand label, not a link — the top bar already has the
+                    home link; a second same-target link in the open drawer is a
+                    needless duplicate for keyboard/screen-reader users. */}
+                <Logo label={docsLabel} />
                 <button
                   type="button"
                   onClick={() => setOpen(false)}
