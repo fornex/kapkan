@@ -9,7 +9,7 @@ import (
 // files (no build step, no framework) served from the API listener so the
 // whole product — detector and UI — ships as one binary.
 //
-//go:embed static/index.html static/*.js static/*.css static/locales/*.js
+//go:embed static/index.html static/*.js static/*.css static/*.svg static/locales/*.js
 var dashboardFS embed.FS
 
 // dashboardAsset describes one served file.
@@ -22,6 +22,7 @@ type dashboardAsset struct {
 // http.FileServer over the FS) removes any path-traversal surface.
 var dashboardAssets = map[string]dashboardAsset{
 	"GET /{$}":            {"static/index.html", "text/html; charset=utf-8"},
+	"GET /favicon.svg":    {"static/favicon.svg", "image/svg+xml; charset=utf-8"},
 	"GET /app.js":         {"static/app.js", "text/javascript; charset=utf-8"},
 	"GET /api.js":         {"static/api.js", "text/javascript; charset=utf-8"},
 	"GET /components.js":  {"static/components.js", "text/javascript; charset=utf-8"},
