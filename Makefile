@@ -1,22 +1,20 @@
-BINARY := kapkan
-PKG := ./...
+# Kapkan — root orchestrator.
+#   engine/   the Go binary (operator console go:embed'd → ONE binary)
+#   console/  canonical operator-UI source (copied into engine at build)
+.PHONY: build engine test clean help
 
-.PHONY: build test lint bench run-dev clean
+help:
+	@echo "make build   - build the single engine binary (console embedded)"
+	@echo "make test    - run the engine test suite"
+	@echo "make clean    - remove build artifacts"
 
-build:
-	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o $(BINARY) ./cmd/kapkan
+build: engine            ## the product: one binary with the console embedded
+
+engine:
+	$(MAKE) -C engine build
 
 test:
-	go test -race -count=1 $(PKG)
-
-lint:
-	golangci-lint run
-
-bench:
-	go test -run '^$$' -bench . -benchmem ./internal/engine/...
-
-run-dev: build
-	./$(BINARY) -config configs/dev.yaml -log-format text
+	$(MAKE) -C engine test
 
 clean:
-	rm -f $(BINARY)
+	$(MAKE) -C engine clean
