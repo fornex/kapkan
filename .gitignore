@@ -15,11 +15,3 @@ engine/internal/api/static/
 /engine/kapkan
 # the site build copies the canonical top-level docs/ here for Next to render
 site/frontend/content/docs/
-
-# auto-release hook: local credentials + runtime state at the monorepo-root
-# .tooling (never commit). Site-relative ignores live in site/.gitignore.
-.tooling/release.env
-.tooling/release.log
-.tooling/release-state.json
-.tooling/release.disabled
-.tooling/.release.lock

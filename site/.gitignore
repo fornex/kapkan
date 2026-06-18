@@ -15,10 +15,3 @@ dist/
 .env.*
 !.env.example
 .DS_Store
-
-# auto-release hook: local credentials + runtime state (never commit)
-.tooling/release.env
-.tooling/release.log
-.tooling/release-state.json
-.tooling/release.disabled
-.tooling/.release.lock

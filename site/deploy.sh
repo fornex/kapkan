@@ -22,7 +22,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # the site/ dir
-REPO_ROOT="$(cd "$ROOT/.." && pwd)"                     # monorepo root (holds .tooling)
 API="${BEADMIN_URL:?set BEADMIN_URL}/api"
 ORIGIN="${BEADMIN_URL}"
 EMAIL="${BEADMIN_EMAIL:?set BEADMIN_EMAIL}"
@@ -104,9 +103,9 @@ CODE="$(curl -s -o /dev/null -w '%{http_code}' "https://$SITE/" || echo 000)"
 echo "    GET / -> $CODE"
 [ "$CODE" = "200" ] || { echo "ERROR: site did not return 200 after deploy"; exit 1; }
 
-# Record what is now live so the auto-release Stop hook stays quiet next turn.
-# The marker lives in the monorepo-root .tooling (shared with the Stop hook).
-if [ -n "$SRC_HASH" ] && [ -d "$REPO_ROOT/.tooling" ]; then
-  ( umask 077; printf '{"hash":"%s","released_at":"%s"}\n' "$SRC_HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$REPO_ROOT/.tooling/release-state.json" )
+# Record what is now live so an outer release wrapper can skip a redundant
+# redeploy next run. The path is supplied by the caller; no-op when unset.
+if [ -n "${RELEASE_STATE_FILE:-}" ] && [ -n "$SRC_HASH" ]; then
+  ( umask 077; printf '{"hash":"%s","released_at":"%s"}\n' "$SRC_HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RELEASE_STATE_FILE" )
 fi
 echo "==> Released: https://$SITE/"
