@@ -1,0 +1,137 @@
+export const metadata = {
+  title: "Grupos de hosts",
+  description:
+    "Agrupa prefijos bajo sus propios umbrales y política de mitigación, con cálculo por host o por total del grupo.",
+};
+
+# Grupos de hosts
+
+Un único bloque global de `thresholds` trata por igual a todos los hosts protegidos. Eso rara
+vez se ajusta a la realidad: el nivel web de un cliente no se comporta en nada como un pool de
+DNS, y una red que solo quieres vigilar no se comporta en nada como una que quieres enviar a
+blackhole automáticamente. Los grupos de hosts te permiten dividir tus `networks` protegidas en
+conjuntos de prefijos con nombre, cada uno con sus propios umbrales y política de mitigación, en
+lugar de ajustar un único conjunto de umbrales para el host más ruidoso de la máquina.
+
+Un grupo de hosts es una lista de prefijos más unos `thresholds`, `thresholds_outgoing` y
+`baseline` opcionales, un conmutador `ban` y un modo de `calculation`. Todo lo que no definas se
+hereda de la configuración global.
+
+<Callout type="info" title="Los grupos de hosts son opcionales">
+Sin un bloque `hostgroups`, cada destino dentro de `networks` se evalúa frente a los
+`thresholds` globales. Añade grupos solo donde un subconjunto de tu red necesite una política
+distinta.
+</Callout>
+
+## Ejemplo
+
+```yaml
+networks:
+  - "203.0.113.0/24"
+
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 35000
+
+hostgroups:
+  - name: web                    # tighter per-host limits for this /26
+    networks:
+      - "203.0.113.0/26"
+    thresholds:
+      pps: 20000
+      mbps: 500
+      flows_per_sec: 10000
+  - name: customers-no-rtbh      # detect and notify, but never auto-blackhole
+    networks:
+      - "203.0.113.64/26"
+    ban: false
+  - name: dns-pool               # alert on the pool's TOTAL traffic
+    networks:
+      - "203.0.113.128/26"
+    calculation: total
+    thresholds:
+      pps: 300000
+      mbps: 4000
+      flows_per_sec: 150000
+```
+
+Esto divide el `203.0.113.0/24` que proteges en tres políticas. El grupo `web` baja el límite por
+host para un nivel que nunca debería ser ruidoso. El grupo `customers-no-rtbh` sigue detectando y
+notificando, pero te deja a ti la mitigación. El grupo `dns-pool` deja de mirar los resolutores
+individuales y vigila en su lugar la tasa combinada del pool.
+
+## Reglas
+
+- **Propiedad por coincidencia de prefijo más largo.** Cada host pertenece a exactamente un grupo:
+  el que tiene el prefijo coincidente más específico (más largo). Un host que está dentro de un
+  grupo `/24` y de un grupo `/26` contenido en él pertenece al `/26`.
+- **Respaldo global implícito.** Los hosts que no coinciden con ningún grupo caen en un grupo
+  `global` implícito que lleva los `thresholds` de nivel superior (y `thresholds_outgoing` /
+  `baseline` si están definidos). Nunca tienes que enumerar todos los prefijos: cualquier resto
+  usa la política global.
+- **Los prefijos de un grupo deben estar dentro de `networks`.** Un grupo solo puede acotar la
+  protección que ya declaraste; un prefijo fuera de tus `networks` protegidas es un error de
+  configuración.
+- **Los umbrales son opcionales.** Omite `thresholds` y el grupo hereda los umbrales globales.
+  Defínelo para sobrescribirlos solo para ese grupo.
+- **`ban: false` deshabilita el RTBH automático.** Los hosts del grupo siguen siendo detectados,
+  clasificados y notificados, pero no se anuncia ningún blackhole automático. Los baneos manuales
+  a través de la API siguen funcionando y siguen aplicándose a esos hosts.
+- **`calculation: total` suma el grupo.** En lugar de evaluar cada host, el tráfico combinado del
+  grupo se compara con los umbrales. Los grupos de tipo total reportan `scope: "group"` en los
+  eventos, las notificaciones y la API, y **nunca banean automáticamente**: no hay un único host
+  al que enviar a blackhole. El valor por defecto, `calculation: per_host`, evalúa cada host de
+  forma independiente.
+- **Los grupos de hosts se recargan en caliente** junto con el resto de la configuración (`SIGHUP`
+  o `POST /api/v1/config/reload`); no necesitas reiniciar para añadir, quitar o reajustar un
+  grupo.
+
+<Callout type="warning" title="Los grupos de tipo total nunca envían a blackhole automáticamente">
+Un grupo `calculation: total` dispara un ataque para el conjunto de prefijos en su totalidad, de
+modo que no hay una única dirección para la que anunciar un `/32` o `/128`. Usa los grupos de tipo
+total para alertar sobre la carga agregada (un pool de anycast o de DNS); combínalos con un grupo
+por host o con baneos manuales si además necesitas mitigación automática.
+</Callout>
+
+## Sobrescrituras por grupo
+
+Más allá de `thresholds`, cada grupo también puede llevar sus propios umbrales salientes y
+baseline, o quedar excluido de una funcionalidad que la configuración global activó.
+
+- **`thresholds_outgoing`** — da a un grupo su propia política para los ataques originados por sus
+  hosts (máquinas comprometidas que atacan hacia el exterior). Usa las mismas claves que
+  `thresholds`; al menos una debe estar definida. Consulta [Detección](/docs/detection) para la
+  detección saliente.
+- **`baseline`** — un grupo hereda el bloque global de baseline aprendido, o lo sobrescribe por
+  completo con el suyo. Para excluir un grupo de los baselines por completo, define
+  `baseline: { enabled: false }`: el grupo usará entonces solo umbrales estáticos.
+- **`tenant`** — etiqueta al propietario del grupo para que un token de API con alcance de tenant
+  solo vea los ataques, baneos y hosts de sus propios grupos. Consulta
+  [Multi-tenencia](/docs/multi-tenancy).
+
+```yaml
+hostgroups:
+  - name: edge
+    networks:
+      - "203.0.113.192/26"
+    thresholds:
+      pps: 40000
+    thresholds_outgoing:        # watch for compromised hosts in this group
+      pps: 30000
+      udp_pps: 15000
+    baseline:
+      enabled: false            # static thresholds only, no learning
+```
+
+Las sobrescrituras por grupo son independientes: un grupo puede definir `thresholds` pero heredar
+el `baseline` global, o definir su propio `baseline` mientras hereda los `thresholds` globales.
+Todo lo que quede sin definir vuelve al valor global.
+
+## Relacionado
+
+- [Referencia de configuración](/docs/configuration) — cada clave del archivo YAML.
+- [Detección y umbrales](/docs/detection) — cómo funcionan los umbrales y la detección saliente.
+- [Baselines](/docs/baselines) — umbrales por host aprendidos de forma continua.
+- [Mitigación y RTBH](/docs/mitigation) — de qué se excluye `ban: false`.
+- [API REST](/docs/api) — dónde aparecen `scope` y el estado por grupo.

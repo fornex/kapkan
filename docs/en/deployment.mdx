@@ -1,0 +1,149 @@
+export const metadata = {
+  title: "Production deployment",
+  description:
+    "Deploy Kapkan as a hardened systemd service, with file layout, secrets and config reloads.",
+};
+
+# Production deployment
+
+A hardened systemd unit and a production config example ship in the repository's
+[`deploy/`](https://github.com/fornex/kapkan) directory: `deploy/kapkan.service`
+and `deploy/config.example.yaml`. This page walks through installing the binary as a
+system service, where each file lives, how secrets are kept out of the YAML, and how to
+reload configuration without a restart.
+
+<Callout type="info" title="Build first">
+The steps below assume you already have a `kapkan` binary. If you have not built it yet,
+see the [Quickstart](/docs/quickstart) or [Building from source](#building-from-source).
+</Callout>
+
+## Install
+
+Run the following as root from a checkout of the repository (so that `deploy/` is
+available). It installs the binary, creates an unprivileged system user, lays out
+`/etc/kapkan`, installs the production config, writes the secrets env file at restrictive
+permissions, installs the systemd unit, and enables the service.
+
+```sh
+sudo install -m 0755 kapkan /usr/local/bin/kapkan
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo install -d -o kapkan -g kapkan /etc/kapkan
+sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
+echo 'KAPKAN_TG_TOKEN=123456:abc' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
+```
+
+The unit runs as the `kapkan` user with `ExecStart=/usr/local/bin/kapkan -config
+/etc/kapkan/config.yaml -log-format json -log-level info`, restarts on failure, and is
+heavily sandboxed: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
+`ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
+`MemoryDenyWriteExecute` and more.
+
+<Callout type="info" title="Binding BGP to port 179">
+Kapkan needs no special privileges in dry-run or when peering from a high local port. If
+you bind the BGP speaker to the well-known port 179, grant the capability by adding
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` to the unit's `[Service]` section.
+</Callout>
+
+After it is running, check status and follow the logs:
+
+```sh
+sudo systemctl status kapkan
+sudo journalctl -u kapkan -f
+```
+
+## File layout
+
+| Path | Mode | Purpose |
+| --- | --- | --- |
+| `/usr/local/bin/kapkan` | `0755` | The single static daemon binary. |
+| `/etc/kapkan/config.yaml` | `0640` | The YAML configuration, owned by `kapkan:kapkan`. |
+| `/etc/kapkan/kapkan.env` | `0600` | Secrets env file (tokens, SMTP credentials). |
+| `/etc/systemd/system/kapkan.service` | `0644` | The hardened systemd unit. |
+
+The whole `/etc/kapkan` directory is mounted read-only to the process via
+`ReadOnlyPaths=/etc/kapkan`, so the daemon can read its config and secrets but cannot
+modify them.
+
+## Secrets
+
+No credential belongs in `config.yaml`. The YAML references each secret by the name of an
+**environment variable**, and the unit loads those variables from the env file via
+`EnvironmentFile=-/etc/kapkan/kapkan.env`. Keep that file at mode `0600`.
+
+The config keys that read from the environment are the `*_env` keys:
+
+- `notify.telegram.token_env` — e.g. `KAPKAN_TG_TOKEN`, the Telegram bot token.
+- `notify.email.username_env` / `notify.email.password_env` — SMTP credentials.
+- `api.token_env` — the API bearer token (see [Authentication](/docs/authentication)).
+- `storage.clickhouse.username_env` / `password_env` — ClickHouse credentials, if you
+  enable the optional history store.
+
+For example, the YAML names the variable and the env file supplies its value:
+
+```yaml
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"   # name of the env var, never the token itself
+    chat_id: "-1001234567890"
+```
+
+```text
+# /etc/kapkan/kapkan.env  (mode 0600)
+KAPKAN_TG_TOKEN=123456:abcdef
+KAPKAN_API_TOKEN=a-long-random-string
+```
+
+<Callout type="success" title="Why this matters">
+Because secrets live only in process environment, your `config.yaml` is safe to keep in
+git and diff. The systemd sandbox keeps `/etc/kapkan` read-only and runs the daemon as an
+unprivileged user, so the env file is never writable by the service.
+</Callout>
+
+## Config reload
+
+Kapkan hot-reloads its configuration on `SIGHUP` — no restart, no dropped flow state. The
+systemd unit wires this up with `ExecReload=/bin/kill -HUP $MAINPID`, so you reload with:
+
+```sh
+sudo systemctl reload kapkan
+```
+
+Equivalently, you can trigger the same reload over the API:
+
+```sh
+curl -s -X POST localhost:8080/api/v1/config/reload
+```
+
+Most keys reload live, including `dry_run`, thresholds, `networks`, hostgroups, baselines
+and notification settings. A few sizing parameters require a restart — notably the
+`samples.buffer_flows` / `flows_per_attack` ring sizing.
+
+## Building from source
+
+Building requires **Go 1.22 or newer**. The `Makefile` provides the standard targets:
+
+```sh
+make build  # static binary
+make test   # go test -race ./...
+make lint   # golangci-lint run
+make bench  # engine hot-path benchmarks
+```
+
+`make build` produces the single static `kapkan` binary you install in the steps above.
+Tests use synthetic NetFlow/sFlow datagrams built by `pkg/flowgen` (real wire format) and
+an in-process GoBGP peer, so no real routers are ever contacted.
+
+<Callout type="warning" title="Before you expose Kapkan">
+Keep `dry_run: true` until you have validated detection against live telemetry — see
+[Going live](/docs/going-live). And set an API token before binding the listener beyond
+`127.0.0.1`, or the API and dashboard are reachable unauthenticated — see
+[Authentication](/docs/authentication).
+</Callout>
+
+## Related
+
+- [Configuration reference](/docs/configuration) — every key in the YAML file.
+- [Authentication](/docs/authentication) — set a bearer token before exposing the API.
+- [Going live](/docs/going-live) — validate detection, then turn off dry-run.

@@ -1,0 +1,196 @@
+export const metadata = {
+  title: "Konfigurationsreferenz",
+  description:
+    "Jeder Schlüssel in der YAML-Konfigurationsdatei von Kapkan, mit Standardwerten und einem vollständigen, kommentierten Beispiel.",
+};
+
+# Konfigurationsreferenz
+
+Kapkan wird über eine einzige YAML-Datei konfiguriert, die mit `-config` übergeben wird. Das
+Repository liefert zwei Ausgangspunkte: [`configs/dev.yaml`](/docs/quickstart) für die lokale
+Entwicklung (Test-Präfixe, Loopback-Bind, `dry_run: true`) und
+[`deploy/config.example.yaml`](/docs/deployment) für den Produktivbetrieb, das maßgebliche Inline-
+Kommentare und Standardwerte enthält. Kopieren Sie das Produktionsbeispiel nach
+`/etc/kapkan/config.yaml` und passen Sie es an Ihr Netzwerk an.
+
+Die Datei ist zur Laufzeit neu ladbar. Senden Sie `SIGHUP` (`systemctl reload kapkan`) oder
+`POST /api/v1/config/reload`, und Kapkan liest die Datei erneut ein und wendet die neuen
+Schwellenwerte, Netzwerke, Hostgroups, Baselines und Benachrichtigungseinstellungen an, ohne die
+Flow-Erfassung zu unterbrechen. Einige wenige Schlüssel sind beim Start fixiert — siehe
+[Sampling-Korrektur](#sampling-korrektur) und den Hinweis zur Dimensionierung von `samples` weiter
+unten.
+
+<Callout type="warning" title="Dry-Run ist standardmäßig aktiviert">
+`dry_run` ist standardmäßig `true`, und ein fehlender `dry_run`-Schlüssel wird als `true` behandelt.
+Belassen Sie es dabei, bis Sie die Erkennung gegen Live-Telemetrie validiert haben. Siehe
+[Live gehen](/docs/going-live).
+</Callout>
+
+## Geheimnisse und Umgebungsvariablen
+
+Geheimnisse werden niemals in die Konfigurationsdatei geschrieben. Jedes nennt eine
+Umgebungsvariable, und Kapkan liest den Wert beim Laden aus der Prozessumgebung:
+
+- `notify.telegram.token_env` — das Telegram-Bot-Token.
+- `notify.email.username_env` / `notify.email.password_env` — SMTP-Zugangsdaten.
+- `storage.clickhouse.username_env` / `password_env` — ClickHouse-Zugangsdaten.
+- `api.token_env` (oder jedes `api.tokens[].token_env`) — das/die Bearer-Token für REST-API / Dashboard.
+
+Mit der systemd-Unit liegen diese in einer `EnvironmentFile` wie `/etc/kapkan/kapkan.env` mit den
+Berechtigungen `0600`:
+
+```sh
+KAPKAN_TG_TOKEN=123456:abc...
+KAPKAN_API_TOKEN=a-long-random-string
+```
+
+## Schlüssel der obersten Ebene
+
+Jeder Schlüssel der obersten Ebene, seine Bedeutung und sein Standardwert. Für die größeren
+Subsysteme verweist eine einzeilige Zusammenfassung auf die dedizierte Seite.
+
+| Schlüssel | Bedeutung |
+| --- | --- |
+| `dry_run` | Wenn `true` (der Standard, auch bei Abwesenheit), werden Blackholes protokolliert und nachverfolgt, aber **niemals angekündigt**. |
+| `listen.sflow` / `listen.netflow` | UDP-Lauschadressen. NetFlow v5/v9 und IPFIX teilen sich den `netflow`-Socket. Mindestens ein Listener ist erforderlich. Siehe [Funktionsweise](/docs/how-it-works). |
+| `sampling.default_rate` | Sampling-Rate, die verwendet wird, wenn ein Exporter seine eigene nicht meldet. Muss `>= 1` sein. |
+| `networks` | Geschützte Präfixe. Die Erkennung gilt **nur** für Ziele innerhalb dieser Präfixe, und sie dürfen sich nicht überschneiden. |
+| `protected_whitelist` | Adressen, die **niemals** gesperrt werden, unabhängig vom Datenverkehr. Siehe [Sicherheitsmodell](/docs/safety). |
+| `thresholds.pps` / `.mbps` / `.flows_per_sec` | Schwellenwerte pro Ziel nach Sampling-Korrektur. Alle müssen `> 0` sein. Siehe [Erkennung](/docs/detection). |
+| `thresholds.tcp_pps` / `udp_pps` / `icmp_pps` / `tcp_syn_pps` / `frag_pps` (und jede `_mbps`-Variante) | Optionale Limits pro Protokoll. Ein Wert von `0` oder ein fehlender Schlüssel deaktiviert das jeweilige Limit. Jeder überschrittene Schwellenwert löst aus (ODER-Semantik). |
+| `thresholds_outgoing` | Optional. Erkennt Angriffe, die **von** geschützten Hosts ausgehen (kompromittierte Maschinen). Gleiche Schlüssel wie `thresholds`; mindestens einer muss gesetzt sein. Fehlt der Block, wird ausgehender Datenverkehr nicht gezählt. Siehe [Erkennung](/docs/detection). |
+| `hostgroups[]` | Optionale benannte Präfixgruppen mit eigenen Schwellenwerten und eigener Mitigation-Policy, einschließlich `per_host`- oder `total`-Berechnung. Jede kann ein `tenant`-Label tragen. Siehe [Hostgroups](/docs/hostgroups). |
+| `tenant` | Optionales Tenant-Label für die implizite globale/Fallback-Gruppe. Siehe [Mandantenfähigkeit](/docs/multi-tenancy). |
+| `samples.enabled` / `buffer_flows` / `flows_per_attack` | Kontinuierlicher Datenverkehrspuffer für Angriffs-Samples (Standardwerte: `true` / `65536` / `20`). Änderungen an der Dimensionierung erfordern einen Neustart. |
+| `baseline` | Optionale kontinuierlich per EWMA gelernte Schwellenwerte pro Host, pro Hostgroup überschreibbar. Siehe [Baselines](/docs/baselines). |
+| `ban.ttl_seconds` | Jede Ankündigung wird nach dieser Anzahl von Sekunden automatisch zurückgezogen. Keine dauerhaften Sperren. |
+| `ban.unban_hysteresis_seconds` | Der Datenverkehr muss so lange unter dem Schwellenwert bleiben, bevor eine Sperre zurückgezogen wird; dies verhindert Flapping. |
+| `ban.max_active_bans` | Harte Obergrenze für gleichzeitige Sperren. Neue Sperren über der Obergrenze werden abgelehnt. |
+| `mitigation` | Mitigation-Methode: `blackhole` (Standard), `flowspec` oder `divert`. Pro Hostgroup überschreibbar. Siehe [FlowSpec](/docs/flowspec) und [Traffic-Umleitung](/docs/scrubbing). |
+| `flowspec.action` / `rate_mbps` | FlowSpec-Regelaktion: `discard` oder `rate_limit` (mit `rate_mbps`). Siehe [FlowSpec](/docs/flowspec). |
+| `escalation[]` | Optionale Leiter aus `{ after_seconds, action }`-Stufen (`none` / `flowspec` / `divert` / `blackhole`), die `mitigation` außer Kraft setzt. Siehe [Eskalationsstufen](/docs/escalation). |
+| `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | BGP-Identität, IPv4/IPv6-Blackhole-Next-Hops und RTBH-Community (`ASN:value`). `router_id` muss eine IPv4-Adresse in Dotted-Quad-Notation sein. Siehe [Mitigation](/docs/mitigation). |
+| `bgp.communities` / `local_pref` | Optionale Community-**Liste** (setzt `community` außer Kraft) und ein `LOCAL_PREF` für iBGP-Peers. Alle `bgp`-Attribute sind pro Hostgroup überschreibbar. |
+| `bgp.neighbors[]` | eBGP-Peers: `address`, `remote_asn` und ein optionaler `port` für Tests. |
+| `scrubbing.next_hop` / `next_hop6` / `community` / `communities` / `local_pref` | Das Scrubbing-Center, zu dem die `divert`-Aktion den Datenverkehr lenkt. `next_hop` ist zum Umleiten erforderlich (`next_hop6` ebenfalls, wenn IPv6 geschützt wird); die Community ist optional. Pro Hostgroup überschreibbar. Siehe [Traffic-Umleitung](/docs/scrubbing). |
+| `notify.*` | Telegram-, Slack-, E-Mail-, Webhook- und Exec-Hook-Kanäle. Siehe [Benachrichtigungen](/docs/notifications). |
+| `storage.clickhouse.*` | Optionale ClickHouse-Persistenz für Angriffs- und Datenverkehrshistorie (`url`, `database`, `username_env`, `password_env`, `ttl_days`, …). Siehe [Speicherung](/docs/storage). |
+| `api.listen` | Lauschadresse für REST-API und Metriken. Standard `127.0.0.1:8080`. |
+| `api.dashboard` | Stellt die eingebettete Web-UI unter `/` auf dem API-Listener bereit. Standard `true`. Siehe [Dashboard](/docs/dashboard). |
+| `api.token_env` | Nennt die Umgebungsvariable, die ein einzelnes Operator-Bearer-Token enthält. Erforderlich, bevor der Listener über localhost hinaus exponiert wird. Siehe [Authentifizierung](/docs/authentication). |
+| `api.tokens[]` | Rollenbasierte Tokens: jeder Eintrag hat einen `name`, ein `token_env`, eine `role` (`viewer` oder `operator`) und einen optionalen `tenant`-Geltungsbereich. Setzt `token_env` außer Kraft (gegenseitig ausschließend). Siehe [Authentifizierung](/docs/authentication) und [Mandantenfähigkeit](/docs/multi-tenancy). |
+
+### Details zu Schwellenwerten
+
+Die drei Basis-Schwellenwerte — `pps`, `mbps`, `flows_per_sec` — sind verpflichtend und müssen
+alle `> 0` sein. Die Limits pro Protokoll sind optionale Verfeinerungen: `tcp_syn_pps` zählt reine
+SYNs (SYN gesetzt, ACK nicht gesetzt) und `frag_pps` zählt IP-Fragmente, die nicht das erste sind.
+Die Erkennung verwendet ODER-Semantik — bereits ein einziger überschrittener Schwellenwert löst den
+Angriff aus. Alle Werte werden in realen, nicht gesampelten Einheiten ausgedrückt (siehe
+[Sampling-Korrektur](#sampling-korrektur)).
+
+## Ein vollständiges Beispiel
+
+Eine realistische Produktionskonfiguration, angepasst aus `deploy/config.example.yaml`:
+
+```yaml
+dry_run: true                       # keep until detection is validated
+
+listen:
+  sflow: ":6343"
+  netflow: ":2055"                  # NetFlow v5/v9 + IPFIX share this socket
+
+sampling:
+  default_rate: 1000                # used only when an exporter omits its own rate
+
+networks:                           # detection applies ONLY inside these prefixes
+  - "203.0.113.0/24"
+  - "2001:db8::/32"
+
+protected_whitelist:                # never banned, regardless of traffic
+  - "203.0.113.1"                   # gateway / router
+  - "203.0.113.2"                   # authoritative nameserver
+
+thresholds:                         # per destination host, after sampling correction
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 35000
+  tcp_syn_pps: 5000                 # optional per-protocol; 0/absent disables
+  udp_pps: 60000
+
+thresholds_outgoing:                # detect compromised hosts attacking outward
+  pps: 50000
+  udp_pps: 20000
+
+ban:
+  ttl_seconds: 600                  # every ban auto-withdraws after this
+  unban_hysteresis_seconds: 120     # stay below threshold this long before unban
+  max_active_bans: 50               # refuse new bans past this cap
+
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"             # must be an IPv4 dotted-quad
+  next_hop: "192.0.2.1"             # IPv4 blackhole (discard) next-hop
+  next_hop6: "100::1"               # IPv6 blackhole next-hop
+  community: "65000:666"            # RTBH community your upstream honors
+  neighbors:
+    - address: "10.0.0.254"
+      remote_asn: 65000
+
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"    # token read from this env var, never the file
+    chat_id: "-1001234567890"
+  slack:
+    webhook_url: ""                 # optional Slack incoming webhook
+  email:
+    smtp_host: ""                   # "mail.example.com:587"; empty disables
+    from: ""
+    to: []
+    username_env: "KAPKAN_SMTP_USER"
+    password_env: "KAPKAN_SMTP_PASS"
+    require_tls: false              # STARTTLS auto-required when credentials are set
+
+api:
+  listen: "127.0.0.1:8080"          # default localhost bind needs no auth
+  dashboard: true                   # embedded web UI at /; false = JSON API only
+  # token_env: "KAPKAN_API_TOKEN"   # REQUIRED before exposing beyond localhost
+```
+
+Die Blöcke `hostgroups`, `baseline` und `samples` sind hier aus Gründen der Kürze weggelassen.
+Siehe die dedizierten Seiten für ihre vollständigen Schemata:
+
+- [Hostgroups](/docs/hostgroups) — Schwellenwerte pro Präfix, `ban: false` und `calculation: total`.
+- [Baselines](/docs/baselines) — `factor`, `half_life_seconds`, `warmup_seconds`, `floor`.
+- Der `samples`-Block: `enabled` (Standard `true`), `buffer_flows` (Standard `65536`) und
+  `flows_per_attack` (Standard `20`). Diese steuern den kontinuierlichen Flow-Ring, der genutzt
+  wird, um in dem Moment, in dem ein Angriff auslöst, die dominierenden Quellen, Ports und
+  Protokolle an jeden Angriff anzuhängen. Eine Änderung der Dimensionierung erfordert einen
+  Neustart.
+
+## Sampling-Korrektur
+
+Flow-Telemetrie ist gesampelt — ein Router exportiert einen Datensatz pro N Pakete. Kapkan
+multipliziert jede beobachtete Rate mit der Sampling-Rate des Exporters, sodass Schwellenwerte in
+realen, nicht gesampelten Datenverkehrseinheiten ausgedrückt werden. Die Rate stammt aus dem
+Flow-Paket, wenn der Exporter sie meldet, andernfalls aus `sampling.default_rate`.
+
+Das bedeutet, dass ein Schwellenwert wie `pps: 80000` die reale Angriffsrate ist, auf die Sie
+reagieren möchten, nicht ein gesampelter Zählwert. Wenn Ihr Exporter mit `1:1000` sampelt und die
+Rate nicht bekanntgibt, setzen Sie `sampling.default_rate: 1000`, damit ein einzelnes gesampeltes
+Paket pro Sekunde korrekt als 1000 reale Pakete pro Sekunde gezählt wird.
+
+<Callout type="warning" title="Sampling vor dem Live-Gang richtig einstellen">
+Eine falsche `sampling.default_rate` skaliert jeden Schwellenwert um denselben Faktor. Stellen Sie
+sie so ein, dass sie dem entspricht, was Ihre Router tatsächlich exportieren, und bestätigen Sie
+dann im Dry-Run, dass die Erkennung bei den von Ihnen erwarteten Raten auslöst.
+</Callout>
+
+## Verwandte Themen
+
+- [Erkennung & Schwellenwerte](/docs/detection) — was als Angriff zählt, Limits pro Protokoll und Erkennung ausgehender Angriffe.
+- [Hostgroups](/docs/hostgroups) — Policies pro Präfix und Gruppen mit Gesamtdatenverkehr.
+- [Baselines](/docs/baselines) — kontinuierlich gelernte Schwellenwerte.
+- [Mitigation](/docs/mitigation) — BGP, RTBH, TTLs und Sperr-Obergrenzen.
+- [Authentifizierung](/docs/authentication) — Absicherung von API und Dashboard.
+- [Live gehen](/docs/going-live) — validieren, dann Dry-Run abschalten.

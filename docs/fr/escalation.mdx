@@ -1,0 +1,71 @@
+export const metadata = {
+  title: "Paliers d'escalade",
+  description:
+    "Renforcez progressivement la réponse de mitigation à mesure qu'une attaque persiste — de manière déclarative, de l'alerte au FlowSpec puis au blackhole.",
+};
+
+# Paliers d'escalade
+
+Une méthode `mitigation` unique déclenche la même réponse à l'instant même où une attaque est
+détectée. Un palier d'escalade, lui, **renforce progressivement la réponse à mesure qu'une
+attaque persiste** — de manière déclarative, là où FastNetMon vous oblige à écrire un script
+de rappel.
+
+```yaml
+escalation:                         # supersedes `mitigation` when present
+  - { after_seconds: 0,   action: none }       # alert only at first
+  - { after_seconds: 30,  action: flowspec }   # still under attack after 30s → surgical drop
+  - { after_seconds: 90,  action: divert }     # still under attack after 90s → scrub
+  - { after_seconds: 300, action: blackhole }  # still under attack after 300s → blackhole
+flowspec:
+  action: discard
+scrubbing:
+  next_hop: "192.0.2.100"   # scrubbing center; see Traffic diversion
+  community: "65000:200"
+```
+
+## Application des paliers
+
+Le `after_seconds` de chaque palier est mesuré à partir du début de l'attaque. Un palier
+s'applique une fois ce délai écoulé **et que l'attaque est toujours active** — aucun événement
+de fin n'est encore survenu, c'est-à-dire que le trafic reste au-dessus du seuil durant
+l'hystérésis de levée du bannissement (unban).
+
+- Le premier palier doit être à `0` seconde.
+- `action` vaut `none` (alerte seule), `flowspec`, `divert` ([scrubbing](/docs/scrubbing)) ou
+  `blackhole`.
+- Un palier ne peut que **maintenir ou renforcer** la réponse : `none` < `flowspec` < `divert` <
+  `blackhole`. Une désescalade entre paliers constitue une erreur de configuration.
+
+## Make-before-break
+
+La montée vers un palier suit le principe make-before-break : le nouveau palier est annoncé en
+premier, et le précédent n'est retiré qu'une fois cette annonce réussie — de sorte que la
+victime n'est jamais momentanément sans protection pendant le basculement. Si l'annonce échoue,
+le bannissement conserve le palier opérationnel et réessaie au tick suivant. Si plusieurs
+paliers arrivent à échéance en même temps (attaque de longue durée, ou démon qui rattrape son
+retard après une pause), le bannissement saute directement au palier dû le plus élevé et
+n'annonce jamais les paliers qu'il franchit.
+
+La seule exception est `divert → blackhole` : tous deux empruntent le même NLRI de route d'hôte,
+de sorte que la réannonce du blackhole remplace atomiquement la route de divert — sans retrait
+distinct, sans interruption. Les basculements entre familles (règles FlowSpec vers une route
+d'hôte, ou inversement) relèvent du cas make-before-break ci-dessus.
+
+## Cycle de vie et compatibilité
+
+Le palier est **surchargeable par hostgroup** et partage le reste du cycle de vie du
+bannissement : retrait automatique au TTL, plafond `max_active_bans`, liste blanche absolue et
+dry-run (qui fait avancer le palier et journalise chaque échelon, mais sans jamais annoncer).
+
+Lorsqu'aucun bloc `escalation` n'est défini, la méthode `mitigation` unique se comporte
+exactement comme un palier à un seul échelon à `0` seconde — compatibilité ascendante totale.
+Le palier et la méthode courants sont visibles par bannissement dans `/api/v1/bans`
+(`escalation`, `escalation_step`).
+
+## Voir aussi
+
+- [Atténuation RTBH](/docs/mitigation) — la méthode blackhole.
+- [Atténuation FlowSpec](/docs/flowspec) — la méthode chirurgicale qu'un palier peut parcourir.
+- [Déviation du trafic](/docs/scrubbing) — le palier `divert` qui scrube au lieu de jeter.
+- [Référence de configuration](/docs/configuration) · [API REST](/docs/api)

@@ -1,22 +1,26 @@
-BINARY := kapkan
-PKG := ./...
+# Kapkan monorepo — root orchestrator.
+#   engine/   the Go binary (operator console go:embed'd → ONE binary)
+#   console/  canonical operator-UI source (copied into engine at build)
+#   site/     the kapkan.io static site (Next.js)
+#   docs/     canonical user-facing MDX (copied into the site at build)
+.PHONY: build engine test site clean help
 
-.PHONY: build test lint bench run-dev clean
+help:
+	@echo "make build   - build the single engine binary (console embedded)"
+	@echo "make test    - run the engine test suite"
+	@echo "make site    - build the static site (docs/ -> site/frontend/content/docs)"
+	@echo "make clean    - remove build artifacts"
 
-build:
-	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o $(BINARY) ./cmd/kapkan
+build: engine            ## the product: one binary with the console embedded
+
+engine:
+	$(MAKE) -C engine build
 
 test:
-	go test -race -count=1 $(PKG)
+	$(MAKE) -C engine test
 
-lint:
-	golangci-lint run
-
-bench:
-	go test -run '^$$' -bench . -benchmem ./internal/engine/...
-
-run-dev: build
-	./$(BINARY) -config configs/dev.yaml -log-format text
+site:
+	cd site/frontend && npm run build
 
 clean:
-	rm -f $(BINARY)
+	$(MAKE) -C engine clean

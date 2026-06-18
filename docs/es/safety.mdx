@@ -1,0 +1,96 @@
+export const metadata = {
+  title: "Modelo de seguridad",
+  description:
+    "Las seis reglas de seguridad innegociables que Kapkan aplica en el código para que nunca pueda enrutar a blackhole lo que no debe.",
+};
+
+# Modelo de seguridad
+
+Enviar una ruta a blackhole es un instrumento contundente: un anuncio erróneo o
+descontrolado puede dejar tu propia infraestructura fuera de línea más rápido que cualquier
+ataque. Kapkan está diseñado para que eso no pueda ocurrir por accidente. Las seis reglas
+siguientes se aplican en el código y están cubiertas por pruebas: no son opciones de
+configuración que puedas olvidarte de definir, y son innegociables.
+
+Cada una de ellas se aplica por igual a los bloqueos **automáticos** impulsados por la
+detección y a los bloqueos **manuales** solicitados a través de la API. No existe ninguna vía
+que las omita.
+
+## 1. Dry-run por defecto
+
+Kapkan anuncia una ruta de blackhole únicamente cuando la configuración establece de forma
+explícita `dry_run: false`. Una clave `dry_run` ausente se trata como `true`. En modo dry-run,
+todo anuncio que se produciría queda registrado y se expone a través de la API y de las
+métricas, pero **nunca se envía** a tus routers. Puedes ejecutar Kapkan contra telemetría de
+producción real, ver cómo se dispara la detección e inspeccionar cada ruta que *anunciaría*
+antes de que pueda tocar un solo prefijo.
+
+<Callout type="warning" title="Optas por la mitigación; nunca te sales de ella">
+Dado que una clave `dry_run` ausente significa dry-run, la única forma de empezar a anunciar
+rutas es escribir deliberadamente `dry_run: false` y recargar. Un error tipográfico, un archivo
+truncado o una clave olvidada fallan de forma segura. Consulta [Puesta en marcha](/docs/going-live)
+para la lista de validación antes de activarlo.
+</Callout>
+
+## 2. Sin bloqueos permanentes
+
+Todo anuncio lleva un TTL (`ban.ttl_seconds`) y se retira automáticamente cuando expira,
+incluso si el ataque sigue en curso. No existe ninguna ruta de código que produzca un anuncio
+sin caducidad. Un proceso bloqueado, una notificación perdida o un operador que se ausenta
+nunca pueden dejar un host en blackhole para siempre; el peor caso es que el tráfico se
+descarte durante una ventana de TTL y luego se reevalúe.
+
+## 3. Histéresis de desbloqueo
+
+Un bloqueo se retira solo después de que el tráfico del objetivo se haya mantenido por debajo
+del umbral durante `ban.unban_hysteresis_seconds`, no en el instante en que una sola ventana
+desciende. Esto evita el aleteo de anuncio/retirada que de otro modo ocurriría en el borde de
+un ataque, donde el tráfico oscila justo por encima y por debajo del límite y haría fluctuar
+BGP en cada ventana.
+
+## 4. Tope rígido de bloqueos
+
+`ban.max_active_bans` es un techo absoluto sobre el número de bloqueos simultáneos. Una vez
+alcanzado, los nuevos bloqueos se rechazan y el rechazo se alerta de forma ruidosa en lugar de
+anunciarse. Este es el cortacircuitos contra una configuración errónea o una tormenta de
+detección: Kapkan nunca enviará a blackhole la mitad de tu red porque un umbral se haya fijado
+demasiado bajo o porque un atacante se distribuya entre miles de destinos. Un bloqueo manual
+que superaría el tope también se rechaza (ver más abajo).
+
+## 5. La lista blanca es absoluta
+
+Las direcciones incluidas en `protected_whitelist` —tus routers, servidores de nombres y otra
+infraestructura crítica— nunca se anuncian, sin importar cuánto tráfico atraigan ni quién lo
+solicite. La lista blanca anula la detección y anula las solicitudes de bloqueo manual. No
+existe ningún indicador que la eluda.
+
+## 6. Detección con alcance acotado
+
+Kapkan actúa únicamente sobre los destinos que están dentro de los prefijos `networks`
+configurados. El tráfico hacia direcciones fuera de tus rangos protegidos se sigue contabilizando
+en las métricas, pero nunca puede desencadenar un bloqueo. No puedes enrutar a blackhole por
+accidente un prefijo que no posees, aunque una inundación atraviese tu red de camino a otro
+sitio.
+
+## Cómo los bloqueos manuales heredan todas las reglas
+
+El endpoint `POST /api/v1/ban` no es una vía de escape. Una solicitud de bloqueo manual se
+verifica contra las mismas salvaguardas que la detección automática, y una solicitud que
+infringe alguna se rechaza con un HTTP `409` en lugar de anunciarse silenciosamente:
+
+| Solicitud de bloqueo manual | Resultado |
+| --- | --- |
+| El objetivo está en `protected_whitelist` | `409` — nunca se anuncia |
+| El objetivo está fuera del alcance de `networks` configurado | `409` — fuera de alcance |
+| Bloquear el objetivo superaría `max_active_bans` | `409` — tope alcanzado |
+
+Un bloqueo manual que supera las tres comprobaciones aún respeta las reglas de TTL y de
+histéresis: caduca automáticamente como cualquier otro anuncio. La única regla que los bloqueos
+manuales eluden es el propio *umbral de detección* —ese es el sentido completo de un bloqueo
+manual—, pero nunca las salvaguardas de seguridad que rodean al anuncio.
+
+## Relacionado
+
+- [Mitigación y RTBH](/docs/mitigation) — cómo funcionan de principio a fin los anuncios, los TTL, la histéresis y el tope.
+- [Puesta en marcha](/docs/going-live) — valida la detección en dry-run y luego desactívalo de forma segura.
+- [Referencia de configuración](/docs/configuration) — las claves `dry_run`, `ban`, `protected_whitelist` y `networks`.

@@ -1,0 +1,195 @@
+export const metadata = {
+  title: "Referencia de configuración",
+  description:
+    "Cada clave del archivo de configuración YAML de Kapkan, con sus valores predeterminados y un ejemplo completo y anotado.",
+};
+
+# Referencia de configuración
+
+Kapkan se configura mediante un único archivo YAML que se pasa con `-config`. El repositorio
+incluye dos puntos de partida: [`configs/dev.yaml`](/docs/quickstart) para desarrollo local
+(prefijos de prueba, escucha en loopback, `dry_run: true`) y
+[`deploy/config.example.yaml`](/docs/deployment) para producción, que contiene los comentarios
+en línea y los valores predeterminados de referencia. Copia el ejemplo de producción a
+`/etc/kapkan/config.yaml` y adáptalo a tu red.
+
+El archivo se puede recargar en tiempo de ejecución. Envía `SIGHUP`
+(`systemctl reload kapkan`) o `POST /api/v1/config/reload` y Kapkan vuelve a leer el archivo y
+aplica los nuevos umbrales, redes, hostgroups, líneas base (baselines) y opciones de
+notificación sin interrumpir la ingesta de flow. Algunas claves quedan fijadas al arrancar:
+consulta [Corrección de muestreo](#corrección-de-muestreo) y la nota sobre el dimensionamiento de
+`samples` más abajo.
+
+<Callout type="warning" title="El modo dry-run está activado por defecto">
+`dry_run` tiene el valor predeterminado `true`, y una clave `dry_run` ausente se trata como
+`true`. Mantenlo así hasta que hayas validado la detección frente a telemetría real. Consulta
+[Puesta en producción](/docs/going-live).
+</Callout>
+
+## Secretos y variables de entorno
+
+Los secretos nunca se escriben en el archivo de configuración. Cada uno nombra una variable de
+entorno, y Kapkan lee el valor del entorno del proceso en el momento de la carga:
+
+- `notify.telegram.token_env` — el token del bot de Telegram.
+- `notify.email.username_env` / `notify.email.password_env` — las credenciales SMTP.
+- `storage.clickhouse.username_env` / `password_env` — las credenciales de ClickHouse.
+- `api.token_env` (o cada `api.tokens[].token_env`) — el/los bearer token(s) de la API REST / del panel.
+
+Con la unidad de systemd, estos residen en un `EnvironmentFile` como `/etc/kapkan/kapkan.env`
+con permisos `0600`:
+
+```sh
+KAPKAN_TG_TOKEN=123456:abc...
+KAPKAN_API_TOKEN=a-long-random-string
+```
+
+## Claves de nivel superior
+
+Cada clave de nivel superior, su significado y su valor predeterminado. Para los subsistemas más
+grandes, un resumen de una línea remite a la página dedicada.
+
+| Clave | Significado |
+| --- | --- |
+| `dry_run` | Cuando es `true` (el valor predeterminado, incluso cuando está ausente), los blackholes se registran y se rastrean, pero **nunca se anuncian**. |
+| `listen.sflow` / `listen.netflow` | Direcciones de escucha UDP. NetFlow v5/v9 e IPFIX comparten el socket `netflow`. Se requiere al menos un listener. Consulta [Cómo funciona](/docs/how-it-works). |
+| `sampling.default_rate` | Tasa de muestreo que se usa cuando un exportador no informa la suya propia. Debe ser `>= 1`. |
+| `networks` | Prefijos protegidos. La detección se aplica **únicamente** a los destinos dentro de estos, y no deben solaparse. |
+| `protected_whitelist` | Direcciones que **nunca** se bloquean, sin importar el tráfico. Consulta [Modelo de seguridad](/docs/safety). |
+| `thresholds.pps` / `.mbps` / `.flows_per_sec` | Umbrales por destino tras la corrección de muestreo. Todos deben ser `> 0`. Consulta [Detección](/docs/detection). |
+| `thresholds.tcp_pps` / `udp_pps` / `icmp_pps` / `tcp_syn_pps` / `frag_pps` (y cada variante `_mbps`) | Límites opcionales por protocolo. Un valor de `0` o una clave ausente desactiva ese límite. Cualquier umbral superado dispara la detección (semántica OR). |
+| `thresholds_outgoing` | Opcional. Detecta ataques **originados por** hosts protegidos (máquinas comprometidas). Mismas claves que `thresholds`; al menos una debe estar definida. Si está ausente, el tráfico saliente no se contabiliza. Consulta [Detección](/docs/detection). |
+| `hostgroups[]` | Grupos de prefijos con nombre opcionales, con sus propios umbrales y su política de mitigación, incluido el cálculo `per_host` o `total`. Cada uno puede llevar una etiqueta `tenant`. Consulta [Grupos de hosts](/docs/hostgroups). |
+| `tenant` | Etiqueta de tenant opcional para el grupo global/de reserva implícito. Consulta [Multi-tenencia](/docs/multi-tenancy). |
+| `samples.enabled` / `buffer_flows` / `flows_per_attack` | Búfer de tráfico continuo para las muestras de ataques (valores predeterminados: `true` / `65536` / `20`). Los cambios de dimensionamiento requieren un reinicio. |
+| `baseline` | Umbrales por host aprendidos de forma continua mediante EWMA, opcionales y anulables por hostgroup. Consulta [Líneas base](/docs/baselines). |
+| `ban.ttl_seconds` | Cada anuncio se retira automáticamente tras este número de segundos. No hay bloqueos permanentes. |
+| `ban.unban_hysteresis_seconds` | El tráfico debe permanecer por debajo del umbral durante este tiempo antes de retirar un bloqueo, lo que evita el aleteo (flapping). |
+| `ban.max_active_bans` | Límite máximo de bloqueos simultáneos. Los nuevos bloqueos que superen el límite se rechazan. |
+| `mitigation` | Método de mitigación: `blackhole` (predeterminado), `flowspec` o `divert`. Anulable por hostgroup. Consulta [FlowSpec](/docs/flowspec) y [Desvío de tráfico](/docs/scrubbing). |
+| `flowspec.action` / `rate_mbps` | Acción de la regla FlowSpec: `discard` o `rate_limit` (con `rate_mbps`). Consulta [FlowSpec](/docs/flowspec). |
+| `escalation[]` | Escala opcional de peldaños `{ after_seconds, action }` (`none` / `flowspec` / `divert` / `blackhole`) que prevalece sobre `mitigation`. Consulta [Escalado progresivo](/docs/escalation). |
+| `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | Identidad BGP, next-hops de blackhole IPv4/IPv6 y community RTBH (`ASN:value`). `router_id` debe ser una dirección IPv4 en notación de cuatro octetos. Consulta [Mitigación](/docs/mitigation). |
+| `bgp.communities` / `local_pref` | **Lista** de communities opcional (anula `community`) y un `LOCAL_PREF` para pares iBGP. Todos los atributos `bgp` son anulables por hostgroup. |
+| `bgp.neighbors[]` | Pares eBGP: `address`, `remote_asn` y un `port` opcional para pruebas. |
+| `scrubbing.next_hop` / `next_hop6` / `community` / `communities` / `local_pref` | El centro de scrubbing al que la acción `divert` desvía el tráfico. `next_hop` es obligatorio para desviar (`next_hop6` también cuando se protege IPv6); la community es opcional. Anulable por hostgroup. Consulta [Desvío de tráfico](/docs/scrubbing). |
+| `notify.*` | Canales de Telegram, Slack, correo electrónico, webhook y exec-hook. Consulta [Notificaciones](/docs/notifications). |
+| `storage.clickhouse.*` | Persistencia opcional en ClickHouse para el historial de ataques y de tráfico (`url`, `database`, `username_env`, `password_env`, `ttl_days`, …). Consulta [Almacenamiento](/docs/storage). |
+| `api.listen` | Dirección de escucha de la API REST y las métricas. Predeterminado `127.0.0.1:8080`. |
+| `api.dashboard` | Sirve la interfaz web integrada en `/` en el listener de la API. Predeterminado `true`. Consulta [Panel de control](/docs/dashboard). |
+| `api.token_env` | Nombra la variable de entorno que contiene un único bearer token de operator. Obligatorio antes de exponer el listener más allá de localhost. Consulta [Autenticación](/docs/authentication). |
+| `api.tokens[]` | Tokens basados en roles: cada entrada tiene un `name`, un `token_env`, un `role` (`viewer` u `operator`) y un ámbito `tenant` opcional. Prevalece sobre `token_env` (mutuamente excluyentes). Consulta [Autenticación](/docs/authentication) y [Multi-tenencia](/docs/multi-tenancy). |
+
+### Detalle de los umbrales
+
+Los tres umbrales base — `pps`, `mbps`, `flows_per_sec` — son obligatorios y todos deben ser
+`> 0`. Los límites por protocolo son refinamientos opcionales: `tcp_syn_pps` cuenta los SYN
+puros (flag SYN activado, ACK desactivado) y `frag_pps` cuenta los fragmentos IP que no son el
+primero. La detección usa semántica OR: cualquier umbral superado de forma individual dispara el
+ataque. Todos los valores se expresan en unidades reales, sin muestrear (consulta
+[Corrección de muestreo](#corrección-de-muestreo)).
+
+## Un ejemplo completo
+
+Una configuración de producción realista, adaptada de `deploy/config.example.yaml`:
+
+```yaml
+dry_run: true                       # keep until detection is validated
+
+listen:
+  sflow: ":6343"
+  netflow: ":2055"                  # NetFlow v5/v9 + IPFIX share this socket
+
+sampling:
+  default_rate: 1000                # used only when an exporter omits its own rate
+
+networks:                           # detection applies ONLY inside these prefixes
+  - "203.0.113.0/24"
+  - "2001:db8::/32"
+
+protected_whitelist:                # never banned, regardless of traffic
+  - "203.0.113.1"                   # gateway / router
+  - "203.0.113.2"                   # authoritative nameserver
+
+thresholds:                         # per destination host, after sampling correction
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 35000
+  tcp_syn_pps: 5000                 # optional per-protocol; 0/absent disables
+  udp_pps: 60000
+
+thresholds_outgoing:                # detect compromised hosts attacking outward
+  pps: 50000
+  udp_pps: 20000
+
+ban:
+  ttl_seconds: 600                  # every ban auto-withdraws after this
+  unban_hysteresis_seconds: 120     # stay below threshold this long before unban
+  max_active_bans: 50               # refuse new bans past this cap
+
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"             # must be an IPv4 dotted-quad
+  next_hop: "192.0.2.1"             # IPv4 blackhole (discard) next-hop
+  next_hop6: "100::1"               # IPv6 blackhole next-hop
+  community: "65000:666"            # RTBH community your upstream honors
+  neighbors:
+    - address: "10.0.0.254"
+      remote_asn: 65000
+
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"    # token read from this env var, never the file
+    chat_id: "-1001234567890"
+  slack:
+    webhook_url: ""                 # optional Slack incoming webhook
+  email:
+    smtp_host: ""                   # "mail.example.com:587"; empty disables
+    from: ""
+    to: []
+    username_env: "KAPKAN_SMTP_USER"
+    password_env: "KAPKAN_SMTP_PASS"
+    require_tls: false              # STARTTLS auto-required when credentials are set
+
+api:
+  listen: "127.0.0.1:8080"          # default localhost bind needs no auth
+  dashboard: true                   # embedded web UI at /; false = JSON API only
+  # token_env: "KAPKAN_API_TOKEN"   # REQUIRED before exposing beyond localhost
+```
+
+Los bloques `hostgroups`, `baseline` y `samples` se omiten aquí por brevedad. Consulta las
+páginas dedicadas para ver sus esquemas completos:
+
+- [Grupos de hosts](/docs/hostgroups) — umbrales por prefijo, `ban: false` y `calculation: total`.
+- [Líneas base](/docs/baselines) — `factor`, `half_life_seconds`, `warmup_seconds`, `floor`.
+- El bloque `samples`: `enabled` (predeterminado `true`), `buffer_flows` (predeterminado `65536`)
+  y `flows_per_attack` (predeterminado `20`). Estos controlan el ring buffer de flow continuo que
+  se usa para adjuntar las fuentes, los puertos y los protocolos dominantes a cada ataque en el
+  momento en que se dispara. Cambiar el dimensionamiento requiere un reinicio.
+
+## Corrección de muestreo
+
+La telemetría de flow está muestreada: un router exporta un registro por cada N paquetes. Kapkan
+multiplica cada tasa observada por la tasa de muestreo del exportador, de modo que los umbrales
+se expresan en unidades de tráfico reales y sin muestrear. La tasa proviene del paquete de flow
+cuando el exportador la informa; de lo contrario, de `sampling.default_rate`.
+
+Esto significa que un umbral como `pps: 80000` es la tasa de ataque real sobre la que quieres
+actuar, no un recuento muestreado. Si tu exportador muestrea a `1:1000` y no anuncia la tasa,
+establece `sampling.default_rate: 1000` para que un único paquete-por-segundo muestreado se
+cuente correctamente como 1000 paquetes-por-segundo reales.
+
+<Callout type="warning" title="Configura bien el muestreo antes de la puesta en producción">
+Un `sampling.default_rate` incorrecto escala todos los umbrales por el mismo factor.
+Configúralo para que coincida con lo que tus routers realmente exportan y, a continuación,
+confirma en modo dry-run que la detección se dispara a las tasas que esperas.
+</Callout>
+
+## Relacionado
+
+- [Detección y umbrales](/docs/detection) — qué cuenta como un ataque, los límites por protocolo y la detección del tráfico saliente.
+- [Grupos de hosts](/docs/hostgroups) — políticas por prefijo y grupos de tráfico total.
+- [Líneas base](/docs/baselines) — umbrales aprendidos de forma continua.
+- [Mitigación](/docs/mitigation) — BGP, RTBH, TTLs y límites de bloqueos.
+- [Autenticación](/docs/authentication) — protección de la API y el panel.
+- [Puesta en producción](/docs/going-live) — valida y luego desactiva el modo dry-run.

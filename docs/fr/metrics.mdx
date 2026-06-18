@@ -1,0 +1,70 @@
+export const metadata = {
+  title: "Métriques",
+  description:
+    "Métriques Prometheus exposées sous l'espace de noms kapkan_ sur l'écouteur de l'API.",
+};
+
+# Métriques
+
+Kapkan expose des métriques Prometheus sous l'espace de noms `kapkan_` via `GET /metrics` sur
+l'écouteur de l'API (`api.listen`, par défaut `127.0.0.1:8080`). Elles couvrent l'ensemble du
+pipeline — l'ingestion des flows, le moteur de détection, l'atténuation RTBH et les notifications —
+afin que vous puissiez collecter le débit, la latence, les attaques actives et les routes annoncées
+dans votre supervision existante.
+
+<Callout type="info" title="/metrics reste ouvert">
+Le point de terminaison `/metrics` n'est jamais authentifié, même lorsque vous définissez un jeton
+d'API avec `api.token_env`. Seuls les points de terminaison de données `/api/v1` exigent
+`Authorization: Bearer <token>`. Configurez l'écouteur en conséquence — voir
+[Authentification](/docs/authentication).
+</Callout>
+
+## Métriques disponibles
+
+| Métrique | Labels | Signification |
+| --- | --- | --- |
+| `kapkan_ingest_flows_total` | `protocol` | Total des flows ingérés, par protocole de flow. |
+| `kapkan_ingest_packets_total` | `exporter`, `protocol` | Total des paquets de flow reçus, par exporteur source et par protocole. |
+| `kapkan_ingest_decode_errors_total` | — | Paquets de flow dont le décodage a échoué. |
+| `kapkan_engine_active_attacks` | — | Jauge des attaques actuellement en cours. |
+| `kapkan_engine_attacks_total` | — | Compteur des attaques détectées depuis le démarrage. |
+| `kapkan_engine_process_latency_seconds` | — | Histogramme de la latence de traitement par flow sur le chemin critique. |
+| `kapkan_engine_tracked_hosts` | — | Jauge des hôtes actuellement suivis par le moteur. |
+| `kapkan_mitigate_announced_routes` | `mode` | Jauge des routes de blackhole actuellement annoncées, ventilées par mode `real` / `dry_run`. |
+| `kapkan_mitigate_flowspec_rules` | `mode` | Jauge des règles [FlowSpec](/docs/flowspec) actuellement annoncées, ventilées par mode `real` / `dry_run`. Surveillez-la par rapport à la limite de routes FlowSpec de vos routeurs. |
+| `kapkan_mitigate_bans_rejected_total` | — | Bannissements refusés par une règle de sécurité (liste blanche, périmètre ou plafond `max_active_bans`). |
+| `kapkan_notify_notifications_total` | `channel`, `result` | Notifications tentées, par canal (telegram, slack, email, webhook, exec) et par `result`. |
+| `kapkan_storage_rows_total` | `table`, `result` | Lignes transmises au [stockage ClickHouse](/docs/storage) optionnel, par table et selon `written` / `dropped` / `error`. |
+
+Le label `mode` sur `kapkan_mitigate_announced_routes` est le moyen le plus rapide de confirmer
+l'état dry-run d'un coup d'œil : tant que `dry_run: true`, chaque route qui aurait été annoncée est
+comptabilisée sous `mode="dry_run"` et aucune sous `mode="real"`. Voir [Atténuation](/docs/mitigation)
+et le [Modèle de sécurité](/docs/safety).
+
+## Collecte (scraping)
+
+Ajoutez Kapkan comme cible de collecte dans votre configuration Prometheus :
+
+```yaml
+scrape_configs:
+  - job_name: kapkan
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+```
+
+Utilisez l'hôte et le port de votre valeur `api.listen`. Si vous exposez l'écouteur au-delà de
+localhost, définissez un jeton d'API — `/metrics` reste accessible sans celui-ci, de sorte que
+votre collecteur n'a besoin d'aucun identifiant.
+
+Pour inspecter directement la sortie brute :
+
+```sh
+curl -s localhost:8080/metrics | grep kapkan_
+```
+
+## Pages connexes
+
+- [API REST](/docs/api) — les points de terminaison de données servis aux côtés de `/metrics`.
+- [Stockage (ClickHouse)](/docs/storage) — la persistance optionnelle derrière `kapkan_storage_rows_total`.
+- [Déploiement](/docs/deployment) — exécuter Kapkan en tant que service et choisir une adresse d'écoute.

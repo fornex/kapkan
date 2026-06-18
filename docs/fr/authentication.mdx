@@ -1,0 +1,126 @@
+export const metadata = {
+  title: "Authentification",
+  description:
+    "Sécurisez l'API et le tableau de bord avec un bearer token avant d'exposer l'écouteur au-delà de localhost.",
+};
+
+# Authentification
+
+Par défaut, l'API et le tableau de bord de Kapkan sont **non authentifiés**. Cela n'est sûr que
+parce que la valeur par défaut de `api.listen` se lie à `127.0.0.1` — l'écouteur n'est accessible
+que depuis l'hôte lui-même, de sorte qu'aucun token n'est requis pour lire l'état, lister les
+attaques ou émettre des bannissements manuels. Dès que vous liez l'écouteur à une adresse
+routable, cette protection disparaît.
+
+<Callout type="danger" title="Définissez un token avant d'exposer l'écouteur">
+Si vous remplacez `api.listen` par autre chose que localhost — par exemple `0.0.0.0:8080`
+ou une interface spécifique — configurez d'abord un token. Un écouteur non authentifié sur une
+adresse routable permet à n'importe qui d'atteindre l'[API](/docs/api), y compris les endpoints
+de bannissement et de débannissement manuels.
+</Callout>
+
+## Définir un token
+
+La forme abrégée est un unique token operator. Ajoutez `token_env` au bloc `api` — il nomme la
+variable d'environnement qui contient le token ; le secret lui-même est lu depuis l'environnement
+du processus à chaque requête, jamais depuis le fichier de configuration :
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  token_env: "KAPKAN_API_TOKEN"   # token read from this env var, never the file
+```
+
+Fournissez ensuite la valeur hors bande, par exemple via l'environnement de votre gestionnaire de
+services ou un fichier de secrets :
+
+```sh
+export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
+./kapkan -config configs/prod.yaml
+```
+
+Conserver le token dans une variable d'environnement plutôt que dans le YAML signifie que la
+configuration reste sûre à valider dans git et à comparer avec le reste de votre [configuration](/docs/configuration).
+
+## Rôles
+
+Pour un contrôle d'accès basé sur les rôles, utilisez `tokens` au lieu de `token_env` — une liste où
+chaque entrée nomme la variable d'environnement contenant son secret ainsi qu'un rôle :
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  tokens:
+    - { name: dashboard,  token_env: "KAPKAN_API_RO", role: viewer }
+    - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
+```
+
+| Rôle | Autorisations |
+| --- | --- |
+| `viewer` | Lecture seule : état, attaques, hôtes, bannissements, métriques. |
+| `operator` | Tout ce qu'un viewer peut faire, plus le bannissement/débannissement manuel et le rechargement de la configuration. |
+
+`token_env` et `tokens` sont **mutuellement exclusifs** — `token_env` correspond à exactement un
+token operator. Une requête est comparée à chaque token configuré (en temps constant) ; le rôle le
+plus élevé qui correspond s'applique. Une lecture avec un token viewer fonctionne ; une mutation
+avec un token viewer est refusée par un `403 Forbidden` ; une requête sans token valide reçoit un
+`401 Unauthorized`. Une variable d'environnement vide ou non définie ne correspond jamais, de sorte
+qu'un secret mal configuré échoue en mode fermé.
+
+Les tokens et les rôles sont lus depuis l'environnement à chaque requête, de sorte que la rotation
+d'un secret ou la modification de l'ensemble des tokens prend effet au prochain [rechargement de
+configuration](/docs/api) — sans redémarrage.
+
+Un token peut également porter un `tenant` optionnel, le limitant aux données d'un seul client. C'est
+la fonctionnalité [Multi-tenant](/docs/multi-tenancy), superposée aux rôles décrits ici.
+
+## Ce qu'il protège
+
+Une fois un token défini, chaque requête `/api/v1` doit le transporter dans un en-tête
+`Authorization` en utilisant le schéma bearer :
+
+```http
+GET /api/v1/status HTTP/1.1
+Host: kapkan.internal:8080
+Authorization: Bearer <token>
+```
+
+Le token fourni est comparé à celui configuré en **temps constant**, de sorte que la comparaison
+elle-même ne divulgue pas le secret par effet de timing.
+
+Ce qui reste ouvert et ce qui devient protégé :
+
+| Chemin | Avec un token configuré |
+| --- | --- |
+| `GET /api/v1/*` | Requiert un token **viewer** (ou operator) |
+| `POST /api/v1/*` | Requiert un token **operator** **et** un type de contenu JSON |
+| `GET /metrics` | Ouvert — le scrape Prometheus reste non authentifié |
+| Coque statique de l'UI (`/`) | Ouverte — mais pas les données qui se trouvent derrière |
+
+La coque statique de l'UI du tableau de bord reste accessible afin qu'un navigateur puisse la
+charger, mais elle ne possède aucune donnée propre : elle interroge `/api/v1`, demande donc le
+token et le conserve dans `sessionStorage`. De même, `/metrics` reste ouvert pour votre scraper
+Prometheus. Consultez la page [tableau de bord](/docs/dashboard) pour savoir comment l'UI gère la
+demande de token.
+
+## CSRF
+
+Les endpoints POST requièrent `Content-Type: application/json` en plus du token. Un navigateur
+effectuant une requête cross-site ne peut pas définir un en-tête `Authorization` personnalisé sans
+un preflight CORS, et un simple envoi de formulaire ne peut pas transmettre le type de contenu
+JSON. Exiger les deux — le token dans un en-tête de requête et le type de contenu JSON — bloque la
+falsification de requête cross-site (CSRF) contre les endpoints de bannissement manuel, de
+débannissement et de rechargement de configuration.
+
+<Callout type="info" title="Rôles et tenants sont des axes différents">
+Un rôle délimite ce qu'un token peut *faire* (lecture ou mutation). Le `tenant` optionnel d'un token
+délimite quelles données il peut *voir et toucher*. Ils se composent : un viewer peut être sans
+périmètre (tous les tenants) ou limité à un seul. Voir [Multi-tenant](/docs/multi-tenancy).
+</Callout>
+
+## Pour aller plus loin
+
+- [Multi-tenant](/docs/multi-tenancy) — limiter un token aux données d'un seul client.
+- [API REST](/docs/api) — les endpoints que le token protège.
+- [Tableau de bord](/docs/dashboard) — comment l'UI intégrée demande et stocke le token.
+- [Déploiement](/docs/deployment) — lier l'écouteur et fournir le token en production.

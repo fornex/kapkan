@@ -1,0 +1,67 @@
+export const metadata = {
+  title: "Eskalationsstufen",
+  description:
+    "Verstärken Sie die Mitigation-Reaktion, je länger ein Angriff andauert — deklarativ, von der Warnung über FlowSpec bis zum Blackhole.",
+};
+
+# Eskalationsstufen
+
+Eine einzelne `mitigation`-Methode löst in dem Moment, in dem ein Angriff erkannt wird, immer dieselbe
+Reaktion aus. Eine Eskalationsstufenleiter hingegen **verstärkt die Reaktion, je länger ein Angriff
+andauert** — deklarativ, dort, wo FastNetMon Sie ein Callback-Skript schreiben lässt.
+
+```yaml
+escalation:                         # supersedes `mitigation` when present
+  - { after_seconds: 0,   action: none }       # alert only at first
+  - { after_seconds: 30,  action: flowspec }   # still under attack after 30s → surgical drop
+  - { after_seconds: 90,  action: divert }     # still under attack after 90s → scrub
+  - { after_seconds: 300, action: blackhole }  # still under attack after 300s → blackhole
+flowspec:
+  action: discard
+scrubbing:
+  next_hop: "192.0.2.100"   # scrubbing center; see Traffic diversion
+  community: "65000:200"
+```
+
+## So greifen die Stufen
+
+Das `after_seconds` jeder Stufe wird ab dem Beginn des Angriffs gemessen. Eine Stufe greift, sobald so
+viel Zeit verstrichen ist **und der Angriff noch aktiv ist** — also noch kein Endereignis vorliegt, d. h.
+der Datenverkehr liegt durch die Unban-Hysterese hindurch weiterhin über dem Schwellenwert.
+
+- Die erste Stufe muss bei `0` Sekunden liegen.
+- `action` ist `none` (nur Warnung), `flowspec`, `divert` ([Scrubbing](/docs/scrubbing)) oder
+  `blackhole`.
+- Eine Leiter darf die Reaktion nur **halten oder verstärken**: `none` < `flowspec` < `divert` <
+  `blackhole`. Eine Deeskalation zwischen den Stufen ist ein Konfigurationsfehler.
+
+## Make-before-break
+
+Der Aufstieg zu einer Stufe erfolgt nach dem Make-before-break-Prinzip: Die neue Stufe wird zuerst
+angekündigt, und die vorherige wird erst zurückgezogen, nachdem dies erfolgreich war — sodass das Opfer
+während des Umschaltens nie kurzzeitig ungeschützt ist. Schlägt die Ankündigung fehl, hält der Ban die
+funktionierende Stufe und wiederholt den Versuch beim nächsten Tick. Werden mehrere Stufen gleichzeitig
+fällig (ein lang andauernder Angriff oder der Daemon, der nach einer Pause aufholt), springt der Ban
+direkt zur höchsten fälligen Stufe und kündigt die übersprungenen Stufen nie an.
+
+Die einzige Ausnahme ist `divert → blackhole`: Beide nutzen dasselbe Host-Route-NLRI, sodass die
+erneute Blackhole-Ankündigung die Divert-Route atomar ersetzt — kein separates Zurückziehen, keine
+Lücke. Wechsel zwischen Adressfamilien (von FlowSpec-Regeln zu einer Host-Route oder zurück) sind der
+oben beschriebene Make-before-break-Fall.
+
+## Lebenszyklus und Kompatibilität
+
+Die Leiter ist **pro Hostgroup überschreibbar** und teilt sich den restlichen Ban-Lebenszyklus: das
+automatische TTL-Zurückziehen, das `max_active_bans`-Limit, die absolute Whitelist und den Dry-run (der
+die Leiter voranschreiten lässt und jede Stufe protokolliert, aber nie ankündigt).
+
+Ist kein `escalation`-Block gesetzt, verhält sich die einzelne `mitigation`-Methode exakt wie eine
+einstufige Leiter bei `0` Sekunden — vollständige Abwärtskompatibilität. Die aktuelle Stufe und Methode
+sind pro Ban in `/api/v1/bans` sichtbar (`escalation`, `escalation_step`).
+
+## Verwandte Themen
+
+- [RTBH-Mitigation](/docs/mitigation) — die Blackhole-Methode.
+- [FlowSpec-Mitigation](/docs/flowspec) — die chirurgische Methode, die eine Leiter durchlaufen kann.
+- [Traffic-Umleitung](/docs/scrubbing) — die `divert`-Stufe, die scrubbt, statt zu verwerfen.
+- [Konfigurationsreferenz](/docs/configuration) · [REST-API](/docs/api)

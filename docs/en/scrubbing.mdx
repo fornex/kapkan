@@ -1,0 +1,109 @@
+export const metadata = {
+  title: "Traffic diversion (scrubbing)",
+  description:
+    "Divert a victim's traffic to a scrubbing center instead of blackholing it — the divert action cleans the flood rather than dropping all traffic.",
+};
+
+# Traffic diversion (scrubbing)
+
+A blackhole finishes the attacker's job: it drops **all** of the victim's traffic, the good
+with the bad. The `divert` action instead announces the victim's host route toward a
+**scrubbing center** — its BGP next-hop, plus an optional divert community — so the traffic
+is rerouted, cleaned, and reinjected rather than dropped. It is the natural rung between
+[FlowSpec](/docs/flowspec) (surgical drops of one vector) and [blackhole](/docs/mitigation)
+(the last resort that takes the victim offline).
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"      # scrubbing center BGP next-hop (v4); required to divert
+  next_hop6: "100::100"        # required when IPv6 space is protected
+  community: "65000:200"       # optional divert community (the next-hop does the rerouting)
+  # communities: ["65000:200", "65000:201"]   # or a full set
+  local_pref: 200              # often raised so the divert route wins selection
+
+mitigation: divert             # or use divert as an escalation rung (see below)
+```
+
+## How it works
+
+Divert reuses the RTBH host-route machinery. Where a blackhole announces the victim's
+`/32` or `/128` toward a discard next-hop with your RTBH community, a divert announces the
+**same** host route toward the scrubbing center's next-hop with the divert community (and an
+optional `LOCAL_PREF`, usually raised so the more-specific divert route wins path
+selection). Your edge then carries that victim's traffic to the scrubber; the scrubber drops
+the attack and reinjects the clean remainder toward the real destination.
+
+Reinjection of cleaned traffic — over GRE, a VRF, or a separate routing context — is the
+scrubber's job, outside Kapkan's BGP signaling. Kapkan's role is to steer the victim's
+traffic to the scrubber for the duration of the attack and steer it back afterward.
+
+<Callout type="info" title="A divert route is withdrawn like any ban">
+The route is withdrawn on attack end or TTL exactly like a blackhole, and the scrubbing
+attributes are **frozen on the ban when it is created** — a config reload changes only future
+bans, never the route a live ban already announced.
+</Callout>
+
+## The scrubbing block
+
+| Key | Meaning |
+| --- | --- |
+| `next_hop` | The scrubbing center's IPv4 BGP next-hop. **Required** whenever a ladder or method diverts. |
+| `next_hop6` | The scrubbing center's IPv6 next-hop. **Required** when the deployment protects IPv6 space — there is no discard-style fallback for diversion, traffic must reach a real scrubber. |
+| `community` | Optional divert community in `ASN:value` form. The next-hop does the rerouting; the community is an extra signal for your edge. |
+| `communities` | Optional community **list** that overrides `community` when set. |
+| `local_pref` | Optional `LOCAL_PREF` attached to the divert route, often raised so it wins selection. Default `0` omits it. |
+
+The divert route Kapkan builds reads as `divert <prefix> next-hop <next_hop> community
+<community>` — the string surfaced in the `route` field of the [ban object](/docs/api), with
+`method: divert`.
+
+## Per-hostgroup scrubbing
+
+A [hostgroup](/docs/hostgroups) can point at its own scrubber with a `scrubbing:` block —
+the same shape as the per-group `bgp:` block. Each unset field inherits the global
+`scrubbing` block, so different customers can divert to different scrubbing centers.
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"      # global default scrubber
+  community: "65000:200"
+
+hostgroups:
+  - name: customer-a
+    networks: ["203.0.113.64/26"]
+    scrubbing:
+      next_hop: "192.0.2.250"  # customer-A's dedicated scrubber
+      communities: ["65000:400"]
+```
+
+## In an escalation ladder
+
+`divert` is most powerful as a rung in an [escalation ladder](/docs/escalation): alert, then
+surgically drop the vector, then scrub everything, and only blackhole as a last resort.
+
+```yaml
+escalation:
+  - { after_seconds: 0,   action: none }       # alert only
+  - { after_seconds: 30,  action: flowspec }   # surgical drop
+  - { after_seconds: 90,  action: divert }     # scrub
+  - { after_seconds: 300, action: blackhole }  # last resort
+```
+
+Ladder severity only ever strengthens: `none` < `flowspec` < `divert` < `blackhole`.
+Climbing from `divert` to `blackhole` is seamless — both ride the same host-route NLRI, so
+the blackhole announcement atomically replaces the divert route with no withdraw and no gap
+in coverage. (Cross-family switches, like `flowspec → divert`, stay
+[make-before-break](/docs/escalation#make-before-break).)
+
+<Callout type="warning" title="Total groups cannot divert">
+A `total` [hostgroup](/docs/hostgroups) measures aggregate traffic and has no single victim
+route to announce, so it cannot divert: an inherited divert stage degrades to blackhole, and
+an explicit one is a config error — the same rule as FlowSpec.
+</Callout>
+
+## Related
+
+- [RTBH mitigation](/docs/mitigation) — the blackhole method divert is built on.
+- [FlowSpec mitigation](/docs/flowspec) — the surgical method a ladder can step through first.
+- [Escalation ladders](/docs/escalation) — step from alert to FlowSpec to divert to blackhole.
+- [Configuration reference](/docs/configuration) · [REST API](/docs/api)

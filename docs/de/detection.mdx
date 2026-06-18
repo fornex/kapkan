@@ -1,0 +1,248 @@
+export const metadata = {
+  title: "Erkennung & Schwellenwerte",
+  description:
+    "Wie Kapkan volumetrische Angriffe erkennt: Schwellenwerte pro Ziel über ein gleitendes Fenster, Limits pro Protokoll, Sampling-Korrektur und Erkennung ausgehender Angriffe.",
+};
+
+# Erkennung & Schwellenwerte
+
+Kapkan erkennt volumetrische Angriffe **pro Ziel-Host** über ein gleitendes Zeitfenster.
+Für jede geschützte Adresse führt es fenstergestützte Ratenzähler, und sobald ein konfigurierter
+Schwellenwert überschritten wird, eröffnet es einen Angriff, hängt ein Flow-Sample an, klassifiziert
+den Vektor und übergibt das Ereignis an Mitigation, Benachrichtigungen und die API.
+
+Jede Rate wird in **realen, nicht gesampelten Einheiten** ausgewertet. Flow-Exporter sampeln — sie
+melden einen Datensatz pro N Pakete —, daher multipliziert Kapkan jede beobachtete Rate mit der
+Sampling-Rate des Exporters, bevor sie mit einem Schwellenwert verglichen wird. Sie konfigurieren
+Schwellenwerte im Datenverkehr, den der Angreifer tatsächlich sendet, nicht in gesampelten
+Datensätzen.
+
+<Callout type="info" title="Erkennung ist schreibgeschützt">
+Das Erkennen eines Angriffs kündigt von sich aus niemals eine Route an. Die Erkennung erzeugt einen
+Angriffsdatensatz und ein Ereignis; die Mitigation ist ein separater, standardmäßig im Dry-Run
+laufender Schritt. Siehe [Mitigation](/docs/mitigation) und das [Sicherheitsmodell](/docs/safety).
+</Callout>
+
+## Kern-Schwellenwerte
+
+Der oberste `thresholds`-Block definiert die Basis-Limits, die auf **jeden Ziel-Host** innerhalb
+Ihrer geschützten `networks` angewendet werden. Drei Kernmetriken werden immer ausgewertet:
+
+| Metrik | Einheit | Bedeutung |
+| --- | --- | --- |
+| `pps` | Pakete/Sek. | Gesamte eingehende Paketrate zum Host. |
+| `mbps` | Megabit/Sek. | Gesamte eingehende Bitrate zum Host. |
+| `flows_per_sec` | flows/sec | Anzahl eindeutiger Flow-Datensätze/Sek. in Richtung des Hosts. |
+
+```yaml
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 40000
+```
+
+Alle drei Kern-Schwellenwerte müssen größer als `0` sein. Ein Host gilt als „unter Angriff", sobald
+einer von ihnen über das gleitende Fenster überschritten wird.
+
+<Callout type="info" title="Overrides pro Gruppe">
+Diese globalen Schwellenwerte sind der Rückfallwert. Sie können bestimmten Präfixen strengere oder
+großzügigere Limits geben oder den summierten Datenverkehr eines Pools auswerten — mit
+[Hostgroups](/docs/hostgroups). Kapkan kann außerdem das Normalniveau jedes Hosts erlernen und den
+effektiven Schwellenwert automatisch verschärfen — siehe [Baselines](/docs/baselines).
+</Callout>
+
+## Sampling-Korrektur
+
+Gesampelte Flow-Telemetrie zählt Datenverkehr konstruktionsbedingt zu niedrig: ein Exporter, der 1
+von 1000 sampelt, meldet ungefähr einen Datensatz pro tausend Pakete. Kapkan korrigiert dies, sodass
+Ihre Schwellenwerte in realem Datenverkehr ausgedrückt bleiben.
+
+Jede Rate wird mit der Sampling-Rate des Exporters multipliziert:
+
+```text
+corrected_rate = observed_rate * sampling_rate
+```
+
+Die Sampling-Rate stammt aus dem Flow-Paket selbst, wenn der Exporter sie meldet; andernfalls greift
+Kapkan auf die konfigurierte `sampling.default_rate` zurück:
+
+```yaml
+sampling:
+  default_rate: 1000   # used only when a packet carries no sampling rate; must be >= 1
+```
+
+Da die Korrektur vor dem Schwellenwertvergleich erfolgt, bedeutet ein Schwellenwert `pps: 80000`
+80.000 reale Pakete pro Sekunde, unabhängig davon, wie aggressiv Ihre Router sampeln.
+
+<Callout type="warning" title="Setzen Sie die richtige Standard-Rate">
+Wenn Ihre Exporter ihre Sampling-Rate nicht ankündigen, muss `sampling.default_rate` mit dem
+übereinstimmen, was sie tatsächlich sampeln. Ein zu niedriger Standardwert zählt Datenverkehr zu
+niedrig und verzögert die Erkennung; ein zu hoher zählt zu hoch und löst zu früh aus.
+</Callout>
+
+## Schwellenwerte pro Protokoll
+
+Über die Kern-Summen hinaus können Sie optionale Limits pro Protokoll festlegen. Damit lassen sich
+Angriffe erkennen, die für ein einzelnes Protokoll groß, im Aggregat aber unsichtbar sind — zum
+Beispiel ein SYN-Flood, dessen Paketrate hoch ist, dessen Bitrate aber unter dem globalen `mbps`
+bleibt.
+
+Jedes Protokoll hat eine `pps`- und eine `mbps`-Variante. Die Metriknamen lauten exakt:
+
+| Protokoll | pps-Metrik | mbps-Metrik | Zählt |
+| --- | --- | --- | --- |
+| TCP | `tcp_pps` | `tcp_mbps` | Alle TCP-Pakete. |
+| UDP | `udp_pps` | `udp_mbps` | Alle UDP-Pakete. |
+| ICMP | `icmp_pps` | `icmp_mbps` | Alle ICMP-Pakete. |
+| TCP SYN | `tcp_syn_pps` | `tcp_syn_mbps` | Nur reine SYNs (SYN-Flag gesetzt, ACK gelöscht). |
+| Fragmente | `frag_pps` | `frag_mbps` | Nicht-erste IP-Fragmente. |
+
+```yaml
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 40000
+  tcp_syn_pps: 50000
+  udp_mbps: 800
+  frag_pps: 30000
+```
+
+Einige Regeln bestimmen das Verhalten:
+
+- **ODER-Semantik.** Jeder einzelne überschrittene Schwellenwert löst die Erkennung aus. Die
+  Kernmetriken und jede konfigurierte Metrik pro Protokoll werden unabhängig ausgewertet; die erste,
+  die ihr Limit überschreitet, eröffnet den Angriff, und die auslösende Metrik wird im Ereignis
+  vermerkt.
+- **`tcp_syn` ist nur SYN.** Es zählt Pakete mit gesetztem SYN-Flag und gelöschtem ACK-Flag — die
+  halb-offenen Pakete eines SYN-Floods — nicht alle TCP-Pakete.
+- **`frag` sind Nicht-erste-Fragmente.** Es zählt die nachfolgenden Fragmente fragmentierter
+  Datagramme, das Kennzeichen eines Fragmentierungs-Floods.
+- **`0` oder fehlend deaktiviert.** Eine Metrik pro Protokoll, die in der Konfiguration weggelassen
+  oder auf `0` gesetzt wird, wird einfach nicht ausgewertet und kostet nichts.
+
+## Geltungsbereich
+
+Die Erkennung ist **auf Ihre geschützten Präfixe beschränkt**. Es wird ausschließlich auf Ziele
+innerhalb der konfigurierten `networks` reagiert. Datenverkehr zu jedem anderen Ziel wird zur
+Sichtbarkeit weiterhin in Prometheus-Metriken gezählt, kann aber niemals einen Angriff eröffnen oder
+einen Bann auslösen.
+
+```yaml
+networks:
+  - 203.0.113.0/24
+  - 2001:db8::/48
+```
+
+Dies ist eine der durchgesetzten Sicherheitsregeln: ein Ziel außerhalb von `networks` liegt
+vollständig außerhalb des Geltungsbereichs der Mitigation. Geschützte Präfixe dürfen sich nicht
+überlappen. Siehe das [Sicherheitsmodell](/docs/safety) für die vollständige Liste der Garantien.
+
+## Erkennung ausgehender Angriffe
+
+Standardmäßig überwacht Kapkan den Datenverkehr, der **bei** Ihren geschützten Hosts **ankommt**
+(`direction: incoming`). Fügen Sie einen `thresholds_outgoing`-Block hinzu — global oder pro
+Hostgroup —, und Kapkan überwacht zusätzlich den Datenverkehr, der diese Hosts **verlässt**, und
+meldet Angriffe mit `direction: outgoing`. Dies ist die Signatur einer kompromittierten Maschine in
+Ihrem Netzwerk, die dazu benutzt wird, jemand anderen anzugreifen.
+
+```yaml
+thresholds_outgoing:
+  pps: 50000
+  udp_pps: 20000
+```
+
+`thresholds_outgoing` nimmt dieselben Schlüssel wie `thresholds`; mindestens einer muss gesetzt sein.
+Einige Details sind wichtig:
+
+- **Richtungswerte.** Angriffsereignisse tragen `direction: incoming` oder `direction: outgoing`.
+  Ausgehend bedeutet, dass der Ziel-Host die Quelle des Floods ist.
+- **Gemeinsame RTBH-Route.** Ein Host, der gleichzeitig angegriffen wird **und** angreift, hält zwei
+  unabhängige Angriffsdatensätze — einen pro Richtung —, teilt sich aber eine einzige RTBH-Route. Die
+  Route wird erst zurückgezogen, wenn der letzte der beiden Angriffe endet, sodass das Beenden einer
+  Richtung niemals vorzeitig die Blackhole-Aufhebung eines Hosts auslöst, der in der anderen Richtung
+  noch aktiv ist.
+- **Keine Kosten bei Abwesenheit.** Ohne einen `thresholds_outgoing`-Block wird ausgehender
+  Datenverkehr nicht einmal gezählt — es gibt keinen Overhead auf dem Hot-Path.
+
+<Callout type="warning" title="RTBH ist zielbasiert">
+Das Blackholing eines ausgehenden Angreifers verwirft den Datenverkehr zum Host, was ihn offline
+nimmt und den Missbrauch meist stoppt, den ausgehenden Flood aber nur dann direkt unterbindet, wenn
+Ihr Edge auch Quellen in geblackholten Präfixen verwirft (zum Beispiel mit uRPF). Setzen Sie
+`ban: false` auf der Hostgroup, wenn Sie den Alarm ohne die Route wünschen. Siehe
+[Mitigation](/docs/mitigation).
+</Callout>
+
+## Angriffs-Samples
+
+Wenn ein Angriff eröffnet wird, hängt Kapkan sofort ein Flow-Sample an — die wichtigsten Quellen,
+Quell-Ports, Ziel-Ports und Protokolle, die den Datenverkehr treiben. Dies ist möglich, weil Kapkan
+einen **kontinuierlichen Datenverkehrspuffer** führt: aktuelle Flows werden gepuffert, sobald sie
+eintreffen, sodass das Fenster, das zur Schwellenwertüberschreitung führt, in dem Moment bereits
+verfügbar ist, in dem die Erkennung auslöst. Es gibt keine Erfassungsverzögerung nach der Erkennung
+und kein Risiko, den Beginn des Angriffs zu verpassen.
+
+```yaml
+samples:
+  enabled: true        # default on
+  buffer_flows: 65536  # rolling buffer size
+  flows_per_attack: 20 # raw flow records kept per attack
+```
+
+Die Zählersummen des Samples (wichtigste Quellen, Ports und Protokolle) sind sampling-korrigiert; die
+rohen Flow-Datensätze tragen die unkorrigierten Zahlen des Exporters plus ihre `sampling_rate`. Das
+Feld `total_packets` ist die nicht abgeschnittene korrigierte Paketsumme, die als Nenner für die
+Anteile verwendet wird, da die Top-K-Listen die leichteren Schlüssel verwerfen. Samples erscheinen im
+`attack_started`-Ereignis, in Benachrichtigungen und in der [API](/docs/api). Änderungen an der
+Puffergröße erfordern einen Neustart.
+
+## Klassifizierung
+
+Jeder Angriff wird zum Erkennungszeitpunkt mit einem abgeleiteten **Vektor** versehen, der aus den
+fenstergestützten Raten pro Protokoll und dem Flow-Sample berechnet wird. Die Klassifizierung trägt
+eine `confidence` — den Anteil (`0..1`) des Angriffsverkehrs, der der gewinnenden Signatur entspricht
+— und, für Amplifikationsvektoren, den Quell-Port `src_port` des reflektierten Dienstes.
+
+Der Klassifizierer erkennt diese `type`-Werte:
+
+| Typ | Vektor |
+| --- | --- |
+| `ntp_amplification` | Reflektierte NTP-Antworten (`src_port` 123). |
+| `dns_amplification` | Reflektierte DNS-Antworten (`src_port` 53). |
+| `cldap_amplification` | Reflektierte CLDAP-Antworten (`src_port` 389). |
+| `memcached_amplification` | Reflektierte memcached-Antworten (`src_port` 11211). |
+| `ssdp_amplification` | Reflektierte SSDP-Antworten (`src_port` 1900). |
+| `chargen_amplification` | Reflektierte chargen-Antworten (`src_port` 19). |
+| `syn_flood` | TCP-SYN-dominierter Flood. |
+| `fragment_flood` | Flood aus Nicht-ersten IP-Fragmenten. |
+| `icmp_flood` | ICMP-dominierter Flood. |
+| `udp_flood` | UDP-dominierter Flood ohne Amplifikationssignatur. |
+| `tcp_flood` | TCP-dominierter Flood. |
+| `mixed` | Kein einzelner Vektor dominiert. |
+
+Wie ein Vektor ausgewählt wird:
+
+- Eine Signatur benötigt einen **dominanten Anteil** — mehr als die Hälfte des fenstergestützten
+  Datenverkehrs —, um zu gewinnen. Zuerst wird auf Amplifikation geprüft (am spezifischsten), dann
+  reine SYN, dann Fragmente, dann ICMP-, UDP- und TCP-volumetrische Floods.
+- Ein **Amplifikations**-Vektor erfordert außerdem antwortgroße Pakete vom Port des reflektierten
+  Dienstes: die durchschnittliche Paketgröße von diesem Quell-Port muss groß genug sein, um als
+  reflektierte Antwort gelesen zu werden. Anfragegroße Pakete von einem Dienst-Port klassifizieren
+  stattdessen als gewöhnlicher Flood.
+- Wenn keine Signatur den dominanten Anteil erreicht, wird der Angriff als `mixed` gekennzeichnet und
+  `confidence` ist `0`.
+
+<Callout type="info" title="Confidence ist ein Anteil, keine Wahrscheinlichkeit">
+`confidence` ist der Bruchteil des Angriffsverkehrs, der der gewinnenden Signatur entsprach, im
+Bereich `0..1`. Ein Wert von `0` bedeutet, dass der Angriff `mixed` ist — es passte überhaupt keine
+Signatur.
+</Callout>
+
+## Verwandte Themen
+
+- [Hostgroups](/docs/hostgroups) — Schwellenwerte pro Präfix, Berechnung gesamt vs. pro Host und
+  Richtlinie pro Gruppe.
+- [Baselines](/docs/baselines) — erlernte Schwellenwerte pro Host, die die statischen Limits
+  automatisch verschärfen.
+- [Mitigation](/docs/mitigation) — wie ein erkannter Angriff zu einer RTBH-Route wird.
+- [REST API](/docs/api) — aktive und kürzliche Angriffe mit ihren Samples und ihrer Klassifizierung
+  auslesen.

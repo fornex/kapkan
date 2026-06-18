@@ -1,0 +1,113 @@
+export const metadata = {
+  title: "Déviation du trafic (scrubbing)",
+  description:
+    "Déviez le trafic d'une victime vers un centre de nettoyage (scrubbing) au lieu de le blackholer — l'action divert nettoie le flood plutôt que de tout supprimer.",
+};
+
+# Déviation du trafic (scrubbing)
+
+Un blackhole termine le travail de l'attaquant : il supprime **tout** le trafic de la victime, le
+bon comme le mauvais. L'action `divert` annonce au contraire la route d'hôte de la victime vers un
+**centre de nettoyage (scrubbing center)** — son next-hop BGP, plus une community de déviation
+optionnelle — de sorte que le trafic est réacheminé, nettoyé et réinjecté plutôt que supprimé.
+C'est l'échelon naturel entre [FlowSpec](/docs/flowspec) (suppression chirurgicale d'un seul
+vecteur) et le [blackhole](/docs/mitigation) (le dernier recours qui met la victime hors ligne).
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"      # scrubbing center BGP next-hop (v4); required to divert
+  next_hop6: "100::100"        # required when IPv6 space is protected
+  community: "65000:200"       # optional divert community (the next-hop does the rerouting)
+  # communities: ["65000:200", "65000:201"]   # or a full set
+  local_pref: 200              # often raised so the divert route wins selection
+
+mitigation: divert             # or use divert as an escalation rung (see below)
+```
+
+## Fonctionnement
+
+La déviation réutilise la machinerie de route d'hôte de RTBH. Là où un blackhole annonce le `/32`
+ou `/128` de la victime vers un next-hop de rejet avec votre community RTBH, une déviation annonce
+la **même** route d'hôte vers le next-hop du centre de nettoyage avec la community de déviation (et
+un `LOCAL_PREF` optionnel, généralement augmenté pour que la route de déviation plus spécifique
+remporte la sélection de chemin). Votre edge achemine alors le trafic de cette victime vers le
+scrubber ; le scrubber supprime l'attaque et réinjecte le reste nettoyé vers la véritable
+destination.
+
+La réinjection du trafic nettoyé — via GRE, un VRF ou un contexte de routage séparé — est le rôle
+du scrubber, en dehors de la signalisation BGP de Kapkan. Le rôle de Kapkan est d'orienter le
+trafic de la victime vers le scrubber pendant toute la durée de l'attaque, puis de le réorienter
+ensuite.
+
+<Callout type="info" title="Une route de déviation est retirée comme tout ban">
+La route est retirée à la fin de l'attaque ou au TTL, exactement comme un blackhole, et les
+attributs de scrubbing sont **figés sur le ban au moment de sa création** — un rechargement de
+configuration ne modifie que les bans futurs, jamais la route qu'un ban actif a déjà annoncée.
+</Callout>
+
+## Le bloc scrubbing
+
+| Clé | Signification |
+| --- | --- |
+| `next_hop` | Le next-hop BGP IPv4 du centre de nettoyage. **Requis** dès qu'un palier ou une méthode dévie. |
+| `next_hop6` | Le next-hop IPv6 du centre de nettoyage. **Requis** lorsque le déploiement protège un espace IPv6 — il n'existe pas de repli de type rejet pour la déviation, le trafic doit atteindre un véritable scrubber. |
+| `community` | Community de déviation optionnelle sous la forme `ASN:value`. Le next-hop effectue le réacheminement ; la community est un signal supplémentaire pour votre edge. |
+| `communities` | **Liste** de communities optionnelle qui remplace `community` lorsqu'elle est définie. |
+| `local_pref` | `LOCAL_PREF` optionnel attaché à la route de déviation, souvent augmenté pour qu'elle remporte la sélection. La valeur par défaut `0` l'omet. |
+
+La route de déviation que Kapkan construit se lit `divert <prefix> next-hop <next_hop> community
+<community>` — la chaîne exposée dans le champ `route` de l'[objet ban](/docs/api), avec
+`method: divert`.
+
+## Scrubbing par hostgroup
+
+Un [hostgroup](/docs/hostgroups) peut pointer vers son propre scrubber au moyen d'un bloc
+`scrubbing:` — de même forme que le bloc `bgp:` par groupe. Chaque champ non défini hérite du bloc
+`scrubbing` global, de sorte que différents clients peuvent dévier vers différents centres de
+nettoyage.
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"      # global default scrubber
+  community: "65000:200"
+
+hostgroups:
+  - name: customer-a
+    networks: ["203.0.113.64/26"]
+    scrubbing:
+      next_hop: "192.0.2.250"  # customer-A's dedicated scrubber
+      communities: ["65000:400"]
+```
+
+## Dans un palier d'escalade
+
+`divert` est particulièrement puissant en tant qu'échelon d'un [palier d'escalade](/docs/escalation) :
+alerter, puis supprimer chirurgicalement le vecteur, puis tout nettoyer, et ne blackholer qu'en
+dernier recours.
+
+```yaml
+escalation:
+  - { after_seconds: 0,   action: none }       # alert only
+  - { after_seconds: 30,  action: flowspec }   # surgical drop
+  - { after_seconds: 90,  action: divert }     # scrub
+  - { after_seconds: 300, action: blackhole }  # last resort
+```
+
+La sévérité du palier ne fait que se renforcer : `none` < `flowspec` < `divert` < `blackhole`.
+Passer de `divert` à `blackhole` est transparent — les deux empruntent le même NLRI de route
+d'hôte, de sorte que l'annonce du blackhole remplace atomiquement la route de déviation, sans
+retrait et sans interruption de couverture. (Les changements entre familles, comme
+`flowspec → divert`, restent en [make-before-break](/docs/escalation#make-before-break).)
+
+<Callout type="warning" title="Les groupes total ne peuvent pas dévier">
+Un [hostgroup](/docs/hostgroups) `total` mesure le trafic agrégé et n'a pas de route de victime
+unique à annoncer, il ne peut donc pas dévier : une étape de déviation héritée se dégrade en
+blackhole, et une étape explicite est une erreur de configuration — la même règle que pour FlowSpec.
+</Callout>
+
+## Voir aussi
+
+- [Atténuation RTBH](/docs/mitigation) — la méthode blackhole sur laquelle divert repose.
+- [Atténuation FlowSpec](/docs/flowspec) — la méthode chirurgicale qu'un palier peut traverser en premier.
+- [Paliers d'escalade](/docs/escalation) — passez de l'alerte à FlowSpec, à divert, puis au blackhole.
+- [Référence de configuration](/docs/configuration) · [API REST](/docs/api)

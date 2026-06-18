@@ -1,0 +1,109 @@
+export const metadata = {
+  title: "Отвод трафика (scrubbing)",
+  description:
+    "Отводите трафик жертвы в центр очистки (scrubbing center) вместо blackhole — действие divert очищает поток от флуда, а не отбрасывает весь трафик.",
+};
+
+# Отвод трафика (scrubbing)
+
+Blackhole завершает работу за атакующего: он отбрасывает **весь** трафик жертвы — и хороший,
+и плохой. Действие `divert` вместо этого анонсирует хостовый маршрут жертвы в сторону
+**центра очистки (scrubbing center)** — его BGP next-hop плюс необязательное divert-community, —
+так что трафик перенаправляется, очищается и реинжектируется обратно, а не отбрасывается. Это
+естественная ступень между [FlowSpec](/docs/flowspec) (хирургическое отбрасывание одного вектора)
+и [blackhole](/docs/mitigation) (крайняя мера, выводящая жертву в офлайн).
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"      # scrubbing center BGP next-hop (v4); required to divert
+  next_hop6: "100::100"        # required when IPv6 space is protected
+  community: "65000:200"       # optional divert community (the next-hop does the rerouting)
+  # communities: ["65000:200", "65000:201"]   # or a full set
+  local_pref: 200              # often raised so the divert route wins selection
+
+mitigation: divert             # or use divert as an escalation rung (see below)
+```
+
+## Как это работает
+
+Divert переиспользует механику хостовых маршрутов RTBH. Там, где blackhole анонсирует `/32`
+или `/128` жертвы в сторону discard next-hop с вашим RTBH-community, divert анонсирует **тот же**
+хостовый маршрут в сторону next-hop центра очистки с divert-community (и необязательным
+`LOCAL_PREF`, обычно повышенным, чтобы более специфичный divert-маршрут выиграл выбор пути).
+Тогда ваш граничный маршрутизатор доставляет трафик этой жертвы до scrubber'а; scrubber
+отбрасывает атаку и реинжектирует очищенный остаток в сторону реального назначения.
+
+Реинжекция очищенного трафика — через GRE, VRF или отдельный контекст маршрутизации — это
+задача scrubber'а, вне BGP-сигнализации Kapkan. Роль Kapkan — направить трафик жертвы к
+scrubber'у на время атаки и вернуть его обратно после.
+
+<Callout type="info" title="Divert-маршрут отзывается как любой бан">
+Маршрут отзывается по завершении атаки или по TTL ровно так же, как blackhole, а scrubbing-атрибуты
+**фиксируются на бане в момент его создания** — перезагрузка конфигурации меняет только будущие
+баны, но никогда — маршрут, который уже анонсирован активным баном.
+</Callout>
+
+## Блок scrubbing
+
+| Ключ | Значение |
+| --- | --- |
+| `next_hop` | IPv4 BGP next-hop центра очистки. **Обязателен** всякий раз, когда лестница или метод выполняет divert. |
+| `next_hop6` | IPv6 next-hop центра очистки. **Обязателен**, когда развёртывание защищает IPv6-пространство — для отвода нет запасного варианта в стиле discard, трафик должен достичь реального scrubber'а. |
+| `community` | Необязательное divert-community в форме `ASN:value`. Перенаправление выполняет next-hop; community — это дополнительный сигнал для вашего граничного маршрутизатора. |
+| `communities` | Необязательный **список** community, который переопределяет `community`, когда задан. |
+| `local_pref` | Необязательный `LOCAL_PREF`, прикреплённый к divert-маршруту, часто повышенный, чтобы он выиграл выбор. Значение по умолчанию `0` опускает его. |
+
+Divert-маршрут, который строит Kapkan, читается как `divert <prefix> next-hop <next_hop> community
+<community>` — эта строка отображается в поле `route` [объекта бана](/docs/api), с
+`method: divert`.
+
+## Scrubbing для отдельной hostgroup
+
+[Hostgroup](/docs/hostgroups) может указывать на собственный scrubber через блок `scrubbing:` —
+той же формы, что и блок `bgp:` для группы. Каждое незаданное поле наследуется из глобального
+блока `scrubbing`, так что разные клиенты могут отводить трафик в разные центры очистки.
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"      # global default scrubber
+  community: "65000:200"
+
+hostgroups:
+  - name: customer-a
+    networks: ["203.0.113.64/26"]
+    scrubbing:
+      next_hop: "192.0.2.250"  # customer-A's dedicated scrubber
+      communities: ["65000:400"]
+```
+
+## В лестнице эскалации
+
+`divert` наиболее силён в роли ступени [лестницы эскалации](/docs/escalation): сначала оповещение,
+затем хирургическое отбрасывание вектора, затем очистка всего, и только blackhole как крайняя мера.
+
+```yaml
+escalation:
+  - { after_seconds: 0,   action: none }       # alert only
+  - { after_seconds: 30,  action: flowspec }   # surgical drop
+  - { after_seconds: 90,  action: divert }     # scrub
+  - { after_seconds: 300, action: blackhole }  # last resort
+```
+
+Серьёзность ступеней лестницы всегда только усиливается: `none` < `flowspec` < `divert` < `blackhole`.
+Подъём с `divert` на `blackhole` бесшовен — оба используют один и тот же хостовый маршрут (NLRI),
+так что анонс blackhole атомарно заменяет divert-маршрут без отзыва и без разрыва в покрытии.
+(Переходы между семействами, такие как `flowspec → divert`, остаются
+[make-before-break](/docs/escalation#make-before-break).)
+
+<Callout type="warning" title="Группы total не могут выполнять divert">
+[Hostgroup](/docs/hostgroups) с `total` измеряет агрегированный трафик и не имеет единого
+маршрута жертвы для анонса, поэтому не может выполнять divert: унаследованная ступень divert
+деградирует до blackhole, а явная является ошибкой конфигурации — то же правило, что и для FlowSpec.
+</Callout>
+
+## Связанные разделы
+
+- [RTBH-митигация](/docs/mitigation) — метод blackhole, на котором построен divert.
+- [FlowSpec-митигация](/docs/flowspec) — хирургический метод, через который лестница может пройти первым.
+- [Лестницы эскалации](/docs/escalation) — переход от оповещения к FlowSpec, к divert, к blackhole.
+- [Справочник по конфигурации](/docs/configuration) · [REST API](/docs/api)

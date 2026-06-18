@@ -1,0 +1,90 @@
+export const metadata = {
+  title: "Puesta en producción",
+  description:
+    "Valida la detección y el BGP en modo dry-run y, después, desactiva el dry-run con confianza.",
+};
+
+# Puesta en producción
+
+Kapkan funciona en **modo dry-run de forma predeterminada**. Hasta que establezcas explícitamente
+`dry_run: false`, cada blackhole que se generaría se registra y se expone a través de la API, pero
+**nunca se anuncia** a tus routers. Esto te ofrece una ruta segura hacia producción: ejecuta contra
+telemetría real y peers BGP reales, confirma que el motor se dispara sobre los prefijos correctos y
+que anunciaría las rutas correctas, y después acciona un único interruptor.
+
+Esta página es el procedimiento breve y ordenado para esa transición. No te saltes ningún paso:
+cada uno verifica una parte distinta del pipeline antes de que cualquier ruta pueda llegar a un
+router.
+
+<Callout type="info" title="El dry-run sigue estableciendo peering y detectando">
+El dry-run solo suprime el anuncio BGP. Kapkan sigue ingiriendo flows, ejecutando la detección,
+rastreando los baneos, lanzando notificaciones y estableciendo sus sesiones BGP. Estás validando el
+pipeline real, no una simulación.
+</Callout>
+
+## Lista de verificación
+
+1. **Ejecuta en dry-run y valida la detección.** Con `dry_run: true`, confirma en los logs y
+   mediante `GET /api/v1/attacks` que la detección se dispara sobre los prefijos correctos y que las
+   rutas que se generarían (el campo `route` de cada ataque) son correctas. Aquí es donde ajustas los
+   umbrales, los hostgroups y las líneas base contra tu tráfico real; nada de esto puede tocar una
+   ruta.
+
+   ```sh
+   curl -s localhost:8080/api/v1/attacks | jq
+   ```
+
+2. **Confirma que el BGP alcanza el estado `ESTABLISHED`.** El peering ocurre incluso en dry-run, de
+   modo que puedes verificar la conectividad antes de anunciar nada. Vigila en los logs el evento
+   `bgp peer state` y confirma que cada vecino configurado alcanza el estado `ESTABLISHED`. Si una
+   sesión se queda atascada, corrige ahora la configuración del peer (ASN, direcciones, interfaz de
+   origen, ACLs), mientras una configuración errónea resulta inofensiva.
+
+   ```sh
+   ./kapkan -config /etc/kapkan/config.yaml -log-format text | grep "bgp peer state"
+   ```
+
+3. **Desactiva el dry-run y recarga.** Establece `dry_run: false` en tu configuración y, a
+   continuación, recarga Kapkan para que vuelva a leer el archivo. La recarga no es disruptiva: no
+   reinicia el daemon ni interrumpe las sesiones BGP.
+
+   ```sh
+   # Either signal the process:
+   sudo systemctl reload kapkan      # sends SIGHUP
+
+   # ...or call the API:
+   curl -s -X POST -H 'Content-Type: application/json' \
+     localhost:8080/api/v1/config/reload
+   ```
+
+   Tanto `SIGHUP` como `POST /api/v1/config/reload` realizan la misma recarga en caliente. Tras la
+   recarga, `GET /api/v1/status` informa del modo activo y la siguiente detección que cruce un umbral
+   anuncia una ruta blackhole real.
+
+<Callout type="danger" title="Este es el punto de no retorno">
+Una vez que `dry_run` es false, se anuncian rutas blackhole reales a tus routers. Un ataque detectado
+descarta ahora tráfico en vivo hacia la dirección objetivo. Confirma tus límites de seguridad
+(`ban.ttl_seconds`, `ban.unban_hysteresis_seconds`, `ban.max_active_bans` y `protected_whitelist`)
+antes de accionar el interruptor. Consulta el [Modelo de seguridad](/docs/safety).
+</Callout>
+
+## Verificar el modo en producción
+
+Tras el paso 3, una comprobación rápida de que realmente estás en producción y de que los anuncios se
+comportan correctamente:
+
+- `GET /api/v1/status` muestra el modo actual y los recuentos de ataques/baneos activos.
+- La métrica `mitigate_announced_routes` está etiquetada por modo; en producción, las rutas se
+  contabilizan bajo `real` en lugar de `dry_run`. Consulta [Métricas](/docs/metrics).
+- `GET /api/v1/bans` enumera todos los baneos, activos e históricos, de modo que puedes confirmar que
+  un baneo se anunció y, más tarde, se retiró automáticamente al expirar su TTL.
+
+Si algo parece incorrecto, establece `dry_run: true` y recarga de nuevo: vuelves de inmediato a un
+estado seguro, sin anuncios, con la detección y el peering aún en marcha.
+
+## Relacionado
+
+- [Modelo de seguridad](/docs/safety): las garantías de dry-run, TTL, histéresis, tope de baneos y whitelist.
+- [Mitigación](/docs/mitigation): cómo se anuncian y se retiran las rutas RTBH.
+- [Referencia de configuración](/docs/configuration): las claves `dry_run`, `bgp` y `ban`.
+- [API REST](/docs/api): los endpoints `attacks`, `status`, `bans` y `config/reload`.

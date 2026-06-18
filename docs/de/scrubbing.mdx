@@ -1,0 +1,115 @@
+export const metadata = {
+  title: "Traffic-Umleitung (Scrubbing)",
+  description:
+    "Leiten Sie den Verkehr eines Opfers zu einem Scrubbing-Center um, statt ihn per Blackhole zu verwerfen — die divert-Aktion säubert die Flut, anstatt allen Verkehr fallen zu lassen.",
+};
+
+# Traffic-Umleitung (Scrubbing)
+
+Ein Blackhole vollendet die Arbeit des Angreifers: Es verwirft **den gesamten** Verkehr des
+Opfers, den guten zusammen mit dem schlechten. Die `divert`-Aktion kündigt stattdessen die
+Host-Route des Opfers in Richtung eines **Scrubbing-Centers** an — über deren BGP-Next-Hop
+samt einer optionalen Divert-Community — sodass der Verkehr umgeleitet, gesäubert und wieder
+eingespeist statt verworfen wird. Es ist die natürliche Stufe zwischen
+[FlowSpec](/docs/flowspec) (chirurgisches Verwerfen eines Vektors) und [Blackhole](/docs/mitigation)
+(dem letzten Mittel, das das Opfer offline nimmt).
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"      # scrubbing center BGP next-hop (v4); required to divert
+  next_hop6: "100::100"        # required when IPv6 space is protected
+  community: "65000:200"       # optional divert community (the next-hop does the rerouting)
+  # communities: ["65000:200", "65000:201"]   # or a full set
+  local_pref: 200              # often raised so the divert route wins selection
+
+mitigation: divert             # or use divert as an escalation rung (see below)
+```
+
+## Funktionsweise
+
+Divert nutzt dieselbe RTBH-Host-Route-Maschinerie wieder. Wo ein Blackhole die `/32`- oder
+`/128`-Route des Opfers in Richtung eines Discard-Next-Hops mit Ihrer RTBH-Community
+ankündigt, kündigt ein Divert **dieselbe** Host-Route in Richtung des Next-Hops des
+Scrubbing-Centers mit der Divert-Community an (sowie einem optionalen `LOCAL_PREF`,
+üblicherweise erhöht, damit die spezifischere Divert-Route die Pfadauswahl gewinnt). Ihr Edge
+trägt den Verkehr dieses Opfers dann zum Scrubber; der Scrubber verwirft den Angriff und
+speist den gesäuberten Rest wieder in Richtung des echten Ziels ein.
+
+Die Wiedereinspeisung des gesäuberten Verkehrs — über GRE, ein VRF oder einen separaten
+Routing-Kontext — ist Aufgabe des Scrubbers, außerhalb der BGP-Signalisierung von Kapkan.
+Kapkans Rolle besteht darin, den Verkehr des Opfers für die Dauer des Angriffs zum Scrubber zu
+lenken und ihn danach wieder zurückzulenken.
+
+<Callout type="info" title="Eine Divert-Route wird wie jeder Ban zurückgezogen">
+Die Route wird bei Angriffsende oder TTL exakt wie ein Blackhole zurückgezogen, und die
+Scrubbing-Attribute werden **beim Erstellen des Bans eingefroren** — ein Config-Reload ändert
+nur künftige Bans, niemals die Route, die ein bereits aktiver Ban angekündigt hat.
+</Callout>
+
+## Der scrubbing-Block
+
+| Schlüssel | Bedeutung |
+| --- | --- |
+| `next_hop` | Der IPv4-BGP-Next-Hop des Scrubbing-Centers. **Erforderlich**, sobald eine Stufenleiter oder Methode umleitet. |
+| `next_hop6` | Der IPv6-Next-Hop des Scrubbing-Centers. **Erforderlich**, wenn das Deployment IPv6-Adressraum schützt — es gibt keinen Discard-artigen Fallback für die Umleitung, der Verkehr muss einen echten Scrubber erreichen. |
+| `community` | Optionale Divert-Community in der Form `ASN:value`. Der Next-Hop führt die Umleitung durch; die Community ist ein zusätzliches Signal für Ihr Edge. |
+| `communities` | Optionale Community-**Liste**, die `community` überschreibt, wenn gesetzt. |
+| `local_pref` | Optionaler `LOCAL_PREF`, der an die Divert-Route angehängt wird, oft erhöht, damit sie die Auswahl gewinnt. Der Standardwert `0` lässt ihn weg. |
+
+Die Divert-Route, die Kapkan erstellt, liest sich als `divert <prefix> next-hop <next_hop> community
+<community>` — die Zeichenkette, die im `route`-Feld des [Ban-Objekts](/docs/api) erscheint, mit
+`method: divert`.
+
+## Scrubbing pro Hostgruppe
+
+Eine [Hostgruppe](/docs/hostgroups) kann mit einem `scrubbing:`-Block auf ihren eigenen
+Scrubber verweisen — in derselben Form wie der `bgp:`-Block pro Gruppe. Jedes nicht gesetzte
+Feld erbt vom globalen `scrubbing`-Block, sodass verschiedene Kunden zu verschiedenen
+Scrubbing-Centern umleiten können.
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"      # global default scrubber
+  community: "65000:200"
+
+hostgroups:
+  - name: customer-a
+    networks: ["203.0.113.64/26"]
+    scrubbing:
+      next_hop: "192.0.2.250"  # customer-A's dedicated scrubber
+      communities: ["65000:400"]
+```
+
+## In einer Eskalationsstufenleiter
+
+`divert` ist am wirkungsvollsten als Stufe in einer [Eskalationsstufenleiter](/docs/escalation):
+zuerst alarmieren, dann den Vektor chirurgisch verwerfen, dann alles scrubben und nur als
+letztes Mittel ein Blackhole setzen.
+
+```yaml
+escalation:
+  - { after_seconds: 0,   action: none }       # alert only
+  - { after_seconds: 30,  action: flowspec }   # surgical drop
+  - { after_seconds: 90,  action: divert }     # scrub
+  - { after_seconds: 300, action: blackhole }  # last resort
+```
+
+Die Schwere einer Stufenleiter wird immer nur stärker: `none` < `flowspec` < `divert` < `blackhole`.
+Der Aufstieg von `divert` zu `blackhole` ist nahtlos — beide nutzen dieselbe Host-Route-NLRI,
+sodass die Blackhole-Ankündigung die Divert-Route atomar ersetzt, ohne Withdraw und ohne Lücke
+in der Abdeckung. (Wechsel über Familien hinweg, wie `flowspec → divert`, bleiben
+[make-before-break](/docs/escalation#make-before-break).)
+
+<Callout type="warning" title="total-Gruppen können nicht umleiten">
+Eine `total`-[Hostgruppe](/docs/hostgroups) misst aggregierten Verkehr und hat keine einzelne
+Opfer-Route zum Ankündigen, daher kann sie nicht umleiten: Eine geerbte Divert-Stufe stuft sich
+zu einem Blackhole herab, und eine explizite ist ein Config-Fehler — dieselbe Regel wie bei
+FlowSpec.
+</Callout>
+
+## Verwandt
+
+- [RTBH-Mitigation](/docs/mitigation) — die Blackhole-Methode, auf der Divert aufbaut.
+- [FlowSpec-Mitigation](/docs/flowspec) — die chirurgische Methode, die eine Stufenleiter zuerst durchlaufen kann.
+- [Eskalationsstufen](/docs/escalation) — von Alarm über FlowSpec und Divert bis zum Blackhole aufsteigen.
+- [Konfigurationsreferenz](/docs/configuration) · [REST-API](/docs/api)

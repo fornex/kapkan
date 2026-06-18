@@ -1,0 +1,126 @@
+export const metadata = {
+  title: "Baselines",
+  description:
+    "Continuous learned thresholds that tighten detection to each host's normal traffic level, with poisoning-aware guards.",
+};
+
+# Baselines
+
+With a `baseline` block, Kapkan continuously learns each host's normal traffic level and
+tightens detection to it. It keeps an EWMA (exponentially weighted moving average) of the
+real, sampling-corrected rate **per host, per direction** — and a per-group total for
+`calculation: total` hostgroups — then derives an effective threshold of
+`learned_normal × factor`. A host that normally does 10k pps is flagged at roughly 30k
+instead of waiting for the global 80k.
+
+This is the "stop tuning thresholds by hand" mode. Where FastNetMon's automated baseline is
+an offline calculator you run and copy numbers from, Kapkan's is online: it follows your
+traffic continuously and re-derives the effective threshold as the host's normal level
+drifts.
+
+<Callout type="info" title="Baselines tighten, never loosen">
+Your static [thresholds](/docs/detection) always remain in force as a hard ceiling. A
+baseline can only make detection *more* sensitive for a host — it can never raise the bar
+above what you configured.
+</Callout>
+
+## Example
+
+```yaml
+baseline:
+  factor: 3              # attack = traffic above learned_normal × factor
+  half_life_seconds: 3600
+  warmup_seconds: 600
+  floor:
+    pps: 5000
+    mbps: 50
+    flows_per_sec: 2000
+```
+
+The block is optional. Absent, Kapkan uses your static thresholds alone. The effective
+threshold for each host and metric is:
+
+```text
+effective = clamp(learned_normal × factor, low = floor, high = static_threshold)
+```
+
+In words: `learned_normal × factor`, bounded below by `floor` and above by the static
+thresholds (the ceiling).
+
+## Keys
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `factor` | `3` | Multiplier on the learned normal level. The effective threshold is `learned_normal × factor`. |
+| `half_life_seconds` | `3600` | EWMA half-life. The time over which an old observation loses half its weight; larger values make the baseline slower and steadier. |
+| `warmup_seconds` | `600` | A freshly observed host is gated by static thresholds only for this long, counted from its first real traffic. |
+| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | example `5000` / `50` / `2000` | Lower bound on the effective threshold per metric, so quiet hosts never become hair-triggers. |
+
+## Poisoning-aware design
+
+A naive learned baseline is attackable: feed a host a slow, rising flood and it learns the
+flood as "normal," raising the bar until real attacks slip under it. Kapkan's baseline is
+built to resist this. The static thresholds stay as guards, and several rules bound what the
+baseline can ever do.
+
+- **Ceiling.** Traffic above the static thresholds always triggers. A poisoned or
+  fast-grown baseline can never raise the effective threshold above what you configured.
+- **Floor.** The effective threshold never drops below `floor`, so a normally quiet host
+  does not become a hair-trigger that fires on any small burst.
+- **Frozen under attack.** While a host is under attack — including the
+  `unban_hysteresis_seconds` tail after the rate drops — its baseline is not trained at all.
+  Attack traffic never teaches the host that the attack is normal.
+- **Clamped learning.** Outside attacks, each training sample is capped at
+  `baseline × factor` before it updates the EWMA. A slow attacker ramp can therefore raise
+  the baseline by at most `2^(factor−1)` per half-life — about `4×` per hour at the defaults
+  (`factor: 3`, `half_life_seconds: 3600`). That is hours to climb from a normal level to
+  the static ceiling, and never past it. Aggressive settings (a large `factor` or a short
+  `half_life_seconds`) shrink that window, so choose them deliberately.
+- **Learning only on real traffic.** A direction with no traffic in the window never trains
+  its baseline. An incoming-only host keeps its static outgoing threshold, and an empty
+  `total` group never warms up to a zero baseline.
+- **Warm-up.** A freshly observed host is protected by static thresholds only for
+  `warmup_seconds`, counted from its first real traffic. An evicted (long-quiet) host
+  re-warms up when it returns.
+
+<Callout type="warning" title="A host already flooded at first sight">
+Warm-up traffic itself trains the initial baseline. A host that is *already* under a
+sub-static flood the first time Kapkan sees it learns that flood as "normal" — bounded by
+the static ceiling, but there is no clean reference for a host attacked from first sight.
+Set `warmup_seconds` to at least a few multiples of `half_life_seconds` so the baseline
+converges before it starts gating.
+</Callout>
+
+## Visibility
+
+Learned levels are exposed per host in the [REST API](/docs/api). The
+`GET /api/v1/hosts` snapshot carries `baseline` (incoming) and `baseline_out` (outgoing)
+alongside each host's measured per-direction rates and attack state. The
+[dashboard](/docs/dashboard) renders the same learned baselines next to the top talkers,
+so you can see what each host is being held to.
+
+## Per-hostgroup
+
+Baselines follow [hostgroup](/docs/hostgroups) scope. A group either inherits the global
+`baseline` block or overrides it wholesale — there is no partial merge. To opt a group out
+of baselines entirely while keeping the global block for everyone else, disable it on the
+group:
+
+```yaml
+hostgroups:
+  - name: dns-pool
+    networks: ["203.0.113.128/26"]
+    calculation: total
+    baseline: { enabled: false }   # this group uses static thresholds only
+```
+
+For `calculation: total` groups, the baseline learns the group's summed traffic rather than
+per-host levels, and the same poisoning-aware rules apply to that total.
+
+## Related
+
+- [Detection & thresholds](/docs/detection) — the static thresholds baselines sit inside.
+- [Hostgroups](/docs/hostgroups) — per-group thresholds, totals, and baseline overrides.
+- [Configuration reference](/docs/configuration) — every key in the YAML file.
+- [REST API](/docs/api) — the `/api/v1/hosts` snapshot and its `baseline` fields.
+- [Going live](/docs/going-live) — validate detection in dry-run before announcing.

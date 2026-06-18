@@ -17,14 +17,20 @@ jobs:
   test:
     name: build & test (race)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: engine/go.mod
           cache: true
-      - name: Build
-        run: go build ./...
+          cache-dependency-path: engine/go.sum
+      # `make build`/`make test` first copy console/ into internal/api/static
+      # (the go:embed target) so the single binary embeds the operator console.
+      - name: Build (single binary, console embedded)
+        run: make build
       - name: Test (race)
         run: make test
 
@@ -35,24 +41,35 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: engine/go.mod
           # The golangci-lint action manages its own module cache.
           cache: false
+      # The api package go:embeds static/; populate it before the linter
+      # type-checks, or the package won't compile.
+      - name: Sync console assets (go:embed target)
+        run: make console-sync
+        working-directory: engine
       - uses: golangci/golangci-lint-action@v7
         with:
-          # Tracks the latest v2.x (matches .golangci.yml version "2").
-          # Pin to a specific tag for fully reproducible runs.
+          # Tracks the latest v2.x (matches engine/.golangci.yml version "2").
           version: latest
+          working-directory: engine
 
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: engine/go.mod
           cache: true
+          cache-dependency-path: engine/go.sum
+      - name: Sync console assets (go:embed target)
+        run: make console-sync
       - name: Run govulncheck (gate on reachable, non-accepted advisories)
         # Enforced gate: fails on any *reachable* (symbol-level "called") advisory
         # that is NOT in the accepted allowlist. Non-reachable findings (a vuln is
@@ -82,3 +99,22 @@ jobs:
             esac
           done
           exit $fail
+
+  site:
+    name: site build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: site/frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      # `prebuild` copies the top-level docs/ into content/docs before next build.
+      - name: Build static export
+        run: npm run build

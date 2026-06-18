@@ -1,0 +1,86 @@
+export const metadata = {
+  title: "Démarrage rapide",
+  description:
+    "Compilez le binaire Kapkan, lancez-le en dry-run avec la configuration de développement et observez votre première détection.",
+};
+
+# Démarrage rapide
+
+Ce guide vous accompagne d'un checkout neuf jusqu'à une instance Kapkan en cours d'exécution, en
+dry-run, qui détecte les attaques visant un préfixe de test. Rien ici ne peut annoncer une route —
+le mode dry-run est activé par défaut.
+
+<Callout type="info" title="Prérequis">
+Go 1.22 ou une version plus récente. Pour observer des détections en conditions réelles, vous avez
+également besoin d'un routeur exportant du NetFlow / IPFIX / sFlow — mais vous pouvez valider la
+chaîne de bout en bout sans en avoir un grâce au générateur de flow intégré (voir la dernière
+section).
+</Callout>
+
+## 1. Compiler le binaire
+
+```sh
+make build
+```
+
+Cela produit un unique binaire `kapkan` statique.
+
+## 2. Lancer en dry-run
+
+Démarrez Kapkan avec la configuration de développement fournie et des journaux lisibles par un
+humain :
+
+```sh
+make run-dev
+# equivalent to:
+./kapkan -config configs/dev.yaml -log-format text
+```
+
+La configuration de développement ([`configs/dev.yaml`](/docs/configuration)) a `dry_run: true`, un
+réseau protégé de test `203.0.113.0/24`, et écoute le sFlow sur `:6343` et le
+NetFlow/IPFIX sur `:2055`.
+
+## 3. Orienter vos exporteurs vers Kapkan
+
+Configurez les exporteurs de flow de vos routeurs pour qu'ils envoient les données aux ports
+d'écoute de Kapkan :
+
+| Protocole | Port par défaut |
+| --- | --- |
+| sFlow v5 | `:6343` |
+| NetFlow v5/v9 + IPFIX | `:2055` |
+
+NetFlow et IPFIX partagent le même socket UDP. Au moins un écouteur doit être configuré.
+
+## 4. L'observer en action
+
+Kapkan expose son API REST et ses métriques sur `127.0.0.1:8080` par défaut :
+
+```sh
+# Current mode, protected networks, thresholds, active attack/ban counts
+curl -s localhost:8080/api/v1/status | jq
+
+# Active attacks plus the last 100 that ended, with samples and classification
+curl -s localhost:8080/api/v1/attacks | jq
+
+# Prometheus metrics
+curl -s localhost:8080/metrics | grep kapkan_
+```
+
+Vous pouvez aussi ouvrir le [tableau de bord](/docs/dashboard) intégré sur
+[http://localhost:8080](http://localhost:8080) dans un navigateur.
+
+## 5. Pas de routeur ? Générez des attaques synthétiques
+
+Kapkan est livré avec `pkg/flowgen`, qui construit de véritables datagrammes NetFlow / sFlow au
+format réseau — y compris des schémas d'amplification, de SYN-flood et d'UDP-flood. Il est utilisé
+tout au long de la suite de tests pour valider la détection de bout en bout sans toucher à un
+véritable routeur. Le test d'intégration dans `internal/app` rejoue un flood d'amplification NTP sur
+un socket UDP réel contre une instance en dry-run et vérifie que l'attaque et son ban virtuel (à
+expiration automatique) apparaissent dans l'API.
+
+## Étapes suivantes
+
+- [Référence de configuration](/docs/configuration) — adaptez la configuration à votre réseau.
+- [Détection et seuils](/docs/detection) — ajustez ce qui est considéré comme une attaque.
+- [Passage en production](/docs/going-live) — validez, puis désactivez le dry-run.
