@@ -15,7 +15,13 @@ cd "$ROOT/frontend" 2>/dev/null || exit 0
 
 {
   # Deployable source trees (skip editor/OS junk that never affects the build).
-  find app content components lib public -type f \
+  # content/ is omitted: it is a build-time copy of the canonical top-level docs/.
+  find app components lib public -type f \
+    ! -name '.DS_Store' ! -name 'Thumbs.db' ! -name '*.swp' ! -name '*~' ! -name '.#*' \
+    -print0 2>/dev/null
+  # Canonical user-facing docs live at the monorepo-root docs/ (../../docs from
+  # site/frontend); they render into the site, so a docs change must redeploy.
+  find ../../docs -type f \
     ! -name '.DS_Store' ! -name 'Thumbs.db' ! -name '*.swp' ! -name '*~' ! -name '.#*' \
     -print0 2>/dev/null
   # Build-affecting config files at the frontend root.

@@ -21,7 +21,8 @@
 #
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # the site/ dir
+REPO_ROOT="$(cd "$ROOT/.." && pwd)"                     # monorepo root (holds .tooling)
 API="${BEADMIN_URL:?set BEADMIN_URL}/api"
 ORIGIN="${BEADMIN_URL}"
 EMAIL="${BEADMIN_EMAIL:?set BEADMIN_EMAIL}"
@@ -104,7 +105,8 @@ echo "    GET / -> $CODE"
 [ "$CODE" = "200" ] || { echo "ERROR: site did not return 200 after deploy"; exit 1; }
 
 # Record what is now live so the auto-release Stop hook stays quiet next turn.
-if [ -n "$SRC_HASH" ] && [ -d "$ROOT/.tooling" ]; then
-  ( umask 077; printf '{"hash":"%s","released_at":"%s"}\n' "$SRC_HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ROOT/.tooling/release-state.json" )
+# The marker lives in the monorepo-root .tooling (shared with the Stop hook).
+if [ -n "$SRC_HASH" ] && [ -d "$REPO_ROOT/.tooling" ]; then
+  ( umask 077; printf '{"hash":"%s","released_at":"%s"}\n' "$SRC_HASH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$REPO_ROOT/.tooling/release-state.json" )
 fi
 echo "==> Released: https://$SITE/"
