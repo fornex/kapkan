@@ -329,7 +329,7 @@ func keysMatch(t *testing.T, what string, got map[string]any, documented map[str
 // records, counters, the metric enum and the required list are all
 // cross-checked against real marshaled payloads.
 func TestPayloadMatchesPublishedSchema(t *testing.T) {
-	raw, err := os.ReadFile("../../docs/callback-schema.json")
+	raw, err := os.ReadFile("../../../docs/callback-schema.json")
 	if err != nil {
 		t.Fatalf("read schema: %v", err)
 	}
