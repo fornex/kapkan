@@ -11,3 +11,7 @@ files.zip
 # console/ is the canonical operator-UI source; the build copies it here so the
 # engine binary can go:embed it.
 engine/internal/api/static/
+# engine binary (built into engine/ by make build)
+/engine/kapkan
+
+.tooling/.release.lock
