@@ -1,6 +1,0 @@
-{
-  "product_repo": "~/Projects/kapkan",
-  "synced_commit": "8272b6c",
-  "synced_at": "2026-06-15",
-  "note": "Commit of the Kapkan product the docs site was last synced to. The docs under frontend/content/docs/<lang> reflect the product at this commit. When the product moves ahead, the SessionStart hook (.tooling/hooks/docs-sync-check.sh) reminds you; run /sync-docs to update all languages and then advance synced_commit to the new product HEAD. Synced through M20 (multi-tenancy): docs cover ClickHouse storage, BGP FlowSpec, escalation ladders, per-hostgroup BGP attributes, traffic diversion/scrubbing, viewer/operator API token roles, the FastNetMon-compatible exec callback, and per-tenant API scoping (new multi-tenancy page) in all five languages."
-}
