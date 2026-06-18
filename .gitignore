@@ -13,5 +13,3 @@ files.zip
 engine/internal/api/static/
 # engine binary (built into engine/ by make build)
 /engine/kapkan
-
-.tooling/.release.lock
