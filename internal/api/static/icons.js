@@ -6,6 +6,21 @@
   var P = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" class="ico" aria-hidden="true">';
   var F = '<svg viewBox="0 0 24 24" fill="currentColor" class="ico" aria-hidden="true">';
   var ICONS = {
+    /* Brand tile mark — escalation-ramp motif. Intentionally multi-color
+       (not currentColor); uses fill/stroke presentation attributes only, so
+       it stays CSP style-src safe like the rest of this set. */
+    brandmark:    '<svg viewBox="0 0 64 64" class="ico" aria-hidden="true">' +
+      '<rect x="1" y="1" width="62" height="62" rx="15.4" fill="#141a21" stroke="#2a323d" stroke-width="1.5"/>' +
+      '<rect x="40.32" y="15.36" width="6.82" height="6.82" rx="1.08" fill="#9cccff"/>' +
+      '<rect x="32" y="23.68" width="6.82" height="6.82" rx="1.08" fill="#4ea1ff"/>' +
+      '<rect x="40.32" y="23.68" width="6.82" height="6.82" rx="1.08" fill="#9cccff"/>' +
+      '<rect x="23.68" y="32" width="6.82" height="6.82" rx="1.08" fill="#3f8fe0"/>' +
+      '<rect x="32" y="32" width="6.82" height="6.82" rx="1.08" fill="#4ea1ff"/>' +
+      '<rect x="40.32" y="32" width="6.82" height="6.82" rx="1.08" fill="#9cccff"/>' +
+      '<rect x="15.36" y="40.32" width="6.82" height="6.82" rx="1.08" fill="#2f6dab"/>' +
+      '<rect x="23.68" y="40.32" width="6.82" height="6.82" rx="1.08" fill="#3f8fe0"/>' +
+      '<rect x="32" y="40.32" width="6.82" height="6.82" rx="1.08" fill="#4ea1ff"/>' +
+      '<rect x="40.32" y="40.32" width="6.82" height="6.82" rx="1.08" fill="#9cccff"/></svg>',
     shield:       P + '<path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg>',
     "shield-check": P + '<path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg>',
     "shield-alert": P + '<path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M12 8v4"/><circle cx="12" cy="15.5" r=".6" fill="currentColor"/></svg>',

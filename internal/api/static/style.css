@@ -171,7 +171,8 @@ button { font-family: inherit; }
   font-size: var(--t-lg); font-weight: 700; letter-spacing: -0.02em;
   color: var(--text-strong); white-space: nowrap;
 }
-.brand__name b { color: var(--accent); font-weight: 700; }
+/* wordmark tail "kan" — brand light accent (#9cccff), the lightest ramp packet */
+.brand__name b { color: #9cccff; font-weight: 700; }
 .is-collapsed .brand__name { display: none; }
 
 .nav { padding: var(--s-3) var(--s-3); display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; }

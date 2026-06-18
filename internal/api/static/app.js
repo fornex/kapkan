@@ -65,7 +65,7 @@
 
   /* ---------- shell (built once / on locale change) ---------- */
   function buildShell() {
-    K.clear(document.getElementById("brandMark")).appendChild(w.icon("shield"));
+    K.clear(document.getElementById("brandMark")).appendChild(w.icon("brandmark"));
 
     /* nav */
     var nav = K.clear(document.getElementById("nav"));
