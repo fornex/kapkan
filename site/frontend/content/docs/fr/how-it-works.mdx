@@ -1,0 +1,190 @@
+export const metadata = {
+  title: "Fonctionnement",
+  description:
+    "L'architecture de Kapkan : le pipeline ingestion → moteur → mitigation/notification/api dans un unique binaire Go.",
+};
+
+# Fonctionnement
+
+Kapkan est un unique binaire Go lié statiquement, doté d'une architecture interne modulaire.
+Il n'y a aucun sidecar, aucune base de données ni service web séparé à exécuter : l'ingestion
+des flows, le moteur de détection, la mitigation BGP, l'API REST, le tableau de bord et les
+notificateurs sont autant de packages compilés dans un seul processus. Vous le pointez vers
+une configuration YAML, vous pointez les exporteurs de vos routeurs vers lui, et il tourne.
+
+Tout ce que vous observez — attaques, principaux émetteurs (top talkers), baselines apprises,
+bannissements — réside en mémoire de processus et est servi directement depuis là. Aucun
+composant externe n'est requis pour l'exécuter ; les intégrations optionnelles (un serveur
+ClickHouse pour l'historique, un relais SMTP pour les e-mails) sont les seules dépendances, et
+Kapkan fonctionne entièrement en mémoire sans elles.
+
+## Le pipeline
+
+Le binaire est organisé en un unique pipeline unidirectionnel. Chaque étape transmet des
+données normalisées à la suivante, et le moteur diffuse ses résultats vers les trois étapes
+consommatrices :
+
+1. **Ingestion** — des écouteurs UDP décodent les datagrammes sFlow v5, NetFlow v5/v9 et IPFIX
+   (via la bibliothèque [goflow2](https://github.com/netsampler/goflow2), en mode bibliothèque)
+   vers une unique représentation `Flow` normalisée. Le taux d'échantillonnage est lu dans le
+   paquet lorsque l'exporteur le signale, sinon dans `sampling.default_rate`.
+2. **Moteur (hot path)** — chaque flow est agrégé dans des compteurs par hôte répartis en
+   shards sur une fenêtre glissante, corrigé de l'échantillonnage pour exprimer le trafic réel,
+   puis évalué par rapport aux seuils actifs (globaux, par protocole, par hostgroup, et
+   baselines apprises). C'est l'étape critique pour les performances ; voir
+   [Performances](#performances).
+3. **Mitigation / notification / api** — lorsqu'un seuil est franchi, le moteur émet un
+   événement d'attaque. L'étape de mitigation annonce ou retire des routes RTBH via le
+   locuteur BGP embarqué, l'étape de notification diffuse l'événement vers vos canaux, et
+   l'étape API expose l'état en direct au tableau de bord et aux appelants.
+
+Le flux de données, en une ligne :
+
+```text
+ingest → engine (hot path) → [mitigate, notify, api]
+```
+
+<Callout type="info" title="Une seule direction">
+Les flows avancent à travers le pipeline ; les étapes consommatrices ne réinjectent jamais
+rien dans le hot path. Le moteur est la seule étape qui touche à l'état par flow, ce qui
+permet de garder le hot path sans allocation et avec un minimum de verrous.
+</Callout>
+
+## Composants
+
+En interne, Kapkan suit la disposition de projet Go standard. Chaque package est responsable
+d'une étape du pipeline :
+
+| Package | Responsabilité |
+| --- | --- |
+| `cmd/kapkan/` | main, analyse des flags, gestion des signaux |
+| `internal/app/` | câblage de tous les composants ; test de bout en bout |
+| `internal/config/` | chargement YAML, validation, rechargement à chaud SIGHUP |
+| `internal/ingest/` | ingestion goflow2 en mode bibliothèque vers un `Flow` normalisé |
+| `internal/engine/` | compteurs par hôte répartis en shards, fenêtre glissante, évaluation des seuils |
+| `internal/mitigate/` | GoBGP embarqué : annonce/retrait RTBH, TTL, plafonds, dry-run |
+| `internal/notify/` | notifications Telegram, Slack, e-mail, webhook et exec-hook |
+| `internal/api/` | API REST + métriques Prometheus |
+| `pkg/flowgen/` | générateur synthétique NetFlow/sFlow pour les tests et la charge |
+
+La même disposition sous forme d'arborescence :
+
+```text
+cmd/kapkan/        main, flag parsing, signal handling
+internal/app/      wiring of all components; end-to-end test
+internal/config/   YAML load, validation, SIGHUP hot-reload
+internal/ingest/   goflow2 library-mode ingestion -> normalized Flow
+internal/engine/   sharded per-host counters, sliding window, threshold eval
+internal/mitigate/ embedded GoBGP: RTBH announce/withdraw, TTL, caps, dry-run
+internal/notify/   Telegram + webhook notifications
+internal/api/      REST API + Prometheus metrics
+pkg/flowgen/       synthetic NetFlow/sFlow generator for tests and load
+```
+
+Les principales bibliothèques tierces sont [goflow2](https://github.com/netsampler/goflow2)
+pour le décodage des flows et [GoBGP](https://github.com/osrg/gobgp) pour le locuteur BGP —
+toutes deux utilisées en mode bibliothèque, de sorte qu'il n'y a ni collecteur externe ni
+démon de routage à déployer aux côtés de Kapkan. Le HTTP et la journalisation structurée
+utilisent la bibliothèque standard de Go.
+
+## Flux de données
+
+```text
+ingest → engine (hot path) → [mitigate, notify, api]
+```
+
+Chaque saut, dans l'ordre :
+
+- **Exporteur de routeur → ingestion.** Vos routeurs envoient des enregistrements de flows
+  échantillonnés via UDP vers les ports d'écoute configurés (`listen.sflow`,
+  `listen.netflow`). Le package d'ingestion décode le format en transit et normalise chaque
+  enregistrement — adresses, ports, protocole, compteurs d'octets/de paquets, taux
+  d'échantillonnage — vers un unique type `Flow` interne, quel que soit le protocole qui l'a
+  produit.
+- **Ingestion → moteur.** Les flows normalisés entrent dans le hot path. Le moteur attribue
+  chaque flow à un hôte de destination au sein de `networks`, multiplie ses compteurs par le
+  taux d'échantillonnage afin que les débits soient exprimés en trafic réel (non
+  échantillonné), et met à jour les compteurs à fenêtre glissante de cet hôte. Les
+  destinations hors de `networks` sont comptabilisées dans les métriques mais ne déclenchent
+  jamais d'action.
+- **Moteur → mitigation.** Lorsqu'un hôte franchit un seuil, le moteur lève un événement
+  d'attaque. L'étape de mitigation décide s'il faut annoncer une route RTBH — en respectant
+  le dry-run, la liste blanche, la politique `ban` du hostgroup et le plafond de
+  bannissements — et planifie son retrait basé sur le TTL.
+- **Moteur → notification.** Le même événement est délivré à chaque canal configuré (Telegram,
+  Slack, e-mail, webhook, exec hook) avec la classification de l'attaque et un échantillon de
+  flows joints.
+- **Moteur → api.** L'état en direct — attaques actives et récentes, hôtes suivis,
+  bannissements — est lu dans la mémoire du moteur par l'API REST et le tableau de bord
+  embarqué.
+
+Comme les flows récents sont mis en tampon en continu (`samples.*`), dès qu'un seuil est
+franchi les sources, ports et protocoles dominants de l'attaque sont déjà joints à
+l'événement — il n'y a aucun délai de capture après la détection.
+
+## Performances
+
+Le hot path correspond au traitement par flow dans `internal/engine`, et il est conçu pour
+rester rapide à des débits de flows à l'échelle d'une attaque :
+
+- **Compteurs par hôte répartis en shards.** L'état des hôtes est réparti sur des shards
+  indexés par un hachage de l'IP (256 shards), de sorte que les flows concurrents entrent
+  rarement en contention sur le même verrou.
+- **Fenêtre glissante.** Chaque hôte conserve une vue fenêtrée de son trafic récent, de sorte
+  que les seuils sont évalués par rapport à un débit glissant plutôt qu'à des pics
+  instantanés.
+- **Hot path sans allocation.** Les tampons sont préalloués et les compteurs sont atomiques ;
+  le chemin par flow évite les allocations sur le tas afin que le ramasse-miettes reste à
+  l'écart.
+
+Deux chiffres décrivent l'objectif, à des échelles différentes — présentez-les pour ce qu'ils
+sont :
+
+- Le README indique que le moteur soutient **≥20M flows/sec/cœur** sur le hot path — le débit
+  par cœur de l'étape d'agrégation en mémoire prise isolément.
+- L'objectif d'ingénierie dans `engineering-doc` est de **≥200k flows/sec sur 8 cœurs** pour le
+  traitement par flow de bout en bout — la barre qu'une modification du hot path doit franchir
+  dans les benchmarks `make bench` avant d'être considérée comme terminée.
+
+<Callout type="info" title="Mesurez avant de vous y fier">
+Le moteur est livré avec des benchmarks `go test -bench` (`make bench`). La règle du projet est
+de les exécuter avant de prétendre qu'une modification du hot path est terminée, afin que les
+chiffres ci-dessus restent honnêtes d'une version à l'autre.
+</Callout>
+
+## Configuration et rechargement
+
+Kapkan se configure par un unique fichier YAML, transmis avec `-config`. Il n'y a aucune
+configuration en couches ou fusionnée avec l'environnement à raisonner — ce qui se trouve dans
+le fichier (plus les quelques secrets lus depuis des variables d'environnement nommées)
+constitue l'état d'exécution. Le conserver dans git vous donne un enregistrement diffable et
+relisable de chaque seuil et de chaque peer.
+
+La configuration est **rechargeable à chaud** sans redémarrer le démon. Déclenchez un
+rechargement de deux façons :
+
+- Envoyez `SIGHUP` au processus (par exemple `sudo systemctl reload kapkan`).
+- Appelez `POST /api/v1/config/reload` sur l'API.
+
+Les deux relisent et revalident le fichier sur place. Les seuils de détection, les hostgroups,
+les baselines, les paramètres de notification et le commutateur `dry_run` prennent tous effet
+au rechargement. Une poignée de paramètres structurels — notamment le dimensionnement du
+tampon de trafic sous `samples.*` — nécessitent un redémarrage complet ; voir la
+[Référence de configuration](/docs/configuration) pour savoir quelles clés se rechargent et
+lesquelles non.
+
+<Callout type="warning" title="Les rechargements sont validés">
+Un rechargement revalide l'intégralité du fichier. Si la nouvelle configuration est invalide,
+le rechargement est rejeté et la précédente configuration valide continue de s'exécuter — une
+mauvaise modification ne mettra pas le démon à terre, mais vérifiez les journaux pour confirmer
+que votre changement a bien été appliqué.
+</Callout>
+
+## Voir aussi
+
+- [Introduction](/docs/introduction) — ce qu'est Kapkan et à qui il s'adresse.
+- [Démarrage rapide](/docs/quickstart) — compilez le binaire et observez votre première détection.
+- [Détection et seuils](/docs/detection) — comment le moteur décide de ce qui constitue une attaque.
+- [Mitigation](/docs/mitigation) — comment les annonces RTBH sont émises et retirées.
+- [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.
+- [Métriques](/docs/metrics) — les séries Prometheus `kapkan_`.

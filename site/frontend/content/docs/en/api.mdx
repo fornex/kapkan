@@ -1,0 +1,342 @@
+export const metadata = {
+  title: "REST API",
+  description:
+    "The Kapkan REST API: status, attacks, hosts, bans, manual ban/unban and config reload, with response shapes.",
+};
+
+# REST API
+
+Kapkan exposes a small JSON REST API for observing detection and driving manual mitigation.
+It is served on the address in `api.listen`, which defaults to `127.0.0.1:8080`. The same
+listener also serves the embedded [dashboard](/docs/dashboard) and the Prometheus
+[`/metrics`](/docs/metrics) endpoint.
+
+The API is read-mostly: status, active and recent attacks, the tracked-host snapshot, and
+the ban table are all `GET`s. Three `POST` endpoints mutate state — manual ban, manual
+unban, and config reload.
+
+<Callout type="warning" title="Authenticate before exposing it">
+The default `api.listen` binds to `127.0.0.1`, so the API is safe unauthenticated only on
+localhost. Before binding beyond loopback, set a bearer token. See [Authentication](/docs/authentication).
+</Callout>
+
+All `/api/v1` routes pass through the token check when auth is configured; once configured,
+every request must carry `Authorization: Bearer <token>`. Tokens carry a **role**: the `GET`
+routes need the **viewer** role, and the mutating routes (`ban`, `unban`, `config/reload`)
+need the **operator** role. A read with a viewer token works; a mutation with a viewer token
+returns `403`; an unknown token returns `401`. The `POST` endpoints additionally require a
+JSON content type — send `Content-Type: application/json`. Note that `/metrics` and the
+static dashboard shell are served without a token; the data the dashboard loads is fetched
+through the guarded API. See [Authentication](/docs/authentication) for the token roles.
+
+A token may also be **tenant-scoped**: it then sees only its tenant's rows on every read
+endpoint (`/status` is rebuilt to its own hostgroups and counts), and may `ban`/`unban` only
+within its tenant — an out-of-tenant target returns a uniform `403`. See
+[Multi-tenancy](/docs/multi-tenancy).
+
+## Endpoints
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/v1/status` | Mode, uptime, protected networks, thresholds, hostgroups, active attack/ban counts. |
+| GET | `/api/v1/attacks` | Active attacks plus the last 100 that ended, with samples and classification. |
+| GET | `/api/v1/hosts` | Tracked-host snapshot: per-direction rates, learned baselines, attack state. |
+| GET | `/api/v1/bans` | All bans, active and historical. |
+| POST | `/api/v1/ban` | Manually ban an address. |
+| POST | `/api/v1/unban` | Manually withdraw a ban. |
+| POST | `/api/v1/config/reload` | Re-read the config file (same as `SIGHUP`). |
+| GET | `/metrics` | Prometheus metrics. |
+
+All responses are JSON. Errors return an object of the form `{"error": "..."}` with an
+appropriate HTTP status.
+
+### GET /api/v1/status
+
+Returns the current operating mode and a summary of what Kapkan is protecting.
+
+```json
+{
+  "dry_run": true,
+  "uptime_seconds": 8123,
+  "networks": ["203.0.113.0/24", "198.51.100.0/24"],
+  "active_attacks": 1,
+  "active_bans": 1,
+  "thresholds": {
+    "pps": 80000,
+    "mbps": 1000,
+    "flows_per_sec": 20000
+  },
+  "hostgroups": [
+    { "name": "web", "calculation": "per_host", "mitigation": "blackhole", "ban": true }
+  ]
+}
+```
+
+`dry_run` reports the global mode: when `true`, no blackhole is announced to your routers.
+`thresholds` and `hostgroups` mirror the active configuration; see
+[Detection](/docs/detection) and [Hostgroups](/docs/hostgroups) for their full shape.
+
+### GET /api/v1/attacks
+
+Returns currently active attacks plus the last 100 that ended (newest first). Both arrays
+hold `Attack` objects.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `scope` | string | `host` or `group`. Group-scoped attacks carry no `target`. |
+| `target` | string | The attacked address (host scope). |
+| `group` | string | Hostgroup name (group scope, or the host's group). |
+| `tenant` | string | The owning group's tenant, when one is labeled (see [Multi-tenancy](/docs/multi-tenancy)). |
+| `direction` | string | `incoming` or `outgoing`. |
+| `metric` | string | The metric that tripped, e.g. `pps`, `mbps`, `tcp_syn_pps`. |
+| `rate` | number | The observed rate at detection, in the metric's unit. |
+| `threshold` | number | The threshold that was crossed. |
+| `rates` | object | Full per-protocol rate breakdown (see below). |
+| `active` | bool | `true` while ongoing. |
+| `ban_state` | string | `active`, `withdrawn`, or `rejected`. Omitted when no ban. |
+| `method` | string | Mitigation method: `blackhole`, `flowspec`, or `divert`. Omitted when no ban. |
+| `route` | string | The route string (`blackhole …` / `divert …`), or a `flowspec: ...` summary, when a ban exists. |
+| `flowspec` | array | The generated [FlowSpec](/docs/flowspec) rules, when `method` is `flowspec`. |
+| `dry_run` | bool | Whether the ban was virtual. |
+| `started_at` | string | RFC 3339 timestamp. |
+| `ended_at` | string | RFC 3339 timestamp; omitted while active. |
+| `sample` | object | Flow sample captured at detection; omitted when sampling is off. |
+| `classification` | object | Inferred attack vector; omitted when unclassified. |
+
+```json
+{
+  "active": [
+    {
+      "scope": "host",
+      "target": "203.0.113.66",
+      "group": "web",
+      "direction": "incoming",
+      "metric": "pps",
+      "rate": 412000,
+      "threshold": 80000,
+      "rates": {
+        "pps": 412000,
+        "mbps": 3100,
+        "flows_per_sec": 9800,
+        "udp_pps": 405000,
+        "udp_mbps": 3080
+      },
+      "active": true,
+      "ban_state": "active",
+      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "dry_run": false,
+      "started_at": "2026-06-13T09:41:07Z",
+      "sample": {
+        "top_sources": [
+          { "key": "198.51.100.23", "packets": 1240000, "bytes": 1612000000 }
+        ],
+        "top_src_ports": [
+          { "key": "123", "packets": 1180000, "bytes": 1534000000 }
+        ],
+        "top_dst_ports": [
+          { "key": "443", "packets": 1240000, "bytes": 1612000000 }
+        ],
+        "protocols": [
+          { "key": "udp", "packets": 1240000, "bytes": 1612000000 }
+        ],
+        "total_packets": 1240000
+      },
+      "classification": {
+        "type": "ntp_amplification",
+        "confidence": 0.95,
+        "src_port": 123
+      }
+    }
+  ],
+  "recent": []
+}
+```
+
+The `rates` object carries the base trio (`pps`, `mbps`, `flows_per_sec`) plus the
+per-protocol fields that are nonzero: `tcp_pps`, `tcp_mbps`, `udp_pps`, `udp_mbps`,
+`icmp_pps`, `icmp_mbps`, `tcp_syn_pps`, `tcp_syn_mbps`, `frag_pps`, `frag_mbps`. The
+`sample` object summarizes the buffered flows behind the detection — `top_sources`,
+`top_src_ports`, `top_dst_ports`, `protocols` (each a list of `{key, packets, bytes}`
+counters), an optional raw `flows` list, and `total_packets`. The `classification`
+`type` is one of the vectors documented in [Detection](/docs/detection); `confidence`
+is the share (`0..1`) of attack traffic matching the winning signature, and `src_port`
+is the reflected service port for amplification vectors.
+
+### GET /api/v1/hosts
+
+Returns a snapshot of every tracked host — the top-talkers data. Each entry is a `HostStat`.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `target` | string | The host address. |
+| `group` | string | The host's hostgroup name. |
+| `rates` | object | Current incoming windowed rates. |
+| `rates_out` | object | Outgoing rates; only nonzero when outgoing detection is on. |
+| `in_attack` | bool | Whether the host is in any active attack. |
+| `metric` | string | The metric of the active attack; omitted when not in attack. |
+| `direction` | string | The active attack's direction; omitted when not in attack. |
+| `baseline` | object | Learned incoming baseline; present when baselines are configured. |
+| `baseline_out` | object | Learned outgoing baseline; present when baselines are configured. |
+
+```json
+{
+  "hosts": [
+    {
+      "target": "203.0.113.66",
+      "group": "web",
+      "rates": {
+        "pps": 412000,
+        "mbps": 3100,
+        "flows_per_sec": 9800,
+        "udp_pps": 405000
+      },
+      "rates_out": {
+        "pps": 120,
+        "mbps": 2
+      },
+      "in_attack": true,
+      "metric": "pps",
+      "direction": "incoming",
+      "baseline": {
+        "pps": 950,
+        "mbps": 7,
+        "flows_per_sec": 60
+      },
+      "baseline_out": {
+        "pps": 110,
+        "mbps": 2,
+        "flows_per_sec": 14
+      }
+    }
+  ]
+}
+```
+
+The `baseline` and `baseline_out` objects carry the learned-normal base trio (`pps`,
+`mbps`, `flows_per_sec`) and appear only while EWMA baselines are configured for the host's
+group. See [Baselines](/docs/baselines).
+
+### GET /api/v1/bans
+
+Returns the full ban table — active and historical. Each entry is a `Ban`.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `target` | string | The banned address. |
+| `prefix` | string | The blackhole prefix (`/32` or `/128`). |
+| `metric` | string | The metric that triggered the ban; omitted for manual bans. |
+| `rate` | number | Observed rate at ban time; omitted when zero. |
+| `threshold` | number | Threshold crossed; omitted when zero. |
+| `next_hop` | string | The discard next-hop. |
+| `community` | string | The RTBH community. |
+| `local_pref` | number | The `LOCAL_PREF` attached to the route; omitted when zero. |
+| `route` | string | The full route string, or a `flowspec: ...` summary for FlowSpec bans. |
+| `state` | string | `active`, `withdrawn`, or `rejected`. |
+| `dry_run` | bool | Whether the ban was virtual. |
+| `manual` | bool | `true` for operator-requested bans. |
+| `started_at` | string | RFC 3339 timestamp. |
+| `expires_at` | string | TTL expiry; bans are never permanent. |
+| `withdrawn_at` | string | When the route was withdrawn; omitted while active. |
+| `reason` | string | Why a ban was rejected or withdrawn; omitted otherwise. |
+| `method` | string | Mitigation method: `blackhole`, `flowspec`, or `divert`. |
+| `flowspec` | array | The generated [FlowSpec](/docs/flowspec) rules, when `method` is `flowspec`. |
+| `escalation` | array | The configured [escalation ladder](/docs/escalation), when one is set. |
+| `escalation_step` | number | Index of the ladder's current rung. |
+
+```json
+{
+  "bans": [
+    {
+      "target": "203.0.113.66",
+      "prefix": "203.0.113.66/32",
+      "metric": "pps",
+      "rate": 412000,
+      "threshold": 80000,
+      "next_hop": "192.0.2.1",
+      "community": "65000:666",
+      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "state": "active",
+      "dry_run": false,
+      "manual": false,
+      "started_at": "2026-06-13T09:41:07Z",
+      "expires_at": "2026-06-13T10:41:07Z"
+    }
+  ]
+}
+```
+
+See [Mitigation](/docs/mitigation) for how TTL, hysteresis and the ban cap shape this
+lifecycle.
+
+### POST /api/v1/ban
+
+Manually blackholes an address. The body is a single IP:
+
+```http
+POST /api/v1/ban
+Content-Type: application/json
+
+{"ip": "203.0.113.66"}
+```
+
+The response is the resulting `Ban` object. A manual ban honors every safety rule that an
+automatic ban does:
+
+- A **whitelisted** target is refused with HTTP `409 Conflict` and `reason: "whitelisted"`; it is never announced.
+- A target **outside the configured `networks`** is refused with HTTP `409` and `reason: "outside configured networks"`.
+- A request that would exceed **`max_active_bans`** is refused with HTTP `409` and `reason: "max_active_bans reached"`.
+
+In each `409` case the body is still a `Ban` object with `state: "rejected"` and the
+`reason` field set. An invalid or unparseable IP returns HTTP `400`.
+
+<Callout type="warning" title="Dry-run still applies">
+A manual ban respects the global mode. While `dry_run` is `true`, the ban is recorded and
+returned with `dry_run: true` but no route is announced. See the [Safety model](/docs/safety).
+</Callout>
+
+### POST /api/v1/unban
+
+Withdraws an active ban for the given address. The body is the same `{"ip": "..."}` shape
+and the same JSON content type is required:
+
+```http
+POST /api/v1/unban
+Content-Type: application/json
+
+{"ip": "203.0.113.66"}
+```
+
+On success it returns the withdrawn `Ban`. If there is no active ban for the address, it
+returns HTTP `404`.
+
+### POST /api/v1/config/reload
+
+Re-reads the config file from disk and applies it — the same effect as sending `SIGHUP`.
+The body is empty; the JSON content type is still required.
+
+```json
+{
+  "reloaded": true,
+  "dry_run": false,
+  "thresholds": {
+    "pps": 80000,
+    "mbps": 1000,
+    "flows_per_sec": 20000
+  }
+}
+```
+
+If the new config fails to parse or validate, the running config is left untouched and the
+endpoint returns HTTP `400` with the error. See [Configuration](/docs/configuration).
+
+### GET /metrics
+
+Serves Prometheus metrics in the standard text exposition format. This endpoint is not
+under `/api/v1` and is served without the bearer token so a scraper can reach it. See
+[Metrics](/docs/metrics) for the full metric list.
+
+## Related
+
+- [Authentication](/docs/authentication) — set a bearer token before exposing the listener.
+- [Dashboard](/docs/dashboard) — the embedded web UI served on the same address.
+- [Metrics](/docs/metrics) — the Prometheus `/metrics` endpoint.

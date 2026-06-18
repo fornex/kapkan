@@ -1,0 +1,124 @@
+export const metadata = {
+  title: "Autenticación",
+  description:
+    "Protege la API y el panel con un token de portador (bearer) antes de exponer el listener más allá de localhost.",
+};
+
+# Autenticación
+
+De forma predeterminada, la API y el panel de Kapkan **no requieren autenticación**. Esto solo es
+seguro porque el valor predeterminado de `api.listen` se enlaza a `127.0.0.1`: el listener solo es
+accesible desde el propio host, por lo que no se necesita ningún token para leer el estado, listar
+ataques o emitir baneos manuales. En el momento en que enlazas el listener a una dirección enrutable,
+esa protección desaparece.
+
+<Callout type="danger" title="Configura un token antes de exponer el listener">
+Si cambias `api.listen` a cualquier valor distinto de localhost —por ejemplo `0.0.0.0:8080`
+o una interfaz específica—, configura primero un token. Un listener sin autenticación en una
+dirección enrutable permite que cualquiera alcance la [API](/docs/api), incluidos los endpoints
+de baneo y desbaneo manual.
+</Callout>
+
+## Configurar un token
+
+La forma abreviada es un único token de operator. Añade `token_env` al bloque `api`: nombra la
+variable de entorno que contiene el token; el secreto en sí se lee del entorno del proceso en cada
+solicitud, nunca del archivo de configuración:
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  token_env: "KAPKAN_API_TOKEN"   # token read from this env var, never the file
+```
+
+Luego proporciona el valor fuera de banda, por ejemplo a través del entorno de tu gestor de servicios
+o de un archivo de secretos:
+
+```sh
+export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
+./kapkan -config configs/prod.yaml
+```
+
+Mantener el token en una variable de entorno en lugar de en el YAML significa que la configuración
+sigue siendo segura para confirmarla en git y compararla junto con el resto de tu [configuración](/docs/configuration).
+
+## Roles
+
+Para el control de acceso basado en roles usa `tokens` en lugar de `token_env`: una lista donde cada
+entrada nombra la variable de entorno que contiene su secreto y un rol:
+
+```yaml
+api:
+  listen: "0.0.0.0:8080"
+  tokens:
+    - { name: dashboard,  token_env: "KAPKAN_API_RO", role: viewer }
+    - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
+```
+
+| Rol | Qué puede hacer |
+| --- | --- |
+| `viewer` | Solo lectura: estado, ataques, hosts, baneos, métricas. |
+| `operator` | Todo lo que puede hacer un viewer, además de baneo/desbaneo manual y recarga de configuración. |
+
+`token_env` y `tokens` son **mutuamente excluyentes**: `token_env` es exactamente un único token de
+operator. Una solicitud se coteja con cada token configurado (en tiempo constante); se aplica el rol
+coincidente más alto. Una lectura con un token de viewer funciona; una mutación con un token de viewer
+se rechaza con `403 Forbidden`; una solicitud sin un token válido es `401 Unauthorized`. Una variable
+de entorno vacía o sin definir nunca coincide, de modo que un secreto mal configurado falla de forma
+cerrada.
+
+Los tokens y los roles se leen del entorno en cada solicitud, así que rotar un secreto o cambiar el
+conjunto de tokens surte efecto en la siguiente [recarga de configuración](/docs/api), sin reinicio.
+
+Un token también puede llevar un `tenant` opcional, acotándolo a los datos de un único cliente. Esa es
+la función de [Multi-tenencia](/docs/multi-tenancy), superpuesta a los roles descritos aquí.
+
+## Qué protege
+
+Con un token configurado, cada solicitud `/api/v1` debe incluirlo en una cabecera `Authorization`
+usando el esquema de portador (bearer):
+
+```http
+GET /api/v1/status HTTP/1.1
+Host: kapkan.internal:8080
+Authorization: Bearer <token>
+```
+
+El token proporcionado se compara con el configurado en **tiempo constante**, de modo que la
+comparación en sí no filtra el secreto a través de la temporización.
+
+Qué permanece abierto y qué pasa a estar protegido:
+
+| Ruta | Con autenticación configurada |
+| --- | --- |
+| `GET /api/v1/*` | Requiere un token de **viewer** (u operator) |
+| `POST /api/v1/*` | Requiere un token de **operator** **y** un tipo de contenido JSON |
+| `GET /metrics` | Abierto: el scrape de Prometheus sigue sin autenticación |
+| Shell estático de la UI (`/`) | Abierto, pero los datos que hay detrás no lo están |
+
+El shell estático de la UI del panel sigue siendo accesible para que un navegador pueda cargarlo, pero
+no tiene datos propios: consulta `/api/v1`, por lo que solicita el token y lo guarda en
+`sessionStorage`. `/metrics` igualmente permanece abierto para tu scraper de Prometheus. Consulta la
+página del [panel](/docs/dashboard) para ver cómo la UI gestiona la solicitud del token.
+
+## CSRF
+
+Los endpoints POST requieren `Content-Type: application/json` además del token. Un navegador que
+realiza una solicitud entre sitios no puede establecer una cabecera `Authorization` personalizada sin
+un preflight de CORS, y un simple envío de formulario no puede mandar el tipo de contenido JSON. Exigir
+ambos —el token en una cabecera de la solicitud y el tipo de contenido JSON— bloquea la falsificación
+de solicitudes entre sitios (CSRF) contra los endpoints de baneo manual, desbaneo y recarga de
+configuración.
+
+<Callout type="info" title="Los roles y los tenants son ejes distintos">
+Un rol acota lo que un token puede *hacer* (leer frente a mutar). El `tenant` opcional de un token
+acota qué datos puede *ver y tocar*. Se componen: un viewer puede no estar acotado (todos los tenants)
+o acotado a uno solo. Consulta [Multi-tenencia](/docs/multi-tenancy).
+</Callout>
+
+## Relacionado
+
+- [Multi-tenencia](/docs/multi-tenancy): acota un token a los datos de un único cliente.
+- [API REST](/docs/api): los endpoints que protege el token.
+- [Panel](/docs/dashboard): cómo la UI integrada solicita y almacena el token.
+- [Despliegue](/docs/deployment): enlazar el listener y proporcionar el token en producción.

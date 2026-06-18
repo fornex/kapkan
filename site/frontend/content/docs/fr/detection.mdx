@@ -1,0 +1,232 @@
+export const metadata = {
+  title: "Détection et seuils",
+  description:
+    "Comment Kapkan détecte les attaques volumétriques : seuils par destination sur fenêtre glissante, limites par protocole, correction de l'échantillonnage et détection des attaques sortantes.",
+};
+
+# Détection et seuils
+
+Kapkan détecte les attaques volumétriques **par hôte de destination** sur une fenêtre temporelle glissante.
+Pour chaque adresse protégée, il tient à jour des compteurs de débit fenêtrés, et dès qu'un seuil
+configuré est franchi, il ouvre une attaque, lui attache un échantillon de flow, classe le vecteur, puis
+transmet l'événement à la mitigation, aux notifications et à l'API.
+
+Chaque débit est évalué en **unités réelles, non échantillonnées**. Les exportateurs de flow échantillonnent — ils rapportent un
+enregistrement pour N paquets — c'est pourquoi Kapkan multiplie chaque débit observé par le taux d'échantillonnage de l'exportateur
+avant de le comparer à un seuil. Vous configurez les seuils selon le trafic que l'attaquant
+envoie réellement, et non selon des enregistrements échantillonnés.
+
+<Callout type="info" title="La détection est en lecture seule">
+Détecter une attaque n'annonce jamais une route à elle seule. La détection produit un enregistrement d'attaque
+et un événement ; la mitigation est une étape distincte, en dry-run (simulation) par défaut. Voir [Mitigation](/docs/mitigation)
+et le [modèle de sûreté](/docs/safety).
+</Callout>
+
+## Seuils de base
+
+Le bloc `thresholds` de premier niveau définit les limites de référence appliquées à **chaque hôte de destination**
+au sein de vos `networks` protégés. Trois métriques de base sont toujours évaluées :
+
+| Métrique | Unité | Signification |
+| --- | --- | --- |
+| `pps` | paquets/sec | Débit total de paquets entrants vers l'hôte. |
+| `mbps` | mégabits/sec | Débit binaire total entrant vers l'hôte. |
+| `flows_per_sec` | flows/sec | Enregistrements de flow distincts/sec vers l'hôte. |
+
+```yaml
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 40000
+```
+
+Les trois seuils de base doivent tous être supérieurs à `0`. Un hôte passe « sous attaque » dès que
+l'un d'eux est dépassé sur la fenêtre glissante.
+
+<Callout type="info" title="Surcharges par groupe">
+Ces seuils globaux constituent la valeur de repli. Vous pouvez attribuer à des préfixes spécifiques des limites plus strictes ou plus souples,
+ou évaluer le trafic cumulé d'un pool, à l'aide des [hostgroups](/docs/hostgroups). Kapkan peut aussi apprendre
+le niveau normal de chaque hôte et resserrer automatiquement le seuil effectif — voir [Baselines](/docs/baselines).
+</Callout>
+
+## Correction de l'échantillonnage
+
+La télémétrie de flow échantillonnée sous-estime le trafic par conception : un exportateur échantillonnant 1 paquet sur 1000 rapporte
+environ un enregistrement pour mille paquets. Kapkan corrige cela afin que vos seuils restent
+exprimés en trafic réel.
+
+Chaque débit est multiplié par le taux d'échantillonnage de l'exportateur :
+
+```text
+corrected_rate = observed_rate * sampling_rate
+```
+
+Le taux d'échantillonnage provient du paquet de flow lui-même lorsque l'exportateur le renseigne ; sinon Kapkan
+se rabat sur la valeur `sampling.default_rate` configurée :
+
+```yaml
+sampling:
+  default_rate: 1000   # used only when a packet carries no sampling rate; must be >= 1
+```
+
+Comme la correction intervient avant la comparaison au seuil, un seuil `pps: 80000` correspond à 80 000
+paquets réels par seconde, quelle que soit l'agressivité de l'échantillonnage de vos routeurs.
+
+<Callout type="warning" title="Définissez le bon taux par défaut">
+Si vos exportateurs n'annoncent pas leur taux d'échantillonnage, `sampling.default_rate` doit correspondre à ce qu'ils
+échantillonnent réellement. Une valeur par défaut trop basse sous-estime le trafic et retarde la détection ; une valeur trop
+élevée le surestime et déclenche trop tôt.
+</Callout>
+
+## Seuils par protocole
+
+Au-delà des totaux de base, vous pouvez définir des limites optionnelles par protocole. Elles permettent de détecter une attaque
+importante pour un protocole donné mais invisible dans l'agrégat — par exemple un SYN flood dont le débit de paquets
+est élevé mais dont le débit binaire reste sous le `mbps` global.
+
+Chaque protocole possède une variante `pps` et une variante `mbps`. Les noms de métrique sont exactement :
+
+| Protocole | métrique pps | métrique mbps | Comptabilise |
+| --- | --- | --- | --- |
+| TCP | `tcp_pps` | `tcp_mbps` | Tous les paquets TCP. |
+| UDP | `udp_pps` | `udp_mbps` | Tous les paquets UDP. |
+| ICMP | `icmp_pps` | `icmp_mbps` | Tous les paquets ICMP. |
+| TCP SYN | `tcp_syn_pps` | `tcp_syn_mbps` | Uniquement les SYN purs (drapeau SYN positionné, ACK à zéro). |
+| Fragments | `frag_pps` | `frag_mbps` | Fragments IP autres que le premier. |
+
+```yaml
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 40000
+  tcp_syn_pps: 50000
+  udp_mbps: 800
+  frag_pps: 30000
+```
+
+Quelques règles régissent leur comportement :
+
+- **Sémantique OU.** N'importe quel seuil franchi déclenche la détection. Les métriques de base et chaque
+  métrique par protocole configurée sont évaluées indépendamment ; la première à dépasser sa limite ouvre
+  l'attaque, et la métrique déclenchante est enregistrée sur l'événement.
+- **`tcp_syn` ne compte que les SYN.** Elle comptabilise les paquets dont le drapeau SYN est positionné et le drapeau ACK à zéro — les
+  paquets semi-ouverts d'un SYN flood — et non l'ensemble des paquets TCP.
+- **`frag` compte les fragments autres que le premier.** Elle comptabilise les fragments de fin des datagrammes fragmentés, la
+  signature caractéristique d'un flood par fragmentation.
+- **`0` ou absent désactive.** Une métrique par protocole omise de la configuration, ou fixée à `0`, n'est tout
+  simplement pas évaluée et ne coûte rien.
+
+## Périmètre
+
+La détection est **limitée à vos préfixes protégés**. Seules les destinations situées au sein des `networks`
+configurés font l'objet d'actions. Le trafic vers toute autre destination est tout de même comptabilisé dans les métriques
+Prometheus à des fins de visibilité, mais il ne peut jamais ouvrir une attaque ni déclencher un bannissement.
+
+```yaml
+networks:
+  - 203.0.113.0/24
+  - 2001:db8::/48
+```
+
+C'est l'une des règles de sûreté appliquées : une destination en dehors de `networks` est entièrement hors
+périmètre pour la mitigation. Les préfixes protégés ne doivent pas se chevaucher. Voir le [modèle de sûreté](/docs/safety) pour
+la liste complète des garanties.
+
+## Détection sortante
+
+Par défaut, Kapkan surveille le trafic **arrivant vers** vos hôtes protégés (`direction: incoming`). Ajoutez un
+bloc `thresholds_outgoing` — globalement ou par hostgroup — et il surveille aussi le trafic **quittant**
+ces hôtes, signalant des attaques `direction: outgoing`. C'est la signature d'une machine compromise
+à l'intérieur de votre réseau utilisée pour attaquer un tiers.
+
+```yaml
+thresholds_outgoing:
+  pps: 50000
+  udp_pps: 20000
+```
+
+`thresholds_outgoing` accepte les mêmes clés que `thresholds` ; au moins une doit être définie. Quelques détails
+importent :
+
+- **Valeurs de direction.** Les événements d'attaque portent `direction: incoming` ou `direction: outgoing`. Sortant
+  signifie que l'hôte cible est la source du flood.
+- **Route RTBH partagée.** Un hôte qui est attaqué **et** qui attaque en même temps détient deux
+  enregistrements d'attaque indépendants — un par direction — mais partage une seule route RTBH. La route n'est
+  retirée que lorsque la dernière des deux attaques se termine, de sorte que la clôture d'une direction ne lève jamais
+  prématurément le blackhole d'un hôte encore actif dans l'autre.
+- **Coût nul en l'absence du bloc.** Sans bloc `thresholds_outgoing`, le trafic sortant n'est même pas
+  comptabilisé — il n'y a aucune surcharge sur le chemin critique.
+
+<Callout type="warning" title="Le RTBH est basé sur la destination">
+Le blackholing d'un attaquant sortant rejette le trafic vers l'hôte, ce qui le met hors ligne et arrête généralement
+l'abus, mais n'arrête le flood sortant directement que là où votre bordure rejette aussi les sources des préfixes
+blackholés (par exemple avec uRPF). Définissez `ban: false` sur le hostgroup si vous voulez l'alerte
+sans la route. Voir [Mitigation](/docs/mitigation).
+</Callout>
+
+## Échantillons d'attaque
+
+Lorsqu'une attaque s'ouvre, Kapkan lui attache immédiatement un échantillon de flow — les principales sources, ports
+source, ports de destination et protocoles à l'origine du trafic. Cela est possible parce que Kapkan conserve un
+**tampon de trafic continu** : les flows récents sont mis en tampon au fur et à mesure de leur arrivée, de sorte que la fenêtre menant
+au franchissement du seuil est déjà disponible à l'instant même où la détection se déclenche. Il n'y a aucun délai de capture
+post-détection ni aucun risque de manquer le début de l'attaque.
+
+```yaml
+samples:
+  enabled: true        # default on
+  buffer_flows: 65536  # rolling buffer size
+  flows_per_attack: 20 # raw flow records kept per attack
+```
+
+Les totaux des compteurs de l'échantillon (principales sources, ports et protocoles) sont corrigés de l'échantillonnage ; les
+enregistrements de flow bruts portent les chiffres de l'exportateur avant correction ainsi que leur `sampling_rate`. Le champ `total_packets`
+est le total de paquets corrigé non tronqué, utilisé comme dénominateur pour les parts, puisque les listes top-K
+écartent les clés les plus légères. Les échantillons apparaissent sur l'événement `attack_started`, dans les notifications et dans
+l'[API](/docs/api). Toute modification du dimensionnement du tampon nécessite un redémarrage.
+
+## Classification
+
+Chaque attaque est étiquetée avec un **vecteur** déduit au moment de la détection, calculé à partir des débits par
+protocole fenêtrés et de l'échantillon de flow. La classification porte une `confidence` — la part
+(`0..1`) du trafic d'attaque correspondant à la signature gagnante — et, pour les vecteurs d'amplification, le
+`src_port` du service réfléchi.
+
+Le classificateur reconnaît ces valeurs de `type` :
+
+| Type | Vecteur |
+| --- | --- |
+| `ntp_amplification` | Réponses NTP réfléchies (`src_port` 123). |
+| `dns_amplification` | Réponses DNS réfléchies (`src_port` 53). |
+| `cldap_amplification` | Réponses CLDAP réfléchies (`src_port` 389). |
+| `memcached_amplification` | Réponses memcached réfléchies (`src_port` 11211). |
+| `ssdp_amplification` | Réponses SSDP réfléchies (`src_port` 1900). |
+| `chargen_amplification` | Réponses chargen réfléchies (`src_port` 19). |
+| `syn_flood` | Flood TCP dominé par les SYN. |
+| `fragment_flood` | Flood de fragments IP autres que le premier. |
+| `icmp_flood` | Flood dominé par l'ICMP. |
+| `udp_flood` | Flood dominé par l'UDP, sans signature d'amplification. |
+| `tcp_flood` | Flood dominé par le TCP. |
+| `mixed` | Aucun vecteur unique ne domine. |
+
+Comment un vecteur est choisi :
+
+- Une signature a besoin d'une **part dominante** — plus de la moitié du trafic fenêtré — pour l'emporter. L'amplification
+  est vérifiée en premier (la plus spécifique), puis les SYN purs, puis les fragments, puis les floods volumétriques ICMP, UDP
+  et TCP.
+- Un vecteur d'**amplification** exige en outre des paquets de la taille d'une réponse provenant du port de service réfléchi :
+  la taille moyenne des paquets issus de ce port source doit être suffisamment grande pour être interprétée comme une réponse réfléchie.
+  Des paquets de la taille d'une requête issus d'un port de service sont classés comme un simple flood.
+- Lorsqu'aucune signature n'atteint la part dominante, l'attaque est étiquetée `mixed` et `confidence` vaut `0`.
+
+<Callout type="info" title="La confiance est une part, pas une probabilité">
+`confidence` est la fraction du trafic d'attaque correspondant à la signature gagnante, dans l'intervalle
+`0..1`. Une valeur de `0` signifie que l'attaque est `mixed` — aucune signature n'a correspondu.
+</Callout>
+
+## Voir aussi
+
+- [Hostgroups](/docs/hostgroups) — seuils par préfixe, calcul total vs. par hôte, et politique par groupe.
+- [Baselines](/docs/baselines) — seuils par hôte appris qui resserrent automatiquement les limites statiques.
+- [Mitigation](/docs/mitigation) — comment une attaque détectée devient une route RTBH.
+- [API REST](/docs/api) — consultez les attaques actives et récentes avec leurs échantillons et leur classification.

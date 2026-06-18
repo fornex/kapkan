@@ -1,0 +1,107 @@
+export const metadata = {
+  title: "Multi-tenancy",
+  description:
+    "Run one kapkan instance for many customers — each tenant's API token sees and touches only its own attacks, bans and hosts.",
+};
+
+# Multi-tenancy
+
+One Kapkan instance can serve many customers (an MSP or IDC use case) and give each a token
+that sees and touches **only their own** attacks, bans and hosts. A tenant is just an optional
+label on a [hostgroup](/docs/hostgroups) — there is no new top-level object, no separate tenant
+registry, and the detection hot path is untouched.
+
+```yaml
+tenant: "house"                 # optional: label the global/fallback group
+
+hostgroups:
+  - name: custA-web
+    tenant: "customerA"         # this group belongs to customerA
+    networks: ["203.0.113.0/26"]
+  - name: custA-dns
+    tenant: "customerA"         # a tenant can span several groups
+    networks: ["203.0.113.64/26"]
+  - name: custB
+    tenant: "customerB"
+    networks: ["198.51.100.0/24"]
+  - name: shared-infra          # no tenant → visible only to admin tokens
+    networks: ["192.0.2.0/24"]
+
+api:
+  tokens:
+    - { name: admin,    token_env: KAPKAN_ADMIN, role: operator }
+    - { name: a-portal, token_env: KAPKAN_A,     role: viewer,   tenant: "customerA" }
+    - { name: b-ops,    token_env: KAPKAN_B,     role: operator, tenant: "customerB" }
+```
+
+## The model
+
+"Which tenant owns this IP" is answered by the **same** longest-prefix hostgroup lookup the
+engine and mitigator already use to attribute traffic — there is one source of truth for IP
+ownership, and the resolution never runs on the per-flow detection path. A tenant can span
+several hostgroups (a customer with separate web and DNS groups). The implicit
+global/fallback group can carry a top-level `tenant` so catch-all traffic is attributed to a
+house tenant; a hostgroup with **no** `tenant` is unlabeled and visible only to admin tokens.
+
+A tenant label is **not** a unit of mitigation policy — thresholds, BGP attributes and
+escalation stay per-hostgroup. It is purely an ownership tag used to scope the API.
+
+## Token scope
+
+An [API token](/docs/authentication) gains an optional `tenant`, building on its role:
+
+| Token | Sees | May mutate |
+| --- | --- | --- |
+| unscoped (no `tenant`) | all tenants (admin) | per its role |
+| `tenant: customerA`, `role: viewer` | only customerA | nothing |
+| `tenant: customerA`, `role: operator` | only customerA | only customerA |
+
+An unscoped token is an admin — the default, fully backward-compatible behavior. A token
+scoped to a tenant that no hostgroup uses is rejected at config load (a typo would otherwise
+silently see nothing).
+
+## Enforcement
+
+Scoping is **default-deny for scoped tokens** at a single choke point: the request's tenant is
+derived once during authentication, and one visibility predicate decides every row. A new read
+endpoint that forgets to filter would, for a scoped token, return nothing — never another
+tenant's data.
+
+- **Reads** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` return only rows whose owning
+  group carries the caller's tenant. `/status` is rebuilt per scope: a scoped token gets only
+  its own hostgroups and counts, never the global protected networks, the global thresholds, or
+  the deployment-wide fallback group — so a tenant never learns another's prefixes or BGP
+  posture.
+- **Mutations** — a scoped operator may `ban`/`unban` only within its own prefixes. A target
+  outside the tenant returns a uniform `403` whether or not a ban exists, so a tenant cannot
+  probe another's ban state. `POST /api/v1/config/reload` is **admin-only** — a reload rewrites
+  every tenant's policy and the token set itself.
+- **Ambiguity fails closed** — if one bearer secret matches tokens of different role or tenant
+  (a reused secret), the request is refused rather than resolved to the wider scope.
+
+<Callout type="info" title="/metrics and the dashboard">
+`/metrics` is not tenant-scoped — it stays an admin/operator scrape surface. The dashboard
+shell is shared (it holds no data of its own); every data call it makes is filtered by the
+token pasted into it, so a tenant's viewer token shows only that tenant's data.
+</Callout>
+
+<Callout type="warning" title="Ownership follows the current config">
+A scoped token's visibility is computed against the live config: re-tenanting a prefix (an
+admin-only reload) hands its in-flight attacks and bans to the **new** owner immediately. This
+is deliberate — control follows current ownership — but it means a mistaken reload can briefly
+move rows between tenants.
+</Callout>
+
+## Backward compatibility
+
+No tenant configured anywhere = single-tenant behavior, byte-for-byte: every group is
+unlabeled, every token is an unscoped admin, and the API returns everything as before. Tenancy
+is opt-in and you cannot get isolation on an open (token-less) API — there is no principal to
+scope.
+
+## Related
+
+- [Hostgroups](/docs/hostgroups) — the prefix groups a tenant labels.
+- [Authentication](/docs/authentication) — token roles the tenant scope builds on.
+- [REST API](/docs/api) — the endpoints that are filtered per tenant.
+- [Configuration reference](/docs/configuration)

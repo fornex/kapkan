@@ -1,0 +1,232 @@
+export const metadata = {
+  title: "Detection & thresholds",
+  description:
+    "How Kapkan detects volumetric attacks: sliding-window per-destination thresholds, per-protocol limits, sampling correction, and outgoing-attack detection.",
+};
+
+# Detection & thresholds
+
+Kapkan detects volumetric attacks **per destination host** over a sliding time window.
+For every protected address it keeps windowed rate counters, and the moment any configured
+threshold is crossed it opens an attack, attaches a flow sample, classifies the vector, and
+hands the event to mitigation, notifications and the API.
+
+Every rate is evaluated in **real, unsampled units**. Flow exporters sample — they report one
+record per N packets — so Kapkan multiplies each observed rate by the exporter's sampling rate
+before comparing it to a threshold. You configure thresholds in the traffic the attacker is
+actually sending, not in sampled records.
+
+<Callout type="info" title="Detection is read-only">
+Detecting an attack never announces a route on its own. Detection produces an attack record
+and an event; mitigation is a separate, dry-run-by-default step. See [Mitigation](/docs/mitigation)
+and the [Safety model](/docs/safety).
+</Callout>
+
+## Core thresholds
+
+The top-level `thresholds` block defines the baseline limits applied to **each destination host**
+inside your protected `networks`. Three core metrics are always evaluated:
+
+| Metric | Unit | Meaning |
+| --- | --- | --- |
+| `pps` | packets/sec | Total inbound packet rate to the host. |
+| `mbps` | megabits/sec | Total inbound bit rate to the host. |
+| `flows_per_sec` | flows/sec | Distinct flow records/sec toward the host. |
+
+```yaml
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 40000
+```
+
+All three core thresholds must be greater than `0`. A host crosses into "under attack" as soon as
+any one of them is exceeded over the sliding window.
+
+<Callout type="info" title="Per-group overrides">
+These global thresholds are the fallback. You can give specific prefixes tighter or looser limits,
+or evaluate a pool's summed traffic, with [hostgroups](/docs/hostgroups). Kapkan can also learn
+each host's normal level and tighten the effective threshold automatically — see [Baselines](/docs/baselines).
+</Callout>
+
+## Sampling correction
+
+Sampled flow telemetry undercounts traffic by design: an exporter sampling 1-in-1000 reports
+roughly one record for every thousand packets. Kapkan corrects for this so your thresholds stay
+expressed in real traffic.
+
+Every rate is multiplied by the exporter's sampling rate:
+
+```text
+corrected_rate = observed_rate * sampling_rate
+```
+
+The sampling rate comes from the flow packet itself when the exporter reports it; otherwise Kapkan
+falls back to the configured `sampling.default_rate`:
+
+```yaml
+sampling:
+  default_rate: 1000   # used only when a packet carries no sampling rate; must be >= 1
+```
+
+Because correction happens before threshold comparison, a `pps: 80000` threshold means 80,000
+real packets per second regardless of how aggressively your routers sample.
+
+<Callout type="warning" title="Set the right default rate">
+If your exporters do not advertise their sampling rate, `sampling.default_rate` must match what they
+actually sample. A default that is too low under-counts traffic and delays detection; one that is too
+high over-counts and trips early.
+</Callout>
+
+## Per-protocol thresholds
+
+Beyond the core totals, you can set optional per-protocol limits. These let you catch an attack that
+is large for one protocol but invisible in the aggregate — for example a SYN flood whose packet rate
+is high but whose bit rate stays under the global `mbps`.
+
+Each protocol has a `pps` and an `mbps` variant. The metric names are exactly:
+
+| Protocol | pps metric | mbps metric | Counts |
+| --- | --- | --- | --- |
+| TCP | `tcp_pps` | `tcp_mbps` | All TCP packets. |
+| UDP | `udp_pps` | `udp_mbps` | All UDP packets. |
+| ICMP | `icmp_pps` | `icmp_mbps` | All ICMP packets. |
+| TCP SYN | `tcp_syn_pps` | `tcp_syn_mbps` | Pure SYNs only (SYN flag set, ACK clear). |
+| Fragments | `frag_pps` | `frag_mbps` | Non-first IP fragments. |
+
+```yaml
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 40000
+  tcp_syn_pps: 50000
+  udp_mbps: 800
+  frag_pps: 30000
+```
+
+A few rules govern how these behave:
+
+- **OR semantics.** Any single crossed threshold triggers detection. The core metrics and every
+  configured per-protocol metric are evaluated independently; the first to exceed its limit opens
+  the attack, and the triggering metric is recorded on the event.
+- **`tcp_syn` is SYN-only.** It counts packets with the SYN flag set and the ACK flag clear — the
+  half-open packets of a SYN flood — not all TCP packets.
+- **`frag` is non-first fragments.** It counts the trailing fragments of fragmented datagrams, the
+  hallmark of a fragmentation flood.
+- **`0` or absent disables.** A per-protocol metric left out of the config, or set to `0`, is simply
+  not evaluated and costs nothing.
+
+## Scope
+
+Detection is **scoped to your protected prefixes**. Only destinations inside the configured
+`networks` are ever acted on. Traffic to any other destination is still counted in Prometheus
+metrics for visibility, but it can never open an attack or trigger a ban.
+
+```yaml
+networks:
+  - 203.0.113.0/24
+  - 2001:db8::/48
+```
+
+This is one of the enforced safety rules: a destination outside `networks` is out of scope for
+mitigation entirely. Protected prefixes must not overlap. See the [Safety model](/docs/safety) for
+the full list of guarantees.
+
+## Outgoing detection
+
+By default Kapkan watches traffic **arriving at** your protected hosts (`direction: incoming`). Add a
+`thresholds_outgoing` block — globally or per hostgroup — and it also watches traffic **leaving**
+those hosts, reporting `direction: outgoing` attacks. This is the signature of a compromised machine
+inside your network being used to attack someone else.
+
+```yaml
+thresholds_outgoing:
+  pps: 50000
+  udp_pps: 20000
+```
+
+`thresholds_outgoing` takes the same keys as `thresholds`; at least one must be set. A few details
+matter:
+
+- **Direction values.** Attack events carry `direction: incoming` or `direction: outgoing`. Outgoing
+  means the target host is the source of the flood.
+- **Shared RTBH route.** A host that is being attacked **and** attacking at the same time holds two
+  independent attack records — one per direction — but shares a single RTBH route. The route is
+  withdrawn only when the last of the two attacks ends, so clearing one direction never prematurely
+  un-blackholes a host still active in the other.
+- **Zero cost when absent.** Without a `thresholds_outgoing` block, outgoing traffic is not even
+  counted — there is no hot-path overhead.
+
+<Callout type="warning" title="RTBH is destination-based">
+Blackholing an outgoing attacker drops traffic to the host, which takes it offline and usually stops
+the abuse, but only stops the outbound flood directly where your edge also drops sources in
+blackholed prefixes (for example with uRPF). Set `ban: false` on the hostgroup if you want the alert
+without the route. See [Mitigation](/docs/mitigation).
+</Callout>
+
+## Attack samples
+
+When an attack opens, Kapkan attaches a flow sample to it immediately — the top sources, source
+ports, destination ports and protocols driving the traffic. This is possible because Kapkan keeps a
+**continuous traffic buffer**: recent flows are buffered as they arrive, so the window leading up to
+the threshold trip is already on hand the instant detection fires. There is no post-detection capture
+delay and no risk of missing the start of the attack.
+
+```yaml
+samples:
+  enabled: true        # default on
+  buffer_flows: 65536  # rolling buffer size
+  flows_per_attack: 20 # raw flow records kept per attack
+```
+
+The sample's counter totals (top sources, ports and protocols) are sampling-corrected; the raw flow
+records carry the exporter's pre-correction numbers plus their `sampling_rate`. The `total_packets`
+field is the untruncated corrected packet total used as the denominator for shares, since the top-K
+lists drop the lighter keys. Samples appear on the `attack_started` event, in notifications, and in
+the [API](/docs/api). Buffer sizing changes require a restart.
+
+## Classification
+
+Each attack is labelled with an inferred **vector** at detection time, computed from the windowed
+per-protocol rates and the flow sample. The classification carries a `confidence` — the share
+(`0..1`) of the attack traffic matching the winning signature — and, for amplification vectors, the
+reflected service `src_port`.
+
+The classifier recognizes these `type` values:
+
+| Type | Vector |
+| --- | --- |
+| `ntp_amplification` | Reflected NTP responses (`src_port` 123). |
+| `dns_amplification` | Reflected DNS responses (`src_port` 53). |
+| `cldap_amplification` | Reflected CLDAP responses (`src_port` 389). |
+| `memcached_amplification` | Reflected memcached responses (`src_port` 11211). |
+| `ssdp_amplification` | Reflected SSDP responses (`src_port` 1900). |
+| `chargen_amplification` | Reflected chargen responses (`src_port` 19). |
+| `syn_flood` | TCP SYN-dominated flood. |
+| `fragment_flood` | Non-first IP fragment flood. |
+| `icmp_flood` | ICMP-dominated flood. |
+| `udp_flood` | UDP-dominated flood with no amplification signature. |
+| `tcp_flood` | TCP-dominated flood. |
+| `mixed` | No single vector dominates. |
+
+How a vector is chosen:
+
+- A signature needs a **dominant share** — more than half the windowed traffic — to win. Amplification
+  is checked first (most specific), then pure SYN, then fragments, then ICMP, UDP and TCP volumetric
+  floods.
+- An **amplification** vector also requires response-sized packets from the reflected service port:
+  the average packet size from that source port must be large enough to read as a reflected response.
+  Request-sized packets from a service port classify as a plain flood instead.
+- When no signature reaches the dominant share, the attack is labelled `mixed` and `confidence` is `0`.
+
+<Callout type="info" title="Confidence is a share, not a probability">
+`confidence` is the fraction of the attack traffic that matched the winning signature, in the range
+`0..1`. A value of `0` means the attack is `mixed` — no signature matched at all.
+</Callout>
+
+## Related
+
+- [Hostgroups](/docs/hostgroups) — per-prefix thresholds, total vs. per-host calculation, and per-group policy.
+- [Baselines](/docs/baselines) — learned per-host thresholds that tighten the static limits automatically.
+- [Mitigation](/docs/mitigation) — how a detected attack becomes an RTBH route.
+- [REST API](/docs/api) — read active and recent attacks with their samples and classification.

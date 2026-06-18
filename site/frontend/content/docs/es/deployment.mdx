@@ -1,0 +1,154 @@
+export const metadata = {
+  title: "Despliegue en producción",
+  description:
+    "Despliega Kapkan como un servicio systemd reforzado, con su disposición de archivos, secretos y recargas de configuración.",
+};
+
+# Despliegue en producción
+
+En el directorio [`deploy/`](https://github.com/fornex/kapkan) del repositorio
+se incluyen una unidad systemd reforzada y un ejemplo de configuración de producción:
+`deploy/kapkan.service` y `deploy/config.example.yaml`. Esta página explica cómo instalar
+el binario como servicio del sistema, dónde reside cada archivo, cómo mantener los secretos
+fuera del YAML y cómo recargar la configuración sin reiniciar.
+
+<Callout type="info" title="Compila primero">
+Los pasos siguientes asumen que ya dispones de un binario `kapkan`. Si todavía no lo has
+compilado, consulta la [Guía rápida](/docs/quickstart) o [Compilar desde el código fuente](#compilar-desde-el-código-fuente).
+</Callout>
+
+## Instalación
+
+Ejecuta lo siguiente como root desde una copia de trabajo del repositorio (para que
+`deploy/` esté disponible). Instala el binario, crea un usuario del sistema sin privilegios,
+prepara `/etc/kapkan`, instala la configuración de producción, escribe el archivo de entorno
+de secretos con permisos restrictivos, instala la unidad systemd y habilita el servicio.
+
+```sh
+sudo install -m 0755 kapkan /usr/local/bin/kapkan
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo install -d -o kapkan -g kapkan /etc/kapkan
+sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
+echo 'KAPKAN_TG_TOKEN=123456:abc' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
+```
+
+La unidad se ejecuta como el usuario `kapkan` con `ExecStart=/usr/local/bin/kapkan -config
+/etc/kapkan/config.yaml -log-format json -log-level info`, se reinicia ante fallos y está
+fuertemente aislada en un sandbox: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
+`ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
+`MemoryDenyWriteExecute` y más.
+
+<Callout type="info" title="Enlazar BGP al puerto 179">
+Kapkan no necesita privilegios especiales en modo dry-run ni cuando establece el peering
+desde un puerto local alto. Si enlazas el hablante BGP al puerto bien conocido 179, concede
+la capacidad añadiendo `AmbientCapabilities=CAP_NET_BIND_SERVICE` a la sección `[Service]`
+de la unidad.
+</Callout>
+
+Una vez en ejecución, comprueba el estado y sigue los registros:
+
+```sh
+sudo systemctl status kapkan
+sudo journalctl -u kapkan -f
+```
+
+## Disposición de archivos
+
+| Ruta | Modo | Propósito |
+| --- | --- | --- |
+| `/usr/local/bin/kapkan` | `0755` | El único binario estático del daemon. |
+| `/etc/kapkan/config.yaml` | `0640` | La configuración YAML, propiedad de `kapkan:kapkan`. |
+| `/etc/kapkan/kapkan.env` | `0600` | Archivo de entorno con secretos (tokens, credenciales SMTP). |
+| `/etc/systemd/system/kapkan.service` | `0644` | La unidad systemd reforzada. |
+
+Todo el directorio `/etc/kapkan` se monta en modo solo lectura para el proceso mediante
+`ReadOnlyPaths=/etc/kapkan`, de modo que el daemon puede leer su configuración y sus secretos
+pero no puede modificarlos.
+
+## Secretos
+
+Ninguna credencial debe ir en `config.yaml`. El YAML referencia cada secreto por el nombre de
+una **variable de entorno**, y la unidad carga esas variables desde el archivo de entorno
+mediante `EnvironmentFile=-/etc/kapkan/kapkan.env`. Mantén ese archivo en modo `0600`.
+
+Las claves de configuración que leen del entorno son las claves `*_env`:
+
+- `notify.telegram.token_env` — p. ej. `KAPKAN_TG_TOKEN`, el token del bot de Telegram.
+- `notify.email.username_env` / `notify.email.password_env` — credenciales SMTP.
+- `api.token_env` — el token bearer de la API (consulta [Autenticación](/docs/authentication)).
+- `storage.clickhouse.username_env` / `password_env` — credenciales de ClickHouse, si
+  habilitas el almacén de histórico opcional.
+
+Por ejemplo, el YAML nombra la variable y el archivo de entorno proporciona su valor:
+
+```yaml
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"   # name of the env var, never the token itself
+    chat_id: "-1001234567890"
+```
+
+```text
+# /etc/kapkan/kapkan.env  (mode 0600)
+KAPKAN_TG_TOKEN=123456:abcdef
+KAPKAN_API_TOKEN=a-long-random-string
+```
+
+<Callout type="success" title="Por qué esto importa">
+Como los secretos residen únicamente en el entorno del proceso, tu `config.yaml` se puede
+mantener y comparar (diff) de forma segura en git. El sandbox de systemd mantiene
+`/etc/kapkan` en modo solo lectura y ejecuta el daemon como un usuario sin privilegios, por
+lo que el archivo de entorno nunca es escribible por el servicio.
+</Callout>
+
+## Recarga de configuración
+
+Kapkan recarga su configuración en caliente al recibir `SIGHUP`: sin reinicio y sin pérdida
+del estado de flows. La unidad systemd conecta esto mediante `ExecReload=/bin/kill -HUP $MAINPID`,
+de modo que puedes recargar con:
+
+```sh
+sudo systemctl reload kapkan
+```
+
+De forma equivalente, puedes desencadenar la misma recarga a través de la API:
+
+```sh
+curl -s -X POST localhost:8080/api/v1/config/reload
+```
+
+La mayoría de las claves se recargan en vivo, incluidas `dry_run`, los umbrales, `networks`,
+los hostgroups, las líneas base y los ajustes de notificación. Algunos parámetros de
+dimensionamiento requieren un reinicio, en particular el dimensionamiento del ring buffer
+`samples.buffer_flows` / `flows_per_attack`.
+
+## Compilar desde el código fuente
+
+La compilación requiere **Go 1.22 o más reciente**. El `Makefile` ofrece los objetivos
+estándar:
+
+```sh
+make build  # static binary
+make test   # go test -race ./...
+make lint   # golangci-lint run
+make bench  # engine hot-path benchmarks
+```
+
+`make build` produce el único binario estático `kapkan` que instalas en los pasos anteriores.
+Las pruebas usan datagramas NetFlow/sFlow sintéticos generados por `pkg/flowgen` (formato de
+cable real) y un peer GoBGP en proceso, de modo que nunca se contacta con routers reales.
+
+<Callout type="warning" title="Antes de exponer Kapkan">
+Mantén `dry_run: true` hasta que hayas validado la detección contra telemetría en vivo;
+consulta [Puesta en producción](/docs/going-live). Y establece un token de API antes de
+enlazar el listener más allá de `127.0.0.1`, o de lo contrario la API y el panel quedarán
+accesibles sin autenticación; consulta [Autenticación](/docs/authentication).
+</Callout>
+
+## Relacionado
+
+- [Referencia de configuración](/docs/configuration) — cada clave del archivo YAML.
+- [Autenticación](/docs/authentication) — establece un token bearer antes de exponer la API.
+- [Puesta en producción](/docs/going-live) — valida la detección y luego desactiva el modo dry-run.

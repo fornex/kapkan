@@ -1,0 +1,117 @@
+export const metadata = {
+  title: "Mandantenfähigkeit",
+  description:
+    "Betreiben Sie eine Kapkan-Instanz für viele Kunden — das API-Token jedes Mandanten (tenant) sieht und verändert nur dessen eigene Angriffe, Bans und Hosts.",
+};
+
+# Mandantenfähigkeit
+
+Eine einzelne Kapkan-Instanz kann viele Kunden bedienen (ein MSP- oder IDC-Anwendungsfall) und
+jedem ein Token geben, das **nur dessen eigene** Angriffe, Bans und Hosts sieht und verändert.
+Ein Mandant (tenant) ist lediglich ein optionales Label an einer
+[Hostgruppe](/docs/hostgroups) — es gibt kein neues Top-Level-Objekt, keine separate
+Mandantenregistrierung, und der heiße Erkennungspfad bleibt unberührt.
+
+```yaml
+tenant: "house"                 # optional: label the global/fallback group
+
+hostgroups:
+  - name: custA-web
+    tenant: "customerA"         # this group belongs to customerA
+    networks: ["203.0.113.0/26"]
+  - name: custA-dns
+    tenant: "customerA"         # a tenant can span several groups
+    networks: ["203.0.113.64/26"]
+  - name: custB
+    tenant: "customerB"
+    networks: ["198.51.100.0/24"]
+  - name: shared-infra          # no tenant → visible only to admin tokens
+    networks: ["192.0.2.0/24"]
+
+api:
+  tokens:
+    - { name: admin,    token_env: KAPKAN_ADMIN, role: operator }
+    - { name: a-portal, token_env: KAPKAN_A,     role: viewer,   tenant: "customerA" }
+    - { name: b-ops,    token_env: KAPKAN_B,     role: operator, tenant: "customerB" }
+```
+
+## Das Modell
+
+„Welcher Mandant besitzt diese IP" wird durch **denselben** Longest-Prefix-Hostgruppen-Lookup
+beantwortet, den Engine und Mitigator bereits zur Zuordnung von Traffic verwenden — es gibt
+eine einzige Quelle der Wahrheit für IP-Eigentümerschaft, und die Auflösung läuft nie auf dem
+Per-Flow-Erkennungspfad. Ein Mandant kann sich über mehrere Hostgruppen erstrecken (ein Kunde
+mit getrennten Web- und DNS-Gruppen). Die implizite globale/Fallback-Gruppe kann ein
+Top-Level-`tenant` tragen, sodass Catch-all-Traffic einem House-Mandanten zugeordnet wird; eine
+Hostgruppe **ohne** `tenant` ist unbeschriftet und nur für Admin-Tokens sichtbar.
+
+Ein Mandanten-Label ist **keine** Einheit der Mitigation-Policy — Schwellenwerte,
+BGP-Attribute und Eskalation bleiben pro Hostgruppe. Es ist rein ein Eigentümerschafts-Tag, das
+zum Eingrenzen der API dient.
+
+## Token-Scope
+
+Ein [API-Token](/docs/authentication) erhält einen optionalen `tenant`, der auf seiner Rolle
+aufbaut:
+
+| Token | Sieht | Darf verändern |
+| --- | --- | --- |
+| ungebunden (kein `tenant`) | alle Mandanten (Admin) | gemäß seiner Rolle |
+| `tenant: customerA`, `role: viewer` | nur customerA | nichts |
+| `tenant: customerA`, `role: operator` | nur customerA | nur customerA |
+
+Ein ungebundenes Token ist ein Admin — das standardmäßige, vollständig abwärtskompatible
+Verhalten. Ein Token, das an einen Mandanten gebunden ist, den keine Hostgruppe nutzt, wird beim
+Laden der Konfiguration abgelehnt (ein Tippfehler würde sonst stillschweigend nichts sehen).
+
+## Durchsetzung
+
+Das Scoping ist **default-deny für gebundene Tokens** an einem einzigen Engpass: Der Mandant der
+Anfrage wird einmal während der Authentifizierung abgeleitet, und ein einziges
+Sichtbarkeitsprädikat entscheidet über jede Zeile. Ein neuer Lese-Endpoint, der das Filtern
+vergisst, würde für ein gebundenes Token nichts zurückgeben — niemals die Daten eines anderen
+Mandanten.
+
+- **Lesezugriffe** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` geben nur Zeilen zurück,
+  deren besitzende Gruppe den Mandanten des Aufrufers trägt. `/status` wird pro Scope neu
+  aufgebaut: ein gebundenes Token erhält nur seine eigenen Hostgruppen und Zähler, niemals die
+  globalen geschützten Netze, die globalen Schwellenwerte oder die deployment-weite
+  Fallback-Gruppe — sodass ein Mandant nie die Präfixe oder die BGP-Aufstellung eines anderen
+  erfährt.
+- **Mutationen** — ein gebundener Operator darf nur innerhalb seiner eigenen Präfixe
+  `ban`/`unban`. Ein Ziel außerhalb des Mandanten gibt ein einheitliches `403` zurück,
+  unabhängig davon, ob ein Ban existiert, sodass ein Mandant den Ban-Zustand eines anderen nicht
+  ausspähen kann. `POST /api/v1/config/reload` ist **nur für Admins** — ein Reload schreibt die
+  Policy jedes Mandanten und das Token-Set selbst neu.
+- **Mehrdeutigkeit schlägt geschlossen fehl** — wenn ein einzelnes Bearer-Secret zu Tokens
+  unterschiedlicher Rolle oder unterschiedlichen Mandanten passt (ein wiederverwendetes Secret),
+  wird die Anfrage abgelehnt, statt auf den weiteren Scope aufgelöst zu werden.
+
+<Callout type="info" title="/metrics und das Dashboard">
+`/metrics` ist nicht mandantengebunden — es bleibt eine Scrape-Oberfläche für Admin/Operator. Die
+Dashboard-Shell ist geteilt (sie hält keine eigenen Daten); jeder Datenaufruf, den sie tätigt,
+wird durch das eingefügte Token gefiltert, sodass das Viewer-Token eines Mandanten nur dessen
+eigene Daten anzeigt.
+</Callout>
+
+<Callout type="warning" title="Eigentümerschaft folgt der aktuellen Konfiguration">
+Die Sichtbarkeit eines gebundenen Tokens wird gegen die Live-Konfiguration berechnet: Das
+Neuzuweisen eines Präfixes an einen Mandanten (ein nur für Admins zulässiger Reload) übergibt
+dessen laufende Angriffe und Bans sofort an den **neuen** Eigentümer. Das ist beabsichtigt — die
+Kontrolle folgt der aktuellen Eigentümerschaft — bedeutet aber, dass ein fehlerhafter Reload
+Zeilen kurzzeitig zwischen Mandanten verschieben kann.
+</Callout>
+
+## Abwärtskompatibilität
+
+Kein Mandant irgendwo konfiguriert = Single-Tenant-Verhalten, Byte für Byte: jede Gruppe ist
+unbeschriftet, jedes Token ist ein ungebundener Admin, und die API gibt alles wie zuvor zurück.
+Mandantenfähigkeit ist opt-in, und auf einer offenen (token-losen) API lässt sich keine
+Isolation erreichen — es gibt kein Principal, das eingegrenzt werden könnte.
+
+## Verwandte Themen
+
+- [Hostgruppen](/docs/hostgroups) — die Präfix-Gruppen, die ein Mandant beschriftet.
+- [Authentifizierung](/docs/authentication) — die Token-Rollen, auf denen der Mandanten-Scope aufbaut.
+- [REST-API](/docs/api) — die Endpoints, die pro Mandant gefiltert werden.
+- [Konfigurationsreferenz](/docs/configuration)

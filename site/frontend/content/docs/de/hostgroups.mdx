@@ -1,0 +1,143 @@
+export const metadata = {
+  title: "Hostgruppen",
+  description:
+    "Gruppieren Sie Präfixe unter eigenen Schwellenwerten und einer eigenen Mitigationsrichtlinie, mit Berechnung pro Host oder als Gruppensumme.",
+};
+
+# Hostgruppen
+
+Ein einzelner globaler `thresholds`-Block behandelt jeden geschützten Host gleich. Das
+entspricht selten der Realität: Eine Web-Schicht eines Kunden verhält sich völlig anders als
+ein DNS-Pool, und ein Netzwerk, das Sie nur beobachten wollen, verhält sich völlig anders als
+eines, das Sie automatisch ins Blackhole leiten wollen. Mit Hostgruppen können Sie Ihre
+geschützten `networks` in benannte Präfixmengen aufteilen, von denen jede ihre eigenen
+Schwellenwerte und ihre eigene Mitigationsrichtlinie trägt, statt einen einzigen
+Schwellenwertsatz auf den lautesten Host der Maschine abzustimmen.
+
+Eine Hostgruppe ist eine Liste von Präfixen plus optionalen `thresholds`,
+`thresholds_outgoing`, `baseline`, einem `ban`-Schalter und einem `calculation`-Modus. Alles,
+was Sie nicht festlegen, wird aus der globalen Konfiguration geerbt.
+
+<Callout type="info" title="Hostgruppen sind optional">
+Ohne `hostgroups`-Block wird jedes Ziel innerhalb von `networks` gegen die globalen
+`thresholds` ausgewertet. Fügen Sie Gruppen nur dort hinzu, wo eine Teilmenge Ihres Netzwerks
+eine andere Richtlinie benötigt.
+</Callout>
+
+## Beispiel
+
+```yaml
+networks:
+  - "203.0.113.0/24"
+
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 35000
+
+hostgroups:
+  - name: web                    # tighter per-host limits for this /26
+    networks:
+      - "203.0.113.0/26"
+    thresholds:
+      pps: 20000
+      mbps: 500
+      flows_per_sec: 10000
+  - name: customers-no-rtbh      # detect and notify, but never auto-blackhole
+    networks:
+      - "203.0.113.64/26"
+    ban: false
+  - name: dns-pool               # alert on the pool's TOTAL traffic
+    networks:
+      - "203.0.113.128/26"
+    calculation: total
+    thresholds:
+      pps: 300000
+      mbps: 4000
+      flows_per_sec: 150000
+```
+
+Dies teilt das von Ihnen geschützte `203.0.113.0/24` in drei Richtlinien auf. Die `web`-Gruppe
+senkt die Pro-Host-Schwelle für eine Schicht, die niemals laut sein sollte. Die
+`customers-no-rtbh`-Gruppe erkennt und benachrichtigt weiterhin, überlässt die Mitigation aber
+Ihnen. Die `dns-pool`-Gruppe betrachtet nicht mehr einzelne Resolver, sondern überwacht
+stattdessen die kombinierte Rate des Pools.
+
+## Regeln
+
+- **Zuordnung per Longest-Prefix-Match.** Jeder Host gehört zu genau einer Gruppe: derjenigen
+  mit dem spezifischsten (längsten) passenden Präfix. Ein Host, der sowohl in einer
+  `/24`-Gruppe als auch in einer darin enthaltenen `/26`-Gruppe liegt, gehört zur `/26`.
+- **Impliziter globaler Fallback.** Hosts, die von keiner Gruppe erfasst werden, fallen in eine
+  implizite `global`-Gruppe, die die `thresholds` der obersten Ebene trägt (sowie
+  `thresholds_outgoing` / `baseline`, falls gesetzt). Sie müssen niemals jedes Präfix
+  aufzählen — alles Übrige verwendet die globale Richtlinie.
+- **Gruppenpräfixe müssen innerhalb von `networks` liegen.** Eine Gruppe kann nur einen bereits
+  deklarierten Schutz weiter einschränken; ein Präfix außerhalb Ihrer geschützten `networks`
+  ist ein Konfigurationsfehler.
+- **Schwellenwerte sind optional.** Lassen Sie `thresholds` weg, und die Gruppe erbt die
+  globalen Schwellenwerte. Setzen Sie es, um sie nur für diese Gruppe zu überschreiben.
+- **`ban: false` deaktiviert automatisches RTBH.** Die Hosts der Gruppe werden weiterhin
+  erkannt, klassifiziert und gemeldet, aber es wird kein automatisches Blackhole angekündigt.
+  Manuelle Bans über die API funktionieren weiterhin und gelten weiterhin für diese Hosts.
+- **`calculation: total` summiert die Gruppe.** Statt jeden Host einzeln auszuwerten, wird der
+  kombinierte Verkehr der Gruppe mit den Schwellenwerten verglichen. Total-Gruppen melden
+  `scope: "group"` in Events, Benachrichtigungen und der API und **bannen niemals automatisch**
+  — es gibt keinen einzelnen Host, der ins Blackhole geleitet werden könnte. Der Standardwert,
+  `calculation: per_host`, wertet jeden Host unabhängig aus.
+- **Hostgruppen werden per Hot-Reload neu geladen** zusammen mit dem Rest der Konfiguration
+  (`SIGHUP` oder `POST /api/v1/config/reload`); Sie müssen nicht neu starten, um eine Gruppe
+  hinzuzufügen, zu entfernen oder neu abzustimmen.
+
+<Callout type="warning" title="Total-Gruppen leiten niemals automatisch ins Blackhole">
+Eine `calculation: total`-Gruppe löst einen Angriff für die Präfixmenge als Ganzes aus, sodass
+es keine einzelne Adresse gibt, für die ein `/32` oder `/128` angekündigt werden könnte.
+Verwenden Sie Total-Gruppen, um auf aggregierte Last hinzuweisen (einen Anycast- oder
+DNS-Pool); kombinieren Sie sie mit einer Pro-Host-Gruppe oder manuellen Bans, wenn Sie zudem
+eine automatische Mitigation benötigen.
+</Callout>
+
+## Überschreibungen pro Gruppe
+
+Über `thresholds` hinaus kann jede Gruppe auch ihre eigenen ausgehenden Schwellenwerte und
+ihre eigene Baseline tragen oder sich von einer Funktion abmelden, die die globale
+Konfiguration aktiviert hat.
+
+- **`thresholds_outgoing`** — gibt einer Gruppe ihre eigene Richtlinie für Angriffe, die von
+  ihren Hosts ausgehen (kompromittierte Maschinen, die nach außen angreifen). Verwendet
+  dieselben Schlüssel wie `thresholds`; mindestens einer muss gesetzt sein. Siehe
+  [Erkennung](/docs/detection) zur Erkennung ausgehenden Verkehrs.
+- **`baseline`** — eine Gruppe erbt den globalen Block der gelernten Baseline oder
+  überschreibt ihn vollständig durch einen eigenen. Um eine Gruppe vollständig von Baselines
+  auszuschließen, setzen Sie `baseline: { enabled: false }` — die Gruppe verwendet dann nur
+  statische Schwellenwerte.
+- **`tenant`** — kennzeichnet den Eigentümer der Gruppe, sodass ein mandantenbezogenes
+  API-Token nur die Angriffe, Bans und Hosts seiner eigenen Gruppen sieht. Siehe
+  [Mandantenfähigkeit](/docs/multi-tenancy).
+
+```yaml
+hostgroups:
+  - name: edge
+    networks:
+      - "203.0.113.192/26"
+    thresholds:
+      pps: 40000
+    thresholds_outgoing:        # watch for compromised hosts in this group
+      pps: 30000
+      udp_pps: 15000
+    baseline:
+      enabled: false            # static thresholds only, no learning
+```
+
+Überschreibungen pro Gruppe sind voneinander unabhängig: Eine Gruppe kann `thresholds` setzen,
+aber die globale `baseline` erben, oder ihre eigene `baseline` setzen, während sie die globalen
+`thresholds` erbt. Alles, was nicht gesetzt ist, fällt auf den globalen Wert zurück.
+
+## Verwandte Themen
+
+- [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.
+- [Erkennung & Schwellenwerte](/docs/detection) — wie Schwellenwerte und die Erkennung
+  ausgehenden Verkehrs funktionieren.
+- [Baselines](/docs/baselines) — kontinuierlich gelernte Schwellenwerte pro Host.
+- [Mitigation & RTBH](/docs/mitigation) — wovon `ban: false` sich abmeldet.
+- [REST API](/docs/api) — wo `scope` und der Zustand pro Gruppe erscheinen.

@@ -1,0 +1,183 @@
+export const metadata = {
+  title: "Funktionsweise",
+  description:
+    "Die Architektur von Kapkan: die Pipeline ingest → engine → mitigate/notify/api in einer einzigen Go-Binärdatei.",
+};
+
+# Funktionsweise
+
+Kapkan ist eine einzelne, statisch gelinkte Go-Binärdatei mit modularem Innenleben. Es gibt
+keinen Sidecar, keine Datenbank und keinen separaten Webdienst, den man betreiben müsste:
+Flow-Ingestion, die Erkennungs-Engine, die BGP-Mitigation, die REST-API, das Dashboard und die
+Notifier sind allesamt Pakete, die zu einem einzigen Prozess kompiliert werden. Sie verweisen es
+auf eine YAML-Konfiguration, richten die Exporter Ihrer Router darauf aus, und es läuft.
+
+Alles, was Sie beobachten — Angriffe, Top-Talker, gelernte Baselines, Sperren — liegt im
+Prozessspeicher und wird direkt von dort ausgeliefert. Für den Betrieb ist nichts Externes
+erforderlich; optionale Integrationen (ein ClickHouse-Server für die Historie, ein SMTP-Relay für
+E-Mails) sind die einzigen Abhängigkeiten, und Kapkan läuft ohne sie vollständig im Prozess.
+
+## Die Pipeline
+
+Die Binärdatei ist als eine einzige, unidirektionale Pipeline aufgebaut. Jede Stufe übergibt
+normalisierte Daten an die nächste, und die Engine verteilt ihre Ergebnisse an die drei
+Consumer-Stufen:
+
+1. **Ingest** — UDP-Listener dekodieren sFlow-v5-, NetFlow-v5/v9- und IPFIX-Datagramme (über die
+   [goflow2](https://github.com/netsampler/goflow2)-Bibliothek im Library-Modus) in eine einzige
+   normalisierte `Flow`-Repräsentation. Die Sampling-Rate wird aus dem Paket gelesen, wenn der
+   Exporter sie meldet, andernfalls aus `sampling.default_rate`.
+2. **Engine (Hot Path)** — jeder Flow wird über ein gleitendes Fenster in sharded Per-Host-Zähler
+   eingerechnet, sampling-korrigiert auf reale Traffic-Einheiten und gegen die aktiven Schwellwerte
+   (global, pro Protokoll, pro Hostgroup und gelernte Baselines) ausgewertet. Dies ist die
+   performance-kritische Stufe; siehe [Performance](#performance).
+3. **Mitigate / notify / api** — wenn ein Schwellwert überschritten wird, gibt die Engine ein
+   Angriffsereignis aus. Die Mitigate-Stufe kündigt RTBH-Routen über den eingebetteten BGP-Speaker
+   an oder zieht sie zurück, die Notify-Stufe verteilt das Ereignis an Ihre Kanäle, und die
+   API-Stufe stellt den Live-Zustand für das Dashboard und für aufrufende Clients bereit.
+
+Der Datenfluss in einer Zeile:
+
+```text
+ingest → engine (hot path) → [mitigate, notify, api]
+```
+
+<Callout type="info" title="Nur eine Richtung">
+Flows bewegen sich vorwärts durch die Pipeline; die Consumer-Stufen speisen niemals in den Hot Path
+zurück. Die Engine ist die einzige Stufe, die Per-Flow-Zustand berührt, und genau das hält den Hot
+Path allokationsfrei und lock-arm.
+</Callout>
+
+## Komponenten
+
+Intern folgt Kapkan dem standardmäßigen Go-Projektlayout. Jedes Paket besitzt eine Stufe der
+Pipeline:
+
+| Paket | Verantwortung |
+| --- | --- |
+| `cmd/kapkan/` | main, Flag-Parsing, Signal-Handling |
+| `internal/app/` | Verdrahtung aller Komponenten; End-to-End-Test |
+| `internal/config/` | YAML-Laden, Validierung, SIGHUP-Hot-Reload |
+| `internal/ingest/` | goflow2-Ingestion im Library-Modus in einen normalisierten `Flow` |
+| `internal/engine/` | sharded Per-Host-Zähler, gleitendes Fenster, Schwellwertauswertung |
+| `internal/mitigate/` | eingebettetes GoBGP: RTBH-Announce/-Withdraw, TTL, Caps, Dry-Run |
+| `internal/notify/` | Benachrichtigungen über Telegram, Slack, E-Mail, Webhook und Exec-Hook |
+| `internal/api/` | REST-API + Prometheus-Metriken |
+| `pkg/flowgen/` | synthetischer NetFlow-/sFlow-Generator für Tests und Last |
+
+Dasselbe Layout als Baum:
+
+```text
+cmd/kapkan/        main, flag parsing, signal handling
+internal/app/      wiring of all components; end-to-end test
+internal/config/   YAML load, validation, SIGHUP hot-reload
+internal/ingest/   goflow2 library-mode ingestion -> normalized Flow
+internal/engine/   sharded per-host counters, sliding window, threshold eval
+internal/mitigate/ embedded GoBGP: RTBH announce/withdraw, TTL, caps, dry-run
+internal/notify/   Telegram + webhook notifications
+internal/api/      REST API + Prometheus metrics
+pkg/flowgen/       synthetic NetFlow/sFlow generator for tests and load
+```
+
+Die wichtigsten Drittanbieter-Bibliotheken sind [goflow2](https://github.com/netsampler/goflow2) für
+die Flow-Dekodierung und [GoBGP](https://github.com/osrg/gobgp) für den BGP-Speaker — beide werden
+im Library-Modus verwendet, sodass es keinen externen Collector und keinen Routing-Daemon gibt, der
+neben Kapkan bereitgestellt werden müsste. HTTP und strukturiertes Logging nutzen die
+Go-Standardbibliothek.
+
+## Datenfluss
+
+```text
+ingest → engine (hot path) → [mitigate, notify, api]
+```
+
+Jeder Sprung, der Reihe nach:
+
+- **Router-Exporter → Ingest.** Ihre Router senden gesampelte Flow-Records per UDP an die
+  konfigurierten Listen-Ports (`listen.sflow`, `listen.netflow`). Das Ingest-Paket dekodiert das
+  Wire-Format und normalisiert jeden Record — Adressen, Ports, Protokoll, Byte-/Paketzähler,
+  Sampling-Rate — in einen internen `Flow`-Typ, unabhängig davon, welches Protokoll ihn erzeugt
+  hat.
+- **Ingest → Engine.** Normalisierte Flows treten in den Hot Path ein. Die Engine ordnet jeden Flow
+  einem Ziel-Host innerhalb von `networks` zu, multipliziert seine Zähler mit der Sampling-Rate,
+  sodass die Raten in realem (ungesampeltem) Traffic ausgedrückt sind, und aktualisiert die Zähler
+  des gleitenden Fensters dieses Hosts. Ziele außerhalb von `networks` werden in den Metriken
+  gezählt, lösen aber niemals eine Aktion aus.
+- **Engine → Mitigate.** Wenn ein Host einen Schwellwert überschreitet, löst die Engine ein
+  Angriffsereignis aus. Die Mitigate-Stufe entscheidet, ob eine RTBH-Route angekündigt wird — unter
+  Beachtung von Dry-Run, der Whitelist, der `ban`-Policy der Hostgroup und des Ban-Caps — und plant
+  deren TTL-basierte Rücknahme.
+- **Engine → Notify.** Dasselbe Ereignis wird an jeden konfigurierten Kanal (Telegram, Slack,
+  E-Mail, Webhook, Exec-Hook) zugestellt, samt der Klassifikation des Angriffs und einem angehängten
+  Flow-Sample.
+- **Engine → API.** Der Live-Zustand — aktive und kürzliche Angriffe, beobachtete Hosts, Sperren —
+  wird von der REST-API und dem eingebetteten Dashboard aus dem Engine-Speicher gelesen.
+
+Da kürzliche Flows kontinuierlich gepuffert werden (`samples.*`), sind in dem Moment, in dem ein
+Schwellwert überschritten wird, die dominierenden Quellen, Ports und Protokolle des Angriffs bereits
+an das Ereignis angehängt — es gibt keine Erfassungsverzögerung nach der Erkennung.
+
+## Performance
+
+Der Hot Path ist die Per-Flow-Verarbeitung in `internal/engine`, und er ist darauf ausgelegt, auch
+bei Flow-Raten in Angriffsgröße schnell zu bleiben:
+
+- **Sharded Per-Host-Zähler.** Der Host-Zustand ist über Shards verteilt, die anhand eines Hashes
+  der IP gekeyt sind (256 Shards), sodass nebenläufige Flows nur selten um dieselbe Lock
+  konkurrieren.
+- **Gleitendes Fenster.** Jeder Host hält eine Fensteransicht seines kürzlichen Traffics vor, sodass
+  Schwellwerte gegen eine rollierende Rate statt gegen momentane Spitzen ausgewertet werden.
+- **Allokationsfreier Hot Path.** Puffer werden vorab allokiert und Zähler sind atomar; der
+  Per-Flow-Pfad vermeidet Heap-Allokationen, sodass der Garbage Collector nicht in die Quere kommt.
+
+Zwei Kennzahlen beschreiben das Ziel auf unterschiedlichen Ebenen — präsentieren Sie sie als das,
+was sie sind:
+
+- Das README gibt an, dass die Engine **≥20 Mio. flows/sec/Core** auf dem Hot Path durchhält — der
+  Per-Core-Durchsatz des In-Memory-Folding-Schritts in Isolation.
+- Das Engineering-Ziel in `engineering-doc` ist **≥200k flows/sec auf 8 Cores** für die End-to-End-
+  Per-Flow-Verarbeitung — die Messlatte, die eine Hot-Path-Änderung in den `make bench`-Benchmarks
+  überspringen muss, bevor sie als fertig gilt.
+
+<Callout type="info" title="Erst benchmarken, dann vertrauen">
+Die Engine bringt `go test -bench`-Benchmarks mit (`make bench`). Die Projektregel lautet, diese
+auszuführen, bevor irgendeine Hot-Path-Änderung als abgeschlossen erklärt wird, damit die obigen
+Zahlen über Releases hinweg ehrlich bleiben.
+</Callout>
+
+## Konfiguration & Reload
+
+Kapkan wird über eine einzige YAML-Datei konfiguriert, die mit `-config` übergeben wird. Es gibt
+keine geschichtete oder umgebungsgemergte Konfiguration, über die man nachdenken müsste — was in der
+Datei steht (plus die wenigen Secrets, die aus benannten Umgebungsvariablen gelesen werden), ist der
+laufende Zustand. Sie in Git zu halten, gibt Ihnen einen diffbaren, prüfbaren Nachweis jedes
+Schwellwerts und Peers.
+
+Die Konfiguration ist **hot-reloadbar**, ohne den Daemon neu zu starten. Lösen Sie einen Reload auf
+zwei Wegen aus:
+
+- Senden Sie `SIGHUP` an den Prozess (zum Beispiel `sudo systemctl reload kapkan`).
+- Rufen Sie `POST /api/v1/config/reload` gegen die API auf.
+
+Beide lesen und validieren die Datei direkt neu. Erkennungs-Schwellwerte, Hostgroups, Baselines,
+Benachrichtigungseinstellungen und der `dry_run`-Schalter werden allesamt beim Reload wirksam. Eine
+Handvoll struktureller Einstellungen — insbesondere die Dimensionierung des Traffic-Puffers unter
+`samples.*` — erfordert einen vollständigen Neustart; in der
+[Konfigurationsreferenz](/docs/configuration) ist nachzulesen, welche Schlüssel neu geladen werden
+und welche nicht.
+
+<Callout type="warning" title="Reloads werden validiert">
+Ein Reload validiert die gesamte Datei neu. Ist die neue Konfiguration ungültig, wird der Reload
+abgelehnt und die vorherige gültige Konfiguration läuft weiter — eine fehlerhafte Bearbeitung legt
+den Daemon nicht lahm, prüfen Sie aber die Logs, um zu bestätigen, dass Ihre Änderung tatsächlich
+angewendet wurde.
+</Callout>
+
+## Verwandt
+
+- [Einführung](/docs/introduction) — was Kapkan ist und für wen es gedacht ist.
+- [Schnellstart](/docs/quickstart) — die Binärdatei bauen und Ihre erste Erkennung sehen.
+- [Erkennung & Schwellwerte](/docs/detection) — wie die Engine entscheidet, was ein Angriff ist.
+- [Mitigation](/docs/mitigation) — wie RTBH-Ankündigungen erstellt und zurückgenommen werden.
+- [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.
+- [Metriken](/docs/metrics) — die `kapkan_`-Prometheus-Serien.

@@ -1,0 +1,136 @@
+export const metadata = {
+  title: "Baselines",
+  description:
+    "Kontinuierlich gelernte Schwellenwerte, die die Erkennung an das normale Verkehrsniveau jedes Hosts anpassen — mit Schutzmechanismen gegen Manipulation (Poisoning).",
+};
+
+# Baselines
+
+Mit einem `baseline`-Block lernt Kapkan kontinuierlich das normale Verkehrsniveau jedes
+Hosts und passt die Erkennung daran an. Es führt einen EWMA (exponentiell gewichteten
+gleitenden Mittelwert) der realen, um das Sampling korrigierten Rate **pro Host und pro
+Richtung** — sowie eine Gruppensumme für Hostgroups mit `calculation: total` — und leitet
+daraus einen effektiven Schwellenwert von `learned_normal × factor` ab. Ein Host, der
+normalerweise 10k pps verarbeitet, wird bei rund 30k markiert, statt auf die globalen 80k
+zu warten.
+
+Dies ist der Modus „Schluss mit dem manuellen Tuning von Schwellenwerten“. Während die
+automatisierte Baseline von FastNetMon ein Offline-Rechner ist, den man ausführt und dessen
+Werte man kopiert, arbeitet die von Kapkan online: Sie folgt Ihrem Verkehr kontinuierlich
+und leitet den effektiven Schwellenwert neu ab, wenn sich das normale Niveau des Hosts
+verschiebt.
+
+<Callout type="info" title="Baselines verschärfen, sie lockern nie">
+Ihre statischen [Schwellenwerte](/docs/detection) bleiben stets als feste Obergrenze in
+Kraft. Eine Baseline kann die Erkennung für einen Host nur *empfindlicher* machen — sie kann
+die Latte niemals höher legen, als Sie konfiguriert haben.
+</Callout>
+
+## Beispiel
+
+```yaml
+baseline:
+  factor: 3              # attack = traffic above learned_normal × factor
+  half_life_seconds: 3600
+  warmup_seconds: 600
+  floor:
+    pps: 5000
+    mbps: 50
+    flows_per_sec: 2000
+```
+
+Der Block ist optional. Fehlt er, verwendet Kapkan ausschließlich Ihre statischen
+Schwellenwerte. Der effektive Schwellenwert für jeden Host und jede Metrik lautet:
+
+```text
+effective = clamp(learned_normal × factor, low = floor, high = static_threshold)
+```
+
+In Worten: `learned_normal × factor`, nach unten begrenzt durch `floor` und nach oben durch
+die statischen Schwellenwerte (die Obergrenze).
+
+## Schlüssel
+
+| Schlüssel | Standard | Bedeutung |
+| --- | --- | --- |
+| `factor` | `3` | Multiplikator auf das gelernte normale Niveau. Der effektive Schwellenwert ist `learned_normal × factor`. |
+| `half_life_seconds` | `3600` | EWMA-Halbwertszeit. Die Zeitspanne, über die eine alte Beobachtung die Hälfte ihres Gewichts verliert; größere Werte machen die Baseline langsamer und stabiler. |
+| `warmup_seconds` | `600` | Ein frisch beobachteter Host wird für diese Dauer ausschließlich durch statische Schwellenwerte abgesichert, gezählt ab seinem ersten realen Verkehr. |
+| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | Beispiel `5000` / `50` / `2000` | Untergrenze für den effektiven Schwellenwert pro Metrik, damit ruhige Hosts nie zu überempfindlichen Auslösern werden. |
+
+## Manipulationssicheres Design (Poisoning-aware)
+
+Eine naive gelernte Baseline ist angreifbar: Speist man einen Host mit einer langsam
+ansteigenden Flut, lernt er die Flut als „normal“ und legt die Latte immer höher, bis echte
+Angriffe darunter durchschlüpfen. Die Baseline von Kapkan ist so gebaut, dass sie dem
+widersteht. Die statischen Schwellenwerte bleiben als Schutzmechanismen erhalten, und
+mehrere Regeln begrenzen, was die Baseline überhaupt jemals tun kann.
+
+- **Obergrenze.** Verkehr oberhalb der statischen Schwellenwerte löst immer aus. Eine
+  manipulierte oder schnell gewachsene Baseline kann den effektiven Schwellenwert niemals
+  über das anheben, was Sie konfiguriert haben.
+- **Untergrenze.** Der effektive Schwellenwert fällt nie unter `floor`, sodass ein
+  normalerweise ruhiger Host nicht zu einem überempfindlichen Auslöser wird, der bei jedem
+  kleinen Burst feuert.
+- **Eingefroren unter Angriff.** Solange ein Host unter Angriff steht — einschließlich des
+  `unban_hysteresis_seconds`-Nachlaufs, nachdem die Rate abgefallen ist — wird seine
+  Baseline überhaupt nicht trainiert. Angriffsverkehr lehrt den Host niemals, dass der
+  Angriff normal sei.
+- **Begrenztes Lernen (Clamping).** Außerhalb von Angriffen wird jedes Trainings-Sample auf
+  `baseline × factor` gekappt, bevor es den EWMA aktualisiert. Eine langsame Angreifer-Rampe
+  kann die Baseline daher um höchstens `2^(factor−1)` pro Halbwertszeit anheben — bei den
+  Standardwerten (`factor: 3`, `half_life_seconds: 3600`) etwa `4×` pro Stunde. Das bedeutet
+  Stunden, um von einem normalen Niveau bis zur statischen Obergrenze zu klettern, und
+  niemals darüber hinaus. Aggressive Einstellungen (ein großer `factor` oder ein kurzes
+  `half_life_seconds`) verkleinern dieses Fenster, wählen Sie sie also bewusst.
+- **Lernen nur bei realem Verkehr.** Eine Richtung ohne Verkehr im Fenster trainiert ihre
+  Baseline niemals. Ein Host mit ausschließlich eingehendem Verkehr behält seinen statischen
+  ausgehenden Schwellenwert, und eine leere `total`-Gruppe wärmt sich niemals auf eine
+  Null-Baseline auf.
+- **Warm-up.** Ein frisch beobachteter Host wird nur für `warmup_seconds` durch statische
+  Schwellenwerte geschützt, gezählt ab seinem ersten realen Verkehr. Ein verdrängter
+  (lange ruhiger) Host wärmt sich erneut auf, wenn er zurückkehrt.
+
+<Callout type="warning" title="Ein Host, der schon beim ersten Anblick geflutet wird">
+Der Warm-up-Verkehr selbst trainiert die anfängliche Baseline. Ein Host, der *bereits* unter
+einer sub-statischen Flut steht, wenn Kapkan ihn zum ersten Mal sieht, lernt diese Flut als
+„normal“ — begrenzt durch die statische Obergrenze, aber für einen Host, der vom ersten
+Anblick an angegriffen wird, gibt es keine saubere Referenz. Setzen Sie `warmup_seconds` auf
+mindestens einige Vielfache von `half_life_seconds`, damit die Baseline konvergiert, bevor
+sie mit dem Absichern beginnt.
+</Callout>
+
+## Sichtbarkeit
+
+Gelernte Niveaus werden pro Host über die [REST-API](/docs/api) bereitgestellt. Der
+Snapshot `GET /api/v1/hosts` führt `baseline` (eingehend) und `baseline_out` (ausgehend)
+zusammen mit den gemessenen Raten je Richtung und dem Angriffszustand jedes Hosts. Das
+[Dashboard](/docs/dashboard) rendert dieselben gelernten Baselines neben den Top Talkers,
+sodass Sie sehen können, woran jeder Host gemessen wird.
+
+## Pro Hostgroup
+
+Baselines folgen dem Geltungsbereich der [Hostgroup](/docs/hostgroups). Eine Gruppe erbt
+entweder den globalen `baseline`-Block oder überschreibt ihn vollständig — es gibt keine
+teilweise Zusammenführung. Um eine Gruppe vollständig von Baselines auszunehmen und dabei
+den globalen Block für alle anderen beizubehalten, deaktivieren Sie ihn für die Gruppe:
+
+```yaml
+hostgroups:
+  - name: dns-pool
+    networks: ["203.0.113.128/26"]
+    calculation: total
+    baseline: { enabled: false }   # this group uses static thresholds only
+```
+
+Bei Gruppen mit `calculation: total` lernt die Baseline den summierten Verkehr der Gruppe
+statt der Niveaus einzelner Hosts, und für diese Summe gelten dieselben
+manipulationssicheren Regeln.
+
+## Verwandte Themen
+
+- [Erkennung & Schwellenwerte](/docs/detection) — die statischen Schwellenwerte, innerhalb derer Baselines sitzen.
+- [Hostgroups](/docs/hostgroups) — Schwellenwerte pro Gruppe, Summen und Baseline-Overrides.
+- [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.
+- [REST-API](/docs/api) — der `/api/v1/hosts`-Snapshot und seine `baseline`-Felder.
+- [Going Live](/docs/going-live) — Erkennung im Dry-run validieren, bevor Sie ankündigen.

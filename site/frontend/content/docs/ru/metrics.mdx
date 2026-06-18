@@ -1,0 +1,69 @@
+export const metadata = {
+  title: "Метрики",
+  description:
+    "Метрики Prometheus, экспортируемые в пространстве имён kapkan_ на слушателе API.",
+};
+
+# Метрики
+
+Kapkan экспортирует метрики Prometheus в пространстве имён `kapkan_` по адресу `GET /metrics` на
+слушателе API (`api.listen`, по умолчанию `127.0.0.1:8080`). Они охватывают весь конвейер —
+приём flow, движок детектирования, митигацию RTBH и уведомления — поэтому вы можете собирать
+данные о пропускной способности, задержке, активных атаках и анонсированных маршрутах в свою
+существующую систему мониторинга.
+
+<Callout type="info" title="/metrics остаётся открытым">
+Эндпоинт `/metrics` всегда доступен без аутентификации, даже когда вы задаёте токен API через
+`api.token_env`. Только эндпоинты данных `/api/v1` требуют `Authorization: Bearer <token>`.
+Привязывайте слушатель соответствующим образом — см. [Аутентификация](/docs/authentication).
+</Callout>
+
+## Доступные метрики
+
+| Метрика | Метки | Значение |
+| --- | --- | --- |
+| `kapkan_ingest_flows_total` | `protocol` | Общее число принятых flow, с разбивкой по протоколу flow. |
+| `kapkan_ingest_packets_total` | `exporter`, `protocol` | Общее число полученных flow-пакетов, с разбивкой по исходному экспортёру и протоколу. |
+| `kapkan_ingest_decode_errors_total` | — | Flow-пакеты, которые не удалось декодировать. |
+| `kapkan_engine_active_attacks` | — | Gauge атак, находящихся в процессе в данный момент. |
+| `kapkan_engine_attacks_total` | — | Счётчик атак, обнаруженных с момента запуска. |
+| `kapkan_engine_process_latency_seconds` | — | Гистограмма задержки обработки на горячем пути в расчёте на один flow. |
+| `kapkan_engine_tracked_hosts` | — | Gauge хостов, отслеживаемых движком в данный момент. |
+| `kapkan_mitigate_announced_routes` | `mode` | Gauge blackhole-маршрутов, анонсированных в данный момент, с разбивкой по режиму `real` / `dry_run`. |
+| `kapkan_mitigate_flowspec_rules` | `mode` | Gauge правил [FlowSpec](/docs/flowspec), анонсированных в данный момент, с разбивкой по режиму `real` / `dry_run`. Следите за этим значением относительно лимита маршрутов FlowSpec на ваших маршрутизаторах. |
+| `kapkan_mitigate_bans_rejected_total` | — | Блокировки, отклонённые правилом безопасности (whitelist, область действия или ограничение `max_active_bans`). |
+| `kapkan_notify_notifications_total` | `channel`, `result` | Попытки отправки уведомлений, с разбивкой по каналу (telegram, slack, email, webhook, exec) и `result`. |
+| `kapkan_storage_rows_total` | `table`, `result` | Строки, переданные в опциональное [хранилище ClickHouse](/docs/storage), с разбивкой по таблице и значениям `written` / `dropped` / `error`. |
+
+Метка `mode` у `kapkan_mitigate_announced_routes` — самый быстрый способ подтвердить состояние
+dry-run с одного взгляда: пока `dry_run: true`, каждый потенциальный маршрут учитывается под
+`mode="dry_run"` и ничего под `mode="real"`. См. [Митигация](/docs/mitigation) и
+[Модель безопасности](/docs/safety).
+
+## Сбор метрик
+
+Добавьте Kapkan как цель сбора (scrape target) в конфигурацию Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: kapkan
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+```
+
+Используйте хост и порт из значения `api.listen`. Если вы открываете слушатель за пределами
+localhost, задайте токен API — `/metrics` остаётся доступным без него, поэтому вашему сборщику
+не нужны учётные данные.
+
+Чтобы посмотреть сырой вывод напрямую:
+
+```sh
+curl -s localhost:8080/metrics | grep kapkan_
+```
+
+## Связанные материалы
+
+- [REST API](/docs/api) — эндпоинты данных, обслуживаемые вместе с `/metrics`.
+- [Хранилище (ClickHouse)](/docs/storage) — опциональное персистентное хранилище, стоящее за `kapkan_storage_rows_total`.
+- [Развёртывание](/docs/deployment) — запуск Kapkan как сервиса и выбор адреса прослушивания.

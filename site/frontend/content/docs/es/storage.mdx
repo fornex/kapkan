@@ -1,0 +1,69 @@
+export const metadata = {
+  title: "Almacenamiento (ClickHouse)",
+  description:
+    "Persistencia opcional en ClickHouse para el historial de ataques y de tráfico — análisis forense y gráficos del panel, sin bloquear nunca la detección.",
+};
+
+# Almacenamiento (ClickHouse)
+
+Apunta Kapkan a un servidor ClickHouse para conservar el historial de ataques y de tráfico —
+la respuesta a "qué nos golpeó el martes pasado". Sin él, Kapkan se ejecuta por completo en
+proceso sobre datos en vivo.
+
+<Callout type="info" title="Mejor esfuerzo, nunca bloquea la detección">
+La persistencia funciona a partir de una cola acotada con un envío no bloqueante. Un ClickHouse
+lento o caído descarta filas (contabilizadas en `storage_rows_total` con `result="dropped"`) en
+lugar de frenar la ruta crítica del motor.
+</Callout>
+
+## Activación
+
+```yaml
+storage:
+  clickhouse:
+    url: "http://127.0.0.1:8123"   # empty/absent disables persistence
+    database: "kapkan"             # created if absent
+    username_env: "KAPKAN_CH_USER" # optional; credentials come from the env
+    password_env: "KAPKAN_CH_PASS"
+    ttl_days: 7                    # rows auto-expire (per-row TTL)
+    flush_interval_seconds: 5
+    batch_size: 1000
+    queue_size: 100000
+    traffic_interval_seconds: 10
+```
+
+Las credenciales se leen de las variables de entorno indicadas (`username_env` / `password_env`),
+nunca del archivo de configuración.
+
+## Cómo funciona
+
+Kapkan se comunica con la **interfaz HTTP** de ClickHouse usando la biblioteca estándar de Go —
+sin dependencia de un driver. La única dependencia externa es el propio servidor ClickHouse.
+
+Al arrancar, crea de forma idempotente dos tablas MergeTree:
+
+| Tabla | Contenido |
+| --- | --- |
+| `attack_events` | Cada inicio y fin de ataque: tipo, dirección, tasas, las principales fuentes de la muestra y el estado del bloqueo. |
+| `traffic` | Instantáneas periódicas de tasa y línea base por host (cada `traffic_interval_seconds`). |
+
+Ambas llevan un TTL por fila de `ttl_days`, de modo que la retención queda acotada sin
+intervención del operador.
+
+## Contrapresión
+
+Las filas pasan a una cola acotada (`queue_size`) con un envío no bloqueante y se vuelcan en
+lotes (`batch_size` / `flush_interval_seconds`). Si ClickHouse está lento o caído, las filas se
+descartan —contabilizadas como `storage_rows_total` con `result="dropped"`— y el motor sigue
+funcionando. Consulta [Métricas](/docs/metrics).
+
+## Qué se persiste y qué no
+
+La tabla `traffic` actualmente persiste únicamente instantáneas por host. La agregación por ASN
+no se persiste (Kapkan no resuelve los ASN a partir de los flows) y los totales por hostgroup
+aún no se capturan en instantáneas — ambos son candidatos para un seguimiento posterior.
+
+## Relacionado
+
+- [Referencia de configuración](/docs/configuration) — la lista completa de claves de `storage`.
+- [Métricas](/docs/metrics) — el contador `storage_rows_total`.

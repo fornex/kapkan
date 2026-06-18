@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$tooling_PROJECT_DIR/.tooling/hooks/docs-sync-check.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$tooling_PROJECT_DIR/.tooling/hooks/auto-release.sh\"",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}

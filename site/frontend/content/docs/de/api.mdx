@@ -1,0 +1,348 @@
+export const metadata = {
+  title: "REST-API",
+  description:
+    "Die Kapkan-REST-API: Status, Angriffe, Hosts, Sperren, manuelles Sperren/Entsperren und Konfigurations-Reload, mit Antwortstrukturen.",
+};
+
+# REST-API
+
+Kapkan stellt eine kleine JSON-REST-API bereit, um die Erkennung zu beobachten und die manuelle
+Mitigation zu steuern. Sie wird unter der in `api.listen` angegebenen Adresse bereitgestellt, die
+standardmäßig `127.0.0.1:8080` lautet. Derselbe Listener bedient auch das eingebettete
+[Dashboard](/docs/dashboard) und den Prometheus-Endpunkt [`/metrics`](/docs/metrics).
+
+Die API ist überwiegend lesend: Status, aktive und kürzlich beendete Angriffe, der Snapshot der
+verfolgten Hosts sowie die Sperrtabelle sind allesamt `GET`-Aufrufe. Drei `POST`-Endpunkte ändern
+den Zustand — manuelles Sperren, manuelles Entsperren und Konfigurations-Reload.
+
+<Callout type="warning" title="Vor dem Freigeben authentifizieren">
+Standardmäßig bindet `api.listen` an `127.0.0.1`, sodass die API nur auf localhost ohne
+Authentifizierung sicher ist. Bevor Sie über das Loopback-Interface hinaus binden, legen Sie ein
+Bearer-Token fest. Siehe [Authentifizierung](/docs/authentication).
+</Callout>
+
+Alle `/api/v1`-Routen durchlaufen die Token-Prüfung, sobald die Authentifizierung konfiguriert ist;
+ist sie einmal konfiguriert, muss jede Anfrage `Authorization: Bearer <token>` mitführen. Tokens
+tragen eine **Rolle**: Die `GET`-Routen benötigen die Rolle **viewer**, und die zustandsändernden
+Routen (`ban`, `unban`, `config/reload`) benötigen die Rolle **operator**. Ein Lesezugriff mit einem
+viewer-Token funktioniert; eine Änderung mit einem viewer-Token liefert `403`; ein unbekanntes Token
+liefert `401`. Die `POST`-Endpunkte verlangen zusätzlich einen JSON-Content-Type — senden Sie
+`Content-Type: application/json`. Beachten Sie, dass `/metrics` und das statische Dashboard-Gerüst
+ohne Token bereitgestellt werden; die Daten, die das Dashboard lädt, werden über die geschützte API
+abgerufen. Siehe [Authentifizierung](/docs/authentication) zu den Token-Rollen.
+
+Ein Token kann zudem **tenant-bezogen** (mandantengebunden) sein: Es sieht dann auf jedem
+Lese-Endpunkt nur die Zeilen seines Tenants (`/status` wird auf die eigenen Hostgroups und
+Zählungen umgebaut) und darf nur innerhalb seines Tenants `ban`/`unban` ausführen — ein Ziel
+außerhalb des Tenants liefert ein einheitliches `403`. Siehe
+[Mandantenfähigkeit](/docs/multi-tenancy).
+
+## Endpunkte
+
+| Methode | Pfad | Beschreibung |
+| --- | --- | --- |
+| GET | `/api/v1/status` | Modus, Uptime, geschützte Netzwerke, Schwellenwerte, Hostgroups, Anzahl aktiver Angriffe/Sperren. |
+| GET | `/api/v1/attacks` | Aktive Angriffe sowie die letzten 100 beendeten, mit Samples und Klassifizierung. |
+| GET | `/api/v1/hosts` | Snapshot der verfolgten Hosts: Raten je Richtung, gelernte Baselines, Angriffszustand. |
+| GET | `/api/v1/bans` | Alle Sperren, aktive und historische. |
+| POST | `/api/v1/ban` | Eine Adresse manuell sperren. |
+| POST | `/api/v1/unban` | Eine Sperre manuell zurückziehen. |
+| POST | `/api/v1/config/reload` | Konfigurationsdatei neu einlesen (entspricht `SIGHUP`). |
+| GET | `/metrics` | Prometheus-Metriken. |
+
+Alle Antworten sind JSON. Fehler liefern ein Objekt der Form `{"error": "..."}` mit einem
+passenden HTTP-Status zurück.
+
+### GET /api/v1/status
+
+Gibt den aktuellen Betriebsmodus und eine Zusammenfassung dessen zurück, was Kapkan schützt.
+
+```json
+{
+  "dry_run": true,
+  "uptime_seconds": 8123,
+  "networks": ["203.0.113.0/24", "198.51.100.0/24"],
+  "active_attacks": 1,
+  "active_bans": 1,
+  "thresholds": {
+    "pps": 80000,
+    "mbps": 1000,
+    "flows_per_sec": 20000
+  },
+  "hostgroups": [
+    { "name": "web", "calculation": "per_host", "mitigation": "blackhole", "ban": true }
+  ]
+}
+```
+
+`dry_run` gibt den globalen Modus an: Bei `true` wird kein Blackhole an Ihre Router angekündigt.
+`thresholds` und `hostgroups` spiegeln die aktive Konfiguration wider; ihre vollständige Struktur
+finden Sie unter [Erkennung](/docs/detection) und [Hostgroups](/docs/hostgroups).
+
+### GET /api/v1/attacks
+
+Gibt die aktuell aktiven Angriffe sowie die letzten 100 beendeten zurück (neueste zuerst). Beide
+Arrays enthalten `Attack`-Objekte.
+
+| Feld | Typ | Hinweise |
+| --- | --- | --- |
+| `scope` | string | `host` oder `group`. Gruppenbezogene Angriffe führen kein `target`. |
+| `target` | string | Die angegriffene Adresse (Host-Scope). |
+| `group` | string | Hostgroup-Name (Gruppen-Scope oder die Gruppe des Hosts). |
+| `tenant` | string | Der Tenant der besitzenden Gruppe, sofern einer zugewiesen ist (siehe [Mandantenfähigkeit](/docs/multi-tenancy)). |
+| `direction` | string | `incoming` oder `outgoing`. |
+| `metric` | string | Die Metrik, die ausgelöst hat, z. B. `pps`, `mbps`, `tcp_syn_pps`. |
+| `rate` | number | Die bei der Erkennung beobachtete Rate, in der Einheit der Metrik. |
+| `threshold` | number | Der überschrittene Schwellenwert. |
+| `rates` | object | Vollständige Ratenaufschlüsselung je Protokoll (siehe unten). |
+| `active` | bool | `true`, solange der Angriff andauert. |
+| `ban_state` | string | `active`, `withdrawn` oder `rejected`. Entfällt, wenn keine Sperre vorliegt. |
+| `method` | string | Mitigationsmethode: `blackhole`, `flowspec` oder `divert`. Entfällt, wenn keine Sperre vorliegt. |
+| `route` | string | Der Routen-String (`blackhole …` / `divert …`) oder eine `flowspec: ...`-Zusammenfassung, wenn eine Sperre existiert. |
+| `flowspec` | array | Die generierten [FlowSpec](/docs/flowspec)-Regeln, wenn `method` gleich `flowspec` ist. |
+| `dry_run` | bool | Ob die Sperre virtuell war. |
+| `started_at` | string | RFC-3339-Zeitstempel. |
+| `ended_at` | string | RFC-3339-Zeitstempel; entfällt, solange aktiv. |
+| `sample` | object | Bei der Erkennung erfasstes Flow-Sample; entfällt, wenn Sampling deaktiviert ist. |
+| `classification` | object | Abgeleiteter Angriffsvektor; entfällt, wenn nicht klassifiziert. |
+
+```json
+{
+  "active": [
+    {
+      "scope": "host",
+      "target": "203.0.113.66",
+      "group": "web",
+      "direction": "incoming",
+      "metric": "pps",
+      "rate": 412000,
+      "threshold": 80000,
+      "rates": {
+        "pps": 412000,
+        "mbps": 3100,
+        "flows_per_sec": 9800,
+        "udp_pps": 405000,
+        "udp_mbps": 3080
+      },
+      "active": true,
+      "ban_state": "active",
+      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "dry_run": false,
+      "started_at": "2026-06-13T09:41:07Z",
+      "sample": {
+        "top_sources": [
+          { "key": "198.51.100.23", "packets": 1240000, "bytes": 1612000000 }
+        ],
+        "top_src_ports": [
+          { "key": "123", "packets": 1180000, "bytes": 1534000000 }
+        ],
+        "top_dst_ports": [
+          { "key": "443", "packets": 1240000, "bytes": 1612000000 }
+        ],
+        "protocols": [
+          { "key": "udp", "packets": 1240000, "bytes": 1612000000 }
+        ],
+        "total_packets": 1240000
+      },
+      "classification": {
+        "type": "ntp_amplification",
+        "confidence": 0.95,
+        "src_port": 123
+      }
+    }
+  ],
+  "recent": []
+}
+```
+
+Das `rates`-Objekt führt das Basistrio (`pps`, `mbps`, `flows_per_sec`) sowie die Felder je
+Protokoll, die ungleich null sind: `tcp_pps`, `tcp_mbps`, `udp_pps`, `udp_mbps`, `icmp_pps`,
+`icmp_mbps`, `tcp_syn_pps`, `tcp_syn_mbps`, `frag_pps`, `frag_mbps`. Das `sample`-Objekt fasst die
+gepufferten Flows hinter der Erkennung zusammen — `top_sources`, `top_src_ports`, `top_dst_ports`,
+`protocols` (jeweils eine Liste von `{key, packets, bytes}`-Zählern), eine optionale rohe
+`flows`-Liste und `total_packets`. Der `type` der `classification` ist einer der unter
+[Erkennung](/docs/detection) dokumentierten Vektoren; `confidence` ist der Anteil (`0..1`) des
+Angriffsverkehrs, der zur erkannten Signatur passt, und `src_port` ist der reflektierte
+Dienst-Port für Amplification-Vektoren.
+
+### GET /api/v1/hosts
+
+Gibt einen Snapshot jedes verfolgten Hosts zurück — die Top-Talker-Daten. Jeder Eintrag ist ein
+`HostStat`.
+
+| Feld | Typ | Hinweise |
+| --- | --- | --- |
+| `target` | string | Die Host-Adresse. |
+| `group` | string | Der Hostgroup-Name des Hosts. |
+| `rates` | object | Aktuelle eingehende Raten über das Zeitfenster. |
+| `rates_out` | object | Ausgehende Raten; nur ungleich null, wenn die ausgehende Erkennung aktiviert ist. |
+| `in_attack` | bool | Ob sich der Host in einem aktiven Angriff befindet. |
+| `metric` | string | Die Metrik des aktiven Angriffs; entfällt, wenn kein Angriff vorliegt. |
+| `direction` | string | Die Richtung des aktiven Angriffs; entfällt, wenn kein Angriff vorliegt. |
+| `baseline` | object | Gelernte eingehende Baseline; vorhanden, wenn Baselines konfiguriert sind. |
+| `baseline_out` | object | Gelernte ausgehende Baseline; vorhanden, wenn Baselines konfiguriert sind. |
+
+```json
+{
+  "hosts": [
+    {
+      "target": "203.0.113.66",
+      "group": "web",
+      "rates": {
+        "pps": 412000,
+        "mbps": 3100,
+        "flows_per_sec": 9800,
+        "udp_pps": 405000
+      },
+      "rates_out": {
+        "pps": 120,
+        "mbps": 2
+      },
+      "in_attack": true,
+      "metric": "pps",
+      "direction": "incoming",
+      "baseline": {
+        "pps": 950,
+        "mbps": 7,
+        "flows_per_sec": 60
+      },
+      "baseline_out": {
+        "pps": 110,
+        "mbps": 2,
+        "flows_per_sec": 14
+      }
+    }
+  ]
+}
+```
+
+Die Objekte `baseline` und `baseline_out` führen das gelernte Normal-Basistrio (`pps`, `mbps`,
+`flows_per_sec`) und erscheinen nur, solange EWMA-Baselines für die Gruppe des Hosts konfiguriert
+sind. Siehe [Baselines](/docs/baselines).
+
+### GET /api/v1/bans
+
+Gibt die vollständige Sperrtabelle zurück — aktive und historische. Jeder Eintrag ist ein `Ban`.
+
+| Feld | Typ | Hinweise |
+| --- | --- | --- |
+| `target` | string | Die gesperrte Adresse. |
+| `prefix` | string | Das Blackhole-Präfix (`/32` oder `/128`). |
+| `metric` | string | Die Metrik, die die Sperre ausgelöst hat; entfällt bei manuellen Sperren. |
+| `rate` | number | Beobachtete Rate zum Sperrzeitpunkt; entfällt, wenn null. |
+| `threshold` | number | Überschrittener Schwellenwert; entfällt, wenn null. |
+| `next_hop` | string | Der Discard-Next-Hop. |
+| `community` | string | Die RTBH-Community. |
+| `local_pref` | number | Der an die Route angehängte `LOCAL_PREF`; entfällt, wenn null. |
+| `route` | string | Der vollständige Routen-String oder eine `flowspec: ...`-Zusammenfassung bei FlowSpec-Sperren. |
+| `state` | string | `active`, `withdrawn` oder `rejected`. |
+| `dry_run` | bool | Ob die Sperre virtuell war. |
+| `manual` | bool | `true` bei vom Operator angeforderten Sperren. |
+| `started_at` | string | RFC-3339-Zeitstempel. |
+| `expires_at` | string | TTL-Ablauf; Sperren sind niemals dauerhaft. |
+| `withdrawn_at` | string | Wann die Route zurückgezogen wurde; entfällt, solange aktiv. |
+| `reason` | string | Warum eine Sperre abgelehnt oder zurückgezogen wurde; entfällt andernfalls. |
+| `method` | string | Mitigationsmethode: `blackhole`, `flowspec` oder `divert`. |
+| `flowspec` | array | Die generierten [FlowSpec](/docs/flowspec)-Regeln, wenn `method` gleich `flowspec` ist. |
+| `escalation` | array | Die konfigurierte [Eskalationsleiter](/docs/escalation), sofern eine festgelegt ist. |
+| `escalation_step` | number | Index der aktuellen Stufe der Leiter. |
+
+```json
+{
+  "bans": [
+    {
+      "target": "203.0.113.66",
+      "prefix": "203.0.113.66/32",
+      "metric": "pps",
+      "rate": 412000,
+      "threshold": 80000,
+      "next_hop": "192.0.2.1",
+      "community": "65000:666",
+      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "state": "active",
+      "dry_run": false,
+      "manual": false,
+      "started_at": "2026-06-13T09:41:07Z",
+      "expires_at": "2026-06-13T10:41:07Z"
+    }
+  ]
+}
+```
+
+Siehe [Mitigation](/docs/mitigation), wie TTL, Hysterese und die Sperrobergrenze diesen
+Lebenszyklus prägen.
+
+### POST /api/v1/ban
+
+Sperrt eine Adresse manuell per Blackhole. Der Body ist eine einzelne IP:
+
+```http
+POST /api/v1/ban
+Content-Type: application/json
+
+{"ip": "203.0.113.66"}
+```
+
+Die Antwort ist das resultierende `Ban`-Objekt. Eine manuelle Sperre beachtet jede Sicherheitsregel,
+die auch eine automatische Sperre beachtet:
+
+- Ein **auf der Whitelist stehendes** Ziel wird mit HTTP `409 Conflict` und `reason: "whitelisted"` abgelehnt; es wird niemals angekündigt.
+- Ein Ziel **außerhalb der konfigurierten `networks`** wird mit HTTP `409` und `reason: "outside configured networks"` abgelehnt.
+- Eine Anfrage, die **`max_active_bans`** überschreiten würde, wird mit HTTP `409` und `reason: "max_active_bans reached"` abgelehnt.
+
+In jedem `409`-Fall ist der Body weiterhin ein `Ban`-Objekt mit `state: "rejected"` und gesetztem
+`reason`-Feld. Eine ungültige oder nicht parsbare IP liefert HTTP `400` zurück.
+
+<Callout type="warning" title="Dry-run gilt weiterhin">
+Eine manuelle Sperre respektiert den globalen Modus. Solange `dry_run` gleich `true` ist, wird die
+Sperre aufgezeichnet und mit `dry_run: true` zurückgegeben, aber keine Route wird angekündigt. Siehe
+das [Sicherheitsmodell](/docs/safety).
+</Callout>
+
+### POST /api/v1/unban
+
+Zieht eine aktive Sperre für die angegebene Adresse zurück. Der Body hat dieselbe
+`{"ip": "..."}`-Struktur und derselbe JSON-Content-Type ist erforderlich:
+
+```http
+POST /api/v1/unban
+Content-Type: application/json
+
+{"ip": "203.0.113.66"}
+```
+
+Bei Erfolg gibt er die zurückgezogene `Ban` zurück. Wenn keine aktive Sperre für die Adresse
+existiert, liefert er HTTP `404` zurück.
+
+### POST /api/v1/config/reload
+
+Liest die Konfigurationsdatei neu von der Festplatte ein und wendet sie an — derselbe Effekt wie das
+Senden von `SIGHUP`. Der Body ist leer; der JSON-Content-Type ist dennoch erforderlich.
+
+```json
+{
+  "reloaded": true,
+  "dry_run": false,
+  "thresholds": {
+    "pps": 80000,
+    "mbps": 1000,
+    "flows_per_sec": 20000
+  }
+}
+```
+
+Falls die neue Konfiguration nicht geparst oder validiert werden kann, bleibt die laufende
+Konfiguration unverändert und der Endpunkt liefert HTTP `400` mit dem Fehler zurück. Siehe
+[Konfiguration](/docs/configuration).
+
+### GET /metrics
+
+Stellt Prometheus-Metriken im standardmäßigen Text-Expositionsformat bereit. Dieser Endpunkt liegt
+nicht unter `/api/v1` und wird ohne das Bearer-Token bereitgestellt, damit ein Scraper ihn erreichen
+kann. Die vollständige Metrikliste finden Sie unter [Metriken](/docs/metrics).
+
+## Verwandt
+
+- [Authentifizierung](/docs/authentication) — legen Sie ein Bearer-Token fest, bevor Sie den Listener freigeben.
+- [Dashboard](/docs/dashboard) — die eingebettete Web-UI, die unter derselben Adresse bereitgestellt wird.
+- [Metriken](/docs/metrics) — der Prometheus-Endpunkt `/metrics`.

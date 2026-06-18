@@ -1,0 +1,88 @@
+export const metadata = {
+  title: "Going live",
+  description:
+    "Validate detection and BGP in dry-run, then turn off dry-run with confidence.",
+};
+
+# Going live
+
+Kapkan is **dry-run by default**. Until you explicitly set `dry_run: false`, every would-be
+blackhole is logged and exposed through the API, but **never announced** to your routers.
+That gives you a safe path to production: run against real telemetry and real BGP peers,
+confirm the engine fires on the right prefixes and would announce the right routes, then
+flip a single switch.
+
+This page is the short, ordered procedure for that transition. Do not skip a step — each one
+verifies a different part of the pipeline before any route can reach a router.
+
+<Callout type="info" title="Dry-run still peers and detects">
+Dry-run only suppresses the BGP announcement. Kapkan still ingests flows, runs detection,
+tracks bans, fires notifications, and establishes its BGP sessions. You are validating the
+real pipeline, not a simulation.
+</Callout>
+
+## Checklist
+
+1. **Run in dry-run and validate detection.** With `dry_run: true`, confirm in the logs and
+   via `GET /api/v1/attacks` that detection fires on the right prefixes and that the
+   would-be routes (the `route` field on each attack) are correct. This is where you tune
+   thresholds, hostgroups and baselines against your real traffic — nothing here can touch a
+   route.
+
+   ```sh
+   curl -s localhost:8080/api/v1/attacks | jq
+   ```
+
+2. **Confirm BGP reaches `ESTABLISHED`.** Peering happens even in dry-run, so you can verify
+   connectivity before announcing anything. Watch the logs for the `bgp peer state` event and
+   confirm each configured neighbor reaches `ESTABLISHED`. If a session is stuck, fix the
+   peer config (ASN, addresses, source interface, ACLs) now — while a misconfiguration is
+   harmless.
+
+   ```sh
+   ./kapkan -config /etc/kapkan/config.yaml -log-format text | grep "bgp peer state"
+   ```
+
+3. **Turn off dry-run and reload.** Set `dry_run: false` in your config, then reload Kapkan
+   so it re-reads the file. Reload is non-disruptive: it does not restart the daemon or drop
+   BGP sessions.
+
+   ```sh
+   # Either signal the process:
+   sudo systemctl reload kapkan      # sends SIGHUP
+
+   # ...or call the API:
+   curl -s -X POST -H 'Content-Type: application/json' \
+     localhost:8080/api/v1/config/reload
+   ```
+
+   Both `SIGHUP` and `POST /api/v1/config/reload` perform the same hot-reload. After the
+   reload, `GET /api/v1/status` reports the live mode and the next detection that crosses a
+   threshold announces a real blackhole route.
+
+<Callout type="danger" title="This is the point of no return">
+Once `dry_run` is false, real blackhole routes are announced to your routers. A detected
+attack now drops live traffic to the targeted address. Confirm your safety limits —
+`ban.ttl_seconds`, `ban.unban_hysteresis_seconds`, `ban.max_active_bans` and
+`protected_whitelist` — before you flip the switch. See the [Safety model](/docs/safety).
+</Callout>
+
+## Verifying the live mode
+
+After step 3, a quick check that you are truly live and that announcements behave:
+
+- `GET /api/v1/status` shows the current mode and active attack/ban counts.
+- The `mitigate_announced_routes` metric is labeled by mode; in production, routes are
+  counted under `real` rather than `dry_run`. See [Metrics](/docs/metrics).
+- `GET /api/v1/bans` lists every ban, active and historical, so you can confirm a ban was
+  announced and later auto-withdrawn after its TTL.
+
+If anything looks wrong, set `dry_run: true` and reload again — you are back to a safe,
+no-announce state immediately, with detection and peering still running.
+
+## Related
+
+- [Safety model](/docs/safety) — the dry-run, TTL, hysteresis, ban-cap and whitelist guarantees.
+- [Mitigation](/docs/mitigation) — how RTBH routes are announced and withdrawn.
+- [Configuration reference](/docs/configuration) — `dry_run`, `bgp` and `ban` keys.
+- [REST API](/docs/api) — the `attacks`, `status`, `bans` and `config/reload` endpoints.

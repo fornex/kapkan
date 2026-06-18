@@ -1,0 +1,81 @@
+export const metadata = {
+  title: "Tableau de bord",
+  description:
+    "L'interface web embarquée et sans étape de build, servie sur l'écouteur de l'API — attaques en direct, principaux émetteurs, hostgroups et contrôles de bannissement.",
+};
+
+# Tableau de bord
+
+Kapkan est livré avec une interface web autonome embarquée directement dans le binaire via `go:embed`.
+Il n'y a aucune étape de build, aucun bundler et aucune ressource externe à télécharger — le même binaire
+statique `kapkan` sert le tableau de bord en parallèle de l'API JSON et des métriques Prometheus. Il s'agit
+de JavaScript pur qui interroge l'API REST, et non d'une application React ; il fonctionne donc entièrement
+à partir de données en direct, sans aucune base de données requise.
+
+<Callout type="info" title="Un seul binaire, un seul écouteur">
+Le tableau de bord, l'API JSON et `/metrics` sont tous servis par le même processus à la même
+adresse. Il n'y a aucun service web distinct à déployer ou à maintenir synchronisé.
+</Callout>
+
+## Où il se trouve
+
+Le tableau de bord est servi sur `/` à la même adresse que l'API REST — la valeur `api.listen`
+de votre configuration. Avec la valeur par défaut `127.0.0.1:8080`, vous l'ouvrez à l'adresse
+[http://localhost:8080](http://localhost:8080).
+
+Pour ne servir que l'API JSON et les métriques sans l'interface, désactivez-la :
+
+```yaml
+api:
+  listen: "127.0.0.1:8080"
+  dashboard: false   # serve the JSON API and /metrics only
+```
+
+Avec `api.dashboard: false`, les points de terminaison `/api/v1` et `/metrics` continuent de fonctionner —
+seule l'enveloppe de l'interface embarquée cesse d'être servie.
+
+## Ce qu'il affiche
+
+Le tableau de bord interroge l'API JSON et restitue tout ce que Kapkan suit en mémoire :
+
+- **Mode actif** — indique si l'instance fonctionne en dry-run ou en mode actif, afin que vous puissiez voir d'un
+  coup d'œil si une attaque détectée serait réellement annoncée.
+- **Attaques actives et récentes** — les attaques en cours ainsi que celles récemment terminées,
+  chacune avec sa classification (vecteurs d'amplification tels que NTP / DNS / CLDAP / memcached /
+  SSDP / chargen, et inondations SYN / UDP / TCP / ICMP / par fragments) ainsi que les sources,
+  ports et protocoles dominants capturés à partir des échantillons de flow.
+- **Principaux émetteurs (top talkers)** — l'instantané des hôtes suivis avec les débits par direction et les
+  références (baselines) apprises, afin que vous puissiez voir qui est le plus bruyant et comment cela se compare à la normale.
+- **Hostgroups** — vos groupes de préfixes nommés et leur état.
+- **Table de bannissement** — chaque bannissement, actif et historique.
+
+Il expose également les mêmes points de terminaison de contrôle que l'API : **bannissement / débannissement manuel**
+d'une adresse et **rechargement de la configuration** (l'équivalent de `SIGHUP`). L'ensemble de la vue fonctionne
+uniquement à partir de données en direct — aucun ClickHouse ni autre base de données n'est nécessaire pour quoi que ce soit.
+
+<Callout type="success" title="Aucune base de données requise">
+Le tableau de bord est entièrement construit à partir de l'état en mémoire du moteur. Le stockage historique des flows
+est une fonctionnalité distincte et optionnelle — il n'est pas nécessaire pour voir les attaques en direct, les principaux émetteurs ou les bannissements.
+</Callout>
+
+## Authentification
+
+Par défaut, l'API et le tableau de bord ne sont pas authentifiés, ce qui n'est sûr que parce que la valeur par défaut
+de `api.listen` se lie à `127.0.0.1`. Lorsque vous définissez un jeton d'API, le tableau de bord s'adapte : l'enveloppe
+statique de l'interface se charge toujours, mais les données qui la sous-tendent ne s'affichent qu'une fois le jeton fourni.
+
+Lorsque l'authentification est activée, le tableau de bord demande le jeton et le conserve dans le
+`sessionStorage` du navigateur, en l'attachant comme en-tête bearer sur chaque requête API qu'il effectue. Chaque
+requête `/api/v1` est autorisée avec `Authorization: Bearer <token>` ; `/metrics` et l'enveloppe
+statique restent ouverts, mais pas les données en direct ni les contrôles de bannissement / rechargement.
+
+<Callout type="warning" title="Définissez un jeton avant d'exposer l'écouteur">
+Avant de lier `api.listen` à autre chose que `127.0.0.1`, configurez un jeton d'API. Consultez
+[Authentification](/docs/authentication) pour savoir comment définir `api.token_env` et comment les requêtes sont
+vérifiées.
+</Callout>
+
+## Voir aussi
+
+- [API REST](/docs/api) — les points de terminaison que le tableau de bord interroge et les actions de contrôle qu'il appelle.
+- [Authentification](/docs/authentication) — comment protéger l'API et le tableau de bord avec un jeton.

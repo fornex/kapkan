@@ -1,0 +1,35 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "frontend",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd frontend && npm run dev -- --port 3099"],
+      "port": 3099
+    },
+    {
+      "name": "kapkan-design",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8099", "--directory", "/tmp/kapkan-design/design_handoff_kapkan_console"],
+      "port": 8099
+    },
+    {
+      "name": "kapkan-real",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["/tmp/kapkan-fixture-server.py"],
+      "port": 8090
+    },
+    {
+      "name": "kapkan-live",
+      "runtimeExecutable": "/tmp/kapkand",
+      "runtimeArgs": ["-config", "/tmp/kapkan-smoke.yaml", "-log-format", "text"],
+      "port": 8096
+    },
+    {
+      "name": "kapkan-console",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8899", "--directory", "/Users/fornex/Projects/kapkan/internal/api/static"],
+      "port": 8899
+    }
+  ]
+}

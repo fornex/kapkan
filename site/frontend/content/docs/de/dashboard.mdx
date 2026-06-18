@@ -1,0 +1,90 @@
+export const metadata = {
+  title: "Dashboard",
+  description:
+    "Die eingebettete, build-freie Web-Oberfläche, die auf dem API-Listener bereitgestellt wird — Live-Angriffe, Top-Talker, Hostgroups und Sperr-Steuerung.",
+};
+
+# Dashboard
+
+Kapkan bringt eine eigenständige Web-Oberfläche mit, die per `go:embed` direkt in die Binärdatei
+eingebettet ist. Es gibt keinen Build-Schritt, keinen Bundler und keine externen Assets, die
+geladen werden müssten — dieselbe statische `kapkan`-Binärdatei stellt das Dashboard zusammen mit
+der JSON-API und den Prometheus-Metriken bereit. Es handelt sich um reines JavaScript, das die
+REST-API abfragt (Polling), nicht um eine React-Anwendung, sodass es vollständig aus Live-Daten
+läuft und keine Datenbank benötigt.
+
+<Callout type="info" title="Eine Binärdatei, ein Listener">
+Das Dashboard, die JSON-API und `/metrics` werden alle vom selben Prozess unter derselben Adresse
+bereitgestellt. Es gibt keinen separaten Webdienst, der bereitgestellt oder synchron gehalten
+werden müsste.
+</Callout>
+
+## Wo es zu finden ist
+
+Das Dashboard wird unter `/` auf derselben Adresse wie die REST-API bereitgestellt — dem Wert
+`api.listen` aus Ihrer Konfiguration. Mit der Standardeinstellung `127.0.0.1:8080` öffnen Sie es
+unter [http://localhost:8080](http://localhost:8080).
+
+Um nur die JSON-API und die Metriken ohne die Oberfläche bereitzustellen, deaktivieren Sie es:
+
+```yaml
+api:
+  listen: "127.0.0.1:8080"
+  dashboard: false   # serve the JSON API and /metrics only
+```
+
+Mit `api.dashboard: false` funktionieren die `/api/v1`-Endpunkte und `/metrics` weiterhin — nur
+die eingebettete UI-Shell wird nicht mehr bereitgestellt.
+
+## Was es anzeigt
+
+Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher verfolgt:
+
+- **Live-Modus** — ob die Instanz im Dry-run- oder im Live-Betrieb läuft, sodass Sie auf einen
+  Blick sehen, ob ein erkannter Angriff tatsächlich angekündigt würde.
+- **Aktive und kürzliche Angriffe** — aktuell laufende Angriffe sowie die kürzlich beendeten,
+  jeweils mit ihrer Klassifizierung (Amplification-Vektoren wie NTP / DNS / CLDAP / memcached /
+  SSDP / chargen sowie SYN- / UDP- / TCP- / ICMP- / Fragment-Floods) und den dominierenden
+  Quellen, Ports und Protokollen, die aus den Flow-Samples erfasst wurden.
+- **Top-Talker** — der Snapshot der verfolgten Hosts mit Raten je Richtung und gelernten
+  Baselines, sodass Sie sehen können, wer am lautesten ist und wie sich das im Vergleich zum
+  Normalzustand verhält.
+- **Hostgroups** — Ihre benannten Präfixgruppen und deren Zustand.
+- **Sperrtabelle** — jede Sperre, aktiv und historisch.
+
+Es stellt außerdem dieselben Steuerungs-Endpunkte bereit, die auch die API bietet: **manuelles
+Sperren / Entsperren** einer Adresse und **Konfigurations-Reload** (das Äquivalent zu `SIGHUP`).
+Die gesamte Ansicht funktioniert allein mit Live-Daten — für nichts davon werden ClickHouse oder
+eine andere Datenbank benötigt.
+
+<Callout type="success" title="Keine Datenbank erforderlich">
+Das Dashboard wird vollständig aus dem In-Memory-Zustand der Engine aufgebaut. Die historische
+Flow-Speicherung ist eine separate, optionale Funktion — sie ist nicht erforderlich, um
+Live-Angriffe, Top-Talker oder Sperren zu sehen.
+</Callout>
+
+## Authentifizierung
+
+Standardmäßig sind die API und das Dashboard nicht authentifiziert, was nur deshalb sicher ist,
+weil die Standardeinstellung `api.listen` an `127.0.0.1` bindet. Wenn Sie ein API-Token setzen,
+passt sich das Dashboard an: Die statische UI-Shell wird weiterhin geladen, die Daten dahinter
+jedoch erst, wenn Sie das Token bereitstellen.
+
+Wenn die Authentifizierung aktiviert ist, fragt das Dashboard nach dem Token und behält es im
+`sessionStorage` des Browsers, wobei es bei jeder API-Anfrage als Bearer-Header angehängt wird.
+Jede `/api/v1`-Anfrage wird mit `Authorization: Bearer <token>` autorisiert; `/metrics` und die
+statische Shell bleiben offen, die Live-Daten sowie die Steuerungen für Sperre / Reload jedoch
+nicht.
+
+<Callout type="warning" title="Setzen Sie ein Token, bevor Sie den Listener freigeben">
+Bevor Sie `api.listen` an etwas anderes als `127.0.0.1` binden, konfigurieren Sie ein API-Token.
+Unter [Authentifizierung](/docs/authentication) erfahren Sie, wie Sie `api.token_env` setzen und
+wie Anfragen verifiziert werden.
+</Callout>
+
+## Verwandte Themen
+
+- [REST-API](/docs/api) — die Endpunkte, die das Dashboard abfragt, und die Steuerungsaktionen,
+  die es aufruft.
+- [Authentifizierung](/docs/authentication) — wie Sie die API und das Dashboard mit einem Token
+  schützen.

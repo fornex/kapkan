@@ -1,0 +1,156 @@
+export const metadata = {
+  title: "Produktiv-Deployment",
+  description:
+    "Kapkan als gehärteten systemd-Dienst betreiben — mit Dateilayout, Geheimnissen und Konfigurations-Reloads.",
+};
+
+# Produktiv-Deployment
+
+Eine gehärtete systemd-Unit und ein Beispiel für eine Produktivkonfiguration liegen im
+Verzeichnis [`deploy/`](https://github.com/fornex/kapkan) des Repositorys bei:
+`deploy/kapkan.service` und `deploy/config.example.yaml`. Diese Seite führt durch die
+Installation des Binaries als Systemdienst, zeigt, wo die einzelnen Dateien liegen, wie
+Geheimnisse aus der YAML-Datei herausgehalten werden und wie sich die Konfiguration ohne
+Neustart neu laden lässt.
+
+<Callout type="info" title="Zuerst bauen">
+Die folgenden Schritte setzen voraus, dass Sie bereits ein `kapkan`-Binary haben. Falls Sie
+es noch nicht gebaut haben, lesen Sie den [Schnelleinstieg](/docs/quickstart) oder
+[Aus dem Quellcode bauen](#aus-dem-quellcode-bauen).
+</Callout>
+
+## Installation
+
+Führen Sie das Folgende als root aus einem Checkout des Repositorys aus (damit `deploy/`
+verfügbar ist). Es installiert das Binary, legt einen unprivilegierten Systembenutzer an,
+richtet `/etc/kapkan` ein, installiert die Produktivkonfiguration, schreibt die Geheimnis-Env-Datei
+mit restriktiven Berechtigungen, installiert die systemd-Unit und aktiviert den Dienst.
+
+```sh
+sudo install -m 0755 kapkan /usr/local/bin/kapkan
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo install -d -o kapkan -g kapkan /etc/kapkan
+sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
+echo 'KAPKAN_TG_TOKEN=123456:abc' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
+```
+
+Die Unit läuft als Benutzer `kapkan` mit `ExecStart=/usr/local/bin/kapkan -config
+/etc/kapkan/config.yaml -log-format json -log-level info`, startet bei Fehlern neu und ist
+stark abgeschottet: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
+`ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
+`MemoryDenyWriteExecute` und mehr.
+
+<Callout type="info" title="BGP an Port 179 binden">
+Kapkan benötigt im dry-run oder beim Peering von einem hohen lokalen Port keine besonderen
+Privilegien. Wenn Sie den BGP-Speaker an den well-known Port 179 binden, erteilen Sie die
+nötige Capability, indem Sie `AmbientCapabilities=CAP_NET_BIND_SERVICE` zum Abschnitt
+`[Service]` der Unit hinzufügen.
+</Callout>
+
+Sobald der Dienst läuft, prüfen Sie den Status und verfolgen Sie die Logs:
+
+```sh
+sudo systemctl status kapkan
+sudo journalctl -u kapkan -f
+```
+
+## Dateilayout
+
+| Pfad | Modus | Zweck |
+| --- | --- | --- |
+| `/usr/local/bin/kapkan` | `0755` | Das einzelne statische Daemon-Binary. |
+| `/etc/kapkan/config.yaml` | `0640` | Die YAML-Konfiguration, im Besitz von `kapkan:kapkan`. |
+| `/etc/kapkan/kapkan.env` | `0600` | Geheimnis-Env-Datei (Tokens, SMTP-Zugangsdaten). |
+| `/etc/systemd/system/kapkan.service` | `0644` | Die gehärtete systemd-Unit. |
+
+Das gesamte Verzeichnis `/etc/kapkan` wird dem Prozess über `ReadOnlyPaths=/etc/kapkan`
+schreibgeschützt eingehängt, sodass der Daemon seine Konfiguration und Geheimnisse lesen,
+aber nicht verändern kann.
+
+## Geheimnisse
+
+Keine Zugangsdaten gehören in `config.yaml`. Die YAML-Datei verweist auf jedes Geheimnis über
+den Namen einer **Umgebungsvariablen**, und die Unit lädt diese Variablen aus der Env-Datei
+über `EnvironmentFile=-/etc/kapkan/kapkan.env`. Behalten Sie für diese Datei den Modus `0600` bei.
+
+Die Konfigurationsschlüssel, die aus der Umgebung lesen, sind die `*_env`-Schlüssel:
+
+- `notify.telegram.token_env` — z. B. `KAPKAN_TG_TOKEN`, der Telegram-Bot-Token.
+- `notify.email.username_env` / `notify.email.password_env` — SMTP-Zugangsdaten.
+- `api.token_env` — der API-Bearer-Token (siehe [Authentifizierung](/docs/authentication)).
+- `storage.clickhouse.username_env` / `password_env` — ClickHouse-Zugangsdaten, falls Sie
+  den optionalen Verlaufsspeicher aktivieren.
+
+Zum Beispiel benennt die YAML-Datei die Variable, und die Env-Datei liefert ihren Wert:
+
+```yaml
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"   # name of the env var, never the token itself
+    chat_id: "-1001234567890"
+```
+
+```text
+# /etc/kapkan/kapkan.env  (mode 0600)
+KAPKAN_TG_TOKEN=123456:abcdef
+KAPKAN_API_TOKEN=a-long-random-string
+```
+
+<Callout type="success" title="Warum das wichtig ist">
+Da Geheimnisse ausschließlich in der Prozessumgebung leben, können Sie Ihre `config.yaml`
+gefahrlos in git aufbewahren und diffen. Die systemd-Sandbox hält `/etc/kapkan`
+schreibgeschützt und betreibt den Daemon als unprivilegierten Benutzer, sodass die Env-Datei
+für den Dienst niemals beschreibbar ist.
+</Callout>
+
+## Konfigurations-Reload
+
+Kapkan lädt seine Konfiguration bei `SIGHUP` im laufenden Betrieb neu — ohne Neustart, ohne
+verlorenen flow-Status. Die systemd-Unit verdrahtet dies mit
+`ExecReload=/bin/kill -HUP $MAINPID`, sodass Sie folgendermaßen neu laden:
+
+```sh
+sudo systemctl reload kapkan
+```
+
+Gleichwertig können Sie denselben Reload über die API auslösen:
+
+```sh
+curl -s -X POST localhost:8080/api/v1/config/reload
+```
+
+Die meisten Schlüssel werden live neu geladen, darunter `dry_run`, Schwellenwerte,
+`networks`, hostgroups, Baselines und Benachrichtigungseinstellungen. Einige wenige
+Dimensionierungsparameter erfordern einen Neustart — namentlich die Ring-Dimensionierung
+`samples.buffer_flows` / `flows_per_attack`.
+
+## Aus dem Quellcode bauen
+
+Zum Bauen wird **Go 1.22 oder neuer** benötigt. Das `Makefile` stellt die üblichen Targets bereit:
+
+```sh
+make build  # static binary
+make test   # go test -race ./...
+make lint   # golangci-lint run
+make bench  # engine hot-path benchmarks
+```
+
+`make build` erzeugt das einzelne statische `kapkan`-Binary, das Sie in den obigen Schritten
+installieren. Die Tests verwenden synthetische NetFlow-/sFlow-Datagramme, die von
+`pkg/flowgen` erzeugt werden (echtes Wire-Format), sowie einen In-Process-GoBGP-Peer, sodass
+niemals echte Router kontaktiert werden.
+
+<Callout type="warning" title="Bevor Sie Kapkan exponieren">
+Behalten Sie `dry_run: true` bei, bis Sie die Erkennung gegen Live-Telemetrie validiert haben
+— siehe [In Betrieb gehen](/docs/going-live). Und setzen Sie einen API-Token, bevor Sie den
+Listener über `127.0.0.1` hinaus binden, sonst sind API und Dashboard unauthentifiziert
+erreichbar — siehe [Authentifizierung](/docs/authentication).
+</Callout>
+
+## Verwandte Themen
+
+- [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.
+- [Authentifizierung](/docs/authentication) — setzen Sie einen Bearer-Token, bevor Sie die API exponieren.
+- [In Betrieb gehen](/docs/going-live) — validieren Sie die Erkennung und schalten Sie dann den dry-run ab.

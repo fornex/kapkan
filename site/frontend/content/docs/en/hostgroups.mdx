@@ -1,0 +1,132 @@
+export const metadata = {
+  title: "Hostgroups",
+  description:
+    "Group prefixes under their own thresholds and mitigation policy, with per-host or group-total calculation.",
+};
+
+# Hostgroups
+
+A single global `thresholds` block treats every protected host the same. That rarely
+matches reality: a customer web tier behaves nothing like a DNS pool, and a network you
+only want to watch behaves nothing like one you want to auto-blackhole. Hostgroups let you
+carve your protected `networks` into named prefix sets, each carrying its own thresholds
+and mitigation policy, instead of tuning one threshold set for the loudest host on the box.
+
+A hostgroup is a list of prefixes plus optional `thresholds`, `thresholds_outgoing`,
+`baseline`, a `ban` toggle, and a `calculation` mode. Everything you do not set is
+inherited from the global configuration.
+
+<Callout type="info" title="Hostgroups are optional">
+With no `hostgroups` block, every destination inside `networks` is evaluated against the
+global `thresholds`. Add groups only where a subset of your network needs a different
+policy.
+</Callout>
+
+## Example
+
+```yaml
+networks:
+  - "203.0.113.0/24"
+
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 35000
+
+hostgroups:
+  - name: web                    # tighter per-host limits for this /26
+    networks:
+      - "203.0.113.0/26"
+    thresholds:
+      pps: 20000
+      mbps: 500
+      flows_per_sec: 10000
+  - name: customers-no-rtbh      # detect and notify, but never auto-blackhole
+    networks:
+      - "203.0.113.64/26"
+    ban: false
+  - name: dns-pool               # alert on the pool's TOTAL traffic
+    networks:
+      - "203.0.113.128/26"
+    calculation: total
+    thresholds:
+      pps: 300000
+      mbps: 4000
+      flows_per_sec: 150000
+```
+
+This carves the `203.0.113.0/24` you protect into three policies. The `web` group lowers
+the per-host bar for a tier that should never be loud. The `customers-no-rtbh` group still
+detects and notifies but leaves mitigation to you. The `dns-pool` group stops looking at
+individual resolvers and watches the pool's combined rate instead.
+
+## Rules
+
+- **Longest-prefix-match ownership.** Each host is owned by exactly one group: the one
+  with the most specific (longest) matching prefix. A host inside both a `/24` group and a
+  `/26` group inside it belongs to the `/26`.
+- **Implicit global fallback.** Hosts matched by no group fall into an implicit `global`
+  group that carries the top-level `thresholds` (and `thresholds_outgoing` / `baseline` if
+  set). You never have to enumerate every prefix — anything left over uses the global
+  policy.
+- **Group prefixes must lie inside `networks`.** A group can only narrow protection you
+  already declared; a prefix outside your protected `networks` is a config error.
+- **Thresholds are optional.** Omit `thresholds` and the group inherits the global
+  thresholds. Set it to override them for that group only.
+- **`ban: false` disables auto-RTBH.** The group's hosts are still detected, classified
+  and notified, but no automatic blackhole is announced. Manual bans through the API still
+  work and still apply to those hosts.
+- **`calculation: total` sums the group.** Instead of evaluating each host, the group's
+  combined traffic is compared to the thresholds. Total groups report `scope: "group"` in
+  events, notifications and the API, and **never auto-ban** — there is no single host to
+  blackhole. The default, `calculation: per_host`, evaluates each host independently.
+- **Hostgroups hot-reload** with the rest of the config (`SIGHUP` or
+  `POST /api/v1/config/reload`); you do not need to restart to add, remove or retune a
+  group.
+
+<Callout type="warning" title="Total groups never blackhole automatically">
+A `calculation: total` group fires an attack for the prefix set as a whole, so there is no
+single address to announce a `/32` or `/128` for. Use total groups to alert on aggregate
+load (an anycast or DNS pool); pair them with a per-host group or manual bans if you also
+need automatic mitigation.
+</Callout>
+
+## Per-group overrides
+
+Beyond `thresholds`, each group may also carry its own outgoing thresholds and baseline,
+or opt out of a feature the global config turned on.
+
+- **`thresholds_outgoing`** — give a group its own policy for attacks originated by its
+  hosts (compromised machines attacking outward). Uses the same keys as `thresholds`; at
+  least one must be set. See [Detection](/docs/detection) for outgoing detection.
+- **`baseline`** — a group inherits the global learned-baseline block, or overrides it
+  wholesale with its own. To exclude a group from baselines entirely, set
+  `baseline: { enabled: false }` — the group then uses static thresholds only.
+- **`tenant`** — label the group's owner so a tenant-scoped API token sees only its own
+  groups' attacks, bans and hosts. See [Multi-tenancy](/docs/multi-tenancy).
+
+```yaml
+hostgroups:
+  - name: edge
+    networks:
+      - "203.0.113.192/26"
+    thresholds:
+      pps: 40000
+    thresholds_outgoing:        # watch for compromised hosts in this group
+      pps: 30000
+      udp_pps: 15000
+    baseline:
+      enabled: false            # static thresholds only, no learning
+```
+
+Per-group overrides are independent: a group can set `thresholds` but inherit the global
+`baseline`, or set its own `baseline` while inheriting global `thresholds`. Anything left
+unset falls back to the global value.
+
+## Related
+
+- [Configuration reference](/docs/configuration) — every key in the YAML file.
+- [Detection & thresholds](/docs/detection) — how thresholds and outgoing detection work.
+- [Baselines](/docs/baselines) — continuous learned per-host thresholds.
+- [Mitigation & RTBH](/docs/mitigation) — what `ban: false` opts out of.
+- [REST API](/docs/api) — where `scope` and per-group state appear.

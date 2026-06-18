@@ -1,0 +1,155 @@
+export const metadata = {
+  title: "Déploiement en production",
+  description:
+    "Déployez Kapkan en tant que service systemd renforcé, avec organisation des fichiers, secrets et rechargements de configuration.",
+};
+
+# Déploiement en production
+
+Une unité systemd renforcée et un exemple de configuration de production sont fournis dans le
+répertoire [`deploy/`](https://github.com/fornex/kapkan) du dépôt : `deploy/kapkan.service`
+et `deploy/config.example.yaml`. Cette page explique comment installer le binaire en tant que
+service système, où réside chaque fichier, comment garder les secrets hors du YAML et comment
+recharger la configuration sans redémarrage.
+
+<Callout type="info" title="Compilez d'abord">
+Les étapes ci-dessous supposent que vous disposez déjà d'un binaire `kapkan`. Si vous ne l'avez
+pas encore compilé, consultez le [Démarrage rapide](/docs/quickstart) ou
+[Compilation depuis les sources](#compilation-depuis-les-sources).
+</Callout>
+
+## Installation
+
+Exécutez les commandes suivantes en tant que root depuis une copie locale du dépôt (afin que
+`deploy/` soit disponible). Cela installe le binaire, crée un utilisateur système non privilégié,
+met en place `/etc/kapkan`, installe la configuration de production, écrit le fichier d'environnement
+des secrets avec des permissions restrictives, installe l'unité systemd et active le service.
+
+```sh
+sudo install -m 0755 kapkan /usr/local/bin/kapkan
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo install -d -o kapkan -g kapkan /etc/kapkan
+sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
+echo 'KAPKAN_TG_TOKEN=123456:abc' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
+```
+
+L'unité s'exécute sous l'utilisateur `kapkan` avec `ExecStart=/usr/local/bin/kapkan -config
+/etc/kapkan/config.yaml -log-format json -log-level info`, redémarre en cas d'échec et est
+fortement cloisonnée : `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
+`ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
+`MemoryDenyWriteExecute` et bien plus encore.
+
+<Callout type="info" title="Lier BGP au port 179">
+Kapkan n'a besoin d'aucun privilège particulier en dry-run ou lorsqu'il établit un peering depuis
+un port local élevé. Si vous liez le locuteur BGP au port bien connu 179, accordez la capacité en
+ajoutant `AmbientCapabilities=CAP_NET_BIND_SERVICE` à la section `[Service]` de l'unité.
+</Callout>
+
+Une fois le service en cours d'exécution, vérifiez son état et suivez les journaux :
+
+```sh
+sudo systemctl status kapkan
+sudo journalctl -u kapkan -f
+```
+
+## Organisation des fichiers
+
+| Chemin | Mode | Rôle |
+| --- | --- | --- |
+| `/usr/local/bin/kapkan` | `0755` | Le binaire unique et statique du démon. |
+| `/etc/kapkan/config.yaml` | `0640` | La configuration YAML, appartenant à `kapkan:kapkan`. |
+| `/etc/kapkan/kapkan.env` | `0600` | Fichier d'environnement des secrets (jetons, identifiants SMTP). |
+| `/etc/systemd/system/kapkan.service` | `0644` | L'unité systemd renforcée. |
+
+L'ensemble du répertoire `/etc/kapkan` est monté en lecture seule pour le processus via
+`ReadOnlyPaths=/etc/kapkan`, de sorte que le démon peut lire sa configuration et ses secrets mais
+ne peut pas les modifier.
+
+## Secrets
+
+Aucun identifiant ne doit figurer dans `config.yaml`. Le YAML référence chaque secret par le nom
+d'une **variable d'environnement**, et l'unité charge ces variables depuis le fichier d'environnement
+via `EnvironmentFile=-/etc/kapkan/kapkan.env`. Conservez ce fichier en mode `0600`.
+
+Les clés de configuration qui lisent depuis l'environnement sont les clés `*_env` :
+
+- `notify.telegram.token_env` — par ex. `KAPKAN_TG_TOKEN`, le jeton du bot Telegram.
+- `notify.email.username_env` / `notify.email.password_env` — identifiants SMTP.
+- `api.token_env` — le jeton bearer de l'API (voir [Authentification](/docs/authentication)).
+- `storage.clickhouse.username_env` / `password_env` — identifiants ClickHouse, si vous
+  activez le magasin d'historique optionnel.
+
+Par exemple, le YAML nomme la variable et le fichier d'environnement en fournit la valeur :
+
+```yaml
+notify:
+  telegram:
+    token_env: "KAPKAN_TG_TOKEN"   # name of the env var, never the token itself
+    chat_id: "-1001234567890"
+```
+
+```text
+# /etc/kapkan/kapkan.env  (mode 0600)
+KAPKAN_TG_TOKEN=123456:abcdef
+KAPKAN_API_TOKEN=a-long-random-string
+```
+
+<Callout type="success" title="Pourquoi c'est important">
+Comme les secrets ne résident que dans l'environnement du processus, votre `config.yaml` peut être
+conservé et comparé (diff) en toute sécurité dans git. Le cloisonnement systemd maintient
+`/etc/kapkan` en lecture seule et exécute le démon sous un utilisateur non privilégié, de sorte que
+le fichier d'environnement n'est jamais accessible en écriture par le service.
+</Callout>
+
+## Rechargement de la configuration
+
+Kapkan recharge sa configuration à chaud sur `SIGHUP` — sans redémarrage, sans perte de l'état des
+flow. L'unité systemd met cela en place avec `ExecReload=/bin/kill -HUP $MAINPID`, de sorte que vous
+rechargez avec :
+
+```sh
+sudo systemctl reload kapkan
+```
+
+De manière équivalente, vous pouvez déclencher le même rechargement via l'API :
+
+```sh
+curl -s -X POST localhost:8080/api/v1/config/reload
+```
+
+La plupart des clés se rechargent à chaud, notamment `dry_run`, les seuils, `networks`, les
+hostgroups, les références (baselines) et les paramètres de notification. Quelques paramètres de
+dimensionnement nécessitent un redémarrage — en particulier le dimensionnement de l'anneau
+`samples.buffer_flows` / `flows_per_attack`.
+
+## Compilation depuis les sources
+
+La compilation requiert **Go 1.22 ou une version plus récente**. Le `Makefile` fournit les cibles
+standard :
+
+```sh
+make build  # static binary
+make test   # go test -race ./...
+make lint   # golangci-lint run
+make bench  # engine hot-path benchmarks
+```
+
+`make build` produit le binaire `kapkan` unique et statique que vous installez aux étapes
+ci-dessus. Les tests utilisent des datagrammes NetFlow/sFlow synthétiques générés par `pkg/flowgen`
+(format de transmission réel) et un peer GoBGP intra-processus, de sorte qu'aucun routeur réel n'est
+jamais contacté.
+
+<Callout type="warning" title="Avant d'exposer Kapkan">
+Conservez `dry_run: true` jusqu'à ce que vous ayez validé la détection face à de la télémétrie en
+direct — voir [Mise en production](/docs/going-live). Et définissez un jeton d'API avant de lier
+l'écouteur au-delà de `127.0.0.1`, faute de quoi l'API et le tableau de bord seront accessibles sans
+authentification — voir [Authentification](/docs/authentication).
+</Callout>
+
+## Voir aussi
+
+- [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.
+- [Authentification](/docs/authentication) — définissez un jeton bearer avant d'exposer l'API.
+- [Mise en production](/docs/going-live) — validez la détection, puis désactivez le dry-run.

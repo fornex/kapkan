@@ -1,0 +1,81 @@
+export const metadata = {
+  title: "Dashboard",
+  description:
+    "The embedded, build-free web UI served on the API listener — live attacks, top talkers, hostgroups and ban controls.",
+};
+
+# Dashboard
+
+Kapkan ships with a self-contained web UI embedded directly in the binary via `go:embed`.
+There is no build step, no bundler, and no external assets to fetch — the same static `kapkan`
+binary serves the dashboard alongside the JSON API and Prometheus metrics. It is plain
+JavaScript that polls the REST API, not a React application, so it runs entirely from live
+data with no database required.
+
+<Callout type="info" title="One binary, one listener">
+The dashboard, the JSON API and `/metrics` are all served by the same process on the same
+address. There is no separate web service to deploy or keep in sync.
+</Callout>
+
+## Where it lives
+
+The dashboard is served at `/` on the same address as the REST API — the `api.listen`
+value from your config. With the default of `127.0.0.1:8080`, you open it at
+[http://localhost:8080](http://localhost:8080).
+
+To serve only the JSON API and metrics without the UI, disable it:
+
+```yaml
+api:
+  listen: "127.0.0.1:8080"
+  dashboard: false   # serve the JSON API and /metrics only
+```
+
+With `api.dashboard: false`, the `/api/v1` endpoints and `/metrics` keep working — only the
+embedded UI shell stops being served.
+
+## What it shows
+
+The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
+
+- **Live mode** — whether the instance is running in dry-run or live, so you can see at a
+  glance whether a detected attack would actually be announced.
+- **Active and recent attacks** — currently firing attacks plus the recently ended ones,
+  each with its classification (amplification vectors such as NTP / DNS / CLDAP / memcached /
+  SSDP / chargen, and SYN / UDP / TCP / ICMP / fragment floods) and the dominant sources,
+  ports and protocols captured from the flow samples.
+- **Top talkers** — the tracked-host snapshot with per-direction rates and learned
+  baselines, so you can see who is loudest and how it compares to normal.
+- **Hostgroups** — your named prefix groups and their state.
+- **Ban table** — every ban, active and historical.
+
+It also exposes the same control endpoints the API offers: **manual ban / unban** of an
+address and **config reload** (the equivalent of `SIGHUP`). The whole view works on live
+data alone — no ClickHouse or other database is needed for any of it.
+
+<Callout type="success" title="No database required">
+The dashboard is built entirely from the engine's in-memory state. Historical flow storage
+is a separate, optional feature — it is not needed to see live attacks, top talkers or bans.
+</Callout>
+
+## Authentication
+
+By default the API and dashboard are unauthenticated, which is safe only because the default
+`api.listen` binds to `127.0.0.1`. When you set an API token, the dashboard adapts: the
+static UI shell still loads, but the data behind it does not until you supply the token.
+
+When auth is enabled, the dashboard prompts for the token and keeps it in the browser's
+`sessionStorage`, attaching it as a bearer header on every API request it makes. Each
+`/api/v1` request is authorized with `Authorization: Bearer <token>`; `/metrics` and the
+static shell stay open, but the live data and the ban / reload controls do not.
+
+<Callout type="warning" title="Set a token before exposing the listener">
+Before binding `api.listen` to anything beyond `127.0.0.1`, configure an API token. See
+[Authentication](/docs/authentication) for how to set `api.token_env` and how requests are
+verified.
+</Callout>
+
+## Related
+
+- [REST API](/docs/api) — the endpoints the dashboard polls and the control actions it calls.
+- [Authentication](/docs/authentication) — how to protect the API and dashboard with a token.

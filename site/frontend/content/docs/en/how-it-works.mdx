@@ -1,0 +1,173 @@
+export const metadata = {
+  title: "How it works",
+  description:
+    "Kapkan's architecture: the ingest → engine → mitigate/notify/api pipeline in a single Go binary.",
+};
+
+# How it works
+
+Kapkan is a single, statically-linked Go binary with modular internals. There is no
+sidecar, no database and no separate web service to run: flow ingestion, the detection
+engine, BGP mitigation, the REST API, the dashboard and the notifiers are all packages
+compiled into one process. You point it at a YAML config, point your routers' exporters at
+it, and it runs.
+
+Everything you observe — attacks, top talkers, learned baselines, bans — lives in process
+memory and is served straight from there. Nothing external is required to run; optional
+integrations (a ClickHouse server for history, an SMTP relay for email) are the only
+dependencies, and Kapkan runs entirely in-process without them.
+
+## The pipeline
+
+The binary is organized as a single, one-directional pipeline. Each stage hands normalized
+data to the next, and the engine fans its results out to the three consumer stages:
+
+1. **Ingest** — UDP listeners decode sFlow v5, NetFlow v5/v9 and IPFIX datagrams (via the
+   [goflow2](https://github.com/netsampler/goflow2) library, in library mode) into a single
+   normalized `Flow` representation. Sampling rate is read from the packet when the exporter
+   reports it, otherwise from `sampling.default_rate`.
+2. **Engine (hot path)** — every flow is folded into sharded per-host counters over a
+   sliding window, sampling-corrected to real traffic units, and evaluated against the
+   active thresholds (global, per-protocol, per-hostgroup, and learned baselines). This is
+   the performance-critical stage; see [Performance](#performance).
+3. **Mitigate / notify / api** — when a threshold trips, the engine emits an attack event.
+   The mitigate stage announces or withdraws RTBH routes through the embedded BGP speaker,
+   the notify stage fans the event out to your channels, and the API stage exposes live
+   state to the dashboard and to callers.
+
+The data flow, in one line:
+
+```text
+ingest → engine (hot path) → [mitigate, notify, api]
+```
+
+<Callout type="info" title="One direction only">
+Flows move forward through the pipeline; the consumer stages never feed back into the hot
+path. The engine is the only stage that touches per-flow state, which is what keeps the hot
+path allocation-free and lock-light.
+</Callout>
+
+## Components
+
+Internally, Kapkan follows the standard Go project layout. Each package owns one stage of
+the pipeline:
+
+| Package | Responsibility |
+| --- | --- |
+| `cmd/kapkan/` | main, flag parsing, signal handling |
+| `internal/app/` | wiring of all components; end-to-end test |
+| `internal/config/` | YAML load, validation, SIGHUP hot-reload |
+| `internal/ingest/` | goflow2 library-mode ingestion into a normalized `Flow` |
+| `internal/engine/` | sharded per-host counters, sliding window, threshold eval |
+| `internal/mitigate/` | embedded GoBGP: RTBH announce/withdraw, TTL, caps, dry-run |
+| `internal/notify/` | Telegram, Slack, email, webhook and exec-hook notifications |
+| `internal/api/` | REST API + Prometheus metrics |
+| `pkg/flowgen/` | synthetic NetFlow/sFlow generator for tests and load |
+
+The same layout as a tree:
+
+```text
+cmd/kapkan/        main, flag parsing, signal handling
+internal/app/      wiring of all components; end-to-end test
+internal/config/   YAML load, validation, SIGHUP hot-reload
+internal/ingest/   goflow2 library-mode ingestion -> normalized Flow
+internal/engine/   sharded per-host counters, sliding window, threshold eval
+internal/mitigate/ embedded GoBGP: RTBH announce/withdraw, TTL, caps, dry-run
+internal/notify/   Telegram + webhook notifications
+internal/api/      REST API + Prometheus metrics
+pkg/flowgen/       synthetic NetFlow/sFlow generator for tests and load
+```
+
+The key third-party libraries are [goflow2](https://github.com/netsampler/goflow2) for flow
+decoding and [GoBGP](https://github.com/osrg/gobgp) for the BGP speaker — both used in
+library mode, so there is no external collector or routing daemon to deploy alongside
+Kapkan. HTTP and structured logging use the Go standard library.
+
+## Data flow
+
+```text
+ingest → engine (hot path) → [mitigate, notify, api]
+```
+
+Each hop, in order:
+
+- **Router exporter → ingest.** Your routers send sampled flow records over UDP to the
+  configured listen ports (`listen.sflow`, `listen.netflow`). The ingest package decodes the
+  wire format and normalizes each record — addresses, ports, protocol, byte/packet counts,
+  sampling rate — into one internal `Flow` type, regardless of which protocol produced it.
+- **Ingest → engine.** Normalized flows enter the hot path. The engine attributes each flow
+  to a destination host inside `networks`, multiplies its counts by the sampling rate so
+  rates are expressed in real (unsampled) traffic, and updates that host's sliding-window
+  counters. Destinations outside `networks` are counted in metrics but never trigger action.
+- **Engine → mitigate.** When a host crosses a threshold, the engine raises an attack event.
+  The mitigate stage decides whether to announce an RTBH route — honoring dry-run, the
+  whitelist, the hostgroup `ban` policy and the ban cap — and schedules its TTL-based
+  withdrawal.
+- **Engine → notify.** The same event is delivered to every configured channel (Telegram,
+  Slack, email, webhook, exec hook) with the attack's classification and flow sample
+  attached.
+- **Engine → api.** Live state — active and recent attacks, tracked hosts, bans — is read
+  out of engine memory by the REST API and the embedded dashboard.
+
+Because recent flows are buffered continuously (`samples.*`), the moment a threshold trips
+the attack's dominant sources, ports and protocols are already attached to the event — there
+is no post-detection capture delay.
+
+## Performance
+
+The hot path is the per-flow processing in `internal/engine`, and it is built to stay fast
+under attack-scale flow rates:
+
+- **Sharded per-host counters.** Host state is split across shards keyed by a hash of the IP
+  (256 shards), so concurrent flows rarely contend on the same lock.
+- **Sliding window.** Each host keeps a windowed view of its recent traffic, so thresholds
+  are evaluated against a rolling rate rather than instantaneous spikes.
+- **Allocation-free hot path.** Buffers are pre-allocated and counters are atomic; the
+  per-flow path avoids heap allocations so the garbage collector stays out of the way.
+
+Two figures describe the target, at different scopes — present them as what they are:
+
+- The README states the engine sustains **≥20M flows/sec/core** on the hot path — the
+  per-core throughput of the in-memory folding step in isolation.
+- The engineering target in `engineering-doc` is **≥200k flows/sec on 8 cores** for end-to-end
+  per-flow processing — the bar a hot-path change must clear in the `make bench` benchmarks
+  before it is considered done.
+
+<Callout type="info" title="Benchmark before you trust it">
+The engine ships with `go test -bench` benchmarks (`make bench`). The project rule is to run
+them before claiming any hot-path change is complete, so the figures above stay honest across
+releases.
+</Callout>
+
+## Configuration & reload
+
+Kapkan is configured by a single YAML file, passed with `-config`. There is no layered or
+environment-merged config to reason about — what is in the file (plus the few secrets read
+from named environment variables) is the running state. Keeping it in git gives you a
+diffable, reviewable record of every threshold and peer.
+
+Configuration is **hot-reloadable** without restarting the daemon. Trigger a reload two ways:
+
+- Send `SIGHUP` to the process (for example `sudo systemctl reload kapkan`).
+- Call `POST /api/v1/config/reload` against the API.
+
+Both re-read and re-validate the file in place. Detection thresholds, hostgroups, baselines,
+notification settings and the `dry_run` switch all take effect on reload. A handful of
+structural settings — notably the traffic-buffer sizing under `samples.*` — require a full
+restart; see the [Configuration reference](/docs/configuration) for which keys reload and
+which do not.
+
+<Callout type="warning" title="Reloads are validated">
+A reload re-validates the whole file. If the new config is invalid, the reload is rejected and
+the previous good config keeps running — a bad edit will not take the daemon down, but check
+the logs to confirm your change actually applied.
+</Callout>
+
+## Related
+
+- [Introduction](/docs/introduction) — what Kapkan is and who it is for.
+- [Quickstart](/docs/quickstart) — build the binary and see your first detection.
+- [Detection & thresholds](/docs/detection) — how the engine decides what is an attack.
+- [Mitigation](/docs/mitigation) — how RTBH announcements are made and withdrawn.
+- [Configuration reference](/docs/configuration) — every key in the YAML file.
+- [Metrics](/docs/metrics) — the `kapkan_` Prometheus series.
