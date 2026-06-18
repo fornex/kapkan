@@ -6,3 +6,8 @@
 *.prof
 .DS_Store
 files.zip
+
+# Monorepo generated paths (populated at build, never committed)
+# console/ is the canonical operator-UI source; the build copies it here so the
+# engine binary can go:embed it.
+engine/internal/api/static/
