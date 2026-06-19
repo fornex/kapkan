@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -20,6 +21,11 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// errStatDeferred marks a filesystem check (geoip database, exec-hook path) that
+// the browser/wasm build cannot perform; statFile returns it there and the
+// validate() call sites skip the check, leaving it to the server at load.
+var errStatDeferred = errors.New("file check deferred to server-side load")
 
 // Config is the root of the kapkan configuration. Fields mirror the YAML
 // shape exactly; parsed derivatives (prefixes, addresses, community value)
@@ -1376,11 +1382,13 @@ func (c *Config) validateGeoIP() error {
 		if path == "" {
 			continue
 		}
-		fi, err := os.Stat(path)
-		if err != nil {
+		fi, err := statFile(path)
+		switch {
+		case errors.Is(err, errStatDeferred):
+			// browser/wasm build: cannot stat; the server verifies at load.
+		case err != nil:
 			return fmt.Errorf("geoip.%s %q: %w", name, path, err)
-		}
-		if fi.IsDir() {
+		case fi.IsDir():
 			return fmt.Errorf("geoip.%s %q is a directory, expected an .mmdb file", name, path)
 		}
 	}
@@ -1598,11 +1606,13 @@ func (c *Config) validateNotify() error {
 		}
 		// Fail at config load, not at the first attack: a typo'd hook
 		// path discovered mid-incident means silently lost notifications.
-		fi, err := os.Stat(n.Exec.Command)
-		if err != nil {
+		fi, err := statFile(n.Exec.Command)
+		switch {
+		case errors.Is(err, errStatDeferred):
+			// browser/wasm build: cannot stat; the server verifies at load.
+		case err != nil:
 			return fmt.Errorf("notify.exec.command: %w", err)
-		}
-		if fi.IsDir() || fi.Mode()&0o111 == 0 {
+		case fi.IsDir() || fi.Mode()&0o111 == 0:
 			return fmt.Errorf("notify.exec.command %q is not an executable file", n.Exec.Command)
 		}
 	}
