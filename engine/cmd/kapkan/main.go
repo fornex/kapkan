@@ -37,7 +37,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "dump-schema:", err)
 			os.Exit(1)
 		}
-		os.Stdout.Write(b)
+		if _, err := os.Stdout.Write(b); err != nil {
+			fmt.Fprintln(os.Stderr, "dump-schema:", err)
+			os.Exit(1)
+		}
 		return
 	}
 	if *checkConfig != "" {
