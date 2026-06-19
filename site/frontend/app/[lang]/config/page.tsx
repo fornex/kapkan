@@ -5,6 +5,7 @@ import { wizardChrome } from "@/lib/wizard/strings";
 import { site } from "@/lib/site";
 import { Logo } from "@/components/Logo";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ConfigWizard } from "@/components/ConfigWizard";
 
 export function generateStaticParams() {
@@ -47,6 +48,7 @@ export default async function ConfigPage({
           >
             {t.docsCta}
           </Link>
+          <LanguageSwitcher lang={loc} />
           <a
             href={site.repo}
             target="_blank"
@@ -59,7 +61,7 @@ export default async function ConfigPage({
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">
+      <main className="mx-auto w-full max-w-7xl flex-1 px-6 py-10">
         <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{t.title}</h1>
         <p className="mt-2 max-w-2xl text-muted-foreground">{t.intro}</p>
         <p className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
