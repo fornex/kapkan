@@ -1,7 +1,7 @@
 BINARY := kapkan
 PKG := ./...
 
-.PHONY: build test lint bench run-dev clean console-sync
+.PHONY: build test lint bench run-dev clean console-sync schema
 
 # The operator console lives in the monorepo's top-level console/ folder; the Go
 # binary go:embeds internal/api/static. Copy console/ there before any compile
@@ -25,6 +25,12 @@ bench: console-sync
 
 run-dev: build
 	./$(BINARY) -config configs/dev.yaml -log-format text
+
+# Regenerate the committed config schema from the Config struct. The drift gate
+# (TestSchemaMatchesGenerated) fails the build until the result is committed.
+# Depends on console-sync because cmd/kapkan go:embeds the console at compile.
+schema: console-sync
+	go run ./cmd/kapkan -dump-schema > ../docs/config-schema.json
 
 clean:
 	rm -f $(BINARY)

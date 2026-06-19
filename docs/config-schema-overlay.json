@@ -1,0 +1,93 @@
+{
+  "$comment": "Hand-maintained companion to config-schema.json. It carries what reflection over the Config struct cannot see: which fields belong on the wizard's basic vs advanced step, one-line help, the expected value FORMAT for fields validated imperatively (IP/CIDR/host:port/community — not by regex, so absent from the generated schema's `pattern`), and behavioural flags. Keys are dotted yaml paths; array elements use the field name with no index (e.g. hostgroups.name, bgp.neighbors.address). Flags: `secret` — the field names an environment VARIABLE, the wizard must collect a name and never a value; `defaultWhenAbsent` — value the engine assumes when the key is omitted (the wizard must respect it, e.g. NEVER emit dry_run:false without an explicit, warned opt-in — prefer omitting the key); `reloadImmutable` — changing it needs a process restart, a SIGHUP reload is rejected; `serverVerified` — points at a server-side file the browser cannot check, so `kapkan -check-config` on the host is the real check. TestOverlayKeysExist guarantees every key here still resolves in config-schema.json; reconcile against engine/internal/config/config.go via /sync-wizard.",
+  "fields": {
+    "dry_run": { "tier": "basic", "defaultWhenAbsent": true, "description": "When true (the default, including when the key is absent), mitigation is simulated and never announced. Keep it on until detection is validated against live telemetry." },
+
+    "listen.sflow": { "tier": "basic", "format": "hostport", "reloadImmutable": true, "description": "UDP listen address for sFlow, e.g. \":6343\". At least one of sflow/netflow is required." },
+    "listen.netflow": { "tier": "basic", "format": "hostport", "reloadImmutable": true, "description": "UDP listen address for NetFlow v5/v9 and IPFIX (shared socket), e.g. \":2055\"." },
+
+    "sampling.default_rate": { "tier": "basic", "description": "Sampling rate assumed when an exporter does not report its own. Wrong here scales EVERY threshold — set it to what your routers actually export." },
+
+    "networks": { "tier": "basic", "format": "cidr", "crossField": "Prefixes must not overlap each other. Detection applies ONLY to destinations inside these.", "description": "Protected prefixes." },
+    "protected_whitelist": { "tier": "basic", "format": "ip", "description": "Addresses that are never banned, regardless of traffic (gateways, nameservers)." },
+    "flow_sources": { "tier": "advanced", "format": "ip", "description": "Optional allowlist of trusted flow-exporter source addresses; bounds metric cardinality, does not affect detection." },
+
+    "thresholds.pps": { "tier": "basic", "description": "Per-host packets/sec threshold (real, unsampled units). Required, > 0." },
+    "thresholds.mbps": { "tier": "basic", "description": "Per-host megabits/sec threshold. Required, > 0." },
+    "thresholds.flows_per_sec": { "tier": "basic", "description": "Per-host flows/sec threshold. Required, > 0." },
+    "thresholds.tcp_syn_pps": { "tier": "advanced", "description": "Optional pure-SYN packets/sec limit; 0 or absent disables it." },
+    "thresholds.udp_pps": { "tier": "advanced", "description": "Optional UDP packets/sec limit; 0 or absent disables it." },
+
+    "thresholds_outgoing.pps": { "tier": "advanced", "crossField": "If the block is present, set at least one threshold.", "description": "Detects attacks ORIGINATED by protected hosts (compromised machines). Absent, outgoing traffic is not counted." },
+
+    "ban.ttl_seconds": { "tier": "basic", "description": "Every announcement auto-withdraws after this many seconds. There are no permanent bans." },
+    "ban.unban_hysteresis_seconds": { "tier": "basic", "description": "Traffic must stay below threshold this long before a ban is withdrawn (anti-flap)." },
+    "ban.max_active_bans": { "tier": "basic", "description": "Hard cap on simultaneous bans; new bans past the cap are refused." },
+
+    "mitigation": { "tier": "advanced", "description": "Default mitigation method. blackhole drops all victim traffic; flowspec is surgical; divert sends traffic to a scrubbing center." },
+    "flowspec.action": { "tier": "advanced", "description": "FlowSpec rule action. rate_limit requires flowspec.rate_mbps > 0." },
+    "flowspec.rate_mbps": { "tier": "advanced", "crossField": "Required and > 0 only when action is rate_limit.", "description": "Rate-limit ceiling in megabits/sec." },
+
+    "escalation.after_seconds": { "tier": "advanced", "crossField": "The first rung must be 0; rungs strictly increase; a ladder may only hold or strengthen (none < flowspec < divert < blackhole).", "description": "Delay from attack start at which this rung applies." },
+    "escalation.action": { "tier": "advanced", "description": "Rung action. Supersedes the single `mitigation` method when escalation is set." },
+
+    "scrubbing.next_hop": { "tier": "advanced", "format": "ipv4", "crossField": "Required when any ladder diverts.", "description": "Scrubbing center IPv4 next-hop for the divert action." },
+    "scrubbing.next_hop6": { "tier": "advanced", "format": "ipv6", "crossField": "Required to divert when IPv6 space is protected.", "description": "Scrubbing center IPv6 next-hop." },
+    "scrubbing.community": { "tier": "advanced", "format": "community", "description": "Optional divert community (ASN:value); the next-hop does the rerouting." },
+
+    "baseline.factor": { "tier": "advanced", "description": "Multiplies the learned baseline into the effective threshold (1.5..100, default 3)." },
+    "baseline.half_life_seconds": { "tier": "advanced", "description": "EWMA half-life in seconds (10..604800, default 3600)." },
+    "baseline.warmup_seconds": { "tier": "advanced", "description": "Observation time before a host's baseline gates detection (0..86400, default 600)." },
+    "baseline.floor.pps": { "tier": "advanced", "description": "Minimum effective pps threshold — a quiet host's tiny baseline must not make detection hair-trigger. Required, > 0." },
+
+    "hostgroups.name": { "tier": "advanced", "description": "Group name (log/JSON/header-safe charset). Must be unique and not 'global'." },
+    "hostgroups.networks": { "tier": "advanced", "format": "cidr", "crossField": "Each prefix must sit inside a top-level networks entry and not collide with another group.", "description": "Prefixes this group owns (longest-prefix match wins)." },
+    "hostgroups.calculation": { "tier": "advanced", "crossField": "A total group alerts only and never auto-bans; ban:true and explicit flowspec/divert are rejected for it.", "description": "per_host evaluates each host; total sums the group's traffic." },
+    "hostgroups.thresholds.pps": { "tier": "advanced", "description": "Per-group pps override; omit the block to inherit the global thresholds." },
+    "hostgroups.mitigation": { "tier": "advanced", "description": "Per-group mitigation method; empty inherits the global default." },
+    "hostgroups.ban": { "tier": "advanced", "description": "Automatic RTBH for the group's hosts (default true). Must not be true for a total group." },
+    "hostgroups.tenant": { "tier": "advanced", "description": "Optional owner label; a tenant-scoped API token sees and mutates only its own groups." },
+
+    "tenant": { "tier": "advanced", "description": "Optional tenant label for the implicit global/fallback group." },
+
+    "samples.enabled": { "tier": "advanced", "defaultWhenAbsent": true, "description": "Continuous flow buffer that attaches dominant sources/ports to each attack." },
+    "samples.buffer_flows": { "tier": "advanced", "reloadImmutable": true, "description": "Total capacity of the recent-flows ring (256..1048576, default 65536). Sizing changes require a restart." },
+    "samples.flows_per_attack": { "tier": "advanced", "reloadImmutable": true, "description": "Raw flow records attached to one attack event (1..500, default 20)." },
+
+    "bgp.local_asn": { "tier": "basic", "reloadImmutable": true, "description": "Kapkan's local BGP AS number." },
+    "bgp.router_id": { "tier": "basic", "format": "ipv4", "reloadImmutable": true, "description": "BGP router ID; must be an IPv4 dotted-quad." },
+    "bgp.next_hop": { "tier": "basic", "format": "ipv4", "description": "IPv4 blackhole (discard) next-hop." },
+    "bgp.next_hop6": { "tier": "advanced", "format": "ipv6", "description": "IPv6 blackhole next-hop (required if IPv6 space is protected and blackholed)." },
+    "bgp.community": { "tier": "basic", "format": "community", "description": "RTBH community your upstream honors, as ASN:value." },
+    "bgp.neighbors.address": { "tier": "basic", "format": "ip", "description": "eBGP peer address." },
+    "bgp.neighbors.remote_asn": { "tier": "basic", "description": "eBGP peer AS number." },
+
+    "geoip.enabled": { "tier": "advanced", "reloadImmutable": true, "description": "Enable GeoIP/ASN attribution of attack-sample sources." },
+    "geoip.asn_database": { "tier": "advanced", "format": "path", "reloadImmutable": true, "serverVerified": true, "description": "Path to a GeoLite2-ASN.mmdb file on the engine host." },
+    "geoip.country_database": { "tier": "advanced", "format": "path", "reloadImmutable": true, "serverVerified": true, "description": "Path to a GeoLite2-Country.mmdb file on the engine host." },
+
+    "storage.clickhouse.url": { "tier": "advanced", "format": "url", "reloadImmutable": true, "description": "ClickHouse HTTP endpoint, e.g. http://127.0.0.1:8123. Empty disables persistence." },
+    "storage.clickhouse.database": { "tier": "advanced", "description": "ClickHouse database name (identifier charset, default kapkan)." },
+    "storage.clickhouse.username_env": { "tier": "advanced", "secret": true, "description": "Env var holding the ClickHouse username." },
+    "storage.clickhouse.password_env": { "tier": "advanced", "secret": true, "description": "Env var holding the ClickHouse password." },
+    "storage.clickhouse.ttl_days": { "tier": "advanced", "description": "Row retention in days (1..365, default 7)." },
+
+    "notify.telegram.token_env": { "tier": "basic", "secret": true, "description": "Env var holding the Telegram bot token (never the token itself)." },
+    "notify.telegram.chat_id": { "tier": "basic", "description": "Telegram chat ID to post alerts to." },
+    "notify.slack.webhook_url": { "tier": "advanced", "format": "url", "secret": true, "description": "Slack incoming webhook URL (https; the path is a bearer secret)." },
+    "notify.email.smtp_host": { "tier": "advanced", "format": "hostport", "crossField": "When set, from and at least one to recipient are required.", "description": "SMTP server host:port; empty disables email." },
+    "notify.email.username_env": { "tier": "advanced", "secret": true, "description": "Env var holding the SMTP username." },
+    "notify.email.password_env": { "tier": "advanced", "secret": true, "description": "Env var holding the SMTP password." },
+    "notify.exec.command": { "tier": "advanced", "format": "path", "serverVerified": true, "description": "Absolute path to an executable run on each attack event; verified at load on the engine host." },
+    "notify.exec.format": { "tier": "advanced", "description": "Invocation convention: kapkan (event argv + JSON stdin) or fastnetmon (FastNetMon notify_script contract)." },
+    "notify.webhook.url": { "tier": "advanced", "format": "url", "description": "Optional generic JSON POST target." },
+
+    "api.listen": { "tier": "basic", "format": "hostport", "reloadImmutable": true, "description": "REST API and metrics listen address (default 127.0.0.1:8080)." },
+    "api.dashboard": { "tier": "basic", "defaultWhenAbsent": true, "description": "Serve the embedded web UI on the API listener." },
+    "api.token_env": { "tier": "basic", "secret": true, "crossField": "Mutually exclusive with api.tokens. Required before exposing the listener beyond localhost.", "description": "Env var holding a single operator bearer token." },
+    "api.tokens.name": { "tier": "advanced", "description": "Label for this role-based token." },
+    "api.tokens.token_env": { "tier": "advanced", "secret": true, "description": "Env var holding this token's secret." },
+    "api.tokens.role": { "tier": "advanced", "description": "viewer (read-only) or operator (read + ban/unban/reload)." },
+    "api.tokens.tenant": { "tier": "advanced", "description": "Optional tenant scope; must match a tenant used by some hostgroup." }
+  }
+}
