@@ -54,10 +54,12 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
   const [step, setStep] = useState(0);
   const [copied, setCopied] = useState(false);
   const lastStep = t.steps.length - 1;
+  const onReview = step === lastStep;
 
   const yaml = useMemo(() => emitConfig(s), [s]);
 
-  // Engine-exact validation via the wasm build of the real Parse+validate.
+  // Engine-exact validation via the wasm build of the real Parse+validate. Runs
+  // live as fields change so the result is ready the moment the review step opens.
   const validatorRef = useRef<EngineValidator | null>(null);
   const [engineReady, setEngineReady] = useState<boolean | null>(null);
   const [engineResult, setEngineResult] = useState<EngineResult | null>(null);
@@ -198,7 +200,7 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
 
   const mitigationOpts = fieldNode("mitigation")?.enum ?? ["blackhole", "flowspec", "divert"];
 
-  // --- per-step form content ---
+  // --- per-step form content (steps 0..lastStep-1; the review step is rendered below) ---
   function stepContent() {
     switch (step) {
       case 0:
@@ -354,33 +356,69 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
           </>
         );
       default:
-        return (
-          <Section title={t.reviewTitle}>
-            <p className="text-sm text-muted-foreground">{t.reviewIntro}</p>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={copy}
-                className="rounded-md border border-border px-4 py-2 text-sm font-medium hover:bg-muted"
-              >
-                {copied ? t.copied : t.copy}
-              </button>
-              <button
-                type="button"
-                onClick={download}
-                className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-foreground hover:opacity-90"
-              >
-                {t.download}
-              </button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {t.checkHint}{" "}
-              <code className="rounded bg-muted px-1.5 py-0.5 font-mono">kapkan -check-config kapkan.yaml</code>
-            </p>
-          </Section>
-        );
+        return null;
     }
   }
+
+  // The generated config + engine validation — shown only on the final review step.
+  const reviewPanel = (
+    <>
+      <Section title={t.reviewTitle}>
+        <p className="text-sm text-muted-foreground">{t.reviewIntro}</p>
+      </Section>
+
+      <div className="overflow-hidden rounded-lg border border-border bg-surface">
+        <div className="flex items-center justify-between border-b border-border px-4 py-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t.output}</span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={copy}
+              className="rounded-md border border-border px-3 py-1 text-xs font-medium hover:bg-muted"
+            >
+              {copied ? t.copied : t.copy}
+            </button>
+            <button
+              type="button"
+              onClick={download}
+              className="rounded-md bg-accent px-3 py-1 text-xs font-medium text-accent-foreground hover:opacity-90"
+            >
+              {t.download}
+            </button>
+          </div>
+        </div>
+        <pre className="max-h-[60vh] overflow-y-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs leading-relaxed">
+          {yaml}
+        </pre>
+      </div>
+
+      {engineResult && (
+        <div
+          className={`rounded-md border px-3 py-2 text-xs ${
+            engineResult.ok ? "border-emerald-500/40 bg-emerald-500/10" : "border-red-500/40 bg-red-500/10"
+          }`}
+        >
+          {engineResult.ok ? (
+            <>
+              <p className="font-medium text-emerald-600 dark:text-emerald-400">✓ {t.accepts}</p>
+              {engineResult.summary && (
+                <pre className="mt-1 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground">
+                  {engineResult.summary}
+                </pre>
+              )}
+            </>
+          ) : (
+            <p className="font-medium text-red-500">✗ {engineResult.error}</p>
+          )}
+        </div>
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        {t.checkHint}{" "}
+        <code className="rounded bg-muted px-1.5 py-0.5 font-mono">kapkan -check-config kapkan.yaml</code>
+      </p>
+    </>
+  );
 
   return (
     <div>
@@ -416,92 +454,28 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
         })}
       </ol>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[28rem_minmax(0,1fr)]">
-        {/* form */}
-        <div className="min-w-0 space-y-6">
-          {stepContent()}
+      {/* single column: form while stepping, the config only on the review step */}
+      <div className={`mx-auto space-y-6 ${onReview ? "max-w-4xl" : "max-w-2xl"}`}>
+        {onReview ? reviewPanel : stepContent()}
 
-          <div className="flex items-center justify-between pt-1">
+        <div className="flex items-center justify-between pt-1">
+          <button
+            type="button"
+            disabled={step === 0}
+            onClick={() => setStep((n) => Math.max(0, n - 1))}
+            className="rounded-full border border-border px-5 py-2 text-sm font-medium disabled:opacity-40 enabled:hover:bg-muted"
+          >
+            {t.back}
+          </button>
+          {step < lastStep && (
             <button
               type="button"
-              disabled={step === 0}
-              onClick={() => setStep((n) => Math.max(0, n - 1))}
-              className="rounded-full border border-border px-5 py-2 text-sm font-medium disabled:opacity-40 enabled:hover:bg-muted"
+              onClick={() => setStep((n) => Math.min(lastStep, n + 1))}
+              className="rounded-full bg-accent px-5 py-2 text-sm font-medium text-accent-foreground hover:opacity-90"
             >
-              {t.back}
+              {t.next}
             </button>
-            {step < lastStep ? (
-              <button
-                type="button"
-                onClick={() => setStep((n) => Math.min(lastStep, n + 1))}
-                className="rounded-full bg-accent px-5 py-2 text-sm font-medium text-accent-foreground hover:opacity-90"
-              >
-                {t.next}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={download}
-                className="rounded-full bg-accent px-5 py-2 text-sm font-medium text-accent-foreground hover:opacity-90"
-              >
-                {t.download}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* output (persistent across steps) */}
-        <div className="min-w-0 lg:sticky lg:top-6 lg:h-fit">
-          <div className="overflow-hidden rounded-lg border border-border bg-surface">
-            <div className="flex items-center justify-between border-b border-border px-4 py-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t.output}</span>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={copy}
-                  className="rounded-md border border-border px-3 py-1 text-xs font-medium hover:bg-muted"
-                >
-                  {copied ? t.copied : t.copy}
-                </button>
-                <button
-                  type="button"
-                  onClick={download}
-                  className="rounded-md bg-accent px-3 py-1 text-xs font-medium text-accent-foreground hover:opacity-90"
-                >
-                  {t.download}
-                </button>
-              </div>
-            </div>
-            <pre className="max-h-[70vh] overflow-y-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs leading-relaxed">
-              {yaml}
-            </pre>
-          </div>
-
-          {engineResult && (
-            <div
-              className={`mt-3 rounded-md border px-3 py-2 text-xs ${
-                engineResult.ok ? "border-emerald-500/40 bg-emerald-500/10" : "border-red-500/40 bg-red-500/10"
-              }`}
-            >
-              {engineResult.ok ? (
-                <>
-                  <p className="font-medium text-emerald-600 dark:text-emerald-400">✓ {t.accepts}</p>
-                  {engineResult.summary && (
-                    <pre className="mt-1 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground">
-                      {engineResult.summary}
-                    </pre>
-                  )}
-                </>
-              ) : (
-                <p className="font-medium text-red-500">✗ {engineResult.error}</p>
-              )}
-            </div>
           )}
-
-          <p className="mt-3 text-xs text-muted-foreground">
-            {t.checkHint}{" "}
-            <code className="rounded bg-muted px-1.5 py-0.5 font-mono">kapkan -check-config kapkan.yaml</code>
-          </p>
         </div>
       </div>
     </div>

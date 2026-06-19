@@ -74,7 +74,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     back: "Back",
     next: "Next",
     reviewTitle: "Review & export",
-    reviewIntro: "Check the engine result on the right, then copy or download your config.",
+    reviewIntro: "Check the engine result below, then copy or download your config.",
     sections: {
       mode: "Mode",
       telemetry: "Telemetry",
@@ -125,7 +125,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     back: "Назад",
     next: "Далее",
     reviewTitle: "Обзор и экспорт",
-    reviewIntro: "Проверьте результат движка справа, затем скопируйте или скачайте конфиг.",
+    reviewIntro: "Проверьте результат движка ниже, затем скопируйте или скачайте конфиг.",
     sections: {
       mode: "Режим",
       telemetry: "Телеметрия",
@@ -176,7 +176,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     back: "Zurück",
     next: "Weiter",
     reviewTitle: "Prüfen & exportieren",
-    reviewIntro: "Prüfen Sie das Engine-Ergebnis rechts, dann kopieren oder laden Sie die Konfiguration herunter.",
+    reviewIntro: "Prüfen Sie das Engine-Ergebnis unten, dann kopieren oder laden Sie die Konfiguration herunter.",
     sections: {
       mode: "Modus",
       telemetry: "Telemetrie",
@@ -227,7 +227,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     back: "Précédent",
     next: "Suivant",
     reviewTitle: "Vérifier & exporter",
-    reviewIntro: "Vérifiez le résultat du moteur à droite, puis copiez ou téléchargez votre configuration.",
+    reviewIntro: "Vérifiez le résultat du moteur ci-dessous, puis copiez ou téléchargez votre configuration.",
     sections: {
       mode: "Mode",
       telemetry: "Télémétrie",
@@ -278,7 +278,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     back: "Atrás",
     next: "Siguiente",
     reviewTitle: "Revisar y exportar",
-    reviewIntro: "Revisa el resultado del motor a la derecha y luego copia o descarga tu configuración.",
+    reviewIntro: "Revisa el resultado del motor abajo y luego copia o descarga tu configuración.",
     sections: {
       mode: "Modo",
       telemetry: "Telemetría",
