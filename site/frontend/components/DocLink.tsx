@@ -24,7 +24,7 @@ export function DocLink({ href = "", children, ...props }: ComponentPropsWithout
   }
 
   let target = href;
-  if (href === "/docs" || href.startsWith("/docs/")) {
+  if (href === "/docs" || href.startsWith("/docs/") || href === "/config") {
     const seg = pathname.split("/")[1] ?? "";
     const lang = isLocale(seg) ? seg : defaultLocale;
     target = `/${lang}${href}`;

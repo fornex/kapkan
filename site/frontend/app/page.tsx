@@ -44,6 +44,12 @@ export default function Home() {
           >
             Read the docs
           </Link>
+          <Link
+            href="/config"
+            className="flex h-11 items-center justify-center rounded-full border border-border px-6 font-medium transition-colors hover:bg-muted"
+          >
+            Build a config
+          </Link>
           <a
             href={site.repo}
             target="_blank"
