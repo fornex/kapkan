@@ -1,0 +1,834 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Generated from engine/internal/config/config.go by `make -C engine schema`. DO NOT EDIT BY HAND. The file shape is closed: unknown keys are rejected.",
+  "properties": {
+    "api": {
+      "additionalProperties": false,
+      "properties": {
+        "dashboard": {
+          "type": "boolean",
+          "x-optional": true
+        },
+        "listen": {
+          "type": "string"
+        },
+        "token_env": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "type": "string"
+        },
+        "tokens": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "role": {
+                "enum": [
+                  "viewer",
+                  "operator"
+                ],
+                "type": "string"
+              },
+              "tenant": {
+                "type": "string"
+              },
+              "token_env": {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array",
+          "x-optional": true
+        }
+      },
+      "type": "object"
+    },
+    "ban": {
+      "additionalProperties": false,
+      "properties": {
+        "max_active_bans": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "ttl_seconds": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "unban_hysteresis_seconds": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "baseline": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "x-optional": true
+        },
+        "factor": {
+          "maximum": 100,
+          "minimum": 1.5,
+          "type": "number"
+        },
+        "floor": {
+          "additionalProperties": false,
+          "properties": {
+            "flows_per_sec": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "mbps": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "pps": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "half_life_seconds": {
+          "maximum": 604800,
+          "minimum": 10,
+          "type": "integer"
+        },
+        "warmup_seconds": {
+          "maximum": 86400,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "x-optional": true
+    },
+    "bgp": {
+      "additionalProperties": false,
+      "properties": {
+        "communities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "community": {
+          "type": "string"
+        },
+        "listen_port": {
+          "type": "integer"
+        },
+        "local_asn": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "local_pref": {
+          "type": "integer"
+        },
+        "neighbors": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer"
+              },
+              "remote_asn": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "next_hop": {
+          "type": "string"
+        },
+        "next_hop6": {
+          "type": "string"
+        },
+        "router_id": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "escalation": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "none",
+              "flowspec",
+              "divert",
+              "blackhole"
+            ],
+            "type": "string"
+          },
+          "after_seconds": {
+            "maximum": 86400,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "x-optional": true
+    },
+    "flow_sources": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "x-optional": true
+    },
+    "flowspec": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "discard",
+            "rate_limit"
+          ],
+          "type": "string"
+        },
+        "rate_mbps": {
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "x-optional": true
+    },
+    "geoip": {
+      "additionalProperties": false,
+      "properties": {
+        "asn_database": {
+          "type": "string"
+        },
+        "country_database": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "hostgroups": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "ban": {
+            "type": "boolean",
+            "x-optional": true
+          },
+          "baseline": {
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "x-optional": true
+              },
+              "factor": {
+                "maximum": 100,
+                "minimum": 1.5,
+                "type": "number"
+              },
+              "floor": {
+                "additionalProperties": false,
+                "properties": {
+                  "flows_per_sec": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "mbps": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "pps": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "half_life_seconds": {
+                "maximum": 604800,
+                "minimum": 10,
+                "type": "integer"
+              },
+              "warmup_seconds": {
+                "maximum": 86400,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object",
+            "x-optional": true
+          },
+          "bgp": {
+            "additionalProperties": false,
+            "properties": {
+              "communities": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "x-optional": true
+              },
+              "local_pref": {
+                "type": "integer",
+                "x-optional": true
+              },
+              "next_hop": {
+                "type": "string"
+              },
+              "next_hop6": {
+                "type": "string"
+              }
+            },
+            "type": "object",
+            "x-optional": true
+          },
+          "calculation": {
+            "enum": [
+              "per_host",
+              "total"
+            ],
+            "type": "string"
+          },
+          "escalation": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "enum": [
+                    "none",
+                    "flowspec",
+                    "divert",
+                    "blackhole"
+                  ],
+                  "type": "string"
+                },
+                "after_seconds": {
+                  "maximum": 86400,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "x-optional": true
+          },
+          "flowspec": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "enum": [
+                  "discard",
+                  "rate_limit"
+                ],
+                "type": "string"
+              },
+              "rate_mbps": {
+                "minimum": 0,
+                "type": "number"
+              }
+            },
+            "type": "object",
+            "x-optional": true
+          },
+          "mitigation": {
+            "enum": [
+              "blackhole",
+              "flowspec",
+              "divert"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "networks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "x-optional": true
+          },
+          "scrubbing": {
+            "additionalProperties": false,
+            "properties": {
+              "communities": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "x-optional": true
+              },
+              "local_pref": {
+                "type": "integer",
+                "x-optional": true
+              },
+              "next_hop": {
+                "type": "string"
+              },
+              "next_hop6": {
+                "type": "string"
+              }
+            },
+            "type": "object",
+            "x-optional": true
+          },
+          "tenant": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "thresholds": {
+            "additionalProperties": false,
+            "properties": {
+              "flows_per_sec": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "frag_mbps": {
+                "type": "integer"
+              },
+              "frag_pps": {
+                "type": "integer"
+              },
+              "icmp_mbps": {
+                "type": "integer"
+              },
+              "icmp_pps": {
+                "type": "integer"
+              },
+              "mbps": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "pps": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "tcp_mbps": {
+                "type": "integer"
+              },
+              "tcp_pps": {
+                "type": "integer"
+              },
+              "tcp_syn_mbps": {
+                "type": "integer"
+              },
+              "tcp_syn_pps": {
+                "type": "integer"
+              },
+              "udp_mbps": {
+                "type": "integer"
+              },
+              "udp_pps": {
+                "type": "integer"
+              }
+            },
+            "type": "object",
+            "x-optional": true
+          },
+          "thresholds_outgoing": {
+            "additionalProperties": false,
+            "properties": {
+              "flows_per_sec": {
+                "type": "integer"
+              },
+              "frag_mbps": {
+                "type": "integer"
+              },
+              "frag_pps": {
+                "type": "integer"
+              },
+              "icmp_mbps": {
+                "type": "integer"
+              },
+              "icmp_pps": {
+                "type": "integer"
+              },
+              "mbps": {
+                "type": "integer"
+              },
+              "pps": {
+                "type": "integer"
+              },
+              "tcp_mbps": {
+                "type": "integer"
+              },
+              "tcp_pps": {
+                "type": "integer"
+              },
+              "tcp_syn_mbps": {
+                "type": "integer"
+              },
+              "tcp_syn_pps": {
+                "type": "integer"
+              },
+              "udp_mbps": {
+                "type": "integer"
+              },
+              "udp_pps": {
+                "type": "integer"
+              }
+            },
+            "type": "object",
+            "x-optional": true
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "x-optional": true
+    },
+    "listen": {
+      "additionalProperties": false,
+      "properties": {
+        "netflow": {
+          "type": "string"
+        },
+        "sflow": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "mitigation": {
+      "enum": [
+        "blackhole",
+        "flowspec",
+        "divert"
+      ],
+      "type": "string"
+    },
+    "networks": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "x-optional": true
+    },
+    "notify": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "password_env": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            "require_tls": {
+              "type": "boolean"
+            },
+            "smtp_host": {
+              "type": "string"
+            },
+            "to": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "x-optional": true
+            },
+            "username_env": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "exec": {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "format": {
+              "enum": [
+                "kapkan",
+                "fastnetmon"
+              ],
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "slack": {
+          "additionalProperties": false,
+          "properties": {
+            "webhook_url": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "telegram": {
+          "additionalProperties": false,
+          "properties": {
+            "chat_id": {
+              "type": "string"
+            },
+            "token_env": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "webhook": {
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "protected_whitelist": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "x-optional": true
+    },
+    "samples": {
+      "additionalProperties": false,
+      "properties": {
+        "buffer_flows": {
+          "maximum": 1048576,
+          "minimum": 256,
+          "type": "integer"
+        },
+        "enabled": {
+          "type": "boolean",
+          "x-optional": true
+        },
+        "flows_per_attack": {
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "sampling": {
+      "additionalProperties": false,
+      "properties": {
+        "default_rate": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "scrubbing": {
+      "additionalProperties": false,
+      "properties": {
+        "communities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "community": {
+          "type": "string"
+        },
+        "local_pref": {
+          "type": "integer"
+        },
+        "next_hop": {
+          "type": "string"
+        },
+        "next_hop6": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "storage": {
+      "additionalProperties": false,
+      "properties": {
+        "clickhouse": {
+          "additionalProperties": false,
+          "properties": {
+            "batch_size": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "database": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            "flush_interval_seconds": {
+              "maximum": 3600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "password_env": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            "queue_size": {
+              "maximum": 10000000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "traffic_interval_seconds": {
+              "maximum": 3600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "ttl_days": {
+              "maximum": 365,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "url": {
+              "type": "string"
+            },
+            "username_env": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "tenant": {
+      "pattern": "^[A-Za-z0-9._-]{1,64}$",
+      "type": "string"
+    },
+    "thresholds": {
+      "additionalProperties": false,
+      "properties": {
+        "flows_per_sec": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "frag_mbps": {
+          "type": "integer"
+        },
+        "frag_pps": {
+          "type": "integer"
+        },
+        "icmp_mbps": {
+          "type": "integer"
+        },
+        "icmp_pps": {
+          "type": "integer"
+        },
+        "mbps": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pps": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "tcp_mbps": {
+          "type": "integer"
+        },
+        "tcp_pps": {
+          "type": "integer"
+        },
+        "tcp_syn_mbps": {
+          "type": "integer"
+        },
+        "tcp_syn_pps": {
+          "type": "integer"
+        },
+        "udp_mbps": {
+          "type": "integer"
+        },
+        "udp_pps": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "thresholds_outgoing": {
+      "additionalProperties": false,
+      "properties": {
+        "flows_per_sec": {
+          "type": "integer"
+        },
+        "frag_mbps": {
+          "type": "integer"
+        },
+        "frag_pps": {
+          "type": "integer"
+        },
+        "icmp_mbps": {
+          "type": "integer"
+        },
+        "icmp_pps": {
+          "type": "integer"
+        },
+        "mbps": {
+          "type": "integer"
+        },
+        "pps": {
+          "type": "integer"
+        },
+        "tcp_mbps": {
+          "type": "integer"
+        },
+        "tcp_pps": {
+          "type": "integer"
+        },
+        "tcp_syn_mbps": {
+          "type": "integer"
+        },
+        "tcp_syn_pps": {
+          "type": "integer"
+        },
+        "udp_mbps": {
+          "type": "integer"
+        },
+        "udp_pps": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "x-optional": true
+    }
+  },
+  "title": "Kapkan configuration",
+  "type": "object"
+}
