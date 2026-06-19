@@ -73,7 +73,7 @@ export function emitConfig(s: WizardState): string {
   L.push("");
 
   if (s.dry_run) {
-    L.push("dry_run: true                       # blackholes are simulated, never announced — keep until detection is validated");
+    L.push("dry_run: true                       # simulated, never announced — keep until detection is validated");
   } else {
     L.push("dry_run: false                      # LIVE: BGP announcements WILL be sent to your neighbors");
   }
@@ -85,10 +85,10 @@ export function emitConfig(s: WizardState): string {
   L.push("");
 
   L.push("sampling:");
-  L.push(`  default_rate: ${num(s.default_rate)}                # used when an exporter omits its own rate — wrong here mis-scales EVERY threshold`);
+  L.push(`  default_rate: ${num(s.default_rate)}                # used when an exporter omits its own rate`);
   L.push("");
 
-  L.push("networks:                             # detection applies ONLY inside these prefixes; they must not overlap");
+  L.push("networks:                             # detection applies only inside these; no overlaps");
   for (const n of s.networks) if (n.trim()) L.push(`  - ${q(n.trim())}`);
   L.push("");
 

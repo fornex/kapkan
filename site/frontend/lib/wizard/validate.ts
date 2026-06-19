@@ -2,11 +2,14 @@
 // schema (enum / minimum / maximum / pattern) wherever the engine expresses
 // them declaratively, and from the overlay's `format` hint for the fields the
 // engine validates imperatively with net/netip (IP / CIDR / host:port /
-// community), which therefore carry no regex in the schema. This catches the
-// common mistakes inline; cross-field rules (CIDR overlap, prefix containment,
-// monotonic ladders) are deferred to `kapkan -check-config`, by design.
+// community), which therefore carry no regex in the schema. Messages are
+// localized — the caller passes its locale's WizardValidation strings. This
+// catches the common mistakes inline; cross-field rules (CIDR overlap, prefix
+// containment, monotonic ladders) are deferred to the wasm engine validator and
+// to `kapkan -check-config`.
 
 import { fieldNode, fieldMeta } from "./schema";
+import type { WizardValidation } from "./strings";
 
 function isIPv4(s: string): boolean {
   const parts = s.split(".");
@@ -16,8 +19,6 @@ function isIPv4(s: string): boolean {
 
 function isIPv6(s: string): boolean {
   if (!s.includes(":")) return false;
-  // Permissive: hex groups separated by ":", at most one "::". Good enough for
-  // inline feedback; the engine's netip parse is authoritative.
   if ((s.match(/::/g) ?? []).length > 1) return false;
   const body = s.split("%")[0]; // strip zone id
   return /^[0-9a-fA-F:]+$/.test(body) && body.split(":").every((g) => g === "" || /^[0-9a-fA-F]{1,4}$/.test(g));
@@ -51,16 +52,6 @@ function isCommunity(s: string): boolean {
   return Number(m[1]) <= 65535 && Number(m[2]) <= 65535;
 }
 
-const formatLabel: Record<string, string> = {
-  ipv4: "an IPv4 address (e.g. 192.0.2.1)",
-  ipv6: "an IPv6 address (e.g. 2001:db8::1)",
-  ip: "an IP address",
-  cidr: "a CIDR prefix (e.g. 203.0.113.0/24)",
-  hostport: "host:port (e.g. :6343 or 127.0.0.1:8080)",
-  community: "a BGP community ASN:value (e.g. 65000:666)",
-  url: "an http(s) URL",
-};
-
 function formatOK(format: string, v: string): boolean {
   switch (format) {
     case "ipv4":
@@ -82,34 +73,36 @@ function formatOK(format: string, v: string): boolean {
   }
 }
 
-// validateString returns an error message for a string value at `path`, or null
-// if it is acceptable. Empty strings are treated as "unset" and pass (the emit
-// layer omits empties); callers enforce required-ness separately.
-export function validateString(path: string, value: string): string | null {
-  const v = value.trim();
-  if (v === "") return null;
+// validateString returns a localized error for a string value at `path`, or null
+// if it is acceptable. Empty strings are treated as "unset" and pass; callers
+// enforce required-ness separately.
+export function validateString(path: string, value: string, v: WizardValidation): string | null {
+  const s = value.trim();
+  if (s === "") return null;
 
   const node = fieldNode(path);
-  if (node?.enum && !node.enum.includes(v)) {
-    return `must be one of: ${node.enum.join(", ")}`;
+  if (node?.enum && !node.enum.includes(s)) {
+    return v.enum.replace("{allowed}", node.enum.join(", "));
   }
-  if (node?.pattern && !new RegExp(node.pattern).test(v)) {
-    // The only patterns the engine ships are identifier-style (env var names,
-    // db/group names); a generic message reads better than the raw regex.
-    return `invalid value (allowed: letters, digits, "_", "-", "." per the engine rule)`;
+  if (node?.pattern && !new RegExp(node.pattern).test(s)) {
+    return v.identifier;
   }
   const fmt = fieldMeta(path).format;
-  if (fmt && !formatOK(fmt, v)) {
-    return `must be ${formatLabel[fmt] ?? fmt}`;
+  if (fmt && !formatOK(fmt, s)) {
+    return v.formats[fmt] ?? v.identifier;
   }
   return null;
 }
 
 // validateNumber checks the schema's numeric bounds for `path`.
-export function validateNumber(path: string, value: number): string | null {
-  if (Number.isNaN(value)) return "must be a number";
+export function validateNumber(path: string, value: number, v: WizardValidation): string | null {
+  if (Number.isNaN(value)) return v.notNumber;
   const node = fieldNode(path);
-  if (node?.minimum !== undefined && value < node.minimum) return `must be ≥ ${node.minimum}`;
-  if (node?.maximum !== undefined && value > node.maximum) return `must be ≤ ${node.maximum}`;
+  if (node?.minimum !== undefined && value < node.minimum) {
+    return v.min.replace("{min}", String(node.minimum));
+  }
+  if (node?.maximum !== undefined && value > node.maximum) {
+    return v.max.replace("{max}", String(node.maximum));
+  }
   return null;
 }

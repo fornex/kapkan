@@ -20,6 +20,10 @@
 # production
 /build
 
+# wasm config validator — built fresh at predev/prebuild, never committed
+/public/kapkan-validate.wasm
+/public/wasm_exec.js
+
 # misc
 .DS_Store
 *.pem

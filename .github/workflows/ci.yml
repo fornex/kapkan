@@ -113,8 +113,18 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: site/frontend/package-lock.json
+      # `prebuild` also compiles the engine config validator to wasm
+      # (scripts/build-wasm.mjs) so the config builder ships engine-exact
+      # in-browser validation. The step is tolerant of a missing toolchain, but
+      # CI provides Go so the built site matches production.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache: true
+          cache-dependency-path: engine/go.sum
       - name: Install
         run: npm ci
-      # `prebuild` copies the top-level docs/ into content/docs before next build.
+      # `prebuild` copies the top-level docs/ into content/docs and builds the
+      # wasm validator before next build.
       - name: Build static export
         run: npm run build
