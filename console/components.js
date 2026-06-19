@@ -214,7 +214,7 @@
         sub
       ]);
     });
-    return h("div", { class: "ladder" + (compact ? " ladder--compact" : "") }, rungs);
+    return h("div", { class: "ladder" + (compact ? " ladder--compact" : "") + (config ? " ladder--config" : "") }, rungs);
   }
 
   /* ---------- gauge: metric vs threshold ---------- */
@@ -281,9 +281,9 @@
     if (obj.next_hop) rows.push(routeRow(I.t("ac.nexthop"), h("span", { class: "mono", text: obj.next_hop })));
     if (obj.community) rows.push(routeRow(I.t("ac.community"), h("span", { class: "mono", text: obj.community })));
     if (obj.local_pref != null) rows.push(routeRow(I.t("ac.localpref"), h("span", { class: "mono", text: String(obj.local_pref) })));
-    var box = h("div", { class: "route" + (dry ? " is-dry" : "") }, rows);
-    if (dry) box.appendChild(h("span", { class: "route__tag" }, badge("badge--dry", I.t("ac.simulated"), "shield-alert")));
-    return box;
+    /* the dry-run cue is the dashed amber border + a badge in the section header
+       (rendered by the caller), so the box itself carries no inline tag. */
+    return h("div", { class: "route" + (dry ? " is-dry" : "") }, rows);
   }
 
   /* ---------- share bars (sample) ---------- */
