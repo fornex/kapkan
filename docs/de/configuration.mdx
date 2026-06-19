@@ -31,6 +31,26 @@ Belassen Sie es dabei, bis Sie die Erkennung gegen Live-Telemetrie validiert hab
 [Live gehen](/docs/going-live).
 </Callout>
 
+## Konfiguration validieren
+
+Bevor Sie neu laden oder live gehen, prüfen Sie eine Datei mit dem eigenen Validator der Engine:
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml
+```
+
+Er führt exakt dasselbe Parsen und dieselbe Validierung wie der Daemon aus — einschließlich der
+feldübergreifenden Regeln, die ein Formular nicht ausdrücken kann (keine überlappenden `networks`,
+Hostgroup-Präfixe innerhalb eines geschützten Netzes, monoton steigende
+[Eskalations](/docs/escalation)-Stufen) — und gibt anschließend die aufgelöste Konfiguration aus
+(Modus, geschützte Netze und die effektive Mitigation pro [Hostgroup](/docs/hostgroups)) und endet mit
+`0`. Bei einem Problem gibt er den genauen Fehler aus und endet mit `1`, sodass er sich sauber in CI
+oder eine Pre-Deploy-Prüfung einfügt.
+
+`kapkan -dump-schema` gibt das JSON-Schema der Konfiguration auf stdout aus; der
+[Konfigurations-Builder](/config) nutzt dieses Schema, um Felder direkt im Browser während der Eingabe
+zu prüfen.
+
 ## Geheimnisse und Umgebungsvariablen
 
 Geheimnisse werden niemals in die Konfigurationsdatei geschrieben. Jedes nennt eine

@@ -28,6 +28,26 @@ et la note sur le dimensionnement de `samples` plus bas.
 réglage tant que vous n'avez pas validé la détection face à de la télémétrie réelle. Voir [Passage en production](/docs/going-live).
 </Callout>
 
+## Valider la configuration
+
+Avant de recharger ou de passer en production, vérifiez un fichier avec le validateur intégré du moteur :
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml
+```
+
+Il effectue exactement la même analyse et la même validation que le démon — y compris les règles
+inter-champs qu'un formulaire ne peut pas exprimer (pas de `networks` qui se chevauchent, préfixes de
+hostgroup contenus dans un réseau protégé, paliers d'[escalade](/docs/escalation) monotones) — puis
+affiche la configuration résolue (mode, réseaux protégés et l'atténuation effective par
+[hostgroup](/docs/hostgroups)) et se termine avec le code `0`. En cas de problème, il affiche l'erreur
+exacte et se termine avec le code `1`, ce qui l'intègre proprement dans une CI ou une vérification de
+pré-déploiement.
+
+`kapkan -dump-schema` affiche le schéma JSON de la configuration sur stdout ; le
+[générateur de configuration](/config) utilise ce schéma pour valider les champs dans votre navigateur
+au fur et à mesure de la saisie.
+
 ## Secrets et variables d'environnement
 
 Les secrets ne sont jamais écrits dans le fichier de configuration. Chacun désigne une variable

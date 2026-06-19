@@ -28,6 +28,24 @@ note on `samples` sizing below.
 way until you have validated detection against live telemetry. See [Going live](/docs/going-live).
 </Callout>
 
+## Validating the configuration
+
+Before you reload or go live, check a file with the engine's own validator:
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml
+```
+
+It runs the exact same parse and validation the daemon does — including the cross-field rules a
+form cannot express (no overlapping `networks`, hostgroup prefixes contained by a protected
+network, monotonic [escalation](/docs/escalation) ladders) — then prints the resolved
+configuration (mode, protected networks, and the effective mitigation per
+[hostgroup](/docs/hostgroups)) and exits `0`. On any problem it prints the exact error and exits
+`1`, so it drops cleanly into CI or a pre-deploy check.
+
+`kapkan -dump-schema` prints the configuration's JSON schema to stdout; the
+[config builder](/config) consumes that schema to validate fields in your browser as you type.
+
 ## Secrets and environment variables
 
 Secrets are never written in the config file. Each one names an environment variable, and

@@ -31,6 +31,25 @@ consulta [Corrección de muestreo](#corrección-de-muestreo) y la nota sobre el 
 [Puesta en producción](/docs/going-live).
 </Callout>
 
+## Validar la configuración
+
+Antes de recargar o pasar a producción, comprueba un archivo con el propio validador del motor:
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml
+```
+
+Ejecuta exactamente el mismo análisis y la misma validación que el demonio —incluidas las reglas entre
+campos que un formulario no puede expresar (sin `networks` solapadas, prefijos de hostgroup contenidos
+en una red protegida, escaleras de [escalado](/docs/escalation) monótonas)— y luego imprime la
+configuración resuelta (modo, redes protegidas y la mitigación efectiva por cada
+[hostgroup](/docs/hostgroups)) y termina con `0`. Ante cualquier problema imprime el error exacto y
+termina con `1`, de modo que encaja limpiamente en CI o en una comprobación previa al despliegue.
+
+`kapkan -dump-schema` imprime el esquema JSON de la configuración en stdout; el
+[generador de configuración](/config) usa ese esquema para validar los campos en tu navegador a medida
+que escribes.
+
 ## Secretos y variables de entorno
 
 Los secretos nunca se escriben en el archivo de configuración. Cada uno nombra una variable de
