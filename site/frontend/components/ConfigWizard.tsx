@@ -1,11 +1,12 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Locale } from "@/lib/i18n";
 import { wizardChrome } from "@/lib/wizard/strings";
 import { emitConfig, initialState, type WizardState } from "@/lib/wizard/emit";
 import { fieldMeta, fieldNode } from "@/lib/wizard/schema";
 import { validateNumber, validateString } from "@/lib/wizard/validate";
+import { loadEngineValidator, type EngineResult, type EngineValidator } from "@/lib/wizard/wasm";
 
 const inputCls =
   "w-full min-w-0 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-accent";
@@ -46,6 +47,37 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
   const [copied, setCopied] = useState(false);
 
   const yaml = useMemo(() => emitConfig(s), [s]);
+
+  // Engine-exact validation via the wasm build of the real Parse+validate.
+  // Loads lazily; if unavailable the wizard keeps its schema-only checks.
+  const validatorRef = useRef<EngineValidator | null>(null);
+  const [engineReady, setEngineReady] = useState<boolean | null>(null);
+  const [engineResult, setEngineResult] = useState<EngineResult | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadEngineValidator().then((fn) => {
+      if (cancelled) return;
+      validatorRef.current = fn;
+      setEngineReady(!!fn);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const fn = validatorRef.current;
+    if (!fn) return;
+    const id = setTimeout(() => {
+      try {
+        setEngineResult(fn(yaml));
+      } catch {
+        setEngineResult(null);
+      }
+    }, 350);
+    return () => clearTimeout(id);
+  }, [yaml, engineReady]);
 
   function set<K extends keyof WizardState>(k: K, v: WizardState[K]) {
     setS((p) => ({ ...p, [k]: v }));
@@ -359,6 +391,32 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
             {yaml}
           </pre>
         </div>
+
+        {engineResult && (
+          <div
+            className={`mt-3 rounded-md border px-3 py-2 text-xs ${
+              engineResult.ok
+                ? "border-emerald-500/40 bg-emerald-500/10"
+                : "border-red-500/40 bg-red-500/10"
+            }`}
+          >
+            {engineResult.ok ? (
+              <>
+                <p className="font-medium text-emerald-600 dark:text-emerald-400">
+                  ✓ Engine accepts this config
+                </p>
+                {engineResult.summary && (
+                  <pre className="mt-1 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground">
+                    {engineResult.summary}
+                  </pre>
+                )}
+              </>
+            ) : (
+              <p className="font-medium text-red-500">✗ {engineResult.error}</p>
+            )}
+          </div>
+        )}
+
         <p className="mt-3 text-xs text-muted-foreground">
           {t.checkHint}{" "}
           <code className="rounded bg-muted px-1.5 py-0.5 font-mono">kapkan -check-config kapkan.yaml</code>
