@@ -33,6 +33,11 @@ export type WizardChrome = {
   liveWarning: string;
   addItem: string;
   addNeighbor: string;
+  steps: string[];
+  back: string;
+  next: string;
+  reviewTitle: string;
+  reviewIntro: string;
   sections: {
     mode: string;
     telemetry: string;
@@ -65,6 +70,11 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     liveWarning: "LIVE mode: real BGP blackhole announcements will be sent. Keep dry-run on until detection is validated.",
     addItem: "+ Add",
     addNeighbor: "+ Add neighbor",
+    steps: ["Mode & telemetry", "Networks", "Thresholds", "Mitigation & BGP", "Ban, alerts & API", "Review & export"],
+    back: "Back",
+    next: "Next",
+    reviewTitle: "Review & export",
+    reviewIntro: "Check the engine result on the right, then copy or download your config.",
     sections: {
       mode: "Mode",
       telemetry: "Telemetry",
@@ -111,6 +121,11 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     liveWarning: "Боевой режим: реальные BGP-анонсы blackhole будут отправлены. Держите dry-run включённым, пока детект не выверен.",
     addItem: "+ Добавить",
     addNeighbor: "+ Добавить соседа",
+    steps: ["Режим и телеметрия", "Сети", "Пороги", "Митигация и BGP", "Бан, алерты, API", "Обзор и экспорт"],
+    back: "Назад",
+    next: "Далее",
+    reviewTitle: "Обзор и экспорт",
+    reviewIntro: "Проверьте результат движка справа, затем скопируйте или скачайте конфиг.",
     sections: {
       mode: "Режим",
       telemetry: "Телеметрия",
@@ -157,6 +172,11 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     liveWarning: "LIVE-Modus: echte BGP-Blackhole-Ankündigungen werden gesendet. Lassen Sie Dry-Run an, bis die Erkennung validiert ist.",
     addItem: "+ Hinzufügen",
     addNeighbor: "+ Nachbarn hinzufügen",
+    steps: ["Modus & Telemetrie", "Netze", "Schwellen", "Mitigation & BGP", "Ban, Alerts, API", "Prüfen & Export"],
+    back: "Zurück",
+    next: "Weiter",
+    reviewTitle: "Prüfen & exportieren",
+    reviewIntro: "Prüfen Sie das Engine-Ergebnis rechts, dann kopieren oder laden Sie die Konfiguration herunter.",
     sections: {
       mode: "Modus",
       telemetry: "Telemetrie",
@@ -203,6 +223,11 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     liveWarning: "Mode LIVE : de vraies annonces BGP blackhole seront envoyées. Gardez le dry-run activé jusqu'à validation de la détection.",
     addItem: "+ Ajouter",
     addNeighbor: "+ Ajouter un voisin",
+    steps: ["Mode & télémétrie", "Réseaux", "Seuils", "Atténuation & BGP", "Ban, alertes, API", "Vérifier & exporter"],
+    back: "Précédent",
+    next: "Suivant",
+    reviewTitle: "Vérifier & exporter",
+    reviewIntro: "Vérifiez le résultat du moteur à droite, puis copiez ou téléchargez votre configuration.",
     sections: {
       mode: "Mode",
       telemetry: "Télémétrie",
@@ -249,6 +274,11 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
     liveWarning: "Modo LIVE: se enviarán anuncios BGP blackhole reales. Mantén dry-run activado hasta validar la detección.",
     addItem: "+ Añadir",
     addNeighbor: "+ Añadir vecino",
+    steps: ["Modo y telemetría", "Redes", "Umbrales", "Mitigación y BGP", "Ban, alertas, API", "Revisar y exportar"],
+    back: "Atrás",
+    next: "Siguiente",
+    reviewTitle: "Revisar y exportar",
+    reviewIntro: "Revisa el resultado del motor a la derecha y luego copia o descarga tu configuración.",
     sections: {
       mode: "Modo",
       telemetry: "Telemetría",
