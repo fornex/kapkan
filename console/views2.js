@@ -91,54 +91,61 @@
   }
 
   /* ===== HOSTGROUPS ===== */
-  function hostgroups(root, ctx) {
-    var cards = ctx.groups.map(function (g) {
-      var thr = g.thresholds || {};
-      var thrRows = Object.keys(thr).map(function (k) {
-        return [h("dt", { class: "mono", text: k }), h("dd", { class: "mono", text: I.abbr(thr[k]) })];
-      });
-      var bgpRows = [
-        [h("dt", { text: I.t("hg.nexthop") }), h("dd", { class: "mono", text: g.next_hop || I.t("common.na") })],
-        [h("dt", { text: I.t("hg.community") }), h("dd", { class: "mono", text: g.community || I.t("common.na") })],
-        [h("dt", { text: I.t("hg.localpref") }), h("dd", { class: "mono", text: g.local_pref != null ? String(g.local_pref) : I.t("common.na") })],
-        [h("dt", { text: I.t("hg.scrub") }), h("dd", { class: "mono", text: g.scrub_next_hop || I.t("common.na") })]
-      ];
-      return h("div", { class: "card" }, [
-        h("div", { class: "card__head" }, [
-          h("div", { class: "group-card__name", text: g.name }),
-          h("div", { class: "row wrap", style: { gap: "8px" } }, [
-            K.badge("badge--muted", I.label("calc", g.calc)),
-            K.badge(g.mitigation === "blackhole" ? "badge--active" : g.mitigation === "divert" ? "badge--elev" : "badge--accent", I.label("method", g.mitigation)),
-            K.badge(g.ban_enabled ? "badge--calm" : "badge--muted", I.t("hg.banenabled") + ": " + (g.ban_enabled ? I.t("common.enabled") : I.t("common.disabled")))
-          ])
-        ]),
-        h("div", { class: "card__body stack" }, [
-          h("div", { class: "cols-2" }, [
-            h("div", {}, [h("div", { class: "section-label", text: I.t("hg.thresholds") }), h("dl", { class: "kv" }, [].concat.apply([], thrRows))]),
-            (function () {
-              var bl = g.baseline, rows = [[h("dt", { text: I.t("hg.baseline") }), h("dd", { text: bl ? I.t("common.enabled") : I.t("common.disabled") })]];
-              if (bl) {
-                rows.push([h("dt", { text: "factor" }), h("dd", { class: "mono", text: "×" + bl.factor })]);
-                if (bl.warmup_seconds != null) rows.push([h("dt", { text: "warmup" }), h("dd", { class: "mono", text: bl.warmup_seconds + "s" })]);
-              }
-              return h("div", {}, [
-                h("div", { class: "section-label", text: I.t("hg.baseline") }),
-                h("dl", { class: "kv" }, rows.reduce(function (acc, x) { return acc.concat(x); }, []))
-              ]);
-            })()
-          ]),
-          h("div", {}, [
-            h("div", { class: "section-label" }, [w.icon("layers"), h("span", { text: I.t("hg.escalation") }), h("span", { class: "td-muted", style: { fontSize: "var(--t-xs)" }, text: "· " + I.t("lad.config") })]),
-            K.ladder(g.escalation, -1, { config: true })
-          ]),
-          h("div", {}, [h("div", { class: "section-label", text: I.t("hg.bgp") }), h("dl", { class: "kv" }, [].concat.apply([], bgpRows))])
-        ])
-      ]);
+  /* full policy detail for one group — shown in the expanded table row */
+  function groupBody(g) {
+    var thr = g.thresholds || {};
+    var thrRows = Object.keys(thr).map(function (k) {
+      return [h("dt", { class: "mono", text: k }), h("dd", { class: "mono", text: I.abbr(thr[k]) })];
     });
+    var bgpRows = [
+      [h("dt", { text: I.t("hg.nexthop") }), h("dd", { class: "mono", text: g.next_hop || I.t("common.na") })],
+      [h("dt", { text: I.t("hg.community") }), h("dd", { class: "mono", text: g.community || I.t("common.na") })],
+      [h("dt", { text: I.t("hg.localpref") }), h("dd", { class: "mono", text: g.local_pref != null ? String(g.local_pref) : I.t("common.na") })],
+      [h("dt", { text: I.t("hg.scrub") }), h("dd", { class: "mono", text: g.scrub_next_hop || I.t("common.na") })]
+    ];
+    var bl = g.baseline, blRows = [[h("dt", { text: I.t("hg.baseline") }), h("dd", { text: bl ? I.t("common.enabled") : I.t("common.disabled") })]];
+    if (bl) {
+      blRows.push([h("dt", { text: "factor" }), h("dd", { class: "mono", text: "×" + bl.factor })]);
+      if (bl.warmup_seconds != null) blRows.push([h("dt", { text: "warmup" }), h("dd", { class: "mono", text: bl.warmup_seconds + "s" })]);
+    }
+    return h("div", { class: "stack" }, [
+      h("div", { class: "cols-2" }, [
+        h("div", {}, [h("div", { class: "section-label", text: I.t("hg.thresholds") }), h("dl", { class: "kv" }, [].concat.apply([], thrRows))]),
+        h("div", {}, [h("div", { class: "section-label", text: I.t("hg.baseline") }), h("dl", { class: "kv" }, [].concat.apply([], blRows))])
+      ]),
+      h("div", {}, [
+        h("div", { class: "section-label" }, [w.icon("layers"), h("span", { text: I.t("hg.escalation") }), h("span", { class: "td-muted", style: { fontSize: "var(--t-xs)" }, text: "· " + I.t("lad.config") })]),
+        K.ladder(g.escalation, -1, { config: true })
+      ]),
+      h("div", {}, [h("div", { class: "section-label", text: I.t("hg.bgp") }), h("dl", { class: "kv" }, [].concat.apply([], bgpRows))])
+    ]);
+  }
+
+  function hgKey(e, fn) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } }
+
+  function hostgroups(root, ctx) {
+    var rows = [];
+    ctx.groups.forEach(function (g) {
+      var key = "hg:" + g.name, expanded = ctx.state.expanded.has(key);
+      var toggle = function () { ctx.actions.toggleHost(key); };
+      rows.push(h("tr", { class: "is-clickable" + (expanded ? " is-open" : ""), tabindex: "0", role: "button", "data-akey": key,
+        onclick: toggle, onkeydown: function (e) { hgKey(e, toggle); } }, [
+        h("td", { class: "target-cell" }, h("span", { class: "row", style: { gap: "8px" } }, [w.icon(expanded ? "chevron-down" : "chevron-right"), h("span", { class: "mono", text: g.name })])),
+        h("td", {}, K.badge("badge--muted", I.label("calc", g.calc))),
+        h("td", {}, K.badge(g.mitigation === "blackhole" ? "badge--active" : g.mitigation === "divert" ? "badge--elev" : "badge--accent", I.label("method", g.mitigation))),
+        h("td", {}, K.badge(g.ban_enabled ? "badge--calm" : "badge--muted", g.ban_enabled ? I.t("common.enabled") : I.t("common.disabled"))),
+        h("td", { class: "mono", text: g.baseline ? "×" + g.baseline.factor : "—" })
+      ]));
+      if (expanded) rows.push(h("tr", { class: "attack-detail-row" }, h("td", { attrs: { colspan: "5" } }, h("div", { class: "attack-card__body" }, groupBody(g)))));
+    });
+    function hgth(k) { return h("th", { text: I.t(k) }); }
     K.mount(root, [
       V.viewHead(I.t("nav.hostgroups"), null),
       h("div", { class: "banner banner--info" }, [w.icon("lock"), h("span", { class: "banner__txt", text: I.t("hg.readonly") })]),
-      h("div", { class: "stack" }, cards)
+      h("div", { class: "card" }, h("div", { class: "tablewrap" }, h("table", { class: "tbl attacks-tbl" }, [
+        h("thead", {}, h("tr", {}, [hgth("col.group"), hgth("hg.calc"), hgth("col.method"), hgth("hg.banenabled"), hgth("hg.baseline")])),
+        h("tbody", {}, rows)
+      ])))
     ]);
   }
 
