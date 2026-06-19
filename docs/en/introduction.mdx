@@ -28,14 +28,15 @@ production telemetry and validate detection before it can touch a single route. 
 - **Ingest** — sFlow v5, NetFlow v5/v9 and IPFIX over UDP, in library mode (no sidecar),
   via [goflow2](https://github.com/netsampler/goflow2).
 - **Detect** — per-destination volumetric attacks using sampling-corrected pps / Mbps /
-  flows-per-second thresholds over a sliding window, plus optional per-protocol limits and
-  outgoing-attack detection.
+  flows-per-second thresholds over a sliding window, plus optional per-protocol limits,
+  [learned baselines](/docs/baselines) and outgoing-attack detection.
 - **Classify** — each attack is labelled from its flow sample: amplification
   (NTP / DNS / CLDAP / memcached / SSDP / chargen), SYN / UDP / TCP / ICMP / fragment floods.
 - **Mitigate** — announce `/32` and `/128` blackhole routes via an embedded
-  [GoBGP](https://github.com/osrg/gobgp) speaker, or drop only the attack vector with
-  surgical [BGP FlowSpec](/docs/flowspec) rules (RFC 8955/8956), optionally stepped up over
-  time with [escalation ladders](/docs/escalation).
+  [GoBGP](https://github.com/osrg/gobgp) speaker, drop only the attack vector with
+  surgical [BGP FlowSpec](/docs/flowspec) rules (RFC 8955/8956), or divert the victim to a
+  [scrubbing centre](/docs/scrubbing) instead of dropping its traffic — optionally stepped up
+  over time with [escalation ladders](/docs/escalation).
 - **Observe** — a REST API, an embedded web dashboard, Prometheus `/metrics`, and
   notifications over Telegram, Slack, email, webhook and an exec hook.
 - **Persist (optional)** — keep attack and traffic history in

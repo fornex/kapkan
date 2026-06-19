@@ -28,13 +28,14 @@ production et valider la détection avant qu'elle ne puisse toucher la moindre r
 - **Ingestion** — sFlow v5, NetFlow v5/v9 et IPFIX sur UDP, en mode bibliothèque (sans sidecar),
   via [goflow2](https://github.com/netsampler/goflow2).
 - **Détection** — attaques volumétriques par destination à l'aide de seuils en pps / Mbps /
-  flows par seconde corrigés de l'échantillonnage sur une fenêtre glissante, avec en option des limites par protocole et
-  la détection des attaques sortantes.
+  flows par seconde corrigés de l'échantillonnage sur une fenêtre glissante, avec en option des limites par protocole,
+  des [lignes de base apprises](/docs/baselines) et la détection des attaques sortantes.
 - **Classification** — chaque attaque est étiquetée à partir de son échantillon de flow : amplification
   (NTP / DNS / CLDAP / memcached / SSDP / chargen), floods SYN / UDP / TCP / ICMP / fragment.
 - **Mitigation** — annonce de routes blackhole `/32` et `/128` via un locuteur
-  [GoBGP](https://github.com/osrg/gobgp) embarqué, ou suppression du seul vecteur d'attaque grâce à
-  des règles chirurgicales [BGP FlowSpec](/docs/flowspec) (RFC 8955/8956), éventuellement renforcées au fil du
+  [GoBGP](https://github.com/osrg/gobgp) embarqué, suppression du seul vecteur d'attaque grâce à
+  des règles chirurgicales [BGP FlowSpec](/docs/flowspec) (RFC 8955/8956), ou détournement de la victime vers un
+  [centre de nettoyage (scrubbing)](/docs/scrubbing) au lieu de supprimer son trafic — éventuellement renforcés au fil du
   temps par des [échelles d'escalade](/docs/escalation).
 - **Observation** — une API REST, un tableau de bord web embarqué, l'endpoint Prometheus `/metrics` et des
   notifications par Telegram, Slack, e-mail, webhook et un exec hook.

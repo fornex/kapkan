@@ -29,12 +29,13 @@ telemetría de producción y validar la detección antes de que pueda tocar una 
   mediante [goflow2](https://github.com/netsampler/goflow2).
 - **Detecta** — ataques volumétricos por destino utilizando umbrales de pps / Mbps /
   flows por segundo corregidos por muestreo sobre una ventana deslizante, además de límites
-  opcionales por protocolo y detección de ataques salientes.
+  opcionales por protocolo, [líneas base aprendidas](/docs/baselines) y detección de ataques salientes.
 - **Clasifica** — cada ataque se etiqueta a partir de su muestra de flow: amplificación
   (NTP / DNS / CLDAP / memcached / SSDP / chargen), inundaciones SYN / UDP / TCP / ICMP / de fragmentos.
 - **Mitiga** — anuncia rutas blackhole `/32` y `/128` mediante un speaker
-  [GoBGP](https://github.com/osrg/gobgp) integrado, o descarta únicamente el vector de ataque con
-  reglas quirúrgicas de [BGP FlowSpec](/docs/flowspec) (RFC 8955/8956), escaladas opcionalmente
+  [GoBGP](https://github.com/osrg/gobgp) integrado, descarta únicamente el vector de ataque con
+  reglas quirúrgicas de [BGP FlowSpec](/docs/flowspec) (RFC 8955/8956) o desvía a la víctima a un
+  [centro de limpieza (scrubbing)](/docs/scrubbing) en lugar de descartar su tráfico — escalado opcionalmente
   con el tiempo mediante [escalado progresivo](/docs/escalation).
 - **Observa** — una API REST, un panel web integrado, `/metrics` de Prometheus y
   notificaciones por Telegram, Slack, email, webhook y un exec hook.

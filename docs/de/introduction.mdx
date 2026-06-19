@@ -28,13 +28,14 @@ einzige Route berühren kann. Siehe das [Sicherheitsmodell](/docs/safety).
 - **Aufnehmen** — sFlow v5, NetFlow v5/v9 und IPFIX über UDP, im Bibliotheksmodus (ohne Sidecar),
   über [goflow2](https://github.com/netsampler/goflow2).
 - **Erkennen** — volumetrische Angriffe pro Ziel anhand sampling-korrigierter pps- / Mbps- /
-  flows/sec-Schwellenwerte über ein gleitendes Fenster, zuzüglich optionaler Limits pro Protokoll und
-  Erkennung ausgehender Angriffe.
+  flows/sec-Schwellenwerte über ein gleitendes Fenster, zuzüglich optionaler Limits pro Protokoll,
+  [gelernter Baselines](/docs/baselines) und Erkennung ausgehender Angriffe.
 - **Klassifizieren** — jeder Angriff wird anhand seines Flow-Samples gekennzeichnet: Amplification
   (NTP / DNS / CLDAP / memcached / SSDP / chargen), SYN- / UDP- / TCP- / ICMP- / Fragment-Floods.
 - **Mitigieren** — Ankündigung von `/32`- und `/128`-Blackhole-Routen über einen eingebetteten
-  [GoBGP](https://github.com/osrg/gobgp)-Speaker, oder gezieltes Verwerfen ausschließlich des
-  Angriffsvektors mit chirurgisch präzisen [BGP-FlowSpec](/docs/flowspec)-Regeln (RFC 8955/8956),
+  [GoBGP](https://github.com/osrg/gobgp)-Speaker, gezieltes Verwerfen ausschließlich des
+  Angriffsvektors mit chirurgisch präzisen [BGP-FlowSpec](/docs/flowspec)-Regeln (RFC 8955/8956)
+  oder Umleitung des Opfers in ein [Scrubbing-Center](/docs/scrubbing), statt seinen Verkehr zu verwerfen —
   optional über die Zeit hochgestuft mit [Eskalationsstufen](/docs/escalation).
 - **Beobachten** — eine REST-API, ein eingebettetes Web-Dashboard, Prometheus `/metrics` und
   Benachrichtigungen über Telegram, Slack, E-Mail, Webhook und einen Exec-Hook.
