@@ -122,6 +122,10 @@ thresholds: # per destination host, after sampling correction
 # flowspec:
 #   action: discard      # or rate_limit
 #   rate_mbps: 100       # required for rate_limit
+#   source_anchored: true        # drop only the dominant attacker sources (from the
+#                                # attack sample) to the victim, sparing its clients
+#   min_source_concentration: 0.8 # ...but only when the top sources cover >= this
+#                                # share of the attack; else fall back to victim-anchored
 #
 # Or an escalation ladder (supersedes `mitigation`): step the response up the
 # longer an attack lasts. Each rung fires after the given seconds IF the

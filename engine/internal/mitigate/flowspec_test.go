@@ -105,7 +105,7 @@ func TestGenerateRulesVectors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rules := generateRules(tt.target, engine.DirIncoming, tt.cls, nil, config.FlowSpecDiscard, 0)
+			rules := generateRules(tt.target, engine.DirIncoming, tt.cls, nil, config.FlowSpecDiscard, 0, false, 0)
 			if len(rules) != tt.wantN {
 				t.Fatalf("rule count = %d, want %d: %v", len(rules), tt.wantN, rules)
 			}
@@ -128,7 +128,7 @@ func TestGenerateRulesVectors(t *testing.T) {
 
 func TestGenerateRulesRateLimit(t *testing.T) {
 	rules := generateRules(netip.MustParseAddr("203.0.113.66"), engine.DirIncoming, cls(engine.AttackSYNFlood), nil,
-		config.FlowSpecRateLimit, 12_500_000)
+		config.FlowSpecRateLimit, 12_500_000, false, 0)
 	if len(rules) != 1 {
 		t.Fatalf("rule count = %d, want 1", len(rules))
 	}
@@ -142,7 +142,7 @@ func TestGenerateRulesMixedWithSample(t *testing.T) {
 		{Key: "123", Packets: 1000}, {Key: "53", Packets: 500}, {Key: "40000", Packets: 10},
 	}}
 	rules := generateRules(netip.MustParseAddr("203.0.113.66"), engine.DirIncoming, cls(engine.AttackMixed), sample,
-		config.FlowSpecDiscard, 0)
+		config.FlowSpecDiscard, 0, false, 0)
 	// destination-only + two known reflector ports (123, 53); 40000 ignored.
 	if len(rules) != 3 {
 		t.Fatalf("rule count = %d, want 3 (dst-only + 123 + 53): %v", len(rules), rules)
@@ -157,7 +157,7 @@ func TestGenerateRulesMixedWithSample(t *testing.T) {
 }
 
 func TestGenerateRulesCapAndInvalid(t *testing.T) {
-	if rules := generateRules(netip.Addr{}, engine.DirIncoming, cls(engine.AttackUDPFlood), nil, config.FlowSpecDiscard, 0); rules != nil {
+	if rules := generateRules(netip.Addr{}, engine.DirIncoming, cls(engine.AttackUDPFlood), nil, config.FlowSpecDiscard, 0, false, 0); rules != nil {
 		t.Errorf("invalid target produced rules: %v", rules)
 	}
 	// A flood of known reflector ports must still cap at maxRulesPerAttack.
@@ -166,7 +166,7 @@ func TestGenerateRulesCapAndInvalid(t *testing.T) {
 		ports = append(ports, engine.Counter{Key: p})
 	}
 	sample := &engine.AttackSample{TopSrcPorts: append(ports, ports...)} // duplicates
-	rules := generateRules(netip.MustParseAddr("203.0.113.66"), engine.DirIncoming, cls(engine.AttackMixed), sample, config.FlowSpecDiscard, 0)
+	rules := generateRules(netip.MustParseAddr("203.0.113.66"), engine.DirIncoming, cls(engine.AttackMixed), sample, config.FlowSpecDiscard, 0, false, 0)
 	if len(rules) > maxRulesPerAttack {
 		t.Errorf("rule count = %d, want <= %d", len(rules), maxRulesPerAttack)
 	}
@@ -177,7 +177,7 @@ func TestGenerateRulesCapAndInvalid(t *testing.T) {
 // matches the outbound flood.
 func TestGenerateRulesOutgoingAnchorsSource(t *testing.T) {
 	host := netip.MustParseAddr("203.0.113.77")
-	rules := generateRules(host, engine.DirOutgoing, cls(engine.AttackUDPFlood), nil, config.FlowSpecDiscard, 0)
+	rules := generateRules(host, engine.DirOutgoing, cls(engine.AttackUDPFlood), nil, config.FlowSpecDiscard, 0, false, 0)
 	if len(rules) != 1 {
 		t.Fatalf("rules = %+v, want 1", rules)
 	}
@@ -193,5 +193,63 @@ func TestGenerateRulesOutgoingAnchorsSource(t *testing.T) {
 	}
 	if !strings.HasPrefix(r.String(), "src 203.0.113.77/32") {
 		t.Errorf("String() = %q, want it to start with the src anchor", r.String())
+	}
+}
+
+// TestGenerateRulesSourceAnchored: a concentrated sample yields composite
+// {victim-dst, attacker-src} rules covering the dominant sources, dropping only
+// the attackers and sparing the victim's legitimate clients.
+func TestGenerateRulesSourceAnchored(t *testing.T) {
+	victim := netip.MustParseAddr("203.0.113.66")
+	sample := &engine.AttackSample{
+		TotalPackets: 1000,
+		TopSources: []engine.Counter{
+			{Key: "198.51.100.10", Packets: 600},
+			{Key: "198.51.100.11", Packets: 350},
+			{Key: "198.51.100.12", Packets: 20}, // beyond the 0.8 gate; not emitted
+		},
+	}
+	rules := generateRules(victim, engine.DirIncoming, cls(engine.AttackUDPFlood), sample, config.FlowSpecDiscard, 0, true, 0.8)
+	if len(rules) != 2 {
+		t.Fatalf("rules = %+v, want 2 source-anchored (top 2 cover 0.95 >= 0.8)", rules)
+	}
+	for _, r := range rules {
+		if r.Dst.Addr() != victim || r.Dst.Bits() != 32 {
+			t.Errorf("dst = %s, want victim /32", r.Dst)
+		}
+		if !r.Src.IsValid() || r.Src.Bits() != 32 {
+			t.Errorf("src = %v, want an attacker /32", r.Src)
+		}
+		if r.Proto != 0 {
+			t.Errorf("source-anchored rule should drop ALL from the attacker, got proto %d", r.Proto)
+		}
+	}
+	// The rule String renders both anchors.
+	if got := rules[0].String(); !strings.Contains(got, "dst 203.0.113.66/32") || !strings.Contains(got, "src 198.51.100.10/32") {
+		t.Errorf("String() = %q, want both dst and src", got)
+	}
+}
+
+// TestGenerateRulesSourceAnchoredDiffuseFallsBack: when no small set of sources
+// dominates, source anchoring is skipped and a victim-anchored rule is emitted.
+func TestGenerateRulesSourceAnchoredDiffuseFallsBack(t *testing.T) {
+	victim := netip.MustParseAddr("203.0.113.66")
+	sample := &engine.AttackSample{
+		TotalPackets: 1000, // the top sources cover only 150/1000 = 0.15 < 0.8
+		TopSources: []engine.Counter{
+			{Key: "198.51.100.10", Packets: 50},
+			{Key: "198.51.100.11", Packets: 50},
+			{Key: "198.51.100.12", Packets: 50},
+		},
+	}
+	rules := generateRules(victim, engine.DirIncoming, cls(engine.AttackUDPFlood), sample, config.FlowSpecDiscard, 0, true, 0.8)
+	if len(rules) != 1 {
+		t.Fatalf("rules = %+v, want 1 victim-anchored fallback", rules)
+	}
+	if rules[0].Src.IsValid() {
+		t.Errorf("diffuse attack must fall back to victim-anchored (no src), got src %v", rules[0].Src)
+	}
+	if rules[0].Dst.Addr() != victim || rules[0].Proto != 17 {
+		t.Errorf("fallback rule = %+v, want victim-anchored udp", rules[0])
 	}
 }

@@ -337,6 +337,19 @@ type FlowSpec struct {
 	// RateMbps is the rate-limit ceiling in megabits/sec; required and used
 	// only when Action is rate_limit.
 	RateMbps float64 `yaml:"rate_mbps"`
+	// SourceAnchored, when true, lets a flowspec rule pin BOTH the victim as
+	// destination AND a dominant attacker source (from the attack sample) so
+	// only the attackers are filtered, sparing the victim's legitimate clients.
+	// It applies only when the sample is concentrated enough (see
+	// MinSourceConcentration); otherwise the rule falls back to victim-anchored.
+	// Default false (victim-anchored, today's behavior).
+	SourceAnchored bool `yaml:"source_anchored"`
+	// MinSourceConcentration is the share (0–1) of sampled attack packets the
+	// dominant sources must cover, within the rule budget, before source
+	// anchoring is used instead of a victim-anchored rule. Omitted/0 defaults to
+	// 0.8 when source_anchored is on; a diffuse attack (e.g. reflection from
+	// thousands of sources) stays below it and falls back to victim-anchored.
+	MinSourceConcentration float64 `yaml:"min_source_concentration"`
 }
 
 // CalcMethod selects how a hostgroup's thresholds are applied.
@@ -420,6 +433,10 @@ type Group struct {
 	// FlowSpec rules (rate is per-second bytes; 0 for discard).
 	FlowSpecAction  FlowSpecAction `json:"flowspec_action,omitempty"`
 	FlowSpecRateBps float64        `json:"-"`
+	// FlowSpecSourceAnchored enables composite victim+attacker-source rules when
+	// the attack sample is concentrated; FlowSpecMinConcentration is the gate.
+	FlowSpecSourceAnchored   bool    `json:"flowspec_source_anchored,omitempty"`
+	FlowSpecMinConcentration float64 `json:"-"`
 	// Escalation is the resolved mitigation ladder; always at least one
 	// stage (synthesized from Mitigation when not explicitly configured).
 	Escalation []EscalationStage `json:"escalation,omitempty"`
@@ -923,29 +940,36 @@ func (c *Config) validateHostgroups() error {
 		}
 	}
 
+	globalSrcAnchor, globalMinConc, err := resolveSourceAnchor(c.FlowSpec, nil)
+	if err != nil {
+		return fmt.Errorf("flowspec: %w", err)
+	}
+
 	c.Groups = make([]Group, 0, len(c.Hostgroups)+1)
 	c.Groups = append(c.Groups, Group{
-		Name:                  GlobalGroup,
-		Calc:                  CalcPerHost,
-		Thresholds:            c.Thresholds,
-		OutThresholds:         c.ThresholdsOutgoing,
-		Baseline:              globalBaseline,
-		Mitigation:            globalMethod,
-		FlowSpecAction:        globalAction,
-		FlowSpecRateBps:       globalRate,
-		Escalation:            globalStages,
-		BlackholeNextHop:      globalBGP.nextHop,
-		BlackholeNextHop6:     globalBGP.nextHop6,
-		BlackholeCommunities:  globalBGP.communities,
-		BlackholeCommunityStr: globalBGP.commStr,
-		LocalPref:             globalBGP.localPref,
-		ScrubNextHop:          globalScrub.nextHop,
-		ScrubNextHop6:         globalScrub.nextHop6,
-		ScrubCommunities:      globalScrub.communities,
-		ScrubCommunityStr:     globalScrub.commStr,
-		ScrubLocalPref:        globalScrub.localPref,
-		Tenant:                c.Tenant,
-		BanEnabled:            true,
+		Name:                     GlobalGroup,
+		Calc:                     CalcPerHost,
+		Thresholds:               c.Thresholds,
+		OutThresholds:            c.ThresholdsOutgoing,
+		Baseline:                 globalBaseline,
+		Mitigation:               globalMethod,
+		FlowSpecAction:           globalAction,
+		FlowSpecRateBps:          globalRate,
+		FlowSpecSourceAnchored:   globalSrcAnchor,
+		FlowSpecMinConcentration: globalMinConc,
+		Escalation:               globalStages,
+		BlackholeNextHop:         globalBGP.nextHop,
+		BlackholeNextHop6:        globalBGP.nextHop6,
+		BlackholeCommunities:     globalBGP.communities,
+		BlackholeCommunityStr:    globalBGP.commStr,
+		LocalPref:                globalBGP.localPref,
+		ScrubNextHop:             globalScrub.nextHop,
+		ScrubNextHop6:            globalScrub.nextHop6,
+		ScrubCommunities:         globalScrub.communities,
+		ScrubCommunityStr:        globalScrub.commStr,
+		ScrubLocalPref:           globalScrub.localPref,
+		Tenant:                   c.Tenant,
+		BanEnabled:               true,
 	})
 	c.groupRoutes = nil
 
@@ -1103,28 +1127,35 @@ func (c *Config) validateHostgroups() error {
 			}
 		}
 
+		groupSrcAnchor, groupMinConc, err := resolveSourceAnchor(hg.FlowSpec, c.FlowSpec)
+		if err != nil {
+			return fmt.Errorf("hostgroups[%q]: flowspec: %w", hg.Name, err)
+		}
+
 		c.Groups = append(c.Groups, Group{
-			Name:                  hg.Name,
-			Calc:                  calc,
-			Thresholds:            th,
-			OutThresholds:         outTh,
-			Baseline:              groupBaseline,
-			Mitigation:            method,
-			FlowSpecAction:        action,
-			FlowSpecRateBps:       rate,
-			Escalation:            stages,
-			BlackholeNextHop:      groupBGP.nextHop,
-			BlackholeNextHop6:     groupBGP.nextHop6,
-			BlackholeCommunities:  groupBGP.communities,
-			BlackholeCommunityStr: groupBGP.commStr,
-			LocalPref:             groupBGP.localPref,
-			ScrubNextHop:          groupScrub.nextHop,
-			ScrubNextHop6:         groupScrub.nextHop6,
-			ScrubCommunities:      groupScrub.communities,
-			ScrubCommunityStr:     groupScrub.commStr,
-			ScrubLocalPref:        groupScrub.localPref,
-			Tenant:                hg.Tenant,
-			BanEnabled:            banEnabled,
+			Name:                     hg.Name,
+			Calc:                     calc,
+			Thresholds:               th,
+			OutThresholds:            outTh,
+			Baseline:                 groupBaseline,
+			Mitigation:               method,
+			FlowSpecAction:           action,
+			FlowSpecRateBps:          rate,
+			FlowSpecSourceAnchored:   groupSrcAnchor,
+			FlowSpecMinConcentration: groupMinConc,
+			Escalation:               stages,
+			BlackholeNextHop:         groupBGP.nextHop,
+			BlackholeNextHop6:        groupBGP.nextHop6,
+			BlackholeCommunities:     groupBGP.communities,
+			BlackholeCommunityStr:    groupBGP.commStr,
+			LocalPref:                groupBGP.localPref,
+			ScrubNextHop:             groupScrub.nextHop,
+			ScrubNextHop6:            groupScrub.nextHop6,
+			ScrubCommunities:         groupScrub.communities,
+			ScrubCommunityStr:        groupScrub.commStr,
+			ScrubLocalPref:           groupScrub.localPref,
+			Tenant:                   hg.Tenant,
+			BanEnabled:               banEnabled,
 		})
 	}
 
@@ -1203,6 +1234,28 @@ func resolveMitigation(methodStr string, flow *FlowSpec, defMethod MitigationMet
 	}
 	action, rate, err := resolveFlowSpecPolicy(flow, defFlow)
 	return method, action, rate, err
+}
+
+// resolveSourceAnchor resolves the source-anchoring policy from the effective
+// FlowSpec block (the group's own, else the default). It returns whether source
+// anchoring is enabled and the resolved concentration gate (defaulting to 0.8
+// when enabled without an explicit value).
+func resolveSourceAnchor(flow, defFlow *FlowSpec) (bool, float64, error) {
+	fs := flow
+	if fs == nil {
+		fs = defFlow
+	}
+	if fs == nil || !fs.SourceAnchored {
+		return false, 0, nil
+	}
+	mc := fs.MinSourceConcentration
+	if mc < 0 || mc > 1 {
+		return false, 0, fmt.Errorf("flowspec.min_source_concentration must be in 0..1, got %g", mc)
+	}
+	if mc == 0 {
+		mc = 0.8
+	}
+	return true, mc, nil
 }
 
 // resolveFlowSpecPolicy resolves the FlowSpec action policy (own block, else
