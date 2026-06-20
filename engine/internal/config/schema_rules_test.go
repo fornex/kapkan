@@ -118,6 +118,11 @@ api: {listen: "127.0.0.1:8080"}
 			wantErr: "carpet.thresholds",
 		},
 		{
+			name:    "carpet with an invalid mitigation method",
+			yaml:    validBase + "\ncarpet:\n  thresholds: {pps: 100000}\n  mitigation: bogus\n",
+			wantErr: "carpet.mitigation",
+		},
+		{
 			name:    "unknown key is rejected (closed schema)",
 			yaml:    validBase + "\nbogus_key: 1\n",
 			wantErr: "not found",
