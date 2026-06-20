@@ -197,9 +197,20 @@
           "minimum": 16,
           "type": "integer"
         },
+        "max_active_prefix_bans": {
+          "minimum": 1,
+          "type": "integer"
+        },
         "min_hosts": {
           "minimum": 2,
           "type": "integer"
+        },
+        "mitigation": {
+          "enum": [
+            "flowspec",
+            "blackhole"
+          ],
+          "type": "string"
         },
         "thresholds": {
           "additionalProperties": false,

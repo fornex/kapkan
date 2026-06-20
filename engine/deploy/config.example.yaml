@@ -81,6 +81,10 @@ thresholds: # per destination host, after sampling correction
 #   thresholds:                # AGGREGATE volume over the prefix
 #     pps: 2000000
 #     mbps: 20000
+#   mitigation: flowspec       # empty (default) = alert-only; flowspec drops the
+#                              # vector to the whole prefix; blackhole RTBHs it.
+#                              # EITHER refuses a prefix containing a whitelisted addr.
+#   max_active_prefix_bans: 10 # cap on simultaneous carpet bans (separate from host bans)
 
 # Attack samples: recent flows are buffered continuously so detections carry
 # their dominant sources/ports/protocols instantly. ~120 bytes per buffered

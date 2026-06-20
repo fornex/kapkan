@@ -40,6 +40,8 @@
     "carpet.thresholds.pps": { "tier": "advanced", "description": "Aggregate packets/sec threshold for the whole prefix (summed over its hosts). 0 disables this metric; set at least one carpet threshold. Should be well above the per-host pps." },
     "carpet.thresholds.mbps": { "tier": "advanced", "description": "Aggregate megabits/sec threshold for the prefix. 0 disables it." },
     "carpet.thresholds.flows_per_sec": { "tier": "advanced", "description": "Aggregate flows/sec threshold for the prefix. 0 disables it." },
+    "carpet.mitigation": { "tier": "advanced", "defaultWhenAbsent": "", "description": "Auto-mitigate the aggregation prefix: empty (default) is alert-only; 'flowspec' announces a FlowSpec rule matching the attack vector on the whole prefix (surgical); 'blackhole' announces an RTBH route for the prefix (drops all of it). EITHER method refuses a prefix containing a protected_whitelist address — the whitelist guarantee is absolute." },
+    "carpet.max_active_prefix_bans": { "tier": "advanced", "defaultWhenAbsent": 10, "description": "Cap on simultaneous carpet (prefix) bans, separate from ban.max_active_bans (host bans) so neither starves the other. A prefix ban also counts its full address span toward ban.max_banned_fraction." },
 
     "escalation.after_seconds": { "tier": "advanced", "crossField": "The first rung must be 0; rungs strictly increase; a ladder may only hold or strengthen (none < flowspec < divert < blackhole).", "description": "Delay from attack start at which this rung applies." },
     "escalation.action": { "tier": "advanced", "description": "Rung action. Supersedes the single `mitigation` method when escalation is set." },

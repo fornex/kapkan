@@ -361,8 +361,8 @@ type FlowSpec struct {
 // folds every monitored per-host destination's incoming rates into its
 // aggregation prefix and raises a prefix-scoped attack when the aggregate
 // crosses Thresholds AND the traffic is spread across at least MinHosts
-// distinct hosts. Absent (nil) disables it. Carpet attacks are alert-only:
-// the prefix is reported (and mitigable in principle) but never auto-banned.
+// distinct hosts. Absent (nil) disables it. Carpet attacks are alert-only by
+// default; set Mitigation to auto-mitigate the aggregation prefix.
 type Carpet struct {
 	// AggregationPrefixV4/V6 are the supernet lengths per-host rates fold into
 	// (defaults /24 and /48). A /24 with attack traffic spread across MinHosts
@@ -378,6 +378,29 @@ type Carpet struct {
 	// (sampling-corrected, summed over its hosts). A zero metric is disabled; at
 	// least one must be set. They should be well above the per-host thresholds.
 	Thresholds Thresholds `yaml:"thresholds"`
+	// Mitigation auto-mitigates the aggregation prefix: "" (the default) is
+	// alert-only; "flowspec" announces a FlowSpec rule matching the attack
+	// vector on the whole prefix (surgical — drops only the vector); "blackhole"
+	// announces an RTBH route for the prefix (drops ALL of it). Either method
+	// REFUSES a prefix that contains a protected_whitelist address — the
+	// whitelist guarantee is absolute and a prefix mitigation cannot exempt a
+	// single member. A diffuse attack still raises the alert regardless.
+	Mitigation string `yaml:"mitigation"`
+	// MaxActivePrefixBans caps simultaneous carpet (prefix) bans, separately from
+	// ban.max_active_bans (host bans), so neither starves the other. Default 10.
+	MaxActivePrefixBans int `yaml:"max_active_prefix_bans"`
+}
+
+// Method resolves carpet.mitigation to a MitigationMethod ("" = alert-only).
+func (c Carpet) Method() MitigationMethod {
+	switch c.Mitigation {
+	case string(MitigateFlowSpec):
+		return MitigateFlowSpec
+	case string(MitigateBlackhole):
+		return MitigateBlackhole
+	default:
+		return ""
+	}
 }
 
 // CalcMethod selects how a hostgroup's thresholds are applied.
@@ -1232,6 +1255,17 @@ func (c *Config) validateCarpet() error {
 	if cp.Thresholds.Zero() {
 		return fmt.Errorf("carpet.thresholds: set at least one aggregate threshold")
 	}
+	switch cp.Mitigation {
+	case "", string(MitigateFlowSpec), string(MitigateBlackhole):
+	default:
+		return fmt.Errorf("carpet.mitigation must be empty, %q or %q, got %q", MitigateFlowSpec, MitigateBlackhole, cp.Mitigation)
+	}
+	if cp.MaxActivePrefixBans == 0 {
+		cp.MaxActivePrefixBans = 10
+	}
+	if cp.MaxActivePrefixBans < 1 {
+		return fmt.Errorf("carpet.max_active_prefix_bans must be >= 1, got %d", cp.MaxActivePrefixBans)
+	}
 	return nil
 }
 
@@ -1963,6 +1997,30 @@ func (c *Config) ProtectedAddrs(is6 bool) float64 {
 func (c *Config) IsWhitelisted(addr netip.Addr) bool {
 	for _, a := range c.WhitelistAddrs {
 		if a == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// PrefixContainsWhitelisted reports whether p covers any whitelisted address.
+// A prefix-scoped mitigation (carpet) cannot exempt a single member, so a
+// prefix containing a whitelisted address must be refused outright — the
+// whitelist guarantee is absolute.
+func (c *Config) PrefixContainsWhitelisted(p netip.Prefix) bool {
+	for _, a := range c.WhitelistAddrs {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// PrefixInNetworks reports whether p is fully contained in a protected prefix
+// (so a prefix-scoped ban never announces a route for space we do not own).
+func (c *Config) PrefixInNetworks(p netip.Prefix) bool {
+	for _, np := range c.NetworkPrefixes {
+		if np.Contains(p.Addr()) && np.Bits() <= p.Bits() {
 			return true
 		}
 	}

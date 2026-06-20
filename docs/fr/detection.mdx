@@ -156,10 +156,13 @@ Fixez les seuils agrégés bien au-dessus de ceux par hôte — ils cumulent l'e
 porte `scope: prefix`, le CIDR d'agrégation dans `prefix`, et son fan-out dans `hosts`, aux côtés de
 l'échantillon et de la classification habituels.
 
-<Callout type="info" title="Alerte seulement">
-Les attaques carpet sont signalées mais **jamais bannies automatiquement** sous cette forme : en mitiger une revient à agir sur un
-préfixe entier (un RTBH sur un `/24` blackholerait chaque hôte qu'il contient, y compris tout membre en liste blanche), ce qui
-constitue un choix distinct et délibéré. Pour l'instant, servez-vous de l'alerte pour agir manuellement.
+<Callout type="info" title="L'atténuation est en option">
+Les attaques carpet sont en alerte seule par défaut. Définissez `carpet.mitigation` pour atténuer automatiquement le préfixe
+d'agrégation — `flowspec` ne supprime que le vecteur d'attaque sur l'ensemble du préfixe (chirurgical), ou `blackhole` le met en
+RTBH. Chacune des deux méthodes **refuse catégoriquement un préfixe contenant une adresse `protected_whitelist`** : une atténuation
+de préfixe ne peut pas exempter un seul membre et la garantie de liste blanche est absolue. Un bannissement de préfixe compte aussi
+toute son étendue d'adresses dans `ban.max_banned_fraction` et possède son propre plafond `carpet.max_active_prefix_bans`.
+Voir [Mitigation](/docs/mitigation).
 </Callout>
 
 ## Détection sortante

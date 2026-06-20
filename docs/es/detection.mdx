@@ -158,11 +158,14 @@ Establece los umbrales del agregado muy por encima de los de por host: suman tod
 carpet lleva `scope: prefix`, el CIDR de agregación en `prefix` y su fan-out en `hosts`, junto con la muestra
 y la clasificación habituales.
 
-<Callout type="info" title="Solo alerta">
-Los ataques de carpet se informan pero **nunca se bloquean automáticamente** en esta forma: mitigar uno
-significa actuar sobre un prefijo completo (un RTBH de un `/24` haría blackhole de todos los hosts que
-contiene, incluido cualquier miembro en la lista blanca), lo cual es una decisión aparte y deliberada. Por
-ahora, usa la alerta para actuar de forma manual.
+<Callout type="info" title="La mitigación es opcional (opt-in)">
+Los ataques de carpet son de solo alerta por defecto. Establece `carpet.mitigation` para mitigar de forma
+automática el prefijo de agregación — `flowspec` descarta el vector de ataque sobre todo el prefijo
+(quirúrgico), o `blackhole` le aplica un RTBH. Cualquiera de los dos métodos **rechaza de plano un prefijo
+que contenga una dirección de `protected_whitelist`**: una mitigación de prefijo no puede eximir a un solo
+miembro y la garantía de la lista blanca es absoluta. Un bloqueo de prefijo también computa todo su rango de
+direcciones para `ban.max_banned_fraction` y tiene su propio límite `carpet.max_active_prefix_bans`. Consulta
+[Mitigación](/docs/mitigation).
 </Callout>
 
 ## Detección saliente

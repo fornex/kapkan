@@ -32,6 +32,7 @@ import (
 var enumValues = map[string][]string{
 	"mitigation":             {string(MitigateBlackhole), string(MitigateFlowSpec), string(MitigateDivert)},
 	"ban.fallback":           {"none", string(MitigateBlackhole)},
+	"carpet.mitigation":      {string(MitigateFlowSpec), string(MitigateBlackhole)},
 	"flowspec.action":        {string(FlowSpecDiscard), string(FlowSpecRateLimit)},
 	"escalation.action":      {string(EscalateNone), string(EscalateFlowSpec), string(EscalateDivert), string(EscalateBlackhole)},
 	"hostgroups.calculation": {string(CalcPerHost), string(CalcTotal)},
@@ -80,9 +81,10 @@ var numericBounds = map[string]map[string]float64{
 	"flowspec.rate_mbps":                {"minimum": 0},
 	"flowspec.min_source_concentration": {"minimum": 0, "maximum": 1},
 
-	"carpet.aggregation_prefix_v4": {"minimum": 8, "maximum": 32},
-	"carpet.aggregation_prefix_v6": {"minimum": 16, "maximum": 128},
-	"carpet.min_hosts":             {"minimum": 2},
+	"carpet.aggregation_prefix_v4":  {"minimum": 8, "maximum": 32},
+	"carpet.aggregation_prefix_v6":  {"minimum": 16, "maximum": 128},
+	"carpet.min_hosts":              {"minimum": 2},
+	"carpet.max_active_prefix_bans": {"minimum": 1},
 }
 
 // stringPatterns maps a yaml path to a regex the value must match. Beyond these

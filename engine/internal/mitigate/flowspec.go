@@ -126,7 +126,27 @@ func generateRules(target netip.Addr, dir engine.Direction, cls *engine.Classifi
 		// The compromised host is the source of the flood; match on source.
 		base = FlowSpecRule{Src: hostPrefix(target), Action: action, RateBytes: rateBytes}
 	}
+	return narrowedRules(base, target.Is6(), cls, sample)
+}
 
+// generateCarpetRules builds the FlowSpec rule set for a carpet-bomb aggregation
+// prefix: the attack vector matched on the WHOLE prefix as destination, so it
+// drops only the vector and spares non-vector traffic to the prefix's hosts. The
+// caller guarantees the prefix contains no whitelisted address (a prefix that
+// does is refused outright). Returns nil for an invalid prefix.
+func generateCarpetRules(prefix netip.Prefix, cls *engine.Classification, sample *engine.AttackSample, action config.FlowSpecAction, rateBytes float64) []FlowSpecRule {
+	if !prefix.IsValid() {
+		return nil
+	}
+	base := FlowSpecRule{Dst: prefix, Action: action, RateBytes: rateBytes}
+	return narrowedRules(base, prefix.Addr().Is6(), cls, sample)
+}
+
+// narrowedRules applies the classification's protocol/port/flag narrowing on top
+// of base (which already carries the anchor prefix and action). is6 selects
+// ICMPv6 vs ICMP for an ICMP flood. With no usable signal it returns a single
+// anchor-only rule (plus dominant sampled reflector ports for the mixed case).
+func narrowedRules(base FlowSpecRule, is6 bool, cls *engine.Classification, sample *engine.AttackSample) []FlowSpecRule {
 	var rules []FlowSpecRule
 	add := func(mut func(*FlowSpecRule)) {
 		if len(rules) >= maxRulesPerAttack {
@@ -158,7 +178,7 @@ func generateRules(target netip.Addr, dir engine.Direction, cls *engine.Classifi
 		add(func(r *FlowSpecRule) { r.Fragment = true })
 	case typ == engine.AttackICMPFlood:
 		proto := uint8(1)
-		if target.Is6() {
+		if is6 {
 			proto = 58 // ICMPv6
 		}
 		add(func(r *FlowSpecRule) { r.Proto = proto })
@@ -167,9 +187,9 @@ func generateRules(target netip.Addr, dir engine.Direction, cls *engine.Classifi
 	case typ == engine.AttackTCPFlood:
 		add(func(r *FlowSpecRule) { r.Proto = 6 })
 	default:
-		// mixed / unknown: a destination-only rule. Add the dominant sampled
-		// source ports as extra UDP rules when a sample is available, so a
-		// multi-vector amplification still gets per-port precision.
+		// mixed / unknown: an anchor-only rule. Add the dominant sampled source
+		// ports as extra UDP rules when a sample is available, so a multi-vector
+		// amplification still gets per-port precision.
 		add(func(r *FlowSpecRule) {})
 		for _, p := range dominantUDPPorts(sample) {
 			add(func(r *FlowSpecRule) { r.Proto = 17; r.SrcPort = p })

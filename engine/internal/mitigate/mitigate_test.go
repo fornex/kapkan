@@ -1557,3 +1557,138 @@ func TestGaugeBucketsBansByOwnDryRun(t *testing.T) {
 		t.Errorf("dry_run announced = %v, want 1 (the post-reload ban)", got)
 	}
 }
+
+// carpetMitigYAML is a live config with carpet detection + the given mitigation
+// method. `extra` injects top-level lines (e.g. a protected_whitelist). The
+// networks are a /24 and a /16 so address-unit accounting has room.
+func carpetMitigYAML(method, extra string) string {
+	return `dry_run: false
+listen: {netflow: ":2055"}
+sampling: {default_rate: 1000}
+networks: ["203.0.113.0/24", "198.51.0.0/16"]
+` + extra + `thresholds: {pps: 80000, mbps: 1000, flows_per_sec: 35000}
+ban: {ttl_seconds: 600, unban_hysteresis_seconds: 120, max_active_bans: 50}
+carpet:
+  aggregation_prefix_v4: 24
+  min_hosts: 5
+  thresholds: {pps: 100000}
+  mitigation: ` + method + `
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"
+  next_hop: "192.0.2.1"
+  community: "65000:666"
+  neighbors: [{address: "10.0.0.254", remote_asn: 65000}]
+api: {listen: "127.0.0.1:8080"}
+`
+}
+
+func carpetEvent(prefix string) engine.Event {
+	p := netip.MustParsePrefix(prefix)
+	return engine.Event{
+		Kind: engine.AttackStarted, Scope: engine.ScopePrefix,
+		Target: p.Addr(), Prefix: prefix, Group: "global", BanEnabled: true,
+		Metric: engine.MetricPPS, Rate: 200000, Threshold: 100000,
+		Classification: &engine.Classification{Type: engine.AttackUDPFlood}, At: time.Now(),
+	}
+}
+
+// TestCarpetFlowSpecBan: a carpet attack with mitigation=flowspec yields a
+// FlowSpec ban anchored on the WHOLE /24 (vector-narrowed), no RTBH route, and
+// ending it withdraws.
+func TestCarpetFlowSpecBan(t *testing.T) {
+	rec := newRecorder()
+	m := newMitigator(t, carpetMitigYAML("flowspec", ""), rec, nil)
+	ban := m.OnAttackStarted(carpetEvent("203.0.113.0/24"))
+	if ban == nil || ban.State != BanActive || ban.Method != config.MitigateFlowSpec {
+		t.Fatalf("ban = %+v, want active flowspec", ban)
+	}
+	if len(ban.FlowSpec) != 1 || ban.FlowSpec[0].Dst != netip.MustParsePrefix("203.0.113.0/24") || ban.FlowSpec[0].Proto != 17 {
+		t.Fatalf("flowspec = %+v, want one dst=203.0.113.0/24 udp rule", ban.FlowSpec)
+	}
+	if rec.announceCount("203.0.113.0/24") != 0 {
+		t.Error("flowspec carpet ban must not announce an RTBH route")
+	}
+	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopePrefix, Prefix: "203.0.113.0/24", At: time.Now()})
+	if len(m.ActiveBans()) != 0 {
+		t.Errorf("active bans = %d, want 0 after carpet attack ended", len(m.ActiveBans()))
+	}
+}
+
+// TestCarpetBlackholeBan: mitigation=blackhole announces an RTBH route for the
+// whole /24.
+func TestCarpetBlackholeBan(t *testing.T) {
+	rec := newRecorder()
+	m := newMitigator(t, carpetMitigYAML("blackhole", ""), rec, nil)
+	ban := m.OnAttackStarted(carpetEvent("203.0.113.0/24"))
+	if ban == nil || ban.State != BanActive || ban.Method != config.MitigateBlackhole {
+		t.Fatalf("ban = %+v, want active blackhole", ban)
+	}
+	if rec.announceCount("203.0.113.0/24") != 1 {
+		t.Errorf("RTBH announce of the /24 = %d, want 1", rec.announceCount("203.0.113.0/24"))
+	}
+}
+
+// TestCarpetWhitelistedMemberRejected: the absolute whitelist guarantee — a
+// prefix containing a whitelisted address is refused outright, announcing
+// nothing, for either method.
+func TestCarpetWhitelistedMemberRejected(t *testing.T) {
+	for _, method := range []string{"blackhole", "flowspec"} {
+		rec := newRecorder()
+		m := newMitigator(t, carpetMitigYAML(method, "protected_whitelist: [\"203.0.113.5\"]\n"), rec, nil)
+		ban := m.OnAttackStarted(carpetEvent("203.0.113.0/24"))
+		if ban == nil || ban.State != BanRejected || !strings.Contains(ban.Reason, "whitelisted member") {
+			t.Fatalf("method %s: ban = %+v, want rejected (whitelisted member in prefix)", method, ban)
+		}
+		if rec.announceCount("203.0.113.0/24") != 0 || len(rec.flowSpecUp()) != 0 {
+			t.Errorf("method %s: a prefix with a whitelisted member must announce nothing", method)
+		}
+	}
+}
+
+// TestCarpetAlertOnlyWhenBanDisabled: an alert-only carpet event (BanEnabled
+// false, as the engine sets when carpet.mitigation is empty) creates no ban.
+func TestCarpetAlertOnlyWhenBanDisabled(t *testing.T) {
+	rec := newRecorder()
+	m := newMitigator(t, carpetMitigYAML("flowspec", ""), rec, nil)
+	ev := carpetEvent("203.0.113.0/24")
+	ev.BanEnabled = false
+	if ban := m.OnAttackStarted(ev); ban != nil {
+		t.Fatalf("alert-only carpet event produced a ban: %+v", ban)
+	}
+	if len(m.ActiveBans()) != 0 {
+		t.Error("alert-only carpet must create no ban")
+	}
+}
+
+// TestCarpetPrefixCapSeparateFromHosts: max_active_prefix_bans caps carpet bans
+// without starving host bans (separate cap).
+func TestCarpetPrefixCapSeparateFromHosts(t *testing.T) {
+	rec := newRecorder()
+	yaml := strings.Replace(carpetMitigYAML("blackhole", ""), "mitigation: blackhole", "mitigation: blackhole\n  max_active_prefix_bans: 1", 1)
+	m := newMitigator(t, yaml, rec, nil)
+	if b := m.OnAttackStarted(carpetEvent("203.0.113.0/24")); b.State != BanActive {
+		t.Fatalf("first carpet ban = %s, want active", b.State)
+	}
+	if b := m.OnAttackStarted(carpetEvent("198.51.100.0/24")); b.State != BanRejected || !strings.Contains(b.Reason, "max_active_prefix_bans") {
+		t.Fatalf("second carpet ban = %+v, want rejected (prefix cap)", b)
+	}
+	if hb := m.OnAttackStarted(startedEvent("198.51.100.7")); hb.State != BanActive {
+		t.Errorf("host ban = %s, want active (prefix cap must not starve host bans)", hb.State)
+	}
+}
+
+// TestCarpetBlastRadiusAddressUnits: a /24 ban is weighed by its 256-address
+// span, not as one unit. v4 protected = /24 + /16 = 65792 addrs; one /24
+// (256/65792=0.0039) fits under 0.005, two (512/65792=0.0078) exceed.
+func TestCarpetBlastRadiusAddressUnits(t *testing.T) {
+	rec := newRecorder()
+	yaml := strings.Replace(carpetMitigYAML("blackhole", ""), "max_active_bans: 50", "max_active_bans: 50, max_banned_fraction: 0.005", 1)
+	m := newMitigator(t, yaml, rec, nil)
+	if b := m.OnAttackStarted(carpetEvent("203.0.113.0/24")); b.State != BanActive {
+		t.Fatalf("first /24 = %s, want active (256/65792 < 0.005)", b.State)
+	}
+	if b := m.OnAttackStarted(carpetEvent("198.51.100.0/24")); b.State != BanRejected || !strings.Contains(b.Reason, "max_banned_fraction") {
+		t.Fatalf("second /24 = %+v, want rejected — proves a /24 counts as 256 addresses", b)
+	}
+}

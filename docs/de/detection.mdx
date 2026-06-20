@@ -163,11 +163,14 @@ Setzen Sie die Aggregat-Schwellenwerte deutlich über die Werte pro Host — sie
 Präfix. Ein Carpet-Angriff trägt `scope: prefix`, das Aggregations-CIDR in `prefix` und sein Fan-out
 in `hosts`, neben dem üblichen Sample und der Klassifizierung.
 
-<Callout type="info" title="Nur Alarm">
-Carpet-Angriffe werden gemeldet, aber in dieser Form **niemals automatisch gebannt**: einen solchen
-zu mitigieren bedeutet, auf ein ganzes Präfix zu reagieren (ein `/24`-RTBH würde jeden Host darin
-blackholen, einschließlich eines etwaigen auf der Whitelist stehenden Mitglieds), was eine separate,
-bewusste Entscheidung ist. Nutzen Sie den Alarm vorerst, um manuell zu handeln.
+<Callout type="info" title="Mitigation ist optional">
+Carpet-Angriffe sind standardmäßig nur Alarm. Setzen Sie `carpet.mitigation`, um das
+Aggregationspräfix automatisch zu mitigieren — `flowspec` verwirft den Angriffsvektor für das gesamte
+Präfix (chirurgisch), oder `blackhole` blackholet es per RTBH. Beide Methoden **verweigern ein
+Präfix, das eine `protected_whitelist`-Adresse enthält** rundheraus: eine Präfix-Mitigation kann kein
+einzelnes Mitglied ausnehmen, und die Whitelist-Garantie ist absolut. Ein Präfix-Bann zählt zudem
+seine gesamte Adressspanne auf `ban.max_banned_fraction` an und hat seine eigene
+`carpet.max_active_prefix_bans`-Obergrenze. Siehe [Mitigation](/docs/mitigation).
 </Callout>
 
 ## Erkennung ausgehender Angriffe

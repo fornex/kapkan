@@ -30,7 +30,7 @@ Binden Sie den Listener entsprechend — siehe [Authentifizierung](/docs/authent
 | `kapkan_engine_tracked_hosts` | — | Gauge der aktuell von der Engine verfolgten Hosts. |
 | `kapkan_mitigate_announced_routes` | `mode` | Gauge der aktuell angekündigten Blackhole-Routen, aufgeteilt nach den Modi `real` / `dry_run`. |
 | `kapkan_mitigate_flowspec_rules` | `mode` | Gauge der aktuell angekündigten [FlowSpec](/docs/flowspec)-Regeln, aufgeteilt nach den Modi `real` / `dry_run`. Behalten Sie diesen Wert im Verhältnis zum FlowSpec-Routenlimit Ihrer Router im Auge. |
-| `kapkan_mitigate_bans_rejected_total` | `reason` | Sperren, die durch eine Sicherheitsregel abgelehnt wurden, nach `reason`: `max_active_bans`, `blast_radius_fraction` oder `blast_radius_rate`. |
+| `kapkan_mitigate_bans_rejected_total` | `reason` | Sperren, die durch eine Sicherheitsregel abgelehnt wurden, nach `reason`: `max_active_bans`, `blast_radius_fraction`, `blast_radius_rate` oder `max_active_prefix_bans` (carpet). |
 | `kapkan_mitigate_fallback_total` | `from`, `to` | Mitigation-Ankündigungen, die auf eine fallback-Methode heruntergestuft wurden, weil der Peer die primäre Methode abgelehnt hat, nach `from`/`to`. Eine Reihe mit `from="flowspec"` und einem Wert ungleich null kennzeichnet Upstreams, die FlowSpec nicht berücksichtigen. |
 | `kapkan_notify_notifications_total` | `channel`, `result` | Versuchte Benachrichtigungen, nach Kanal (telegram, slack, email, webhook, exec) und `result`. |
 | `kapkan_storage_rows_total` | `table`, `result` | Zeilen, die an die optionale [ClickHouse-Speicherung](/docs/storage) übergeben wurden, nach Tabelle und `written` / `dropped` / `error`. |

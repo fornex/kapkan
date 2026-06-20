@@ -156,10 +156,13 @@ Set the aggregate thresholds well above the per-host ones — they sum the whole
 carries `scope: prefix`, the aggregation CIDR in `prefix`, and its fan-out in `hosts`, alongside the
 usual sample and classification.
 
-<Callout type="info" title="Alert-only">
-Carpet attacks are reported but **never auto-banned** in this form: mitigating one means acting on a
-whole prefix (a `/24` RTBH would blackhole every host in it, including any whitelisted member), which
-is a separate, deliberate choice. Use the alert to act manually for now.
+<Callout type="info" title="Mitigation is opt-in">
+Carpet attacks are alert-only by default. Set `carpet.mitigation` to auto-mitigate the aggregation
+prefix — `flowspec` drops the attack vector to the whole prefix (surgical), or `blackhole` RTBHs it.
+Either method **refuses a prefix that contains a `protected_whitelist` address** outright: a prefix
+mitigation cannot exempt one member and the whitelist guarantee is absolute. A prefix ban also counts
+its full address span toward `ban.max_banned_fraction` and has its own `carpet.max_active_prefix_bans`
+cap. See [Mitigation](/docs/mitigation).
 </Callout>
 
 ## Outgoing detection

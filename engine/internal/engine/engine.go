@@ -838,7 +838,7 @@ func (e *Engine) evalCarpets(cfg *config.Config, agg map[netip.Prefix]*carpetAcc
 					Hosts:          acc.hosts,
 					Direction:      DirIncoming,
 					Group:          cfg.GroupFor(prefix.Addr()).Name,
-					BanEnabled:     false, // carpet attacks are alert-only
+					BanEnabled:     cfg.Carpet.Mitigation != "", // alert-only unless a carpet method is set
 					Metric:         metric,
 					Rate:           rate,
 					Threshold:      threshold,
