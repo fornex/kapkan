@@ -77,7 +77,8 @@ var numericBounds = map[string]map[string]float64{
 	"bgp.local_asn":            {"minimum": 1},
 	"bgp.neighbors.remote_asn": {"minimum": 1},
 
-	"flowspec.rate_mbps": {"minimum": 0},
+	"flowspec.rate_mbps":                {"minimum": 0},
+	"flowspec.min_source_concentration": {"minimum": 0, "maximum": 1},
 }
 
 // stringPatterns maps a yaml path to a regex the value must match. Beyond these

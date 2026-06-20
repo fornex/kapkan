@@ -364,6 +364,21 @@ func TestFlowSpecAnnounceWithdraw(t *testing.T) {
 		t.Fatalf("source-anchored rule never round-tripped: %v", paths)
 	}
 
+	// Composite victim+attacker rule: dst = victim, src = a dominant attacker.
+	// Proves both the type-1 destination and type-2 source prefix encode in ONE
+	// rule — the #5 source-anchored surgical-mitigation path.
+	comp := FlowSpecRule{Dst: netip.MustParsePrefix("203.0.113.70/32"), Src: netip.MustParsePrefix("198.51.100.10/32"), Action: "discard"}
+	if err := m.speaker.AnnounceFlowSpec(ctx, comp); err != nil {
+		t.Fatalf("AnnounceFlowSpec composite: %v", err)
+	}
+	paths = waitFlowSpec(t, recv, familyV4FS, func(p map[string]string) bool {
+		_, _, ok := hasRule(p, "203.0.113.70/32", "source: 198.51.100.10/32")
+		return ok
+	})
+	if _, _, ok := hasRule(paths, "203.0.113.70/32", "source: 198.51.100.10/32"); !ok {
+		t.Fatalf("composite victim+attacker rule never round-tripped: %v", paths)
+	}
+
 	// Withdraw both the v4 and v6 rules and confirm each leaves the RIB.
 	if err := m.speaker.WithdrawFlowSpec(ctx, v4); err != nil {
 		t.Fatalf("WithdrawFlowSpec v4: %v", err)

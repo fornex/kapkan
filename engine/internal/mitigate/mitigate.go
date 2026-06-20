@@ -410,7 +410,8 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 		b.divAttrs = groupDivertAttrs(group, target)
 	}
 	if ladderUsesFlowSpec(group.Escalation) {
-		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample, group.FlowSpecAction, group.FlowSpecRateBps)
+		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample,
+			group.FlowSpecAction, group.FlowSpecRateBps, group.FlowSpecSourceAnchored, group.FlowSpecMinConcentration)
 	}
 
 	// Apply the first rung. On announce failure (after any fallback) the ban is

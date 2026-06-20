@@ -228,9 +228,17 @@
           ],
           "type": "string"
         },
+        "min_source_concentration": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
         "rate_mbps": {
           "minimum": 0,
           "type": "number"
+        },
+        "source_anchored": {
+          "type": "boolean"
         }
       },
       "type": "object",
@@ -368,9 +376,17 @@
                 ],
                 "type": "string"
               },
+              "min_source_concentration": {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "number"
+              },
               "rate_mbps": {
                 "minimum": 0,
                 "type": "number"
+              },
+              "source_anchored": {
+                "type": "boolean"
               }
             },
             "type": "object",

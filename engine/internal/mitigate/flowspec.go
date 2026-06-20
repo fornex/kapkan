@@ -31,15 +31,6 @@ type FlowSpecRule struct {
 	RateBytes float64               `json:"rate_bytes,omitempty"` // rate_limit ceiling, bytes/s
 }
 
-// anchor returns the victim prefix (Dst or Src, whichever is set) for the
-// rule's String form.
-func (r FlowSpecRule) anchor() (label string, p netip.Prefix) {
-	if r.Src.IsValid() {
-		return "src", r.Src
-	}
-	return "dst", r.Dst
-}
-
 // protoName renders an IP protocol number for the rule's String form.
 func fsProtoName(p uint8) string {
 	switch p {
@@ -59,8 +50,18 @@ func fsProtoName(p uint8) string {
 // String renders the rule for logs, the API and the dashboard.
 func (r FlowSpecRule) String() string {
 	var b strings.Builder
-	label, p := r.anchor()
-	fmt.Fprintf(&b, "%s %s", label, p)
+	// Render whichever prefixes anchor the rule: dst (victim, incoming), src
+	// (victim-as-source for outgoing, or attacker for a source-anchored rule),
+	// or both (composite victim+attacker).
+	if r.Dst.IsValid() {
+		fmt.Fprintf(&b, "dst %s", r.Dst)
+	}
+	if r.Src.IsValid() {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "src %s", r.Src)
+	}
 	if r.Proto != 0 {
 		fmt.Fprintf(&b, " %s", fsProtoName(r.Proto))
 	}
@@ -107,9 +108,18 @@ var reflectedPorts = map[engine.AttackType]uint16{
 // protocol/port/flags so legitimate traffic is spared. With no usable signal
 // it falls back to an anchor-only rule (equivalent to a blackhole, but
 // expressed as FlowSpec).
-func generateRules(target netip.Addr, dir engine.Direction, cls *engine.Classification, sample *engine.AttackSample, action config.FlowSpecAction, rateBytes float64) []FlowSpecRule {
+func generateRules(target netip.Addr, dir engine.Direction, cls *engine.Classification, sample *engine.AttackSample, action config.FlowSpecAction, rateBytes float64, sourceAnchored bool, minConc float64) []FlowSpecRule {
 	if !target.IsValid() {
 		return nil
+	}
+	// Source anchoring (incoming attacks only): when the sample shows a
+	// concentrated set of attacker sources, emit composite victim+attacker rules
+	// that drop ONLY those sources to the victim, sparing its legitimate
+	// clients. Falls through to victim-anchored narrowing when too diffuse.
+	if sourceAnchored && dir != engine.DirOutgoing {
+		if rs := sourceAnchoredRules(target, sample, action, rateBytes, minConc); rs != nil {
+			return rs
+		}
 	}
 	base := FlowSpecRule{Dst: hostPrefix(target), Action: action, RateBytes: rateBytes}
 	if dir == engine.DirOutgoing {
@@ -171,6 +181,40 @@ func generateRules(target netip.Addr, dir engine.Direction, cls *engine.Classifi
 func isAmplification(t engine.AttackType) bool {
 	_, ok := reflectedPorts[t]
 	return ok
+}
+
+// sourceAnchoredRules builds composite {victim-dst, attacker-src} rules from the
+// attack sample's dominant sources, but only when those sources (within the rule
+// budget) cover at least minConc of the sampled attack packets — otherwise it
+// returns nil and the caller falls back to a victim-anchored rule. Each selected
+// top source becomes a host prefix (/32 or /128) match: there is NO widening into
+// larger prefixes, so a rule can never spill onto an innocent neighbor of an
+// attacker. A diffuse attack (reflection/spoofing across many sources) never
+// reaches the gate and stays victim-anchored.
+func sourceAnchoredRules(target netip.Addr, sample *engine.AttackSample, action config.FlowSpecAction, rateBytes float64, minConc float64) []FlowSpecRule {
+	if sample == nil || sample.TotalPackets == 0 || len(sample.TopSources) == 0 {
+		return nil
+	}
+	dst := hostPrefix(target)
+	var rules []FlowSpecRule
+	var covered uint64
+	for _, c := range sample.TopSources {
+		if len(rules) >= maxRulesPerAttack {
+			break
+		}
+		src, err := netip.ParseAddr(c.Key)
+		if err != nil || !src.IsValid() || src.Is4() != target.Is4() {
+			continue // unparseable, or a different family than the victim
+		}
+		rules = append(rules, FlowSpecRule{
+			Dst: dst, Src: hostPrefix(src), Action: action, RateBytes: rateBytes,
+		})
+		covered += c.Packets
+		if float64(covered)/float64(sample.TotalPackets) >= minConc {
+			return rules // concentration gate reached within the rule budget
+		}
+	}
+	return nil // too diffuse (or no usable sources): caller falls back
 }
 
 // dominantUDPPorts returns well-known reflector source ports present in the
