@@ -83,6 +83,7 @@ summary points to the dedicated page.
 | `tenant` | Optional tenant label for the implicit global/fallback group. See [Multi-tenancy](/docs/multi-tenancy). |
 | `samples.enabled` / `buffer_flows` / `flows_per_attack` | Continuous traffic buffer for attack samples (defaults: `true` / `65536` / `20`). Sizing changes require a restart. |
 | `baseline` | Optional continuous EWMA learned per-host thresholds, per-hostgroup overridable. See [Baselines](/docs/baselines). |
+| `carpet` | Optional carpet-bombing (subnet-spread) detection: raises an alert-only prefix-scoped attack when traffic aggregated over a `/24` (`aggregation_prefix_v4`/`v6`) crosses `carpet.thresholds` across at least `min_hosts` distinct hosts — catching floods that stay under every per-host threshold. |
 | `ban.ttl_seconds` | Every announcement auto-withdraws after this many seconds. No permanent bans. |
 | `ban.unban_hysteresis_seconds` | Traffic must stay below threshold this long before a ban is withdrawn, preventing flapping. |
 | `ban.max_active_bans` | Hard cap on simultaneous bans. New bans past the cap are refused. |

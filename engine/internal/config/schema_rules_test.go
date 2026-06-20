@@ -113,6 +113,11 @@ api: {listen: "127.0.0.1:8080"}
 			wantErr: "ban_window_seconds must be > 0",
 		},
 		{
+			name:    "carpet block without any aggregate threshold",
+			yaml:    validBase + "\ncarpet:\n  min_hosts: 5\n",
+			wantErr: "carpet.thresholds",
+		},
+		{
 			name:    "unknown key is rejected (closed schema)",
 			yaml:    validBase + "\nbogus_key: 1\n",
 			wantErr: "not found",

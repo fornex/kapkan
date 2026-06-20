@@ -85,6 +85,7 @@ plus volumineux, un résumé d'une ligne renvoie vers la page dédiée.
 | `tenant` | Étiquette de tenant optionnelle pour le groupe global/de repli implicite. Voir [Multi-tenant](/docs/multi-tenancy). |
 | `samples.enabled` / `buffer_flows` / `flows_per_attack` | Tampon de trafic continu pour les échantillons d'attaque (valeurs par défaut : `true` / `65536` / `20`). Les changements de dimensionnement nécessitent un redémarrage. |
 | `baseline` | Seuils par hôte appris en continu par EWMA, optionnels et surchargeables par hostgroup. Voir [Baselines](/docs/baselines). |
+| `carpet` | Détection optionnelle du carpet-bombing (réparti sur un sous-réseau) : déclenche une attaque au niveau du préfixe (alerte seule) lorsque le trafic agrégé sur un `/24` (`aggregation_prefix_v4`/`v6`) dépasse `carpet.thresholds` sur au moins `min_hosts` hôtes distincts — détecte les floods qui restent sous chaque seuil par hôte. |
 | `ban.ttl_seconds` | Chaque annonce se retire automatiquement après ce nombre de secondes. Aucun bannissement permanent. |
 | `ban.unban_hysteresis_seconds` | Le trafic doit rester sous le seuil pendant cette durée avant qu'un bannissement ne soit retiré, ce qui évite le flapping. |
 | `ban.max_active_bans` | Plafond strict du nombre de bannissements simultanés. Les nouveaux bannissements au-delà du plafond sont refusés. |

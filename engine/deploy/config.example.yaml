@@ -67,6 +67,21 @@ thresholds: # per destination host, after sampling correction
 #     mbps: 50
 #     flows_per_sec: 2000
 
+# Carpet-bombing (subnet-spread) detection: catches an attack that spreads its
+# volume across many hosts in a prefix, staying under every per-host threshold
+# so per-host detection never fires. Folds each host's incoming rates into its
+# aggregation prefix; raises a prefix-scoped (alert-only) attack when the
+# aggregate crosses `thresholds` AND the traffic is spread across >= min_hosts
+# distinct hosts. Set the aggregate thresholds well above the per-host ones.
+#
+# carpet:
+#   aggregation_prefix_v4: 24  # aggregate per /24 (default)
+#   aggregation_prefix_v6: 48  # and per /48 for IPv6 (default)
+#   min_hosts: 10              # fan-out gate (minimum 2)
+#   thresholds:                # AGGREGATE volume over the prefix
+#     pps: 2000000
+#     mbps: 20000
+
 # Attack samples: recent flows are buffered continuously so detections carry
 # their dominant sources/ports/protocols instantly. ~120 bytes per buffered
 # flow; sizing changes require a restart.
