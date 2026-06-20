@@ -137,6 +137,39 @@ Dies ist eine der durchgesetzten Sicherheitsregeln: ein Ziel außerhalb von `net
 vollständig außerhalb des Geltungsbereichs der Mitigation. Geschützte Präfixe dürfen sich nicht
 überlappen. Siehe das [Sicherheitsmodell](/docs/safety) für die vollständige Liste der Garantien.
 
+## Carpet-bombing-Erkennung
+
+Die Erkennung pro Host ist blind gegenüber einem **Carpet-Bomb** (Angriff mit Verteilung über ein
+Subnetz): Volumen, das dünn über jede Adresse eines Präfixes verteilt wird, sodass kein einzelner
+Host seinen Schwellenwert überschreitet, obwohl das Aggregat gewaltig ist. Der optionale
+`carpet`-Block fängt dies ab. Die eingehenden Raten jedes überwachten Hosts werden in dessen
+**Aggregationspräfix** zusammengefasst (standardmäßig ein `/24` für IPv4, ein `/48` für IPv6), und
+ein präfixbezogener Angriff wird ausgelöst, wenn das Aggregat `carpet.thresholds` überschreitet
+**und** der Datenverkehr über mindestens `min_hosts` eindeutige Hosts verteilt ist — das Fan-out-Gate,
+das einen echten subnetzverteilten Flood von einem einzelnen schweren Host (der bereits pro Host
+erfasst wird) unterscheidet.
+
+```yaml
+carpet:
+  aggregation_prefix_v4: 24  # fold per /24 (default)
+  aggregation_prefix_v6: 48  # and per /48 (default)
+  min_hosts: 10              # fan-out gate (minimum 2)
+  thresholds:                # AGGREGATE volume over the prefix
+    pps: 2000000
+    mbps: 20000
+```
+
+Setzen Sie die Aggregat-Schwellenwerte deutlich über die Werte pro Host — sie summieren das gesamte
+Präfix. Ein Carpet-Angriff trägt `scope: prefix`, das Aggregations-CIDR in `prefix` und sein Fan-out
+in `hosts`, neben dem üblichen Sample und der Klassifizierung.
+
+<Callout type="info" title="Nur Alarm">
+Carpet-Angriffe werden gemeldet, aber in dieser Form **niemals automatisch gebannt**: einen solchen
+zu mitigieren bedeutet, auf ein ganzes Präfix zu reagieren (ein `/24`-RTBH würde jeden Host darin
+blackholen, einschließlich eines etwaigen auf der Whitelist stehenden Mitglieds), was eine separate,
+bewusste Entscheidung ist. Nutzen Sie den Alarm vorerst, um manuell zu handeln.
+</Callout>
+
 ## Erkennung ausgehender Angriffe
 
 Standardmäßig überwacht Kapkan den Datenverkehr, der **bei** Ihren geschützten Hosts **ankommt**

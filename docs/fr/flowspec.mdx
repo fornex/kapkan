@@ -62,6 +62,19 @@ règle fait correspondre l'hôte comme **source** (le préfixe source de la RFC 
 qu'elle supprime réellement le flood sortant. Cela diffère d'un blackhole RTBH basé sur la
 destination, qui ne supprime que le trafic *vers* l'hôte.
 
+## Ancrage par la source
+
+Par défaut, chaque règle générée fait correspondre la victime comme **destination**, supprimant le vecteur d'attaque depuis *toutes* les sources — y compris les clients légitimes qui envoient le même protocole. Avec `flowspec.source_anchored: true`, lorsque l'échantillon d'attaque révèle un ensemble **concentré** de sources attaquantes, Kapkan émet à la place des règles composites qui épinglent **à la fois** la victime (destination) **et** chaque attaquant dominant (source), de sorte que seuls les attaquants sont supprimés et que le trafic légitime de la victime est épargné.
+
+```yaml
+flowspec:
+  action: discard
+  source_anchored: true          # drop the attackers, not the protocol from everyone
+  min_source_concentration: 0.8  # ...only when the top sources cover >= this share (default 0.8)
+```
+
+Cela ne s'active que lorsque les sources dominantes couvrent au moins `min_source_concentration` de l'attaque échantillonnée dans le budget de 8 règles. Une attaque **diffuse** — réflexion ou usurpation répartie sur de nombreuses sources — n'atteint jamais ce seuil et revient à la règle ancrée sur la victime. Les sources sélectionnées sont mises en correspondance uniquement comme préfixes d'hôte (`/32`, `/128`) : il n'y a aucun élargissement vers des préfixes plus larges, de sorte qu'une règle ne peut jamais déborder sur un voisin innocent d'un attaquant.
+
 ## Mises en garde
 
 - La correspondance `tcp-flags` pour les SYN floods est un masque de bits qui correspond aussi à

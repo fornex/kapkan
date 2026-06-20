@@ -30,7 +30,8 @@ Bind the listener accordingly — see [Authentication](/docs/authentication).
 | `kapkan_engine_tracked_hosts` | — | Gauge of hosts currently tracked by the engine. |
 | `kapkan_mitigate_announced_routes` | `mode` | Gauge of blackhole routes currently announced, split by `real` / `dry_run` mode. |
 | `kapkan_mitigate_flowspec_rules` | `mode` | Gauge of [FlowSpec](/docs/flowspec) rules currently announced, split by `real` / `dry_run` mode. Watch this against your routers' FlowSpec route limit. |
-| `kapkan_mitigate_bans_rejected_total` | — | Bans refused by a safety rule (whitelist, scope, or the `max_active_bans` cap). |
+| `kapkan_mitigate_bans_rejected_total` | `reason` | Bans refused by a safety guard, by `reason`: `max_active_bans`, `blast_radius_fraction`, or `blast_radius_rate`. |
+| `kapkan_mitigate_fallback_total` | `from`, `to` | Mitigation announces that degraded to a fallback method because the peer rejected the primary, by `from`/`to`. A non-zero `from="flowspec"` series flags upstreams that do not honor FlowSpec. |
 | `kapkan_notify_notifications_total` | `channel`, `result` | Notifications attempted, by channel (telegram, slack, email, webhook, exec) and `result`. |
 | `kapkan_storage_rows_total` | `table`, `result` | Rows handed to the optional [ClickHouse storage](/docs/storage), by table and `written` / `dropped` / `error`. |
 

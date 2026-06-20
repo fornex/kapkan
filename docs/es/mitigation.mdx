@@ -146,6 +146,25 @@ Un baneo también se retira anticipadamente si una recarga de configuración eli
 las `networks` protegidas — Kapkan no mantendrá una ruta activa para un espacio de direcciones que
 ya no protege.
 
+## Reserva cuando se rechaza un método
+
+Los upstreams varían en lo que aceptan — un par puede rechazar de plano un anuncio FlowSpec o de
+divert. De forma predeterminada Kapkan no deja a la víctima indefensa en ese caso: `ban.fallback` es
+`blackhole`, de modo que un anuncio `flowspec`/`divert` rechazado **degrada a una ruta RTBH** en lugar
+de hacer fallar el baneo. Establece `ban.fallback: none` para desactivarlo y rechazar el baneo en su
+lugar.
+
+```yaml
+ban:
+  fallback: blackhole   # degrade a rejected flowspec/divert announce to RTBH (default); none disables
+```
+
+Cuando ocurre una reserva, el baneo registra `fell_back_from` (el método que el par rechazó) y la
+[métrica](/docs/metrics) `kapkan_mitigate_fallback_total` se incrementa — una serie `from="flowspec"`
+distinta de cero señala los upstreams que no aceptan FlowSpec. Una caída total de BGP hace fallar
+ambos métodos, por lo que el baneo se rechaza igual que antes; la reserva solo cambia el caso en que
+específicamente el método quirúrgico no está soportado.
+
 ## Dry-run
 
 En modo dry-run (`dry_run: true`, el valor predeterminado) Kapkan hace todo *excepto* enviar la

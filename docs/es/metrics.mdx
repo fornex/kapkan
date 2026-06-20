@@ -31,7 +31,8 @@ Vincula (bind) el listener en consecuencia — consulta [Autenticación](/docs/a
 | `kapkan_engine_tracked_hosts` | — | Gauge de hosts actualmente rastreados por el motor. |
 | `kapkan_mitigate_announced_routes` | `mode` | Gauge de rutas de blackhole anunciadas actualmente, separadas por el modo `real` / `dry_run`. |
 | `kapkan_mitigate_flowspec_rules` | `mode` | Gauge de reglas de [FlowSpec](/docs/flowspec) anunciadas actualmente, separadas por el modo `real` / `dry_run`. Vigílalo frente al límite de rutas FlowSpec de tus routers. |
-| `kapkan_mitigate_bans_rejected_total` | — | Bloqueos (bans) rechazados por una regla de seguridad (whitelist, alcance o el límite `max_active_bans`). |
+| `kapkan_mitigate_bans_rejected_total` | `reason` | Bloqueos (bans) rechazados por una regla de seguridad, por `reason`: `max_active_bans`, `blast_radius_fraction`, o `blast_radius_rate`. |
+| `kapkan_mitigate_fallback_total` | `from`, `to` | Anuncios de mitigación que degradaron a un método de fallback porque el peer rechazó el primario, por `from`/`to`. Una serie con `from="flowspec"` distinta de cero señala upstreams que no respetan FlowSpec. |
 | `kapkan_notify_notifications_total` | `channel`, `result` | Notificaciones intentadas, por canal (telegram, slack, email, webhook, exec) y `result`. |
 | `kapkan_storage_rows_total` | `table`, `result` | Filas entregadas al [almacenamiento opcional en ClickHouse](/docs/storage), por tabla y `written` / `dropped` / `error`. |
 
