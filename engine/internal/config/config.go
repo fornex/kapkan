@@ -52,6 +52,9 @@ type Config struct {
 	// Baseline enables continuous per-host learned thresholds; static
 	// thresholds remain as floor/ceiling guards.
 	Baseline *Baseline `yaml:"baseline"`
+	// Carpet enables carpet-bombing (subnet-spread) detection; absent disables
+	// it. See the Carpet type.
+	Carpet *Carpet `yaml:"carpet"`
 	// Mitigation selects the default mitigation method (blackhole|flowspec);
 	// hostgroups may override it.
 	Mitigation string `yaml:"mitigation"`
@@ -350,6 +353,31 @@ type FlowSpec struct {
 	// 0.8 when source_anchored is on; a diffuse attack (e.g. reflection from
 	// thousands of sources) stays below it and falls back to victim-anchored.
 	MinSourceConcentration float64 `yaml:"min_source_concentration"`
+}
+
+// Carpet configures carpet-bombing (subnet-spread) detection: an attack that
+// distributes its volume across many hosts in a prefix, staying under each
+// host's threshold so per-host detection never fires. When set, the engine
+// folds every monitored per-host destination's incoming rates into its
+// aggregation prefix and raises a prefix-scoped attack when the aggregate
+// crosses Thresholds AND the traffic is spread across at least MinHosts
+// distinct hosts. Absent (nil) disables it. Carpet attacks are alert-only:
+// the prefix is reported (and mitigable in principle) but never auto-banned.
+type Carpet struct {
+	// AggregationPrefixV4/V6 are the supernet lengths per-host rates fold into
+	// (defaults /24 and /48). A /24 with attack traffic spread across MinHosts
+	// of its /32s raises one carpet attack on the /24.
+	AggregationPrefixV4 int `yaml:"aggregation_prefix_v4"`
+	AggregationPrefixV6 int `yaml:"aggregation_prefix_v6"`
+	// MinHosts is the fan-out gate: at least this many distinct destination
+	// hosts in the prefix must carry traffic this window before a carpet attack
+	// fires, so a single heavy host (already caught per-host) is not reported as
+	// a carpet bomb (default 10, minimum 2).
+	MinHosts int `yaml:"min_hosts"`
+	// Thresholds are the AGGREGATE volume thresholds for the whole prefix
+	// (sampling-corrected, summed over its hosts). A zero metric is disabled; at
+	// least one must be set. They should be well above the per-host thresholds.
+	Thresholds Thresholds `yaml:"thresholds"`
 }
 
 // CalcMethod selects how a hostgroup's thresholds are applied.
@@ -850,6 +878,9 @@ func (c *Config) validate() error {
 	if err := c.validateGeoIP(); err != nil {
 		return err
 	}
+	if err := c.validateCarpet(); err != nil {
+		return err
+	}
 
 	if c.Ban.TTLSeconds <= 0 {
 		return fmt.Errorf("ban.ttl_seconds must be > 0, got %d", c.Ban.TTLSeconds)
@@ -1170,6 +1201,37 @@ func (c *Config) validateHostgroups() error {
 	sort.SliceStable(c.groupRoutes, func(i, j int) bool {
 		return c.groupRoutes[i].prefix.Bits() > c.groupRoutes[j].prefix.Bits()
 	})
+	return nil
+}
+
+// validateCarpet validates and applies defaults to the carpet-bombing
+// detection block in place. A nil block leaves the feature disabled.
+func (c *Config) validateCarpet() error {
+	cp := c.Carpet
+	if cp == nil {
+		return nil
+	}
+	if cp.AggregationPrefixV4 == 0 {
+		cp.AggregationPrefixV4 = 24
+	}
+	if cp.AggregationPrefixV6 == 0 {
+		cp.AggregationPrefixV6 = 48
+	}
+	if cp.AggregationPrefixV4 < 8 || cp.AggregationPrefixV4 > 32 {
+		return fmt.Errorf("carpet.aggregation_prefix_v4 must be in 8..32, got %d", cp.AggregationPrefixV4)
+	}
+	if cp.AggregationPrefixV6 < 16 || cp.AggregationPrefixV6 > 128 {
+		return fmt.Errorf("carpet.aggregation_prefix_v6 must be in 16..128, got %d", cp.AggregationPrefixV6)
+	}
+	if cp.MinHosts == 0 {
+		cp.MinHosts = 10
+	}
+	if cp.MinHosts < 2 {
+		return fmt.Errorf("carpet.min_hosts must be >= 2, got %d", cp.MinHosts)
+	}
+	if cp.Thresholds.Zero() {
+		return fmt.Errorf("carpet.thresholds: set at least one aggregate threshold")
+	}
 	return nil
 }
 

@@ -184,6 +184,72 @@
       },
       "type": "object"
     },
+    "carpet": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregation_prefix_v4": {
+          "maximum": 32,
+          "minimum": 8,
+          "type": "integer"
+        },
+        "aggregation_prefix_v6": {
+          "maximum": 128,
+          "minimum": 16,
+          "type": "integer"
+        },
+        "min_hosts": {
+          "minimum": 2,
+          "type": "integer"
+        },
+        "thresholds": {
+          "additionalProperties": false,
+          "properties": {
+            "flows_per_sec": {
+              "type": "integer"
+            },
+            "frag_mbps": {
+              "type": "integer"
+            },
+            "frag_pps": {
+              "type": "integer"
+            },
+            "icmp_mbps": {
+              "type": "integer"
+            },
+            "icmp_pps": {
+              "type": "integer"
+            },
+            "mbps": {
+              "type": "integer"
+            },
+            "pps": {
+              "type": "integer"
+            },
+            "tcp_mbps": {
+              "type": "integer"
+            },
+            "tcp_pps": {
+              "type": "integer"
+            },
+            "tcp_syn_mbps": {
+              "type": "integer"
+            },
+            "tcp_syn_pps": {
+              "type": "integer"
+            },
+            "udp_mbps": {
+              "type": "integer"
+            },
+            "udp_pps": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "x-optional": true
+    },
     "dry_run": {
       "type": "boolean"
     },
