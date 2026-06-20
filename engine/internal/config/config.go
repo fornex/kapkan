@@ -80,6 +80,11 @@ type Config struct {
 	// Parsed forms, populated by validate().
 	NetworkPrefixes []netip.Prefix `yaml:"-"`
 	WhitelistAddrs  []netip.Addr   `yaml:"-"`
+	// protectedAddrs4/6 are the total address counts of the protected networks
+	// per family (float64 because an IPv6 range exceeds uint64), populated in
+	// validate() and read by the mitigator's blast-radius fraction guard.
+	protectedAddrs4 float64
+	protectedAddrs6 float64
 	// FlowSourceSet is the parsed FlowSources allowlist. Empty/nil means no
 	// allowlist is configured (the exporter-label cardinality cap applies).
 	FlowSourceSet map[netip.Addr]struct{} `yaml:"-"`
@@ -454,6 +459,28 @@ type Ban struct {
 	TTLSeconds             int `yaml:"ttl_seconds"`
 	UnbanHysteresisSeconds int `yaml:"unban_hysteresis_seconds"`
 	MaxActiveBans          int `yaml:"max_active_bans"`
+	// Fallback selects the mitigation method applied when a stage's primary
+	// announce is rejected by the BGP peer. "blackhole" (the default) degrades a
+	// failed flowspec/divert announce to an RTBH route so the victim is still
+	// mitigated when an upstream does not honor the surgical method — leaving a
+	// victim wholly undefended is the worse failure. "none" disables fallback (a
+	// failed announce rejects the ban). Blackhole is terminal and has no fallback.
+	Fallback string `yaml:"fallback"`
+	// MaxBannedFraction caps the share of the protected address space (per
+	// address family) that may be simultaneously blackholed, refusing new bans
+	// once exceeded. A poisoned baseline or spoofed-source storm can drive many
+	// distinct host bans — each under max_active_bans — that together null-route
+	// a large fraction of your OWN network; this bounds that blast radius. The
+	// range is (0,1]; 0 (the default) disables the guard.
+	MaxBannedFraction float64 `yaml:"max_banned_fraction"`
+	// MaxBansPerWindow caps how many NEW bans may be created within
+	// ban_window_seconds, catching a runaway ban storm that the static
+	// max_active_bans cap (a level, not a rate) cannot. 0 (the default) disables
+	// the guard.
+	MaxBansPerWindow int `yaml:"max_bans_per_window"`
+	// BanWindowSeconds is the window for max_bans_per_window; required (> 0)
+	// when that rate is set and ignored otherwise.
+	BanWindowSeconds int `yaml:"ban_window_seconds"`
 }
 
 // TTL returns the ban TTL as a duration.
@@ -462,6 +489,22 @@ func (b Ban) TTL() time.Duration { return time.Duration(b.TTLSeconds) * time.Sec
 // UnbanHysteresis returns the hysteresis as a duration.
 func (b Ban) UnbanHysteresis() time.Duration {
 	return time.Duration(b.UnbanHysteresisSeconds) * time.Second
+}
+
+// BanWindow returns the blast-radius rate window as a duration.
+func (b Ban) BanWindow() time.Duration {
+	return time.Duration(b.BanWindowSeconds) * time.Second
+}
+
+// FallbackMethod resolves ban.fallback to the method applied when a primary
+// announce fails: "" (default) and "blackhole" both yield blackhole; "none"
+// (returning the empty method) disables fallback. validate() guarantees the
+// stored value is one of these.
+func (b Ban) FallbackMethod() MitigationMethod {
+	if b.Fallback == "none" {
+		return ""
+	}
+	return MitigateBlackhole
 }
 
 // BGP configures the embedded BGP speaker.
@@ -716,6 +759,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("networks: at least one protected prefix is required")
 	}
 	c.NetworkPrefixes = make([]netip.Prefix, 0, len(c.Networks))
+	c.protectedAddrs4, c.protectedAddrs6 = 0, 0
 	for _, s := range c.Networks {
 		p, err := netip.ParsePrefix(s)
 		if err != nil {
@@ -731,6 +775,13 @@ func (c *Config) validate() error {
 			}
 		}
 		c.NetworkPrefixes = append(c.NetworkPrefixes, p)
+		// Tally the protected address space per family for the blast-radius
+		// fraction guard. Overlap is already rejected above, so summing is exact.
+		if p.Addr().Is4() {
+			c.protectedAddrs4 += math.Ldexp(1, 32-p.Bits())
+		} else {
+			c.protectedAddrs6 += math.Ldexp(1, 128-p.Bits())
+		}
 	}
 
 	c.WhitelistAddrs = make([]netip.Addr, 0, len(c.ProtectedWhitelist))
@@ -791,6 +842,23 @@ func (c *Config) validate() error {
 	}
 	if c.Ban.MaxActiveBans <= 0 {
 		return fmt.Errorf("ban.max_active_bans must be > 0, got %d", c.Ban.MaxActiveBans)
+	}
+	switch c.Ban.Fallback {
+	case "", "none", string(MitigateBlackhole):
+	default:
+		return fmt.Errorf("ban.fallback must be %q or %q, got %q", "none", MitigateBlackhole, c.Ban.Fallback)
+	}
+	if c.Ban.MaxBannedFraction < 0 || c.Ban.MaxBannedFraction > 1 {
+		return fmt.Errorf("ban.max_banned_fraction must be between 0 and 1, got %v", c.Ban.MaxBannedFraction)
+	}
+	if c.Ban.MaxBansPerWindow < 0 {
+		return fmt.Errorf("ban.max_bans_per_window must be >= 0, got %d", c.Ban.MaxBansPerWindow)
+	}
+	if c.Ban.BanWindowSeconds < 0 {
+		return fmt.Errorf("ban.ban_window_seconds must be >= 0, got %d", c.Ban.BanWindowSeconds)
+	}
+	if c.Ban.MaxBansPerWindow > 0 && c.Ban.BanWindowSeconds <= 0 {
+		return fmt.Errorf("ban.ban_window_seconds must be > 0 when ban.max_bans_per_window is set")
 	}
 
 	if err := c.validateNotify(); err != nil {
@@ -1764,6 +1832,16 @@ func (c *Config) InNetworks(addr netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// ProtectedAddrs returns the total number of addresses in the protected
+// networks of addr's family, as a float64 (an IPv6 range exceeds uint64). The
+// mitigator's blast-radius fraction guard divides active bans by this.
+func (c *Config) ProtectedAddrs(is6 bool) float64 {
+	if is6 {
+		return c.protectedAddrs6
+	}
+	return c.protectedAddrs4
 }
 
 // IsWhitelisted reports whether addr must never be banned.

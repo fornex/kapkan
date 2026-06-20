@@ -57,6 +57,7 @@ func TestSchemaEnumsPresent(t *testing.T) {
 	doc := parseSchema(t)
 	for _, segs := range [][]string{
 		{"mitigation"},
+		{"ban", "fallback"},
 		{"flowspec", "action"},
 		{"escalation", "action"},
 		{"hostgroups", "calculation"},

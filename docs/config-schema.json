@@ -50,8 +50,28 @@
     "ban": {
       "additionalProperties": false,
       "properties": {
+        "ban_window_seconds": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fallback": {
+          "enum": [
+            "none",
+            "blackhole"
+          ],
+          "type": "string"
+        },
         "max_active_bans": {
           "minimum": 1,
+          "type": "integer"
+        },
+        "max_banned_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "max_bans_per_window": {
+          "minimum": 0,
           "type": "integer"
         },
         "ttl_seconds": {

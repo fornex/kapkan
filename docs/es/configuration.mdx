@@ -90,6 +90,9 @@ grandes, un resumen de una línea remite a la página dedicada.
 | `ban.ttl_seconds` | Cada anuncio se retira automáticamente tras este número de segundos. No hay bloqueos permanentes. |
 | `ban.unban_hysteresis_seconds` | El tráfico debe permanecer por debajo del umbral durante este tiempo antes de retirar un bloqueo, lo que evita el aleteo (flapping). |
 | `ban.max_active_bans` | Límite máximo de bloqueos simultáneos. Los nuevos bloqueos que superen el límite se rechazan. |
+| `ban.fallback` | Qué hacer cuando el par **rechaza** un anuncio `flowspec`/`divert`: `blackhole` (por defecto) degrada a una ruta RTBH para que la víctima siga mitigada; `none` rechaza el bloqueo. `blackhole` es terminal. |
+| `ban.max_banned_fraction` | Rechazar nuevos bloqueos cuando se haya puesto en blackhole más de esta fracción (`0`–`1`, por familia de direcciones) del espacio protegido — acota el radio de impacto de una baseline envenenada o una tormenta con orígenes falsificados. `0` (por defecto) lo desactiva. |
+| `ban.max_bans_per_window` / `ban_window_seconds` | Protección contra tormentas: como máximo esta cantidad de **nuevos** bloqueos por ventana (segundos). `max_bans_per_window: 0` (por defecto) lo desactiva; la ventana es obligatoria cuando se define la tasa. |
 | `mitigation` | Método de mitigación: `blackhole` (predeterminado), `flowspec` o `divert`. Anulable por hostgroup. Consulta [FlowSpec](/docs/flowspec) y [Desvío de tráfico](/docs/scrubbing). |
 | `flowspec.action` / `rate_mbps` | Acción de la regla FlowSpec: `discard` o `rate_limit` (con `rate_mbps`). Consulta [FlowSpec](/docs/flowspec). |
 | `escalation[]` | Escala opcional de peldaños `{ after_seconds, action }` (`none` / `flowspec` / `divert` / `blackhole`) que prevalece sobre `mitigation`. Consulta [Escalado progresivo](/docs/escalation). |
@@ -150,6 +153,10 @@ ban:
   ttl_seconds: 600                  # every ban auto-withdraws after this
   unban_hysteresis_seconds: 120     # stay below threshold this long before unban
   max_active_bans: 50               # refuse new bans past this cap
+  # fallback: blackhole             # degrade a rejected flowspec/divert announce to RTBH (default)
+  # max_banned_fraction: 0.05       # never blackhole more than 5% of protected space (per family)
+  # max_bans_per_window: 100        # storm guard: at most 100 new bans per window
+  # ban_window_seconds: 60          # the window for max_bans_per_window
 
 bgp:
   local_asn: 65001

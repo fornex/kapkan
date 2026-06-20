@@ -420,6 +420,115 @@ func TestBGPAnnounceFailureRejectsBan(t *testing.T) {
 	}
 }
 
+// fsFailAnnouncer rejects every FlowSpec announce but accepts unicast
+// (blackhole/divert) — the "upstream does not honor FlowSpec" case the ban
+// fallback targets. It embeds *recorder so a test can inspect the resulting
+// blackhole route.
+type fsFailAnnouncer struct{ *recorder }
+
+func (fsFailAnnouncer) AnnounceFlowSpec(context.Context, FlowSpecRule) error {
+	return fmt.Errorf("peer rejected flowspec")
+}
+
+// TestFlowSpecAnnounceFallsBackToBlackhole: when the peer rejects a flowspec
+// announce and fallback is enabled (the default), the ban degrades to a
+// blackhole route rather than leaving the victim undefended.
+func TestFlowSpecAnnounceFallsBackToBlackhole(t *testing.T) {
+	rec := newRecorder()
+	m := newMitigator(t, flowSpecYAML(), fsFailAnnouncer{rec}, nil)
+
+	ban := m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	if ban == nil || ban.State != BanActive {
+		t.Fatalf("ban = %+v, want active (fell back to blackhole)", ban)
+	}
+	if ban.Method != config.MitigateBlackhole {
+		t.Errorf("method = %q, want blackhole after fallback", ban.Method)
+	}
+	if ban.FellBackFrom != config.MitigateFlowSpec {
+		t.Errorf("fell_back_from = %q, want flowspec", ban.FellBackFrom)
+	}
+	if rec.announceCount("203.0.113.66/32") != 1 {
+		t.Errorf("blackhole announce count = %d, want 1 (the fallback route)", rec.announceCount("203.0.113.66/32"))
+	}
+	if len(m.ActiveBans()) != 1 {
+		t.Errorf("active bans = %d, want 1", len(m.ActiveBans()))
+	}
+}
+
+// TestFlowSpecAnnounceFallbackDisabledRejects: with ban.fallback=none a rejected
+// flowspec announce rejects the ban and announces no blackhole route.
+func TestFlowSpecAnnounceFallbackDisabledRejects(t *testing.T) {
+	rec := newRecorder()
+	m := newMitigator(t, flowSpecYAMLNoFallback(), fsFailAnnouncer{rec}, nil)
+
+	ban := m.OnAttackStarted(fsEvent("203.0.113.66", engine.AttackNTPAmplification))
+	if ban == nil || ban.State != BanRejected {
+		t.Fatalf("ban = %+v, want rejected (fallback disabled)", ban)
+	}
+	if rec.announceCount("203.0.113.66/32") != 0 {
+		t.Error("fallback disabled: no blackhole route should be announced")
+	}
+	if len(m.ActiveBans()) != 0 {
+		t.Errorf("active bans = %d, want 0", len(m.ActiveBans()))
+	}
+}
+
+// TestBlastRadiusFractionCap: max_banned_fraction refuses new bans once the
+// banned share of the protected (per-family) space is exceeded, even when each
+// ban is under max_active_bans.
+func TestBlastRadiusFractionCap(t *testing.T) {
+	// /24 = 256 addresses; 0.01 allows (banned+1)/256 <= 0.01 → at most 2 bans,
+	// so the 3rd distinct ban is refused though max_active_bans is 50.
+	yaml := strings.Replace(liveYAML(), "max_active_bans: 3",
+		"max_active_bans: 50\n  max_banned_fraction: 0.01", 1)
+	rec := newRecorder()
+	m := newMitigator(t, yaml, rec, nil)
+
+	for i := 0; i < 2; i++ {
+		addr := netip.AddrFrom4([4]byte{203, 0, 113, byte(10 + i)})
+		ban := m.OnAttackStarted(engine.Event{Kind: engine.AttackStarted, Scope: engine.ScopeHost, Target: addr, BanEnabled: true, At: time.Now()})
+		if ban.State != BanActive {
+			t.Fatalf("ban %d = %s, want active", i, ban.State)
+		}
+	}
+	ban := m.OnAttackStarted(engine.Event{Kind: engine.AttackStarted, Scope: engine.ScopeHost, Target: netip.MustParseAddr("203.0.113.20"), BanEnabled: true, At: time.Now()})
+	if ban.State != BanRejected {
+		t.Fatalf("3rd ban = %s, want rejected (blast-radius fraction)", ban.State)
+	}
+	if ban.Reason != "max_banned_fraction reached" {
+		t.Errorf("reason = %q, want max_banned_fraction reached", ban.Reason)
+	}
+	if len(m.ActiveBans()) != 2 {
+		t.Errorf("active bans = %d, want 2", len(m.ActiveBans()))
+	}
+}
+
+// TestBlastRadiusRateCap: max_bans_per_window bounds how fast new bans accrue;
+// after the window elapses the counter resets and bans are allowed again.
+func TestBlastRadiusRateCap(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	yaml := strings.Replace(liveYAML(), "max_active_bans: 3",
+		"max_active_bans: 50\n  max_bans_per_window: 2\n  ban_window_seconds: 60", 1)
+	rec := newRecorder()
+	m := newMitigator(t, yaml, rec, clk)
+
+	banAt := func(last byte) *Ban {
+		return m.OnAttackStarted(engine.Event{Kind: engine.AttackStarted, Scope: engine.ScopeHost,
+			Target: netip.AddrFrom4([4]byte{203, 0, 113, last}), BanEnabled: true, At: clk.Now()})
+	}
+	if banAt(10).State != BanActive || banAt(11).State != BanActive {
+		t.Fatal("first two bans should be active within the window")
+	}
+	if b := banAt(12); b.State != BanRejected || b.Reason != "max_bans_per_window reached" {
+		t.Fatalf("3rd ban = %+v, want rejected (rate)", b)
+	}
+	// Advance past the window: the counter resets and a new ban is allowed.
+	clk.Advance(61 * time.Second)
+	if b := banAt(13); b.State != BanActive {
+		t.Fatalf("ban after window reset = %s, want active", b.State)
+	}
+}
+
 func TestBanOutsideNetworksRejected(t *testing.T) {
 	rec := newRecorder()
 	m := newMitigator(t, liveYAML(), rec, nil)
@@ -612,6 +721,14 @@ func flowSpecYAML() string {
 		"mitigation: flowspec\nflowspec:\n  action: discard\nthresholds:", 1)
 }
 
+// flowSpecYAMLNoFallback is flowSpecYAML with the blackhole fallback disabled,
+// so a failed flowspec announce rejects the ban — exercising the pure
+// rollback/reject path rather than degrading to blackhole.
+func flowSpecYAMLNoFallback() string {
+	return strings.Replace(flowSpecYAML(), "max_active_bans: 3",
+		"max_active_bans: 3\n  fallback: none", 1)
+}
+
 func TestFlowSpecMitigationLifecycle(t *testing.T) {
 	rec := newRecorder()
 	m := newMitigator(t, flowSpecYAML(), rec, nil)
@@ -695,10 +812,10 @@ func (f *flakyFS) WithdrawFlowSpec(_ context.Context, r FlowSpecRule) error {
 
 // TestFlowSpecPartialAnnounceRollback: when a later rule in the set fails to
 // announce, the rules already installed are withdrawn (no half-mitigated
-// RIB) and the ban is rejected.
+// RIB) and — with fallback disabled — the ban is rejected.
 func TestFlowSpecPartialAnnounceRollback(t *testing.T) {
 	rec := &flakyFS{}
-	m := newMitigator(t, flowSpecYAML(), rec, nil)
+	m := newMitigator(t, flowSpecYAMLNoFallback(), rec, nil)
 
 	// A mixed-vector attack with two known reflector ports → 3 rules
 	// (dst-only + udp/123 + udp/53), so the 2nd announce fails.
@@ -1216,7 +1333,7 @@ func (f *flakyRollback) WithdrawFlowSpec(_ context.Context, _ FlowSpecRule) erro
 // does not stop the rollback — every already-installed rule is still attempted.
 func TestFlowSpecRollbackWithdrawFailureBestEffort(t *testing.T) {
 	rec := &flakyRollback{}
-	m := newMitigator(t, flowSpecYAML(), rec, nil)
+	m := newMitigator(t, flowSpecYAMLNoFallback(), rec, nil)
 
 	// Mixed-vector attack with two reflector ports → 3 rules (dst-only +
 	// udp/123 + udp/53); the 3rd announce fails after the first two install.

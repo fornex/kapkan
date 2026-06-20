@@ -23,6 +23,10 @@
     "ban.ttl_seconds": { "tier": "basic", "description": "Every announcement auto-withdraws after this many seconds. There are no permanent bans." },
     "ban.unban_hysteresis_seconds": { "tier": "basic", "description": "Traffic must stay below threshold this long before a ban is withdrawn (anti-flap)." },
     "ban.max_active_bans": { "tier": "basic", "description": "Hard cap on simultaneous bans; new bans past the cap are refused." },
+    "ban.fallback": { "tier": "advanced", "defaultWhenAbsent": "blackhole", "description": "What to do when a flowspec/divert announce is REJECTED by the peer: 'blackhole' (the default) degrades to an RTBH route so the victim is still mitigated; 'none' rejects the ban, leaving the victim undefended." },
+    "ban.max_banned_fraction": { "tier": "advanced", "defaultWhenAbsent": 0, "description": "Refuse new bans once more than this share (0–1, per address family) of the protected space is blackholed — bounds the blast radius of a poisoned baseline or spoofed-source storm. 0 (default) disables the guard." },
+    "ban.max_bans_per_window": { "tier": "advanced", "defaultWhenAbsent": 0, "crossField": "Requires ban_window_seconds > 0 when set.", "description": "Storm guard: at most this many NEW bans may be created per ban_window_seconds. 0 (default) disables it." },
+    "ban.ban_window_seconds": { "tier": "advanced", "crossField": "Required (> 0) when max_bans_per_window is set; ignored otherwise.", "description": "The sliding window for max_bans_per_window, in seconds." },
 
     "mitigation": { "tier": "advanced", "description": "Default mitigation method. blackhole drops all victim traffic; flowspec is surgical; divert sends traffic to a scrubbing center." },
     "flowspec.action": { "tier": "advanced", "description": "FlowSpec rule action. rate_limit requires flowspec.rate_mbps > 0." },

@@ -91,6 +91,9 @@ Subsysteme verweist eine einzeilige Zusammenfassung auf die dedizierte Seite.
 | `ban.ttl_seconds` | Jede Ankündigung wird nach dieser Anzahl von Sekunden automatisch zurückgezogen. Keine dauerhaften Sperren. |
 | `ban.unban_hysteresis_seconds` | Der Datenverkehr muss so lange unter dem Schwellenwert bleiben, bevor eine Sperre zurückgezogen wird; dies verhindert Flapping. |
 | `ban.max_active_bans` | Harte Obergrenze für gleichzeitige Sperren. Neue Sperren über der Obergrenze werden abgelehnt. |
+| `ban.fallback` | Was zu tun ist, wenn der Peer eine `flowspec`/`divert`-Ankündigung **ablehnt**: `blackhole` (Standard) stuft auf eine RTBH-Route herab, damit das Opfer weiterhin geschützt ist; `none` lehnt die Sperre ab. `blackhole` ist endgültig. |
+| `ban.max_banned_fraction` | Neue Sperren ablehnen, sobald mehr als dieser Anteil (`0`–`1`, pro Adressfamilie) des geschützten Raums per Blackhole verworfen wird — begrenzt den Schadensradius einer vergifteten Baseline oder eines Sturms mit gefälschten Quellen. `0` (Standard) deaktiviert dies. |
+| `ban.max_bans_per_window` / `ban_window_seconds` | Sturmschutz: höchstens so viele **neue** Sperren pro Fenster (Sekunden). `max_bans_per_window: 0` (Standard) deaktiviert dies; das Fenster ist erforderlich, wenn die Rate gesetzt ist. |
 | `mitigation` | Mitigation-Methode: `blackhole` (Standard), `flowspec` oder `divert`. Pro Hostgroup überschreibbar. Siehe [FlowSpec](/docs/flowspec) und [Traffic-Umleitung](/docs/scrubbing). |
 | `flowspec.action` / `rate_mbps` | FlowSpec-Regelaktion: `discard` oder `rate_limit` (mit `rate_mbps`). Siehe [FlowSpec](/docs/flowspec). |
 | `escalation[]` | Optionale Leiter aus `{ after_seconds, action }`-Stufen (`none` / `flowspec` / `divert` / `blackhole`), die `mitigation` außer Kraft setzt. Siehe [Eskalationsstufen](/docs/escalation). |
@@ -151,6 +154,10 @@ ban:
   ttl_seconds: 600                  # every ban auto-withdraws after this
   unban_hysteresis_seconds: 120     # stay below threshold this long before unban
   max_active_bans: 50               # refuse new bans past this cap
+  # fallback: blackhole             # degrade a rejected flowspec/divert announce to RTBH (default)
+  # max_banned_fraction: 0.05       # never blackhole more than 5% of protected space (per family)
+  # max_bans_per_window: 100        # storm guard: at most 100 new bans per window
+  # ban_window_seconds: 60          # the window for max_bans_per_window
 
 bgp:
   local_asn: 65001
