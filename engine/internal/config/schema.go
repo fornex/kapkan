@@ -31,6 +31,7 @@ import (
 // a constant's string value cannot drift away from the schema unnoticed.
 var enumValues = map[string][]string{
 	"mitigation":             {string(MitigateBlackhole), string(MitigateFlowSpec), string(MitigateDivert)},
+	"ban.fallback":           {"none", string(MitigateBlackhole)},
 	"flowspec.action":        {string(FlowSpecDiscard), string(FlowSpecRateLimit)},
 	"escalation.action":      {string(EscalateNone), string(EscalateFlowSpec), string(EscalateDivert), string(EscalateBlackhole)},
 	"hostgroups.calculation": {string(CalcPerHost), string(CalcTotal)},
@@ -51,6 +52,9 @@ var numericBounds = map[string]map[string]float64{
 	"ban.ttl_seconds":              {"minimum": 1},
 	"ban.unban_hysteresis_seconds": {"minimum": 0},
 	"ban.max_active_bans":          {"minimum": 1},
+	"ban.max_banned_fraction":      {"minimum": 0, "maximum": 1},
+	"ban.max_bans_per_window":      {"minimum": 0},
+	"ban.ban_window_seconds":       {"minimum": 0},
 
 	"baseline.factor":              {"minimum": 1.5, "maximum": 100},
 	"baseline.half_life_seconds":   {"minimum": 10, "maximum": 604800},
