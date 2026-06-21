@@ -6,6 +6,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -208,6 +209,11 @@ func attackRow(ev engine.Event, ban *mitigate.Ban) storage.AttackRow {
 		r.BanState = string(ban.State)
 		if ban.DryRun {
 			r.DryRun = 1
+		}
+	}
+	if ev.Reason != nil {
+		if b, err := json.Marshal(ev.Reason); err == nil {
+			r.Reason = string(b)
 		}
 	}
 	return r

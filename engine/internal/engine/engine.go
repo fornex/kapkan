@@ -581,6 +581,7 @@ func (e *Engine) evalTick(now time.Time) {
 							At:             now,
 							Sample:         sample,
 							Classification: cls,
+							Reason:         buildReason(metric, rates[d], *th, &hs.baselines[d], g.Baseline, nowSec),
 						})
 					}
 					st.belowSince = time.Time{}
@@ -691,6 +692,7 @@ func (e *Engine) evalGroups(cfg *config.Config, totals [][2]Rates, hysteresis ti
 						At:             now,
 						Sample:         sample,
 						Classification: cls,
+						Reason:         buildReason(metric, totals[gi][d], *th, &gs.baselines[d], g.Baseline, now.Unix()),
 					})
 				}
 				st.belowSince = time.Time{}
@@ -846,6 +848,7 @@ func (e *Engine) evalCarpets(cfg *config.Config, agg map[netip.Prefix]*carpetAcc
 					At:             now,
 					Sample:         sample,
 					Classification: cls,
+					Reason:         buildReason(metric, acc.rates, th, nil, nil, now.Unix()),
 				})
 			}
 			st.belowSince = time.Time{}
@@ -920,6 +923,67 @@ func (e *Engine) closeAllCarpets(now time.Time) {
 			delete(e.carpets, prefix)
 		}
 	}
+}
+
+// buildReason captures why a detection fired, for the AttackStarted event. m is
+// the winning metric; r the full windowed rates; staticTh the group's static
+// thresholds (the baseline ceiling); b/bc the baseline state and settings (bc
+// nil = no baseline configured). It runs once per attack start, off the hot
+// path, from inputs already in hand.
+func buildReason(m Metric, r Rates, staticTh config.Thresholds, b *baselineState, bc *config.BaselineSettings, nowSec int64) *Reason {
+	reason := &Reason{
+		ThresholdSource:   "static",
+		Shares:            sharesOf(r),
+		DominantShareGate: dominantShare,
+	}
+	if bc == nil || b == nil {
+		return reason
+	}
+	reason.BaselineConfigured = true
+	if !b.warmedUp(bc, nowSec) {
+		reason.WarmingUp = true
+		if rem := int64(bc.WarmupSeconds) - (nowSec - b.firstSeen); rem > 0 {
+			reason.WarmupRemainingSeconds = int(rem)
+		}
+		return reason // the static threshold applied while the baseline warms up
+	}
+	// Warmed up: the base trio (pps/mbps/flows_per_sec) is baseline-derived,
+	// capped by the static ceiling; per-protocol metrics stay static.
+	if normal, floor, ceiling, ok := baselineParamsFor(m, b, bc, staticTh); ok {
+		reason.ThresholdSource = "baseline"
+		reason.Baseline = &ReasonBaseline{Normal: normal, Factor: bc.Factor, Floor: floor, Ceiling: ceiling}
+	}
+	return reason
+}
+
+// sharesOf returns the per-protocol fraction of total PPS (the same ratios the
+// classifier uses). Zero when there is no traffic.
+func sharesOf(r Rates) ProtocolShares {
+	if r.PPS <= 0 {
+		return ProtocolShares{}
+	}
+	return ProtocolShares{
+		UDP:  r.UDPPPS / r.PPS,
+		SYN:  r.TCPSYNPPS / r.PPS,
+		TCP:  r.TCPPPS / r.PPS,
+		ICMP: r.ICMPPPS / r.PPS,
+		Frag: r.FragPPS / r.PPS,
+	}
+}
+
+// baselineParamsFor returns the learned normal, floor and static ceiling for a
+// base-trio metric; ok is false for per-protocol metrics, which have no
+// baseline (their threshold is always static).
+func baselineParamsFor(m Metric, b *baselineState, bc *config.BaselineSettings, staticTh config.Thresholds) (normal, floor, ceiling float64, ok bool) {
+	switch m {
+	case MetricPPS:
+		return b.pps, float64(bc.Floor.PPS), float64(staticTh.PPS), true
+	case MetricMbps:
+		return b.mbps, float64(bc.Floor.Mbps), float64(staticTh.Mbps), true
+	case MetricFPS:
+		return b.fps, float64(bc.Floor.FlowsPerSec), float64(staticTh.FlowsPerSec), true
+	}
+	return 0, 0, 0, false
 }
 
 // metricTable defines the evaluation order: total metrics first (matching

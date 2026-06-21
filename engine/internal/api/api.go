@@ -56,6 +56,9 @@ type Attack struct {
 	Sample *engine.AttackSample `json:"sample,omitempty"`
 	// Classification is the attack vector inferred at detection time.
 	Classification *engine.Classification `json:"classification,omitempty"`
+	// Reason explains why the detection fired (threshold provenance, warm-up,
+	// protocol shares) — attached at AttackStarted.
+	Reason *engine.Reason `json:"reason,omitempty"`
 }
 
 // attackKey identifies an attack in the active table: host attacks by
@@ -117,6 +120,7 @@ func (s *Server) RecordAttackStarted(ev engine.Event, ban *mitigate.Ban) {
 		StartedAt:      ev.At,
 		Sample:         ev.Sample,
 		Classification: ev.Classification,
+		Reason:         ev.Reason,
 	}
 	if ban != nil {
 		a.BanState = ban.State
