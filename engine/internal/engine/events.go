@@ -157,4 +157,50 @@ type Event struct {
 	// Classification is the attack vector inferred at detection time
 	// (AttackStarted only).
 	Classification *Classification `json:"classification,omitempty"`
+	// Reason explains why the detection fired — threshold provenance (static vs
+	// learned baseline), warm-up state, and the protocol-share breakdown that
+	// drove classification (AttackStarted only).
+	Reason *Reason `json:"reason,omitempty"`
+}
+
+// Reason explains why a detection fired, captured at the moment the threshold
+// crossed from inputs the engine already has (no hot-path cost — built once per
+// attack start). It lets an operator judge a detection — a real attack vs a
+// sampling or threshold artifact — without re-deriving the math.
+type Reason struct {
+	// ThresholdSource is "static" or "baseline": whether the crossed threshold
+	// came from the static config or a warmed-up learned baseline. Per-protocol
+	// metrics are always static.
+	ThresholdSource string `json:"threshold_source"`
+	// Baseline is the reasoning behind a baseline-sourced threshold (nil for
+	// static): the effective threshold = min(ceiling, max(floor, normal*factor)).
+	Baseline *ReasonBaseline `json:"baseline,omitempty"`
+	// BaselineConfigured reports the group has a baseline (even when static won).
+	// WarmingUp / WarmupRemainingSeconds explain a static threshold that applied
+	// only because the baseline had not warmed up yet.
+	BaselineConfigured     bool `json:"baseline_configured,omitempty"`
+	WarmingUp              bool `json:"warming_up,omitempty"`
+	WarmupRemainingSeconds int  `json:"warmup_remaining_seconds,omitempty"`
+	// Shares is the protocol-share breakdown (of total PPS) of the windowed
+	// rates that drove classification; DominantShareGate is the share one
+	// protocol needs to win a vector (otherwise the attack is "mixed").
+	Shares            ProtocolShares `json:"shares"`
+	DominantShareGate float64        `json:"dominant_share_gate"`
+}
+
+// ReasonBaseline is the learned-baseline reasoning behind a threshold.
+type ReasonBaseline struct {
+	Normal  float64 `json:"normal"` // learned EWMA level for the winning metric
+	Factor  float64 `json:"factor"`
+	Floor   float64 `json:"floor"`
+	Ceiling float64 `json:"ceiling"` // the static threshold caps the baseline
+}
+
+// ProtocolShares is the per-protocol fraction of total packets/sec.
+type ProtocolShares struct {
+	UDP  float64 `json:"udp"`
+	SYN  float64 `json:"syn"`
+	TCP  float64 `json:"tcp"`
+	ICMP float64 `json:"icmp"`
+	Frag float64 `json:"frag"`
 }
