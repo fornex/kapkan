@@ -98,14 +98,22 @@ func do(t *testing.T, h http.Handler, method, path, body string) *httptest.Respo
 }
 
 type fakeQuerier struct {
-	pts    []storage.TrafficPoint
-	err    error
-	gotKey string
+	pts       []storage.TrafficPoint
+	err       error
+	gotKey    string
+	auditRows []storage.AuditRow
+	auditErr  error
+	gotAudit  storage.AuditFilter
 }
 
 func (f *fakeQuerier) QueryTraffic(_ context.Context, key string, _, _ time.Time, _ int) ([]storage.TrafficPoint, error) {
 	f.gotKey = key
 	return f.pts, f.err
+}
+
+func (f *fakeQuerier) QueryAudit(_ context.Context, filter storage.AuditFilter) ([]storage.AuditRow, error) {
+	f.gotAudit = filter
+	return f.auditRows, f.auditErr
 }
 
 func TestTrafficEndpoint(t *testing.T) {
@@ -853,5 +861,108 @@ func TestGlobalGroupNotLeakedToScopedToken(t *testing.T) {
 	}
 	if g, _ := groups[0].(map[string]any); g["name"] == config.GlobalGroup {
 		t.Errorf("scoped token received the global group: %v", g)
+	}
+}
+
+// fakeAuditWriter captures audit rows (the other Writer methods are no-ops).
+// Handlers run synchronously inside ServeHTTP, so no locking is needed.
+type fakeAuditWriter struct{ rows []storage.AuditRow }
+
+func (f *fakeAuditWriter) WriteAttack(storage.AttackRow)     {}
+func (f *fakeAuditWriter) WriteTraffic([]storage.TrafficRow) {}
+func (f *fakeAuditWriter) WriteAudit(r storage.AuditRow)     { f.rows = append(f.rows, r) }
+func (f *fakeAuditWriter) Start(context.Context)             {}
+func (f *fakeAuditWriter) Stop()                             {}
+
+// TestAuditEmittedOnMutations: ban/unban/reload each emit one audit record
+// stamped with the operator's token name and tenant.
+func TestAuditEmittedOnMutations(t *testing.T) {
+	t.Setenv("K_ADMIN", "admin-secret")
+	t.Setenv("K_A", "a-secret")
+	t.Setenv("K_B", "b-secret")
+	s := testServer(t, storeFromYAML(t, tenantAPIYAML()))
+	aw := &fakeAuditWriter{}
+	s.SetAuditWriter(aw)
+	h := s.Handler()
+
+	const bIP = "203.0.113.70" // custB
+	if rec := reqWith(h, http.MethodPost, "/api/v1/ban", `{"ip":"`+bIP+`"}`, "b-secret", "application/json"); rec.Code != http.StatusOK {
+		t.Fatalf("ban = %d, want 200; body=%s", rec.Code, rec.Body)
+	}
+	reqWith(h, http.MethodPost, "/api/v1/unban", `{"ip":"`+bIP+`"}`, "b-secret", "application/json")
+	reqWith(h, http.MethodPost, "/api/v1/config/reload", `{}`, "admin-secret", "application/json")
+
+	if len(aw.rows) != 3 {
+		t.Fatalf("audit rows = %d, want 3 (ban, unban, reload): %+v", len(aw.rows), aw.rows)
+	}
+	if b := aw.rows[0]; b.Action != "ban" || b.Operator != "b-op" || b.Tenant != "custB" || b.Target != bIP || b.Source != "api" || b.Result != "active" {
+		t.Errorf("ban audit = %+v, want action=ban operator=b-op tenant=custB target=%s result=active", b, bIP)
+	}
+	if u := aw.rows[1]; u.Action != "unban" || u.Operator != "b-op" || u.Result != "withdrawn" {
+		t.Errorf("unban audit = %+v, want action=unban operator=b-op result=withdrawn", u)
+	}
+	// Reload result depends on the store's path (empty in tests), so assert
+	// identity/action/target only, not ok-vs-error.
+	if r := aw.rows[2]; r.Action != "config_reload" || r.Operator != "admin" || r.TargetType != "global" {
+		t.Errorf("reload audit = %+v, want action=config_reload operator=admin target_type=global", r)
+	}
+}
+
+// TestAuditEndpointTenantScoping: the tenant filter is bound server-side from
+// the caller; a scoped caller cannot widen it with a client param.
+func TestAuditEndpointTenantScoping(t *testing.T) {
+	t.Setenv("K_ADMIN", "admin-secret")
+	t.Setenv("K_A", "a-secret")
+	t.Setenv("K_B", "b-secret")
+	s := testServer(t, storeFromYAML(t, tenantAPIYAML()))
+	fq := &fakeQuerier{auditRows: []storage.AuditRow{{Action: "ban", Operator: "b-op", Tenant: "custB"}}}
+	s.SetQuerier(fq)
+	h := s.Handler()
+
+	// Scoped viewer (custA) passing tenant=custB is ignored: server binds custA.
+	if rec := reqWith(h, http.MethodGet, "/api/v1/audit?tenant=custB", "", "a-secret", ""); rec.Code != http.StatusOK {
+		t.Fatalf("audit = %d, want 200", rec.Code)
+	}
+	if fq.gotAudit.Tenant != "custA" {
+		t.Errorf("bound tenant = %q, want custA (client cannot widen scope)", fq.gotAudit.Tenant)
+	}
+	// Unscoped admin → no tenant filter (sees all).
+	reqWith(h, http.MethodGet, "/api/v1/audit", "", "admin-secret", "")
+	if fq.gotAudit.Tenant != "" {
+		t.Errorf("admin bound tenant = %q, want empty (all tenants)", fq.gotAudit.Tenant)
+	}
+}
+
+// TestAuditEndpointStorageDisabled: nil querier → available:false, not an error.
+func TestAuditEndpointStorageDisabled(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+	rec := do(t, s.Handler(), http.MethodGet, "/api/v1/audit", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("audit = %d, want 200", rec.Code)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["available"] != false {
+		t.Errorf("available = %v, want false", resp["available"])
+	}
+}
+
+// TestAuditEndpointParamValidation: bad params 400; a valid action 200.
+func TestAuditEndpointParamValidation(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+	s.SetQuerier(&fakeQuerier{})
+	h := s.Handler()
+	for _, tc := range []struct {
+		q    string
+		want int
+	}{
+		{"action=bogus", http.StatusBadRequest},
+		{"from=notatime", http.StatusBadRequest},
+		{"target=notanip", http.StatusBadRequest},
+		{"action=ban", http.StatusOK},
+	} {
+		if rec := do(t, h, http.MethodGet, "/api/v1/audit?"+tc.q, ""); rec.Code != tc.want {
+			t.Errorf("audit?%s = %d, want %d", tc.q, rec.Code, tc.want)
+		}
 	}
 }
