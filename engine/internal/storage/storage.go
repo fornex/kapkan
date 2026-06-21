@@ -30,15 +30,28 @@ import (
 type Writer interface {
 	WriteAttack(AttackRow)
 	WriteTraffic([]TrafficRow)
+	WriteAudit(AuditRow)
 	Start(ctx context.Context)
 	Stop()
 }
 
-// Querier reads persisted history for the dashboard's Traffic/Reports view.
-// It is nil when storage is disabled (the API then reports history as
-// unavailable rather than failing).
+// Querier reads persisted history for the dashboard's Traffic/Reports view and
+// the audit trail. It is nil when storage is disabled (the API then reports
+// history as unavailable rather than failing).
 type Querier interface {
 	QueryTraffic(ctx context.Context, key string, from, to time.Time, stepSec int) ([]TrafficPoint, error)
+	QueryAudit(ctx context.Context, f AuditFilter) ([]AuditRow, error)
+}
+
+// AuditFilter scopes an audit query. Tenant is bound server-side from the
+// caller's scope ("" = unscoped admin, no tenant filter); Action/Target are
+// optional. From/To bound the time window.
+type AuditFilter struct {
+	Tenant string
+	Action string
+	Target string
+	From   time.Time
+	To     time.Time
 }
 
 // TrafficPoint is one time-bucket of a host's persisted rates. JSON field
@@ -75,6 +88,24 @@ type AttackRow struct {
 	Reason     string  `json:"reason"`      // compact JSON of the detection Reason (why it fired); empty on attack_ended
 }
 
+// AuditRow is one operator-attributed mutation persisted to the audit_events
+// table — the answer to "who banned 10.0.5.7 at 03:14 and who reloaded config".
+// JSON field names are the ClickHouse column names (JSONEachRow / SELECT alias).
+type AuditRow struct {
+	EventTime  string `json:"event_time"`  // "2006-01-02 15:04:05" UTC
+	Action     string `json:"action"`      // ban | unban | config_reload
+	Result     string `json:"result"`      // active | rejected | withdrawn | ok | error
+	Operator   string `json:"operator"`    // matched API token name ("" in open/token-less mode)
+	Role       string `json:"role"`        // caller role
+	Tenant     string `json:"tenant"`      // caller's scope ("" = unscoped admin); scopes reads
+	Target     string `json:"target"`      // IP for ban/unban; empty for config_reload
+	TargetType string `json:"target_type"` // host | global
+	Reason     string `json:"reason"`      // rejection/error detail; empty on success
+	Source     string `json:"source"`      // api (auto/reload reserved for engine-internal)
+	BanState   string `json:"ban_state"`   // final ban state for ban/unban; empty for reload
+	DryRun     uint8  `json:"dry_run"`     // 1 when the deployment is in dry-run
+}
+
 // TrafficRow is one per-host or per-group rate snapshot persisted to the
 // traffic table.
 type TrafficRow struct {
@@ -93,11 +124,14 @@ type TrafficRow struct {
 const (
 	tableAttacks = "attack_events"
 	tableTraffic = "traffic"
+	tableAudit   = "audit_events"
 	// chDateTime is ClickHouse's DateTime literal layout (UTC).
 	chDateTime = "2006-01-02 15:04:05"
 	// maxTrafficRows caps the read endpoint's result (SQL LIMIT + server-side
 	// max_result_rows) so a wide range / tiny step can't return a huge payload.
 	maxTrafficRows = 5001
+	// maxAuditRows caps the audit read endpoint's result the same way.
+	maxAuditRows = 1001
 )
 
 // pending is a marshaled row tagged with its destination table.
@@ -181,6 +215,11 @@ func (c *ClickHouse) Stop() { c.wg.Wait() }
 // the row and increments a metric rather than stalling the caller.
 func (c *ClickHouse) WriteAttack(r AttackRow) {
 	c.enqueue(tableAttacks, r)
+}
+
+// WriteAudit enqueues one audit event. Non-blocking, like WriteAttack.
+func (c *ClickHouse) WriteAudit(r AuditRow) {
+	c.enqueue(tableAudit, r)
 }
 
 // WriteTraffic enqueues a batch of traffic rows.
@@ -304,6 +343,13 @@ func (c *ClickHouse) ensureSchema(ctx context.Context) error {
 			"pps Float64, mbps Float64, flows_per_sec Float64, in_attack UInt8, baseline_pps Float64"+
 			") ENGINE = MergeTree() ORDER BY (ts, `key`) "+
 			"TTL ts + INTERVAL %d DAY", c.cfg.Database, tableTraffic, c.cfg.TTLDays),
+		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s.%s ("+
+			"event_time DateTime, action LowCardinality(String), result LowCardinality(String), "+
+			"operator String, role LowCardinality(String), tenant String, "+
+			"target String, target_type LowCardinality(String), reason String, "+
+			"source LowCardinality(String), ban_state LowCardinality(String), dry_run UInt8"+
+			") ENGINE = MergeTree() ORDER BY (event_time, tenant) "+
+			"TTL event_time + INTERVAL %d DAY", c.cfg.Database, tableAudit, c.cfg.TTLDays),
 	}
 	for _, s := range stmts {
 		if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(s)); err != nil {
@@ -392,6 +438,50 @@ func (c *ClickHouse) QueryTraffic(ctx context.Context, key string, from, to time
 	return out, nil
 }
 
+// QueryAudit reads audit rows matching f, newest first. Tenant/Action/Target
+// are optional filters bound via param_* (a scoped caller's tenant is bound
+// server-side; an empty tenant means no tenant filter — unscoped admin).
+func (c *ClickHouse) QueryAudit(ctx context.Context, f AuditFilter) ([]AuditRow, error) {
+	where := "event_time BETWEEN {from:DateTime} AND {to:DateTime}"
+	params := url.Values{}
+	params.Set("param_from", f.From.UTC().Format(chDateTime))
+	params.Set("param_to", f.To.UTC().Format(chDateTime))
+	if f.Tenant != "" {
+		where += " AND tenant = {tenant:String}"
+		params.Set("param_tenant", f.Tenant)
+	}
+	if f.Action != "" {
+		where += " AND action = {action:String}"
+		params.Set("param_action", f.Action)
+	}
+	if f.Target != "" {
+		where += " AND target = {target:String}"
+		params.Set("param_target", f.Target)
+	}
+	sql := fmt.Sprintf("SELECT event_time, action, result, operator, role, tenant, target, "+
+		"target_type, reason, source, ban_state, dry_run "+
+		"FROM %s.%s WHERE %s ORDER BY event_time DESC LIMIT %d FORMAT JSONEachRow",
+		c.cfg.Database, tableAudit, where, maxAuditRows)
+	params.Set("readonly", "2")
+	params.Set("max_execution_time", "10")
+	params.Set("max_result_rows", fmt.Sprintf("%d", maxAuditRows))
+	params.Set("result_overflow_mode", "throw")
+	body, err := c.queryRaw(ctx, sql, params)
+	if err != nil {
+		return nil, err
+	}
+	var out []AuditRow
+	dec := json.NewDecoder(bytes.NewReader(body))
+	for dec.More() {
+		var row AuditRow
+		if err := dec.Decode(&row); err != nil {
+			return nil, fmt.Errorf("decode audit row: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
 // queryRaw POSTs a read query (params bound via param_* in the URL) and
 // returns the raw response body. Read path only.
 func (c *ClickHouse) queryRaw(ctx context.Context, sql string, params url.Values) ([]byte, error) {
@@ -425,5 +515,6 @@ type noop struct{}
 
 func (noop) WriteAttack(AttackRow)     {}
 func (noop) WriteTraffic([]TrafficRow) {}
+func (noop) WriteAudit(AuditRow)       {}
 func (noop) Start(context.Context)     {}
 func (noop) Stop()                     {}

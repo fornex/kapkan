@@ -80,6 +80,7 @@ type Server struct {
 	mit     *mitigate.Mitigator
 	log     *slog.Logger
 	querier storage.Querier
+	auditW  storage.Writer // persists audit records; nil until wired (handlers nil-guard)
 	start   time.Time
 
 	mu     sync.Mutex
@@ -103,6 +104,44 @@ func New(store *config.Store, eng *engine.Engine, mit *mitigate.Mitigator, log *
 // endpoint. A nil querier (storage disabled) makes the endpoint report
 // history as unavailable rather than failing.
 func (s *Server) SetQuerier(q storage.Querier) { s.querier = q }
+
+// SetAuditWriter attaches the storage writer used to persist the audit trail
+// (operator-attributed mutations). A no-op writer (storage disabled) is fine;
+// handlers also nil-guard so an unset writer never panics.
+func (s *Server) SetAuditWriter(w storage.Writer) { s.auditW = w }
+
+// writeAudit persists one audit record (best-effort, never blocks) and logs it.
+// caller identity, action, and outcome are stamped by the handler.
+func (s *Server) writeAudit(row storage.AuditRow) {
+	s.log.Info("audit", "action", row.Action, "result", row.Result,
+		"operator", row.Operator, "tenant", row.Tenant, "target", row.Target, "reason", row.Reason)
+	if s.auditW != nil {
+		s.auditW.WriteAudit(row)
+	}
+}
+
+// auditRow builds an audit record stamped with the caller's identity, the
+// current time, and source="api". dryRun marks whether a ban was simulated.
+func auditRow(c caller, action, result, target, targetType, reason, banState string, dryRun bool) storage.AuditRow {
+	var dr uint8
+	if dryRun {
+		dr = 1
+	}
+	return storage.AuditRow{
+		EventTime:  time.Now().UTC().Format("2006-01-02 15:04:05"),
+		Action:     action,
+		Result:     result,
+		Operator:   c.token,
+		Role:       string(c.role),
+		Tenant:     c.tenant,
+		Target:     target,
+		TargetType: targetType,
+		Reason:     reason,
+		Source:     "api",
+		BanState:   banState,
+		DryRun:     dr,
+	}
+}
 
 // RecordAttackStarted records a newly detected attack for the attacks
 // endpoint. ban may be nil.
@@ -190,6 +229,7 @@ func (s *Server) Handler() http.Handler {
 	read("GET /api/v1/hosts", s.handleHosts)
 	read("GET /api/v1/bans", s.handleBans)
 	read("GET /api/v1/traffic", s.handleTraffic)
+	read("GET /api/v1/audit", s.handleAudit)
 	write("POST /api/v1/ban", s.handleBan)
 	write("POST /api/v1/unban", s.handleUnban)
 	write("POST /api/v1/config/reload", s.handleReload)
@@ -258,7 +298,7 @@ func (s *Server) requireRole(required config.Role, next http.HandlerFunc) http.H
 				writeError(w, http.StatusForbidden, "this token's role may not perform this action")
 				return
 			}
-			cl = caller{role: match.Role, tenant: match.Tenant}
+			cl = caller{role: match.Role, tenant: match.Tenant, token: match.Name}
 		}
 		if r.Method == http.MethodPost {
 			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
@@ -277,6 +317,9 @@ func (s *Server) requireRole(required config.Role, next http.HandlerFunc) http.H
 type caller struct {
 	role   config.Role
 	tenant string
+	// token is the matched API token's Name (for audit attribution); "" in
+	// open/token-less mode.
+	token string
 }
 
 // unscoped reports whether the caller sees and may act on every tenant.
@@ -569,6 +612,82 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"available": true, "points": pts})
 }
 
+// handleAudit serves the operator-attributed audit trail (who banned/unbanned/
+// reloaded, when, and the outcome). It is tenant-scoped server-side: a scoped
+// caller sees only its own tenant's records, regardless of any client param.
+// Storage disabled → available:false (not an error), like handleTraffic.
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if s.querier == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"available": false, "events": []storage.AuditRow{}})
+		return
+	}
+	q := r.URL.Query()
+	to := time.Now()
+	from := to.Add(-time.Hour)
+	if v := q.Get("from"); v != "" {
+		t, e := time.Parse(time.RFC3339, v)
+		if e != nil {
+			writeError(w, http.StatusBadRequest, "invalid from (expected RFC3339)")
+			return
+		}
+		from = t
+	}
+	if v := q.Get("to"); v != "" {
+		t, e := time.Parse(time.RFC3339, v)
+		if e != nil {
+			writeError(w, http.StatusBadRequest, "invalid to (expected RFC3339)")
+			return
+		}
+		to = t
+	}
+	if !to.After(from) {
+		writeError(w, http.StatusBadRequest, "to must be after from")
+		return
+	}
+	const maxRange = 31 * 24 * time.Hour
+	if to.Sub(from) > maxRange {
+		writeError(w, http.StatusBadRequest, "time range too large (max 31 days)")
+		return
+	}
+	f := storage.AuditFilter{From: from, To: to}
+	if a := q.Get("action"); a != "" {
+		switch a {
+		case "ban", "unban", "config_reload":
+			f.Action = a
+		default:
+			writeError(w, http.StatusBadRequest, "invalid action (ban|unban|config_reload)")
+			return
+		}
+	}
+	c := callerFrom(r)
+	if t := q.Get("target"); t != "" {
+		addr, err := netip.ParseAddr(t)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid target (expected an IP)")
+			return
+		}
+		if !visibleAddr(c, s.store.Get(), addr) {
+			writeError(w, http.StatusForbidden, "target is outside your tenant")
+			return
+		}
+		f.Target = addr.String()
+	}
+	// Tenant scope is enforced server-side: a scoped caller only ever sees its
+	// own tenant's rows; the client cannot widen this.
+	if !c.unscoped() {
+		f.Tenant = c.tenant
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	rows, err := s.querier.QueryAudit(ctx, f)
+	if err != nil {
+		s.log.Warn("audit query failed", "err", err)
+		writeError(w, http.StatusBadGateway, "audit query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"available": true, "events": rows})
+}
+
 // groupTenant returns the tenant of the named group, or "" if not found.
 func groupTenant(cfg *config.Config, name string) string {
 	for i := range cfg.Groups {
@@ -588,7 +707,8 @@ func (s *Server) handleBan(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if c := callerFrom(r); !visibleAddr(c, s.store.Get(), addr) {
+	c := callerFrom(r)
+	if !visibleAddr(c, s.store.Get(), addr) {
 		// Uniform refusal: never reveal whether addr is banned, or even in a
 		// configured network, to a scoped operator targeting another tenant.
 		s.log.Warn("cross-tenant ban refused", "tenant", c.tenant, "target", addr.String())
@@ -604,7 +724,9 @@ func (s *Server) handleBan(w http.ResponseWriter, r *http.Request) {
 	if ban.State == mitigate.BanRejected {
 		status = http.StatusConflict
 	}
-	s.log.Warn("manual ban requested", "target", addr.String(), "state", string(ban.State))
+	// Audit BOTH success and policy rejection — a refused ban is itself an
+	// auditable operator action.
+	s.writeAudit(auditRow(c, "ban", string(ban.State), addr.String(), "host", ban.Reason, string(ban.State), ban.DryRun))
 	writeJSON(w, status, ban)
 }
 
@@ -616,7 +738,8 @@ func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
 	// Check tenant ownership BEFORE consulting the mitigator, so an
 	// out-of-tenant target returns the same 403 whether or not a ban exists —
 	// no cross-tenant existence oracle on unban.
-	if c := callerFrom(r); !visibleAddr(c, s.store.Get(), addr) {
+	c := callerFrom(r)
+	if !visibleAddr(c, s.store.Get(), addr) {
 		s.log.Warn("cross-tenant unban refused", "tenant", c.tenant, "target", addr.String())
 		writeError(w, http.StatusForbidden, "target is outside your tenant")
 		return
@@ -626,7 +749,7 @@ func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	s.log.Warn("manual unban requested", "target", addr.String())
+	s.writeAudit(auditRow(c, "unban", "withdrawn", addr.String(), "host", "", string(ban.State), ban.DryRun))
 	writeJSON(w, http.StatusOK, ban)
 }
 
@@ -634,17 +757,19 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	// A reload swaps the whole config — every tenant's policy and the token set
 	// itself — so it is admin-only; a scoped operator must not be able to
 	// disrupt other tenants or rewrite the tenant/token mapping.
-	if !callerFrom(r).unscoped() {
+	c := callerFrom(r)
+	if !c.unscoped() {
 		writeError(w, http.StatusForbidden, "config reload is restricted to unscoped (admin) tokens")
 		return
 	}
 	cfg, err := s.store.Reload()
 	if err != nil {
 		s.log.Error("config reload via API failed", "err", err)
+		s.writeAudit(auditRow(c, "config_reload", "error", "", "global", err.Error(), "", false))
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.log.Info("config reloaded via API")
+	s.writeAudit(auditRow(c, "config_reload", "ok", "", "global", "", "", false))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"reloaded":   true,
 		"dry_run":    cfg.DryRun,
