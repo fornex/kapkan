@@ -72,6 +72,7 @@ type AttackRow struct {
 	DryRun     uint8   `json:"dry_run"`
 	TopSources string  `json:"top_sources"` // comma-joined for quick reading
 	TopASNs    string  `json:"top_asns"`    // pipe-joined "AS<n> <org>" (orgs may contain commas); empty when geoip off
+	Reason     string  `json:"reason"`      // compact JSON of the detection Reason (why it fired); empty on attack_ended
 }
 
 // TrafficRow is one per-host or per-group rate snapshot persisted to the
@@ -295,7 +296,7 @@ func (c *ClickHouse) ensureSchema(ctx context.Context) error {
 			"target String, `group` String, direction LowCardinality(String), "+
 			"attack_type LowCardinality(String), metric LowCardinality(String), "+
 			"rate Float64, threshold Float64, pps Float64, mbps Float64, flows_per_sec Float64, "+
-			"ban_state LowCardinality(String), dry_run UInt8, top_sources String, top_asns String"+
+			"ban_state LowCardinality(String), dry_run UInt8, top_sources String, top_asns String, reason String"+
 			") ENGINE = MergeTree() ORDER BY (event_time, target) "+
 			"TTL event_time + INTERVAL %d DAY", c.cfg.Database, tableAttacks, c.cfg.TTLDays),
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s.%s ("+
@@ -315,9 +316,11 @@ func (c *ClickHouse) ensureSchema(ctx context.Context) error {
 	// fresh installs already have the column, so a failure here — e.g. a writer
 	// credential without ALTER rights — must not fail schema init or block the
 	// (unrelated) traffic table above.
-	alter := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS top_asns String", c.cfg.Database, tableAttacks)
-	if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(alter)); err != nil {
-		c.log.Warn("clickhouse: top_asns column upgrade skipped (fresh installs already have it)", "err", err)
+	for _, col := range []string{"top_asns String", "reason String"} {
+		alter := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s", c.cfg.Database, tableAttacks, col)
+		if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(alter)); err != nil {
+			c.log.Warn("clickhouse: attack_events column upgrade skipped (fresh installs already have it)", "column", col, "err", err)
+		}
 	}
 	return nil
 }
