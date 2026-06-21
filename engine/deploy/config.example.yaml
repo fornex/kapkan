@@ -67,6 +67,25 @@ thresholds: # per destination host, after sampling correction
 #     mbps: 50
 #     flows_per_sec: 2000
 
+# Carpet-bombing (subnet-spread) detection: catches an attack that spreads its
+# volume across many hosts in a prefix, staying under every per-host threshold
+# so per-host detection never fires. Folds each host's incoming rates into its
+# aggregation prefix; raises a prefix-scoped (alert-only) attack when the
+# aggregate crosses `thresholds` AND the traffic is spread across >= min_hosts
+# distinct hosts. Set the aggregate thresholds well above the per-host ones.
+#
+# carpet:
+#   aggregation_prefix_v4: 24  # aggregate per /24 (default)
+#   aggregation_prefix_v6: 48  # and per /48 for IPv6 (default)
+#   min_hosts: 10              # fan-out gate (minimum 2)
+#   thresholds:                # AGGREGATE volume over the prefix
+#     pps: 2000000
+#     mbps: 20000
+#   mitigation: flowspec       # empty (default) = alert-only; flowspec drops the
+#                              # vector to the whole prefix; blackhole RTBHs it.
+#                              # EITHER refuses a prefix containing a whitelisted addr.
+#   max_active_prefix_bans: 10 # cap on simultaneous carpet bans (separate from host bans)
+
 # Attack samples: recent flows are buffered continuously so detections carry
 # their dominant sources/ports/protocols instantly. ~120 bytes per buffered
 # flow; sizing changes require a restart.
@@ -122,6 +141,10 @@ thresholds: # per destination host, after sampling correction
 # flowspec:
 #   action: discard      # or rate_limit
 #   rate_mbps: 100       # required for rate_limit
+#   source_anchored: true        # drop only the dominant attacker sources (from the
+#                                # attack sample) to the victim, sparing its clients
+#   min_source_concentration: 0.8 # ...but only when the top sources cover >= this
+#                                # share of the attack; else fall back to victim-anchored
 #
 # Or an escalation ladder (supersedes `mitigation`): step the response up the
 # longer an attack lasts. Each rung fires after the given seconds IF the
@@ -149,6 +172,14 @@ ban:
   ttl_seconds: 600 # every ban auto-withdraws after this (no permanent bans)
   unban_hysteresis_seconds: 120 # traffic must stay below threshold this long to unban
   max_active_bans: 50 # refuse new bans past this cap (never blackhole half the net)
+  # fallback: blackhole # if a flowspec/divert announce is REJECTED by the peer,
+  #   # degrade to an RTBH route so the victim is still mitigated (the default).
+  #   # Set to "none" to instead reject the ban (leaving the victim undefended).
+  # max_banned_fraction: 0.05 # refuse new bans once >5% of the protected address
+  #   # space (per family) is blackholed — bounds the blast radius of a poisoned
+  #   # baseline or spoofed-source storm. 0 (default) disables this guard.
+  # max_bans_per_window: 100 # storm guard: at most this many NEW bans per window
+  # ban_window_seconds: 60   # the window for max_bans_per_window (required when set)
 
 bgp:
   local_asn: 65001

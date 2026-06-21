@@ -563,3 +563,95 @@ func TestIPv6AttackDetected(t *testing.T) {
 		t.Errorf("target = %v, want %v", ev.Target, dst)
 	}
 }
+
+// carpetStore is testStore plus a carpet-bombing detection block: /24
+// aggregation, fan-out gate 5, aggregate pps threshold 100000.
+func carpetStore(t *testing.T) *config.Store {
+	t.Helper()
+	yaml := baseYAML + `
+carpet:
+  aggregation_prefix_v4: 24
+  min_hosts: 5
+  thresholds:
+    pps: 100000
+`
+	cfg, err := config.Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("parse carpet config: %v", err)
+	}
+	return config.NewStore("", cfg)
+}
+
+// TestCarpetBombDetection: 20 hosts in a /24 each flooded UNDER the per-host
+// pps threshold; no host trips individually, but their /24 aggregate crosses
+// the carpet threshold with enough fan-out, so a prefix-scoped attack fires.
+func TestCarpetBombDetection(t *testing.T) {
+	clk := newMockClock()
+	e := New(carpetStore(t), WithClock(clk.Now), WithWindow(5))
+	events := drain(e)
+
+	// 20 hosts .10..29, each 10 records/s × rate 1000 = 10000 pps (< 80000
+	// per-host); /24 aggregate 200000 pps (> 100000) across 20 hosts (>= 5).
+	inject := func() {
+		for h := 10; h < 30; h++ {
+			dst := netip.AddrFrom4([4]byte{203, 0, 113, byte(h)}).String()
+			for i := 0; i < 10; i++ {
+				e.Process(udpFlow(dst, 100, 1, 1000))
+			}
+		}
+	}
+	for s := 0; s < 5; s++ {
+		inject()
+		clk.Advance(time.Second)
+	}
+	e.evalTick(clk.Now())
+
+	ev := waitEvent(t, events)
+	if ev.Kind != AttackStarted || ev.Scope != ScopePrefix {
+		t.Fatalf("event = {kind:%v scope:%v}, want AttackStarted/prefix", ev.Kind, ev.Scope)
+	}
+	if ev.Prefix != "203.0.113.0/24" {
+		t.Errorf("prefix = %q, want 203.0.113.0/24", ev.Prefix)
+	}
+	if ev.Hosts != 20 {
+		t.Errorf("hosts (fan-out) = %d, want 20", ev.Hosts)
+	}
+	if ev.BanEnabled {
+		t.Error("carpet attack must be alert-only (BanEnabled=false)")
+	}
+	if ev.Rate <= ev.Threshold {
+		t.Errorf("rate %v should exceed carpet threshold %v", ev.Rate, ev.Threshold)
+	}
+}
+
+// TestCarpetBombFanOutGate: the same scale of aggregate volume concentrated in
+// only a few hosts (below min_hosts) is NOT a carpet bomb — and since each host
+// also stays under the per-host thresholds, nothing fires at all.
+func TestCarpetBombFanOutGate(t *testing.T) {
+	clk := newMockClock()
+	e := New(carpetStore(t), WithClock(clk.Now), WithWindow(5))
+	events := drain(e)
+
+	// 3 hosts × 40000 pps = 120000 aggregate (> 100000) but fan-out 3 < 5;
+	// packets=10/record keeps per-host fps (4000) under its 35000 threshold and
+	// per-host pps (40000) under 80000, so no per-host attack either.
+	inject := func() {
+		for h := 10; h < 13; h++ {
+			dst := netip.AddrFrom4([4]byte{203, 0, 113, byte(h)}).String()
+			for i := 0; i < 4; i++ {
+				e.Process(udpFlow(dst, 100, 10, 1000))
+			}
+		}
+	}
+	for s := 0; s < 5; s++ {
+		inject()
+		clk.Advance(time.Second)
+	}
+	e.evalTick(clk.Now())
+
+	select {
+	case ev := <-events:
+		t.Fatalf("unexpected event {kind:%v scope:%v}; low fan-out must not trip carpet detection", ev.Kind, ev.Scope)
+	case <-time.After(200 * time.Millisecond):
+	}
+}

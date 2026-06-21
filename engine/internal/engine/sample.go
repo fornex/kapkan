@@ -327,7 +327,7 @@ func (e *Engine) collectHostSample(sh *shard, target netip.Addr, dir int, sinceE
 // design; do not "fix" it by holding all shard locks at once.
 func (e *Engine) collectGroupSample(cfg *config.Config, gi int, dir int, sinceEpoch int64) *AttackSample {
 	d := int8(dir)
-	match := func(se *sampleEntry) bool {
+	return e.collectByMatch(sinceEpoch, func(se *sampleEntry) bool {
 		if se.dir != d {
 			return false
 		}
@@ -336,8 +336,34 @@ func (e *Engine) collectGroupSample(cfg *config.Config, gi int, dir int, sinceEp
 			monitored = se.f.SrcAddr
 		}
 		return cfg.GroupIndexFor(monitored) == gi
-	}
+	})
+}
 
+// collectPrefixSample builds the sample for a carpet-bombing (prefix, incoming)
+// attack by scanning every shard's ring for flows whose monitored endpoint
+// falls inside the aggregation prefix. Callers must NOT hold any shard lock.
+func (e *Engine) collectPrefixSample(prefix netip.Prefix, dir int, sinceEpoch int64) *AttackSample {
+	d := int8(dir)
+	return e.collectByMatch(sinceEpoch, func(se *sampleEntry) bool {
+		if se.dir != d {
+			return false
+		}
+		monitored := se.f.DstAddr
+		if dir == dirOut {
+			monitored = se.f.SrcAddr
+		}
+		return prefix.Contains(monitored)
+	})
+}
+
+// collectByMatch runs the two-pass cross-shard sample scan for any match
+// predicate (shared by the group- and prefix-scoped collectors). The raw-flow
+// cap is allotted across shards by groupQuotas (counted in a first pass);
+// otherwise the first scanned shard would exhaust the cap. Shard locks are
+// released between passes, so the match set may shift slightly — quotas are
+// best-effort and the global cap in add() is the hard bound; this is accepted
+// by design (do not hold all shard locks at once). Callers hold no shard lock.
+func (e *Engine) collectByMatch(sinceEpoch int64, match func(*sampleEntry) bool) *AttackSample {
 	var counts [numShards]int
 	total := 0
 	for i, sh := range e.shards {

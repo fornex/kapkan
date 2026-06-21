@@ -218,33 +218,41 @@ func (b *bgpSpeaker) Withdraw(ctx context.Context, prefix netip.Prefix) error {
 // fragment 12). gobgp computes the operator length/eol bytes from the
 // values via NewFlowSpecComponentItem.
 func flowSpecNLRI(rule FlowSpecRule) (*apb.Any, *api.Family, error) {
-	// Exactly one of Dst/Src anchors the rule on the victim. Source-anchored
-	// rules (RFC 8955 type 2 / RFC 8956 type 2) carry an outgoing attacker's
-	// own address so the rule matches its outbound flood.
-	anchor, source := rule.Dst, false
-	if rule.Src.IsValid() {
-		anchor, source = rule.Src, true
+	// A rule is anchored by its destination (victim, for an incoming attack),
+	// its source (victim-as-source for an outgoing attack, or the attacker for a
+	// source-anchored rule — RFC 8955 type 2 / RFC 8956 type 2), or BOTH (a
+	// composite victim-dst + attacker-src rule). At least one is required.
+	if !rule.Dst.IsValid() && !rule.Src.IsValid() {
+		return nil, nil, fmt.Errorf("flowspec rule has no destination or source prefix")
 	}
-	addr := anchor.Addr()
-	bits := uint8(anchor.Bits())
-	var comps []bgp.FlowSpecComponentInterface
+	is6 := false
+	if rule.Dst.IsValid() {
+		is6 = rule.Dst.Addr().Is6()
+	} else {
+		is6 = rule.Src.Addr().Is6()
+	}
 	family := familyV4FS
-	switch {
-	case addr.Is6():
+	if is6 {
 		family = familyV6FS
-		// The trailing 0 is the RFC 8956 IPv6 prefix offset (match from bit 0).
-		p := bgp.NewIPv6AddrPrefix(bits, addr.String())
-		if source {
-			comps = append(comps, bgp.NewFlowSpecSourcePrefix6(p, 0))
+	}
+	var comps []bgp.FlowSpecComponentInterface
+	// Components are appended in ascending RFC 8955 type order: dst-prefix (1)
+	// before src-prefix (2). The trailing 0 on the IPv6 builders is the RFC 8956
+	// prefix offset (match from bit 0).
+	if rule.Dst.IsValid() {
+		a := rule.Dst
+		if is6 {
+			comps = append(comps, bgp.NewFlowSpecDestinationPrefix6(bgp.NewIPv6AddrPrefix(uint8(a.Bits()), a.Addr().String()), 0))
 		} else {
-			comps = append(comps, bgp.NewFlowSpecDestinationPrefix6(p, 0))
+			comps = append(comps, bgp.NewFlowSpecDestinationPrefix(bgp.NewIPAddrPrefix(uint8(a.Bits()), a.Addr().String())))
 		}
-	default:
-		p := bgp.NewIPAddrPrefix(bits, addr.String())
-		if source {
-			comps = append(comps, bgp.NewFlowSpecSourcePrefix(p))
+	}
+	if rule.Src.IsValid() {
+		a := rule.Src
+		if is6 {
+			comps = append(comps, bgp.NewFlowSpecSourcePrefix6(bgp.NewIPv6AddrPrefix(uint8(a.Bits()), a.Addr().String()), 0))
 		} else {
-			comps = append(comps, bgp.NewFlowSpecDestinationPrefix(p))
+			comps = append(comps, bgp.NewFlowSpecSourcePrefix(bgp.NewIPAddrPrefix(uint8(a.Bits()), a.Addr().String())))
 		}
 	}
 

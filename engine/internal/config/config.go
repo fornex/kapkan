@@ -52,6 +52,9 @@ type Config struct {
 	// Baseline enables continuous per-host learned thresholds; static
 	// thresholds remain as floor/ceiling guards.
 	Baseline *Baseline `yaml:"baseline"`
+	// Carpet enables carpet-bombing (subnet-spread) detection; absent disables
+	// it. See the Carpet type.
+	Carpet *Carpet `yaml:"carpet"`
 	// Mitigation selects the default mitigation method (blackhole|flowspec);
 	// hostgroups may override it.
 	Mitigation string `yaml:"mitigation"`
@@ -80,6 +83,11 @@ type Config struct {
 	// Parsed forms, populated by validate().
 	NetworkPrefixes []netip.Prefix `yaml:"-"`
 	WhitelistAddrs  []netip.Addr   `yaml:"-"`
+	// protectedAddrs4/6 are the total address counts of the protected networks
+	// per family (float64 because an IPv6 range exceeds uint64), populated in
+	// validate() and read by the mitigator's blast-radius fraction guard.
+	protectedAddrs4 float64
+	protectedAddrs6 float64
 	// FlowSourceSet is the parsed FlowSources allowlist. Empty/nil means no
 	// allowlist is configured (the exporter-label cardinality cap applies).
 	FlowSourceSet map[netip.Addr]struct{} `yaml:"-"`
@@ -332,6 +340,67 @@ type FlowSpec struct {
 	// RateMbps is the rate-limit ceiling in megabits/sec; required and used
 	// only when Action is rate_limit.
 	RateMbps float64 `yaml:"rate_mbps"`
+	// SourceAnchored, when true, lets a flowspec rule pin BOTH the victim as
+	// destination AND a dominant attacker source (from the attack sample) so
+	// only the attackers are filtered, sparing the victim's legitimate clients.
+	// It applies only when the sample is concentrated enough (see
+	// MinSourceConcentration); otherwise the rule falls back to victim-anchored.
+	// Default false (victim-anchored, today's behavior).
+	SourceAnchored bool `yaml:"source_anchored"`
+	// MinSourceConcentration is the share (0–1) of sampled attack packets the
+	// dominant sources must cover, within the rule budget, before source
+	// anchoring is used instead of a victim-anchored rule. Omitted/0 defaults to
+	// 0.8 when source_anchored is on; a diffuse attack (e.g. reflection from
+	// thousands of sources) stays below it and falls back to victim-anchored.
+	MinSourceConcentration float64 `yaml:"min_source_concentration"`
+}
+
+// Carpet configures carpet-bombing (subnet-spread) detection: an attack that
+// distributes its volume across many hosts in a prefix, staying under each
+// host's threshold so per-host detection never fires. When set, the engine
+// folds every monitored per-host destination's incoming rates into its
+// aggregation prefix and raises a prefix-scoped attack when the aggregate
+// crosses Thresholds AND the traffic is spread across at least MinHosts
+// distinct hosts. Absent (nil) disables it. Carpet attacks are alert-only by
+// default; set Mitigation to auto-mitigate the aggregation prefix.
+type Carpet struct {
+	// AggregationPrefixV4/V6 are the supernet lengths per-host rates fold into
+	// (defaults /24 and /48). A /24 with attack traffic spread across MinHosts
+	// of its /32s raises one carpet attack on the /24.
+	AggregationPrefixV4 int `yaml:"aggregation_prefix_v4"`
+	AggregationPrefixV6 int `yaml:"aggregation_prefix_v6"`
+	// MinHosts is the fan-out gate: at least this many distinct destination
+	// hosts in the prefix must carry traffic this window before a carpet attack
+	// fires, so a single heavy host (already caught per-host) is not reported as
+	// a carpet bomb (default 10, minimum 2).
+	MinHosts int `yaml:"min_hosts"`
+	// Thresholds are the AGGREGATE volume thresholds for the whole prefix
+	// (sampling-corrected, summed over its hosts). A zero metric is disabled; at
+	// least one must be set. They should be well above the per-host thresholds.
+	Thresholds Thresholds `yaml:"thresholds"`
+	// Mitigation auto-mitigates the aggregation prefix: "" (the default) is
+	// alert-only; "flowspec" announces a FlowSpec rule matching the attack
+	// vector on the whole prefix (surgical — drops only the vector); "blackhole"
+	// announces an RTBH route for the prefix (drops ALL of it). Either method
+	// REFUSES a prefix that contains a protected_whitelist address — the
+	// whitelist guarantee is absolute and a prefix mitigation cannot exempt a
+	// single member. A diffuse attack still raises the alert regardless.
+	Mitigation string `yaml:"mitigation"`
+	// MaxActivePrefixBans caps simultaneous carpet (prefix) bans, separately from
+	// ban.max_active_bans (host bans), so neither starves the other. Default 10.
+	MaxActivePrefixBans int `yaml:"max_active_prefix_bans"`
+}
+
+// Method resolves carpet.mitigation to a MitigationMethod ("" = alert-only).
+func (c Carpet) Method() MitigationMethod {
+	switch c.Mitigation {
+	case string(MitigateFlowSpec):
+		return MitigateFlowSpec
+	case string(MitigateBlackhole):
+		return MitigateBlackhole
+	default:
+		return ""
+	}
 }
 
 // CalcMethod selects how a hostgroup's thresholds are applied.
@@ -415,6 +484,10 @@ type Group struct {
 	// FlowSpec rules (rate is per-second bytes; 0 for discard).
 	FlowSpecAction  FlowSpecAction `json:"flowspec_action,omitempty"`
 	FlowSpecRateBps float64        `json:"-"`
+	// FlowSpecSourceAnchored enables composite victim+attacker-source rules when
+	// the attack sample is concentrated; FlowSpecMinConcentration is the gate.
+	FlowSpecSourceAnchored   bool    `json:"flowspec_source_anchored,omitempty"`
+	FlowSpecMinConcentration float64 `json:"-"`
 	// Escalation is the resolved mitigation ladder; always at least one
 	// stage (synthesized from Mitigation when not explicitly configured).
 	Escalation []EscalationStage `json:"escalation,omitempty"`
@@ -454,6 +527,28 @@ type Ban struct {
 	TTLSeconds             int `yaml:"ttl_seconds"`
 	UnbanHysteresisSeconds int `yaml:"unban_hysteresis_seconds"`
 	MaxActiveBans          int `yaml:"max_active_bans"`
+	// Fallback selects the mitigation method applied when a stage's primary
+	// announce is rejected by the BGP peer. "blackhole" (the default) degrades a
+	// failed flowspec/divert announce to an RTBH route so the victim is still
+	// mitigated when an upstream does not honor the surgical method — leaving a
+	// victim wholly undefended is the worse failure. "none" disables fallback (a
+	// failed announce rejects the ban). Blackhole is terminal and has no fallback.
+	Fallback string `yaml:"fallback"`
+	// MaxBannedFraction caps the share of the protected address space (per
+	// address family) that may be simultaneously blackholed, refusing new bans
+	// once exceeded. A poisoned baseline or spoofed-source storm can drive many
+	// distinct host bans — each under max_active_bans — that together null-route
+	// a large fraction of your OWN network; this bounds that blast radius. The
+	// range is (0,1]; 0 (the default) disables the guard.
+	MaxBannedFraction float64 `yaml:"max_banned_fraction"`
+	// MaxBansPerWindow caps how many NEW bans may be created within
+	// ban_window_seconds, catching a runaway ban storm that the static
+	// max_active_bans cap (a level, not a rate) cannot. 0 (the default) disables
+	// the guard.
+	MaxBansPerWindow int `yaml:"max_bans_per_window"`
+	// BanWindowSeconds is the window for max_bans_per_window; required (> 0)
+	// when that rate is set and ignored otherwise.
+	BanWindowSeconds int `yaml:"ban_window_seconds"`
 }
 
 // TTL returns the ban TTL as a duration.
@@ -462,6 +557,22 @@ func (b Ban) TTL() time.Duration { return time.Duration(b.TTLSeconds) * time.Sec
 // UnbanHysteresis returns the hysteresis as a duration.
 func (b Ban) UnbanHysteresis() time.Duration {
 	return time.Duration(b.UnbanHysteresisSeconds) * time.Second
+}
+
+// BanWindow returns the blast-radius rate window as a duration.
+func (b Ban) BanWindow() time.Duration {
+	return time.Duration(b.BanWindowSeconds) * time.Second
+}
+
+// FallbackMethod resolves ban.fallback to the method applied when a primary
+// announce fails: "" (default) and "blackhole" both yield blackhole; "none"
+// (returning the empty method) disables fallback. validate() guarantees the
+// stored value is one of these.
+func (b Ban) FallbackMethod() MitigationMethod {
+	if b.Fallback == "none" {
+		return ""
+	}
+	return MitigateBlackhole
 }
 
 // BGP configures the embedded BGP speaker.
@@ -716,6 +827,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("networks: at least one protected prefix is required")
 	}
 	c.NetworkPrefixes = make([]netip.Prefix, 0, len(c.Networks))
+	c.protectedAddrs4, c.protectedAddrs6 = 0, 0
 	for _, s := range c.Networks {
 		p, err := netip.ParsePrefix(s)
 		if err != nil {
@@ -731,6 +843,13 @@ func (c *Config) validate() error {
 			}
 		}
 		c.NetworkPrefixes = append(c.NetworkPrefixes, p)
+		// Tally the protected address space per family for the blast-radius
+		// fraction guard. Overlap is already rejected above, so summing is exact.
+		if p.Addr().Is4() {
+			c.protectedAddrs4 += math.Ldexp(1, 32-p.Bits())
+		} else {
+			c.protectedAddrs6 += math.Ldexp(1, 128-p.Bits())
+		}
 	}
 
 	c.WhitelistAddrs = make([]netip.Addr, 0, len(c.ProtectedWhitelist))
@@ -782,6 +901,9 @@ func (c *Config) validate() error {
 	if err := c.validateGeoIP(); err != nil {
 		return err
 	}
+	if err := c.validateCarpet(); err != nil {
+		return err
+	}
 
 	if c.Ban.TTLSeconds <= 0 {
 		return fmt.Errorf("ban.ttl_seconds must be > 0, got %d", c.Ban.TTLSeconds)
@@ -791,6 +913,23 @@ func (c *Config) validate() error {
 	}
 	if c.Ban.MaxActiveBans <= 0 {
 		return fmt.Errorf("ban.max_active_bans must be > 0, got %d", c.Ban.MaxActiveBans)
+	}
+	switch c.Ban.Fallback {
+	case "", "none", string(MitigateBlackhole):
+	default:
+		return fmt.Errorf("ban.fallback must be %q or %q, got %q", "none", MitigateBlackhole, c.Ban.Fallback)
+	}
+	if c.Ban.MaxBannedFraction < 0 || c.Ban.MaxBannedFraction > 1 {
+		return fmt.Errorf("ban.max_banned_fraction must be between 0 and 1, got %v", c.Ban.MaxBannedFraction)
+	}
+	if c.Ban.MaxBansPerWindow < 0 {
+		return fmt.Errorf("ban.max_bans_per_window must be >= 0, got %d", c.Ban.MaxBansPerWindow)
+	}
+	if c.Ban.BanWindowSeconds < 0 {
+		return fmt.Errorf("ban.ban_window_seconds must be >= 0, got %d", c.Ban.BanWindowSeconds)
+	}
+	if c.Ban.MaxBansPerWindow > 0 && c.Ban.BanWindowSeconds <= 0 {
+		return fmt.Errorf("ban.ban_window_seconds must be > 0 when ban.max_bans_per_window is set")
 	}
 
 	if err := c.validateNotify(); err != nil {
@@ -855,29 +994,36 @@ func (c *Config) validateHostgroups() error {
 		}
 	}
 
+	globalSrcAnchor, globalMinConc, err := resolveSourceAnchor(c.FlowSpec, nil)
+	if err != nil {
+		return fmt.Errorf("flowspec: %w", err)
+	}
+
 	c.Groups = make([]Group, 0, len(c.Hostgroups)+1)
 	c.Groups = append(c.Groups, Group{
-		Name:                  GlobalGroup,
-		Calc:                  CalcPerHost,
-		Thresholds:            c.Thresholds,
-		OutThresholds:         c.ThresholdsOutgoing,
-		Baseline:              globalBaseline,
-		Mitigation:            globalMethod,
-		FlowSpecAction:        globalAction,
-		FlowSpecRateBps:       globalRate,
-		Escalation:            globalStages,
-		BlackholeNextHop:      globalBGP.nextHop,
-		BlackholeNextHop6:     globalBGP.nextHop6,
-		BlackholeCommunities:  globalBGP.communities,
-		BlackholeCommunityStr: globalBGP.commStr,
-		LocalPref:             globalBGP.localPref,
-		ScrubNextHop:          globalScrub.nextHop,
-		ScrubNextHop6:         globalScrub.nextHop6,
-		ScrubCommunities:      globalScrub.communities,
-		ScrubCommunityStr:     globalScrub.commStr,
-		ScrubLocalPref:        globalScrub.localPref,
-		Tenant:                c.Tenant,
-		BanEnabled:            true,
+		Name:                     GlobalGroup,
+		Calc:                     CalcPerHost,
+		Thresholds:               c.Thresholds,
+		OutThresholds:            c.ThresholdsOutgoing,
+		Baseline:                 globalBaseline,
+		Mitigation:               globalMethod,
+		FlowSpecAction:           globalAction,
+		FlowSpecRateBps:          globalRate,
+		FlowSpecSourceAnchored:   globalSrcAnchor,
+		FlowSpecMinConcentration: globalMinConc,
+		Escalation:               globalStages,
+		BlackholeNextHop:         globalBGP.nextHop,
+		BlackholeNextHop6:        globalBGP.nextHop6,
+		BlackholeCommunities:     globalBGP.communities,
+		BlackholeCommunityStr:    globalBGP.commStr,
+		LocalPref:                globalBGP.localPref,
+		ScrubNextHop:             globalScrub.nextHop,
+		ScrubNextHop6:            globalScrub.nextHop6,
+		ScrubCommunities:         globalScrub.communities,
+		ScrubCommunityStr:        globalScrub.commStr,
+		ScrubLocalPref:           globalScrub.localPref,
+		Tenant:                   c.Tenant,
+		BanEnabled:               true,
 	})
 	c.groupRoutes = nil
 
@@ -1035,28 +1181,35 @@ func (c *Config) validateHostgroups() error {
 			}
 		}
 
+		groupSrcAnchor, groupMinConc, err := resolveSourceAnchor(hg.FlowSpec, c.FlowSpec)
+		if err != nil {
+			return fmt.Errorf("hostgroups[%q]: flowspec: %w", hg.Name, err)
+		}
+
 		c.Groups = append(c.Groups, Group{
-			Name:                  hg.Name,
-			Calc:                  calc,
-			Thresholds:            th,
-			OutThresholds:         outTh,
-			Baseline:              groupBaseline,
-			Mitigation:            method,
-			FlowSpecAction:        action,
-			FlowSpecRateBps:       rate,
-			Escalation:            stages,
-			BlackholeNextHop:      groupBGP.nextHop,
-			BlackholeNextHop6:     groupBGP.nextHop6,
-			BlackholeCommunities:  groupBGP.communities,
-			BlackholeCommunityStr: groupBGP.commStr,
-			LocalPref:             groupBGP.localPref,
-			ScrubNextHop:          groupScrub.nextHop,
-			ScrubNextHop6:         groupScrub.nextHop6,
-			ScrubCommunities:      groupScrub.communities,
-			ScrubCommunityStr:     groupScrub.commStr,
-			ScrubLocalPref:        groupScrub.localPref,
-			Tenant:                hg.Tenant,
-			BanEnabled:            banEnabled,
+			Name:                     hg.Name,
+			Calc:                     calc,
+			Thresholds:               th,
+			OutThresholds:            outTh,
+			Baseline:                 groupBaseline,
+			Mitigation:               method,
+			FlowSpecAction:           action,
+			FlowSpecRateBps:          rate,
+			FlowSpecSourceAnchored:   groupSrcAnchor,
+			FlowSpecMinConcentration: groupMinConc,
+			Escalation:               stages,
+			BlackholeNextHop:         groupBGP.nextHop,
+			BlackholeNextHop6:        groupBGP.nextHop6,
+			BlackholeCommunities:     groupBGP.communities,
+			BlackholeCommunityStr:    groupBGP.commStr,
+			LocalPref:                groupBGP.localPref,
+			ScrubNextHop:             groupScrub.nextHop,
+			ScrubNextHop6:            groupScrub.nextHop6,
+			ScrubCommunities:         groupScrub.communities,
+			ScrubCommunityStr:        groupScrub.commStr,
+			ScrubLocalPref:           groupScrub.localPref,
+			Tenant:                   hg.Tenant,
+			BanEnabled:               banEnabled,
 		})
 	}
 
@@ -1071,6 +1224,48 @@ func (c *Config) validateHostgroups() error {
 	sort.SliceStable(c.groupRoutes, func(i, j int) bool {
 		return c.groupRoutes[i].prefix.Bits() > c.groupRoutes[j].prefix.Bits()
 	})
+	return nil
+}
+
+// validateCarpet validates and applies defaults to the carpet-bombing
+// detection block in place. A nil block leaves the feature disabled.
+func (c *Config) validateCarpet() error {
+	cp := c.Carpet
+	if cp == nil {
+		return nil
+	}
+	if cp.AggregationPrefixV4 == 0 {
+		cp.AggregationPrefixV4 = 24
+	}
+	if cp.AggregationPrefixV6 == 0 {
+		cp.AggregationPrefixV6 = 48
+	}
+	if cp.AggregationPrefixV4 < 8 || cp.AggregationPrefixV4 > 32 {
+		return fmt.Errorf("carpet.aggregation_prefix_v4 must be in 8..32, got %d", cp.AggregationPrefixV4)
+	}
+	if cp.AggregationPrefixV6 < 16 || cp.AggregationPrefixV6 > 128 {
+		return fmt.Errorf("carpet.aggregation_prefix_v6 must be in 16..128, got %d", cp.AggregationPrefixV6)
+	}
+	if cp.MinHosts == 0 {
+		cp.MinHosts = 10
+	}
+	if cp.MinHosts < 2 {
+		return fmt.Errorf("carpet.min_hosts must be >= 2, got %d", cp.MinHosts)
+	}
+	if cp.Thresholds.Zero() {
+		return fmt.Errorf("carpet.thresholds: set at least one aggregate threshold")
+	}
+	switch cp.Mitigation {
+	case "", string(MitigateFlowSpec), string(MitigateBlackhole):
+	default:
+		return fmt.Errorf("carpet.mitigation must be empty, %q or %q, got %q", MitigateFlowSpec, MitigateBlackhole, cp.Mitigation)
+	}
+	if cp.MaxActivePrefixBans == 0 {
+		cp.MaxActivePrefixBans = 10
+	}
+	if cp.MaxActivePrefixBans < 1 {
+		return fmt.Errorf("carpet.max_active_prefix_bans must be >= 1, got %d", cp.MaxActivePrefixBans)
+	}
 	return nil
 }
 
@@ -1135,6 +1330,28 @@ func resolveMitigation(methodStr string, flow *FlowSpec, defMethod MitigationMet
 	}
 	action, rate, err := resolveFlowSpecPolicy(flow, defFlow)
 	return method, action, rate, err
+}
+
+// resolveSourceAnchor resolves the source-anchoring policy from the effective
+// FlowSpec block (the group's own, else the default). It returns whether source
+// anchoring is enabled and the resolved concentration gate (defaulting to 0.8
+// when enabled without an explicit value).
+func resolveSourceAnchor(flow, defFlow *FlowSpec) (bool, float64, error) {
+	fs := flow
+	if fs == nil {
+		fs = defFlow
+	}
+	if fs == nil || !fs.SourceAnchored {
+		return false, 0, nil
+	}
+	mc := fs.MinSourceConcentration
+	if mc < 0 || mc > 1 {
+		return false, 0, fmt.Errorf("flowspec.min_source_concentration must be in 0..1, got %g", mc)
+	}
+	if mc == 0 {
+		mc = 0.8
+	}
+	return true, mc, nil
 }
 
 // resolveFlowSpecPolicy resolves the FlowSpec action policy (own block, else
@@ -1766,10 +1983,44 @@ func (c *Config) InNetworks(addr netip.Addr) bool {
 	return false
 }
 
+// ProtectedAddrs returns the total number of addresses in the protected
+// networks of addr's family, as a float64 (an IPv6 range exceeds uint64). The
+// mitigator's blast-radius fraction guard divides active bans by this.
+func (c *Config) ProtectedAddrs(is6 bool) float64 {
+	if is6 {
+		return c.protectedAddrs6
+	}
+	return c.protectedAddrs4
+}
+
 // IsWhitelisted reports whether addr must never be banned.
 func (c *Config) IsWhitelisted(addr netip.Addr) bool {
 	for _, a := range c.WhitelistAddrs {
 		if a == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// PrefixContainsWhitelisted reports whether p covers any whitelisted address.
+// A prefix-scoped mitigation (carpet) cannot exempt a single member, so a
+// prefix containing a whitelisted address must be refused outright — the
+// whitelist guarantee is absolute.
+func (c *Config) PrefixContainsWhitelisted(p netip.Prefix) bool {
+	for _, a := range c.WhitelistAddrs {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// PrefixInNetworks reports whether p is fully contained in a protected prefix
+// (so a prefix-scoped ban never announces a route for space we do not own).
+func (c *Config) PrefixInNetworks(p netip.Prefix) bool {
+	for _, np := range c.NetworkPrefixes {
+		if np.Contains(p.Addr()) && np.Bits() <= p.Bits() {
 			return true
 		}
 	}

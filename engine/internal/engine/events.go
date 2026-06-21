@@ -93,6 +93,11 @@ const (
 	// calculation method "total". Group events carry no Target and never
 	// trigger automatic mitigation.
 	ScopeGroup Scope = "group"
+	// ScopePrefix is a carpet-bombing (subnet-spread) attack: volume spread
+	// across many hosts in an aggregation prefix, each under its per-host
+	// threshold. Target carries the prefix's network address and Prefix its
+	// CIDR; Hosts is the fan-out. Alert-only — never auto-banned in this form.
+	ScopePrefix Scope = "prefix"
 )
 
 // EventKind distinguishes attack lifecycle events.
@@ -123,6 +128,11 @@ type Event struct {
 	// hostgroup's total traffic (Group). Target is invalid for ScopeGroup.
 	Scope  Scope      `json:"scope"`
 	Target netip.Addr `json:"target"`
+	// Prefix is the aggregation CIDR of a ScopePrefix (carpet-bombing) attack
+	// (e.g. "203.0.113.0/24"); empty for other scopes. Hosts is its fan-out:
+	// distinct destination hosts in the prefix carrying attack traffic.
+	Prefix string `json:"prefix,omitempty"`
+	Hosts  int    `json:"hosts,omitempty"`
 	// Direction is incoming for attacks ON the target, outgoing when the
 	// target itself originates the attack (compromised host).
 	Direction Direction `json:"direction"`
