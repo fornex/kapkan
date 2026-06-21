@@ -32,7 +32,8 @@ d'API avec `api.token_env`. Seuls les points de terminaison de données `/api/v1
 | `kapkan_engine_tracked_hosts` | — | Jauge des hôtes actuellement suivis par le moteur. |
 | `kapkan_mitigate_announced_routes` | `mode` | Jauge des routes de blackhole actuellement annoncées, ventilées par mode `real` / `dry_run`. |
 | `kapkan_mitigate_flowspec_rules` | `mode` | Jauge des règles [FlowSpec](/docs/flowspec) actuellement annoncées, ventilées par mode `real` / `dry_run`. Surveillez-la par rapport à la limite de routes FlowSpec de vos routeurs. |
-| `kapkan_mitigate_bans_rejected_total` | — | Bannissements refusés par une règle de sécurité (liste blanche, périmètre ou plafond `max_active_bans`). |
+| `kapkan_mitigate_bans_rejected_total` | `reason` | Bannissements refusés par une garde de sécurité, par `reason` : `max_active_bans`, `blast_radius_fraction`, `blast_radius_rate` ou `max_active_prefix_bans` (carpet). |
+| `kapkan_mitigate_fallback_total` | `from`, `to` | Annonces d'atténuation ayant basculé vers une méthode de repli parce que le pair a rejeté la méthode principale, par `from`/`to`. Une série `from="flowspec"` non nulle signale les opérateurs en amont qui n'honorent pas FlowSpec. |
 | `kapkan_notify_notifications_total` | `channel`, `result` | Notifications tentées, par canal (telegram, slack, email, webhook, exec) et par `result`. |
 | `kapkan_storage_rows_total` | `table`, `result` | Lignes transmises au [stockage ClickHouse](/docs/storage) optionnel, par table et selon `written` / `dropped` / `error`. |
 

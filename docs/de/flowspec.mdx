@@ -59,6 +59,19 @@ gleicht die Regel den Host als **Quelle** ab (das RFC-8955/8956-Quellpräfix), s
 Flut tatsächlich verworfen wird. Das unterscheidet sich von einem zielbasierten RTBH-Blackhole, das nur
 den Datenverkehr *zum* Host vernichtet.
 
+## Quellverankerung
+
+Standardmäßig gleicht jede generierte Regel das Opfer als **Ziel** ab und verwirft den Angriffsvektor von *allen* Quellen — einschließlich legitimer Clients, die dasselbe Protokoll senden. Mit `flowspec.source_anchored: true` gibt Kapkan, wenn die Angriffsstichprobe eine **konzentrierte** Menge von Angreifer-Quellen zeigt, stattdessen zusammengesetzte Regeln aus, die **sowohl** das Opfer (Ziel) **als auch** jeden dominanten Angreifer (Quelle) festnageln, sodass nur die Angreifer verworfen werden und der legitime Datenverkehr des Opfers verschont bleibt.
+
+```yaml
+flowspec:
+  action: discard
+  source_anchored: true          # drop the attackers, not the protocol from everyone
+  min_source_concentration: 0.8  # ...only when the top sources cover >= this share (default 0.8)
+```
+
+Sie greift nur, wenn die dominanten Quellen innerhalb des 8-Regeln-Budgets mindestens `min_source_concentration` des stichprobenartig erfassten Angriffs abdecken. Ein **diffuser** Angriff — Reflection oder Spoofing, über viele Quellen verteilt — erreicht diese Schwelle nie und fällt auf die opferverankerte Regel zurück. Ausgewählte Quellen werden ausschließlich als Host-Präfixe (`/32`, `/128`) abgeglichen: Es gibt keine Aufweitung zu größeren Präfixen, sodass eine Regel niemals auf einen unschuldigen Nachbarn eines Angreifers übergreifen kann.
+
 ## Einschränkungen
 
 - Der `tcp-flags`-Match für SYN-Floods ist eine Bitmaske, die auch auf SYN-ACK passt, sodass eine

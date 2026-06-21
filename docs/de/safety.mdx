@@ -74,6 +74,23 @@ aber niemals eine Sperre auslösen. Sie können nicht versehentlich ein Präfix 
 entfernen, das Ihnen nicht gehört, selbst wenn eine Flut zufällig Ihr Netzwerk auf dem Weg
 woandershin durchquert.
 
+## 7. Grenzen des Blast-radius (optional)
+
+Die harte Obergrenze (#4) begrenzt die *Anzahl* der Sperren, nicht wie viel Ihres Netzwerks sie
+abdecken oder wie schnell sie anfallen. Zwei optionale `ban`-Schutzmechanismen verschärfen das
+weiter:
+
+- `max_banned_fraction` verweigert neue Sperren, sobald mehr als dieser Anteil (pro Adressfamilie)
+  Ihres geschützten Bereichs bereits per Blackhole entfernt ist — so kann eine vergiftete Baseline
+  oder ein Sturm mit gefälschter Quelle nicht einen großen Anteil Ihres eigenen Netzwerks ein `/32`
+  nach dem anderen null-routen, selbst während jede Sperre unter der Anzahl-Obergrenze bleibt.
+- `max_bans_per_window` (mit `ban_window_seconds`) begrenzt, wie schnell neue Sperren anfallen, und
+  fängt einen außer Kontrolle geratenen Sturm ab, bevor er die Anzahl-Obergrenze erreicht.
+
+Beide sind standardmäßig deaktiviert (`0`). Eine Ablehnung wird mit einem eigenen Grund
+`blast_radius_fraction` oder `blast_radius_rate` auf der [Metrik](/docs/metrics)
+`kapkan_mitigate_bans_rejected_total` als Alarm gemeldet.
+
 ## Wie manuelle Sperren jede Regel erben
 
 Der Endpunkt `POST /api/v1/ban` ist keine Hintertür. Eine manuelle Sperranfrage wird gegen

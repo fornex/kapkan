@@ -142,6 +142,37 @@ type groupState struct {
 	lastRates [2]Rates
 }
 
+// carpetState tracks the attack lifecycle of one carpet-bombing aggregation
+// prefix. Carpet detection is incoming-only and static-threshold-only (no
+// baseline), so it needs a single attackState.
+type carpetState struct {
+	attack    attackState
+	lastRates Rates
+	lastHosts int
+}
+
+// carpetAccum is one aggregation prefix's summed incoming rates and fan-out
+// (distinct contributing hosts), built fresh each tick like the total-group
+// sums.
+type carpetAccum struct {
+	rates Rates
+	hosts int
+}
+
+// carpetKey returns the aggregation prefix addr belongs to, per the configured
+// per-family supernet length.
+func carpetKey(addr netip.Addr, c *config.Carpet) netip.Prefix {
+	bits := c.AggregationPrefixV4
+	if addr.Is6() {
+		bits = c.AggregationPrefixV6
+	}
+	p, err := addr.Prefix(bits)
+	if err != nil {
+		return netip.PrefixFrom(addr, addr.BitLen()) // unreachable: bits validated
+	}
+	return p
+}
+
 // Engine is the detection core. Construct with New, feed flows with Process
 // or ProcessBatch, drive evaluation with Run, and consume Events.
 type Engine struct {
@@ -157,6 +188,11 @@ type Engine struct {
 	// groups holds total-group attack state. It is touched only by evalTick,
 	// which runs on the single Run goroutine, so it needs no lock.
 	groups map[string]*groupState
+
+	// carpets holds carpet-bombing (per aggregation-prefix) attack state. Like
+	// groups it is touched only by evalTick, so it needs no lock. Entries exist
+	// only for prefixes currently in (or ending) a carpet attack.
+	carpets map[netip.Prefix]*carpetState
 
 	// geo optionally attributes sample sources to ASN/country. nil disables
 	// enrichment; the resolver is read-only and safe for concurrent use.
@@ -227,6 +263,7 @@ func New(store *config.Store, opts ...Option) *Engine {
 		store:     store,
 		windowSec: 5,
 		groups:    make(map[string]*groupState),
+		carpets:   make(map[netip.Prefix]*carpetState),
 		events:    make(chan Event, 256),
 		now:       time.Now,
 		log:       slog.Default(),
@@ -413,6 +450,13 @@ func (e *Engine) evalTick(now time.Time) {
 	// Built fresh each tick — once per second, not on the hot path.
 	totals := make([][2]Rates, len(cfg.Groups))
 
+	// Per aggregation-prefix incoming sums + fan-out for carpet-bombing
+	// detection, built fresh each tick. nil (and zero cost) when disabled.
+	var carpetAgg map[netip.Prefix]*carpetAccum
+	if cfg.Carpet != nil {
+		carpetAgg = make(map[netip.Prefix]*carpetAccum)
+	}
+
 	var active int
 	var tracked int
 	for _, sh := range e.shards {
@@ -469,6 +513,21 @@ func (e *Engine) evalTick(now time.Time) {
 				endBoth(g)
 				evictOrTrack()
 				continue
+			}
+
+			// Fold this host's incoming rates into its aggregation prefix for
+			// carpet-bombing detection (subnet-spread attacks that stay under
+			// every per-host threshold). Only hosts with traffic this window
+			// count toward the fan-out.
+			if carpetAgg != nil && ok && in.PPS > 0 {
+				key := carpetKey(addr, cfg.Carpet)
+				acc := carpetAgg[key]
+				if acc == nil {
+					acc = &carpetAccum{}
+					carpetAgg[key] = acc
+				}
+				acc.rates = addRates(acc.rates, in)
+				acc.hosts++
 			}
 
 			for d := range hs.attacks {
@@ -553,6 +612,14 @@ func (e *Engine) evalTick(now time.Time) {
 	}
 
 	active += e.evalGroups(cfg, totals, hysteresis, now)
+
+	if cfg.Carpet != nil {
+		active += e.evalCarpets(cfg, carpetAgg, hysteresis, now)
+	} else if len(e.carpets) > 0 {
+		// Carpet detection was disabled by a reload: close out any in-flight
+		// carpet attacks so consumers see an end event, then drop the state.
+		e.closeAllCarpets(now)
+	}
 
 	metrics.ActiveAttacks.Set(float64(active))
 	metrics.TrackedHosts.Set(float64(tracked))
@@ -718,6 +785,141 @@ func (e *Engine) endGroupAttack(name string, gs *groupState, dir int, rates Rate
 		At:        now,
 		StartedAt: st.startedAt,
 	})
+}
+
+// evalCarpets runs the carpet-bombing attack lifecycle. A carpet attack fires
+// for an aggregation prefix only when its summed incoming rates cross the
+// carpet thresholds AND the traffic is spread across at least MinHosts distinct
+// hosts — the fan-out gate that separates a real subnet-spread flood from one
+// heavy host already caught per-host. It also drives the end of any in-flight
+// carpet attack whose prefix went quiet. Carpet attacks are alert-only
+// (BanEnabled false). Runs on the Run goroutine outside all shard locks, which
+// collectPrefixSample requires. Returns the active carpet-attack count.
+func (e *Engine) evalCarpets(cfg *config.Config, agg map[netip.Prefix]*carpetAccum, hysteresis time.Duration, now time.Time) int {
+	var active int
+	th := cfg.Carpet.Thresholds
+	minHosts := cfg.Carpet.MinHosts
+	seen := make(map[netip.Prefix]bool, len(agg))
+
+	for prefix, acc := range agg {
+		seen[prefix] = true
+		metric, rate, threshold, over := evaluate(acc.rates, th)
+		exceeded := over && acc.hosts >= minHosts
+		cs := e.carpets[prefix]
+
+		if exceeded {
+			if cs == nil {
+				cs = &carpetState{}
+				e.carpets[prefix] = cs
+			}
+			cs.lastRates = acc.rates
+			cs.lastHosts = acc.hosts
+			st := &cs.attack
+			if !st.inAttack {
+				st.inAttack = true
+				st.metric = metric
+				st.threshold = threshold
+				st.effThresholds = th
+				st.startedAt = now
+				metrics.AttacksTotal.Inc()
+				sample := e.collectPrefixSample(prefix, dirIn, now.Unix()-e.windowSec)
+				cls := classify(acc.rates, sample)
+				e.log.Warn("carpet-bomb attack detected",
+					"prefix", prefix.String(), "hosts", acc.hosts,
+					"metric", string(metric), "type", clsType(cls),
+					"rate", rate, "threshold", threshold,
+					"pps", acc.rates.PPS, "mbps", acc.rates.Mbps,
+					"flows_per_sec", acc.rates.FlowsPerSec)
+				e.emit(Event{
+					Kind:           AttackStarted,
+					Scope:          ScopePrefix,
+					Target:         prefix.Addr(),
+					Prefix:         prefix.String(),
+					Hosts:          acc.hosts,
+					Direction:      DirIncoming,
+					Group:          cfg.GroupFor(prefix.Addr()).Name,
+					BanEnabled:     cfg.Carpet.Mitigation != "", // alert-only unless a carpet method is set
+					Metric:         metric,
+					Rate:           rate,
+					Threshold:      threshold,
+					Rates:          acc.rates,
+					At:             now,
+					Sample:         sample,
+					Classification: cls,
+				})
+			}
+			st.belowSince = time.Time{}
+			active++
+		} else if cs != nil && cs.attack.inAttack {
+			cs.lastRates = acc.rates
+			cs.lastHosts = acc.hosts
+			if cs.attack.belowSince.IsZero() {
+				cs.attack.belowSince = now
+			}
+			if now.Sub(cs.attack.belowSince) >= hysteresis {
+				e.endCarpet(prefix, cs, acc.rates, now, "below threshold")
+			} else {
+				active++
+			}
+		}
+	}
+
+	// In-flight carpet attacks whose prefix carried no traffic this tick: drive
+	// their end (with zero rates) through the same hysteresis.
+	for prefix, cs := range e.carpets {
+		if seen[prefix] || !cs.attack.inAttack {
+			continue
+		}
+		if cs.attack.belowSince.IsZero() {
+			cs.attack.belowSince = now
+		}
+		if now.Sub(cs.attack.belowSince) >= hysteresis {
+			e.endCarpet(prefix, cs, Rates{}, now, "below threshold")
+		} else {
+			active++
+		}
+	}
+	return active
+}
+
+// endCarpet clears one carpet attack's state, emits AttackEnded, and drops the
+// prefix from the carpet table (carpet state is ephemeral, unlike groups).
+func (e *Engine) endCarpet(prefix netip.Prefix, cs *carpetState, rates Rates, now time.Time, reason string) {
+	st := &cs.attack
+	st.inAttack = false
+	st.belowSince = time.Time{}
+	e.log.Info("carpet-bomb attack ended",
+		"prefix", prefix.String(), "metric", string(st.metric),
+		"reason", reason, "duration", now.Sub(st.startedAt).String(),
+		"pps", rates.PPS, "mbps", rates.Mbps, "flows_per_sec", rates.FlowsPerSec)
+	e.emit(Event{
+		Kind:      AttackEnded,
+		Scope:     ScopePrefix,
+		Target:    prefix.Addr(),
+		Prefix:    prefix.String(),
+		Hosts:     cs.lastHosts,
+		Direction: DirIncoming,
+		Group:     e.store.Get().GroupFor(prefix.Addr()).Name,
+		Metric:    st.metric,
+		Rate:      rateFor(rates, st.metric),
+		Threshold: st.threshold,
+		Rates:     rates,
+		At:        now,
+		StartedAt: st.startedAt,
+	})
+	delete(e.carpets, prefix)
+}
+
+// closeAllCarpets ends every in-flight carpet attack — carpet detection was
+// disabled by a reload — and clears the table.
+func (e *Engine) closeAllCarpets(now time.Time) {
+	for prefix, cs := range e.carpets {
+		if cs.attack.inAttack {
+			e.endCarpet(prefix, cs, cs.lastRates, now, "policy change")
+		} else {
+			delete(e.carpets, prefix)
+		}
+	}
 }
 
 // metricTable defines the evaluation order: total metrics first (matching

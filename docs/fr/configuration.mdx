@@ -85,11 +85,16 @@ plus volumineux, un résumé d'une ligne renvoie vers la page dédiée.
 | `tenant` | Étiquette de tenant optionnelle pour le groupe global/de repli implicite. Voir [Multi-tenant](/docs/multi-tenancy). |
 | `samples.enabled` / `buffer_flows` / `flows_per_attack` | Tampon de trafic continu pour les échantillons d'attaque (valeurs par défaut : `true` / `65536` / `20`). Les changements de dimensionnement nécessitent un redémarrage. |
 | `baseline` | Seuils par hôte appris en continu par EWMA, optionnels et surchargeables par hostgroup. Voir [Baselines](/docs/baselines). |
+| `carpet` | Détection optionnelle du carpet-bombing (réparti sur un sous-réseau) : déclenche une attaque au niveau du préfixe lorsque le trafic agrégé sur un `/24` (`aggregation_prefix_v4`/`v6`) dépasse `carpet.thresholds` sur au moins `min_hosts` hôtes distincts — détecte les floods qui restent sous chaque seuil par hôte. Alerte seule sauf si `carpet.mitigation` (`flowspec`/`blackhole`) est défini, qui refuse un préfixe contenant une adresse en liste blanche et est plafonné par `carpet.max_active_prefix_bans`. |
 | `ban.ttl_seconds` | Chaque annonce se retire automatiquement après ce nombre de secondes. Aucun bannissement permanent. |
 | `ban.unban_hysteresis_seconds` | Le trafic doit rester sous le seuil pendant cette durée avant qu'un bannissement ne soit retiré, ce qui évite le flapping. |
 | `ban.max_active_bans` | Plafond strict du nombre de bannissements simultanés. Les nouveaux bannissements au-delà du plafond sont refusés. |
+| `ban.fallback` | Que faire lorsqu'un pair **rejette** une annonce `flowspec`/`divert` : `blackhole` (par défaut) bascule vers une route RTBH afin que la victime reste protégée ; `none` rejette le bannissement. `blackhole` est terminal. |
+| `ban.max_banned_fraction` | Refuser les nouveaux bannissements dès que plus de cette proportion (`0`–`1`, par famille d'adresses) de l'espace protégé est mise en blackhole — borne le rayon d'impact d'une baseline empoisonnée ou d'un afflux à sources usurpées. `0` (par défaut) le désactive. |
+| `ban.max_bans_per_window` / `ban_window_seconds` | Garde anti-tempête : au plus ce nombre de **nouveaux** bannissements par fenêtre (secondes). `max_bans_per_window: 0` (par défaut) le désactive ; la fenêtre est requise lorsque le débit est défini. |
 | `mitigation` | Méthode de mitigation : `blackhole` (par défaut), `flowspec` ou `divert`. Surchargeable par hostgroup. Voir [FlowSpec](/docs/flowspec) et [Déviation du trafic](/docs/scrubbing). |
 | `flowspec.action` / `rate_mbps` | Action de la règle FlowSpec : `discard` ou `rate_limit` (avec `rate_mbps`). Voir [FlowSpec](/docs/flowspec). |
+| `flowspec.source_anchored` / `min_source_concentration` | Lorsqu'activé, une règle FlowSpec épingle **à la fois** la victime (destination) **et** une source attaquante dominante issue de l'échantillon — ne supprimant que les attaquants et épargnant les clients légitimes — mais seulement si l'échantillon est assez concentré (par défaut `0.8`) ; sinon, repli sur l'ancrage victime. Désactivé par défaut. |
 | `escalation[]` | Échelle optionnelle de paliers `{ after_seconds, action }` (`none` / `flowspec` / `divert` / `blackhole`) qui prime sur `mitigation`. Voir [Paliers d'escalade](/docs/escalation). |
 | `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | Identité BGP, next-hops de blackhole IPv4/IPv6 et communauté RTBH (`ASN:value`). `router_id` doit être une adresse IPv4 en notation décimale pointée. Voir [Mitigation](/docs/mitigation). |
 | `bgp.communities` / `local_pref` | **Liste** de communautés optionnelle (qui remplace `community`) et un `LOCAL_PREF` pour les pairs iBGP. Tous les attributs `bgp` sont surchargeables par hostgroup. |
@@ -147,6 +152,10 @@ ban:
   ttl_seconds: 600                  # every ban auto-withdraws after this
   unban_hysteresis_seconds: 120     # stay below threshold this long before unban
   max_active_bans: 50               # refuse new bans past this cap
+  # fallback: blackhole             # degrade a rejected flowspec/divert announce to RTBH (default)
+  # max_banned_fraction: 0.05       # never blackhole more than 5% of protected space (per family)
+  # max_bans_per_window: 100        # storm guard: at most 100 new bans per window
+  # ban_window_seconds: 60          # the window for max_bans_per_window
 
 bgp:
   local_asn: 65001

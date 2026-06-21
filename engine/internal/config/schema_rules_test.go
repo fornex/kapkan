@@ -95,6 +95,34 @@ api: {listen: "127.0.0.1:8080"}
 			wantErr: "not inside any configured networks",
 		},
 		{
+			name: "ban rate guard without window",
+			yaml: `
+listen: {sflow: ":6343"}
+sampling: {default_rate: 1000}
+networks: ["203.0.113.0/24"]
+thresholds: {pps: 1000, mbps: 100, flows_per_sec: 500}
+ban: {ttl_seconds: 600, unban_hysteresis_seconds: 60, max_active_bans: 50, max_bans_per_window: 10}
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"
+  next_hop: "192.0.2.1"
+  community: "65000:666"
+  neighbors: [{address: "10.0.0.254", remote_asn: 65000}]
+api: {listen: "127.0.0.1:8080"}
+`,
+			wantErr: "ban_window_seconds must be > 0",
+		},
+		{
+			name:    "carpet block without any aggregate threshold",
+			yaml:    validBase + "\ncarpet:\n  min_hosts: 5\n",
+			wantErr: "carpet.thresholds",
+		},
+		{
+			name:    "carpet with an invalid mitigation method",
+			yaml:    validBase + "\ncarpet:\n  thresholds: {pps: 100000}\n  mitigation: bogus\n",
+			wantErr: "carpet.mitigation",
+		},
+		{
 			name:    "unknown key is rejected (closed schema)",
 			yaml:    validBase + "\nbogus_key: 1\n",
 			wantErr: "not found",

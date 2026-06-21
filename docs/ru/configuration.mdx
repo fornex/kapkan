@@ -83,11 +83,16 @@ KAPKAN_API_TOKEN=a-long-random-string
 | `tenant` | Опциональная метка tenant для неявной глобальной/резервной группы. См. [Мультиарендность](/docs/multi-tenancy). |
 | `samples.enabled` / `buffer_flows` / `flows_per_attack` | Непрерывный буфер трафика для сэмплов атак (по умолчанию: `true` / `65536` / `20`). Изменение размеров требует перезапуска. |
 | `baseline` | Опциональные непрерывно обучаемые пороги на хост по EWMA, переопределяемые на уровне hostgroup. См. [Базовые линии](/docs/baselines). |
+| `carpet` | Опциональный детект carpet-bombing (распределённого по подсети): поднимает атаку на префикс, когда трафик, агрегированный по `/24` (`aggregation_prefix_v4`/`v6`), превышает `carpet.thresholds` на не менее чем `min_hosts` различных хостах — ловит флуд, остающийся под каждым порогом на хост. Работает только на алерт, пока не задан `carpet.mitigation` (`flowspec`/`blackhole`), который отказывает префиксу, содержащему адрес из белого списка, и ограничен `carpet.max_active_prefix_bans`. |
 | `ban.ttl_seconds` | Каждый анонс автоматически отзывается через указанное число секунд. Постоянных банов нет. |
 | `ban.unban_hysteresis_seconds` | Трафик должен оставаться ниже порога это время, прежде чем бан будет снят, что предотвращает «дребезг» (flapping). |
 | `ban.max_active_bans` | Жёсткий предел одновременных банов. Новые баны сверх лимита отклоняются. |
+| `ban.fallback` | Что делать, когда peer **отклоняет** анонс `flowspec`/`divert`: `blackhole` (по умолчанию) деградирует до RTBH-маршрута, чтобы жертва всё же была защищена; `none` отклоняет бан. `blackhole` — терминальный. |
+| `ban.max_banned_fraction` | Отклонять новые баны, когда в blackhole отправлено больше этой доли (`0`–`1`, на семейство адресов) защищаемого пространства — ограничивает «радиус поражения» отравленного baseline или шторма с подменой источников. `0` (по умолчанию) отключает. |
+| `ban.max_bans_per_window` / `ban_window_seconds` | Защита от шторма: не более стольких **новых** банов за окно (в секундах). `max_bans_per_window: 0` (по умолчанию) отключает; окно обязательно, когда задана скорость. |
 | `mitigation` | Метод смягчения: `blackhole` (по умолчанию), `flowspec` или `divert`. Переопределяется на уровне hostgroup. См. [FlowSpec](/docs/flowspec) и [Отвод трафика](/docs/scrubbing). |
 | `flowspec.action` / `rate_mbps` | Действие правила FlowSpec: `discard` или `rate_limit` (с `rate_mbps`). См. [FlowSpec](/docs/flowspec). |
+| `flowspec.source_anchored` / `min_source_concentration` | Когда включено, правило FlowSpec закрепляет **и** жертву (назначение), **и** доминирующий источник-атакующего из сэмпла — отбрасывая только атакующих и щадя легитимных клиентов — но лишь когда сэмпл достаточно концентрирован (по умолчанию `0.8`); иначе откат к привязке по жертве. По умолчанию выключено. |
 | `escalation[]` | Опциональная лестница ступеней `{ after_seconds, action }` (`none` / `flowspec` / `divert` / `blackhole`), которая имеет приоритет над `mitigation`. См. [Лестницы эскалации](/docs/escalation). |
 | `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | Идентичность BGP, next-hop blackhole для IPv4/IPv6 и RTBH-community (`ASN:value`). `router_id` должен быть IPv4 в формате dotted-quad. См. [Смягчение](/docs/mitigation). |
 | `bgp.communities` / `local_pref` | Опциональный **список** community (переопределяет `community`) и `LOCAL_PREF` для iBGP-пиров. Все атрибуты `bgp` переопределяются на уровне hostgroup. |
@@ -145,6 +150,10 @@ ban:
   ttl_seconds: 600                  # every ban auto-withdraws after this
   unban_hysteresis_seconds: 120     # stay below threshold this long before unban
   max_active_bans: 50               # refuse new bans past this cap
+  # fallback: blackhole             # degrade a rejected flowspec/divert announce to RTBH (default)
+  # max_banned_fraction: 0.05       # never blackhole more than 5% of protected space (per family)
+  # max_bans_per_window: 100        # storm guard: at most 100 new bans per window
+  # ban_window_seconds: 60          # the window for max_bans_per_window
 
 bgp:
   local_asn: 65001

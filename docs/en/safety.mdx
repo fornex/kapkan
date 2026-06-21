@@ -66,6 +66,21 @@ addresses outside your protected ranges is still counted in metrics, but it can 
 trigger a ban. You cannot accidentally blackhole a prefix you do not own, even if a flood
 happens to traverse your network on the way somewhere else.
 
+## 7. Blast-radius limits (optional)
+
+The hard cap (#4) bounds the *number* of bans, not how much of your network they cover or how fast
+they accrue. Two optional `ban` guards tighten that further:
+
+- `max_banned_fraction` refuses new bans once more than that share (per address family) of your
+  protected space is already blackholed — so a poisoned baseline or a spoofed-source storm cannot
+  null-route a large fraction of your own network one `/32` at a time, even while each ban stays under
+  the count cap.
+- `max_bans_per_window` (with `ban_window_seconds`) bounds how fast new bans accrue, catching a
+  runaway storm before it reaches the count cap.
+
+Both default off (`0`). A refusal is alerted with a distinct `blast_radius_fraction` or
+`blast_radius_rate` reason on the `kapkan_mitigate_bans_rejected_total` [metric](/docs/metrics).
+
 ## How manual bans inherit every rule
 
 The `POST /api/v1/ban` endpoint is not an escape hatch. A manual ban request is checked

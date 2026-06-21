@@ -8,6 +8,7 @@ package mitigate
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/netip"
 	"sort"
 	"strings"
@@ -66,6 +67,13 @@ type Ban struct {
 	Escalation     []config.EscalationStage `json:"escalation,omitempty"`
 	EscalationStep int                      `json:"escalation_step"`
 
+	// FellBackFrom records the method whose announce the peer rejected, causing
+	// this ban to degrade to its fallback (blackhole); empty when no fallback
+	// occurred. FellBackReason is its human-readable cause. Surfaced so the API
+	// and notifications make a silent FlowSpec-unsupported upstream visible.
+	FellBackFrom   config.MitigationMethod `json:"fell_back_from,omitempty"`
+	FellBackReason string                  `json:"fell_back_reason,omitempty"`
+
 	// dirMask tracks which attack directions hold this ban (one mitigation
 	// covers both). An incoming and an outgoing attack on the same host
 	// share the ban; it is withdrawn only when the last direction ends.
@@ -120,6 +128,15 @@ type Mitigator struct {
 
 	mu   sync.Mutex
 	bans map[netip.Addr]*Ban
+	// prefixBans holds carpet-bombing (per aggregation-prefix) bans, keyed by
+	// the CIDR. Kept separate from the host bans map so host lookups are
+	// untouched; both share the lifecycle, gauges and blast-radius accounting.
+	prefixBans map[netip.Prefix]*Ban
+
+	// banWindowStart / bansInWindow implement the ban.max_bans_per_window storm
+	// guard as a fixed window. Guarded by mu.
+	banWindowStart time.Time
+	bansInWindow   int
 
 	now    func() time.Time
 	ctx    context.Context
@@ -148,10 +165,11 @@ func withAnnouncer(a announcer) Option {
 // injected). The speaker is not started until Start is called.
 func New(store *config.Store, log *slog.Logger, opts ...Option) (*Mitigator, error) {
 	m := &Mitigator{
-		store: store,
-		log:   log.With("component", "mitigate"),
-		bans:  make(map[netip.Addr]*Ban),
-		now:   time.Now,
+		store:      store,
+		log:        log.With("component", "mitigate"),
+		bans:       make(map[netip.Addr]*Ban),
+		prefixBans: make(map[netip.Prefix]*Ban),
+		now:        time.Now,
 	}
 	for _, o := range opts {
 		o(m)
@@ -204,6 +222,22 @@ func (m *Mitigator) OnAttackStarted(ev engine.Event) *Ban {
 			"target", ev.Target.String(), "group", ev.Group, "scope", string(ev.Scope))
 		return nil
 	}
+	if ev.Scope == engine.ScopePrefix {
+		p, err := netip.ParsePrefix(ev.Prefix)
+		if err != nil {
+			m.log.Error("carpet event carries an invalid prefix; cannot mitigate",
+				"prefix", ev.Prefix, "err", err)
+			return nil
+		}
+		return m.banPrefix(p, banOpts{
+			metric:         ev.Metric,
+			rate:           ev.Rate,
+			threshold:      ev.Threshold,
+			direction:      ev.Direction,
+			classification: ev.Classification,
+			sample:         ev.Sample,
+		})
+	}
 	return m.ban(ev.Target, banOpts{
 		metric:         ev.Metric,
 		rate:           ev.Rate,
@@ -225,6 +259,20 @@ func (m *Mitigator) OnAttackStarted(ev engine.Event) *Ban {
 func (m *Mitigator) OnAttackEnded(ev engine.Event) *Ban {
 	if ev.Scope == engine.ScopeGroup {
 		return nil
+	}
+	if ev.Scope == engine.ScopePrefix {
+		p, err := netip.ParsePrefix(ev.Prefix)
+		if err != nil {
+			return nil
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		b, ok := m.prefixBans[p]
+		if !ok || b.State != BanActive {
+			return nil
+		}
+		m.withdrawLocked(b, "carpet attack ended", false)
+		return copyBan(b)
 	}
 
 	m.mu.Lock()
@@ -322,12 +370,49 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 
 	// SAFETY RULE: hard cap on simultaneous bans.
 	if m.activeCountLocked() >= cfg.Ban.MaxActiveBans {
-		metrics.BansRejectedTotal.Inc()
+		metrics.BansRejectedTotal.WithLabelValues("max_active_bans").Inc()
 		m.log.Error("BAN CAP REACHED: refusing new ban to avoid blackholing half the network",
 			"target", target.String(), "active", m.activeCountLocked(),
 			"max_active_bans", cfg.Ban.MaxActiveBans)
 		return &Ban{Target: target, Prefix: prefix, State: BanRejected,
 			Reason: "max_active_bans reached", DryRun: cfg.DryRun}
+	}
+
+	// SAFETY RULE: blast radius (fraction). Never blackhole more than a
+	// configured share of our OWN address space — even when every ban is under
+	// the count cap, a poisoned baseline or spoofed-source storm could otherwise
+	// null-route a large fraction of the network one /32 at a time.
+	if cfg.Ban.MaxBannedFraction > 0 {
+		if total := cfg.ProtectedAddrs(target.Is6()); total > 0 {
+			banned := m.activeAddressesByFamilyLocked(target.Is6())
+			if (banned+1)/total > cfg.Ban.MaxBannedFraction {
+				metrics.BansRejectedTotal.WithLabelValues("blast_radius_fraction").Inc()
+				m.log.Error("BLAST-RADIUS CAP: refusing new ban; would exceed max_banned_fraction of protected space",
+					"target", target.String(), "family", famLabel(target),
+					"banned", int(banned), "protected_addrs", total,
+					"max_banned_fraction", cfg.Ban.MaxBannedFraction)
+				return &Ban{Target: target, Prefix: prefix, State: BanRejected,
+					Reason: "max_banned_fraction reached", DryRun: cfg.DryRun}
+			}
+		}
+	}
+
+	// SAFETY RULE: blast radius (rate). Bound how FAST new bans accrue so a
+	// runaway storm is contained even before it reaches the count cap.
+	if cfg.Ban.MaxBansPerWindow > 0 {
+		win := cfg.Ban.BanWindow()
+		if m.banWindowStart.IsZero() || now.Sub(m.banWindowStart) >= win {
+			m.banWindowStart = now
+			m.bansInWindow = 0
+		}
+		if m.bansInWindow >= cfg.Ban.MaxBansPerWindow {
+			metrics.BansRejectedTotal.WithLabelValues("blast_radius_rate").Inc()
+			m.log.Error("BLAST-RADIUS RATE: refusing new ban; max_bans_per_window reached",
+				"target", target.String(), "bans_in_window", m.bansInWindow,
+				"max_bans_per_window", cfg.Ban.MaxBansPerWindow, "window", win)
+			return &Ban{Target: target, Prefix: prefix, State: BanRejected,
+				Reason: "max_bans_per_window reached", DryRun: cfg.DryRun}
+		}
 	}
 
 	b := &Ban{
@@ -349,26 +434,203 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	// resolved BGP/scrubbing attributes, which inherit the global blocks) and
 	// the generated FlowSpec rules if any rung is flowspec. A ladder that never
 	// uses an action carries no attributes for it.
-	if ladderUsesBlackhole(group.Escalation) {
+	// Freeze the blackhole attribute set when any rung blackholes OR when the
+	// fallback policy may degrade a failed flowspec/divert announce to blackhole
+	// (so the fallback has frozen attributes to announce, like any other rung).
+	fallbackToBlackhole := cfg.Ban.FallbackMethod() != ""
+	if ladderUsesBlackhole(group.Escalation) ||
+		(fallbackToBlackhole && (ladderUsesFlowSpec(group.Escalation) || ladderUsesDivert(group.Escalation))) {
 		b.bhAttrs = groupBlackholeAttrs(group, target)
 	}
 	if ladderUsesDivert(group.Escalation) {
 		b.divAttrs = groupDivertAttrs(group, target)
 	}
 	if ladderUsesFlowSpec(group.Escalation) {
-		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample, group.FlowSpecAction, group.FlowSpecRateBps)
+		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample,
+			group.FlowSpecAction, group.FlowSpecRateBps, group.FlowSpecSourceAnchored, group.FlowSpecMinConcentration)
 	}
 
-	// Apply the first rung. On announce failure the ban is rejected.
+	// Apply the first rung. On announce failure (after any fallback) the ban is
+	// rejected.
 	if err := m.applyStageLocked(b, 0, cfg); err != nil {
 		b.State = BanRejected
 		b.Reason = "bgp announce failed: " + err.Error()
 		return b
 	}
 
+	if cfg.Ban.MaxBansPerWindow > 0 {
+		m.bansInWindow++
+	}
 	m.bans[target] = b
 	m.updateGaugeLocked()
 	return copyBan(b)
+}
+
+// banPrefix mitigates a carpet-bomb aggregation prefix. It mirrors ban() but
+// announces a route/rules for the WHOLE prefix and enforces the prefix-specific
+// safety rules: a prefix containing ANY whitelisted address is refused outright
+// (the whitelist guarantee is absolute — a prefix mitigation cannot exempt one
+// member), and the prefix must sit inside the protected networks. Carpet bans
+// use a single rung from carpet.mitigation, the global BGP/flowspec policy, a
+// separate concurrent cap, and count their full address span toward the
+// blast-radius fraction.
+func (m *Mitigator) banPrefix(p netip.Prefix, opts banOpts) *Ban {
+	cfg := m.store.Get()
+	now := m.now()
+	method := cfg.Carpet.Method()
+	if method == "" {
+		return nil // alert-only; BanEnabled should already have gated this
+	}
+
+	// SAFETY RULE: the whitelist is absolute. A prefix mitigation covers every
+	// member, so a prefix containing a whitelisted address is refused entirely —
+	// a protected resolver/gateway is never blackholed or filtered as collateral.
+	if cfg.PrefixContainsWhitelisted(p) {
+		m.log.Error("refusing carpet mitigation: prefix contains a whitelisted address",
+			"prefix", p.String())
+		return &Ban{Target: p.Addr(), Prefix: p, State: BanRejected,
+			Reason: "whitelisted member in prefix", DryRun: cfg.DryRun}
+	}
+	// SAFETY RULE: only announce inside the configured networks.
+	if !cfg.PrefixInNetworks(p) {
+		m.log.Error("refusing carpet mitigation: prefix not inside configured networks",
+			"prefix", p.String())
+		return &Ban{Target: p.Addr(), Prefix: p, State: BanRejected,
+			Reason: "prefix outside configured networks", DryRun: cfg.DryRun}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if existing, ok := m.prefixBans[p]; ok && existing.State == BanActive {
+		existing.ExpiresAt = now.Add(cfg.Ban.TTL())
+		return copyBan(existing)
+	}
+
+	// Separate concurrent cap so carpet bans and host bans never starve each other.
+	if m.activePrefixBansLocked() >= cfg.Carpet.MaxActivePrefixBans {
+		metrics.BansRejectedTotal.WithLabelValues("max_active_prefix_bans").Inc()
+		m.log.Error("CARPET CAP REACHED: refusing new prefix ban",
+			"prefix", p.String(), "max_active_prefix_bans", cfg.Carpet.MaxActivePrefixBans)
+		return &Ban{Target: p.Addr(), Prefix: p, State: BanRejected,
+			Reason: "max_active_prefix_bans reached", DryRun: cfg.DryRun}
+	}
+
+	// SAFETY RULE: blast radius (fraction) — a /24 ban spans 256 addresses, so it
+	// is weighed by its full span, not as one unit.
+	if cfg.Ban.MaxBannedFraction > 0 {
+		if total := cfg.ProtectedAddrs(p.Addr().Is6()); total > 0 {
+			banned := m.activeAddressesByFamilyLocked(p.Addr().Is6())
+			if (banned+addressCountForPrefix(p))/total > cfg.Ban.MaxBannedFraction {
+				metrics.BansRejectedTotal.WithLabelValues("blast_radius_fraction").Inc()
+				m.log.Error("BLAST-RADIUS CAP: refusing carpet ban; would exceed max_banned_fraction of protected space",
+					"prefix", p.String(), "family", famLabel(p.Addr()),
+					"banned_addrs", banned, "prefix_addrs", addressCountForPrefix(p),
+					"protected_addrs", total, "max_banned_fraction", cfg.Ban.MaxBannedFraction)
+				return &Ban{Target: p.Addr(), Prefix: p, State: BanRejected,
+					Reason: "max_banned_fraction reached", DryRun: cfg.DryRun}
+			}
+		}
+	}
+
+	// SAFETY RULE: blast radius (rate) — shared per-creation window with host bans.
+	if cfg.Ban.MaxBansPerWindow > 0 {
+		win := cfg.Ban.BanWindow()
+		if m.banWindowStart.IsZero() || now.Sub(m.banWindowStart) >= win {
+			m.banWindowStart = now
+			m.bansInWindow = 0
+		}
+		if m.bansInWindow >= cfg.Ban.MaxBansPerWindow {
+			metrics.BansRejectedTotal.WithLabelValues("blast_radius_rate").Inc()
+			m.log.Error("BLAST-RADIUS RATE: refusing carpet ban; max_bans_per_window reached",
+				"prefix", p.String(), "max_bans_per_window", cfg.Ban.MaxBansPerWindow)
+			return &Ban{Target: p.Addr(), Prefix: p, State: BanRejected,
+				Reason: "max_bans_per_window reached", DryRun: cfg.DryRun}
+		}
+	}
+
+	g := &cfg.Groups[0] // global group: source of the blackhole BGP attributes
+	action := config.EscalateBlackhole
+	if method == config.MitigateFlowSpec {
+		action = config.EscalateFlowSpec
+	}
+	b := &Ban{
+		Target:     p.Addr(),
+		Prefix:     p,
+		Metric:     opts.metric,
+		Rate:       opts.rate,
+		Threshold:  opts.threshold,
+		State:      BanActive,
+		DryRun:     cfg.DryRun,
+		StartedAt:  now,
+		ExpiresAt:  now.Add(cfg.Ban.TTL()),
+		Escalation: []config.EscalationStage{{AfterSeconds: 0, Action: action}},
+	}
+	// Freeze blackhole attributes when the method is blackhole OR a flowspec
+	// fallback may degrade to it (the prefix is already whitelist-free).
+	fallbackToBlackhole := cfg.Ban.FallbackMethod() != ""
+	if method == config.MitigateBlackhole || (method == config.MitigateFlowSpec && fallbackToBlackhole) {
+		b.bhAttrs = groupBlackholeAttrs(g, p.Addr())
+	}
+	if method == config.MitigateFlowSpec {
+		// Vector-anchored on the whole prefix: drops only the attack vector to
+		// the /24, sparing non-vector traffic. The prefix is whitelist-free.
+		b.FlowSpec = generateCarpetRules(p, opts.classification, opts.sample, config.FlowSpecDiscard, 0)
+	}
+
+	if err := m.applyStageLocked(b, 0, cfg); err != nil {
+		b.State = BanRejected
+		b.Reason = "bgp announce failed: " + err.Error()
+		return b
+	}
+	if cfg.Ban.MaxBansPerWindow > 0 {
+		m.bansInWindow++
+	}
+	m.prefixBans[p] = b
+	m.updateGaugeLocked()
+	m.log.Warn("carpet mitigation applied",
+		"prefix", p.String(), "method", string(b.Method), "route", b.Route)
+	return copyBan(b)
+}
+
+// addressCountForPrefix is the number of addresses a prefix spans (1 for a host
+// /32 or /128), as a float64 since an IPv6 span exceeds uint64.
+func addressCountForPrefix(p netip.Prefix) float64 {
+	bits := 32
+	if p.Addr().Is6() {
+		bits = 128
+	}
+	return math.Ldexp(1, bits-p.Bits())
+}
+
+// activeAddressesByFamilyLocked sums the address span of every active ban (host
+// and prefix) in the given family — the numerator of the blast-radius fraction,
+// honest about a /24 ban covering 256 addresses. A host ban is /32 => 1, so the
+// host-only behavior is unchanged.
+func (m *Mitigator) activeAddressesByFamilyLocked(is6 bool) float64 {
+	var n float64
+	for _, b := range m.bans {
+		if b.State == BanActive && b.Target.Is6() == is6 {
+			n += addressCountForPrefix(b.Prefix)
+		}
+	}
+	for _, b := range m.prefixBans {
+		if b.State == BanActive && b.Target.Is6() == is6 {
+			n += addressCountForPrefix(b.Prefix)
+		}
+	}
+	return n
+}
+
+// activePrefixBansLocked counts active carpet (prefix) bans.
+func (m *Mitigator) activePrefixBansLocked() int {
+	n := 0
+	for _, b := range m.prefixBans {
+		if b.State == BanActive {
+			n++
+		}
+	}
+	return n
 }
 
 // ladderUsesFlowSpec reports whether any rung announces FlowSpec.
@@ -503,11 +765,72 @@ func setActiveStage(b *Ban, idx int, v stageView) {
 // the rung on the ban. A "none" rung announces nothing. The caller holds m.mu.
 func (m *Mitigator) applyStageLocked(b *Ban, idx int, cfg *config.Config) error {
 	v := m.stageView(b, b.Escalation[idx])
-	if err := m.announceMethodLocked(b, v.method, v.route, v.attrs, cfg); err != nil {
+	applied, fellBack, err := m.announceStageLocked(b, v, cfg)
+	if err != nil {
 		return err
 	}
-	setActiveStage(b, idx, v)
+	setActiveStage(b, idx, applied)
+	if fellBack {
+		b.FellBackFrom = v.method
+		b.FellBackReason = "primary announce rejected by peer"
+	}
 	return nil
+}
+
+// announceStageLocked announces stage v for ban b, honoring the configured
+// fallback policy: if v's primary method is rejected by the peer and a fallback
+// applies (flowspec/divert -> blackhole, unless ban.fallback is "none"), it
+// announces the fallback instead — make-before-break is preserved because the
+// fallback comes up before any caller withdraws the old rung. It returns the
+// stageView actually applied (which the caller records on the ban) and whether a
+// fallback was used. On failure of both primary and fallback it returns the
+// primary error and leaves b's recorded stage unchanged. The caller holds m.mu.
+func (m *Mitigator) announceStageLocked(b *Ban, v stageView, cfg *config.Config) (applied stageView, fellBack bool, err error) {
+	if e := m.announceMethodLocked(b, v.method, v.route, v.attrs, cfg); e == nil {
+		return v, false, nil
+	} else {
+		err = e
+	}
+	if fallbackFor(v.method, cfg) == "" {
+		return v, false, err // no fallback for this method (blackhole/alert) or disabled
+	}
+	fv := m.blackholeStageView(b)
+	if e := m.announceMethodLocked(b, fv.method, fv.route, fv.attrs, cfg); e != nil {
+		m.log.Error("primary AND fallback announce failed; victim left undefended",
+			"target", b.Target.String(), "primary", string(v.method),
+			"fallback", string(fv.method), "primary_err", err, "fallback_err", e)
+		return v, false, err // report the primary error; ban will be rejected/held
+	}
+	metrics.MitigateFallbackTotal.WithLabelValues(string(v.method), string(fv.method)).Inc()
+	m.log.Warn("primary announce rejected by peer; fell back to blackhole",
+		"target", b.Target.String(), "from", string(v.method), "to", string(fv.method), "err", err)
+	return fv, true, nil
+}
+
+// fallbackFor returns the method to try when primary's announce is rejected, or
+// "" when no fallback applies. Only the surgical methods (flowspec, divert)
+// degrade; blackhole and alert-only have no fallback. ban.fallback="none"
+// disables it entirely.
+func fallbackFor(primary config.MitigationMethod, cfg *config.Config) config.MitigationMethod {
+	fb := cfg.Ban.FallbackMethod()
+	if fb == "" {
+		return ""
+	}
+	if primary == config.MitigateFlowSpec || primary == config.MitigateDivert {
+		return fb
+	}
+	return ""
+}
+
+// blackholeStageView builds the stageView for a blackhole fallback from the
+// frozen blackhole attributes (populated at ban time whenever a fallback is
+// possible).
+func (m *Mitigator) blackholeStageView(b *Ban) stageView {
+	return stageView{
+		method: config.MitigateBlackhole,
+		route:  unicastRoute("blackhole", b.Prefix, b.bhAttrs),
+		attrs:  b.bhAttrs,
+	}
 }
 
 // flowSpecSummary renders a one-line summary of a rule set for the Route
@@ -661,25 +984,33 @@ func (m *Mitigator) escalateLocked(b *Ban, now time.Time, cfg *config.Config) {
 	}
 
 	// Make-before-break: bring the new rung up before tearing the old one down
-	// so the victim is never briefly unprotected during the switch.
-	if err := m.announceMethodLocked(b, v.method, v.route, v.attrs, cfg); err != nil {
+	// so the victim is never briefly unprotected during the switch. If the new
+	// rung's primary announce is rejected, the configured fallback is applied
+	// (and `applied` reflects what actually went up).
+	applied, fellBack, err := m.announceStageLocked(b, v, cfg)
+	if err != nil {
 		m.log.Error("escalation announce failed; staying on current rung",
 			"target", b.Target.String(), "from", string(b.Method),
 			"to", string(v.method), "step", target, "err", err)
 		return
 	}
-	// Withdraw the old rung only if it lives on a DIFFERENT NLRI family. A
-	// same-family unicast transition (divert→blackhole) was already replaced
-	// atomically by the announce above (gobgp implicit-withdraw on the shared
-	// host-route NLRI), so withdrawing by prefix now would tear down the route
-	// we just installed.
+	// Withdraw the old rung only if it lives on a DIFFERENT NLRI family than what
+	// was actually applied. A same-family unicast transition (divert→blackhole,
+	// or a flowspec-rung that fell back to blackhole over a unicast rung) was
+	// already replaced atomically by the announce above (gobgp implicit-withdraw
+	// on the shared host-route NLRI), so withdrawing by prefix now would tear
+	// down the route we just installed.
 	oldMethod, oldRoute := b.Method, b.Route
-	if oldMethod != "" && routeFamilyOf(oldMethod) != routeFamilyOf(v.method) {
+	if oldMethod != "" && routeFamilyOf(oldMethod) != routeFamilyOf(applied.method) {
 		m.withdrawMethodLocked(b, oldMethod, oldRoute, "escalation")
 	}
-	setActiveStage(b, target, v)
+	setActiveStage(b, target, applied)
+	if fellBack {
+		b.FellBackFrom = v.method
+		b.FellBackReason = "primary announce rejected by peer during escalation"
+	}
 	m.log.Warn("escalated mitigation", "target", b.Target.String(),
-		"step", target, "from", string(oldMethod), "method", string(v.method), "route", v.route)
+		"step", target, "from", string(oldMethod), "method", string(applied.method), "route", applied.route)
 	m.updateGaugeLocked()
 }
 
@@ -727,6 +1058,26 @@ func (m *Mitigator) sweepExpired() {
 		// later rung's delay has now elapsed.
 		m.escalateLocked(b, now, cfg)
 	}
+	// Carpet (prefix) bans: same TTL / left-networks / escalation lifecycle,
+	// but the containment check is prefix-based.
+	for _, b := range m.prefixBans {
+		if b.State != BanActive {
+			continue
+		}
+		if !b.ExpiresAt.IsZero() && now.After(b.ExpiresAt) {
+			m.log.Warn("carpet ban TTL expired; auto-withdrawing",
+				"route", b.Route, "prefix", b.Prefix.String())
+			m.withdrawLocked(b, "ttl expired", false)
+			continue
+		}
+		if !cfg.PrefixInNetworks(b.Prefix) {
+			m.log.Warn("carpet ban prefix no longer in configured networks; auto-withdrawing",
+				"route", b.Route, "prefix", b.Prefix.String())
+			m.withdrawLocked(b, "prefix left configured networks", false)
+			continue
+		}
+		m.escalateLocked(b, now, cfg)
+	}
 }
 
 func (m *Mitigator) activeCountLocked() int {
@@ -739,6 +1090,14 @@ func (m *Mitigator) activeCountLocked() int {
 	return n
 }
 
+// famLabel renders an address family for logs/metrics.
+func famLabel(a netip.Addr) string {
+	if a.Is6() {
+		return "ipv6"
+	}
+	return "ipv4"
+}
+
 // updateGaugeLocked recomputes the announced-route and FlowSpec-rule gauges.
 // Each ban is counted into its OWN mode bucket (real|dry_run) using the DryRun
 // frozen on it at creation — never a caller-supplied mode — so a config reload
@@ -747,10 +1106,10 @@ func (m *Mitigator) activeCountLocked() int {
 // always set so a flip leaves no stale value behind.
 func (m *Mitigator) updateGaugeLocked() {
 	var realBans, realFS, dryBans, dryFS int
-	for _, b := range m.bans {
+	count := func(b *Ban) {
 		if b.State != BanActive || b.Method == "" {
 			// Withdrawn/rejected bans and alert-only rungs announce no route.
-			continue
+			return
 		}
 		// Count rules only for bans CURRENTLY on FlowSpec; a ban that merely
 		// precomputed rules for a future rung has not announced them yet.
@@ -765,6 +1124,12 @@ func (m *Mitigator) updateGaugeLocked() {
 			realBans++
 			realFS += fs
 		}
+	}
+	for _, b := range m.bans {
+		count(b)
+	}
+	for _, b := range m.prefixBans {
+		count(b)
 	}
 	metrics.AnnouncedRoutes.WithLabelValues("real").Set(float64(realBans))
 	metrics.AnnouncedRoutes.WithLabelValues("dry_run").Set(float64(dryBans))
@@ -784,6 +1149,11 @@ func (m *Mitigator) ActiveBans() []Ban {
 			out = append(out, *b)
 		}
 	}
+	for _, b := range m.prefixBans {
+		if b.State == BanActive {
+			out = append(out, *b)
+		}
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Target.Less(out[j].Target) })
 	return out
 }
@@ -793,8 +1163,11 @@ func (m *Mitigator) ActiveBans() []Ban {
 func (m *Mitigator) Snapshot() []Ban {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]Ban, 0, len(m.bans))
+	out := make([]Ban, 0, len(m.bans)+len(m.prefixBans))
 	for _, b := range m.bans {
+		out = append(out, *b)
+	}
+	for _, b := range m.prefixBans {
 		out = append(out, *b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })

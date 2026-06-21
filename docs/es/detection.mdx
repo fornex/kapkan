@@ -134,6 +134,40 @@ Esta es una de las reglas de seguridad impuestas: un destino fuera de `networks`
 fuera del alcance de la mitigación. Los prefijos protegidos no deben solaparse. Consulta el
 [modelo de seguridad](/docs/safety) para ver la lista completa de garantías.
 
+## Detección de carpet-bombing
+
+La detección por host es ciega ante un **carpet bomb** (ataque distribuido por toda una subred): volumen
+repartido de forma fina entre todas las direcciones de un prefijo, de modo que ningún host individual cruza
+su umbral aunque el agregado sea enorme. El bloque opcional `carpet` lo detecta. Las tasas entrantes de cada
+host monitoreado se pliegan en su **prefijo de agregación** (un `/24` para IPv4 y un `/48` para IPv6 por
+defecto), y se levanta un ataque acotado al prefijo cuando el agregado cruza `carpet.thresholds` **y** el
+tráfico está repartido entre al menos `min_hosts` hosts distintos: la barrera de fan-out que separa un flood
+real distribuido por la subred de un único host pesado (ya detectado por host).
+
+```yaml
+carpet:
+  aggregation_prefix_v4: 24  # fold per /24 (default)
+  aggregation_prefix_v6: 48  # and per /48 (default)
+  min_hosts: 10              # fan-out gate (minimum 2)
+  thresholds:                # AGGREGATE volume over the prefix
+    pps: 2000000
+    mbps: 20000
+```
+
+Establece los umbrales del agregado muy por encima de los de por host: suman todo el prefijo. Un ataque de
+carpet lleva `scope: prefix`, el CIDR de agregación en `prefix` y su fan-out en `hosts`, junto con la muestra
+y la clasificación habituales.
+
+<Callout type="info" title="La mitigación es opcional (opt-in)">
+Los ataques de carpet son de solo alerta por defecto. Establece `carpet.mitigation` para mitigar de forma
+automática el prefijo de agregación — `flowspec` descarta el vector de ataque sobre todo el prefijo
+(quirúrgico), o `blackhole` le aplica un RTBH. Cualquiera de los dos métodos **rechaza de plano un prefijo
+que contenga una dirección de `protected_whitelist`**: una mitigación de prefijo no puede eximir a un solo
+miembro y la garantía de la lista blanca es absoluta. Un bloqueo de prefijo también computa todo su rango de
+direcciones para `ban.max_banned_fraction` y tiene su propio límite `carpet.max_active_prefix_bans`. Consulta
+[Mitigación](/docs/mitigation).
+</Callout>
+
 ## Detección saliente
 
 Por defecto, Kapkan vigila el tráfico que **llega a** tus hosts protegidos (`direction: incoming`).

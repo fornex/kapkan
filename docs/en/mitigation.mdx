@@ -137,6 +137,24 @@ ban:
 A ban is also withdrawn early if a config reload removes its target from the protected
 `networks` — Kapkan will not keep a route up for address space it no longer protects.
 
+## Fallback when a method is rejected
+
+Upstreams vary in what they honor — a peer may reject a FlowSpec or divert announcement outright. By
+default Kapkan does not leave the victim undefended in that case: `ban.fallback` is `blackhole`, so a
+rejected `flowspec`/`divert` announce **degrades to an RTBH route** rather than failing the ban. Set
+`ban.fallback: none` to disable that and reject the ban instead.
+
+```yaml
+ban:
+  fallback: blackhole   # degrade a rejected flowspec/divert announce to RTBH (default); none disables
+```
+
+When a fallback happens the ban records `fell_back_from` (the method the peer rejected) and the
+`kapkan_mitigate_fallback_total` [metric](/docs/metrics) increments — a non-zero `from="flowspec"`
+series flags upstreams that do not honor FlowSpec. A total BGP outage fails both methods, so the ban
+is still rejected as before; fallback only changes the case where the surgical method specifically is
+unsupported.
+
 ## Dry-run
 
 In dry-run mode (`dry_run: true`, the default) Kapkan does everything *except* send the route.

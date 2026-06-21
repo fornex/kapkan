@@ -145,6 +145,17 @@ Un ban est également retiré de manière anticipée si un rechargement de confi
 des `networks` protégés — Kapkan ne maintiendra pas une route active pour un espace d'adressage qu'il
 ne protège plus.
 
+## Repli lorsqu'une méthode est rejetée
+
+Les upstreams varient dans ce qu'ils honorent — un pair peut rejeter purement et simplement une annonce FlowSpec ou divert. Par défaut, Kapkan ne laisse pas la victime sans défense dans ce cas : `ban.fallback` vaut `blackhole`, de sorte qu'une annonce `flowspec`/`divert` rejetée **se dégrade en une route RTBH** plutôt que de faire échouer le ban. Définissez `ban.fallback: none` pour désactiver cela et rejeter le ban à la place.
+
+```yaml
+ban:
+  fallback: blackhole   # degrade a rejected flowspec/divert announce to RTBH (default); none disables
+```
+
+Lorsqu'un repli se produit, le ban enregistre `fell_back_from` (la méthode que le pair a rejetée) et la métrique `kapkan_mitigate_fallback_total` [metric](/docs/metrics) s'incrémente — une série `from="flowspec"` non nulle signale les upstreams qui n'honorent pas FlowSpec. Une panne BGP totale fait échouer les deux méthodes, donc le ban est tout de même rejeté comme auparavant ; le repli ne change que le cas où la méthode chirurgicale en particulier n'est pas prise en charge.
+
 ## Dry-run
 
 En mode dry-run (`dry_run: true`, la valeur par défaut), Kapkan fait tout *sauf* envoyer la route. Le

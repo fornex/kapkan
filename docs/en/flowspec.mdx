@@ -58,6 +58,28 @@ matches the host as **source** (the RFC 8955/8956 source-prefix), so it actually
 outbound flood. This is unlike a destination-based RTBH blackhole, which only kills traffic
 *to* the host.
 
+## Source anchoring
+
+By default every generated rule matches the victim as **destination**, dropping the attack vector
+from *all* sources — including legitimate clients sending the same protocol. With
+`flowspec.source_anchored: true`, when the attack sample shows a **concentrated** set of attacker
+sources, Kapkan instead emits composite rules pinning **both** the victim (destination) **and** each
+dominant attacker (source), so only the attackers are dropped and the victim's legitimate traffic is
+spared.
+
+```yaml
+flowspec:
+  action: discard
+  source_anchored: true          # drop the attackers, not the protocol from everyone
+  min_source_concentration: 0.8  # ...only when the top sources cover >= this share (default 0.8)
+```
+
+It engages only when the dominant sources cover at least `min_source_concentration` of the sampled
+attack within the 8-rule budget. A **diffuse** attack — reflection or spoofing spread across many
+sources — never reaches that gate and falls back to the victim-anchored rule. Selected sources are
+matched as host prefixes (`/32`, `/128`) only: there is no widening into larger prefixes, so a rule
+can never spill onto an innocent neighbor of an attacker.
+
 ## Caveats
 
 - The `tcp-flags` match for SYN floods is a bitmask that also matches SYN-ACK, so a

@@ -72,6 +72,23 @@ en las métricas, pero nunca puede desencadenar un bloqueo. No puedes enrutar a 
 accidente un prefijo que no posees, aunque una inundación atraviese tu red de camino a otro
 sitio.
 
+## 7. Límites de blast-radius (opcional)
+
+El tope rígido (#4) acota el *número* de bloqueos, no qué parte de tu red cubren ni con qué
+rapidez se acumulan. Dos guardas opcionales de `ban` lo restringen aún más:
+
+- `max_banned_fraction` rechaza nuevos bloqueos una vez que más de esa proporción (por familia
+  de direcciones) de tu espacio protegido ya está en blackhole, de modo que una línea base
+  envenenada o una tormenta de origen falsificado no pueda enrutar a null una gran fracción de tu
+  propia red de un `/32` en uno, incluso mientras cada bloqueo se mantiene por debajo del tope de
+  conteo.
+- `max_bans_per_window` (con `ban_window_seconds`) acota con qué rapidez se acumulan los nuevos
+  bloqueos, atrapando una tormenta descontrolada antes de que alcance el tope de conteo.
+
+Ambas están desactivadas por defecto (`0`). Un rechazo se alerta con un motivo distinto
+`blast_radius_fraction` o `blast_radius_rate` en la [métrica](/docs/metrics)
+`kapkan_mitigate_bans_rejected_total`.
+
 ## Cómo los bloqueos manuales heredan todas las reglas
 
 El endpoint `POST /api/v1/ban` no es una vía de escape. Una solicitud de bloqueo manual se

@@ -93,13 +93,27 @@ var (
 		Help:      "Blackhole routes currently announced, by mode (real|dry_run).",
 	}, []string{"mode"})
 
-	// BansRejectedTotal counts bans refused by the max_active_bans cap.
-	BansRejectedTotal = promauto.NewCounter(prometheus.CounterOpts{
+	// BansRejectedTotal counts bans refused by a safety guard, labeled by the
+	// reason (max_active_bans | blast_radius_fraction | blast_radius_rate). A
+	// climbing blast_radius_* series means a runaway-detection or poisoned
+	// baseline is being contained.
+	BansRejectedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "mitigate",
 		Name:      "bans_rejected_total",
-		Help:      "Ban requests refused because max_active_bans was reached.",
-	})
+		Help:      "Ban requests refused by a safety guard, by reason.",
+	}, []string{"reason"})
+
+	// MitigateFallbackTotal counts mitigation announces that fell back to a
+	// secondary method because the primary was rejected by the peer, labeled by
+	// from/to method. A non-zero from="flowspec" series flags upstreams that do
+	// not honor FlowSpec.
+	MitigateFallbackTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "mitigate",
+		Name:      "fallback_total",
+		Help:      "Mitigation announces that degraded to a fallback method, by from/to.",
+	}, []string{"from", "to"})
 
 	// FlowSpecRules is the number of FlowSpec rules currently announced (or,
 	// in dry-run, virtually so). A single ban can carry several rules, so

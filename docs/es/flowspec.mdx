@@ -61,6 +61,29 @@ regla hace coincidir al host como **origen** (el source-prefix de RFC 8955/8956)
 realmente descarta la inundación saliente. Esto difiere de un blackhole RTBH basado en destino,
 que solo elimina el tráfico *hacia* el host.
 
+## Anclaje de origen
+
+De forma predeterminada, cada regla generada hace coincidir a la víctima como **destino**, descartando
+el vector de ataque desde *todos* los orígenes, incluidos los clientes legítimos que envían el mismo
+protocolo. Con `flowspec.source_anchored: true`, cuando la muestra del ataque revela un conjunto
+**concentrado** de orígenes atacantes, Kapkan emite en su lugar reglas compuestas que fijan **tanto** a
+la víctima (destino) **como** a cada atacante dominante (origen), de modo que solo se descartan los
+atacantes y se preserva el tráfico legítimo de la víctima.
+
+```yaml
+flowspec:
+  action: discard
+  source_anchored: true          # drop the attackers, not the protocol from everyone
+  min_source_concentration: 0.8  # ...only when the top sources cover >= this share (default 0.8)
+```
+
+Solo se activa cuando los orígenes dominantes cubren al menos `min_source_concentration` del ataque
+muestreado dentro del presupuesto de 8 reglas. Un ataque **difuso** —reflexión o spoofing repartido
+entre muchos orígenes— nunca alcanza ese umbral y recurre a la regla anclada a la víctima. Los orígenes
+seleccionados se hacen coincidir únicamente como prefijos de host (`/32`, `/128`): no hay ninguna
+ampliación hacia prefijos más grandes, por lo que una regla nunca puede desbordarse hacia un vecino
+inocente de un atacante.
+
 ## Advertencias
 
 - La coincidencia `tcp-flags` para los SYN floods es una máscara de bits que también coincide con

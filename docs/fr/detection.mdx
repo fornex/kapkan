@@ -132,6 +132,39 @@ C'est l'une des règles de sûreté appliquées : une destination en dehors de `
 périmètre pour la mitigation. Les préfixes protégés ne doivent pas se chevaucher. Voir le [modèle de sûreté](/docs/safety) pour
 la liste complète des garanties.
 
+## Détection par carpet-bombing
+
+La détection par hôte est aveugle à un **carpet bomb** (attaque répartie sur un sous-réseau) : un volume étalé finement sur
+chaque adresse d'un préfixe, de sorte qu'aucun hôte ne franchit individuellement son seuil alors même que l'agrégat est énorme.
+Le bloc optionnel `carpet` le détecte. Les débits entrants de chaque hôte surveillé sont repliés dans son
+**préfixe d'agrégation** (un `/24` pour IPv4, un `/48` pour IPv6 par défaut), et une attaque à l'échelle du préfixe est
+levée lorsque l'agrégat franchit les `carpet.thresholds` **et** que le trafic est réparti sur au moins
+`min_hosts` hôtes distincts — le garde-fou de fan-out qui distingue un véritable flood réparti sur un sous-réseau d'un seul hôte
+chargé (déjà détecté par hôte).
+
+```yaml
+carpet:
+  aggregation_prefix_v4: 24  # fold per /24 (default)
+  aggregation_prefix_v6: 48  # and per /48 (default)
+  min_hosts: 10              # fan-out gate (minimum 2)
+  thresholds:                # AGGREGATE volume over the prefix
+    pps: 2000000
+    mbps: 20000
+```
+
+Fixez les seuils agrégés bien au-dessus de ceux par hôte — ils cumulent l'ensemble du préfixe. Une attaque carpet
+porte `scope: prefix`, le CIDR d'agrégation dans `prefix`, et son fan-out dans `hosts`, aux côtés de
+l'échantillon et de la classification habituels.
+
+<Callout type="info" title="L'atténuation est en option">
+Les attaques carpet sont en alerte seule par défaut. Définissez `carpet.mitigation` pour atténuer automatiquement le préfixe
+d'agrégation — `flowspec` ne supprime que le vecteur d'attaque sur l'ensemble du préfixe (chirurgical), ou `blackhole` le met en
+RTBH. Chacune des deux méthodes **refuse catégoriquement un préfixe contenant une adresse `protected_whitelist`** : une atténuation
+de préfixe ne peut pas exempter un seul membre et la garantie de liste blanche est absolue. Un bannissement de préfixe compte aussi
+toute son étendue d'adresses dans `ban.max_banned_fraction` et possède son propre plafond `carpet.max_active_prefix_bans`.
+Voir [Mitigation](/docs/mitigation).
+</Callout>
+
 ## Détection sortante
 
 Par défaut, Kapkan surveille le trafic **arrivant vers** vos hôtes protégés (`direction: incoming`). Ajoutez un

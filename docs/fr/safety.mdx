@@ -71,6 +71,24 @@ métriques, mais il ne peut jamais déclencher de bannissement. Vous ne pouvez p
 accidentellement un préfixe qui ne vous appartient pas, même si un flood traverse votre réseau en
 route vers une autre destination.
 
+## 7. Limites du rayon d'impact (optionnel)
+
+Le plafond strict (#4) borne le *nombre* de bannissements, mais pas la part de votre réseau qu'ils
+couvrent ni la vitesse à laquelle ils s'accumulent. Deux garde-fous `ban` optionnels resserrent
+encore cela :
+
+- `max_banned_fraction` refuse les nouveaux bannissements dès que plus que cette part (par famille
+  d'adresses) de votre espace protégé est déjà blackholée — ainsi une référence empoisonnée ou une
+  tempête à sources usurpées ne peut pas null-router une large fraction de votre propre réseau un
+  `/32` à la fois, même tant que chaque bannissement reste sous le plafond de comptage.
+- `max_bans_per_window` (avec `ban_window_seconds`) borne la vitesse à laquelle les nouveaux
+  bannissements s'accumulent, en attrapant une tempête incontrôlée avant qu'elle n'atteigne le
+  plafond de comptage.
+
+Les deux sont désactivés par défaut (`0`). Un refus déclenche une alerte avec un motif distinct
+`blast_radius_fraction` ou `blast_radius_rate` sur la [métrique](/docs/metrics)
+`kapkan_mitigate_bans_rejected_total`.
+
 ## Comment les bannissements manuels héritent de toutes les règles
 
 Le point de terminaison `POST /api/v1/ban` n'est pas une échappatoire. Une demande de bannissement

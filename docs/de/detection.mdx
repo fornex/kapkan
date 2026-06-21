@@ -137,6 +137,42 @@ Dies ist eine der durchgesetzten Sicherheitsregeln: ein Ziel außerhalb von `net
 vollständig außerhalb des Geltungsbereichs der Mitigation. Geschützte Präfixe dürfen sich nicht
 überlappen. Siehe das [Sicherheitsmodell](/docs/safety) für die vollständige Liste der Garantien.
 
+## Carpet-bombing-Erkennung
+
+Die Erkennung pro Host ist blind gegenüber einem **Carpet-Bomb** (Angriff mit Verteilung über ein
+Subnetz): Volumen, das dünn über jede Adresse eines Präfixes verteilt wird, sodass kein einzelner
+Host seinen Schwellenwert überschreitet, obwohl das Aggregat gewaltig ist. Der optionale
+`carpet`-Block fängt dies ab. Die eingehenden Raten jedes überwachten Hosts werden in dessen
+**Aggregationspräfix** zusammengefasst (standardmäßig ein `/24` für IPv4, ein `/48` für IPv6), und
+ein präfixbezogener Angriff wird ausgelöst, wenn das Aggregat `carpet.thresholds` überschreitet
+**und** der Datenverkehr über mindestens `min_hosts` eindeutige Hosts verteilt ist — das Fan-out-Gate,
+das einen echten subnetzverteilten Flood von einem einzelnen schweren Host (der bereits pro Host
+erfasst wird) unterscheidet.
+
+```yaml
+carpet:
+  aggregation_prefix_v4: 24  # fold per /24 (default)
+  aggregation_prefix_v6: 48  # and per /48 (default)
+  min_hosts: 10              # fan-out gate (minimum 2)
+  thresholds:                # AGGREGATE volume over the prefix
+    pps: 2000000
+    mbps: 20000
+```
+
+Setzen Sie die Aggregat-Schwellenwerte deutlich über die Werte pro Host — sie summieren das gesamte
+Präfix. Ein Carpet-Angriff trägt `scope: prefix`, das Aggregations-CIDR in `prefix` und sein Fan-out
+in `hosts`, neben dem üblichen Sample und der Klassifizierung.
+
+<Callout type="info" title="Mitigation ist optional">
+Carpet-Angriffe sind standardmäßig nur Alarm. Setzen Sie `carpet.mitigation`, um das
+Aggregationspräfix automatisch zu mitigieren — `flowspec` verwirft den Angriffsvektor für das gesamte
+Präfix (chirurgisch), oder `blackhole` blackholet es per RTBH. Beide Methoden **verweigern ein
+Präfix, das eine `protected_whitelist`-Adresse enthält** rundheraus: eine Präfix-Mitigation kann kein
+einzelnes Mitglied ausnehmen, und die Whitelist-Garantie ist absolut. Ein Präfix-Bann zählt zudem
+seine gesamte Adressspanne auf `ban.max_banned_fraction` an und hat seine eigene
+`carpet.max_active_prefix_bans`-Obergrenze. Siehe [Mitigation](/docs/mitigation).
+</Callout>
+
 ## Erkennung ausgehender Angriffe
 
 Standardmäßig überwacht Kapkan den Datenverkehr, der **bei** Ihren geschützten Hosts **ankommt**

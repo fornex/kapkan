@@ -132,6 +132,39 @@ This is one of the enforced safety rules: a destination outside `networks` is ou
 mitigation entirely. Protected prefixes must not overlap. See the [Safety model](/docs/safety) for
 the full list of guarantees.
 
+## Carpet-bombing detection
+
+Per-host detection is blind to a **carpet bomb** (subnet-spread attack): volume spread thinly across
+every address in a prefix, so no single host crosses its threshold even though the aggregate is huge.
+The optional `carpet` block catches it. Each monitored host's incoming rates are folded into its
+**aggregation prefix** (a `/24` for IPv4, `/48` for IPv6 by default), and a prefix-scoped attack is
+raised when the aggregate crosses `carpet.thresholds` **and** the traffic is spread across at least
+`min_hosts` distinct hosts — the fan-out gate that separates a real subnet-spread flood from one heavy
+host (already caught per-host).
+
+```yaml
+carpet:
+  aggregation_prefix_v4: 24  # fold per /24 (default)
+  aggregation_prefix_v6: 48  # and per /48 (default)
+  min_hosts: 10              # fan-out gate (minimum 2)
+  thresholds:                # AGGREGATE volume over the prefix
+    pps: 2000000
+    mbps: 20000
+```
+
+Set the aggregate thresholds well above the per-host ones — they sum the whole prefix. A carpet attack
+carries `scope: prefix`, the aggregation CIDR in `prefix`, and its fan-out in `hosts`, alongside the
+usual sample and classification.
+
+<Callout type="info" title="Mitigation is opt-in">
+Carpet attacks are alert-only by default. Set `carpet.mitigation` to auto-mitigate the aggregation
+prefix — `flowspec` drops the attack vector to the whole prefix (surgical), or `blackhole` RTBHs it.
+Either method **refuses a prefix that contains a `protected_whitelist` address** outright: a prefix
+mitigation cannot exempt one member and the whitelist guarantee is absolute. A prefix ban also counts
+its full address span toward `ban.max_banned_fraction` and has its own `carpet.max_active_prefix_bans`
+cap. See [Mitigation](/docs/mitigation).
+</Callout>
+
 ## Outgoing detection
 
 By default Kapkan watches traffic **arriving at** your protected hosts (`direction: incoming`). Add a
