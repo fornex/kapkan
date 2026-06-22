@@ -81,6 +81,7 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	a.API = api.New(store, a.Engine, mit, log)
 	a.API.SetQuerier(storage.NewQuerier(store.Get().StorageCfg, log))
 	a.Storage = storage.NewWriter(store.Get().StorageCfg, log)
+	a.API.SetAuditWriter(a.Storage) // operator-attributed audit trail (no-op when storage off)
 	return a, nil
 }
 

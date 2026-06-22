@@ -125,6 +125,51 @@ func TestSchemaInitAndInsert(t *testing.T) {
 	w.Stop()
 }
 
+func sampleAudit() AuditRow {
+	return AuditRow{
+		EventTime: "2026-06-13 12:00:00", Action: "ban", Result: "active",
+		Operator: "b-op", Role: "operator", Tenant: "custB",
+		Target: "203.0.113.70", TargetType: "host", Source: "api",
+		BanState: "active", DryRun: 1,
+	}
+}
+
+// TestAuditSchemaAndWrite: Start issues the audit_events DDL with a TTL, and
+// WriteAudit emits one standalone-JSON row carrying the operator and tenant.
+func TestAuditSchemaAndWrite(t *testing.T) {
+	rec := newRecorder()
+	srv, cfg := rec.server(t)
+	defer srv.Close()
+
+	w := NewWriter(cfg, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	w.Start(ctx)
+	defer func() { cancel(); w.Stop() }()
+
+	rec.mu.Lock()
+	ddl := strings.Join(rec.ddl, "\n")
+	rec.mu.Unlock()
+	for _, want := range []string{"audit_events", "ORDER BY (event_time, tenant)", "INTERVAL 7 DAY"} {
+		if !strings.Contains(ddl, want) {
+			t.Errorf("audit DDL missing %q:\n%s", want, ddl)
+		}
+	}
+
+	w.WriteAudit(sampleAudit())
+	waitFor(t, func() bool { return len(rec.inserts("audit_events")) == 1 })
+
+	got := rec.inserts("audit_events")[0]
+	for _, want := range []string{`"action":"ban"`, `"operator":"b-op"`, `"tenant":"custB"`, `"target":"203.0.113.70"`, `"source":"api"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("audit row missing %q: %s", want, got)
+		}
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(got), &obj); err != nil {
+		t.Errorf("audit line is not valid standalone JSON: %q (%v)", got, err)
+	}
+}
+
 func TestBatchSizeFlush(t *testing.T) {
 	rec := newRecorder()
 	srv, cfg := rec.server(t)
