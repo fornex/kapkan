@@ -21,9 +21,10 @@ Bind the listener accordingly — see [Authentication](/docs/authentication).
 
 | Metric | Labels | Meaning |
 | --- | --- | --- |
-| `kapkan_ingest_flows_total` | `protocol` | Total flows ingested, by flow protocol. |
-| `kapkan_ingest_packets_total` | `exporter`, `protocol` | Total flow packets received, by source exporter and protocol. |
-| `kapkan_ingest_decode_errors_total` | — | Flow packets that failed to decode. |
+| `kapkan_ingest_flows_total` | `proto` | Total flows ingested, by flow protocol. |
+| `kapkan_ingest_packets_total` | `exporter`, `proto` | Total telemetry datagrams received, by source exporter (cardinality-bounded; see `flow_sources`) and protocol. |
+| `kapkan_ingest_decode_errors_total` | `proto` | Telemetry datagrams that failed to decode, by protocol. |
+| `kapkan_ingest_dropped_flows_total` | — | Flows dropped because the engine input queue was full. |
 | `kapkan_engine_active_attacks` | — | Gauge of attacks currently in progress. |
 | `kapkan_engine_attacks_total` | — | Counter of attacks detected since start. |
 | `kapkan_engine_process_latency_seconds` | — | Histogram of per-flow hot-path processing latency. |
@@ -61,6 +62,21 @@ To inspect the raw output directly:
 ```sh
 curl -s localhost:8080/metrics | grep kapkan_
 ```
+
+## Grafana dashboard
+
+An official Grafana dashboard for the `kapkan_*` set ships in the repository at
+[`engine/deploy/grafana/kapkan-overview.json`](https://github.com/fornex/kapkan/blob/main/engine/deploy/grafana/kapkan-overview.json).
+It covers the full pipeline — ingest flow/datagram/decode rates and dropped flows, active and
+started attacks, tracked hosts, hot-path latency quantiles, announced routes and FlowSpec
+rules by `mode`, bans rejected by `reason`, mitigation fallbacks, and notification and storage
+results.
+
+In Grafana, go to **Dashboards → New → Import**, upload the JSON, and pick your Prometheus
+data source when prompted (it is templatized as `DS_PROMETHEUS`). The dashboard targets
+Grafana 10+ and is import-verified against Grafana 11. See the
+[README](https://github.com/fornex/kapkan/blob/main/engine/deploy/grafana/README.md) next to
+it for provisioning.
 
 ## Related
 

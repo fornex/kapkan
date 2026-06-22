@@ -22,9 +22,10 @@ Vincula (bind) el listener en consecuencia — consulta [Autenticación](/docs/a
 
 | Métrica | Etiquetas | Significado |
 | --- | --- | --- |
-| `kapkan_ingest_flows_total` | `protocol` | Total de flows ingeridos, por protocolo de flow. |
-| `kapkan_ingest_packets_total` | `exporter`, `protocol` | Total de paquetes de flow recibidos, por exportador de origen y protocolo. |
-| `kapkan_ingest_decode_errors_total` | — | Paquetes de flow que no se pudieron decodificar. |
+| `kapkan_ingest_flows_total` | `proto` | Total de flows ingeridos, por protocolo de flow. |
+| `kapkan_ingest_packets_total` | `exporter`, `proto` | Total de datagramas de telemetría recibidos, por exportador de origen (con cardinalidad acotada; consulta `flow_sources`) y protocolo. |
+| `kapkan_ingest_decode_errors_total` | `proto` | Datagramas de telemetría que no se pudieron decodificar, por protocolo. |
+| `kapkan_ingest_dropped_flows_total` | — | Flows descartados porque la cola de entrada del motor estaba llena. |
 | `kapkan_engine_active_attacks` | — | Gauge de ataques actualmente en curso. |
 | `kapkan_engine_attacks_total` | — | Contador de ataques detectados desde el arranque. |
 | `kapkan_engine_process_latency_seconds` | — | Histograma de la latencia de procesamiento en la ruta crítica (hot-path) por flow. |
@@ -62,6 +63,21 @@ Para inspeccionar la salida en bruto directamente:
 ```sh
 curl -s localhost:8080/metrics | grep kapkan_
 ```
+
+## Grafana dashboard
+
+Un dashboard oficial de Grafana para el conjunto `kapkan_*` se incluye en el repositorio en
+[`engine/deploy/grafana/kapkan-overview.json`](https://github.com/fornex/kapkan/blob/main/engine/deploy/grafana/kapkan-overview.json).
+Cubre todo el pipeline — tasas de ingesta de flows/datagramas/decodificación y flows descartados, ataques
+activos e iniciados, hosts rastreados, cuantiles de latencia en la ruta crítica, rutas anunciadas y reglas
+FlowSpec por `mode`, bloqueos rechazados por `reason`, fallbacks de mitigación, y resultados de notificación
+y almacenamiento.
+
+En Grafana, ve a **Dashboards → New → Import**, sube el JSON y elige tu fuente de datos
+Prometheus cuando se te solicite (está parametrizada como `DS_PROMETHEUS`). El dashboard se dirige a
+Grafana 10+ y está verificado para importación contra Grafana 11. Consulta el
+[README](https://github.com/fornex/kapkan/blob/main/engine/deploy/grafana/README.md) junto a
+él para el aprovisionamiento.
 
 ## Relacionado
 
