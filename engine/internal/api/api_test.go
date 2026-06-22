@@ -217,6 +217,45 @@ func TestAttacksEndpoint(t *testing.T) {
 	}
 }
 
+func TestAttackDryRunFallbackFromConfig(t *testing.T) {
+	// When an attack is recorded with no ban (ban==nil) — e.g. mitigation is
+	// disabled or the attack is group-scoped — Attack.DryRun must fall back to
+	// the config's dry_run flag (the else-branch of RecordAttackStarted).
+	record := func(t *testing.T, yaml string) Attack {
+		t.Helper()
+		s := testServer(t, storeFromYAML(t, yaml))
+		s.RecordAttackStarted(engine.Event{
+			Kind: engine.AttackStarted, Target: netip.MustParseAddr("203.0.113.50"),
+			Metric: engine.MetricPPS, Rate: 200000, Threshold: 80000, At: time.Now(),
+		}, nil)
+		rec := do(t, s.Handler(), http.MethodGet, "/api/v1/attacks", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		var resp struct {
+			Active []Attack `json:"active"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Active) != 1 {
+			t.Fatalf("active = %d, want 1", len(resp.Active))
+		}
+		return resp.Active[0]
+	}
+
+	// dry_run: true config → the fallback marks the unbanned attack dry-run.
+	if a := record(t, "dry_run: true\n"+apiYAML); !a.DryRun {
+		t.Errorf("DryRun = false, want true (dry_run: true config, ban=nil)")
+	}
+	// dry_run: false config → the fallback reflects the live (non-dry-run) flag.
+	// (dry_run defaults to true when the key is absent — the safety default —
+	// so this case must set it explicitly to exercise the false direction.)
+	if a := record(t, "dry_run: false\n"+apiYAML); a.DryRun {
+		t.Errorf("DryRun = true, want false (dry_run: false config, ban=nil)")
+	}
+}
+
 func TestRecentRingBounded(t *testing.T) {
 	s := testServer(t, storeFromYAML(t, apiYAML))
 	for i := 0; i < maxRecentAttacks+50; i++ {
