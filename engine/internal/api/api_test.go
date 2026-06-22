@@ -217,6 +217,45 @@ func TestAttacksEndpoint(t *testing.T) {
 	}
 }
 
+func TestAttackDryRunFallbackFromConfig(t *testing.T) {
+	// When an attack is recorded with no ban (ban==nil) — e.g. mitigation is
+	// disabled or the attack is group-scoped — Attack.DryRun must fall back to
+	// the config's dry_run flag (the else-branch of RecordAttackStarted).
+	record := func(t *testing.T, yaml string) Attack {
+		t.Helper()
+		s := testServer(t, storeFromYAML(t, yaml))
+		s.RecordAttackStarted(engine.Event{
+			Kind: engine.AttackStarted, Target: netip.MustParseAddr("203.0.113.50"),
+			Metric: engine.MetricPPS, Rate: 200000, Threshold: 80000, At: time.Now(),
+		}, nil)
+		rec := do(t, s.Handler(), http.MethodGet, "/api/v1/attacks", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		var resp struct {
+			Active []Attack `json:"active"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Active) != 1 {
+			t.Fatalf("active = %d, want 1", len(resp.Active))
+		}
+		return resp.Active[0]
+	}
+
+	// dry_run: true config → the fallback marks the unbanned attack dry-run.
+	if a := record(t, "dry_run: true\n"+apiYAML); !a.DryRun {
+		t.Errorf("DryRun = false, want true (dry_run: true config, ban=nil)")
+	}
+	// dry_run: false config → the fallback reflects the live (non-dry-run) flag.
+	// (dry_run defaults to true when the key is absent — the safety default —
+	// so this case must set it explicitly to exercise the false direction.)
+	if a := record(t, "dry_run: false\n"+apiYAML); a.DryRun {
+		t.Errorf("DryRun = true, want false (dry_run: false config, ban=nil)")
+	}
+}
+
 func TestRecentRingBounded(t *testing.T) {
 	s := testServer(t, storeFromYAML(t, apiYAML))
 	for i := 0; i < maxRecentAttacks+50; i++ {
@@ -741,6 +780,26 @@ func banTargets(t *testing.T, body []byte) map[string]bool {
 	return out
 }
 
+// groupAttackNames returns the set of group names for the GROUP-scoped active
+// attacks in an /attacks response. Group attacks share the invalid zero target,
+// so (unlike attackTargets) they must be keyed by name, not address.
+func groupAttackNames(t *testing.T, body []byte) map[string]bool {
+	t.Helper()
+	var resp struct {
+		Active []Attack `json:"active"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("attacks body: %v\n%s", err, body)
+	}
+	out := map[string]bool{}
+	for _, a := range resp.Active {
+		if a.Scope == engine.ScopeGroup {
+			out[a.Group] = true
+		}
+	}
+	return out
+}
+
 // TestTenantScoping is the core cross-tenant isolation test: a scoped token
 // sees and may mutate only its own tenant's data; an admin sees all.
 func TestTenantScoping(t *testing.T) {
@@ -964,5 +1023,67 @@ func TestAuditEndpointParamValidation(t *testing.T) {
 		if rec := do(t, h, http.MethodGet, "/api/v1/audit?"+tc.q, ""); rec.Code != tc.want {
 			t.Errorf("audit?%s = %d, want %d", tc.q, rec.Code, tc.want)
 		}
+	}
+}
+
+// TestGroupAttackTenantScoping is the cross-tenant isolation test for the
+// GROUP-scoped (total-group) attack path, which is gated by visibleGroupName
+// (api.go) rather than by address. A total-group attack carries a group name
+// but no single target address, so the scoped/admin filtering must match the
+// group's owning tenant by name — not by GroupFor(addr). With two groups owned
+// by DIFFERENT tenants (custA-web / custB-web from tenantAPIYAML), a scoped
+// caller must see only its own tenant's group attack; an admin sees both.
+func TestGroupAttackTenantScoping(t *testing.T) {
+	t.Setenv("K_ADMIN", "admin-secret")
+	t.Setenv("K_A", "a-secret")
+	t.Setenv("K_B", "b-secret")
+	s := testServer(t, storeFromYAML(t, tenantAPIYAML()))
+	h := s.Handler()
+
+	// One GROUP-scoped (total-group) attack per tenant-owned group. These have
+	// no single target address; visibility is decided purely by group name →
+	// owning tenant in visibleGroupName.
+	s.RecordAttackStarted(engine.Event{
+		Kind: engine.AttackStarted, Scope: engine.ScopeGroup, Group: "custA-web",
+		Metric: engine.MetricPPS, Rate: 180000, Threshold: 150000, At: time.Now(),
+	}, nil)
+	s.RecordAttackStarted(engine.Event{
+		Kind: engine.AttackStarted, Scope: engine.ScopeGroup, Group: "custB-web",
+		Metric: engine.MetricMbps, Rate: 12000, Threshold: 10000, At: time.Now(),
+	}, nil)
+
+	// custA viewer: sees its own group attack, NOT custB's. The second clause
+	// is what distinguishes "sees only own tenant" from "sees all" — without
+	// the tenant gate this assertion fails.
+	aSeen := groupAttackNames(t, reqWith(h, http.MethodGet, "/api/v1/attacks", "", "a-secret", "").Body.Bytes())
+	if !aSeen["custA-web"] || aSeen["custB-web"] {
+		t.Errorf("custA viewer group attacks = %v, want only custA-web (custB-web must be hidden)", aSeen)
+	}
+
+	// custB operator: the mirror case — only custB's group attack.
+	bSeen := groupAttackNames(t, reqWith(h, http.MethodGet, "/api/v1/attacks", "", "b-secret", "").Body.Bytes())
+	if !bSeen["custB-web"] || bSeen["custA-web"] {
+		t.Errorf("custB operator group attacks = %v, want only custB-web (custA-web must be hidden)", bSeen)
+	}
+
+	// admin (unscoped): sees BOTH tenants' group attacks.
+	adminSeen := groupAttackNames(t, reqWith(h, http.MethodGet, "/api/v1/attacks", "", "admin-secret", "").Body.Bytes())
+	if !adminSeen["custA-web"] || !adminSeen["custB-web"] {
+		t.Errorf("admin group attacks = %v, want both custA-web and custB-web", adminSeen)
+	}
+
+	// A GROUP-scoped attack on an UNKNOWN group is hidden from any scoped
+	// caller (visibleGroupName default-deny on no name match) but still visible
+	// to the admin — so a refactor that fell back to "visible" on no match
+	// would leak it.
+	s.RecordAttackStarted(engine.Event{
+		Kind: engine.AttackStarted, Scope: engine.ScopeGroup, Group: "no-such-group",
+		Metric: engine.MetricPPS, Rate: 1, Threshold: 0, At: time.Now(),
+	}, nil)
+	if aSeen := groupAttackNames(t, reqWith(h, http.MethodGet, "/api/v1/attacks", "", "a-secret", "").Body.Bytes()); aSeen["no-such-group"] {
+		t.Errorf("custA viewer saw unknown-group attack %v, want default-deny", aSeen)
+	}
+	if adminSeen := groupAttackNames(t, reqWith(h, http.MethodGet, "/api/v1/attacks", "", "admin-secret", "").Body.Bytes()); !adminSeen["no-such-group"] {
+		t.Errorf("admin missing unknown-group attack %v, want it visible", adminSeen)
 	}
 }
