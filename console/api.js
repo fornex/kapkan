@@ -186,6 +186,7 @@
       dry_run: !!a.dry_run, started_at: a.started_at, ended_at: a.ended_at,
       sample: mapSample(a.sample),
       classification: a.classification || { type: "mixed", confidence: 0 },
+      reason: a.reason || null,
       escalation: d.escalation, escalation_step: d.step,
       /* recent table reads peak_rate; the API exposes the last measurement
          (rate), not a stored peak — surface it until /api/v1/traffic lands. */

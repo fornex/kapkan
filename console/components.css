@@ -222,6 +222,24 @@
 .share__bar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; transition: width var(--dur) var(--ease); }
 .share__bar.is-src > i { background: var(--active); }
 
+/* ---------- why this fired (detection reason) ---------- */
+.reason { display: flex; flex-direction: column; gap: var(--s-4); }
+.reason__src { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; font-size: var(--t-sm); }
+.reason__warmup { display: flex; align-items: center; gap: 6px; font-size: var(--t-sm); color: var(--elev); }
+.reason__math { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--s-2) var(--s-4); background: var(--inset); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-4); }
+.reason__kv { display: flex; justify-content: space-between; gap: var(--s-3); align-items: baseline; }
+.reason__kv-k { font-size: var(--t-xs); color: var(--faint); }
+.reason__kv-v { font-size: var(--t-sm); color: var(--text); font-variant-numeric: tabular-nums; }
+.reason__kv.is-eff { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: var(--s-2); margin-top: 2px; }
+.reason__kv.is-eff .reason__kv-k { color: var(--text); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.reason__kv.is-eff .reason__kv-v { color: var(--accent); font-weight: 700; }
+.reason__formula { font-size: var(--t-xs); }
+.reason__shares { background: var(--inset); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-4); }
+.reason__shares .share:first-of-type { margin-top: var(--s-2); }
+.reason__dom { margin-left: 6px; font-family: var(--sans, inherit); font-size: var(--t-xs); color: var(--active); text-transform: uppercase; letter-spacing: .05em; }
+.share__bar.is-dom > i { background: var(--active); }
+.reason__gate { font-size: var(--t-xs); margin-top: var(--s-2); }
+
 /* ============================================================================
    Tables
    ========================================================================== */
