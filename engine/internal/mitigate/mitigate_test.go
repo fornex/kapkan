@@ -1692,3 +1692,81 @@ func TestCarpetBlastRadiusAddressUnits(t *testing.T) {
 		t.Fatalf("second /24 = %+v, want rejected — proves a /24 counts as 256 addresses", b)
 	}
 }
+
+// carpetMitigYAMLv6 mirrors carpetMitigYAML but protects an IPv6 /32
+// (2001:db8::/32 => ProtectedAddrs(is6) = 2^96) and sets an IPv6 aggregation
+// prefix so carpet bans on an IPv6 supernet sit inside the configured network.
+// `extra` injects top-level lines; networks include an IPv4 net too so a mixed
+// config is exercised, but the IPv6 /32 is what the v6 blast-radius math uses.
+func carpetMitigYAMLv6(method, extra string) string {
+	return `dry_run: false
+listen: {netflow: ":2055"}
+sampling: {default_rate: 1000}
+networks: ["203.0.113.0/24", "2001:db8::/32"]
+` + extra + `thresholds: {pps: 80000, mbps: 1000, flows_per_sec: 35000}
+ban: {ttl_seconds: 600, unban_hysteresis_seconds: 120, max_active_bans: 50}
+carpet:
+  aggregation_prefix_v4: 24
+  aggregation_prefix_v6: 48
+  min_hosts: 5
+  thresholds: {pps: 100000}
+  mitigation: ` + method + `
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"
+  next_hop: "192.0.2.1"
+  community: "65000:666"
+  neighbors: [{address: "10.0.0.254", remote_asn: 65000}]
+api: {listen: "127.0.0.1:8080"}
+`
+}
+
+// TestCarpetBlastRadiusAddressUnitsV6 is the IPv6 analogue of
+// TestCarpetBlastRadiusAddressUnits: it locks addressCountForPrefix for the
+// 128-bit family (2^(128-bits)) and the blast-radius fraction gate against
+// ProtectedAddrs(is6). Protected space is the IPv6 /32 = 2^96 addresses.
+// With max_banned_fraction = 1e-5:
+//   - a /64 spans 2^64 addrs; (0+2^64)/2^96 = 2^-32 ≈ 2.3e-10 < 1e-5 -> ADMIT.
+//   - a /48 spans 2^80 addrs; (0+2^80)/2^96 = 2^-16 ≈ 1.526e-5 > 1e-5 -> REJECT
+//     with state BanRejected, reason max_banned_fraction, and the
+//     blast_radius_fraction rejection metric incremented.
+//
+// Picking /64 (admit) and /48 (reject) makes both cases unambiguous and proves
+// the IPv6 span is 2^(128-bits), not a 32-bit (IPv4) computation.
+func TestCarpetBlastRadiusAddressUnitsV6(t *testing.T) {
+	rec := newRecorder()
+	yaml := strings.Replace(carpetMitigYAMLv6("blackhole", ""),
+		"max_active_bans: 50", "max_active_bans: 50, max_banned_fraction: 0.00001", 1)
+	m := newMitigator(t, yaml, rec, nil)
+
+	// ADMIT: a /64 within the protected /32 is far under the fraction.
+	const v64 = "2001:db8:0:1::/64" // 2^64 addrs; 2^64/2^96 = 2^-32 < 1e-5
+	if b := m.OnAttackStarted(carpetEvent(v64)); b == nil || b.State != BanActive ||
+		b.Method != config.MitigateBlackhole {
+		t.Fatalf("IPv6 /64 carpet ban = %+v, want active blackhole (2^64/2^96 = 2^-32 < 1e-5)", b)
+	}
+	if got := rec.announceCount(netip.MustParsePrefix(v64).String()); got != 1 {
+		t.Errorf("RTBH announce of the IPv6 /64 = %d, want 1", got)
+	}
+
+	// REJECT: a /48 (2^80 addrs) alone already exceeds the fraction, even with an
+	// empty ban table — proves the span is 2^(128-48)=2^80, not an IPv4-width calc.
+	before := testutil.ToFloat64(metrics.BansRejectedTotal.WithLabelValues("blast_radius_fraction"))
+	rec48 := newRecorder()
+	m48 := newMitigator(t, yaml, rec48, nil)
+	const v48 = "2001:db8::/48" // 2^80 addrs; 2^80/2^96 = 2^-16 > 1e-5
+	b := m48.OnAttackStarted(carpetEvent(v48))
+	if b == nil || b.State != BanRejected {
+		t.Fatalf("IPv6 /48 carpet ban = %+v, want rejected (2^80/2^96 = 2^-16 > 1e-5)", b)
+	}
+	if b.Reason != "max_banned_fraction reached" {
+		t.Errorf("reason = %q, want max_banned_fraction reached", b.Reason)
+	}
+	if rec48.announceCount(netip.MustParsePrefix(v48).String()) != 0 {
+		t.Error("a blast-radius-rejected IPv6 /48 must announce no route")
+	}
+	after := testutil.ToFloat64(metrics.BansRejectedTotal.WithLabelValues("blast_radius_fraction"))
+	if after-before != 1 {
+		t.Errorf("blast_radius_fraction metric delta = %v, want 1", after-before)
+	}
+}

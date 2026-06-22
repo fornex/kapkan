@@ -549,6 +549,39 @@ func TestStaleRingEntriesExcluded(t *testing.T) {
 	}
 }
 
+// TestForwardClockJumpYieldsEmptySample characterizes scanRing under a clock
+// that jumps far forward (NTP correction, container clock reset). Flows are
+// recorded at the current epoch, then the sample is collected with sinceEpoch
+// set far in the future. scanRing's epoch guards (e.epoch == 0 ||
+// e.epoch < sinceEpoch-1 stops; e.epoch < sinceEpoch skips) make every
+// recorded entry fall outside the window, so the collection returns nil and
+// never panics. This pins the current silent-empty behavior so any future
+// change to the epoch math (e.g. clamping instead of dropping) is deliberate,
+// and proves the scan does not crash on clock skew.
+func TestForwardClockJumpYieldsEmptySample(t *testing.T) {
+	clk := newMockClock()
+	e := New(testStore(t), WithClock(clk.Now), WithWindow(1))
+	dst := netip.MustParseAddr("203.0.113.20")
+
+	// Record real flows at the current (normal) epoch.
+	for i := 0; i < 50; i++ {
+		e.Process(attackerFlow("198.51.100.7", dst.String(), 123, 1000))
+	}
+
+	// The clock jumps far forward, so the requested window starts long after
+	// every entry was written.
+	sinceEpoch := clk.Now().Unix() + 10000
+
+	sh := e.shardFor(dst)
+	sh.mu.Lock()
+	s := e.collectHostSample(sh, dst, dirIn, sinceEpoch)
+	sh.mu.Unlock()
+
+	if s != nil {
+		t.Errorf("collectHostSample = %+v, want nil under a forward clock jump (all entries pre-date the window)", s)
+	}
+}
+
 // TestFlowsPerAttackHonored: the configured cap is read from config and
 // enforced exactly. Kills the mutation hardcoding sampleFlows.
 func TestFlowsPerAttackHonored(t *testing.T) {
