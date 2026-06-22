@@ -33,6 +33,8 @@ make run-dev
 ./kapkan -config configs/dev.yaml -log-format text
 ```
 
+`-config` указывает на YAML-конфигурацию, а `-log-format text` переключает логи с используемого по умолчанию структурированного JSON на читаемый человеком вид — полный список флагов и допустимые для них значения см. в [Справочнике CLI](/docs/cli).
+
 Конфигурация для разработки ([`configs/dev.yaml`](/docs/configuration)) содержит `dry_run: true`, тестовую
 защищаемую сеть `203.0.113.0/24` и слушает sFlow на `:6343`, а
 NetFlow/IPFIX — на `:2055`.

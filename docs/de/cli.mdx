@@ -1,0 +1,93 @@
+export const metadata = {
+  title: "CLI-Referenz",
+  description:
+    "Jeder Kommandozeilen-Flag des Kapkan-Binarys — Konfigurationspfad, Log-Format und -Level sowie die Schema-/Validierungs-Hilfsmodi.",
+};
+
+# CLI-Referenz
+
+Kapkan ist ein einzelnes Binary. Alles, was es tut, wird beim Start über Kommandozeilen-Flags
+ausgewählt — es gibt keine Subcommands über die beiden Hilfsmodi unten hinaus. Alle Logs gehen
+nach **stderr**, sodass die REST-API und die Metriken auf stdout für das Piping sauber bleiben.
+
+```sh
+kapkan [flags]
+```
+
+## Flags
+
+| Flag | Standard | Beschreibung |
+| --- | --- | --- |
+| `-config <path>` | `configs/dev.yaml` | Pfad zur YAML-[Konfigurationsdatei](/docs/configuration). |
+| `-log-format <fmt>` | `json` | Log-Ausgabeformat: `json` (strukturiert, für Log-Collectors) oder `text` (menschenlesbar, für lokale Läufe). Jeder andere Wert als `text` wird als `json` behandelt. |
+| `-log-level <lvl>` | `info` | Minimales Log-Level: `debug`, `info`, `warn`, `error`. Ein unbekannter Wert fällt auf `info` zurück. |
+| `-check-config <path>` | — | Validiert die Konfigurationsdatei unter `<path>` und beendet sich — startet den Daemon **nicht**. Siehe [unten](#eine-konfiguration-validieren). |
+| `-dump-schema` | `false` | Gibt das JSON-Schema der Konfiguration auf stdout aus und beendet sich. Siehe [unten](#das-schema-ausgeben). |
+
+<Callout type="info" title="json oder text?">
+Verwenden Sie `-log-format text` für die lokale Entwicklung — es ist das Format, das der
+Schnellstart und das [`make run-dev`](/docs/quickstart)-Target nutzen. Behalten Sie im
+Produktivbetrieb den Standard `json` bei, damit ein Log-Collector die strukturierten Felder
+parsen kann; die [systemd-Unit](/docs/deployment) wird mit `-log-format json -log-level info`
+ausgeliefert.
+</Callout>
+
+## Den Daemon betreiben
+
+Ohne Hilfs-Flag öffnet Kapkan seine Flow-Listener, die REST-API und (sofern nicht im Dry-Run) den
+BGP-Speaker und läuft dann, bis es `SIGINT` oder `SIGTERM` empfängt, woraufhin es sich sauber
+herunterfährt. Es endet nur bei einem fatalen Start- oder Laufzeitfehler mit einem Wert ungleich
+null.
+
+```sh
+# Local, human-readable logs against the bundled dev config:
+kapkan -config configs/dev.yaml -log-format text
+
+# Production-style: structured logs at info level:
+kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
+```
+
+Die Konfigurationsdatei ist zur Laufzeit ohne Neustart neu ladbar — senden Sie `SIGHUP`
+(`systemctl reload kapkan`) oder `POST /api/v1/config/reload`. Siehe die
+[Konfigurationsreferenz](/docs/configuration) dazu, was neu geladen wird und was beim Start
+fixiert ist.
+
+## Hilfs-Subcommands
+
+Diese beiden Flags beenden sich, bevor der Daemon startet — sie öffnen niemals einen Listener und
+senden keine Ankündigung, sodass sie sich gefahrlos auf einem Produktivhost ausführen lassen.
+
+### Eine Konfiguration validieren
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml
+```
+
+Führt exakt dasselbe Parsen und dieselbe Validierung der Engine aus — einschließlich der
+feldübergreifenden Regeln, die ein statisches Schema nicht ausdrücken kann — gibt dann die
+aufgelöste Konfiguration aus (Modus, geschützte Netze und die effektive Mitigation pro
+[Hostgroup](/docs/hostgroups)) und beendet sich:
+
+| Exit-Code | Bedeutung |
+| --- | --- |
+| `0` | Die Konfiguration ist gültig. |
+| `1` | Die Konfiguration ist ungültig; der genaue Fehler wird auf stderr ausgegeben. |
+
+Die saubere 0/1-Aufteilung fügt sich direkt in CI oder eine Pre-Deploy-Prüfung ein. Siehe
+[Konfiguration validieren](/docs/configuration#konfiguration-validieren).
+
+### Das Schema ausgeben
+
+```sh
+kapkan -dump-schema
+```
+
+Gibt das JSON-Schema der Konfiguration auf stdout aus und endet mit `0` (oder `1` bei einem
+internen Fehler). Der [Konfigurations-Builder](/config) nutzt dieses Schema, um Felder direkt in
+Ihrem Browser zu prüfen.
+
+## Nächste Schritte
+
+- [Schnellstart](/docs/quickstart) — das Binary erstellen und im Dry-Run betreiben.
+- [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.
+- [Produktiv-Deployment](/docs/deployment) — die systemd-Unit und ihre Flags.
