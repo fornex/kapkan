@@ -65,9 +65,10 @@ curl -s localhost:8080/metrics | grep kapkan_
 
 ## Grafana dashboard
 
-Ein offizielles Grafana-Dashboard für die `kapkan_*`-Sammlung wird im Repository unter
-[`engine/deploy/grafana/kapkan-overview.json`](https://github.com/fornex/kapkan/blob/main/engine/deploy/grafana/kapkan-overview.json)
-ausgeliefert. Es deckt die gesamte Pipeline ab — Ingest-Raten für Flows/Datagramme/Dekodierung und
+Ein offizielles Grafana-Dashboard für die `kapkan_*`-Sammlung steht direkt zum Download bereit unter
+[`kapkan-overview.json`](/kapkan-overview.json) (sein Quellcode liegt im Repository unter
+[`engine/deploy/grafana/`](https://github.com/fornex/kapkan/tree/main/engine/deploy/grafana)).
+Es deckt die gesamte Pipeline ab — Ingest-Raten für Flows/Datagramme/Dekodierung und
 verworfene Flows, aktive und gestartete Angriffe, verfolgte Hosts, Latenz-Quantile auf dem Hot Path,
 angekündigte Routen und FlowSpec-Regeln nach `mode`, nach `reason` abgelehnte Sperren,
 Mitigation-Fallbacks sowie Benachrichtigungs- und Speicherergebnisse.

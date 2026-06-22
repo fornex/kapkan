@@ -66,8 +66,9 @@ curl -s localhost:8080/metrics | grep kapkan_
 
 ## Grafana dashboard
 
-Официальный дашборд Grafana для набора `kapkan_*` поставляется в репозитории по пути
-[`engine/deploy/grafana/kapkan-overview.json`](https://github.com/fornex/kapkan/blob/main/engine/deploy/grafana/kapkan-overview.json).
+Официальный дашборд Grafana для набора `kapkan_*` можно скачать напрямую по ссылке
+[`kapkan-overview.json`](/kapkan-overview.json) (его исходник лежит в репозитории в каталоге
+[`engine/deploy/grafana/`](https://github.com/fornex/kapkan/tree/main/engine/deploy/grafana)).
 Он охватывает весь конвейер — скорости приёма flow/датаграмм/декодирования и отброшенные flow,
 активные и начавшиеся атаки, отслеживаемые хосты, квантили задержки горячего пути, анонсированные
 маршруты и правила FlowSpec по `mode`, блокировки, отклонённые по `reason`, резервные переключения

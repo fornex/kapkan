@@ -66,8 +66,9 @@ curl -s localhost:8080/metrics | grep kapkan_
 
 ## Grafana dashboard
 
-Un dashboard oficial de Grafana para el conjunto `kapkan_*` se incluye en el repositorio en
-[`engine/deploy/grafana/kapkan-overview.json`](https://github.com/fornex/kapkan/blob/main/engine/deploy/grafana/kapkan-overview.json).
+Un dashboard oficial de Grafana para el conjunto `kapkan_*` está disponible para descargar directamente en
+[`kapkan-overview.json`](/kapkan-overview.json) (su código fuente reside en el repositorio bajo
+[`engine/deploy/grafana/`](https://github.com/fornex/kapkan/tree/main/engine/deploy/grafana)).
 Cubre todo el pipeline — tasas de ingesta de flows/datagramas/decodificación y flows descartados, ataques
 activos e iniciados, hosts rastreados, cuantiles de latencia en la ruta crítica, rutas anunciadas y reglas
 FlowSpec por `mode`, bloqueos rechazados por `reason`, fallbacks de mitigación, y resultados de notificación
