@@ -1,0 +1,88 @@
+export const metadata = {
+  title: "CLI reference",
+  description:
+    "Every command-line flag of the kapkan binary — config path, log format and level, and the schema/validation utility subcommands.",
+};
+
+# CLI reference
+
+Kapkan is a single binary. Everything it does is selected by command-line flags at startup —
+there are no subcommands beyond the two utility modes below. All logs go to **stderr**, so the
+REST API and metrics on stdout stay clean for piping.
+
+```sh
+kapkan [flags]
+```
+
+## Flags
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-config <path>` | `configs/dev.yaml` | Path to the YAML [configuration file](/docs/configuration). |
+| `-log-format <fmt>` | `json` | Log output format: `json` (structured, for log collectors) or `text` (human-readable, for local runs). Any value other than `text` is treated as `json`. |
+| `-log-level <lvl>` | `info` | Minimum log level: `debug`, `info`, `warn`, `error`. An unrecognized value falls back to `info`. |
+| `-check-config <path>` | — | Validate the config file at `<path>` and exit — does **not** start the daemon. See [below](#validating-a-config). |
+| `-dump-schema` | `false` | Print the configuration JSON schema to stdout and exit. See [below](#dumping-the-schema). |
+
+<Callout type="info" title="json or text?">
+Use `-log-format text` for local development — it is the format the Quickstart and the
+[`make run-dev`](/docs/quickstart) target use. Keep the default `json` in production so a log
+collector can parse the structured fields; the [systemd unit](/docs/deployment) ships with
+`-log-format json -log-level info`.
+</Callout>
+
+## Running the daemon
+
+With no utility flag, Kapkan opens its flow listeners, REST API and (when not in dry-run) BGP
+speaker, then runs until it receives `SIGINT` or `SIGTERM`, at which point it shuts down
+cleanly. It exits non-zero only on a fatal startup or runtime error.
+
+```sh
+# Local, human-readable logs against the bundled dev config:
+kapkan -config configs/dev.yaml -log-format text
+
+# Production-style: structured logs at info level:
+kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
+```
+
+The config file is reloadable at runtime without a restart — send `SIGHUP`
+(`systemctl reload kapkan`) or `POST /api/v1/config/reload`. See the
+[configuration reference](/docs/configuration) for what reloads and what is fixed at startup.
+
+## Utility subcommands
+
+These two flags exit before the daemon starts — they never open a listener or send an
+announcement, so they are safe to run on a production host.
+
+### Validating a config
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml
+```
+
+Runs the engine's exact parse and validation — including cross-field rules a static schema
+cannot express — then prints the resolved configuration (mode, protected networks, and the
+effective mitigation per [hostgroup](/docs/hostgroups)) and exits:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The config is valid. |
+| `1` | The config is invalid; the exact error is printed to stderr. |
+
+The clean 0/1 split drops straight into CI or a pre-deploy gate. See
+[Validating the configuration](/docs/configuration#validating-the-configuration).
+
+### Dumping the schema
+
+```sh
+kapkan -dump-schema
+```
+
+Prints the configuration's JSON schema to stdout and exits `0` (or `1` on an internal error).
+The [config builder](/config) consumes this schema to validate fields in your browser.
+
+## Next steps
+
+- [Quickstart](/docs/quickstart) — build the binary and run it in dry-run.
+- [Configuration reference](/docs/configuration) — every key in the YAML file.
+- [Production deployment](/docs/deployment) — the systemd unit and its flags.

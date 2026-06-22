@@ -1,0 +1,92 @@
+export const metadata = {
+  title: "Référence CLI",
+  description:
+    "Chaque option de ligne de commande du binaire kapkan — chemin de configuration, format et niveau des journaux, et les sous-commandes utilitaires de schéma/validation.",
+};
+
+# Référence CLI
+
+Kapkan est un binaire unique. Tout ce qu'il fait est sélectionné par des options de ligne de commande
+au démarrage — il n'existe aucune sous-commande au-delà des deux modes utilitaires ci-dessous. Tous les
+journaux vont vers **stderr**, de sorte que l'API REST et les métriques sur stdout restent propres pour
+le piping.
+
+```sh
+kapkan [flags]
+```
+
+## Options
+
+| Option | Valeur par défaut | Description |
+| --- | --- | --- |
+| `-config <path>` | `configs/dev.yaml` | Chemin du [fichier de configuration](/docs/configuration) YAML. |
+| `-log-format <fmt>` | `json` | Format de sortie des journaux : `json` (structuré, pour les collecteurs de journaux) ou `text` (lisible par un humain, pour les exécutions locales). Toute valeur autre que `text` est traitée comme `json`. |
+| `-log-level <lvl>` | `info` | Niveau de journalisation minimal : `debug`, `info`, `warn`, `error`. Une valeur non reconnue retombe sur `info`. |
+| `-check-config <path>` | — | Valide le fichier de configuration situé à `<path>` puis se termine — ne démarre **pas** le démon. Voir [ci-dessous](#valider-une-configuration). |
+| `-dump-schema` | `false` | Affiche le schéma JSON de la configuration sur stdout puis se termine. Voir [ci-dessous](#exporter-le-schéma). |
+
+<Callout type="info" title="json ou text ?">
+Utilisez `-log-format text` pour le développement local — c'est le format utilisé par le Démarrage
+rapide et la cible [`make run-dev`](/docs/quickstart). Conservez la valeur par défaut `json` en
+production afin qu'un collecteur de journaux puisse analyser les champs structurés ; l'[unité
+systemd](/docs/deployment) est livrée avec `-log-format json -log-level info`.
+</Callout>
+
+## Exécuter le démon
+
+Sans option utilitaire, Kapkan ouvre ses écouteurs de flow, son API REST et (hors dry-run) son
+locuteur BGP, puis tourne jusqu'à ce qu'il reçoive `SIGINT` ou `SIGTERM`, moment auquel il s'arrête
+proprement. Il ne se termine avec un code non nul qu'en cas d'erreur fatale au démarrage ou à
+l'exécution.
+
+```sh
+# Local, human-readable logs against the bundled dev config:
+kapkan -config configs/dev.yaml -log-format text
+
+# Production-style: structured logs at info level:
+kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
+```
+
+Le fichier de configuration est rechargeable à l'exécution sans redémarrage — envoyez `SIGHUP`
+(`systemctl reload kapkan`) ou `POST /api/v1/config/reload`. Voir la
+[référence de configuration](/docs/configuration) pour ce qui se recharge et ce qui est figé au
+démarrage.
+
+## Sous-commandes utilitaires
+
+Ces deux options se terminent avant le démarrage du démon — elles n'ouvrent jamais d'écouteur ni
+n'envoient d'annonce, elles sont donc sûres à exécuter sur un hôte de production.
+
+### Valider une configuration
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml
+```
+
+Effectue exactement la même analyse et la même validation que le moteur — y compris les règles
+inter-champs qu'un schéma statique ne peut pas exprimer — puis affiche la configuration résolue (mode,
+réseaux protégés et l'atténuation effective par [hostgroup](/docs/hostgroups)) et se termine :
+
+| Code de sortie | Signification |
+| --- | --- |
+| `0` | La configuration est valide. |
+| `1` | La configuration est invalide ; l'erreur exacte est affichée sur stderr. |
+
+Cette séparation nette 0/1 s'intègre directement dans une CI ou une vérification de pré-déploiement.
+Voir [Valider la configuration](/docs/configuration#valider-la-configuration).
+
+### Exporter le schéma
+
+```sh
+kapkan -dump-schema
+```
+
+Affiche le schéma JSON de la configuration sur stdout et se termine avec le code `0` (ou `1` en cas
+d'erreur interne). Le [générateur de configuration](/config) utilise ce schéma pour valider les champs
+dans votre navigateur.
+
+## Étapes suivantes
+
+- [Démarrage rapide](/docs/quickstart) — compilez le binaire et exécutez-le en dry-run.
+- [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.
+- [Déploiement en production](/docs/deployment) — l'unité systemd et ses options.

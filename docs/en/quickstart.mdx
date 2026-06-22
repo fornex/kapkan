@@ -33,6 +33,10 @@ make run-dev
 ./kapkan -config configs/dev.yaml -log-format text
 ```
 
+`-config` points at the YAML config and `-log-format text` switches logs from the default
+structured JSON to a human-readable form — see the [CLI reference](/docs/cli) for every flag
+and its accepted values.
+
 The development config ([`configs/dev.yaml`](/docs/configuration)) has `dry_run: true`, a
 test protected network of `203.0.113.0/24`, and listens for sFlow on `:6343` and
 NetFlow/IPFIX on `:2055`.

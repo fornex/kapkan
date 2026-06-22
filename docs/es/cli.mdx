@@ -1,0 +1,90 @@
+export const metadata = {
+  title: "Referencia de CLI",
+  description:
+    "Cada opción de línea de comandos del binario de Kapkan: ruta de la configuración, formato y nivel de los registros, y los subcomandos de utilidad para el esquema y la validación.",
+};
+
+# Referencia de CLI
+
+Kapkan es un único binario. Todo lo que hace se selecciona mediante opciones de línea de comandos
+al arrancar; no hay subcomandos más allá de los dos modos de utilidad que se describen abajo. Todos
+los registros van a **stderr**, de modo que la API REST y las métricas en stdout se mantienen limpias
+para canalizarlas (piping).
+
+```sh
+kapkan [flags]
+```
+
+## Flags
+
+| Flag | Predeterminado | Descripción |
+| --- | --- | --- |
+| `-config <path>` | `configs/dev.yaml` | Ruta al [archivo de configuración](/docs/configuration) YAML. |
+| `-log-format <fmt>` | `json` | Formato de salida de los registros: `json` (estructurado, para recolectores de logs) o `text` (legible para humanos, para ejecuciones locales). Cualquier valor distinto de `text` se trata como `json`. |
+| `-log-level <lvl>` | `info` | Nivel mínimo de registro: `debug`, `info`, `warn`, `error`. Un valor no reconocido recae en `info`. |
+| `-check-config <path>` | — | Valida el archivo de configuración en `<path>` y termina; **no** inicia el demonio. Consulta [más abajo](#validar-una-configuración). |
+| `-dump-schema` | `false` | Imprime el esquema JSON de la configuración en stdout y termina. Consulta [más abajo](#volcar-el-esquema). |
+
+<Callout type="info" title="¿json o text?">
+Usa `-log-format text` para el desarrollo local; es el formato que emplean la Guía rápida y el
+objetivo [`make run-dev`](/docs/quickstart). Mantén el valor predeterminado `json` en producción para
+que un recolector de logs pueda analizar los campos estructurados; la [unidad de systemd](/docs/deployment)
+se entrega con `-log-format json -log-level info`.
+</Callout>
+
+## Ejecutar el demonio
+
+Sin ninguna flag de utilidad, Kapkan abre sus listeners de flow, la API REST y (cuando no está en
+modo dry-run) el hablante BGP, y luego se ejecuta hasta que recibe `SIGINT` o `SIGTERM`, momento en
+el que se apaga limpiamente. Solo termina con un código distinto de cero ante un error fatal de
+arranque o de ejecución.
+
+```sh
+# Local, human-readable logs against the bundled dev config:
+kapkan -config configs/dev.yaml -log-format text
+
+# Production-style: structured logs at info level:
+kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
+```
+
+El archivo de configuración se puede recargar en tiempo de ejecución sin reiniciar: envía `SIGHUP`
+(`systemctl reload kapkan`) o `POST /api/v1/config/reload`. Consulta la
+[referencia de configuración](/docs/configuration) para saber qué se recarga y qué queda fijado al arrancar.
+
+## Subcomandos de utilidad
+
+Estas dos flags terminan antes de que arranque el demonio; nunca abren un listener ni envían un
+anuncio, así que son seguras de ejecutar en un host de producción.
+
+### Validar una configuración
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml
+```
+
+Ejecuta exactamente el mismo análisis y la misma validación del motor —incluidas las reglas entre
+campos que un esquema estático no puede expresar— y luego imprime la configuración resuelta (modo,
+redes protegidas y la mitigación efectiva por cada [hostgroup](/docs/hostgroups)) y termina:
+
+| Código de salida | Significado |
+| --- | --- |
+| `0` | La configuración es válida. |
+| `1` | La configuración no es válida; el error exacto se imprime en stderr. |
+
+La división limpia 0/1 encaja directamente en CI o en una comprobación previa al despliegue. Consulta
+[Validar la configuración](/docs/configuration#validar-la-configuración).
+
+### Volcar el esquema
+
+```sh
+kapkan -dump-schema
+```
+
+Imprime el esquema JSON de la configuración en stdout y termina con `0` (o con `1` ante un error
+interno). El [generador de configuración](/config) usa este esquema para validar los campos en tu navegador.
+
+## Próximos pasos
+
+- [Inicio rápido](/docs/quickstart): compila el binario y ejecútalo en modo dry-run.
+- [Referencia de configuración](/docs/configuration): cada clave del archivo YAML.
+- [Despliegue en producción](/docs/deployment): la unidad de systemd y sus flags.
