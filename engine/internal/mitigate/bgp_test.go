@@ -195,6 +195,142 @@ func assertBlackholeAttrs(t *testing.T, p *api.Path) {
 	}
 }
 
+// TestBGPAnnounceWithdrawLifecycleV6 is the IPv6 analogue of
+// TestBGPAnnounceWithdrawLifecycle. It stands up the same in-process gobgp
+// receiver and verifies that a live ban on an IPv6 host announces a /128
+// blackhole whose IPv6 NLRI rides MP_REACH_NLRI with the configured IPv6
+// next-hop (next_hop6) and blackhole community, and that ending the attack
+// withdraws it. Unlike the IPv4 path (which carries a plain NEXT_HOP), a
+// malformed IPv6 MP_REACH_NLRI would be silently rejected by a real peer, so
+// round-tripping it through gobgp's wire codec is the strongest check that the
+// AFI/SAFI/next-hop encoding is correct.
+func TestBGPAnnounceWithdrawLifecycleV6(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping BGP integration test in -short mode")
+	}
+	ctx := context.Background()
+	const recvPort = 17983
+
+	// Receiver: the "router" we peer with. Passive, listens on a high port.
+	recv := server.NewBgpServer()
+	go recv.Serve()
+	defer recv.Stop()
+	if err := recv.StartBgp(ctx, &api.StartBgpRequest{Global: &api.Global{
+		Asn: 65000, RouterId: "2.2.2.2", ListenPort: recvPort, ListenAddresses: []string{"127.0.0.1"},
+	}}); err != nil {
+		t.Fatalf("receiver StartBgp: %v", err)
+	}
+	if err := recv.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65001},
+		Transport: &api.Transport{PassiveMode: true},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+		AfiSafis:  bothFamilies(),
+	}}); err != nil {
+		t.Fatalf("receiver AddPeer: %v", err)
+	}
+
+	// Speaker: our mitigator, dialing the receiver. The shared bgpYAML config
+	// already protects 2001:db8::/32 and sets next_hop6 / community, so an IPv6
+	// host ban builds the IPv6 MP_REACH_NLRI path.
+	store := storeFrom(t, bgpYAML(recvPort))
+	m, err := New(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New mitigator: %v", err)
+	}
+	if err := m.Start(ctx); err != nil {
+		t.Fatalf("mitigator Start: %v", err)
+	}
+	defer m.Stop()
+
+	if !m.speaker.waitEstablished(ctx, 20*time.Second) {
+		t.Fatal("BGP session never established")
+	}
+
+	// Announce via a live ban on an IPv6 host inside the protected 2001:db8::/32.
+	const prefix = "2001:db8::beef/128"
+	ban := m.OnAttackStarted(startedEvent("2001:db8::beef"))
+	if ban.State != BanActive {
+		t.Fatalf("ban state = %s, want active", ban.State)
+	}
+	if !waitForPrefix(t, recv, familyV6, prefix, true) {
+		t.Fatalf("receiver never saw announced IPv6 prefix %s", prefix)
+	}
+
+	// Verify the IPv6 NLRI, MP_REACH next-hop and community on the received path.
+	dst := listPrefixes(t, recv, familyV6)[prefix]
+	if dst == nil || len(dst.Paths) == 0 {
+		t.Fatalf("no path for %s on receiver", prefix)
+	}
+	assertBlackholeAttrs6(t, dst.Paths[0], prefix)
+
+	// Withdraw via attack ended.
+	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Target: ban.Target, At: time.Now()})
+	if !waitForPrefix(t, recv, familyV6, prefix, false) {
+		t.Fatalf("receiver still has IPv6 prefix %s after withdraw", prefix)
+	}
+}
+
+// assertBlackholeAttrs6 validates a received IPv6 blackhole path: the NLRI must
+// decode to wantPrefix, the next-hop rides inside MP_REACH_NLRI (not a plain
+// NEXT_HOP attribute) carrying the configured next_hop6, and the blackhole
+// community must be present. This is the IPv6 counterpart to assertBlackholeAttrs.
+func assertBlackholeAttrs6(t *testing.T, p *api.Path, wantPrefix string) {
+	t.Helper()
+
+	// The IPv6 NLRI round-trips through gobgp's MP_REACH wire codec.
+	nlri, err := apiutil.GetNativeNlri(p)
+	if err != nil {
+		t.Fatalf("GetNativeNlri: %v", err)
+	}
+	if nlri.String() != wantPrefix {
+		t.Errorf("decoded NLRI = %s, want %s", nlri.String(), wantPrefix)
+	}
+
+	attrs, err := apiutil.GetNativePathAttributes(p)
+	if err != nil {
+		t.Fatalf("GetNativePathAttributes: %v", err)
+	}
+	var sawMpReach, sawCommunity bool
+	for _, a := range attrs {
+		switch v := a.(type) {
+		case *bgp.PathAttributeMpReachNLRI:
+			sawMpReach = true
+			// AFI/SAFI must be IPv6 unicast: a malformed MP_REACH here is
+			// exactly what a real peer would silently reject.
+			if v.AFI != bgp.AFI_IP6 || v.SAFI != bgp.SAFI_UNICAST {
+				t.Errorf("MP_REACH AFI/SAFI = %d/%d, want %d/%d (IPv6 unicast)",
+					v.AFI, v.SAFI, bgp.AFI_IP6, bgp.SAFI_UNICAST)
+			}
+			if v.Nexthop.String() != "100::1" {
+				t.Errorf("MP_REACH next-hop = %s, want 100::1", v.Nexthop.String())
+			}
+			if len(v.Value) == 0 || v.Value[0].String() != wantPrefix {
+				t.Errorf("MP_REACH NLRI = %v, want %s", v.Value, wantPrefix)
+			}
+		case *bgp.PathAttributeCommunities:
+			sawCommunity = true
+			want := uint32(65000)<<16 | 666
+			found := false
+			for _, c := range v.Value {
+				if c == want {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("communities %v missing 65000:666 (%d)", v.Value, want)
+			}
+		case *bgp.PathAttributeNextHop:
+			t.Errorf("IPv6 path must not carry a plain NEXT_HOP attribute, got %s", v.Value.String())
+		}
+	}
+	if !sawMpReach {
+		t.Error("received IPv6 path has no MP_REACH_NLRI attribute")
+	}
+	if !sawCommunity {
+		t.Error("received IPv6 path has no COMMUNITIES attribute")
+	}
+}
+
 // flowSpecPaths lists the FlowSpec paths the receiver holds, returning each
 // decoded NLRI string mapped to its action (decoded from the traffic-rate
 // extended community). This round-trips our encoding through gobgp's real
