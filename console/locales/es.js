@@ -137,6 +137,23 @@
       "ac.proto": "proto", "ac.flags": "flags", "ac.frag": "frag", "ac.packets": "paquetes",
       "ac.simulated": "Simulado (modo simulación)",
 
+      /* por qué se activó (motivo de detección) */
+      "ac.why": "Por qué se activó",
+      "ac.why.static": "Umbral estático",
+      "ac.why.baseline": "Referencia aprendida",
+      "ac.why.staticnote": "Se superó el umbral estático configurado.",
+      "ac.why.baselinenote": "Una referencia aprendida fijó el umbral que se superó.",
+      "ac.why.warmupnote": "La referencia aún se está calentando (quedan {t}) — se aplicó el umbral estático.",
+      "ac.why.normal": "Normal aprendido",
+      "ac.why.factor": "Factor",
+      "ac.why.floor": "Mínimo",
+      "ac.why.ceiling": "Techo (límite estático)",
+      "ac.why.effective": "Umbral efectivo",
+      "ac.why.shares": "Mezcla de protocolos",
+      "ac.why.dominant": "dominante",
+      "ac.why.gate": "Umbral de cuota dominante: {p}",
+      "ac.why.mixed": "Ningún protocolo alcanzó el umbral de {p} — clasificado como mixto.",
+
       /* escalation ladder */
       "lad.timeinstage": "en este nivel",
       "lad.nextin": "siguiente en",

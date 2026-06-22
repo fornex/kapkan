@@ -128,6 +128,23 @@
       "ac.proto": "Proto", "ac.flags": "Flags", "ac.frag": "Frag", "ac.packets": "Pakete",
       "ac.simulated": "Simuliert (Testlauf)",
 
+      /* why this fired (detection reason) */
+      "ac.why": "Warum dies ausgelöst wurde",
+      "ac.why.static": "Statischer Schwellenwert",
+      "ac.why.baseline": "Erlernte Grundlinie",
+      "ac.why.staticnote": "Der konfigurierte statische Schwellenwert wurde überschritten.",
+      "ac.why.baselinenote": "Eine erlernte Grundlinie hat den überschrittenen Schwellenwert festgelegt.",
+      "ac.why.warmupnote": "Grundlinie wird noch eingelernt (noch {t}) — der statische Schwellenwert galt.",
+      "ac.why.normal": "Erlernter Normalwert",
+      "ac.why.factor": "Faktor",
+      "ac.why.floor": "Untergrenze",
+      "ac.why.ceiling": "Obergrenze (statische Deckelung)",
+      "ac.why.effective": "Effektiver Schwellenwert",
+      "ac.why.shares": "Protokollmix",
+      "ac.why.dominant": "dominant",
+      "ac.why.gate": "Schwelle für dominanten Anteil: {p}",
+      "ac.why.mixed": "Kein Protokoll erreichte die Schwelle von {p} — als gemischt eingestuft.",
+
       "lad.timeinstage": "in Stufe",
       "lad.nextin": "nächste in",
       "lad.atmax": "Höchste Stufe — vollständige Blackhole aktiv",
