@@ -23,6 +23,16 @@ export function DocLink({ href = "", children, ...props }: ComponentPropsWithout
     );
   }
 
+  // Static file under public/ (e.g. /kapkan-overview.json): a real download
+  // anchor, never a Next route — not locale-prefixed and not client-routed.
+  if (/^\/[^?#]*\.[a-z0-9]+(?:[?#]|$)/i.test(href)) {
+    return (
+      <a href={href} download className={className} {...props}>
+        {children}
+      </a>
+    );
+  }
+
   let target = href;
   if (href === "/docs" || href.startsWith("/docs/") || href === "/config") {
     const seg = pathname.split("/")[1] ?? "";

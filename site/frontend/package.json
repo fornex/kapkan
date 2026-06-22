@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "predev": "node scripts/copy-docs.mjs && node scripts/build-wasm.mjs",
+    "predev": "node scripts/copy-docs.mjs && node scripts/copy-grafana.mjs && node scripts/build-wasm.mjs",
     "dev": "next dev",
-    "prebuild": "node scripts/copy-docs.mjs && node scripts/build-wasm.mjs",
+    "prebuild": "node scripts/copy-docs.mjs && node scripts/copy-grafana.mjs && node scripts/build-wasm.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"

@@ -24,6 +24,9 @@
 /public/kapkan-validate.wasm
 /public/wasm_exec.js
 
+# Grafana dashboard — copied from engine/deploy/grafana at predev/prebuild
+/public/kapkan-overview.json
+
 # misc
 .DS_Store
 *.pem
