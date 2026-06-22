@@ -70,11 +70,13 @@ le tenant de la requête est dérivé une seule fois lors de l'authentification,
 prédicat de visibilité décide de chaque ligne. Un nouvel endpoint de lecture qui oublierait de
 filtrer renverrait, pour un token cadré, rien du tout — jamais les données d'un autre tenant.
 
-- **Lectures** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` ne renvoient que les lignes dont
-  le groupe propriétaire porte le tenant de l'appelant. `/status` est reconstruit par portée : un
-  token cadré n'obtient que ses propres hostgroups et compteurs, jamais les réseaux protégés
-  globaux, les seuils globaux ni le groupe de repli à l'échelle du déploiement — ainsi un tenant
-  n'apprend jamais les préfixes ou la posture BGP d'un autre.
+- **Lectures** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` et `/audit` ne renvoient que les
+  lignes dont le groupe propriétaire porte le tenant de l'appelant. `/status` est reconstruit par
+  portée : un token cadré n'obtient que ses propres hostgroups et compteurs, jamais les réseaux
+  protégés globaux, les seuils globaux ni le groupe de repli à l'échelle du déploiement — ainsi un
+  tenant n'apprend jamais les préfixes ou la posture BGP d'un autre. Le [journal d'audit](/docs/audit)
+  est lié au tenant de l'appelant côté serveur, et un filtre `target` nommant une adresse hors du
+  tenant est refusé — pas d'oracle d'existence inter-tenant.
 - **Mutations** — un operator cadré ne peut `ban`/`unban` que dans ses propres préfixes. Une cible
   hors du tenant renvoie un `403` uniforme, qu'un bannissement existe ou non, de sorte qu'un
   tenant ne peut pas sonder l'état de bannissement d'un autre. `POST /api/v1/config/reload` est
@@ -109,5 +111,6 @@ token) — il n'y a aucun principal à cadrer.
 
 - [Groupes d'hôtes](/docs/hostgroups) — les groupes de préfixes qu'un tenant étiquette.
 - [Authentification](/docs/authentication) — les rôles de token sur lesquels s'appuie la portée du tenant.
+- [Journal d'audit](/docs/audit) — la piste par tenant des actions des operators.
 - [API REST](/docs/api) — les endpoints filtrés par tenant.
 - [Référence de configuration](/docs/configuration)

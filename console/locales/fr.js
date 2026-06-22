@@ -137,6 +137,23 @@
       "ac.proto": "proto", "ac.flags": "drapeaux", "ac.frag": "frag", "ac.packets": "paquets",
       "ac.simulated": "Simulé (mode simulation)",
 
+      /* why this fired (detection reason) */
+      "ac.why": "Pourquoi cela s'est déclenché",
+      "ac.why.static": "Seuil statique",
+      "ac.why.baseline": "Référence apprise",
+      "ac.why.staticnote": "Le seuil statique configuré a été dépassé.",
+      "ac.why.baselinenote": "Une référence apprise a défini le seuil qui a été dépassé.",
+      "ac.why.warmupnote": "Référence encore en apprentissage ({t} restant) — le seuil statique s'est appliqué.",
+      "ac.why.normal": "Normale apprise",
+      "ac.why.factor": "Facteur",
+      "ac.why.floor": "Plancher",
+      "ac.why.ceiling": "Plafond (limite statique)",
+      "ac.why.effective": "Seuil effectif",
+      "ac.why.shares": "Mix de protocoles",
+      "ac.why.dominant": "dominant",
+      "ac.why.gate": "Seuil de part dominante : {p}",
+      "ac.why.mixed": "Aucun protocole n'a atteint le seuil de {p} — classé comme mixte.",
+
       /* escalation ladder */
       "lad.timeinstage": "à ce niveau",
       "lad.nextin": "suivant dans",

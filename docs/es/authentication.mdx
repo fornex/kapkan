@@ -73,6 +73,13 @@ conjunto de tokens surte efecto en la siguiente [recarga de configuración](/doc
 Un token también puede llevar un `tenant` opcional, acotándolo a los datos de un único cliente. Esa es
 la función de [Multi-tenencia](/docs/multi-tenancy), superpuesta a los roles descritos aquí.
 
+<Callout type="info" title="El nombre del token es la identidad del operator">
+El `name` de cada token es lo que el [registro de auditoría](/docs/audit) anota como el `operator` de
+cada baneo, desbaneo y recarga de configuración que emite, así que dales nombres significativos a los
+tokens. En una API abierta (sin token) no hay ningún principal al que atribuir, y el `operator` de la
+auditoría queda vacío.
+</Callout>
+
 ## Qué protege
 
 Con un token configurado, cada solicitud `/api/v1` debe incluirlo en una cabecera `Authorization`
@@ -119,6 +126,7 @@ o acotado a uno solo. Consulta [Multi-tenencia](/docs/multi-tenancy).
 ## Relacionado
 
 - [Multi-tenencia](/docs/multi-tenancy): acota un token a los datos de un único cliente.
+- [Registro de auditoría](/docs/audit): los nombres de los tokens se convierten en la identidad del operator en cada mutación.
 - [API REST](/docs/api): los endpoints que protege el token.
 - [Panel](/docs/dashboard): cómo la UI integrada solicita y almacena el token.
 - [Despliegue](/docs/deployment): enlazar el listener y proporcionar el token en producción.

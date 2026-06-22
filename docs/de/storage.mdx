@@ -40,15 +40,23 @@ gelesen, niemals aus der Konfigurationsdatei.
 Kapkan kommuniziert über die **HTTP-Schnittstelle** von ClickHouse mit der Go-Standardbibliothek —
 ohne Treiberabhängigkeit. Die einzige externe Abhängigkeit ist der ClickHouse-Server selbst.
 
-Beim Start erstellt Kapkan idempotent zwei MergeTree-Tabellen:
+Beim Start erstellt Kapkan idempotent drei MergeTree-Tabellen:
 
 | Tabelle | Inhalt |
 | --- | --- |
-| `attack_events` | Jeder Angriffsbeginn und jedes Angriffsende: Typ, Richtung, Raten, die Top-Quellen des Samples und der Sperrstatus. |
+| `attack_events` | Jeder Angriffsbeginn und jedes Angriffsende: Typ, Richtung, Raten, die Top-Quellen des Samples, der Sperrstatus und der Erkennungs-`reason`. |
 | `traffic` | Periodische Momentaufnahmen von Rate und Baseline pro Host (alle `traffic_interval_seconds`). |
+| `audit_events` | Dem Betreiber zugeordnete Änderungen: wer jede Sperre/Entsperrung/Konfigurations-Neuladung ausgelöst hat, wann und mit welchem Ergebnis. Siehe [Audit-Log](/docs/audit). |
 
-Beide tragen eine `ttl_days`-TTL pro Zeile, sodass die Aufbewahrung ohne Eingriff des Betreibers
+Jede trägt eine `ttl_days`-TTL pro Zeile, sodass die Aufbewahrung ohne Eingriff des Betreibers
 begrenzt bleibt.
+
+Die `reason`-Spalte der `attack_events`-Tabelle enthält das kompakte JSON des Erkennungs-
+[reason](/docs/detection) — warum der Angriff ausgelöst wurde (Herkunft des Schwellenwerts,
+Warm-up, Protokollanteile) — und ist in der Zeile zum Angriffsende leer. Bestehende Installationen
+erhalten die Spalte automatisch: Die Schema-Initialisierung führt ein `ADD COLUMN IF NOT EXISTS`
+aus, das stillschweigend übersprungen wird, wenn die Schreib-Anmeldedaten keine `ALTER`-Rechte
+haben (Neuinstallationen verfügen bereits darüber).
 
 ## Backpressure
 
@@ -66,4 +74,5 @@ noch nicht als Momentaufnahme erfasst — beides sind Kandidaten für eine Folge
 ## Verwandte Themen
 
 - [Konfigurationsreferenz](/docs/configuration) — die vollständige Liste der `storage`-Schlüssel.
+- [Audit-Log](/docs/audit) — die `audit_events`-Tabelle und ihr Lese-Endpunkt.
 - [Metriken](/docs/metrics) — der Zähler `storage_rows_total`.

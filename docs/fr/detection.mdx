@@ -257,6 +257,40 @@ Comment un vecteur est choisi :
 `0..1`. Une valeur de `0` signifie que l'attaque est `mixed` — aucune signature n'a correspondu.
 </Callout>
 
+## Pourquoi une détection s'est déclenchée
+
+Chaque attaque porte une **raison** — un petit enregistrement, capturé à l'instant même où le seuil est franchi,
+qui explique la détection sans vous obliger à refaire les calculs. Elle permet à un operator de distinguer une véritable
+attaque d'un artefact d'échantillonnage ou de seuil d'un seul coup d'œil. Elle est construite une fois par démarrage d'attaque à partir
+d'entrées dont le moteur dispose déjà, de sorte qu'elle ne coûte rien sur le chemin critique, et elle accompagne l'événement
+`attack_started`, le [stockage](/docs/storage), ainsi que le champ `reason` de l'[API](/docs/api).
+
+Elle répond à deux questions :
+
+- **Quel seuil a été franchi, et d'où provient-il ?** `threshold_source` vaut soit
+  `static` (la limite vient directement de votre configuration), soit `baseline` (une
+  [baseline apprise](/docs/baselines) réchauffée a fixé la limite). Le trio de base (`pps`, `mbps`,
+  `flows_per_sec`) devient dérivé d'une baseline une fois que celle-ci est réchauffée ; les métriques par protocole sont
+  **toujours** static. Pour un seuil de baseline, la raison porte le calcul complet — le `normal` appris,
+  le `factor`, le `floor` et le `ceiling` statique — afin que vous puissiez voir le seuil effectif
+  sous la forme `min(ceiling, max(floor, normal × factor))`.
+- **La baseline était-elle prête ?** Si une baseline est configurée mais encore en cours de réchauffement, `threshold_source`
+  reste `static`, `warming_up` vaut `true`, et `warmup_remaining_seconds` indique le temps restant avant que
+  le seuil appris prenne le relais. Une détection pendant le réchauffement est donc censée utiliser la
+  limite statique.
+
+Elle reformule aussi les **entrées de classification** : `shares` est la fraction par protocole du total des
+PPS (les mêmes ratios que ceux utilisés par le classificateur), et `dominant_share_gate` est la part qu'un protocole
+doit atteindre pour remporter un vecteur — `0.5`. Si aucun protocole ne l'atteint, l'attaque est `mixed`. Voir, par exemple, une
+part UDP de `0.98` à côté d'une classification `ntp_amplification` confirme d'un coup d'œil pourquoi ce vecteur
+l'a emporté.
+
+<Callout type="info" title="Les métriques par protocole sont toujours statiques">
+Les baselines n'apprennent que le trio de base. Lorsqu'une métrique par protocole (`tcp_syn_pps`, `udp_mbps`, …)
+déclenche l'attaque, `threshold_source` vaut `static` même si le groupe possède une baseline réchauffée — il
+n'existe aucun normal appris pour cette métrique auquel se comparer.
+</Callout>
+
 ## Voir aussi
 
 - [Hostgroups](/docs/hostgroups) — seuils par préfixe, calcul total vs. par hôte, et politique par groupe.

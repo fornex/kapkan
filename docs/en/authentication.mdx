@@ -71,6 +71,12 @@ changing the token set takes effect on the next [config reload](/docs/api) — n
 A token may also carry an optional `tenant`, scoping it to one customer's data. That is the
 [Multi-tenancy](/docs/multi-tenancy) feature, layered on the roles described here.
 
+<Callout type="info" title="The token name is the operator identity">
+Each token's `name` is what the [audit log](/docs/audit) records as the `operator` for every
+ban, unban and config reload it issues — so give tokens meaningful names. On an open
+(token-less) API there is no principal to attribute, and the audit `operator` is empty.
+</Callout>
+
 ## What it protects
 
 With a token set, every `/api/v1` request must carry it in an `Authorization` header using
@@ -116,6 +122,7 @@ scoped to one. See [Multi-tenancy](/docs/multi-tenancy).
 ## Related
 
 - [Multi-tenancy](/docs/multi-tenancy) — scope a token to one customer's data.
+- [Audit log](/docs/audit) — token names become the operator identity on every mutation.
 - [REST API](/docs/api) — the endpoints the token protects.
 - [Dashboard](/docs/dashboard) — how the embedded UI prompts for and stores the token.
 - [Deployment](/docs/deployment) — binding the listener and supplying the token in production.

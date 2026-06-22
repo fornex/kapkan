@@ -40,15 +40,23 @@ Les identifiants sont lus à partir des variables d'environnement nommées (`use
 Kapkan dialogue avec l'**interface HTTP** de ClickHouse au moyen de la bibliothèque standard de
 Go — sans dépendance à un driver. La seule dépendance externe est le serveur ClickHouse lui-même.
 
-Au démarrage, il crée de manière idempotente deux tables MergeTree :
+Au démarrage, il crée de manière idempotente trois tables MergeTree :
 
 | Table | Contenu |
 | --- | --- |
-| `attack_events` | Chaque début et fin d'attaque : type, direction, débits, les principales sources de l'échantillon et l'état de bannissement. |
+| `attack_events` | Chaque début et fin d'attaque : type, direction, débits, les principales sources de l'échantillon, l'état de bannissement et le `reason` de la détection. |
 | `traffic` | Instantanés périodiques de débit et de référence par hôte (toutes les `traffic_interval_seconds`). |
+| `audit_events` | Mutations attribuées à un opérateur : qui a déclenché chaque ban/unban/rechargement de configuration, quand et le résultat. Voir [Journal d'audit](/docs/audit). |
 
-Les deux portent un TTL par ligne `ttl_days`, ce qui borne la rétention sans intervention de
+Chacune porte un TTL par ligne `ttl_days`, ce qui borne la rétention sans intervention de
 l'opérateur.
+
+La colonne `reason` de la table `attack_events` contient le JSON compact du
+[reason](/docs/detection) de la détection — pourquoi l'attaque s'est déclenchée (provenance du
+seuil, montée en charge, parts de protocole) — et est vide sur la ligne de fin d'attaque. Les
+déploiements existants acquièrent la colonne automatiquement : l'initialisation du schéma exécute
+un `ADD COLUMN IF NOT EXISTS`, ignoré silencieusement si l'identifiant d'écriture ne dispose pas
+des droits `ALTER` (les installations neuves la possèdent déjà).
 
 ## Contre-pression
 
@@ -67,4 +75,5 @@ ultérieure.
 ## Voir aussi
 
 - [Référence de configuration](/docs/configuration) — la liste complète des clés `storage`.
+- [Journal d'audit](/docs/audit) — la table `audit_events` et son point d'accès en lecture.
 - [Métriques](/docs/metrics) — le compteur `storage_rows_total`.

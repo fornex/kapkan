@@ -42,6 +42,7 @@ within its tenant — an out-of-tenant target returns a uniform `403`. See
 | GET | `/api/v1/attacks` | Active attacks plus the last 100 that ended, with samples and classification. |
 | GET | `/api/v1/hosts` | Tracked-host snapshot: per-direction rates, learned baselines, attack state. |
 | GET | `/api/v1/bans` | All bans, active and historical. |
+| GET | `/api/v1/audit` | Operator-attributed audit trail of mutations (who banned/reloaded, when, outcome). |
 | POST | `/api/v1/ban` | Manually ban an address. |
 | POST | `/api/v1/unban` | Manually withdraw a ban. |
 | POST | `/api/v1/config/reload` | Re-read the config file (same as `SIGHUP`). |
@@ -102,6 +103,7 @@ hold `Attack` objects.
 | `ended_at` | string | RFC 3339 timestamp; omitted while active. |
 | `sample` | object | Flow sample captured at detection; omitted when sampling is off. |
 | `classification` | object | Inferred attack vector; omitted when unclassified. |
+| `reason` | object | Why the detection fired — threshold provenance, warm-up, protocol shares. Attached at start. |
 
 ```json
 {
@@ -161,6 +163,29 @@ counters), an optional raw `flows` list, and `total_packets`. The `classificatio
 `type` is one of the vectors documented in [Detection](/docs/detection); `confidence`
 is the share (`0..1`) of attack traffic matching the winning signature, and `src_port`
 is the reflected service port for amplification vectors.
+
+The `reason` object explains **why** the detection fired — captured once at the start, off
+the hot path. `threshold_source` is `static` or `baseline`: whether the crossed limit came
+from the static config or a warmed-up [learned baseline](/docs/baselines). When it is
+`baseline`, a `baseline` object carries the effective math
+(`min(ceiling, max(floor, normal × factor))`). `baseline_configured`, `warming_up` and
+`warmup_remaining_seconds` explain a static threshold that applied only because the baseline
+had not warmed up yet. `shares` is the per-protocol fraction of total PPS that drove
+classification, and `dominant_share_gate` is the share one protocol needs to win a vector
+(otherwise the attack is `mixed`). See [Detection](/docs/detection) for
+how to read it.
+
+```json
+{
+  "reason": {
+    "threshold_source": "baseline",
+    "baseline": { "normal": 1200, "factor": 8, "floor": 5000, "ceiling": 80000 },
+    "baseline_configured": true,
+    "shares": { "udp": 0.98, "syn": 0, "tcp": 0.01, "icmp": 0, "frag": 0 },
+    "dominant_share_gate": 0.5
+  }
+}
+```
 
 ### GET /api/v1/hosts
 
@@ -268,6 +293,40 @@ Returns the full ban table — active and historical. Each entry is a `Ban`.
 See [Mitigation](/docs/mitigation) for how TTL, hysteresis and the ban cap shape this
 lifecycle.
 
+### GET /api/v1/audit
+
+Returns the operator-attributed audit trail — who issued each `ban`, `unban` or
+`config_reload`, when, and the outcome (including **refused** actions). Records are
+newest-first and the endpoint is tenant-scoped server-side. It takes optional `from`/`to`
+(RFC 3339), `action` (`ban`/`unban`/`config_reload`) and `target` (an IP) query params, and
+defaults to the last hour:
+
+```json
+{
+  "available": true,
+  "events": [
+    {
+      "event_time": "2026-06-22 03:14:09",
+      "action": "ban",
+      "result": "rejected",
+      "operator": "alice",
+      "role": "operator",
+      "tenant": "customerA",
+      "target": "203.0.113.66",
+      "target_type": "host",
+      "reason": "whitelisted",
+      "source": "api",
+      "ban_state": "rejected",
+      "dry_run": 0
+    }
+  ]
+}
+```
+
+When storage is disabled the response is `{"available": false, "events": []}`. See the
+dedicated [Audit log](/docs/audit) page for the full field list, the query rules, and the
+operator-identity and tenant-scoping model.
+
 ### POST /api/v1/ban
 
 Manually blackholes an address. The body is a single IP:
@@ -338,5 +397,6 @@ under `/api/v1` and is served without the bearer token so a scraper can reach it
 ## Related
 
 - [Authentication](/docs/authentication) — set a bearer token before exposing the listener.
+- [Audit log](/docs/audit) — the operator-attributed trail of mutations.
 - [Dashboard](/docs/dashboard) — the embedded web UI served on the same address.
 - [Metrics](/docs/metrics) — the Prometheus `/metrics` endpoint.

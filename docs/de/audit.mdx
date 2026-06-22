@@ -1,0 +1,143 @@
+export const metadata = {
+  title: "Audit-Log",
+  description:
+    "Operator-attribuierte Audit-Spur: wer hat gesperrt, entsperrt oder die Konfiguration neu geladen, wann und mit welchem Ergebnis — abfragbar pro Mandant (tenant).",
+};
+
+# Audit-Log
+
+Jede zustandsändernde API-Aktion wird in eine **Audit-Spur** geschrieben — die Antwort auf „wer
+hat `203.0.113.66` um 03:14 gesperrt, und wer hat die Konfiguration neu geladen". Jeder Eintrag
+benennt den Operator (das API-Token, das den Aufruf getätigt hat), die Aktion, das Ziel und das
+Ergebnis — einschließlich **abgelehnter** Aktionen, denn ein zurückgewiesener Ban ist selbst eine
+auditierbare Entscheidung.
+
+Die Spur wird aus den Mutations-Handlern der [API](/docs/api) geschrieben und über einen
+einzelnen Lese-Endpoint, `GET /api/v1/audit`, bereitgestellt. Sie wird in
+[ClickHouse](/docs/storage) neben der Angriffs- und Traffic-Historie persistiert und ist
+serverseitig **mandantengebunden** (tenant-scoped), genau wie jeder andere Lesezugriff.
+
+<Callout type="info" title="Immer protokolliert, abfragbar wenn Speicherung aktiv ist">
+Jede Mutation wird unabhängig von der Speicherung auf `INFO`-Ebene protokolliert. Die abfragbare
+Historie benötigt [ClickHouse](/docs/storage): bei deaktivierter Speicherung gibt der Endpoint
+`available: false` zurück (er liefert nie einen Fehler), und Sie haben weiterhin die Audit-Zeilen
+im Prozess-Log.
+</Callout>
+
+## Was aufgezeichnet wird
+
+Drei Aktionen werden auditiert, jeweils sowohl bei Erfolg als auch bei Fehlschlag:
+
+| Aktion | Wann | Aufgezeichnete Ergebnisse (`result`) |
+| --- | --- | --- |
+| `ban` | `POST /api/v1/ban` | `active` (oder `withdrawn`/`dry_run` Ban-Zustand) bei Erfolg; `rejected`, wenn eine Sicherheitsabsicherung ihn verweigert. |
+| `unban` | `POST /api/v1/unban` | `withdrawn` bei Erfolg. |
+| `config_reload` | `POST /api/v1/config/reload` | `ok` bei Erfolg; `error`, wenn die neue Konfiguration nicht geparst oder validiert werden kann. |
+
+Eine **abgelehnte** Aktion wird bewusst auditiert: ein Ban, der von der Whitelist, den
+konfigurierten `networks` oder einer [Blast-Radius-Absicherung](/docs/safety) zurückgewiesen wird,
+hinterlässt einen Audit-Eintrag mit `result: "rejected"` und der Ablehnung in `reason`. Die
+Audit-Spur zeigt daher sowohl versuchte als auch angewendete Änderungen.
+
+## Operator-Identität
+
+Das Feld `operator` ist der **Name** des passenden [API-Tokens](/docs/authentication) — der
+`name`, den Sie jedem Eintrag in der Liste `api.tokens` geben. So attribuiert die Spur eine
+Aktion einer Person oder einem System:
+
+```yaml
+api:
+  tokens:
+    - { name: alice,      token_env: KAPKAN_ALICE, role: operator }
+    - { name: automation, token_env: KAPKAN_AUTO,  role: operator }
+```
+
+Ein mit dem Token `alice` ausgeführter Ban zeichnet `operator: "alice"` auf. Auf einer offenen
+(token-losen) API gibt es kein Principal zur Attribuierung, daher ist `operator` leer — ein
+weiterer Grund, [Tokens zu setzen](/docs/authentication), bevor Sie den Listener freigeben.
+
+## GET /api/v1/audit
+
+Gibt Audit-Einträge neueste-zuerst zurück. Erfordert die **viewer**-Rolle, wie die anderen
+Lesezugriffe.
+
+| Query-Parameter | Standard | Hinweise |
+| --- | --- | --- |
+| `from` | now − 1h | RFC 3339 Beginn des Fensters. |
+| `to` | now | RFC 3339 Ende des Fensters. Muss nach `from` liegen; das Fenster darf **31 days** nicht überschreiten. |
+| `action` | (alle) | Filter auf eines von `ban`, `unban`, `config_reload`. |
+| `target` | (alle) | Filter auf eine IP. Muss für den Mandanten des Aufrufers sichtbar sein, sonst ist die Anfrage `403`. |
+
+```http
+GET /api/v1/audit?from=2026-06-22T00:00:00Z&action=ban HTTP/1.1
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "available": true,
+  "events": [
+    {
+      "event_time": "2026-06-22 03:14:09",
+      "action": "ban",
+      "result": "rejected",
+      "operator": "alice",
+      "role": "operator",
+      "tenant": "customerA",
+      "target": "203.0.113.66",
+      "target_type": "host",
+      "reason": "whitelisted",
+      "source": "api",
+      "ban_state": "rejected",
+      "dry_run": 0
+    }
+  ]
+}
+```
+
+Jeder Eintrag trägt diese Felder:
+
+| Feld | Hinweise |
+| --- | --- |
+| `event_time` | UTC, `YYYY-MM-DD HH:MM:SS`. |
+| `action` | `ban`, `unban` oder `config_reload`. |
+| `result` | `active`, `rejected`, `withdrawn`, `ok` oder `error`. |
+| `operator` | Der Name des passenden API-Tokens; leer im offenen (token-losen) Modus. |
+| `role` | Die Rolle des Aufrufers (`viewer` / `operator`). |
+| `tenant` | Der Mandanten-Scope des Aufrufers; leer für einen ungebundenen (Admin-)Aufrufer. |
+| `target` | Die IP bei `ban`/`unban`; leer bei `config_reload`. |
+| `target_type` | `host` bei `ban`/`unban`; `global` bei `config_reload`. |
+| `reason` | Ablehnungs- oder Fehlerdetail; leer bei Erfolg. |
+| `source` | `api` (Operator-Aktion). Engine-interne automatische Aktionen sind für eine zukünftige `auto`-Quelle reserviert. |
+| `ban_state` | Der finale Ban-Zustand bei `ban`/`unban`; leer bei `config_reload`. |
+| `dry_run` | `1`, wenn das Deployment im [dry-run](/docs/safety) ist. |
+
+Eine Abfrage gegen ein Fenster außerhalb des zulässigen Bereichs gibt `400` zurück; ein
+unbekannter `action`-Wert gibt `400` zurück; ein fehlerhaftes `target` gibt `400` zurück. Bei
+deaktivierter Speicherung ist die Antwort `{"available": false, "events": []}` mit `200`.
+
+## Mandanten-Scoping
+
+Der Audit-Endpoint ist **serverseitig mandantengebunden** (tenant-scoped), genau wie `/attacks`
+und `/bans`. Ein [mandantengebundenes Token](/docs/multi-tenancy) sieht nur die Einträge, deren
+`tenant` mit seinem eigenen Scope übereinstimmt; der Scope wird während der Authentifizierung
+gebunden und kann durch keinen Query-Parameter erweitert werden. Ein ungebundenes (Admin-)Token
+sieht die Einträge jedes Mandanten. Ein `target`-Filter, der eine Adresse außerhalb des
+Mandanten des Aufrufers benennt, wird mit `403` verweigert, sodass das Audit-Log kein
+mandantenübergreifendes Existenz-Orakel ist.
+
+## Aufbewahrung
+
+Audit-Einträge liegen in der ClickHouse-Tabelle `audit_events` und erben dieselbe `ttl_days`
+Per-Row-TTL wie der Rest der [Speicherung](/docs/storage) — die Aufbewahrung ist ohne
+Operator-Eingriff begrenzt. Die Persistierung erfolgt nach dem Best-Effort-Prinzip über dieselbe
+begrenzte Queue: ein langsames oder ausgefallenes ClickHouse verwirft Zeilen, statt einen Ban zu
+blockieren, während die `INFO`-Log-Zeile immer ausgegeben wird.
+
+## Verwandte Themen
+
+- [REST-API](/docs/api) — die Mutations-Endpoints, deren Aktionen auditiert werden.
+- [Authentifizierung](/docs/authentication) — Token-Namen werden zur `operator`-Identität.
+- [Mandantenfähigkeit](/docs/multi-tenancy) — wie die Spur pro Mandant eingegrenzt wird.
+- [Speicherung (ClickHouse)](/docs/storage) — wo Audit-Einträge persistiert werden.
+- [Sicherheitsmodell](/docs/safety) — die Absicherungen, die `rejected`-Einträge erzeugen.

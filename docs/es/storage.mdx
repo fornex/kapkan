@@ -40,15 +40,23 @@ nunca del archivo de configuración.
 Kapkan se comunica con la **interfaz HTTP** de ClickHouse usando la biblioteca estándar de Go —
 sin dependencia de un driver. La única dependencia externa es el propio servidor ClickHouse.
 
-Al arrancar, crea de forma idempotente dos tablas MergeTree:
+Al arrancar, crea de forma idempotente tres tablas MergeTree:
 
 | Tabla | Contenido |
 | --- | --- |
-| `attack_events` | Cada inicio y fin de ataque: tipo, dirección, tasas, las principales fuentes de la muestra y el estado del bloqueo. |
+| `attack_events` | Cada inicio y fin de ataque: tipo, dirección, tasas, las principales fuentes de la muestra, el estado del bloqueo y el `reason` de la detección. |
 | `traffic` | Instantáneas periódicas de tasa y línea base por host (cada `traffic_interval_seconds`). |
+| `audit_events` | Mutaciones atribuidas a un operador: quién emitió cada ban/unban/recarga de configuración, cuándo y con qué resultado. Consulta [Registro de auditoría](/docs/audit). |
 
-Ambas llevan un TTL por fila de `ttl_days`, de modo que la retención queda acotada sin
+Cada una lleva un TTL por fila de `ttl_days`, de modo que la retención queda acotada sin
 intervención del operador.
+
+La columna `reason` de la tabla `attack_events` contiene el JSON compacto del
+[reason](/docs/detection) de la detección — por qué se disparó el ataque (procedencia del
+umbral, calentamiento, cuotas de protocolo) — y está vacía en la fila de fin de ataque. Las
+implementaciones existentes obtienen la columna automáticamente: la inicialización del esquema
+ejecuta un `ADD COLUMN IF NOT EXISTS`, que se omite en silencio si la credencial de escritura
+carece de derechos `ALTER` (las instalaciones nuevas ya la tienen).
 
 ## Contrapresión
 
@@ -66,4 +74,5 @@ aún no se capturan en instantáneas — ambos son candidatos para un seguimient
 ## Relacionado
 
 - [Referencia de configuración](/docs/configuration) — la lista completa de claves de `storage`.
+- [Registro de auditoría](/docs/audit) — la tabla `audit_events` y su endpoint de lectura.
 - [Métricas](/docs/metrics) — el contador `storage_rows_total`.

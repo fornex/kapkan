@@ -72,12 +72,14 @@ Sichtbarkeitsprädikat entscheidet über jede Zeile. Ein neuer Lese-Endpoint, de
 vergisst, würde für ein gebundenes Token nichts zurückgeben — niemals die Daten eines anderen
 Mandanten.
 
-- **Lesezugriffe** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` geben nur Zeilen zurück,
-  deren besitzende Gruppe den Mandanten des Aufrufers trägt. `/status` wird pro Scope neu
-  aufgebaut: ein gebundenes Token erhält nur seine eigenen Hostgruppen und Zähler, niemals die
-  globalen geschützten Netze, die globalen Schwellenwerte oder die deployment-weite
+- **Lesezugriffe** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` und `/audit` geben nur
+  Zeilen zurück, deren besitzende Gruppe den Mandanten des Aufrufers trägt. `/status` wird pro
+  Scope neu aufgebaut: ein gebundenes Token erhält nur seine eigenen Hostgruppen und Zähler,
+  niemals die globalen geschützten Netze, die globalen Schwellenwerte oder die deployment-weite
   Fallback-Gruppe — sodass ein Mandant nie die Präfixe oder die BGP-Aufstellung eines anderen
-  erfährt.
+  erfährt. Das [Audit-Log](/docs/audit) ist serverseitig an den Mandanten des Aufrufers gebunden,
+  und ein `target`-Filter, der eine Adresse außerhalb des Mandanten benennt, wird verweigert —
+  kein mandantenübergreifendes Existenz-Orakel.
 - **Mutationen** — ein gebundener Operator darf nur innerhalb seiner eigenen Präfixe
   `ban`/`unban`. Ein Ziel außerhalb des Mandanten gibt ein einheitliches `403` zurück,
   unabhängig davon, ob ein Ban existiert, sodass ein Mandant den Ban-Zustand eines anderen nicht
@@ -113,5 +115,6 @@ Isolation erreichen — es gibt kein Principal, das eingegrenzt werden könnte.
 
 - [Hostgruppen](/docs/hostgroups) — die Präfix-Gruppen, die ein Mandant beschriftet.
 - [Authentifizierung](/docs/authentication) — die Token-Rollen, auf denen der Mandanten-Scope aufbaut.
+- [Audit-Log](/docs/audit) — die mandantenspezifische Spur von Operator-Aktionen.
 - [REST-API](/docs/api) — die Endpoints, die pro Mandant gefiltert werden.
 - [Konfigurationsreferenz](/docs/configuration)

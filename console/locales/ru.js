@@ -128,6 +128,23 @@
       "ac.proto": "прот.", "ac.flags": "флаги", "ac.frag": "фрагм.", "ac.packets": "пакеты",
       "ac.simulated": "Симуляция (тест-режим)",
 
+      /* why this fired (detection reason) */
+      "ac.why": "Почему сработало",
+      "ac.why.static": "Статический порог",
+      "ac.why.baseline": "Обученная база",
+      "ac.why.staticnote": "Превышен заданный статический порог.",
+      "ac.why.baselinenote": "Превышенный порог задан обученной базой.",
+      "ac.why.warmupnote": "База ещё обучается (осталось {t}) — применён статический порог.",
+      "ac.why.normal": "Обученная норма",
+      "ac.why.factor": "Коэффициент",
+      "ac.why.floor": "Нижний предел",
+      "ac.why.ceiling": "Верхний предел (статический потолок)",
+      "ac.why.effective": "Действующий порог",
+      "ac.why.shares": "Состав протоколов",
+      "ac.why.dominant": "преобладает",
+      "ac.why.gate": "Порог преобладания: {p}",
+      "ac.why.mixed": "Ни один протокол не достиг порога {p} — классифицировано как смешанный.",
+
       "lad.timeinstage": "на ступени",
       "lad.nextin": "следующая через",
       "lad.atmax": "Высшая ступень — полный blackhole активен",

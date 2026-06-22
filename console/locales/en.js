@@ -138,6 +138,23 @@
       "ac.proto": "proto", "ac.flags": "flags", "ac.frag": "frag", "ac.packets": "packets",
       "ac.simulated": "Simulated (dry-run)",
 
+      /* why this fired (detection reason) */
+      "ac.why": "Why this fired",
+      "ac.why.static": "Static threshold",
+      "ac.why.baseline": "Learned baseline",
+      "ac.why.staticnote": "The configured static threshold was crossed.",
+      "ac.why.baselinenote": "A learned baseline set the threshold that was crossed.",
+      "ac.why.warmupnote": "Baseline still warming up ({t} left) — the static threshold applied.",
+      "ac.why.normal": "Learned normal",
+      "ac.why.factor": "Factor",
+      "ac.why.floor": "Floor",
+      "ac.why.ceiling": "Ceiling (static cap)",
+      "ac.why.effective": "Effective threshold",
+      "ac.why.shares": "Protocol mix",
+      "ac.why.dominant": "dominant",
+      "ac.why.gate": "Dominant-share gate: {p}",
+      "ac.why.mixed": "No protocol reached the {p} gate — classified as mixed.",
+
       /* escalation ladder */
       "lad.timeinstage": "in stage",
       "lad.nextin": "next in",

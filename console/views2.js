@@ -39,6 +39,8 @@
 
       section("ac.metricvsthreshold", "activity", K.gauge(a.metric, a.rate || a.peak_rate || 0, a.threshold)),
 
+      a.reason ? section("ac.why", "zap", reasonBody(a.reason)) : null,
+
       section("ac.escalation", "layers", h("div", {}, [
         K.ladder(a.escalation, a.escalation_step, { live: isLive, startedMs: new Date(a.started_at).getTime() }),
         h("div", { class: "ladder__legend" }, [w.icon("info"), h("span", { text: I.t("lad.rampnote") })])
@@ -68,6 +70,75 @@
   }
   function section(titleKey, icon, body) {
     return h("div", {}, [h("div", { class: "section-label" }, [w.icon(icon), h("span", { text: I.t(titleKey) })]), body]);
+  }
+  /* "Why this fired" — renders the detection Reason: threshold provenance
+     (static vs learned baseline, with the baseline math), warm-up state, and
+     the protocol-share breakdown that drove classification. r is a.reason;
+     absent on attacks captured before explainability shipped (caller guards). */
+  function reasonBody(r) {
+    var blocks = [];
+    var isBaseline = r.threshold_source === "baseline" && r.baseline;
+
+    blocks.push(h("div", { class: "reason__src" }, [
+      isBaseline ? K.badge("badge--active", I.t("ac.why.baseline"), "activity")
+                 : K.badge("badge--muted", I.t("ac.why.static"), "shield"),
+      h("span", { class: "td-muted", text: isBaseline ? I.t("ac.why.baselinenote") : I.t("ac.why.staticnote") })
+    ]));
+
+    if (r.warming_up) {
+      var left = r.warmup_remaining_seconds ? I.countdown(r.warmup_remaining_seconds) : "—";
+      blocks.push(h("div", { class: "reason__warmup" }, [
+        w.icon("clock"), h("span", { text: I.t("ac.why.warmupnote", { t: left }) })
+      ]));
+    }
+
+    if (isBaseline) {
+      var b = r.baseline;
+      var eff = Math.min(b.ceiling, Math.max(b.floor, b.normal * b.factor));
+      var kv = [
+        ["ac.why.normal", I.abbr(b.normal), false],
+        ["ac.why.factor", "×" + I.abbr(b.factor, ""), false],
+        ["ac.why.floor", I.abbr(b.floor), false],
+        ["ac.why.ceiling", I.abbr(b.ceiling), false],
+        ["ac.why.effective", I.abbr(eff), true]
+      ];
+      blocks.push(h("div", { class: "reason__math" }, kv.map(function (row) {
+        return h("div", { class: "reason__kv" + (row[2] ? " is-eff" : "") }, [
+          h("span", { class: "reason__kv-k", text: I.t(row[0]) }),
+          h("span", { class: "reason__kv-v mono", text: row[1] })
+        ]);
+      })));
+      blocks.push(h("div", { class: "reason__formula mono td-muted", text: "min(ceiling, max(floor, normal × factor))" }));
+    }
+
+    var shares = r.shares || {};
+    var gate = r.dominant_share_gate || 0.5;
+    var list = [["udp", "UDP"], ["syn", "SYN"], ["tcp", "TCP"], ["icmp", "ICMP"], ["frag", "Frag"]]
+      .map(function (p) { return { key: p[1], v: shares[p[0]] || 0 }; })
+      .filter(function (x) { return x.v > 0; })
+      .sort(function (x, y) { return y.v - x.v; });
+    if (list.length) {
+      var anyDom = false;
+      var bars = list.map(function (x) {
+        var dom = x.v >= gate; if (dom) anyDom = true;
+        var bar = h("i"); bar.style.width = Math.max(2, x.v * 100) + "%";
+        return h("div", { class: "share" }, [
+          h("span", { class: "share__key" }, [
+            h("span", { text: x.key }),
+            dom ? h("span", { class: "reason__dom", text: I.t("ac.why.dominant") }) : null
+          ]),
+          h("span", { class: "share__pct", text: I.pct(x.v) }),
+          h("span", { class: "share__bar" + (dom ? " is-dom" : "") }, bar)
+        ]);
+      });
+      blocks.push(h("div", { class: "reason__shares" }, [
+        h("div", { class: "share-group__title", text: I.t("ac.why.shares") }),
+        bars,
+        h("div", { class: "reason__gate td-muted", text: I.t(anyDom ? "ac.why.gate" : "ac.why.mixed", { p: I.pct(gate) }) })
+      ]));
+    }
+
+    return h("div", { class: "reason" }, blocks);
   }
   function rawFlows(flows) {
     var head = h("tr", {}, ["src", "ac.proto", "dst", "dport", "ac.flags", "ac.frag", "ac.packets"].map(function (k, i) {

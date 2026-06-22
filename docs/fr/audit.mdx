@@ -1,0 +1,141 @@
+export const metadata = {
+  title: "Journal d'audit",
+  description:
+    "Piste d'audit attribuée à l'opérateur : qui a banni, débanni ou rechargé la configuration, quand, et avec quel résultat — interrogeable par tenant.",
+};
+
+# Journal d'audit
+
+Chaque action d'API modifiant l'état est consignée dans une **piste d'audit** — la réponse à
+« qui a banni `203.0.113.66` à 03h14, et qui a rechargé la configuration ». Chaque enregistrement
+nomme l'opérateur (le token d'API qui a effectué l'appel), l'action, la cible et le résultat — y
+compris les actions **refusées**, car un bannissement rejeté est lui-même une décision auditable.
+
+La piste est écrite depuis les gestionnaires de mutation de l'[API](/docs/api) et exposée sous la
+forme d'un unique endpoint de lecture, `GET /api/v1/audit`. Elle est persistée dans
+[ClickHouse](/docs/storage) aux côtés de l'historique des attaques et du trafic, et est **limitée
+au tenant** côté serveur, exactement comme toute autre lecture.
+
+<Callout type="info" title="Toujours journalisé, interrogeable lorsque le stockage est activé">
+Chaque mutation est journalisée au niveau `INFO`, indépendamment du stockage. L'historique
+interrogeable nécessite [ClickHouse](/docs/storage) : avec le stockage désactivé, l'endpoint
+renvoie `available: false` (il ne produit jamais d'erreur), et vous disposez toujours des lignes
+d'audit dans le journal du processus.
+</Callout>
+
+## Ce qui est enregistré
+
+Trois actions sont auditées, chacune en cas de succès comme d'échec :
+
+| Action | Quand | Résultats enregistrés (`result`) |
+| --- | --- | --- |
+| `ban` | `POST /api/v1/ban` | `active` (ou état de bannissement `withdrawn`/`dry_run`) en cas de succès ; `rejected` lorsqu'un garde-fou de sécurité le refuse. |
+| `unban` | `POST /api/v1/unban` | `withdrawn` en cas de succès. |
+| `config_reload` | `POST /api/v1/config/reload` | `ok` en cas de succès ; `error` lorsque la nouvelle configuration ne peut être analysée ou validée. |
+
+Une action **refusée** est auditée délibérément : un bannissement rejeté par la whitelist, par les
+`networks` configurés ou par un [garde-fou de rayon d'impact (blast radius)](/docs/safety) laisse un
+enregistrement d'audit avec `result: "rejected"` et le motif du refus dans `reason`. La piste
+d'audit montre donc aussi bien les changements tentés que ceux appliqués.
+
+## Identité de l'opérateur
+
+Le champ `operator` est le **nom** du [token d'API](/docs/authentication) correspondant — le `name`
+que vous attribuez à chaque entrée de la liste `api.tokens`. C'est ainsi que la piste attribue une
+action à une personne ou à un système :
+
+```yaml
+api:
+  tokens:
+    - { name: alice,      token_env: KAPKAN_ALICE, role: operator }
+    - { name: automation, token_env: KAPKAN_AUTO,  role: operator }
+```
+
+Un bannissement émis avec le token `alice` enregistre `operator: "alice"`. Sur une API ouverte (sans
+token), il n'y a aucun principal à attribuer, donc `operator` est vide — une raison de plus pour
+[définir des tokens](/docs/authentication) avant d'exposer l'écouteur.
+
+## GET /api/v1/audit
+
+Renvoie les enregistrements d'audit, du plus récent au plus ancien. Cela nécessite le rôle
+**viewer**, comme les autres lectures.
+
+| Paramètre de requête | Défaut | Notes |
+| --- | --- | --- |
+| `from` | now − 1h | Début RFC 3339 de la fenêtre. |
+| `to` | now | Fin RFC 3339 de la fenêtre. Doit être postérieure à `from` ; la fenêtre ne peut pas dépasser **31 days**. |
+| `action` | (toutes) | Filtre sur l'une des valeurs `ban`, `unban`, `config_reload`. |
+| `target` | (toutes) | Filtre sur une seule IP. Doit être visible par le tenant de l'appelant, sinon la requête renvoie `403`. |
+
+```http
+GET /api/v1/audit?from=2026-06-22T00:00:00Z&action=ban HTTP/1.1
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "available": true,
+  "events": [
+    {
+      "event_time": "2026-06-22 03:14:09",
+      "action": "ban",
+      "result": "rejected",
+      "operator": "alice",
+      "role": "operator",
+      "tenant": "customerA",
+      "target": "203.0.113.66",
+      "target_type": "host",
+      "reason": "whitelisted",
+      "source": "api",
+      "ban_state": "rejected",
+      "dry_run": 0
+    }
+  ]
+}
+```
+
+Chaque enregistrement comporte ces champs :
+
+| Champ | Notes |
+| --- | --- |
+| `event_time` | UTC, `YYYY-MM-DD HH:MM:SS`. |
+| `action` | `ban`, `unban` ou `config_reload`. |
+| `result` | `active`, `rejected`, `withdrawn`, `ok` ou `error`. |
+| `operator` | Le nom du token d'API correspondant ; vide en mode ouvert (sans token). |
+| `role` | Le rôle de l'appelant (`viewer` / `operator`). |
+| `tenant` | La portée tenant de l'appelant ; vide pour un appelant non limité (admin). |
+| `target` | L'IP pour `ban`/`unban` ; vide pour `config_reload`. |
+| `target_type` | `host` pour `ban`/`unban` ; `global` pour `config_reload`. |
+| `reason` | Détail du refus ou de l'erreur ; vide en cas de succès. |
+| `source` | `api` (action d'opérateur). Les actions automatiques internes au moteur sont réservées à une future source `auto`. |
+| `ban_state` | L'état final du bannissement pour `ban`/`unban` ; vide pour `config_reload`. |
+| `dry_run` | `1` lorsque le déploiement est en [dry-run](/docs/safety). |
+
+Une requête portant sur une fenêtre hors limites renvoie `400` ; une valeur d'`action` inconnue
+renvoie `400` ; un `target` mal formé renvoie `400`. Avec le stockage désactivé, la réponse est
+`{"available": false, "events": []}` avec un code `200`.
+
+## Limitation par tenant
+
+L'endpoint d'audit est **limité au tenant côté serveur**, exactement comme `/attacks` et `/bans`. Un
+[token limité à un tenant](/docs/multi-tenancy) ne voit que les enregistrements dont le `tenant`
+correspond à sa propre portée ; la portée est liée lors de l'authentification et ne peut être élargie
+par aucun paramètre de requête. Un token non limité (admin) voit les enregistrements de tous les
+tenants. Un filtre `target` qui nomme une adresse en dehors du tenant de l'appelant est refusé avec
+`403`, de sorte que le journal d'audit ne constitue pas un oracle d'existence inter-tenant.
+
+## Rétention
+
+Les enregistrements d'audit résident dans la table ClickHouse `audit_events` et héritent du même TTL
+par ligne `ttl_days` que le reste du [stockage](/docs/storage) — la rétention est bornée sans
+intervention de l'opérateur. La persistance se fait au mieux (best-effort) depuis la même file
+d'attente bornée : un ClickHouse lent ou indisponible abandonne des lignes plutôt que de bloquer un
+bannissement, tandis que la ligne de journal `INFO` est toujours émise.
+
+## Voir aussi
+
+- [API REST](/docs/api) — les endpoints de mutation dont les actions sont auditées.
+- [Authentification](/docs/authentication) — les noms de tokens deviennent l'identité `operator`.
+- [Multi-tenancy](/docs/multi-tenancy) — comment la piste est limitée par tenant.
+- [Stockage (ClickHouse)](/docs/storage) — où les enregistrements d'audit sont persistés.
+- [Modèle de sécurité](/docs/safety) — les garde-fous qui produisent les enregistrements `rejected`.

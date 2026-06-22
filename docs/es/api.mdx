@@ -42,6 +42,7 @@ dentro de su tenant — un objetivo fuera del tenant devuelve un `403` uniforme.
 | GET | `/api/v1/attacks` | Ataques activos más los últimos 100 que finalizaron, con muestras y clasificación. |
 | GET | `/api/v1/hosts` | Instantánea de hosts monitorizados: tasas por dirección, baselines aprendidos, estado de ataque. |
 | GET | `/api/v1/bans` | Todos los baneos, activos e históricos. |
+| GET | `/api/v1/audit` | Registro de auditoría de las modificaciones, atribuido al operador (quién baneó/recargó, cuándo, resultado). |
 | POST | `/api/v1/ban` | Banear una dirección manualmente. |
 | POST | `/api/v1/unban` | Retirar un baneo manualmente. |
 | POST | `/api/v1/config/reload` | Releer el archivo de configuración (igual que `SIGHUP`). |
@@ -102,6 +103,7 @@ contienen objetos `Attack`.
 | `ended_at` | string | Marca de tiempo RFC 3339; se omite mientras está activo. |
 | `sample` | object | Muestra de flow capturada en la detección; se omite cuando el muestreo está desactivado. |
 | `classification` | object | Vector de ataque inferido; se omite cuando no está clasificado. |
+| `reason` | object | Por qué se disparó la detección: procedencia del umbral, calentamiento, proporciones por protocolo. Se adjunta al inicio. |
 
 ```json
 {
@@ -161,6 +163,29 @@ una lista opcional de `flows` en bruto, y `total_packets`. El `type` de la
 `classification` es uno de los vectores documentados en [Detección](/docs/detection); `confidence`
 es la proporción (`0..1`) del tráfico de ataque que coincide con la firma ganadora, y `src_port`
 es el puerto del servicio reflejado para los vectores de amplificación.
+
+El objeto `reason` explica **por qué** se disparó la detección: se captura una vez al inicio, fuera
+de la ruta crítica. `threshold_source` es `static` o `baseline`: si el límite cruzado provino
+de la configuración estática o de un [baseline aprendido](/docs/baselines) ya calentado. Cuando es
+`baseline`, un objeto `baseline` lleva el cálculo efectivo
+(`min(ceiling, max(floor, normal × factor))`). `baseline_configured`, `warming_up` y
+`warmup_remaining_seconds` explican un umbral estático que se aplicó solo porque el baseline
+aún no se había calentado. `shares` es la fracción por protocolo del total de PPS que impulsó
+la clasificación, y `dominant_share_gate` es la proporción que un protocolo necesita para ganar un vector
+(en caso contrario el ataque es `mixed`). Consulta [Detección](/docs/detection) para
+saber cómo leerlo.
+
+```json
+{
+  "reason": {
+    "threshold_source": "baseline",
+    "baseline": { "normal": 1200, "factor": 8, "floor": 5000, "ceiling": 80000 },
+    "baseline_configured": true,
+    "shares": { "udp": 0.98, "syn": 0, "tcp": 0.01, "icmp": 0, "frag": 0 },
+    "dominant_share_gate": 0.5
+  }
+}
+```
 
 ### GET /api/v1/hosts
 
@@ -268,6 +293,40 @@ Devuelve la tabla completa de baneos: activos e históricos. Cada entrada es un 
 Consulta [Mitigación](/docs/mitigation) para ver cómo el TTL, la histéresis y el límite de baneos dan forma a este
 ciclo de vida.
 
+### GET /api/v1/audit
+
+Devuelve el registro de auditoría atribuido al operador: quién emitió cada `ban`, `unban` o
+`config_reload`, cuándo, y el resultado (incluidas las acciones **rechazadas**). Los registros van
+de más reciente a más antiguo y el endpoint está acotado al tenant en el servidor. Acepta los parámetros de
+consulta opcionales `from`/`to` (RFC 3339), `action` (`ban`/`unban`/`config_reload`) y `target` (una IP), y
+por defecto devuelve la última hora:
+
+```json
+{
+  "available": true,
+  "events": [
+    {
+      "event_time": "2026-06-22 03:14:09",
+      "action": "ban",
+      "result": "rejected",
+      "operator": "alice",
+      "role": "operator",
+      "tenant": "customerA",
+      "target": "203.0.113.66",
+      "target_type": "host",
+      "reason": "whitelisted",
+      "source": "api",
+      "ban_state": "rejected",
+      "dry_run": 0
+    }
+  ]
+}
+```
+
+Cuando el almacenamiento está desactivado, la respuesta es `{"available": false, "events": []}`. Consulta la
+página dedicada de [Registro de auditoría](/docs/audit) para conocer la lista completa de campos, las reglas de consulta y el
+modelo de identidad del operador y de acotamiento por tenant.
+
 ### POST /api/v1/ban
 
 Aplica un blackhole a una dirección manualmente. El cuerpo es una sola IP:
@@ -338,5 +397,6 @@ bajo `/api/v1` y se sirve sin el token bearer para que un scraper pueda alcanzar
 ## Relacionado
 
 - [Autenticación](/docs/authentication) — configura un token bearer antes de exponer el listener.
+- [Registro de auditoría](/docs/audit) — el rastro de modificaciones atribuido al operador.
 - [Panel](/docs/dashboard) — la interfaz web integrada servida en la misma dirección.
 - [Métricas](/docs/metrics) — el endpoint `/metrics` de Prometheus.

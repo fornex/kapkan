@@ -39,14 +39,21 @@ never from the config file.
 Kapkan talks to ClickHouse's **HTTP interface** with the Go standard library — no driver
 dependency. The only external dependency is the ClickHouse server itself.
 
-On start it idempotently creates two MergeTree tables:
+On start it idempotently creates three MergeTree tables:
 
 | Table | Contents |
 | --- | --- |
-| `attack_events` | Every attack start and end: type, direction, rates, the sample's top sources, and ban state. |
+| `attack_events` | Every attack start and end: type, direction, rates, the sample's top sources, ban state, and the detection `reason`. |
 | `traffic` | Periodic per-host rate and baseline snapshots (every `traffic_interval_seconds`). |
+| `audit_events` | Operator-attributed mutations: who issued each ban/unban/config-reload, when, and the outcome. See [Audit log](/docs/audit). |
 
-Both carry a `ttl_days` per-row TTL, so retention is bounded without operator intervention.
+Each carries a `ttl_days` per-row TTL, so retention is bounded without operator intervention.
+
+The `attack_events` table's `reason` column holds the compact JSON of the detection
+[reason](/docs/detection) — why the attack fired (threshold provenance,
+warm-up, protocol shares) — and is empty on the attack-ended row. Existing deployments gain the
+column automatically: schema init runs an `ADD COLUMN IF NOT EXISTS`, skipped silently if the
+writer credential lacks `ALTER` rights (fresh installs already have it).
 
 ## Backpressure
 
@@ -64,4 +71,5 @@ snapshotted — both are candidates for a follow-up.
 ## Related
 
 - [Configuration reference](/docs/configuration) — the full `storage` key list.
+- [Audit log](/docs/audit) — the `audit_events` table and its read endpoint.
 - [Metrics](/docs/metrics) — the `storage_rows_total` counter.

@@ -1,0 +1,143 @@
+export const metadata = {
+  title: "Registro de auditoría",
+  description:
+    "Rastro de auditoría atribuido al operator: quién baneó, desbaneó o recargó la configuración, cuándo y con qué resultado — consultable por tenant.",
+};
+
+# Registro de auditoría
+
+Cada acción de la API que cambia el estado se registra en un **rastro de auditoría** — la
+respuesta a "quién baneó `203.0.113.66` a las 03:14 y quién recargó la configuración". Cada
+registro nombra al operator (el token de API que hizo la llamada), la acción, el objetivo y el
+resultado — incluidas las acciones **rechazadas**, ya que un baneo denegado es en sí mismo una
+decisión auditable.
+
+El rastro se escribe desde los manejadores de mutación de la [API](/docs/api) y se expone como un
+único endpoint de lectura, `GET /api/v1/audit`. Se persiste en [ClickHouse](/docs/storage) junto
+al historial de ataques y tráfico, y está **acotado por tenant** del lado del servidor, igual que
+cualquier otra lectura.
+
+<Callout type="info" title="Siempre registrado, consultable cuando el almacenamiento está activo">
+Cada mutación se registra a nivel `INFO` independientemente del almacenamiento. El historial
+consultable necesita [ClickHouse](/docs/storage): con el almacenamiento deshabilitado el endpoint
+devuelve `available: false` (nunca da error), y aún tienes las líneas de auditoría en el log del
+proceso.
+</Callout>
+
+## Qué se registra
+
+Se auditan tres acciones, cada una tanto en caso de éxito como de fallo:
+
+| Acción | Cuándo | Resultados registrados (`result`) |
+| --- | --- | --- |
+| `ban` | `POST /api/v1/ban` | `active` (o estado de baneo `withdrawn`/`dry_run`) en caso de éxito; `rejected` cuando una protección de seguridad lo deniega. |
+| `unban` | `POST /api/v1/unban` | `withdrawn` en caso de éxito. |
+| `config_reload` | `POST /api/v1/config/reload` | `ok` en caso de éxito; `error` cuando la nueva configuración no se puede parsear o validar. |
+
+Una acción **rechazada** se audita deliberadamente: un baneo rechazado por la whitelist, por las
+`networks` configuradas o por una [protección de radio de impacto](/docs/safety) deja un registro
+de auditoría con `result: "rejected"` y el motivo de la denegación en `reason`. Por lo tanto, el
+rastro de auditoría muestra tanto los cambios intentados como los aplicados.
+
+## Identidad del operator
+
+El campo `operator` es el **nombre** del [token de API](/docs/authentication) que coincidió — el
+`name` que asignas a cada entrada de la lista `api.tokens`. Así es como el rastro atribuye una
+acción a una persona o sistema:
+
+```yaml
+api:
+  tokens:
+    - { name: alice,      token_env: KAPKAN_ALICE, role: operator }
+    - { name: automation, token_env: KAPKAN_AUTO,  role: operator }
+```
+
+Un baneo emitido con el token `alice` registra `operator: "alice"`. En una API abierta (sin
+token) no hay ningún principal al que atribuir, así que `operator` queda vacío — otra razón para
+[configurar tokens](/docs/authentication) antes de exponer el listener.
+
+## GET /api/v1/audit
+
+Devuelve los registros de auditoría del más reciente al más antiguo. Necesita el rol **viewer**,
+como las demás lecturas.
+
+| Parámetro de consulta | Por defecto | Notas |
+| --- | --- | --- |
+| `from` | ahora − 1h | Inicio RFC 3339 de la ventana. |
+| `to` | ahora | Fin RFC 3339 de la ventana. Debe ser posterior a `from`; la ventana no puede exceder **31 days**. |
+| `action` | (todas) | Filtra a una de `ban`, `unban`, `config_reload`. |
+| `target` | (todos) | Filtra a una IP. Debe ser visible para el tenant de quien llama, o la solicitud es `403`. |
+
+```http
+GET /api/v1/audit?from=2026-06-22T00:00:00Z&action=ban HTTP/1.1
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "available": true,
+  "events": [
+    {
+      "event_time": "2026-06-22 03:14:09",
+      "action": "ban",
+      "result": "rejected",
+      "operator": "alice",
+      "role": "operator",
+      "tenant": "customerA",
+      "target": "203.0.113.66",
+      "target_type": "host",
+      "reason": "whitelisted",
+      "source": "api",
+      "ban_state": "rejected",
+      "dry_run": 0
+    }
+  ]
+}
+```
+
+Cada registro lleva estos campos:
+
+| Campo | Notas |
+| --- | --- |
+| `event_time` | UTC, `YYYY-MM-DD HH:MM:SS`. |
+| `action` | `ban`, `unban` o `config_reload`. |
+| `result` | `active`, `rejected`, `withdrawn`, `ok` o `error`. |
+| `operator` | El nombre del token de API que coincidió; vacío en modo abierto (sin token). |
+| `role` | El rol de quien llama (`viewer` / `operator`). |
+| `tenant` | El alcance de tenant de quien llama; vacío para una llamada sin alcance (admin). |
+| `target` | La IP para `ban`/`unban`; vacío para `config_reload`. |
+| `target_type` | `host` para `ban`/`unban`; `global` para `config_reload`. |
+| `reason` | Detalle de la denegación o el error; vacío en caso de éxito. |
+| `source` | `api` (acción de operator). Las acciones automáticas internas del motor se reservan para una futura fuente `auto`. |
+| `ban_state` | El estado de baneo final para `ban`/`unban`; vacío para `config_reload`. |
+| `dry_run` | `1` cuando el despliegue está en [dry-run](/docs/safety). |
+
+Una consulta contra una ventana fuera de rango devuelve `400`; un valor de `action` desconocido
+devuelve `400`; un `target` mal formado devuelve `400`. Con el almacenamiento deshabilitado la
+respuesta es `{"available": false, "events": []}` con `200`.
+
+## Acotamiento por tenant
+
+El endpoint de auditoría está **acotado por tenant del lado del servidor**, exactamente como
+`/attacks` y `/bans`. Un [token acotado a un tenant](/docs/multi-tenancy) ve solo los registros
+cuyo `tenant` coincide con su propio alcance; el alcance se vincula durante la autenticación y no
+puede ampliarse con ningún parámetro de consulta. Un token sin alcance (admin) ve los registros de
+todos los tenants. Un filtro `target` que nombre una dirección fuera del tenant de quien llama se
+deniega con `403`, de modo que el registro de auditoría no es un oráculo de existencia entre
+tenants.
+
+## Retención
+
+Los registros de auditoría viven en la tabla `audit_events` de ClickHouse y heredan el mismo TTL
+por fila `ttl_days` que el resto del [almacenamiento](/docs/storage) — la retención está acotada
+sin intervención del operator. La persistencia es de mejor esfuerzo desde la misma cola acotada:
+un ClickHouse lento o caído descarta filas en lugar de bloquear un baneo, mientras que la línea de
+log `INFO` siempre se emite.
+
+## Relacionado
+
+- [API REST](/docs/api) — los endpoints de mutación cuyas acciones se auditan.
+- [Autenticación](/docs/authentication) — los nombres de token se convierten en la identidad `operator`.
+- [Multi-tenancy](/docs/multi-tenancy) — cómo se acota el rastro por tenant.
+- [Almacenamiento (ClickHouse)](/docs/storage) — dónde se persisten los registros de auditoría.
+- [Modelo de seguridad](/docs/safety) — las protecciones que producen registros `rejected`.
