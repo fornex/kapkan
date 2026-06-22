@@ -45,6 +45,7 @@ außerhalb des Tenants liefert ein einheitliches `403`. Siehe
 | GET | `/api/v1/attacks` | Aktive Angriffe sowie die letzten 100 beendeten, mit Samples und Klassifizierung. |
 | GET | `/api/v1/hosts` | Snapshot der verfolgten Hosts: Raten je Richtung, gelernte Baselines, Angriffszustand. |
 | GET | `/api/v1/bans` | Alle Sperren, aktive und historische. |
+| GET | `/api/v1/audit` | Operator-zugeordneter Audit-Trail von Änderungen (wer wann gesperrt/neu geladen hat, mit Ergebnis). |
 | POST | `/api/v1/ban` | Eine Adresse manuell sperren. |
 | POST | `/api/v1/unban` | Eine Sperre manuell zurückziehen. |
 | POST | `/api/v1/config/reload` | Konfigurationsdatei neu einlesen (entspricht `SIGHUP`). |
@@ -105,6 +106,7 @@ Arrays enthalten `Attack`-Objekte.
 | `ended_at` | string | RFC-3339-Zeitstempel; entfällt, solange aktiv. |
 | `sample` | object | Bei der Erkennung erfasstes Flow-Sample; entfällt, wenn Sampling deaktiviert ist. |
 | `classification` | object | Abgeleiteter Angriffsvektor; entfällt, wenn nicht klassifiziert. |
+| `reason` | object | Warum die Erkennung ausgelöst hat — Herkunft des Schwellenwerts, Warm-up, Protokollanteile. Wird beim Start angehängt. |
 
 ```json
 {
@@ -164,6 +166,29 @@ gepufferten Flows hinter der Erkennung zusammen — `top_sources`, `top_src_port
 [Erkennung](/docs/detection) dokumentierten Vektoren; `confidence` ist der Anteil (`0..1`) des
 Angriffsverkehrs, der zur erkannten Signatur passt, und `src_port` ist der reflektierte
 Dienst-Port für Amplification-Vektoren.
+
+Das `reason`-Objekt erklärt, **warum** die Erkennung ausgelöst hat — einmal beim Start erfasst,
+abseits des Hot Paths. `threshold_source` ist `static` oder `baseline`: ob der überschrittene
+Grenzwert aus der statischen Konfiguration oder aus einer aufgewärmten
+[gelernten Baseline](/docs/baselines) stammt. Ist er `baseline`, führt ein `baseline`-Objekt die
+effektive Rechnung (`min(ceiling, max(floor, normal × factor))`). `baseline_configured`,
+`warming_up` und `warmup_remaining_seconds` erklären einen statischen Schwellenwert, der nur galt,
+weil die Baseline noch nicht aufgewärmt war. `shares` ist der Protokollanteil je Protokoll an der
+gesamten PPS, der die Klassifizierung bestimmt hat, und `dominant_share_gate` ist der Anteil, den
+ein Protokoll braucht, um einen Vektor zu gewinnen (andernfalls ist der Angriff `mixed`). Siehe
+[Erkennung](/docs/detection), wie man es liest.
+
+```json
+{
+  "reason": {
+    "threshold_source": "baseline",
+    "baseline": { "normal": 1200, "factor": 8, "floor": 5000, "ceiling": 80000 },
+    "baseline_configured": true,
+    "shares": { "udp": 0.98, "syn": 0, "tcp": 0.01, "icmp": 0, "frag": 0 },
+    "dominant_share_gate": 0.5
+  }
+}
+```
 
 ### GET /api/v1/hosts
 
@@ -272,6 +297,40 @@ Gibt die vollständige Sperrtabelle zurück — aktive und historische. Jeder Ei
 Siehe [Mitigation](/docs/mitigation), wie TTL, Hysterese und die Sperrobergrenze diesen
 Lebenszyklus prägen.
 
+### GET /api/v1/audit
+
+Gibt den operator-zugeordneten Audit-Trail zurück — wer jeweils `ban`, `unban` oder
+`config_reload` ausgelöst hat, wann und mit welchem Ergebnis (einschließlich **abgelehnter**
+Aktionen). Datensätze sind neueste zuerst und der Endpunkt ist serverseitig tenant-bezogen. Er
+nimmt optionale Query-Parameter `from`/`to` (RFC 3339), `action` (`ban`/`unban`/`config_reload`)
+und `target` (eine IP) entgegen und liefert standardmäßig die letzte Stunde:
+
+```json
+{
+  "available": true,
+  "events": [
+    {
+      "event_time": "2026-06-22 03:14:09",
+      "action": "ban",
+      "result": "rejected",
+      "operator": "alice",
+      "role": "operator",
+      "tenant": "customerA",
+      "target": "203.0.113.66",
+      "target_type": "host",
+      "reason": "whitelisted",
+      "source": "api",
+      "ban_state": "rejected",
+      "dry_run": 0
+    }
+  ]
+}
+```
+
+Wenn der Speicher deaktiviert ist, lautet die Antwort `{"available": false, "events": []}`. Die
+vollständige Feldliste, die Query-Regeln sowie das Modell für Operator-Identität und
+Tenant-Bezug finden Sie auf der eigenen Seite [Audit-Log](/docs/audit).
+
 ### POST /api/v1/ban
 
 Sperrt eine Adresse manuell per Blackhole. Der Body ist eine einzelne IP:
@@ -344,5 +403,6 @@ kann. Die vollständige Metrikliste finden Sie unter [Metriken](/docs/metrics).
 ## Verwandt
 
 - [Authentifizierung](/docs/authentication) — legen Sie ein Bearer-Token fest, bevor Sie den Listener freigeben.
+- [Audit-Log](/docs/audit) — der operator-zugeordnete Trail von Änderungen.
 - [Dashboard](/docs/dashboard) — die eingebettete Web-UI, die unter derselben Adresse bereitgestellt wird.
 - [Metriken](/docs/metrics) — der Prometheus-Endpunkt `/metrics`.

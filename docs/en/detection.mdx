@@ -257,6 +257,40 @@ How a vector is chosen:
 `0..1`. A value of `0` means the attack is `mixed` — no signature matched at all.
 </Callout>
 
+## Why a detection fired
+
+Every attack carries a **reason** — a small record, captured the instant the threshold crosses,
+that explains the detection without making you re-derive the math. It lets an operator tell a real
+attack from a sampling or threshold artifact at a glance. It is built once per attack start from
+inputs the engine already has, so it costs nothing on the hot path, and it rides along on the
+`attack_started` event, in [storage](/docs/storage), and on the [API](/docs/api)'s `reason` field.
+
+It answers two questions:
+
+- **Which threshold was crossed, and where did it come from?** `threshold_source` is either
+  `static` (the limit came straight from your config) or `baseline` (a warmed-up
+  [learned baseline](/docs/baselines) set the limit). The base trio (`pps`, `mbps`,
+  `flows_per_sec`) becomes baseline-derived once the baseline warms up; per-protocol metrics are
+  **always** static. For a baseline threshold the reason carries the full computation — the learned
+  `normal`, the `factor`, the `floor`, and the static `ceiling` — so you can see the effective
+  threshold as `min(ceiling, max(floor, normal × factor))`.
+- **Was the baseline ready?** If a baseline is configured but still warming up, `threshold_source`
+  stays `static`, `warming_up` is `true`, and `warmup_remaining_seconds` tells you how long until
+  the learned threshold takes over. A detection during warm-up is therefore expected to use the
+  static limit.
+
+It also restates the **classification inputs**: `shares` is the per-protocol fraction of total
+PPS (the same ratios the classifier uses), and `dominant_share_gate` is the share one protocol
+needs to win a vector — `0.5`. If no protocol reaches it, the attack is `mixed`. Seeing, say, a UDP
+share of `0.98` next to an `ntp_amplification` classification confirms at a glance why that vector
+won.
+
+<Callout type="info" title="Per-protocol metrics are always static">
+Baselines learn only the base trio. When a per-protocol metric (`tcp_syn_pps`, `udp_mbps`, …)
+trips the attack, `threshold_source` is `static` even if the group has a warmed-up baseline — there
+is no learned normal for that metric to compare against.
+</Callout>
+
 ## Related
 
 - [Hostgroups](/docs/hostgroups) — per-prefix thresholds, total vs. per-host calculation, and per-group policy.

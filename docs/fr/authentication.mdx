@@ -74,6 +74,13 @@ configuration](/docs/api) — sans redémarrage.
 Un token peut également porter un `tenant` optionnel, le limitant aux données d'un seul client. C'est
 la fonctionnalité [Multi-tenant](/docs/multi-tenancy), superposée aux rôles décrits ici.
 
+<Callout type="info" title="Le nom du token est l'identité de l'operator">
+Le `name` de chaque token est ce que le [journal d'audit](/docs/audit) enregistre comme `operator`
+pour chaque bannissement, débannissement et rechargement de configuration qu'il émet — donnez donc
+des noms significatifs aux tokens. Sur une API ouverte (sans token), il n'y a aucun principal à
+attribuer, et le champ `operator` de l'audit est vide.
+</Callout>
+
 ## Ce qu'il protège
 
 Une fois un token défini, chaque requête `/api/v1` doit le transporter dans un en-tête
@@ -121,6 +128,7 @@ périmètre (tous les tenants) ou limité à un seul. Voir [Multi-tenant](/docs/
 ## Pour aller plus loin
 
 - [Multi-tenant](/docs/multi-tenancy) — limiter un token aux données d'un seul client.
+- [Journal d'audit](/docs/audit) — les noms des tokens deviennent l'identité de l'operator à chaque mutation.
 - [API REST](/docs/api) — les endpoints que le token protège.
 - [Tableau de bord](/docs/dashboard) — comment l'UI intégrée demande et stocke le token.
 - [Déploiement](/docs/deployment) — lier l'écouteur et fournir le token en production.

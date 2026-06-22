@@ -1,0 +1,137 @@
+export const metadata = {
+  title: "Audit log",
+  description:
+    "Operator-attributed audit trail: who banned, unbanned or reloaded config, when, and the outcome — queryable per tenant.",
+};
+
+# Audit log
+
+Every state-changing API action is recorded to an **audit trail** — the answer to "who
+banned `203.0.113.66` at 03:14, and who reloaded the config". Each record names the operator
+(the API token that made the call), the action, the target, and the outcome — including
+**refused** actions, since a rejected ban is itself an auditable decision.
+
+The trail is written from the [API](/docs/api) mutation handlers and exposed as a single
+read endpoint, `GET /api/v1/audit`. It is persisted to [ClickHouse](/docs/storage) alongside
+attack and traffic history, and is **tenant-scoped** server-side just like every other read.
+
+<Callout type="info" title="Always logged, queryable when storage is on">
+Every mutation is logged at `INFO` level regardless of storage. The queryable history needs
+[ClickHouse](/docs/storage): with storage disabled the endpoint returns `available: false`
+(it never errors), and you still have the audit lines in the process log.
+</Callout>
+
+## What is recorded
+
+Three actions are audited, each on both success and failure:
+
+| Action | When | Recorded outcomes (`result`) |
+| --- | --- | --- |
+| `ban` | `POST /api/v1/ban` | `active` (or `withdrawn`/`dry_run` ban state) on success; `rejected` when a safety guard refuses it. |
+| `unban` | `POST /api/v1/unban` | `withdrawn` on success. |
+| `config_reload` | `POST /api/v1/config/reload` | `ok` on success; `error` when the new config fails to parse or validate. |
+
+A **refused** action is audited deliberately: a ban rejected by the whitelist, the configured
+`networks`, or a [blast-radius guard](/docs/safety) leaves an audit record with `result:
+"rejected"` and the refusal in `reason`. The audit trail therefore shows attempted as well as
+applied changes.
+
+## Operator identity
+
+The `operator` field is the **name** of the matched [API token](/docs/authentication) — the
+`name` you give each entry in the `api.tokens` list. That is how the trail attributes an
+action to a person or system:
+
+```yaml
+api:
+  tokens:
+    - { name: alice,      token_env: KAPKAN_ALICE, role: operator }
+    - { name: automation, token_env: KAPKAN_AUTO,  role: operator }
+```
+
+A ban issued with the `alice` token records `operator: "alice"`. On an open (token-less) API
+there is no principal to attribute, so `operator` is empty — another reason to
+[set tokens](/docs/authentication) before exposing the listener.
+
+## GET /api/v1/audit
+
+Returns audit records newest-first. It needs the **viewer** role, like the other reads.
+
+| Query param | Default | Notes |
+| --- | --- | --- |
+| `from` | now − 1h | RFC 3339 start of the window. |
+| `to` | now | RFC 3339 end of the window. Must be after `from`; the window may not exceed **31 days**. |
+| `action` | (all) | Filter to one of `ban`, `unban`, `config_reload`. |
+| `target` | (all) | Filter to one IP. Must be visible to the caller's tenant, or the request is `403`. |
+
+```http
+GET /api/v1/audit?from=2026-06-22T00:00:00Z&action=ban HTTP/1.1
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "available": true,
+  "events": [
+    {
+      "event_time": "2026-06-22 03:14:09",
+      "action": "ban",
+      "result": "rejected",
+      "operator": "alice",
+      "role": "operator",
+      "tenant": "customerA",
+      "target": "203.0.113.66",
+      "target_type": "host",
+      "reason": "whitelisted",
+      "source": "api",
+      "ban_state": "rejected",
+      "dry_run": 0
+    }
+  ]
+}
+```
+
+Each record carries these fields:
+
+| Field | Notes |
+| --- | --- |
+| `event_time` | UTC, `YYYY-MM-DD HH:MM:SS`. |
+| `action` | `ban`, `unban`, or `config_reload`. |
+| `result` | `active`, `rejected`, `withdrawn`, `ok`, or `error`. |
+| `operator` | The matched API token name; empty in open (token-less) mode. |
+| `role` | The caller's role (`viewer` / `operator`). |
+| `tenant` | The caller's tenant scope; empty for an unscoped (admin) caller. |
+| `target` | The IP for `ban`/`unban`; empty for `config_reload`. |
+| `target_type` | `host` for `ban`/`unban`; `global` for `config_reload`. |
+| `reason` | Refusal or error detail; empty on success. |
+| `source` | `api` (operator action). Engine-internal automatic actions are reserved for a future `auto` source. |
+| `ban_state` | The final ban state for `ban`/`unban`; empty for `config_reload`. |
+| `dry_run` | `1` when the deployment is in [dry-run](/docs/safety). |
+
+A query against an out-of-range window returns `400`; an unknown `action` value returns `400`;
+a malformed `target` returns `400`. With storage disabled the response is
+`{"available": false, "events": []}` at `200`.
+
+## Tenant scoping
+
+The audit endpoint is **tenant-scoped server-side**, exactly like `/attacks` and `/bans`. A
+[tenant-scoped token](/docs/multi-tenancy) sees only the records whose `tenant` matches its
+own scope; the scope is bound during authentication and cannot be widened by any query
+parameter. An unscoped (admin) token sees every tenant's records. A `target` filter that
+names an address outside the caller's tenant is refused with `403`, so the audit log is not a
+cross-tenant existence oracle.
+
+## Retention
+
+Audit records live in the `audit_events` ClickHouse table and inherit the same `ttl_days`
+per-row TTL as the rest of [storage](/docs/storage) — retention is bounded without operator
+intervention. Persistence is best-effort off the same bounded queue: a slow or down ClickHouse
+drops rows rather than blocking a ban, while the `INFO` log line is always emitted.
+
+## Related
+
+- [REST API](/docs/api) — the mutation endpoints whose actions are audited.
+- [Authentication](/docs/authentication) — token names become the `operator` identity.
+- [Multi-tenancy](/docs/multi-tenancy) — how the trail is scoped per tenant.
+- [Storage (ClickHouse)](/docs/storage) — where audit records are persisted.
+- [Safety model](/docs/safety) — the guards that produce `rejected` records.

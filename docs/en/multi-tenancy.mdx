@@ -67,11 +67,12 @@ derived once during authentication, and one visibility predicate decides every r
 endpoint that forgets to filter would, for a scoped token, return nothing — never another
 tenant's data.
 
-- **Reads** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` return only rows whose owning
-  group carries the caller's tenant. `/status` is rebuilt per scope: a scoped token gets only
-  its own hostgroups and counts, never the global protected networks, the global thresholds, or
-  the deployment-wide fallback group — so a tenant never learns another's prefixes or BGP
-  posture.
+- **Reads** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` and `/audit` return only rows
+  whose owning group carries the caller's tenant. `/status` is rebuilt per scope: a scoped token
+  gets only its own hostgroups and counts, never the global protected networks, the global
+  thresholds, or the deployment-wide fallback group — so a tenant never learns another's prefixes
+  or BGP posture. The [audit log](/docs/audit) is bound to the caller's tenant server-side, and a
+  `target` filter naming an out-of-tenant address is refused — no cross-tenant existence oracle.
 - **Mutations** — a scoped operator may `ban`/`unban` only within its own prefixes. A target
   outside the tenant returns a uniform `403` whether or not a ban exists, so a tenant cannot
   probe another's ban state. `POST /api/v1/config/reload` is **admin-only** — a reload rewrites
@@ -103,5 +104,6 @@ scope.
 
 - [Hostgroups](/docs/hostgroups) — the prefix groups a tenant labels.
 - [Authentication](/docs/authentication) — token roles the tenant scope builds on.
+- [Audit log](/docs/audit) — the per-tenant trail of operator actions.
 - [REST API](/docs/api) — the endpoints that are filtered per tenant.
 - [Configuration reference](/docs/configuration)

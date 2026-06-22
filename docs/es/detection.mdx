@@ -263,6 +263,40 @@ Cómo se elige un vector:
 `0..1`. Un valor de `0` significa que el ataque es `mixed`: no coincidió ninguna firma en absoluto.
 </Callout>
 
+## Por qué se disparó una detección
+
+Cada ataque lleva un **motivo** (reason) — un pequeño registro, capturado en el instante en que se cruza
+el umbral, que explica la detección sin obligarte a rehacer los cálculos. Permite a un operator distinguir
+de un vistazo un ataque real de un artefacto de muestreo o de umbral. Se construye una sola vez al inicio
+del ataque a partir de entradas que el motor ya tiene, así que no cuesta nada en la ruta crítica, y viaja
+junto al evento `attack_started`, en el [almacenamiento](/docs/storage) y en el campo `reason` de la
+[API](/docs/api).
+
+Responde a dos preguntas:
+
+- **¿Qué umbral se cruzó y de dónde provino?** `threshold_source` es `static` (el límite vino directamente
+  de tu configuración) o `baseline` (una [línea base aprendida](/docs/baselines) ya entrenada fijó el
+  límite). El trío base (`pps`, `mbps`, `flows_per_sec`) pasa a derivarse de la baseline una vez que esta
+  se entrena; las métricas por protocolo son **siempre** static. Para un umbral de baseline, el motivo
+  lleva el cálculo completo — el `normal` aprendido, el `factor`, el `floor` y el `ceiling` estático —, de
+  modo que puedes ver el umbral efectivo como `min(ceiling, max(floor, normal × factor))`.
+- **¿Estaba lista la baseline?** Si hay una baseline configurada pero aún en calentamiento,
+  `threshold_source` se mantiene en `static`, `warming_up` es `true` y `warmup_remaining_seconds` te indica
+  cuánto falta para que el umbral aprendido tome el relevo. Por tanto, es esperable que una detección
+  durante el calentamiento use el límite estático.
+
+También reexpone las **entradas de clasificación**: `shares` es la fracción por protocolo del total de
+PPS (las mismas proporciones que usa el clasificador), y `dominant_share_gate` es la proporción que un
+protocolo necesita para ganar un vector — `0.5`. Si ningún protocolo la alcanza, el ataque es `mixed`. Ver,
+por ejemplo, una proporción UDP de `0.98` junto a una clasificación `ntp_amplification` confirma de un
+vistazo por qué ganó ese vector.
+
+<Callout type="info" title="Las métricas por protocolo son siempre static">
+Las baselines solo aprenden el trío base. Cuando una métrica por protocolo (`tcp_syn_pps`, `udp_mbps`, …)
+dispara el ataque, `threshold_source` es `static` aunque el grupo tenga una baseline ya entrenada: no hay
+un normal aprendido con el que comparar esa métrica.
+</Callout>
+
 ## Relacionado
 
 - [Hostgroups](/docs/hostgroups) — umbrales por prefijo, cálculo total frente a por host y política por grupo.

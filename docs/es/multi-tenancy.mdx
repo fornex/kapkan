@@ -70,11 +70,14 @@ estrangulamiento: el tenant de la solicitud se deriva una sola vez durante la au
 un único predicado de visibilidad decide cada fila. Un nuevo endpoint de lectura que olvide
 filtrar devolvería, para un token con alcance, nada — nunca los datos de otro tenant.
 
-- **Lecturas** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` devuelven solo las filas cuyo
-  grupo propietario lleva el tenant de quien llama. `/status` se reconstruye por alcance: un
-  token con alcance obtiene solo sus propios hostgroups y conteos, nunca las redes protegidas
-  globales, los umbrales globales ni el grupo de respaldo de todo el despliegue — de modo que un
-  tenant nunca conoce los prefijos ni la postura BGP de otro.
+- **Lecturas** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` y `/audit` devuelven solo las
+  filas cuyo grupo propietario lleva el tenant de quien llama. `/status` se reconstruye por
+  alcance: un token con alcance obtiene solo sus propios hostgroups y conteos, nunca las redes
+  protegidas globales, los umbrales globales ni el grupo de respaldo de todo el despliegue — de
+  modo que un tenant nunca conoce los prefijos ni la postura BGP de otro. El
+  [registro de auditoría](/docs/audit) está vinculado al tenant de quien llama del lado del
+  servidor, y un filtro `target` que nombre una dirección fuera del tenant se rechaza — sin
+  oráculo de existencia entre tenants.
 - **Mutaciones** — un operator con alcance puede hacer `ban`/`unban` solo dentro de sus propios
   prefijos. Un objetivo fuera del tenant devuelve un `403` uniforme exista o no un baneo, de
   modo que un tenant no puede sondear el estado de baneo de otro. `POST /api/v1/config/reload`
@@ -110,5 +113,6 @@ token) — no hay ningún principal al que acotar.
 
 - [Grupos de hosts](/docs/hostgroups) — los grupos de prefijos que un tenant etiqueta.
 - [Autenticación](/docs/authentication) — los roles de token sobre los que se apoya el alcance del tenant.
+- [Registro de auditoría](/docs/audit) — el rastro por tenant de las acciones del operator.
 - [API REST](/docs/api) — los endpoints que se filtran por tenant.
 - [Referencia de configuración](/docs/configuration)

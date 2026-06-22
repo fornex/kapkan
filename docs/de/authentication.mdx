@@ -76,6 +76,13 @@ Ein Token kann außerdem einen optionalen `tenant` tragen, der es auf die Daten 
 Kunden eingrenzt. Das ist die Funktion [Mandantenfähigkeit](/docs/multi-tenancy), aufgesetzt
 auf die hier beschriebenen Rollen.
 
+<Callout type="info" title="Der Token-Name ist die Operator-Identität">
+Der `name` jedes Tokens ist das, was das [Audit-Log](/docs/audit) als `operator` für jede
+Sperre, Entsperrung und jedes Neuladen der Konfiguration aufzeichnet, die es auslöst — geben
+Sie Tokens also aussagekräftige Namen. Bei einer offenen (token-losen) API gibt es kein
+Principal, dem etwas zugeordnet werden könnte, und der Audit-`operator` ist leer.
+</Callout>
+
 ## Was es schützt
 
 Ist ein Token gesetzt, muss jede `/api/v1`-Anfrage es in einem `Authorization`-Header gemäß
@@ -124,6 +131,7 @@ viewer kann ungebunden sein (alle Mandanten) oder auf einen eingegrenzt. Siehe
 ## Verwandte Themen
 
 - [Mandantenfähigkeit](/docs/multi-tenancy) — ein Token auf die Daten eines einzelnen Kunden eingrenzen.
+- [Audit-Log](/docs/audit) — Token-Namen werden bei jeder Mutation zur Operator-Identität.
 - [REST API](/docs/api) — die Endpunkte, die das Token schützt.
 - [Dashboard](/docs/dashboard) — wie die eingebettete UI zur Eingabe des Tokens auffordert und es speichert.
 - [Deployment](/docs/deployment) — den Listener binden und das Token in der Produktion bereitstellen.

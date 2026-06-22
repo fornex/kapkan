@@ -273,6 +273,41 @@ Bereich `0..1`. Ein Wert von `0` bedeutet, dass der Angriff `mixed` ist — es p
 Signatur.
 </Callout>
 
+## Warum eine Erkennung ausgelöst wurde
+
+Jeder Angriff trägt einen **Grund** — einen kleinen Datensatz, der im Moment der
+Schwellenwertüberschreitung erfasst wird und die Erkennung erklärt, ohne dass Sie die Berechnung neu
+herleiten müssen. Er erlaubt es einem Operator, einen echten Angriff auf einen Blick von einem
+Sampling- oder Schwellenwert-Artefakt zu unterscheiden. Er wird einmal pro Angriffsbeginn aus
+Eingaben gebaut, die die Engine bereits hat, und kostet daher nichts auf dem Hot-Path; er reist im
+`attack_started`-Ereignis mit, im [Storage](/docs/storage) und im Feld `reason` der [API](/docs/api).
+
+Er beantwortet zwei Fragen:
+
+- **Welcher Schwellenwert wurde überschritten, und woher kam er?** `threshold_source` ist entweder
+  `static` (das Limit kam direkt aus Ihrer Konfiguration) oder `baseline` (eine eingelaufene
+  [erlernte Baseline](/docs/baselines) hat das Limit gesetzt). Das Basis-Trio (`pps`, `mbps`,
+  `flows_per_sec`) wird baseline-abgeleitet, sobald die Baseline eingelaufen ist; Metriken pro
+  Protokoll sind **immer** static. Bei einem Baseline-Schwellenwert trägt der Grund die vollständige
+  Berechnung — das erlernte `normal`, den `factor`, den `floor` und den statischen `ceiling` —, sodass
+  Sie den effektiven Schwellenwert als `min(ceiling, max(floor, normal × factor))` sehen können.
+- **War die Baseline bereit?** Wenn eine Baseline konfiguriert ist, aber noch einläuft, bleibt
+  `threshold_source` auf `static`, `warming_up` ist `true`, und `warmup_remaining_seconds` sagt Ihnen,
+  wie lange es noch dauert, bis der erlernte Schwellenwert übernimmt. Eine Erkennung während des
+  Einlaufens verwendet daher erwartungsgemäß das statische Limit.
+
+Er wiederholt außerdem die **Klassifizierungseingaben**: `shares` ist der Anteil pro Protokoll an den
+gesamten PPS (dieselben Verhältnisse, die der Klassifizierer verwendet), und `dominant_share_gate`
+ist der Anteil, den ein Protokoll braucht, um einen Vektor zu gewinnen — `0.5`. Erreicht ihn kein
+Protokoll, ist der Angriff `mixed`. Sieht man etwa einen UDP-Anteil von `0.98` neben einer
+`ntp_amplification`-Klassifizierung, bestätigt das auf einen Blick, warum dieser Vektor gewonnen hat.
+
+<Callout type="info" title="Metriken pro Protokoll sind immer static">
+Baselines erlernen nur das Basis-Trio. Wenn eine Metrik pro Protokoll (`tcp_syn_pps`, `udp_mbps`, …)
+den Angriff auslöst, ist `threshold_source` gleich `static`, selbst wenn die Gruppe eine eingelaufene
+Baseline hat — es gibt für diese Metrik kein erlerntes Normalniveau zum Vergleichen.
+</Callout>
+
 ## Verwandte Themen
 
 - [Hostgroups](/docs/hostgroups) — Schwellenwerte pro Präfix, Berechnung gesamt vs. pro Host und
