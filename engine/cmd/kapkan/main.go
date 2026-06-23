@@ -18,6 +18,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/buildinfo"
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/logging"
+	"github.com/kapkan-io/kapkan/internal/update"
 )
 
 func main() {
@@ -28,6 +29,7 @@ func main() {
 		dumpSchema  = flag.Bool("dump-schema", false, "print the config JSON schema to stdout and exit")
 		checkConfig = flag.String("check-config", "", "validate the config file at this path and exit (0 = valid, 1 = invalid)")
 		showVersion = flag.Bool("version", false, "print the version and exit")
+		checkUpdate = flag.Bool("check-update", false, "check for a newer release and exit (0 = up to date, 10 = update available, 1 = error)")
 	)
 	flag.Parse()
 
@@ -36,6 +38,9 @@ func main() {
 	if *showVersion {
 		fmt.Println("kapkan", buildinfo.String())
 		return
+	}
+	if *checkUpdate {
+		os.Exit(checkForUpdate(*configPath))
 	}
 	if *dumpSchema {
 		b, err := config.GenerateSchema()
@@ -84,6 +89,42 @@ func checkConfigFile(path string) int {
 	for _, g := range cfg.Groups {
 		fmt.Printf("    - %-20s calc=%-8s ban=%-5t  %s\n", g.Name, g.Calc, g.BanEnabled, ladderString(g.Escalation))
 	}
+	return 0
+}
+
+// checkForUpdate performs a one-shot update check and returns the process exit
+// code: 0 (up to date / not comparable), 10 (a newer release is available), or 1
+// (config or network error). It works regardless of update_check.enabled — that
+// flag gates only the background poll — using the configured channel/url. It is
+// the explicit, operator-initiated counterpart to the periodic check.
+func checkForUpdate(path string) int {
+	cfg, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		return 1
+	}
+	chk := update.New(update.Config{
+		Channel: cfg.UpdateCheck.Channel,
+		URL:     cfg.UpdateCheck.URL,
+		Current: buildinfo.Version(),
+	}, logging.New("text", "error"))
+
+	st, err := chk.CheckOnce(context.Background())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "update check: %v\n", err)
+		return 1
+	}
+	fmt.Printf("current: %s\n", buildinfo.Version())
+	sec := ""
+	if st.Security {
+		sec = "  (security)"
+	}
+	fmt.Printf("latest:  %s%s\n", st.LatestVersion, sec)
+	if st.Available {
+		fmt.Printf("A newer release is available: %s\n", st.URL)
+		return 10
+	}
+	fmt.Println("kapkan is up to date.")
 	return 0
 }
 

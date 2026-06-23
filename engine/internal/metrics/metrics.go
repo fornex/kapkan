@@ -4,6 +4,8 @@
 package metrics
 
 import (
+	"runtime"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -134,6 +136,47 @@ var (
 		Help:      "Notification attempts, by channel and result.",
 	}, []string{"channel", "result"})
 )
+
+// Build / update metrics.
+var (
+	// BuildInfo is a constant-1 info gauge carrying the running version in its
+	// labels (the node_exporter idiom) — so a fleet's version drift is queryable
+	// with `count by (version)(kapkan_build_info)` and zero phone-home.
+	BuildInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Name:      "build_info",
+		Help:      "Build metadata; constant 1, version/revision/goversion/goos/goarch in labels.",
+	}, []string{"version", "revision", "goversion", "goos", "goarch"})
+
+	// UpdateAvailable is emitted only when the opt-in update check finds a newer
+	// release: a constant-1 gauge labeled with the latest version and whether it
+	// is security-relevant. Reset before each set, so at most one series exists.
+	UpdateAvailable = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Name:      "update_available",
+		Help:      "1 when a newer release is available (opt-in update check), latest_version/security in labels.",
+	}, []string{"latest_version", "security"})
+)
+
+// RecordBuildInfo sets the kapkan_build_info series for this binary. version and
+// revision come from internal/buildinfo; the runtime fields are filled here so
+// the metrics package stays free of a buildinfo import.
+func RecordBuildInfo(version, revision string) {
+	BuildInfo.WithLabelValues(version, revision, runtime.Version(), runtime.GOOS, runtime.GOARCH).Set(1)
+}
+
+// SetUpdateAvailable replaces the kapkan_update_available series: a single 1 for
+// (latest, security) when an update is available, or none when not.
+func SetUpdateAvailable(available bool, latest string, security bool) {
+	UpdateAvailable.Reset()
+	if available {
+		sec := "false"
+		if security {
+			sec = "true"
+		}
+		UpdateAvailable.WithLabelValues(latest, sec).Set(1)
+	}
+}
 
 // Storage metrics.
 var (

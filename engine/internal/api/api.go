@@ -22,6 +22,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/engine"
 	"github.com/kapkan-io/kapkan/internal/mitigate"
 	"github.com/kapkan-io/kapkan/internal/storage"
+	"github.com/kapkan-io/kapkan/internal/update"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -80,7 +81,8 @@ type Server struct {
 	mit     *mitigate.Mitigator
 	log     *slog.Logger
 	querier storage.Querier
-	auditW  storage.Writer // persists audit records; nil until wired (handlers nil-guard)
+	auditW  storage.Writer  // persists audit records; nil until wired (handlers nil-guard)
+	updchk  *update.Checker // optional update-availability source; nil = disabled
 	start   time.Time
 
 	mu     sync.Mutex
@@ -109,6 +111,11 @@ func (s *Server) SetQuerier(q storage.Querier) { s.querier = q }
 // (operator-attributed mutations). A no-op writer (storage disabled) is fine;
 // handlers also nil-guard so an unset writer never panics.
 func (s *Server) SetAuditWriter(w storage.Writer) { s.auditW = w }
+
+// SetUpdateChecker attaches the opt-in update checker whose latest result feeds
+// the update_available/latest_version fields on /api/v1/status. Nil (the
+// default, when update_check is disabled) reports no update.
+func (s *Server) SetUpdateChecker(c *update.Checker) { s.updchk = c }
 
 // writeAudit persists one audit record (best-effort, never blocks) and logs it.
 // caller identity, action, and outcome are stamped by the handler.
@@ -444,6 +451,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"unscoped": c.unscoped(),
 		// version is build info (not sensitive); shown in Settings to all roles.
 		"version": buildVersion(),
+	}
+	// Update availability (only meaningful when the opt-in check is enabled).
+	// Defaults to "no update" so the console can render unconditionally.
+	if s.updchk != nil {
+		u := s.updchk.Status()
+		resp["update_available"] = u.Available
+		resp["latest_version"] = u.LatestVersion
+		resp["latest_is_security"] = u.Security
+	} else {
+		resp["update_available"] = false
 	}
 	// Global protected networks, thresholds and the deployment's BGP/notify
 	// posture describe the whole deployment; reveal them only to an unscoped
