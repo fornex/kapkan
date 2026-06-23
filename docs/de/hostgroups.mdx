@@ -75,8 +75,10 @@ stattdessen die kombinierte Rate des Pools.
 - **Gruppenpräfixe müssen innerhalb von `networks` liegen.** Eine Gruppe kann nur einen bereits
   deklarierten Schutz weiter einschränken; ein Präfix außerhalb Ihrer geschützten `networks`
   ist ein Konfigurationsfehler.
-- **Schwellenwerte sind optional.** Lassen Sie `thresholds` weg, und die Gruppe erbt die
-  globalen Schwellenwerte. Setzen Sie es, um sie nur für diese Gruppe zu überschreiben.
+- **Schwellenwerte sind optional, aber alles oder nichts.** Lassen Sie `thresholds` weg, und
+  die Gruppe erbt die globalen Schwellenwerte. Um sie für diese Gruppe zu überschreiben, müssen
+  Sie alle drei Werte `pps`, `mbps` und `flows_per_sec` setzen — ein unvollständiger Block wird
+  abgelehnt. (`thresholds_outgoing` verhält sich anders: dort genügt mindestens ein Schlüssel.)
 - **`ban: false` deaktiviert automatisches RTBH.** Die Hosts der Gruppe werden weiterhin
   erkannt, klassifiziert und gemeldet, aber es wird kein automatisches Blackhole angekündigt.
   Manuelle Bans über die API funktionieren weiterhin und gelten weiterhin für diese Hosts.
@@ -92,9 +94,10 @@ stattdessen die kombinierte Rate des Pools.
 <Callout type="warning" title="Total-Gruppen leiten niemals automatisch ins Blackhole">
 Eine `calculation: total`-Gruppe löst einen Angriff für die Präfixmenge als Ganzes aus, sodass
 es keine einzelne Adresse gibt, für die ein `/32` oder `/128` angekündigt werden könnte.
-Verwenden Sie Total-Gruppen, um auf aggregierte Last hinzuweisen (einen Anycast- oder
-DNS-Pool); kombinieren Sie sie mit einer Pro-Host-Gruppe oder manuellen Bans, wenn Sie zudem
-eine automatische Mitigation benötigen.
+`ban: true` auf einer Total-Gruppe wird nicht stillschweigend ignoriert — es schlägt beim Start
+und beim Reload als Konfigurationsfehler fehl. Verwenden Sie Total-Gruppen, um auf aggregierte
+Last hinzuweisen (einen Anycast- oder DNS-Pool); kombinieren Sie sie mit einer separaten
+Pro-Host-Gruppe oder manuellen Bans, wenn Sie zudem eine automatische Mitigation benötigen.
 </Callout>
 
 ## Überschreibungen pro Gruppe
@@ -122,6 +125,8 @@ hostgroups:
       - "203.0.113.192/26"
     thresholds:
       pps: 40000
+      mbps: 800
+      flows_per_sec: 20000
     thresholds_outgoing:        # watch for compromised hosts in this group
       pps: 30000
       udp_pps: 15000

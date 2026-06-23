@@ -36,7 +36,7 @@ services ou un fichier de secrets :
 
 ```sh
 export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
-./kapkan -config configs/prod.yaml
+./kapkan -config /etc/kapkan/config.yaml
 ```
 
 Conserver le token dans une variable d'environnement plutôt que dans le YAML signifie que la
@@ -58,7 +58,7 @@ api:
 | Rôle | Autorisations |
 | --- | --- |
 | `viewer` | Lecture seule : état, attaques, hôtes, bannissements, métriques. |
-| `operator` | Tout ce qu'un viewer peut faire, plus le bannissement/débannissement manuel et le rechargement de la configuration. |
+| `operator` | Tout ce qu'un viewer peut faire, plus le bannissement/débannissement manuel et le rechargement de la configuration (le rechargement est [réservé aux admins](/docs/multi-tenancy) — voir ci-dessous). |
 
 `token_env` et `tokens` sont **mutuellement exclusifs** — `token_env` correspond à exactement un
 token operator. Une requête est comparée à chaque token configuré (en temps constant) ; le rôle le
@@ -67,12 +67,19 @@ avec un token viewer est refusée par un `403 Forbidden` ; une requête sans tok
 `401 Unauthorized`. Une variable d'environnement vide ou non définie ne correspond jamais, de sorte
 qu'un secret mal configuré échoue en mode fermé.
 
-Les tokens et les rôles sont lus depuis l'environnement à chaque requête, de sorte que la rotation
-d'un secret ou la modification de l'ensemble des tokens prend effet au prochain [rechargement de
-configuration](/docs/api) — sans redémarrage.
+La *valeur* secrète d'un token est lue depuis l'environnement à chaque requête, de sorte que sa
+rotation prend effet à la requête suivante. Ajouter ou supprimer des *entrées* de token dans le YAML
+modifie l'ensemble des tokens, ce qui prend effet au prochain [rechargement de
+configuration](/docs/api). Ni l'un ni l'autre ne nécessite de redémarrage.
 
 Un token peut également porter un `tenant` optionnel, le limitant aux données d'un seul client. C'est
 la fonctionnalité [Multi-tenant](/docs/multi-tenancy), superposée aux rôles décrits ici.
+
+Le bannissement/débannissement manuel ne requiert qu'un token operator, mais `POST /api/v1/config/reload`
+est en plus [réservé aux admins](/docs/multi-tenancy) : le token doit être sans périmètre (ne porter aucun
+`tenant`), car un rechargement réécrit la politique de chaque tenant ainsi que l'ensemble des tokens
+lui-même. Un token operator limité à un tenant est refusé par un `403 Forbidden` — `config reload is restricted
+to unscoped (admin) tokens`.
 
 <Callout type="info" title="Le nom du token est l'identité de l'operator">
 Le `name` de chaque token est ce que le [journal d'audit](/docs/audit) enregistre comme `operator`

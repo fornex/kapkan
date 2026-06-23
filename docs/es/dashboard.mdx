@@ -48,10 +48,16 @@ El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea e
   baselines aprendidos, para que veas quién genera más tráfico y cómo se compara con lo normal.
 - **Hostgroups** — tus grupos de prefijos con nombre y su estado.
 - **Tabla de bloqueos** — todos los bloqueos, activos e históricos.
+- **Tráfico / Informes** — gráficas de ingress/egress en vivo construidas a partir de los búferes
+  de tasa en memoria, más una sección de **Informes históricos** que lee las tablas
+  persistidas de ClickHouse cuando el almacenamiento está habilitado.
 
 También expone los mismos endpoints de control que ofrece la API: **bloqueo / desbloqueo manual** de una
-dirección y **recarga de configuración** (el equivalente a `SIGHUP`). Toda la vista funciona solo con datos
-en vivo: no se necesita ClickHouse ni ninguna otra base de datos para nada de ello.
+dirección y **recarga de configuración** (el equivalente a `SIGHUP`). Las gráficas en vivo funcionan solo
+con datos en memoria: no se necesita ClickHouse ni ninguna otra base de datos para ellas. La única excepción
+es la sección de **Informes históricos** en la vista Tráfico / Informes: solo se rellena cuando el
+[almacenamiento de ClickHouse](/docs/storage) está habilitado y, de lo contrario, muestra un marcador
+de posición etiquetado que explica cómo activarlo.
 
 <Callout type="success" title="No se requiere base de datos">
 El panel de control se construye por completo a partir del estado en memoria del motor. El almacenamiento

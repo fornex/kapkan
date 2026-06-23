@@ -74,7 +74,7 @@ internal/config/   YAML load, validation, SIGHUP hot-reload
 internal/ingest/   goflow2 library-mode ingestion -> normalized Flow
 internal/engine/   sharded per-host counters, sliding window, threshold eval
 internal/mitigate/ embedded GoBGP: RTBH announce/withdraw, TTL, caps, dry-run
-internal/notify/   Telegram + webhook notifications
+internal/notify/   Telegram, Slack, email, webhook and exec-hook notifications
 internal/api/      REST API + Prometheus metrics
 pkg/flowgen/       synthetic NetFlow/sFlow generator for tests and load
 ```
@@ -98,12 +98,13 @@ Cada salto, en orden:
   bytes/paquetes, tasa de muestreo — en un único tipo `Flow` interno, independientemente del protocolo
   que lo produjo.
 - **Ingest → engine.** Los flows normalizados entran en la ruta caliente. El motor atribuye cada flow
-  a un host de destino dentro de `networks`, multiplica sus recuentos por la tasa de muestreo para que
+  a un host de destino dentro de `networks` (los prefijos protegidos que configuras — consulta
+  [Detección y umbrales](/docs/detection)), multiplica sus recuentos por la tasa de muestreo para que
   las tasas se expresen en tráfico real (sin muestrear), y actualiza los contadores de ventana
   deslizante de ese host. Los destinos fuera de `networks` se contabilizan en las métricas pero nunca
   desencadenan ninguna acción.
 - **Engine → mitigate.** Cuando un host supera un umbral, el motor genera un evento de ataque. La
-  etapa mitigate decide si anunciar una ruta RTBH — respetando dry-run, la whitelist, la política `ban`
+  etapa mitigate decide si anunciar una ruta RTBH — respetando dry-run, la `protected_whitelist`, la política `ban`
   del hostgroup y el límite de baneos — y programa su retirada basada en TTL.
 - **Engine → notify.** El mismo evento se entrega a cada canal configurado (Telegram, Slack, email,
   webhook, exec hook) con la clasificación del ataque y una muestra de flow adjunta.
@@ -154,11 +155,13 @@ desencadenar una recarga:
 - Enviar `SIGHUP` al proceso (por ejemplo `sudo systemctl reload kapkan`).
 - Llamar a `POST /api/v1/config/reload` contra la API.
 
-Ambas vuelven a leer y a validar el archivo en su lugar. Los umbrales de detección, los hostgroups, las
-líneas base, los ajustes de notificación y el interruptor `dry_run` surten efecto al recargar. Un puñado
-de ajustes estructurales — en particular el dimensionamiento del búfer de tráfico bajo `samples.*` —
-requieren un reinicio completo; consulta la [referencia de configuración](/docs/configuration) para ver
-qué claves se recargan y cuáles no.
+Ambas vuelven a leer y a validar el archivo en su lugar. Casi todo surte efecto al recargar —
+el interruptor `dry_run`, los umbrales de detección, `networks`, los hostgroups, las líneas base, los
+ajustes de notificación y `sampling.default_rate` se recargan todos en caliente. Un puñado de ajustes
+estructurales rechazan la recarga y requieren un reinicio completo: las direcciones de escucha, la
+identidad BGP (`local_asn`, `router_id`), `api.listen`, y los ajustes `samples`, `storage` y `geoip`.
+Consulta la [referencia de configuración](/docs/configuration) para ver la lista completa de qué claves
+se recargan y cuáles no.
 
 <Callout type="warning" title="Las recargas se validan">
 Una recarga vuelve a validar el archivo completo. Si la nueva configuración no es válida, la recarga se

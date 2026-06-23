@@ -36,7 +36,7 @@ o de un archivo de secretos:
 
 ```sh
 export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
-./kapkan -config configs/prod.yaml
+./kapkan -config /etc/kapkan/config.yaml
 ```
 
 Mantener el token en una variable de entorno en lugar de en el YAML significa que la configuración
@@ -58,7 +58,7 @@ api:
 | Rol | Qué puede hacer |
 | --- | --- |
 | `viewer` | Solo lectura: estado, ataques, hosts, baneos, métricas. |
-| `operator` | Todo lo que puede hacer un viewer, además de baneo/desbaneo manual y recarga de configuración. |
+| `operator` | Todo lo que puede hacer un viewer, además de baneo/desbaneo manual y recarga de configuración (la recarga es [exclusiva de admin](/docs/multi-tenancy); consulta más abajo). |
 
 `token_env` y `tokens` son **mutuamente excluyentes**: `token_env` es exactamente un único token de
 operator. Una solicitud se coteja con cada token configurado (en tiempo constante); se aplica el rol
@@ -67,11 +67,18 @@ se rechaza con `403 Forbidden`; una solicitud sin un token válido es `401 Unaut
 de entorno vacía o sin definir nunca coincide, de modo que un secreto mal configurado falla de forma
 cerrada.
 
-Los tokens y los roles se leen del entorno en cada solicitud, así que rotar un secreto o cambiar el
-conjunto de tokens surte efecto en la siguiente [recarga de configuración](/docs/api), sin reinicio.
+El *valor* secreto de un token se lee del entorno en cada solicitud, así que rotarlo surte efecto en
+la siguiente solicitud. Añadir o quitar *entradas* de token en el YAML cambia el conjunto de tokens, lo
+que surte efecto en la siguiente [recarga de configuración](/docs/api). Ninguno de los dos requiere reinicio.
 
 Un token también puede llevar un `tenant` opcional, acotándolo a los datos de un único cliente. Esa es
 la función de [Multi-tenencia](/docs/multi-tenancy), superpuesta a los roles descritos aquí.
+
+El baneo/desbaneo manual solo requiere un token de operator, pero `POST /api/v1/config/reload` es
+además [exclusivo de admin](/docs/multi-tenancy): el token debe estar sin acotar (no llevar ningún
+`tenant`), porque una recarga reescribe la política de cada tenant y el propio conjunto de tokens. Un
+token de operator acotado a un tenant se rechaza con `403 Forbidden`: `config reload is restricted
+to unscoped (admin) tokens`.
 
 <Callout type="info" title="El nombre del token es la identidad del operator">
 El `name` de cada token es lo que el [registro de auditoría](/docs/audit) anota como el `operator` de

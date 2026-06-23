@@ -130,7 +130,8 @@ notify:
 | атака началась, хост отправлен в blackhole или отведён | `ban` |
 | атака началась, только оповещение (без блокировки) | `attack_details` |
 | атака завершилась, блокировка снята | `unban` |
-| **любое событие, пока `dry_run` равно true** | `attack_details` |
+| **любое событие уровня хоста, пока `dry_run` равно true** | `attack_details` |
+| событие уровня группы (`calculation: total`) | *пропускается — хук не вызывается* |
 
 <Callout type="warning" title="Dry-run никогда не порождает ban/unban">
 В режиме dry-run Kapkan ничего не анонсирует — но скрипт блокировки FastNetMon *всё равно*
@@ -195,7 +196,8 @@ notify:
 | `mbps` | number | Мегабиты в секунду с поправкой на сэмплирование. |
 | `flows_per_sec` | number | Flows в секунду с поправкой на сэмплирование. |
 | `ban_state` | string | `active`, `withdrawn` или `rejected`, когда выполнялась проверка подавления атаки. |
-| `route` | string | Анонс маршрута blackhole (предполагаемый маршрут в режиме dry-run). |
+| `method` | string | `blackhole` или `flowspec` — метод подавления, породивший блокировку; отсутствует, когда блокировки нет. |
+| `route` | string | Анонс (в режиме dry-run: предполагаемый): маршрут blackhole или сводка `flowspec: ...` сгенерированных правил. |
 | `dry_run` | boolean | Был ли механизм подавления в режиме dry-run для этого события. |
 | `at` | string | Временная метка события в формате RFC 3339. |
 | `classification` | object | Выведенный вектор атаки — только для `attack_started`. |
@@ -226,7 +228,7 @@ notify:
   "mbps": 8421.5,
   "flows_per_sec": 9400,
   "ban_state": "active",
-  "route": "203.0.113.45/32",
+  "route": "blackhole 203.0.113.45/32 next-hop 192.0.2.1 community 65000:666",
   "dry_run": true,
   "at": "2026-06-13T14:22:07Z",
   "classification": {
@@ -268,5 +270,5 @@ notify:
 ## Связанные материалы
 
 - [REST API](/docs/api) — программный запрос активных и недавних атак.
-- [Метрики](/docs/metrics) — `notify_notifications_total` по каналам и результатам.
+- [Метрики](/docs/metrics) — `kapkan_notify_notifications_total` по каналам и результатам.
 - [Справочник по конфигурации](/docs/configuration) — каждый ключ в YAML-файле.

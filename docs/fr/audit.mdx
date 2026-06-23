@@ -25,11 +25,13 @@ d'audit dans le journal du processus.
 
 ## Ce qui est enregistré
 
-Trois actions sont auditées, chacune en cas de succès comme d'échec :
+Trois actions sont auditées. `ban` et `config_reload` sont enregistrées en cas de succès comme
+d'échec ; `unban` n'est enregistrée qu'en cas de succès — un unban en échec ou sans effet renvoie une
+erreur et n'est pas écrit dans la piste, bien qu'il soit tout de même journalisé :
 
 | Action | Quand | Résultats enregistrés (`result`) |
 | --- | --- | --- |
-| `ban` | `POST /api/v1/ban` | `active` (ou état de bannissement `withdrawn`/`dry_run`) en cas de succès ; `rejected` lorsqu'un garde-fou de sécurité le refuse. |
+| `ban` | `POST /api/v1/ban` | `active` en cas de succès ; `rejected` lorsqu'un garde-fou de sécurité le refuse. Un bannissement en dry-run enregistre tout de même `active` — la simulation est signalée par le champ `dry_run` distinct. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` en cas de succès. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` en cas de succès ; `error` lorsque la nouvelle configuration ne peut être analysée ou validée. |
 

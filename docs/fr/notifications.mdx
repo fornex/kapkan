@@ -133,7 +133,8 @@ notify:
 | attaque démarrée, hôte blackholé ou dérouté | `ban` |
 | attaque démarrée, alerte seule (sans bannissement) | `attack_details` |
 | attaque terminée, un bannissement a été retiré | `unban` |
-| **tout événement lorsque `dry_run` est vrai** | `attack_details` |
+| **tout événement à portée d'hôte lorsque `dry_run` est vrai** | `attack_details` |
+| événement à portée de groupe (`calculation: total`) | *ignoré — le hook n'est pas invoqué* |
 
 <Callout type="warning" title="Le dry-run n'émet jamais ban/unban">
 En dry-run, Kapkan n'annonce rien — mais un script de bannissement FastNetMon *placerait* l'hôte
@@ -198,7 +199,8 @@ champs peuvent être ajoutés sans rien casser chez vous.
 | `mbps` | nombre | Mégabits par seconde, corrigés du sampling. |
 | `flows_per_sec` | nombre | Flows par seconde, corrigés du sampling. |
 | `ban_state` | chaîne | `active`, `withdrawn` ou `rejected`, lorsque la mitigation a été consultée. |
-| `route` | chaîne | L'annonce de route blackhole (la route potentielle en dry-run). |
+| `method` | chaîne | `blackhole` ou `flowspec` — la méthode de mitigation à l'origine du bannissement ; omis lorsqu'il n'y a pas de bannissement. |
+| `route` | chaîne | L'annonce (en dry-run : potentielle) : une route blackhole, ou un résumé `flowspec: ...` des règles générées. |
 | `dry_run` | booléen | Indique si la mitigation était en dry-run pour cet événement. |
 | `at` | chaîne | Horodatage RFC 3339 de l'événement. |
 | `classification` | objet | Vecteur d'attaque déduit — `attack_started` uniquement. |
@@ -229,7 +231,7 @@ Un événement `attack_started` réaliste pour un flood par amplification NTP, d
   "mbps": 8421.5,
   "flows_per_sec": 9400,
   "ban_state": "active",
-  "route": "203.0.113.45/32",
+  "route": "blackhole 203.0.113.45/32 next-hop 192.0.2.1 community 65000:666",
   "dry_run": true,
   "at": "2026-06-13T14:22:07Z",
   "classification": {
@@ -271,5 +273,5 @@ Un événement `attack_started` réaliste pour un flood par amplification NTP, d
 ## Voir aussi
 
 - [API REST](/docs/api) — interrogez par programmation les attaques actives et récentes.
-- [Métriques](/docs/metrics) — `notify_notifications_total` par canal et par résultat.
+- [Métriques](/docs/metrics) — `kapkan_notify_notifications_total` par canal et par résultat.
 - [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.

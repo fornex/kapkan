@@ -48,10 +48,16 @@ Le tableau de bord interroge l'API JSON et restitue tout ce que Kapkan suit en m
   références (baselines) apprises, afin que vous puissiez voir qui est le plus bruyant et comment cela se compare à la normale.
 - **Hostgroups** — vos groupes de préfixes nommés et leur état.
 - **Table de bannissement** — chaque bannissement, actif et historique.
+- **Trafic / Rapports** — des graphiques de trafic entrant/sortant en direct construits à partir des
+  tampons de débit en mémoire, ainsi qu'une section **Rapports historiques** qui lit les tables ClickHouse
+  persistées lorsque le stockage est activé.
 
 Il expose également les mêmes points de terminaison de contrôle que l'API : **bannissement / débannissement manuel**
-d'une adresse et **rechargement de la configuration** (l'équivalent de `SIGHUP`). L'ensemble de la vue fonctionne
-uniquement à partir de données en direct — aucun ClickHouse ni autre base de données n'est nécessaire pour quoi que ce soit.
+d'une adresse et **rechargement de la configuration** (l'équivalent de `SIGHUP`). Les graphiques en direct
+fonctionnent uniquement à partir de données en mémoire — aucun ClickHouse ni autre base de données n'est nécessaire pour eux. La seule exception
+est la section **Rapports historiques** de la vue Trafic / Rapports : elle n'est renseignée que lorsque
+le [stockage ClickHouse](/docs/storage) est activé, et affiche sinon un espace réservé étiqueté
+expliquant comment l'activer.
 
 <Callout type="success" title="Aucune base de données requise">
 Le tableau de bord est entièrement construit à partir de l'état en mémoire du moteur. Le stockage historique des flows

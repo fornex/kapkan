@@ -12,7 +12,7 @@ proceso sobre datos en vivo.
 
 <Callout type="info" title="Mejor esfuerzo, nunca bloquea la detección">
 La persistencia funciona a partir de una cola acotada con un envío no bloqueante. Un ClickHouse
-lento o caído descarta filas (contabilizadas en `storage_rows_total` con `result="dropped"`) en
+lento o caído descarta filas (contabilizadas en `kapkan_storage_rows_total` con `result="dropped"`) en
 lugar de frenar la ruta crítica del motor.
 </Callout>
 
@@ -62,17 +62,20 @@ carece de derechos `ALTER` (las instalaciones nuevas ya la tienen).
 
 Las filas pasan a una cola acotada (`queue_size`) con un envío no bloqueante y se vuelcan en
 lotes (`batch_size` / `flush_interval_seconds`). Si ClickHouse está lento o caído, las filas se
-descartan —contabilizadas como `storage_rows_total` con `result="dropped"`— y el motor sigue
+descartan —contabilizadas como `kapkan_storage_rows_total` con `result="dropped"`— y el motor sigue
 funcionando. Consulta [Métricas](/docs/metrics).
 
 ## Qué se persiste y qué no
 
-La tabla `traffic` actualmente persiste únicamente instantáneas por host. La agregación por ASN
-no se persiste (Kapkan no resuelve los ASN a partir de los flows) y los totales por hostgroup
-aún no se capturan en instantáneas — ambos son candidatos para un seguimiento posterior.
+La tabla `traffic` actualmente persiste únicamente instantáneas por host. Cuando se configura el
+bloque opcional `geoip` (una base de datos `.mmdb` de MaxMind), Kapkan resuelve los ASN por
+origen y persiste los principales ASN de cada ataque en `attack_events.top_asns` (unidos por
+barras verticales `"AS<n> <org>"`, vacío cuando geoip está desactivado). Las series temporales
+por ASN y los totales por hostgroup aún no se capturan en instantáneas — ambos son candidatos
+para un seguimiento posterior.
 
 ## Relacionado
 
 - [Referencia de configuración](/docs/configuration) — la lista completa de claves de `storage`.
 - [Registro de auditoría](/docs/audit) — la tabla `audit_events` y su endpoint de lectura.
-- [Métricas](/docs/metrics) — el contador `storage_rows_total`.
+- [Métricas](/docs/metrics) — el contador `kapkan_storage_rows_total`.

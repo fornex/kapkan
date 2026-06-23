@@ -35,7 +35,7 @@ or a secrets file:
 
 ```sh
 export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
-./kapkan -config configs/prod.yaml
+./kapkan -config /etc/kapkan/config.yaml
 ```
 
 Keeping the token in an environment variable rather than the YAML means the config remains
@@ -57,7 +57,7 @@ api:
 | Role | May do |
 | --- | --- |
 | `viewer` | Read only: status, attacks, hosts, bans, metrics. |
-| `operator` | Everything a viewer can, plus manual ban/unban and config reload. |
+| `operator` | Everything a viewer can, plus manual ban/unban and config reload (reload is [admin-only](/docs/multi-tenancy) — see below). |
 
 `token_env` and `tokens` are **mutually exclusive** — `token_env` is exactly one operator
 token. A request is matched against every configured token (in constant time); the highest
@@ -65,11 +65,18 @@ matching role applies. A read with a viewer token works; a mutation with a viewe
 refused with `403 Forbidden`; a request with no valid token is `401 Unauthorized`. An
 empty or unset env var never matches, so a misconfigured secret fails closed.
 
-Tokens and roles are read from the environment on every request, so rotating a secret or
-changing the token set takes effect on the next [config reload](/docs/api) — no restart.
+A token's secret *value* is read from the environment on every request, so rotating it
+takes effect on the next request. Adding or removing token *entries* in the YAML changes the
+token set, which takes effect on the next [config reload](/docs/api). Neither needs a restart.
 
 A token may also carry an optional `tenant`, scoping it to one customer's data. That is the
 [Multi-tenancy](/docs/multi-tenancy) feature, layered on the roles described here.
+
+Manual ban/unban only require an operator token, but `POST /api/v1/config/reload` is
+additionally [admin-only](/docs/multi-tenancy): the token must be unscoped (carry no
+`tenant`), because a reload rewrites every tenant's policy and the token set itself. A
+tenant-scoped operator token is refused with `403 Forbidden` — `config reload is restricted
+to unscoped (admin) tokens`.
 
 <Callout type="info" title="The token name is the operator identity">
 Each token's `name` is what the [audit log](/docs/audit) records as the `operator` for every

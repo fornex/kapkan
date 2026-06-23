@@ -48,10 +48,16 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
   baselines, so you can see who is loudest and how it compares to normal.
 - **Hostgroups** — your named prefix groups and their state.
 - **Ban table** — every ban, active and historical.
+- **Traffic / Reports** — live ingress/egress charts built from the in-memory rate
+  buffers, plus a **Historical reports** section that reads the persisted ClickHouse
+  tables when storage is enabled.
 
 It also exposes the same control endpoints the API offers: **manual ban / unban** of an
-address and **config reload** (the equivalent of `SIGHUP`). The whole view works on live
-data alone — no ClickHouse or other database is needed for any of it.
+address and **config reload** (the equivalent of `SIGHUP`). The live charts work on
+in-memory data alone — no ClickHouse or other database is needed for them. The one exception
+is the **Historical reports** section on the Traffic / Reports view: it is populated only when
+[ClickHouse storage](/docs/storage) is enabled, and otherwise renders a labeled placeholder
+explaining how to turn it on.
 
 <Callout type="success" title="No database required">
 The dashboard is built entirely from the engine's in-memory state. Historical flow storage

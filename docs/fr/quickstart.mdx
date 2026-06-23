@@ -12,12 +12,21 @@ le mode dry-run est activé par défaut.
 
 <Callout type="info" title="Prérequis">
 Go 1.22 ou une version plus récente. Pour observer des détections en conditions réelles, vous avez
-également besoin d'un routeur exportant du NetFlow / IPFIX / sFlow — mais vous pouvez valider la
-chaîne de bout en bout sans en avoir un grâce au générateur de flow intégré (voir la dernière
-section).
+également besoin d'un routeur exportant du NetFlow / IPFIX / sFlow — mais même sans en avoir un, vous
+pouvez valider la détection de bout en bout en lançant le test d'intégration fourni depuis `engine/`
+(`go test ./internal/app -run TestEndToEnd -v` ; voir la dernière section).
 </Callout>
 
 ## 1. Compiler le binaire
+
+Toutes les commandes ci-dessous s'exécutent depuis le répertoire `engine` du checkout, alors
+commencez par vous y placer :
+
+```sh
+cd engine
+```
+
+Compilez ensuite :
 
 ```sh
 make build
@@ -40,9 +49,9 @@ make run-dev
 par défaut vers une forme lisible par un humain — voir la [Référence CLI](/docs/cli) pour toutes les
 options et leurs valeurs acceptées.
 
-La configuration de développement ([`configs/dev.yaml`](/docs/configuration)) a `dry_run: true`, un
-réseau protégé de test `203.0.113.0/24`, et écoute le sFlow sur `:6343` et le
-NetFlow/IPFIX sur `:2055`.
+La configuration de développement ([`configs/dev.yaml`](/docs/configuration)) a `dry_run: true`, des
+réseaux protégés de test `203.0.113.0/24` et `2001:db8::/32` (ainsi que deux hostgroups d'exemple),
+et écoute le sFlow sur `:6343` et le NetFlow/IPFIX sur `:2055`.
 
 ## 3. Orienter vos exporteurs vers Kapkan
 
@@ -81,7 +90,8 @@ format réseau — y compris des schémas d'amplification, de SYN-flood et d'UDP
 tout au long de la suite de tests pour valider la détection de bout en bout sans toucher à un
 véritable routeur. Le test d'intégration dans `internal/app` rejoue un flood d'amplification NTP sur
 un socket UDP réel contre une instance en dry-run et vérifie que l'attaque et son ban virtuel (à
-expiration automatique) apparaissent dans l'API.
+expiration automatique) — le blackhole potentiel enregistré que le dry-run expose via l'API sans
+jamais l'annoncer — apparaissent dans l'API.
 
 ## Étapes suivantes
 

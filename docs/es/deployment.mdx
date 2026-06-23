@@ -6,9 +6,9 @@ export const metadata = {
 
 # Despliegue en producción
 
-En el directorio [`deploy/`](https://github.com/fornex/kapkan) del repositorio
+En el directorio [`engine/deploy/`](https://github.com/fornex/kapkan/tree/main/engine/deploy) del repositorio
 se incluyen una unidad systemd reforzada y un ejemplo de configuración de producción:
-`deploy/kapkan.service` y `deploy/config.example.yaml`. Esta página explica cómo instalar
+`engine/deploy/kapkan.service` y `engine/deploy/config.example.yaml`. Esta página explica cómo instalar
 el binario como servicio del sistema, dónde reside cada archivo, cómo mantener los secretos
 fuera del YAML y cómo recargar la configuración sin reiniciar.
 
@@ -20,7 +20,7 @@ compilado, consulta la [Guía rápida](/docs/quickstart) o [Compilar desde el c�
 ## Instalación
 
 Ejecuta lo siguiente como root desde una copia de trabajo del repositorio (para que
-`deploy/` esté disponible). Instala el binario, crea un usuario del sistema sin privilegios,
+`engine/deploy/` esté disponible). Instala el binario, crea un usuario del sistema sin privilegios,
 prepara `/etc/kapkan`, instala la configuración de producción, escribe el archivo de entorno
 de secretos con permisos restrictivos, instala la unidad systemd y habilita el servicio.
 
@@ -28,17 +28,28 @@ de secretos con permisos restrictivos, instala la unidad systemd y habilita el s
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
-sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
-echo 'KAPKAN_TG_TOKEN=123456:abc' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
-sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo install -m 0640 -o kapkan -g kapkan engine/deploy/config.example.yaml /etc/kapkan/config.yaml
+echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+sudo install -m 0644 engine/deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
+
+El archivo de entorno anterior solo escribe `KAPKAN_API_TOKEN`, ya que se recomienda un token
+de API antes de exponer el listener (consulta [Autenticación](/docs/authentication)). Escribir el
+archivo de entorno no habilita por sí solo la autenticación: la configuración incluida enlaza
+`127.0.0.1` con `api.token_env` comentado, por lo que el token permanece inactivo. Descomenta
+`api.token_env` (o añade una lista `api.tokens`) para activar la autenticación. Todos los canales
+de notificación son opcionales — añade `KAPKAN_TG_TOKEN`, las credenciales de SMTP o ClickHouse
+solo si realmente usas esas funciones. La lista completa de claves `*_env` está más abajo en
+[Secretos](#secretos).
 
 La unidad se ejecuta como el usuario `kapkan` con `ExecStart=/usr/local/bin/kapkan -config
 /etc/kapkan/config.yaml -log-format json -log-level info`, se reinicia ante fallos y está
 fuertemente aislada en un sandbox: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
-`MemoryDenyWriteExecute` y más.
+`MemoryDenyWriteExecute` y más. También declara `StateDirectory=kapkan` (modo `0700`),
+lo que proporciona al daemon un `/var/lib/kapkan` escribible para [`ban.state_file`](/docs/mitigation)
+mientras que `ProtectSystem=strict` mantiene el resto del sistema de archivos en modo solo lectura.
 
 <Callout type="info" title="Enlazar BGP al puerto 179">
 Kapkan no necesita privilegios especiales en modo dry-run ni cuando establece el peering
@@ -62,6 +73,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/config.yaml` | `0640` | La configuración YAML, propiedad de `kapkan:kapkan`. |
 | `/etc/kapkan/kapkan.env` | `0600` | Archivo de entorno con secretos (tokens, credenciales SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | La unidad systemd reforzada. |
+| `/var/lib/kapkan/` | `0700` | Directorio de estado escribible (`StateDirectory=kapkan`); contiene `ban.state_file` cuando la persistencia de baneos está habilitada. |
 
 Todo el directorio `/etc/kapkan` se monta en modo solo lectura para el proceso mediante
 `ReadOnlyPaths=/etc/kapkan`, de modo que el daemon puede leer su configuración y sus secretos
@@ -116,8 +128,14 @@ sudo systemctl reload kapkan
 De forma equivalente, puedes desencadenar la misma recarga a través de la API:
 
 ```sh
-curl -s -X POST localhost:8080/api/v1/config/reload
+curl -s -X POST localhost:8080/api/v1/config/reload \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $KAPKAN_API_TOKEN"
 ```
+
+`Content-Type: application/json` es obligatorio en cada `POST` mutante (de lo contrario el
+servidor devuelve `415`), y cuando la autenticación está habilitada la recarga necesita un token
+Bearer sin ámbito (de administrador) — un token con ámbito de inquilino obtiene un `403`.
 
 La mayoría de las claves se recargan en vivo, incluidas `dry_run`, los umbrales, `networks`,
 los hostgroups, las líneas base y los ajustes de notificación. Algunos parámetros de

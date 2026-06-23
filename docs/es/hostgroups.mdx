@@ -73,8 +73,10 @@ individuales y vigila en su lugar la tasa combinada del pool.
 - **Los prefijos de un grupo deben estar dentro de `networks`.** Un grupo solo puede acotar la
   protección que ya declaraste; un prefijo fuera de tus `networks` protegidas es un error de
   configuración.
-- **Los umbrales son opcionales.** Omite `thresholds` y el grupo hereda los umbrales globales.
-  Defínelo para sobrescribirlos solo para ese grupo.
+- **Los umbrales son opcionales, pero es todo o nada.** Omite `thresholds` y el grupo hereda los
+  umbrales globales. Para sobrescribirlos solo para ese grupo, define las tres claves `pps`,
+  `mbps` y `flows_per_sec`: un bloque parcial se rechaza. (`thresholds_outgoing` difiere: ahí
+  basta con al menos una clave.)
 - **`ban: false` deshabilita el RTBH automático.** Los hosts del grupo siguen siendo detectados,
   clasificados y notificados, pero no se anuncia ningún blackhole automático. Los baneos manuales
   a través de la API siguen funcionando y siguen aplicándose a esos hosts.
@@ -89,9 +91,11 @@ individuales y vigila en su lugar la tasa combinada del pool.
 
 <Callout type="warning" title="Los grupos de tipo total nunca envían a blackhole automáticamente">
 Un grupo `calculation: total` dispara un ataque para el conjunto de prefijos en su totalidad, de
-modo que no hay una única dirección para la que anunciar un `/32` o `/128`. Usa los grupos de tipo
-total para alertar sobre la carga agregada (un pool de anycast o de DNS); combínalos con un grupo
-por host o con baneos manuales si además necesitas mitigación automática.
+modo que no hay una única dirección para la que anunciar un `/32` o `/128`. Definir `ban: true` en
+un grupo de tipo total no se ignora de forma silenciosa: falla el arranque y la recarga como un
+error de configuración. Usa los grupos de tipo total para alertar sobre la carga agregada (un pool
+de anycast o de DNS); combínalos con un grupo por host independiente o con baneos manuales si
+además necesitas mitigación automática.
 </Callout>
 
 ## Sobrescrituras por grupo
@@ -117,6 +121,8 @@ hostgroups:
       - "203.0.113.192/26"
     thresholds:
       pps: 40000
+      mbps: 800
+      flows_per_sec: 20000
     thresholds_outgoing:        # watch for compromised hosts in this group
       pps: 30000
       udp_pps: 15000

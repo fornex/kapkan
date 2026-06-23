@@ -127,7 +127,8 @@ notify:
 | attack started, host blackholed or diverted | `ban` |
 | attack started, alert-only (no ban) | `attack_details` |
 | attack ended, a ban was withdrawn | `unban` |
-| **any event while `dry_run` is true** | `attack_details` |
+| **any host-scoped event while `dry_run` is true** | `attack_details` |
+| group-scoped (`calculation: total`) event | *skipped — hook not invoked* |
 
 <Callout type="warning" title="Dry-run never emits ban/unban">
 In dry-run Kapkan announces nothing — but a FastNetMon ban script *would* firewall the
@@ -191,7 +192,8 @@ bumped only on breaking changes, so new fields can be added without breaking you
 | `mbps` | number | Sampling-corrected megabits per second. |
 | `flows_per_sec` | number | Sampling-corrected flows per second. |
 | `ban_state` | string | `active`, `withdrawn` or `rejected`, when mitigation was consulted. |
-| `route` | string | The blackhole route announcement (the would-be route in dry-run). |
+| `method` | string | `blackhole` or `flowspec` — the mitigation method that produced the ban; omitted when there is no ban. |
+| `route` | string | The (dry-run: would-be) announcement: a blackhole route, or a `flowspec: ...` summary of the generated rules. |
 | `dry_run` | boolean | Whether mitigation was in dry-run for this event. |
 | `at` | string | RFC 3339 timestamp of the event. |
 | `classification` | object | Inferred attack vector — `attack_started` only. |
@@ -222,7 +224,7 @@ A realistic `attack_started` event for an NTP-amplification flood, detected in d
   "mbps": 8421.5,
   "flows_per_sec": 9400,
   "ban_state": "active",
-  "route": "203.0.113.45/32",
+  "route": "blackhole 203.0.113.45/32 next-hop 192.0.2.1 community 65000:666",
   "dry_run": true,
   "at": "2026-06-13T14:22:07Z",
   "classification": {
@@ -264,5 +266,5 @@ A realistic `attack_started` event for an NTP-amplification flood, detected in d
 ## Related
 
 - [REST API](/docs/api) — query active and recent attacks programmatically.
-- [Metrics](/docs/metrics) — `notify_notifications_total` by channel and result.
+- [Metrics](/docs/metrics) — `kapkan_notify_notifications_total` by channel and result.
 - [Configuration reference](/docs/configuration) — every key in the YAML file.

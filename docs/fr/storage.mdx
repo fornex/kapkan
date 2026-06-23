@@ -12,7 +12,7 @@ entièrement en mémoire sur des données en temps réel.
 
 <Callout type="info" title="Au mieux des efforts, ne bloque jamais la détection">
 La persistance s'appuie sur une file d'attente bornée avec envoi non bloquant. Un ClickHouse
-lent ou indisponible abandonne des lignes (comptabilisées dans `storage_rows_total` avec
+lent ou indisponible abandonne des lignes (comptabilisées dans `kapkan_storage_rows_total` avec
 `result="dropped"`) plutôt que de ralentir le chemin critique du moteur.
 </Callout>
 
@@ -62,18 +62,20 @@ des droits `ALTER` (les installations neuves la possèdent déjà).
 
 Les lignes sont placées dans une file d'attente bornée (`queue_size`) avec un envoi non bloquant
 et sont vidées par lots (`batch_size` / `flush_interval_seconds`). Si ClickHouse est lent ou
-indisponible, les lignes sont abandonnées — comptabilisées dans `storage_rows_total` avec
+indisponible, les lignes sont abandonnées — comptabilisées dans `kapkan_storage_rows_total` avec
 `result="dropped"` — et le moteur continue de fonctionner. Voir [Métriques](/docs/metrics).
 
 ## Ce qui est et n'est pas persisté
 
-La table `traffic` ne persiste actuellement que les instantanés par hôte. L'agrégation par ASN
-n'est pas persistée (Kapkan ne résout pas les ASN à partir des flows) et les totaux par hostgroup
-ne font pas encore l'objet d'instantanés — les deux sont des candidats pour une évolution
-ultérieure.
+La table `traffic` ne persiste actuellement que les instantanés par hôte. Lorsque le bloc
+optionnel `geoip` est configuré (une base de données MaxMind `.mmdb`), Kapkan résout les ASN par
+source et persiste les principaux ASN de chaque attaque dans `attack_events.top_asns` (joints par
+des barres verticales `"AS<n> <org>"`, vide lorsque geoip est désactivé). Les séries temporelles
+par ASN et les totaux par hostgroup ne font pas encore l'objet d'instantanés — les deux sont des
+candidats pour une évolution ultérieure.
 
 ## Voir aussi
 
 - [Référence de configuration](/docs/configuration) — la liste complète des clés `storage`.
 - [Journal d'audit](/docs/audit) — la table `audit_events` et son point d'accès en lecture.
-- [Métriques](/docs/metrics) — le compteur `storage_rows_total`.
+- [Métriques](/docs/metrics) — le compteur `kapkan_storage_rows_total`.

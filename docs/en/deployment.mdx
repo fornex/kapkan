@@ -7,8 +7,8 @@ export const metadata = {
 # Production deployment
 
 A hardened systemd unit and a production config example ship in the repository's
-[`deploy/`](https://github.com/fornex/kapkan) directory: `deploy/kapkan.service`
-and `deploy/config.example.yaml`. This page walks through installing the binary as a
+[`engine/deploy/`](https://github.com/fornex/kapkan/tree/main/engine/deploy) directory: `engine/deploy/kapkan.service`
+and `engine/deploy/config.example.yaml`. This page walks through installing the binary as a
 system service, where each file lives, how secrets are kept out of the YAML, and how to
 reload configuration without a restart.
 
@@ -19,7 +19,7 @@ see the [Quickstart](/docs/quickstart) or [Building from source](#building-from-
 
 ## Install
 
-Run the following as root from a checkout of the repository (so that `deploy/` is
+Run the following as root from a checkout of the repository (so that `engine/deploy/` is
 available). It installs the binary, creates an unprivileged system user, lays out
 `/etc/kapkan`, installs the production config, writes the secrets env file at restrictive
 permissions, installs the systemd unit, and enables the service.
@@ -28,17 +28,27 @@ permissions, installs the systemd unit, and enables the service.
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
-sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
-echo 'KAPKAN_TG_TOKEN=123456:abc' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
-sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo install -m 0640 -o kapkan -g kapkan engine/deploy/config.example.yaml /etc/kapkan/config.yaml
+echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+sudo install -m 0644 engine/deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
+
+The env file above seeds only `KAPKAN_API_TOKEN`, since an API token is recommended before
+you expose the listener (see [Authentication](/docs/authentication)). Seeding the env file
+does not by itself enable auth: the shipped config binds `127.0.0.1` with `api.token_env`
+commented out, so the token stays inert. Uncomment `api.token_env` (or add an `api.tokens`
+list) to turn authentication on. Every notification channel is optional — add
+`KAPKAN_TG_TOKEN`, SMTP or ClickHouse credentials only if you actually use those features.
+The full list of `*_env` keys is under [Secrets](#secrets) below.
 
 The unit runs as the `kapkan` user with `ExecStart=/usr/local/bin/kapkan -config
 /etc/kapkan/config.yaml -log-format json -log-level info`, restarts on failure, and is
 heavily sandboxed: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
-`MemoryDenyWriteExecute` and more.
+`MemoryDenyWriteExecute` and more. It also declares `StateDirectory=kapkan` (mode `0700`),
+giving the daemon a writable `/var/lib/kapkan` for [`ban.state_file`](/docs/mitigation)
+while `ProtectSystem=strict` keeps the rest of the filesystem read-only.
 
 <Callout type="info" title="Binding BGP to port 179">
 Kapkan needs no special privileges in dry-run or when peering from a high local port. If
@@ -61,6 +71,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/config.yaml` | `0640` | The YAML configuration, owned by `kapkan:kapkan`. |
 | `/etc/kapkan/kapkan.env` | `0600` | Secrets env file (tokens, SMTP credentials). |
 | `/etc/systemd/system/kapkan.service` | `0644` | The hardened systemd unit. |
+| `/var/lib/kapkan/` | `0700` | Writable state directory (`StateDirectory=kapkan`); holds `ban.state_file` when ban persistence is enabled. |
 
 The whole `/etc/kapkan` directory is mounted read-only to the process via
 `ReadOnlyPaths=/etc/kapkan`, so the daemon can read its config and secrets but cannot
@@ -113,8 +124,14 @@ sudo systemctl reload kapkan
 Equivalently, you can trigger the same reload over the API:
 
 ```sh
-curl -s -X POST localhost:8080/api/v1/config/reload
+curl -s -X POST localhost:8080/api/v1/config/reload \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $KAPKAN_API_TOKEN"
 ```
+
+`Content-Type: application/json` is mandatory on every mutating `POST` (the server returns
+`415` otherwise), and when auth is enabled the reload needs an unscoped (admin) Bearer
+token — a tenant-scoped token gets `403`.
 
 Most keys reload live, including `dry_run`, thresholds, `networks`, hostgroups, baselines
 and notification settings. A few sizing parameters require a restart — notably the

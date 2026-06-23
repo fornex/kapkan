@@ -23,16 +23,19 @@ localhost. Antes de enlazarla más allá del loopback, configura un token bearer
 Todas las rutas `/api/v1` pasan por la comprobación del token cuando la autenticación está configurada; una vez configurada,
 toda petición debe llevar `Authorization: Bearer <token>`. Los tokens llevan un **rol**: las rutas `GET`
 necesitan el rol **viewer**, y las rutas que modifican el estado (`ban`, `unban`, `config/reload`)
-necesitan el rol **operator**. Una lectura con un token viewer funciona; una modificación con un token viewer
-devuelve `403`; un token desconocido devuelve `401`. Los endpoints `POST` requieren además un
-tipo de contenido JSON: envía `Content-Type: application/json`. Ten en cuenta que `/metrics` y el
+necesitan el rol **operator**. `config/reload` va más allá: requiere un token **sin acotar (admin)**,
+por lo que incluso un token operator que está acotado a un tenant se rechaza con `403`. Una lectura con un
+token viewer funciona; una modificación con un token viewer devuelve `403`; un token desconocido devuelve
+`401`. Los endpoints `POST` requieren además un tipo de contenido JSON: envía
+`Content-Type: application/json`. Ten en cuenta que `/metrics` y el
 armazón estático del panel se sirven sin token; los datos que el panel carga se obtienen
 a través de la API protegida. Consulta [Autenticación](/docs/authentication) para conocer los roles de los tokens.
 
 Un token también puede estar **acotado a un tenant**: en ese caso solo ve las filas de su tenant en cada endpoint
 de lectura (`/status` se reconstruye con sus propios hostgroups y recuentos), y solo puede hacer `ban`/`unban`
-dentro de su tenant — un objetivo fuera del tenant devuelve un `403` uniforme. Consulta
-[Multi-tenencia](/docs/multi-tenancy).
+dentro de su tenant — un objetivo fuera del tenant devuelve un `403` uniforme. Un token acotado a un tenant
+no puede recargar la configuración en absoluto: `config/reload` está restringido a tokens sin acotar (admin) y
+devuelve `403` en caso contrario. Consulta [Multi-tenencia](/docs/multi-tenancy).
 
 ## Endpoints
 
@@ -42,6 +45,7 @@ dentro de su tenant — un objetivo fuera del tenant devuelve un `403` uniforme.
 | GET | `/api/v1/attacks` | Ataques activos más los últimos 100 que finalizaron, con muestras y clasificación. |
 | GET | `/api/v1/hosts` | Instantánea de hosts monitorizados: tasas por dirección, baselines aprendidos, estado de ataque. |
 | GET | `/api/v1/bans` | Todos los baneos, activos e históricos. |
+| GET | `/api/v1/traffic` | Historial de tasas por host persistido (viewer); `{available:false, points:[]}` cuando el almacenamiento está desactivado. |
 | GET | `/api/v1/audit` | Registro de auditoría de las modificaciones, atribuido al operador (quién baneó/recargó, cuándo, resultado). |
 | POST | `/api/v1/ban` | Banear una dirección manualmente. |
 | POST | `/api/v1/unban` | Retirar un baneo manualmente. |
@@ -59,6 +63,8 @@ Devuelve el modo de operación actual y un resumen de lo que Kapkan está proteg
 {
   "dry_run": true,
   "uptime_seconds": 8123,
+  "version": "v1.2.0 · a1b2c3d",
+  "update_available": false,
   "networks": ["203.0.113.0/24", "198.51.100.0/24"],
   "active_attacks": 1,
   "active_bans": 1,
@@ -74,6 +80,9 @@ Devuelve el modo de operación actual y un resumen de lo que Kapkan está proteg
 ```
 
 `dry_run` indica el modo global: cuando es `true`, no se anuncia ningún blackhole a tus routers.
+`version` es el build en ejecución, siempre presente y sin tráfico de salida. `update_available` es `false`
+salvo que el opt-in [`update_check`](/docs/configuration) esté habilitado y encuentre una versión más nueva:
+entonces es `true` y `latest_version` y `latest_is_security` se incluyen junto a él.
 `thresholds` y `hostgroups` reflejan la configuración activa; consulta
 [Detección](/docs/detection) y [Hostgroups](/docs/hostgroups) para conocer su forma completa.
 
@@ -125,7 +134,7 @@ contienen objetos `Attack`.
       },
       "active": true,
       "ban_state": "active",
-      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "route": "blackhole 203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
       "dry_run": false,
       "started_at": "2026-06-13T09:41:07Z",
       "sample": {
@@ -279,7 +288,7 @@ Devuelve la tabla completa de baneos: activos e históricos. Cada entrada es un 
       "threshold": 80000,
       "next_hop": "192.0.2.1",
       "community": "65000:666",
-      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "route": "blackhole 203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
       "state": "active",
       "dry_run": false,
       "manual": false,
@@ -323,9 +332,10 @@ por defecto devuelve la última hora:
 }
 ```
 
-Cuando el almacenamiento está desactivado, la respuesta es `{"available": false, "events": []}`. Consulta la
-página dedicada de [Registro de auditoría](/docs/audit) para conocer la lista completa de campos, las reglas de consulta y el
-modelo de identidad del operador y de acotamiento por tenant.
+Cuando el almacenamiento está desactivado, la respuesta es `{"available": false, "events": []}`. Ten en cuenta que
+los registros de auditoría codifican `dry_run` como un entero (`0`/`1`), no como el booleano JSON usado en el resto
+de esta página. Consulta la página dedicada de [Registro de auditoría](/docs/audit) para conocer la lista completa de
+campos, las reglas de consulta y el modelo de identidad del operador y de acotamiento por tenant.
 
 ### POST /api/v1/ban
 
@@ -371,7 +381,10 @@ devuelve HTTP `404`.
 ### POST /api/v1/config/reload
 
 Relee el archivo de configuración desde disco y lo aplica: el mismo efecto que enviar `SIGHUP`.
-El cuerpo está vacío; el tipo de contenido JSON sigue siendo obligatorio.
+El cuerpo está vacío; el tipo de contenido JSON sigue siendo obligatorio. A diferencia de `ban`/`unban`, este
+endpoint requiere un token **sin acotar (admin)**: una recarga intercambia toda la configuración, por lo que un
+token acotado a un tenant se rechaza con `403` y `config reload is restricted to unscoped
+(admin) tokens`.
 
 ```json
 {

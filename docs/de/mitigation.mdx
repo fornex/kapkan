@@ -70,13 +70,13 @@ bgp:
 | `next_hop6` | Der IPv6-Discard-Next-Hop, der mit jedem `/128`-Blackhole angekündigt wird. Optional; ist er nicht gesetzt, greift Kapkan auf `100::1` zurück (das Discard-Präfix nach RFC 6666). |
 | `community` | Die RTBH-Community im Format `ASN:value` (zum Beispiel `65000:666`). Wird beim Laden einmalig in den Wire-Wert geparst, der mit jeder Route gesendet wird. |
 | `communities` | Optionale Liste von Communities, die `community` **überschreibt**, wenn gesetzt — für Upstreams, die einen vollständigen Satz erwarten. |
-| `local_pref` | Optionales `LOCAL_PREF`-Pfadattribut, das an Blackholes angehängt wird (relevant für iBGP-Peers). Der Standardwert `0` lässt es weg. |
-| `neighbors[]` | Die eBGP-Peers, an die Kapkan ankündigt. Jeder Eintrag erwartet eine `address`, eine `remote_asn` und einen optionalen `port` (Standard `179`, für Tests vorgesehen). |
+| `local_pref` | Optionales `LOCAL_PREF`-Pfadattribut, das an Blackholes angehängt wird. Auf iBGP-Sitzungen wird es berücksichtigt, über eBGP hinweg jedoch verworfen (es ist nicht-transitiv), sodass es nur für iBGP-Nachbarn relevant ist. Der Standardwert `0` lässt es weg. |
+| `neighbors[]` | Die BGP-Peers, an die Kapkan ankündigt, jeweils entweder eBGP oder iBGP. Jeder Eintrag erwartet eine `address`, eine `remote_asn` und einen optionalen `port` (Standard `179`, für Tests vorgesehen). |
 
 `community`, `communities`, `next_hop`, `next_hop6` und `local_pref` lassen sich allesamt pro
 Hostgroup überschreiben — siehe [BGP-Attribute pro Hostgroup](#bgp-attribute-pro-hostgroup).
 
-Die Blackhole-Route, die Kapkan für ein Ziel erstellt, lautet `<prefix> next-hop <next_hop> community
+Die Blackhole-Route, die Kapkan für ein Ziel erstellt, lautet `blackhole <prefix> next-hop <next_hop> community
 <community>` — exakt die Zeichenkette, die im Feld `route` des [Ban-Objekts](#das-ban-objekt) erscheint.
 IPv6-Ziele verwenden `next_hop6` (oder den Fallback `100::1`) anstelle von `next_hop`.
 
@@ -147,6 +147,38 @@ ban:
 Ein Ban wird außerdem vorzeitig zurückgezogen, wenn ein Konfigurations-Reload sein Ziel aus den
 geschützten `networks` entfernt — Kapkan hält keine Route für Adressraum aufrecht, den es nicht mehr
 schützt.
+
+## Persistenz über Neustarts hinweg
+
+Ein Neustart — ein Kernel-Upgrade, eine neue Kapkan-Version — würde normalerweise jede aktive Route
+verwerfen und die Opfer ungeschützt lassen, bis die Engine jeden Angriff erneut erkennt. Zwei
+ergänzende, optionale Mechanismen halten die Mitigation über diese Lücke hinweg aufrecht:
+
+- **Ban-Persistenz (`ban.state_file`).** Richten Sie ihn auf einen beschreibbaren Pfad (zum Beispiel
+  `/var/lib/kapkan/bans.json`) und Kapkan schreibt seine aktiven Bans auf die Festplatte. Beim nächsten
+  Start **rehydriert** es sie und kündigt jede Route sofort erneut an, statt darauf zu warten, dass der
+  Angriff erneut auslöst. Leer (der Standard) deaktiviert die Persistenz. Die
+  [systemd-Unit](/docs/deployment) stellt das Verzeichnis über `StateDirectory=kapkan` bereit.
+- **BGP Graceful Restart (`bgp.graceful_restart`).** Standardmäßig aktiv. Ein Peer, der Graceful Restart
+  (RFC 4724) unterstützt, **behält** Kapkans Routen als *stale*, während die Sitzung unten ist, statt sie
+  in dem Moment zu verwerfen, in dem die BGP-Verbindung abbricht — so bleibt das Blackhole während des
+  kurzen Neustartfensters in Kraft. Das Ankündigen der Capability ist für einen Peer, der sie nicht
+  unterstützt, unschädlich.
+
+```yaml
+ban:
+  state_file: /var/lib/kapkan/bans.json   # persist & re-announce active bans across a restart
+
+bgp:
+  graceful_restart:
+    enabled: true              # default; set false to opt out
+    restart_seconds: 120       # how long the peer holds routes as stale (1..4095)
+    # long_lived: false        # LLGR: extend retention beyond restart_seconds
+    # long_lived_stale_seconds: 3600  # LLGR stale time when long_lived is set (<= 86400)
+```
+
+Gemeinsam eingesetzt überstehen die Bans den Prozessneustart (`state_file`) und die Routen überstehen die
+Sitzungslücke (Graceful Restart), sodass ein Upgrade einen laufenden Angriff nicht mehr un-mitigiert.
 
 ## Fallback bei abgelehnter Methode
 
@@ -220,7 +252,7 @@ serialisiert werden:
 | `next_hop` | string | Der mit der Route angekündigte Discard-Next-Hop. |
 | `community` | string | Die RTBH-Community im Format `ASN:value`. |
 | `local_pref` | number | Das an die Route angehängte `LOCAL_PREF` (bei null weggelassen). |
-| `route` | string | Die vollständige Route als `<prefix> next-hop <next_hop> community <community>` oder eine `flowspec: ...`-Zusammenfassung bei FlowSpec-Bans. |
+| `route` | string | Die vollständige Route als `blackhole <prefix> next-hop <next_hop> community <community>` (oder `divert ...` bei Divert-Bans) oder eine `flowspec: ...`-Zusammenfassung bei FlowSpec-Bans. |
 | `state` | string | Einer von `active`, `withdrawn` oder `rejected`. |
 | `dry_run` | boolean | Ob der Ban im Dry-run-Modus erstellt wurde (Route nicht tatsächlich gesendet). |
 | `manual` | boolean | `true` für vom Betreiber angeforderte Bans, `false` für automatische. |
@@ -232,6 +264,8 @@ serialisiert werden:
 | `flowspec` | array | Die generierten [FlowSpec](/docs/flowspec)-Regeln, wenn die Methode `flowspec` ist. |
 | `escalation` | array | Die konfigurierte [Eskalationsstufe](/docs/escalation), sofern eine gesetzt ist. |
 | `escalation_step` | number | Der Index der aktuellen Stufe der Leiter. |
+| `fell_back_from` | string | Die Methode, deren Ankündigung der Peer abgelehnt hat und die den Ban dadurch auf seinen Fallback herabgestuft hat (weggelassen, wenn kein Fallback erfolgt ist). |
+| `fell_back_reason` | string | Die menschenlesbare Ursache des Fallbacks (weggelassen, wenn kein Fallback erfolgt ist). |
 
 Ein `rejected`-Ban wird niemals angekündigt — er zeichnet eine Ablehnung auf (whitelisted, außerhalb der
 `networks` oder Limit erreicht), sodass die Entscheidung in der API und in den Benachrichtigungen

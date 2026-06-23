@@ -71,8 +71,10 @@ individual resolvers and watches the pool's combined rate instead.
   policy.
 - **Group prefixes must lie inside `networks`.** A group can only narrow protection you
   already declared; a prefix outside your protected `networks` is a config error.
-- **Thresholds are optional.** Omit `thresholds` and the group inherits the global
-  thresholds. Set it to override them for that group only.
+- **Thresholds are optional, but all-or-nothing.** Omit `thresholds` and the group
+  inherits the global thresholds. To override them for that group, set all three of `pps`,
+  `mbps` and `flows_per_sec` — a partial block is rejected. (`thresholds_outgoing` differs:
+  there at least one key suffices.)
 - **`ban: false` disables auto-RTBH.** The group's hosts are still detected, classified
   and notified, but no automatic blackhole is announced. Manual bans through the API still
   work and still apply to those hosts.
@@ -86,9 +88,10 @@ individual resolvers and watches the pool's combined rate instead.
 
 <Callout type="warning" title="Total groups never blackhole automatically">
 A `calculation: total` group fires an attack for the prefix set as a whole, so there is no
-single address to announce a `/32` or `/128` for. Use total groups to alert on aggregate
-load (an anycast or DNS pool); pair them with a per-host group or manual bans if you also
-need automatic mitigation.
+single address to announce a `/32` or `/128` for. Setting `ban: true` on a total group is
+not silently ignored — it fails startup and reload as a config error. Use total groups to
+alert on aggregate load (an anycast or DNS pool); pair them with a separate per-host group
+or manual bans if you also need automatic mitigation.
 </Callout>
 
 ## Per-group overrides
@@ -112,6 +115,8 @@ hostgroups:
       - "203.0.113.192/26"
     thresholds:
       pps: 40000
+      mbps: 800
+      flows_per_sec: 20000
     thresholds_outgoing:        # watch for compromised hosts in this group
       pps: 30000
       udp_pps: 15000

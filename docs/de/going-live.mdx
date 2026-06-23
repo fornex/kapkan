@@ -36,12 +36,20 @@ reale Pipeline, keine Simulation.
 2. **Bestätigen, dass BGP den Zustand `ESTABLISHED` erreicht.** Das Peering findet auch im Dry-Run statt,
    sodass Sie die Konnektivität verifizieren können, bevor Sie etwas ankündigen. Achten Sie in den Logs auf
    das Ereignis `bgp peer state` und bestätigen Sie, dass jeder konfigurierte Nachbar den Zustand
-   `ESTABLISHED` erreicht. Falls eine Sitzung hängen bleibt, korrigieren Sie jetzt die Peer-Konfiguration
-   (ASN, Adressen, Quell-Interface, ACLs) – solange eine Fehlkonfiguration noch harmlos ist.
+   `ESTABLISHED` erreicht. Falls eine Sitzung hängen bleibt, korrigieren Sie sie jetzt – solange eine
+   Fehlkonfiguration noch harmlos ist. Die Korrektur liegt auf einer von zwei Seiten: Kapkans BGP-Konfiguration
+   (`local_asn`, das `remote_asn` und die `address` des Nachbarn) oder die Router-/Host-Seite (Quell-Interface,
+   Firewall-ACLs).
 
    ```sh
-   ./kapkan -config /etc/kapkan/config.yaml -log-format text | grep "bgp peer state"
+   # Folgen Sie den Logs des laufenden Daemons (Kapkan loggt nach stderr, was systemd erfasst):
+   journalctl -u kapkan -f | grep "bgp peer state"
+
+   # Nur zur Entwicklung – stattdessen eine Vordergrund-Instanz starten (2>&1, da die Logs nach stderr gehen):
+   ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
+
+   Sie können den Zustand der Peers auch ohne die Logs über `GET /api/v1/status` bestätigen.
 
 3. **Dry-Run deaktivieren und neu laden.** Setzen Sie `dry_run: false` in Ihrer Konfiguration und laden Sie
    Kapkan anschließend neu, damit die Datei erneut eingelesen wird. Das Neuladen ist unterbrechungsfrei: Es
@@ -72,7 +80,7 @@ Angriff verwirft nun Live-Datenverkehr zur betroffenen Adresse. Bestätigen Sie 
 Nach Schritt 3 eine schnelle Prüfung, dass Sie wirklich live sind und sich die Ankündigungen korrekt verhalten:
 
 - `GET /api/v1/status` zeigt den aktuellen Modus sowie die Anzahl aktiver Angriffe/Bans an.
-- Die Metrik `mitigate_announced_routes` ist nach Modus gekennzeichnet; in der Produktion werden Routen
+- Die Metrik `kapkan_mitigate_announced_routes` ist nach Modus gekennzeichnet; in der Produktion werden Routen
   unter `real` statt unter `dry_run` gezählt. Siehe [Metriken](/docs/metrics).
 - `GET /api/v1/bans` listet jeden Ban auf, aktive wie historische, sodass Sie bestätigen können, dass ein Ban
   angekündigt und später nach Ablauf seiner TTL automatisch zurückgezogen wurde.

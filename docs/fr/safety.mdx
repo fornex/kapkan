@@ -1,16 +1,18 @@
 export const metadata = {
   title: "Modèle de sécurité",
   description:
-    "Les six règles de sécurité non négociables que Kapkan applique dans son code pour ne jamais blackholer la mauvaise cible.",
+    "Les six garanties de sécurité non négociables que Kapkan applique dans son code, plus une couche optionnelle de rayon d'impact, pour ne jamais blackholer la mauvaise cible.",
 };
 
 # Modèle de sécurité
 
 Le blackholing d'une route est un instrument brutal : une annonce erronée ou incontrôlée peut
 mettre votre propre infrastructure hors ligne plus vite que n'importe quelle attaque. Kapkan est
-conçu pour que cela ne puisse pas se produire par accident. Les six règles ci-dessous sont
-appliquées dans le code et couvertes par des tests — ce ne sont pas des options de configuration
-que vous pourriez oublier d'activer, et elles ne sont pas négociables.
+conçu pour que cela ne puisse pas se produire par accident. Les six garanties fondamentales
+ci-dessous sont appliquées dans le code et couvertes par des tests — ce ne sont pas des options de
+configuration que vous pourriez oublier d'activer, et elles ne sont pas négociables. Par-dessus
+elles se trouve une couche optionnelle de rayon d'impact que vous pouvez activer pour un
+confinement supplémentaire.
 
 Chacune d'elles s'applique aussi bien aux bannissements **automatiques** déclenchés par la
 détection qu'aux bannissements **manuels** demandés via l'API. Aucun chemin ne permet de les
@@ -71,11 +73,12 @@ métriques, mais il ne peut jamais déclencher de bannissement. Vous ne pouvez p
 accidentellement un préfixe qui ne vous appartient pas, même si un flood traverse votre réseau en
 route vers une autre destination.
 
-## 7. Limites du rayon d'impact (optionnel)
+## Optionnel : garde-fous du rayon d'impact
 
-Le plafond strict (#4) borne le *nombre* de bannissements, mais pas la part de votre réseau qu'ils
-couvrent ni la vitesse à laquelle ils s'accumulent. Deux garde-fous `ban` optionnels resserrent
-encore cela :
+Ces garde-fous se superposent aux six garanties fondamentales et sont **désactivés par défaut** —
+c'est la seule partie du modèle de sécurité que vous activez vous-même. Le plafond strict (#4) borne
+le *nombre* de bannissements, mais pas la part de votre réseau qu'ils couvrent ni la vitesse à
+laquelle ils s'accumulent. Deux garde-fous `ban` optionnels resserrent encore cela :
 
 - `max_banned_fraction` refuse les nouveaux bannissements dès que plus que cette part (par famille
   d'adresses) de votre espace protégé est déjà blackholée — ainsi une référence empoisonnée ou une
@@ -100,11 +103,16 @@ viole un est rejetée avec un HTTP `409` plutôt qu'annoncée silencieusement :
 | La cible figure dans `protected_whitelist` | `409` — jamais annoncée |
 | La cible est en dehors du périmètre `networks` configuré | `409` — hors périmètre |
 | Bannir la cible dépasserait `max_active_bans` | `409` — plafond atteint |
+| Bannir la cible dépasserait `max_banned_fraction` | `409` — si activé |
+| Bannir la cible dépasserait `max_bans_per_window` | `409` — si activé |
 
-Un bannissement manuel qui passe ces trois contrôles respecte toujours les règles de TTL et
-d'hystérésis : il expire automatiquement comme toute autre annonce. La seule règle que les
-bannissements manuels contournent est le *seuil de détection* lui-même — c'est tout l'intérêt d'un
-bannissement manuel — mais jamais les garde-fous de sécurité entourant l'annonce.
+Si les garde-fous optionnels de rayon d'impact sont activés, un bannissement manuel est lui aussi
+vérifié par rapport à eux, et est rejeté avec le même `409` lorsqu'il dépasserait
+`max_banned_fraction` ou `max_bans_per_window`. Un bannissement manuel qui franchit chacun de ces
+contrôles respecte toujours les règles de TTL et d'hystérésis : il expire automatiquement comme
+toute autre annonce. La seule règle que les bannissements manuels contournent est le *seuil de
+détection* lui-même — c'est tout l'intérêt d'un bannissement manuel — mais jamais les garde-fous de
+sécurité entourant l'annonce.
 
 ## Liens connexes
 

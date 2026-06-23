@@ -7,8 +7,9 @@ export const metadata = {
 # CLI reference
 
 Kapkan is a single binary. Everything it does is selected by command-line flags at startup —
-there are no subcommands beyond the two utility modes below. All logs go to **stderr**, so the
-REST API and metrics on stdout stay clean for piping.
+there are no subcommands beyond the utility modes below. All logs go to **stderr**; the REST
+API and Prometheus metrics are served over HTTP on `api.listen` (default `127.0.0.1:8080`), while
+the utility flags (`-version`, `-dump-schema`) print their output to **stdout**.
 
 ```sh
 kapkan [flags]
@@ -23,6 +24,8 @@ kapkan [flags]
 | `-log-level <lvl>` | `info` | Minimum log level: `debug`, `info`, `warn`, `error`. An unrecognized value falls back to `info`. |
 | `-check-config <path>` | — | Validate the config file at `<path>` and exit — does **not** start the daemon. See [below](#validating-a-config). |
 | `-dump-schema` | `false` | Print the configuration JSON schema to stdout and exit. See [below](#dumping-the-schema). |
+| `-version` | `false` | Print the build version and exit. The same version is exposed at runtime via `/api/v1/status` and the `kapkan_build_info` [metric](/docs/metrics). |
+| `-check-update` | `false` | Run the opt-in [update check](/docs/configuration) once and exit — `0` up to date, `10` an update is available, `1` on error. Polls the GitHub Releases API; sends only the request itself, never node identity or config. |
 
 <Callout type="info" title="json or text?">
 Use `-log-format text` for local development — it is the format the Quickstart and the
@@ -49,10 +52,11 @@ The config file is reloadable at runtime without a restart — send `SIGHUP`
 (`systemctl reload kapkan`) or `POST /api/v1/config/reload`. See the
 [configuration reference](/docs/configuration) for what reloads and what is fixed at startup.
 
-## Utility subcommands
+## Utility flags
 
-These two flags exit before the daemon starts — they never open a listener or send an
-announcement, so they are safe to run on a production host.
+These flags exit before the daemon starts — they never open a listener or send a route
+announcement, so they are safe to run on a production host. (`-check-update` makes a single
+outbound request to the releases API; the others are fully offline.)
 
 ### Validating a config
 
@@ -80,6 +84,28 @@ kapkan -dump-schema
 
 Prints the configuration's JSON schema to stdout and exits `0` (or `1` on an internal error).
 The [config builder](/config) consumes this schema to validate fields in your browser.
+
+### Printing the version
+
+```sh
+kapkan -version
+```
+
+Prints the build version (release tag plus short VCS revision when known) to stdout and exits.
+The same string is served at runtime on `/api/v1/status` and carried by the `kapkan_build_info`
+[metric](/docs/metrics) — so you can confirm a binary's version locally with zero egress.
+
+### Checking for updates
+
+```sh
+kapkan -check-update
+```
+
+Runs the [`update_check`](/docs/configuration) once on demand and exits: `0` if up to date, `10`
+if a newer release is available, `1` on error. It queries the GitHub Releases API and sends only
+the request itself (your IP and a generic User-Agent) — never node identity, config or attack
+data. The periodic in-process check is **off by default**; this flag works regardless of that
+setting.
 
 ## Next steps
 

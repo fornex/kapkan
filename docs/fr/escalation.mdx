@@ -24,12 +24,17 @@ scrubbing:
   community: "65000:200"
 ```
 
+Un [bloc `bgp`](/docs/mitigation#bgp-configuration) est requis pour qu'un palier puisse
+annoncer ; les blocs `flowspec` et `scrubbing` ci-dessus ne sont nécessaires que pour les
+paliers `flowspec` et `divert`.
+
 ## Application des paliers
 
 Le `after_seconds` de chaque palier est mesuré à partir du début de l'attaque. Un palier
-s'applique une fois ce délai écoulé **et que l'attaque est toujours active** — aucun événement
-de fin n'est encore survenu, c'est-à-dire que le trafic reste au-dessus du seuil durant
-l'hystérésis de levée du bannissement (unban).
+s'applique une fois ce délai écoulé **et tant que le bannissement n'a pas encore été levé** —
+la levée n'intervient qu'après que le trafic est resté sous le seuil pendant toute la fenêtre
+d'hystérésis de levée du bannissement (unban). L'horloge du palier continue de tourner depuis
+le début de l'attaque tout du long.
 
 - Le premier palier doit être à `0` seconde.
 - `action` vaut `none` (alerte seule), `flowspec`, `divert` ([scrubbing](/docs/scrubbing)) ou
@@ -60,8 +65,8 @@ dry-run (qui fait avancer le palier et journalise chaque échelon, mais sans jam
 
 Lorsqu'aucun bloc `escalation` n'est défini, la méthode `mitigation` unique se comporte
 exactement comme un palier à un seul échelon à `0` seconde — compatibilité ascendante totale.
-Le palier et la méthode courants sont visibles par bannissement dans `/api/v1/bans`
-(`escalation`, `escalation_step`).
+Chaque bannissement dans `/api/v1/bans` expose le palier complet configuré (`escalation`),
+l'indice de l'échelon courant (`escalation_step`) et la méthode de l'échelon actif (`method`).
 
 ## Voir aussi
 

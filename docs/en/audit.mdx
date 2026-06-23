@@ -23,11 +23,13 @@ Every mutation is logged at `INFO` level regardless of storage. The queryable hi
 
 ## What is recorded
 
-Three actions are audited, each on both success and failure:
+Three actions are audited. `ban` and `config_reload` are recorded on both success and
+failure; `unban` is recorded only on success — a failed or no-op unban returns an error and is
+not written to the trail, though it is still logged:
 
 | Action | When | Recorded outcomes (`result`) |
 | --- | --- | --- |
-| `ban` | `POST /api/v1/ban` | `active` (or `withdrawn`/`dry_run` ban state) on success; `rejected` when a safety guard refuses it. |
+| `ban` | `POST /api/v1/ban` | `active` on success; `rejected` when a safety guard refuses it. A dry-run ban still records `active` — the simulation is signalled by the separate `dry_run` field. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` on success. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` on success; `error` when the new config fails to parse or validate. |
 

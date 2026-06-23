@@ -12,12 +12,21 @@ Dry-Run ist die Voreinstellung.
 
 <Callout type="info" title="Voraussetzungen">
 Go 1.22 oder neuer. Um Live-Erkennungen zu sehen, benötigen Sie außerdem einen Router, der
-NetFlow / IPFIX / sFlow exportiert — Sie können das System aber auch ohne einen solchen
-durchgängig validieren, indem Sie den integrierten Flow-Generator verwenden (siehe den letzten
-Abschnitt).
+NetFlow / IPFIX / sFlow exportiert — aber auch ohne einen solchen können Sie die Erkennung
+durchgängig validieren, indem Sie den mitgelieferten Integrationstest aus `engine/` ausführen
+(`go test ./internal/app -run TestEndToEnd -v`; siehe den letzten Abschnitt).
 </Callout>
 
 ## 1. Das Binary erstellen
+
+Jeder der folgenden Befehle wird aus dem Verzeichnis `engine` des Checkouts ausgeführt, also
+beginnen Sie dort:
+
+```sh
+cd engine
+```
+
+Dann erstellen Sie:
 
 ```sh
 make build
@@ -39,9 +48,9 @@ make run-dev
 voreingestellten strukturierten JSON auf eine menschenlesbare Form um — siehe die
 [CLI-Referenz](/docs/cli) für jeden Flag und seine zulässigen Werte.
 
-Die Entwicklungskonfiguration ([`configs/dev.yaml`](/docs/configuration)) hat `dry_run: true`, ein
-geschütztes Testnetz von `203.0.113.0/24` und lauscht auf sFlow an `:6343` sowie auf
-NetFlow/IPFIX an `:2055`.
+Die Entwicklungskonfiguration ([`configs/dev.yaml`](/docs/configuration)) hat `dry_run: true`,
+geschützte Testnetze von `203.0.113.0/24` und `2001:db8::/32` (sowie ein paar Beispiel-Hostgroups)
+und lauscht auf sFlow an `:6343` sowie auf NetFlow/IPFIX an `:2055`.
 
 ## 3. Richten Sie Ihre Exporter auf Kapkan aus
 
@@ -79,7 +88,9 @@ Wire-Format erzeugt — einschließlich Amplification-, SYN-Flood- und UDP-Flood
 in der gesamten Test-Suite verwendet, um die Erkennung durchgängig zu validieren, ohne einen
 echten Router anzufassen. Der Integrationstest in `internal/app` spielt einen
 NTP-Amplification-Flood über einen echten UDP-Socket gegen eine Dry-Run-Instanz ab und prüft,
-dass der Angriff und sein (automatisch ablaufender) virtueller Bann in der API erscheinen.
+dass der Angriff und sein (automatisch ablaufender) virtueller Bann — das aufgezeichnete
+potenzielle Blackhole, das der Dry-Run über die API offenlegt, ohne es je anzukündigen — in der
+API erscheinen.
 
 ## Nächste Schritte
 

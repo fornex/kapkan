@@ -23,12 +23,12 @@ Vincula (bind) el listener en consecuencia — consulta [Autenticación](/docs/a
 | Métrica | Etiquetas | Significado |
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Total de flows ingeridos, por protocolo de flow. |
-| `kapkan_ingest_packets_total` | `exporter`, `proto` | Total de datagramas de telemetría recibidos, por exportador de origen (con cardinalidad acotada; consulta `flow_sources`) y protocolo. |
+| `kapkan_ingest_packets_total` | `exporter`, `proto` | Total de datagramas de telemetría recibidos, por exportador de origen (con cardinalidad acotada; consulta [`flow_sources`](/docs/configuration)) y protocolo. |
 | `kapkan_ingest_decode_errors_total` | `proto` | Datagramas de telemetría que no se pudieron decodificar, por protocolo. |
 | `kapkan_ingest_dropped_flows_total` | — | Flows descartados porque la cola de entrada del motor estaba llena. |
 | `kapkan_engine_active_attacks` | — | Gauge de ataques actualmente en curso. |
 | `kapkan_engine_attacks_total` | — | Contador de ataques detectados desde el arranque. |
-| `kapkan_engine_process_latency_seconds` | — | Histograma de la latencia de procesamiento en la ruta crítica (hot-path) por flow. |
+| `kapkan_engine_process_latency_seconds` | — | Histograma de la latencia de procesamiento en la ruta crítica (hot-path), observada una vez por lote de ingesta (no por flow). |
 | `kapkan_engine_tracked_hosts` | — | Gauge de hosts actualmente rastreados por el motor. |
 | `kapkan_mitigate_announced_routes` | `mode` | Gauge de rutas de blackhole anunciadas actualmente, separadas por el modo `real` / `dry_run`. |
 | `kapkan_mitigate_flowspec_rules` | `mode` | Gauge de reglas de [FlowSpec](/docs/flowspec) anunciadas actualmente, separadas por el modo `real` / `dry_run`. Vigílalo frente al límite de rutas FlowSpec de tus routers. |
@@ -36,6 +36,8 @@ Vincula (bind) el listener en consecuencia — consulta [Autenticación](/docs/a
 | `kapkan_mitigate_fallback_total` | `from`, `to` | Anuncios de mitigación que degradaron a un método de fallback porque el peer rechazó el primario, por `from`/`to`. Una serie con `from="flowspec"` distinta de cero señala upstreams que no respetan FlowSpec. |
 | `kapkan_notify_notifications_total` | `channel`, `result` | Notificaciones intentadas, por canal (telegram, slack, email, webhook, exec) y `result`. |
 | `kapkan_storage_rows_total` | `table`, `result` | Filas entregadas al [almacenamiento opcional en ClickHouse](/docs/storage), por tabla y `written` / `dropped` / `error`. |
+| `kapkan_build_info` | `version`, `revision`, `goversion`, `goos`, `goarch` | Gauge informativo constante en `1` que lleva el build en ejecución en sus etiquetas (el idiom de `node_exporter`). Consulta la dispersión de versiones de la flota con `count by (version)(kapkan_build_info)` — sin phone-home. |
+| `kapkan_update_available` | `latest_version`, `security` | `1` cuando la comprobación opcional [`update_check`](/docs/configuration) encuentra una versión más reciente (ausente en caso contrario); `security="true"` señala una versión relevante para la seguridad. |
 
 La etiqueta `mode` en `kapkan_mitigate_announced_routes` es la forma más rápida de confirmar el estado
 de dry-run de un vistazo: mientras `dry_run: true`, cada ruta que se habría anunciado se cuenta bajo

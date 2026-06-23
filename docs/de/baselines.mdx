@@ -73,7 +73,7 @@ mehrere Regeln begrenzen, was die Baseline überhaupt jemals tun kann.
   normalerweise ruhiger Host nicht zu einem überempfindlichen Auslöser wird, der bei jedem
   kleinen Burst feuert.
 - **Eingefroren unter Angriff.** Solange ein Host unter Angriff steht — einschließlich des
-  `unban_hysteresis_seconds`-Nachlaufs, nachdem die Rate abgefallen ist — wird seine
+  [`unban_hysteresis_seconds`](/docs/mitigation)-Nachlaufs, nachdem die Rate abgefallen ist — wird seine
   Baseline überhaupt nicht trainiert. Angriffsverkehr lehrt den Host niemals, dass der
   Angriff normal sei.
 - **Begrenztes Lernen (Clamping).** Außerhalb von Angriffen wird jedes Trainings-Sample auf
@@ -97,7 +97,11 @@ einer sub-statischen Flut steht, wenn Kapkan ihn zum ersten Mal sieht, lernt die
 „normal“ — begrenzt durch die statische Obergrenze, aber für einen Host, der vom ersten
 Anblick an angegriffen wird, gibt es keine saubere Referenz. Setzen Sie `warmup_seconds` auf
 mindestens einige Vielfache von `half_life_seconds`, damit die Baseline konvergiert, bevor
-sie mit dem Absichern beginnt.
+sie mit dem Absichern beginnt. Die `600` im Beispiel liegen deutlich unter dieser
+Richtlinie — in Ordnung, wenn Hosts sauber ankommen und Sie das Absichern durch die Baseline
+früher wünschen, aber falls ein Host schon beim ersten Anblick geflutet sein könnte, erhöhen
+Sie `warmup_seconds` auf einige Vielfache von `half_life_seconds` (z. B. `10800` bei der
+Standard-Halbwertszeit von `3600`).
 </Callout>
 
 ## Sichtbarkeit
@@ -131,6 +135,7 @@ manipulationssicheren Regeln.
 
 - [Erkennung & Schwellenwerte](/docs/detection) — die statischen Schwellenwerte, innerhalb derer Baselines sitzen.
 - [Hostgroups](/docs/hostgroups) — Schwellenwerte pro Gruppe, Summen und Baseline-Overrides.
+- [RTBH-Mitigation](/docs/mitigation) — der Bann-Lebenszyklus und der `unban_hysteresis_seconds`-Nachlauf.
 - [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.
 - [REST-API](/docs/api) — der `/api/v1/hosts`-Snapshot und seine `baseline`-Felder.
 - [Going Live](/docs/going-live) — Erkennung im Dry-run validieren, bevor Sie ankündigen.

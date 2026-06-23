@@ -24,9 +24,11 @@ un jeton bearer. Voir [Authentification](/docs/authentication).
 Toutes les routes `/api/v1` passent par la vérification du jeton lorsque l'authentification est
 configurée ; une fois configurée, chaque requête doit porter `Authorization: Bearer <token>`. Les
 jetons portent un **rôle** : les routes `GET` nécessitent le rôle **viewer**, et les routes
-mutables (`ban`, `unban`, `config/reload`) nécessitent le rôle **operator**. Une lecture avec un
-jeton viewer fonctionne ; une mutation avec un jeton viewer renvoie `403` ; un jeton inconnu
-renvoie `401`. Les points de terminaison `POST` exigent en outre un type de contenu JSON —
+mutables (`ban`, `unban`, `config/reload`) nécessitent le rôle **operator**. `config/reload` va
+plus loin : il exige un jeton **non rattaché (admin)**, de sorte que même un jeton operator
+rattaché à un tenant est refusé avec un `403`. Une lecture avec un jeton viewer fonctionne ; une
+mutation avec un jeton viewer renvoie `403` ; un jeton inconnu renvoie `401`. Les points de
+terminaison `POST` exigent en outre un type de contenu JSON —
 envoyez `Content-Type: application/json`. Notez que `/metrics` et l'enveloppe statique du tableau
 de bord sont servis sans jeton ; les données chargées par le tableau de bord sont, elles,
 récupérées via l'API protégée. Voir [Authentification](/docs/authentication) pour les rôles des
@@ -35,7 +37,9 @@ jetons.
 Un jeton peut aussi être **rattaché à un tenant** : il ne voit alors que les lignes de son
 tenant sur chaque point de terminaison de lecture (`/status` est reconstruit pour ses propres
 hostgroups et compteurs), et ne peut effectuer `ban`/`unban` qu'au sein de son tenant — une cible
-hors tenant renvoie un `403` uniforme. Voir [Multi-tenant](/docs/multi-tenancy).
+hors tenant renvoie un `403` uniforme. Un jeton rattaché à un tenant ne peut pas du tout recharger
+la configuration : `config/reload` est réservé aux jetons non rattachés (admin) et renvoie `403`
+sinon. Voir [Multi-tenant](/docs/multi-tenancy).
 
 ## Points de terminaison
 
@@ -45,6 +49,7 @@ hors tenant renvoie un `403` uniforme. Voir [Multi-tenant](/docs/multi-tenancy).
 | GET | `/api/v1/attacks` | Attaques actives ainsi que les 100 dernières terminées, avec échantillons et classification. |
 | GET | `/api/v1/hosts` | Instantané des hôtes suivis : débits par direction, baselines apprises, état d'attaque. |
 | GET | `/api/v1/bans` | Tous les bannissements, actifs et historiques. |
+| GET | `/api/v1/traffic` | Historique des débits par hôte persisté (viewer) ; `{available:false, points:[]}` lorsque le stockage est désactivé. |
 | GET | `/api/v1/audit` | Piste d'audit des mutations attribuée aux opérateurs (qui a banni/rechargé, quand, résultat). |
 | POST | `/api/v1/ban` | Bannir manuellement une adresse. |
 | POST | `/api/v1/unban` | Retirer manuellement un bannissement. |
@@ -62,6 +67,8 @@ Renvoie le mode de fonctionnement actuel et un résumé de ce que Kapkan protèg
 {
   "dry_run": true,
   "uptime_seconds": 8123,
+  "version": "v1.2.0 · a1b2c3d",
+  "update_available": false,
   "networks": ["203.0.113.0/24", "198.51.100.0/24"],
   "active_attacks": 1,
   "active_bans": 1,
@@ -77,7 +84,11 @@ Renvoie le mode de fonctionnement actuel et un résumé de ce que Kapkan protèg
 ```
 
 `dry_run` indique le mode global : lorsqu'il vaut `true`, aucun blackhole n'est annoncé à vos
-routeurs. `thresholds` et `hostgroups` reflètent la configuration active ; voir
+routeurs. `version` est le build en cours d'exécution, toujours présent et sans aucune sortie
+réseau. `update_available` vaut `false` à moins que la vérification optionnelle
+[`update_check`](/docs/configuration) ne soit activée et ne détecte une version plus récente —
+il vaut alors `true` et `latest_version` ainsi que `latest_is_security` sont inclus à ses côtés.
+`thresholds` et `hostgroups` reflètent la configuration active ; voir
 [Détection](/docs/detection) et [Hostgroups](/docs/hostgroups) pour leur forme complète.
 
 ### GET /api/v1/attacks
@@ -128,7 +139,7 @@ en premier). Les deux tableaux contiennent des objets `Attack`.
       },
       "active": true,
       "ban_state": "active",
-      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "route": "blackhole 203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
       "dry_run": false,
       "started_at": "2026-06-13T09:41:07Z",
       "sample": {
@@ -283,7 +294,7 @@ Renvoie la table complète des bannissements — actifs et historiques. Chaque e
       "threshold": 80000,
       "next_hop": "192.0.2.1",
       "community": "65000:666",
-      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "route": "blackhole 203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
       "state": "active",
       "dry_run": false,
       "manual": false,
@@ -327,9 +338,11 @@ serveur. Il accepte des paramètres de requête optionnels `from`/`to` (RFC 3339
 }
 ```
 
-Lorsque le stockage est désactivé, la réponse est `{"available": false, "events": []}`. Voir la
-page dédiée [Journal d'audit](/docs/audit) pour la liste complète des champs, les règles de requête,
-ainsi que le modèle d'identité des opérateurs et de rattachement aux tenants.
+Lorsque le stockage est désactivé, la réponse est `{"available": false, "events": []}`. Notez que
+les enregistrements d'audit encodent `dry_run` sous forme d'entier (`0`/`1`), et non sous forme du
+booléen JSON utilisé ailleurs sur cette page. Voir la page dédiée [Journal d'audit](/docs/audit)
+pour la liste complète des champs, les règles de requête, ainsi que le modèle d'identité des
+opérateurs et de rattachement aux tenants.
 
 ### POST /api/v1/ban
 
@@ -376,7 +389,10 @@ renvoie un statut HTTP `404`.
 ### POST /api/v1/config/reload
 
 Relit le fichier de configuration depuis le disque et l'applique — le même effet que l'envoi d'un
-`SIGHUP`. Le corps est vide ; le type de contenu JSON reste requis.
+`SIGHUP`. Le corps est vide ; le type de contenu JSON reste requis. Contrairement à
+`ban`/`unban`, ce point de terminaison exige un jeton **non rattaché (admin)** : un rechargement
+remplace l'intégralité de la configuration, de sorte qu'un jeton rattaché à un tenant est refusé
+avec un `403` et `config reload is restricted to unscoped (admin) tokens`.
 
 ```json
 {

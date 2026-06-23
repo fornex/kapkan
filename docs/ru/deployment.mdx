@@ -7,8 +7,8 @@ export const metadata = {
 # Развёртывание в продакшене
 
 Защищённый юнит systemd и пример продакшен-конфигурации поставляются в каталоге
-[`deploy/`](https://github.com/fornex/kapkan) репозитория: `deploy/kapkan.service`
-и `deploy/config.example.yaml`. На этой странице описано, как установить бинарный файл как
+[`engine/deploy/`](https://github.com/fornex/kapkan/tree/main/engine/deploy) репозитория: `engine/deploy/kapkan.service`
+и `engine/deploy/config.example.yaml`. На этой странице описано, как установить бинарный файл как
 системный сервис, где располагается каждый файл, как хранить секреты вне YAML и как
 перезагрузить конфигурацию без перезапуска.
 
@@ -19,7 +19,7 @@ export const metadata = {
 
 ## Install
 
-Выполните следующие команды от имени root из клона репозитория (чтобы каталог `deploy/` был
+Выполните следующие команды от имени root из клона репозитория (чтобы каталог `engine/deploy/` был
 доступен). Они устанавливают бинарный файл, создают непривилегированного системного пользователя,
 формируют структуру `/etc/kapkan`, устанавливают продакшен-конфигурацию, записывают файл с
 секретами с ограничительными правами, устанавливают юнит systemd и включают сервис.
@@ -28,17 +28,29 @@ export const metadata = {
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
-sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
-echo 'KAPKAN_TG_TOKEN=123456:abc' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
-sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo install -m 0640 -o kapkan -g kapkan engine/deploy/config.example.yaml /etc/kapkan/config.yaml
+echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+sudo install -m 0644 engine/deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
+
+В env-файл выше записывается только `KAPKAN_API_TOKEN`, поскольку API-токен рекомендуется
+задать до того, как вы откроете доступ к слушателю (см. [Аутентификация](/docs/authentication)).
+Запись env-файла сама по себе не включает аутентификацию: поставляемая конфигурация привязывается
+к `127.0.0.1` с закомментированным `api.token_env`, поэтому токен остаётся неактивным.
+Раскомментируйте `api.token_env` (или добавьте список `api.tokens`), чтобы включить
+аутентификацию. Все каналы уведомлений опциональны — добавляйте `KAPKAN_TG_TOKEN`, учётные данные
+SMTP или ClickHouse только если действительно используете эти возможности. Полный список ключей
+`*_env` приведён ниже в разделе [Секреты](#secrets).
 
 Юнит работает от имени пользователя `kapkan` с `ExecStart=/usr/local/bin/kapkan -config
 /etc/kapkan/config.yaml -log-format json -log-level info`, перезапускается при сбое и сильно
 изолирован: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
-`MemoryDenyWriteExecute` и другие настройки.
+`MemoryDenyWriteExecute` и другие настройки. Он также объявляет `StateDirectory=kapkan`
+(режим `0700`), предоставляя демону доступный для записи `/var/lib/kapkan` для
+[`ban.state_file`](/docs/mitigation), в то время как `ProtectSystem=strict` оставляет
+остальную часть файловой системы доступной только для чтения.
 
 <Callout type="info" title="Привязка BGP к порту 179">
 Kapkan не требует особых привилегий в режиме dry-run или при пиринге с высокого локального порта.
@@ -61,6 +73,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/config.yaml` | `0640` | Конфигурация в YAML, владелец `kapkan:kapkan`. |
 | `/etc/kapkan/kapkan.env` | `0600` | Файл секретов в окружении (токены, учётные данные SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | Защищённый юнит systemd. |
+| `/var/lib/kapkan/` | `0700` | Доступный для записи каталог состояния (`StateDirectory=kapkan`); хранит `ban.state_file`, когда включено сохранение банов. |
 
 Весь каталог `/etc/kapkan` монтируется для процесса только для чтения через
 `ReadOnlyPaths=/etc/kapkan`, поэтому демон может читать свою конфигурацию и секреты, но не может
@@ -115,8 +128,14 @@ sudo systemctl reload kapkan
 Эквивалентно, ту же перезагрузку можно запустить через API:
 
 ```sh
-curl -s -X POST localhost:8080/api/v1/config/reload
+curl -s -X POST localhost:8080/api/v1/config/reload \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $KAPKAN_API_TOKEN"
 ```
+
+`Content-Type: application/json` обязателен для каждого изменяющего `POST` (иначе сервер
+возвращает `415`), а при включённой аутентификации перезагрузка требует bearer-токена без
+ограничения области (admin) — токен, ограниченный тенантом, получает `403`.
 
 Большинство ключей перезагружается без перезапуска, включая `dry_run`, пороги, `networks`,
 hostgroups, базовые линии (baselines) и настройки уведомлений. Некоторые параметры размеров требуют

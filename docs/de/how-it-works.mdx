@@ -74,7 +74,7 @@ internal/config/   YAML load, validation, SIGHUP hot-reload
 internal/ingest/   goflow2 library-mode ingestion -> normalized Flow
 internal/engine/   sharded per-host counters, sliding window, threshold eval
 internal/mitigate/ embedded GoBGP: RTBH announce/withdraw, TTL, caps, dry-run
-internal/notify/   Telegram + webhook notifications
+internal/notify/   Telegram, Slack, email, webhook and exec-hook notifications
 internal/api/      REST API + Prometheus metrics
 pkg/flowgen/       synthetic NetFlow/sFlow generator for tests and load
 ```
@@ -99,13 +99,14 @@ Jeder Sprung, der Reihe nach:
   Sampling-Rate — in einen internen `Flow`-Typ, unabhängig davon, welches Protokoll ihn erzeugt
   hat.
 - **Ingest → Engine.** Normalisierte Flows treten in den Hot Path ein. Die Engine ordnet jeden Flow
-  einem Ziel-Host innerhalb von `networks` zu, multipliziert seine Zähler mit der Sampling-Rate,
+  einem Ziel-Host innerhalb von `networks` zu (den geschützten Präfixen, die Sie konfigurieren — siehe
+  [Erkennung & Schwellwerte](/docs/detection)), multipliziert seine Zähler mit der Sampling-Rate,
   sodass die Raten in realem (ungesampeltem) Traffic ausgedrückt sind, und aktualisiert die Zähler
   des gleitenden Fensters dieses Hosts. Ziele außerhalb von `networks` werden in den Metriken
   gezählt, lösen aber niemals eine Aktion aus.
 - **Engine → Mitigate.** Wenn ein Host einen Schwellwert überschreitet, löst die Engine ein
   Angriffsereignis aus. Die Mitigate-Stufe entscheidet, ob eine RTBH-Route angekündigt wird — unter
-  Beachtung von Dry-Run, der Whitelist, der `ban`-Policy der Hostgroup und des Ban-Caps — und plant
+  Beachtung von Dry-Run, der `protected_whitelist`, der `ban`-Policy der Hostgroup und des Ban-Caps — und plant
   deren TTL-basierte Rücknahme.
 - **Engine → Notify.** Dasselbe Ereignis wird an jeden konfigurierten Kanal (Telegram, Slack,
   E-Mail, Webhook, Exec-Hook) zugestellt, samt der Klassifikation des Angriffs und einem angehängten
@@ -159,12 +160,14 @@ zwei Wegen aus:
 - Senden Sie `SIGHUP` an den Prozess (zum Beispiel `sudo systemctl reload kapkan`).
 - Rufen Sie `POST /api/v1/config/reload` gegen die API auf.
 
-Beide lesen und validieren die Datei direkt neu. Erkennungs-Schwellwerte, Hostgroups, Baselines,
-Benachrichtigungseinstellungen und der `dry_run`-Schalter werden allesamt beim Reload wirksam. Eine
-Handvoll struktureller Einstellungen — insbesondere die Dimensionierung des Traffic-Puffers unter
-`samples.*` — erfordert einen vollständigen Neustart; in der
-[Konfigurationsreferenz](/docs/configuration) ist nachzulesen, welche Schlüssel neu geladen werden
-und welche nicht.
+Beide lesen und validieren die Datei direkt neu. Nahezu alles wird beim Reload wirksam — der
+`dry_run`-Schalter, die Erkennungs-Schwellwerte, `networks`, Hostgroups, Baselines,
+Benachrichtigungseinstellungen und `sampling.default_rate` werden allesamt live neu geladen. Eine
+Handvoll struktureller Einstellungen lehnt den Reload ab und erfordert einen vollständigen Neustart:
+die Listen-Adressen, die BGP-Identität (`local_asn`, `router_id`), `api.listen` sowie die
+Einstellungen `samples`, `storage` und `geoip`. In der
+[Konfigurationsreferenz](/docs/configuration) finden Sie die vollständige Liste, welche Schlüssel neu
+geladen werden und welche nicht.
 
 <Callout type="warning" title="Reloads werden validiert">
 Ein Reload validiert die gesamte Datei neu. Ist die neue Konfiguration ungültig, wird der Reload

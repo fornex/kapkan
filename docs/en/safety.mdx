@@ -1,15 +1,16 @@
 export const metadata = {
   title: "Safety model",
   description:
-    "The six non-negotiable safety rules Kapkan enforces in code so it can never blackhole the wrong thing.",
+    "The six non-negotiable safety guarantees Kapkan enforces in code, plus an optional blast-radius layer, so it can never blackhole the wrong thing.",
 };
 
 # Safety model
 
 Blackholing a route is a blunt instrument: a wrong or runaway announcement can take your
 own infrastructure offline faster than any attack. Kapkan is built so that cannot happen by
-accident. The six rules below are enforced in code and covered by tests — they are not
-configuration options you can forget to set, and they are non-negotiable.
+accident. The six core guarantees below are enforced in code and covered by tests — they are not
+configuration options you can forget to set, and they are non-negotiable. On top of them sits an
+optional blast-radius layer you can switch on for extra containment.
 
 Every one of them applies to **automatic** detection-driven bans and to **manual** bans
 requested through the API alike. There is no path that skips them.
@@ -66,10 +67,11 @@ addresses outside your protected ranges is still counted in metrics, but it can 
 trigger a ban. You cannot accidentally blackhole a prefix you do not own, even if a flood
 happens to traverse your network on the way somewhere else.
 
-## 7. Blast-radius limits (optional)
+## Optional: blast-radius guards
 
-The hard cap (#4) bounds the *number* of bans, not how much of your network they cover or how fast
-they accrue. Two optional `ban` guards tighten that further:
+These guards sit on top of the six core guarantees and are **off by default** — they are the one
+part of the safety model you opt into. The hard cap (#4) bounds the *number* of bans, not how much
+of your network they cover or how fast they accrue. Two optional `ban` guards tighten that further:
 
 - `max_banned_fraction` refuses new bans once more than that share (per address family) of your
   protected space is already blackholed — so a poisoned baseline or a spoofed-source storm cannot
@@ -92,11 +94,15 @@ with HTTP `409` rather than silently announced:
 | Target is in `protected_whitelist` | `409` — never announced |
 | Target is outside the configured `networks` scope | `409` — out of scope |
 | Banning the target would exceed `max_active_bans` | `409` — cap reached |
+| Banning the target would exceed `max_banned_fraction` | `409` — when enabled |
+| Banning the target would exceed `max_bans_per_window` | `409` — when enabled |
 
-A manual ban that passes all three still respects the TTL and hysteresis rules: it
-auto-expires like any other announcement. The only rule manual bans bypass is the *detection
-threshold* itself — that is the entire point of a manual ban — but never the safety guards
-around the announcement.
+If the optional blast-radius guards are enabled, a manual ban is checked against them too, and
+is rejected with the same `409` when it would push past `max_banned_fraction` or
+`max_bans_per_window`. A manual ban that clears every one of these checks still respects the TTL
+and hysteresis rules: it auto-expires like any other announcement. The only rule manual bans
+bypass is the *detection threshold* itself — that is the entire point of a manual ban — but never
+the safety guards around the announcement.
 
 ## Related
 

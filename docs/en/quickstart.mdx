@@ -11,11 +11,20 @@ attacks against a test prefix. Nothing here can announce a route — dry-run is 
 
 <Callout type="info" title="Prerequisites">
 Go 1.22 or newer. To see live detections you also need a router exporting NetFlow / IPFIX /
-sFlow — but you can validate end-to-end without one using the built-in flow generator (see
-the last section).
+sFlow — but even without one you can validate detection end-to-end by running the bundled
+integration test from `engine/` (`go test ./internal/app -run TestEndToEnd -v`; see the last
+section).
 </Callout>
 
 ## 1. Build the binary
+
+Every command below runs from the `engine` directory of the checkout, so start there:
+
+```sh
+cd engine
+```
+
+Then build:
 
 ```sh
 make build
@@ -37,9 +46,9 @@ make run-dev
 structured JSON to a human-readable form — see the [CLI reference](/docs/cli) for every flag
 and its accepted values.
 
-The development config ([`configs/dev.yaml`](/docs/configuration)) has `dry_run: true`, a
-test protected network of `203.0.113.0/24`, and listens for sFlow on `:6343` and
-NetFlow/IPFIX on `:2055`.
+The development config ([`configs/dev.yaml`](/docs/configuration)) has `dry_run: true`, test
+protected networks of `203.0.113.0/24` and `2001:db8::/32` (plus a couple of example
+hostgroups), and listens for sFlow on `:6343` and NetFlow/IPFIX on `:2055`.
 
 ## 3. Point your exporters at Kapkan
 
@@ -76,8 +85,9 @@ Kapkan ships with `pkg/flowgen`, which builds real NetFlow / sFlow wire-format d
 including amplification, SYN-flood and UDP-flood patterns. It is used throughout the test
 suite to validate detection end-to-end without touching a real router. The integration test
 in `internal/app` replays an NTP-amplification flood over a real UDP socket against a
-dry-run instance and asserts the attack and its (auto-expiring) virtual ban appear in the
-API.
+dry-run instance and asserts the attack and its (auto-expiring) virtual ban — the recorded
+would-be blackhole that dry-run exposes through the API without ever announcing it — appear
+in the API.
 
 ## Next steps
 

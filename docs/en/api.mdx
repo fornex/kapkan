@@ -23,16 +23,19 @@ localhost. Before binding beyond loopback, set a bearer token. See [Authenticati
 All `/api/v1` routes pass through the token check when auth is configured; once configured,
 every request must carry `Authorization: Bearer <token>`. Tokens carry a **role**: the `GET`
 routes need the **viewer** role, and the mutating routes (`ban`, `unban`, `config/reload`)
-need the **operator** role. A read with a viewer token works; a mutation with a viewer token
-returns `403`; an unknown token returns `401`. The `POST` endpoints additionally require a
-JSON content type — send `Content-Type: application/json`. Note that `/metrics` and the
+need the **operator** role. `config/reload` goes further: it requires an **unscoped (admin)**
+token, so even an operator token that is tenant-scoped is refused with `403`. A read with a
+viewer token works; a mutation with a viewer token returns `403`; an unknown token returns
+`401`. The `POST` endpoints additionally require a JSON content type — send
+`Content-Type: application/json`. Note that `/metrics` and the
 static dashboard shell are served without a token; the data the dashboard loads is fetched
 through the guarded API. See [Authentication](/docs/authentication) for the token roles.
 
 A token may also be **tenant-scoped**: it then sees only its tenant's rows on every read
 endpoint (`/status` is rebuilt to its own hostgroups and counts), and may `ban`/`unban` only
-within its tenant — an out-of-tenant target returns a uniform `403`. See
-[Multi-tenancy](/docs/multi-tenancy).
+within its tenant — an out-of-tenant target returns a uniform `403`. A tenant-scoped token
+cannot reload config at all: `config/reload` is restricted to unscoped (admin) tokens and
+returns `403` otherwise. See [Multi-tenancy](/docs/multi-tenancy).
 
 ## Endpoints
 
@@ -42,6 +45,7 @@ within its tenant — an out-of-tenant target returns a uniform `403`. See
 | GET | `/api/v1/attacks` | Active attacks plus the last 100 that ended, with samples and classification. |
 | GET | `/api/v1/hosts` | Tracked-host snapshot: per-direction rates, learned baselines, attack state. |
 | GET | `/api/v1/bans` | All bans, active and historical. |
+| GET | `/api/v1/traffic` | Persisted per-host rate history (viewer); `{available:false, points:[]}` when storage is disabled. |
 | GET | `/api/v1/audit` | Operator-attributed audit trail of mutations (who banned/reloaded, when, outcome). |
 | POST | `/api/v1/ban` | Manually ban an address. |
 | POST | `/api/v1/unban` | Manually withdraw a ban. |
@@ -59,6 +63,8 @@ Returns the current operating mode and a summary of what Kapkan is protecting.
 {
   "dry_run": true,
   "uptime_seconds": 8123,
+  "version": "v1.2.0 · a1b2c3d",
+  "update_available": false,
   "networks": ["203.0.113.0/24", "198.51.100.0/24"],
   "active_attacks": 1,
   "active_bans": 1,
@@ -74,6 +80,9 @@ Returns the current operating mode and a summary of what Kapkan is protecting.
 ```
 
 `dry_run` reports the global mode: when `true`, no blackhole is announced to your routers.
+`version` is the running build, always present with zero egress. `update_available` is `false`
+unless the opt-in [`update_check`](/docs/configuration) is enabled and finds a newer release —
+then it is `true` and `latest_version` and `latest_is_security` are included alongside it.
 `thresholds` and `hostgroups` mirror the active configuration; see
 [Detection](/docs/detection) and [Hostgroups](/docs/hostgroups) for their full shape.
 
@@ -125,7 +134,7 @@ hold `Attack` objects.
       },
       "active": true,
       "ban_state": "active",
-      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "route": "blackhole 203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
       "dry_run": false,
       "started_at": "2026-06-13T09:41:07Z",
       "sample": {
@@ -279,7 +288,7 @@ Returns the full ban table — active and historical. Each entry is a `Ban`.
       "threshold": 80000,
       "next_hop": "192.0.2.1",
       "community": "65000:666",
-      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "route": "blackhole 203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
       "state": "active",
       "dry_run": false,
       "manual": false,
@@ -323,9 +332,10 @@ defaults to the last hour:
 }
 ```
 
-When storage is disabled the response is `{"available": false, "events": []}`. See the
-dedicated [Audit log](/docs/audit) page for the full field list, the query rules, and the
-operator-identity and tenant-scoping model.
+When storage is disabled the response is `{"available": false, "events": []}`. Note that
+audit records encode `dry_run` as an integer (`0`/`1`), not the JSON boolean used elsewhere
+on this page. See the dedicated [Audit log](/docs/audit) page for the full field list, the
+query rules, and the operator-identity and tenant-scoping model.
 
 ### POST /api/v1/ban
 
@@ -371,7 +381,10 @@ returns HTTP `404`.
 ### POST /api/v1/config/reload
 
 Re-reads the config file from disk and applies it — the same effect as sending `SIGHUP`.
-The body is empty; the JSON content type is still required.
+The body is empty; the JSON content type is still required. Unlike `ban`/`unban`, this
+endpoint requires an **unscoped (admin)** token: a reload swaps the whole config, so a
+tenant-scoped token is refused with `403` and `config reload is restricted to unscoped
+(admin) tokens`.
 
 ```json
 {

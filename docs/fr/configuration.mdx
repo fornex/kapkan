@@ -13,15 +13,18 @@ avec validation en ligne et valeurs par défaut sûres (dry-run) — rien de ce 
 
 Kapkan se configure à l'aide d'un unique fichier YAML passé avec `-config`. Le dépôt fournit deux
 points de départ : [`configs/dev.yaml`](/docs/quickstart) pour le développement local (préfixes de
-test, écoute sur la loopback, `dry_run: true`) et [`deploy/config.example.yaml`](/docs/deployment) pour
+test, écoute sur la loopback, `dry_run: true`) et [`engine/deploy/config.example.yaml`](/docs/deployment) pour
 la production, qui contient les commentaires de référence et les valeurs par défaut directement en
 ligne. Copiez l'exemple de production vers `/etc/kapkan/config.yaml` et adaptez-le à votre réseau.
 
 Le fichier peut être rechargé à l'exécution. Envoyez `SIGHUP` (`systemctl reload kapkan`) ou
-`POST /api/v1/config/reload` et Kapkan relit le fichier puis applique les nouveaux seuils, réseaux,
-hostgroups, baselines et paramètres de notification sans interrompre l'ingestion des flows.
-Quelques clés sont figées au démarrage — voir [Correction de l'échantillonnage](#correction-de-léchantillonnage)
-et la note sur le dimensionnement de `samples` plus bas.
+`POST /api/v1/config/reload` et Kapkan relit le fichier puis applique les nouveaux paramètres
+sans interrompre l'ingestion des flows. Presque tout se recharge à chaud, y compris `dry_run`,
+les seuils, `networks`, les hostgroups, les baselines, les paramètres de notification et
+`sampling.default_rate`. Six éléments sont figés au démarrage, et un rechargement qui modifie l'un
+d'eux est rejeté (redémarrage requis) : les adresses `listen` ; l'identité BGP
+(`bgp.local_asn`, `bgp.router_id`) ; `api.listen` ; les paramètres `samples` ; les paramètres
+`storage` ; et les paramètres `geoip`.
 
 <Callout type="warning" title="Le dry-run est activé par défaut">
 `dry_run` vaut `true` par défaut, et une clé `dry_run` absente est traitée comme `true`. Conservez ce
@@ -77,6 +80,7 @@ plus volumineux, un résumé d'une ligne renvoie vers la page dédiée.
 | `dry_run` | Lorsqu'elle vaut `true` (valeur par défaut, y compris en cas d'absence), les blackholes sont journalisés et suivis mais **jamais annoncés**. |
 | `listen.sflow` / `listen.netflow` | Adresses d'écoute UDP. NetFlow v5/v9 et IPFIX partagent le socket `netflow`. Au moins un écouteur est requis. Voir [Fonctionnement](/docs/how-it-works). |
 | `sampling.default_rate` | Taux d'échantillonnage utilisé lorsqu'un exportateur ne déclare pas le sien. Doit être `>= 1`. |
+| `flow_sources` | Liste blanche optionnelle d'adresses sources d'exportateurs de confiance. La télémétrie arrive via UDP non authentifié ; ainsi, lorsqu'elle est définie, seules les sources listées sont étiquetées par exportateur sur les métriques (tout le reste est regroupé sous `other`), ce qui borne la cardinalité des étiquettes de métriques. Vide, un plafond automatique est appliqué à la place. N'affecte pas la détection. |
 | `networks` | Préfixes protégés. La détection s'applique **uniquement** aux destinations situées à l'intérieur, et ils ne doivent pas se chevaucher. |
 | `protected_whitelist` | Adresses qui ne sont **jamais** bannies, quel que soit le trafic. Voir [Modèle de sécurité](/docs/safety). |
 | `thresholds.pps` / `.mbps` / `.flows_per_sec` | Seuils par destination après correction de l'échantillonnage. Tous doivent être `> 0`. Voir [Détection](/docs/detection). |
@@ -93,6 +97,7 @@ plus volumineux, un résumé d'une ligne renvoie vers la page dédiée.
 | `ban.fallback` | Que faire lorsqu'un pair **rejette** une annonce `flowspec`/`divert` : `blackhole` (par défaut) bascule vers une route RTBH afin que la victime reste protégée ; `none` rejette le bannissement. `blackhole` est terminal. |
 | `ban.max_banned_fraction` | Refuser les nouveaux bannissements dès que plus de cette proportion (`0`–`1`, par famille d'adresses) de l'espace protégé est mise en blackhole — borne le rayon d'impact d'une baseline empoisonnée ou d'un afflux à sources usurpées. `0` (par défaut) le désactive. |
 | `ban.max_bans_per_window` / `ban_window_seconds` | Garde anti-tempête : au plus ce nombre de **nouveaux** bannissements par fenêtre (secondes). `max_bans_per_window: 0` (par défaut) le désactive ; la fenêtre est requise lorsque le débit est défini. |
+| `ban.state_file` | Chemin inscriptible optionnel (par exemple `/var/lib/kapkan/bans.json`) où les bannissements actifs sont persistés, de sorte qu'un redémarrage les réhydrate et les **ré-annonce** au lieu d'abandonner la mitigation jusqu'à une nouvelle détection. Se combine avec `bgp.graceful_restart`. Vide (par défaut), la persistance est désactivée. Voir [Mitigation](/docs/mitigation). |
 | `mitigation` | Méthode de mitigation : `blackhole` (par défaut), `flowspec` ou `divert`. Surchargeable par hostgroup. Voir [FlowSpec](/docs/flowspec) et [Déviation du trafic](/docs/scrubbing). |
 | `flowspec.action` / `rate_mbps` | Action de la règle FlowSpec : `discard` ou `rate_limit` (avec `rate_mbps`). Voir [FlowSpec](/docs/flowspec). |
 | `flowspec.source_anchored` / `min_source_concentration` | Lorsqu'activé, une règle FlowSpec épingle **à la fois** la victime (destination) **et** une source attaquante dominante issue de l'échantillon — ne supprimant que les attaquants et épargnant les clients légitimes — mais seulement si l'échantillon est assez concentré (par défaut `0.8`) ; sinon, repli sur l'ancrage victime. Désactivé par défaut. |
@@ -100,13 +105,16 @@ plus volumineux, un résumé d'une ligne renvoie vers la page dédiée.
 | `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | Identité BGP, next-hops de blackhole IPv4/IPv6 et communauté RTBH (`ASN:value`). `router_id` doit être une adresse IPv4 en notation décimale pointée. Voir [Mitigation](/docs/mitigation). |
 | `bgp.communities` / `local_pref` | **Liste** de communautés optionnelle (qui remplace `community`) et un `LOCAL_PREF` pour les pairs iBGP. Tous les attributs `bgp` sont surchargeables par hostgroup. |
 | `bgp.neighbors[]` | Pairs eBGP : `address`, `remote_asn` et un `port` optionnel pour les tests. |
+| `bgp.graceful_restart` | BGP Graceful Restart (RFC 4724), **activé par défaut**. Un pair qui le prend en charge conserve les routes de mitigation de Kapkan comme obsolètes pendant que la session est interrompue (par exemple lors d'une mise à niveau) au lieu de les purger. Clés : `enabled` (par défaut `true`), `restart_seconds` (par défaut `120`, `1`–`4095`), `long_lived` (LLGR, par défaut `false`) et `long_lived_stale_seconds` (par défaut `3600`, `≤ 86400`). Voir [Mitigation](/docs/mitigation). |
 | `scrubbing.next_hop` / `next_hop6` / `community` / `communities` / `local_pref` | Le centre de scrubbing vers lequel l'action `divert` oriente le trafic. `next_hop` est requis pour dévier (`next_hop6` également lorsque l'IPv6 est protégée) ; la communauté est optionnelle. Surchargeable par hostgroup. Voir [Déviation du trafic](/docs/scrubbing). |
 | `notify.*` | Canaux Telegram, Slack, e-mail, webhook et exec-hook. Voir [Notifications](/docs/notifications). |
 | `storage.clickhouse.*` | Persistance ClickHouse optionnelle pour l'historique des attaques et du trafic (`url`, `database`, `username_env`, `password_env`, `ttl_days`, …). Voir [Stockage](/docs/storage). |
+| `geoip` | Attribution ASN (et pays) optionnelle MaxMind GeoLite2/GeoIP2 des sources des échantillons d'attaque (`enabled`, `asn_database`, `country_database`). Désactivée par défaut ; figée au démarrage. |
 | `api.listen` | Adresse d'écoute de l'API REST et des métriques. Valeur par défaut `127.0.0.1:8080`. |
 | `api.dashboard` | Sert l'interface web intégrée sur `/` via l'écouteur de l'API. Valeur par défaut `true`. Voir [Tableau de bord](/docs/dashboard). |
 | `api.token_env` | Désigne la variable d'environnement contenant un unique bearer token operator. Requise avant d'exposer l'écouteur au-delà de localhost. Voir [Authentification](/docs/authentication). |
 | `api.tokens[]` | Tokens basés sur les rôles : chaque entrée comporte un `name`, un `token_env`, un `role` (`viewer` ou `operator`) et une portée `tenant` optionnelle. Prime sur `token_env` (mutuellement exclusifs). Voir [Authentification](/docs/authentication) et [Multi-tenant](/docs/multi-tenancy). |
+| `update_check` | Vérification optionnelle et **opt-in** de la disponibilité d'une version plus récente de Kapkan — **désactivée par défaut**, de sorte que Kapkan ne contacte jamais l'extérieur sauf si vous l'activez. Clés : `enabled` (par défaut `false`), `interval_seconds` (par défaut `21600` = 6 h, plancher à `3600`), `channel` (`stable` ou `prerelease`) et un `url` optionnel pour surcharger le miroir. Lorsqu'elle est activée, elle interroge l'API GitHub Releases et expose un résultat sur `/api/v1/status` et la [métrique](/docs/metrics) `kapkan_update_available`. La version en cours d'exécution est toujours exposée localement, quoi qu'il en soit. |
 
 ### Détail des seuils
 
@@ -118,7 +126,7 @@ en unités réelles, non échantillonnées (voir [Correction de l'échantillonna
 
 ## Un exemple complet
 
-Une configuration de production réaliste, adaptée de `deploy/config.example.yaml` :
+Une configuration de production réaliste, adaptée de `engine/deploy/config.example.yaml` :
 
 ```yaml
 dry_run: true                       # keep until detection is validated

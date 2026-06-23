@@ -21,7 +21,7 @@ scrubbing:
   # communities: ["65000:200", "65000:201"]   # or a full set
   local_pref: 200              # often raised so the divert route wins selection
 
-mitigation: divert             # or use divert as an escalation rung (see below)
+mitigation: divert             # or use divert as an escalation rung (see below); an escalation: ladder supersedes this single mitigation: when present
 ```
 
 ## Cómo funciona
@@ -29,8 +29,10 @@ mitigation: divert             # or use divert as an escalation rung (see below)
 Divert reutiliza la maquinaria de rutas de host de RTBH. Donde un blackhole anuncia el
 `/32` o `/128` de la víctima hacia un next-hop de descarte con tu community RTBH, un divert
 anuncia la **misma** ruta de host hacia el next-hop del centro de scrubbing con la community
-de divert (y un `LOCAL_PREF` opcional, normalmente elevado para que la ruta de divert, más
-específica, gane la selección de rutas). Tu edge lleva entonces el tráfico de esa víctima al
+de divert (y un `LOCAL_PREF` opcional). La ruta de host ya supera al agregado que la cubre por
+especificidad; `LOCAL_PREF` solo arbitra la selección de la mejor ruta entre anuncios del mismo
+prefijo, de modo que elevarlo mantiene la ruta de divert ganando frente a cualquier otra ruta
+hacia ese host exacto. Tu edge lleva entonces el tráfico de esa víctima al
 scrubber; el scrubber descarta el ataque y reinyecta el remanente limpio hacia el destino
 real.
 
@@ -53,7 +55,7 @@ anunció.
 | `next_hop6` | El next-hop IPv6 del centro de scrubbing. **Obligatorio** cuando el despliegue protege espacio IPv6 — no hay un fallback de estilo descarte para el desvío, el tráfico debe llegar a un scrubber real. |
 | `community` | Community de divert opcional en formato `ASN:value`. El next-hop hace el reencaminamiento; la community es una señal extra para tu edge. |
 | `communities` | **Lista** de communities opcional que sustituye a `community` cuando se establece. |
-| `local_pref` | `LOCAL_PREF` opcional adjunto a la ruta de divert, normalmente elevado para que gane la selección. El valor por defecto `0` lo omite. |
+| `local_pref` | `LOCAL_PREF` opcional adjunto a la ruta de divert. Arbitra la selección de la mejor ruta entre anuncios del mismo prefijo (no la especificidad — la ruta de host ya gana en eso), de modo que elevarlo mantiene la ruta de divert ganando. El valor por defecto `0` lo omite. |
 
 La ruta de divert que construye Kapkan se lee como `divert <prefix> next-hop <next_hop> community
 <community>` — la cadena que aparece en el campo `route` del [objeto ban](/docs/api), con

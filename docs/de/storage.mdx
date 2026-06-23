@@ -12,7 +12,7 @@ läuft Kapkan vollständig prozessintern auf Live-Daten.
 
 <Callout type="info" title="Best-Effort, blockiert nie die Erkennung">
 Die Persistenz arbeitet über eine begrenzte Warteschlange mit nicht blockierendem Senden. Ein
-langsames oder ausgefallenes ClickHouse verwirft Zeilen (gezählt in `storage_rows_total` mit
+langsames oder ausgefallenes ClickHouse verwirft Zeilen (gezählt in `kapkan_storage_rows_total` mit
 `result="dropped"`), anstatt den Hot Path der Engine zu blockieren.
 </Callout>
 
@@ -62,17 +62,19 @@ haben (Neuinstallationen verfügen bereits darüber).
 
 Zeilen gelangen in eine begrenzte Warteschlange (`queue_size`) mit nicht blockierendem Senden und
 werden in Batches (`batch_size` / `flush_interval_seconds`) geleert. Wenn ClickHouse langsam ist
-oder ausfällt, werden Zeilen verworfen — gezählt als `storage_rows_total` mit
+oder ausfällt, werden Zeilen verworfen — gezählt als `kapkan_storage_rows_total` mit
 `result="dropped"` — und die Engine läuft weiter. Siehe [Metriken](/docs/metrics).
 
 ## Was gespeichert wird und was nicht
 
-Die `traffic`-Tabelle speichert derzeit nur Momentaufnahmen pro Host. Die Aggregation pro ASN
-wird nicht gespeichert (Kapkan löst ASNs nicht aus Flows auf), und Summen pro Hostgroup werden
-noch nicht als Momentaufnahme erfasst — beides sind Kandidaten für eine Folgeversion.
+Die `traffic`-Tabelle speichert derzeit nur Momentaufnahmen pro Host. Wenn der optionale `geoip`-
+Block konfiguriert ist (eine MaxMind-`.mmdb`-Datenbank), löst Kapkan ASNs pro Quelle auf und
+speichert die Top-ASNs jedes Angriffs in `attack_events.top_asns` (durch Pipe verbunden `"AS<n> <org>"`,
+leer wenn geoip deaktiviert ist). Zeitreihen pro ASN und Summen pro Hostgroup werden noch nicht
+als Momentaufnahme erfasst — beides sind Kandidaten für eine Folgeversion.
 
 ## Verwandte Themen
 
 - [Konfigurationsreferenz](/docs/configuration) — die vollständige Liste der `storage`-Schlüssel.
 - [Audit-Log](/docs/audit) — die `audit_events`-Tabelle und ihr Lese-Endpunkt.
-- [Metriken](/docs/metrics) — der Zähler `storage_rows_total`.
+- [Metriken](/docs/metrics) — der Zähler `kapkan_storage_rows_total`.

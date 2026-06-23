@@ -6,7 +6,8 @@ export const metadata = {
 
 # Multi-tenencia
 
-Una instancia de Kapkan puede atender a muchos clientes (un caso de uso de MSP o IDC) y dar a
+Una instancia de Kapkan puede atender a muchos clientes (un caso de uso de proveedor de
+servicios gestionados (MSP) o de centro de datos de internet (IDC)) y dar a
 cada uno un token que ve y modifica **solo sus propios** ataques, baneos y hosts. Un tenant es
 solo una etiqueta opcional en un [hostgroup](/docs/hostgroups) — no hay ningún objeto nuevo de
 nivel superior, ni un registro de tenants aparte, y el camino crítico de detección permanece
@@ -73,8 +74,10 @@ filtrar devolvería, para un token con alcance, nada — nunca los datos de otro
 - **Lecturas** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` y `/audit` devuelven solo las
   filas cuyo grupo propietario lleva el tenant de quien llama. `/status` se reconstruye por
   alcance: un token con alcance obtiene solo sus propios hostgroups y conteos, nunca las redes
-  protegidas globales, los umbrales globales ni el grupo de respaldo de todo el despliegue — de
-  modo que un tenant nunca conoce los prefijos ni la postura BGP de otro. El
+  protegidas globales, los umbrales globales ni la fila de configuración del grupo de respaldo de
+  todo el despliegue — de modo que un tenant nunca conoce los prefijos ni la postura BGP de otro.
+  Un tenant house (el grupo de respaldo etiquetado con un `tenant`) sigue viendo sus ataques,
+  baneos y hosts catch-all; solo se oculta la fila de configuración de ese grupo. El
   [registro de auditoría](/docs/audit) está vinculado al tenant de quien llama del lado del
   servidor, y un filtro `target` que nombre una dirección fuera del tenant se rechaza — sin
   oráculo de existencia entre tenants.
@@ -88,8 +91,9 @@ filtrar devolvería, para un token con alcance, nada — nunca los datos de otro
   amplio.
 
 <Callout type="info" title="/metrics y el panel de control">
-`/metrics` no está acotado por tenant — sigue siendo una superficie de scrape para
-administrador/operator. El armazón del panel de control es compartido (no contiene datos
+`/metrics` no está acotado por tenant — permanece abierto para el scraping de Prometheus y no
+requiere ningún token, incluso cuando la autenticación de la API está configurada. El armazón
+del panel de control es compartido (no contiene datos
 propios); cada llamada de datos que realiza se filtra por el token pegado en él, de modo que el
 token viewer de un tenant muestra solo los datos de ese tenant.
 </Callout>

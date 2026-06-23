@@ -23,12 +23,17 @@ scrubbing:
   community: "65000:200"
 ```
 
+Se requiere un [bloque `bgp`](/docs/mitigation#bgp-configuration) para que cualquier peldaño
+pueda anunciar; los bloques `flowspec` y `scrubbing` de arriba solo hacen falta para los
+peldaños `flowspec` y `divert`.
+
 ## Cómo se aplican los peldaños
 
 El valor `after_seconds` de cada peldaño se mide desde el inicio del ataque. Un peldaño se aplica
-una vez que ha transcurrido ese tiempo **y el ataque sigue activo**: todavía no hay un evento de
-finalización, es decir, el tráfico continúa por encima del umbral a lo largo de la histéresis de
-desbloqueo.
+una vez que ha transcurrido ese tiempo **y el bloqueo aún no se ha retirado**: la retirada solo
+ocurre después de que el tráfico se mantenga por debajo del umbral durante toda la ventana de
+histéresis de desbloqueo. El reloj del peldaño sigue corriendo desde el inicio del ataque en
+todo momento.
 
 - El primer peldaño debe estar en `0` segundos.
 - `action` es `none` (solo alerta), `flowspec`, `divert` ([scrubbing](/docs/scrubbing)) o
@@ -58,8 +63,8 @@ avanza por el escalado y registra cada peldaño pero nunca anuncia).
 
 Cuando no se establece ningún bloque `escalation`, el método único de `mitigation` se comporta
 exactamente como un escalado de un solo peldaño en `0` segundos: compatibilidad total con versiones
-anteriores. El peldaño y el método actuales son visibles por cada bloqueo en `/api/v1/bans`
-(`escalation`, `escalation_step`).
+anteriores. Cada bloqueo en `/api/v1/bans` expone el escalado completo configurado (`escalation`),
+el índice del peldaño actual (`escalation_step`) y el método del peldaño activo (`method`).
 
 ## Relacionado
 

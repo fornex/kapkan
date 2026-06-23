@@ -49,7 +49,7 @@ la victime comme destination ainsi que le vecteur :
 | SYN flood | `dst=victim, proto=tcp, tcp-flags=SYN` |
 | Fragment flood | `dst=victim, fragment` |
 | Flood ICMP / UDP / TCP | `dst=victim, proto=<icmp/udp/tcp>` |
-| mixte / inconnu | `dst=victim` (plus une règle par port de réflecteur dominant dans l'échantillon) |
+| mixte / inconnu | `dst=victim` (plus une règle par port source réfléchi dominant dans l'échantillon) |
 
 La victime est toujours mise en correspondance en `/32` (IPv4) ou `/128` (IPv6). **FlowSpec IPv6 est
 à parité complète avec IPv4** — là où la propre feuille de route de FastNetMon liste encore FlowSpec
@@ -82,7 +82,7 @@ Cela ne s'active que lorsque les sources dominantes couvrent au moins `min_sourc
   la victime — préférez `rate_limit` pour les vecteurs TCP.
 - `max_active_bans` plafonne les **bannissements**, pas les règles : un bannissement FlowSpec peut
   porter jusqu'à 8 règles, donc N bannissements peuvent représenter jusqu'à 8N règles dans la RIB de
-  votre upstream. Surveillez la [métrique](/docs/metrics) `mitigate_flowspec_rules` par rapport à la
+  votre upstream. Surveillez la [métrique](/docs/metrics) `kapkan_mitigate_flowspec_rules` par rapport à la
   limite de routes FlowSpec de vos routeurs.
 
 ## Action de règle et cycle de vie
