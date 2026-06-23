@@ -19,6 +19,8 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-23
+
 ### Added
 
 - Build version stamping: a `kapkan -version` flag, the `version` field in
