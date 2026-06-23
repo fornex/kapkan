@@ -14,13 +14,16 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/api"
+	"github.com/kapkan-io/kapkan/internal/buildinfo"
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/engine"
 	"github.com/kapkan-io/kapkan/internal/geoip"
 	"github.com/kapkan-io/kapkan/internal/ingest"
+	"github.com/kapkan-io/kapkan/internal/metrics"
 	"github.com/kapkan-io/kapkan/internal/mitigate"
 	"github.com/kapkan-io/kapkan/internal/notify"
 	"github.com/kapkan-io/kapkan/internal/storage"
+	"github.com/kapkan-io/kapkan/internal/update"
 )
 
 // App holds the wired components and their lifecycle handles.
@@ -33,6 +36,7 @@ type App struct {
 	API      *api.Server
 	Storage  storage.Writer
 	GeoIP    *geoip.DB
+	Update   *update.Checker // nil when update_check is disabled
 
 	log         *slog.Logger
 	cancel      context.CancelFunc
@@ -82,6 +86,22 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	a.API.SetQuerier(storage.NewQuerier(store.Get().StorageCfg, log))
 	a.Storage = storage.NewWriter(store.Get().StorageCfg, log)
 	a.API.SetAuditWriter(a.Storage) // operator-attributed audit trail (no-op when storage off)
+
+	// Always expose the running version as a zero-egress info metric.
+	metrics.RecordBuildInfo(buildinfo.Version(), buildinfo.Commit())
+
+	// The update check is opt-in (no egress unless enabled). When on, the API
+	// surfaces its result on /api/v1/status; Start launches the poll loop.
+	if uc := store.Get().UpdateCheck; uc.Enabled {
+		a.Update = update.New(update.Config{
+			Enabled:  true,
+			Interval: time.Duration(uc.IntervalSeconds) * time.Second,
+			Channel:  uc.Channel,
+			URL:      uc.URL,
+			Current:  buildinfo.Version(),
+		}, log)
+		a.API.SetUpdateChecker(a.Update)
+	}
 	return a, nil
 }
 
@@ -114,6 +134,12 @@ func (a *App) Start(ctx context.Context) error {
 	go func() { defer a.wg.Done(); a.Engine.Run(runCtx) }()
 	go func() { defer a.wg.Done(); a.consumeEvents(runCtx) }()
 	go func() { defer a.wg.Done(); a.persistTraffic(runCtx) }()
+
+	// Update check (opt-in): detached, never on the startup path, stops on ctx.
+	// No shutdown drain — it holds no state that must be flushed.
+	if a.Update != nil {
+		go a.Update.Run(runCtx)
+	}
 	return nil
 }
 

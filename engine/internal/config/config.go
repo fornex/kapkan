@@ -76,9 +76,10 @@ type Config struct {
 	BGP        BGP         `yaml:"bgp"`
 	// Scrubbing is the default traffic-diversion target (scrubbing center
 	// next-hops + divert community), used by groups whose ladder diverts.
-	Scrubbing Scrubbing `yaml:"scrubbing"`
-	Notify    Notify    `yaml:"notify"`
-	API       API       `yaml:"api"`
+	Scrubbing   Scrubbing   `yaml:"scrubbing"`
+	Notify      Notify      `yaml:"notify"`
+	API         API         `yaml:"api"`
+	UpdateCheck UpdateCheck `yaml:"update_check"`
 
 	// Parsed forms, populated by validate().
 	NetworkPrefixes []netip.Prefix `yaml:"-"`
@@ -783,6 +784,35 @@ type API struct {
 	TokenSpecs []TokenSpec `yaml:"-"`
 }
 
+// UpdateCheck configures the OPTIONAL, opt-in check for a newer kapkan release.
+// kapkan never phones home by default (it is a security tool); the running
+// version is always exposed locally via /api/v1/status and the kapkan_build_info
+// metric with zero egress. When Enabled, kapkan additionally polls the GitHub
+// Releases API on Interval and surfaces "a newer version exists" on the status
+// endpoint, the kapkan_update_available metric and a rate-limited log line. The
+// check transmits only the HTTP request itself (source IP + a generic
+// User-Agent) — never node identity, config, attack data or ban state — and runs
+// off the startup path with a bounded timeout, so a firewalled or slow endpoint
+// never delays the daemon or its BGP bring-up.
+type UpdateCheck struct {
+	// Enabled turns the periodic check on. Default false (no egress).
+	Enabled bool `yaml:"enabled"`
+	// IntervalSeconds is the poll interval; 0 (default) resolves to 21600 (6h).
+	// Floored at 3600 (1h) to stay well within GitHub's unauthenticated rate
+	// limit (ETag/304 responses do not count against it anyway).
+	IntervalSeconds int `yaml:"interval_seconds"`
+	// Channel selects which releases count: "stable" (default, the latest
+	// non-prerelease) or "prerelease" (includes -rc tags).
+	Channel string `yaml:"channel"`
+	// URL overrides the releases endpoint (for a mirror or proxy). Empty uses the
+	// public GitHub API for this repository, derived from Channel.
+	URL string `yaml:"url"`
+	// Notify also sends "update available" through the configured notification
+	// channels (Telegram/webhook) the first time a new version is seen. Default
+	// false. (Wiring is a follow-up; the field is accepted now.)
+	Notify bool `yaml:"notify"`
+}
+
 // APIToken is one configured API credential (YAML shape).
 type APIToken struct {
 	Name     string `yaml:"name"`
@@ -999,6 +1029,35 @@ func (c *Config) validate() error {
 	}
 	if err := c.validateAPITokens(); err != nil {
 		return err
+	}
+	if err := c.validateUpdateCheck(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateUpdateCheck applies the update-check defaults and validates the block.
+// It is meaningful only when Enabled, but the channel/url are validated whenever
+// set so a typo is caught even before the operator flips it on.
+func (c *Config) validateUpdateCheck() error {
+	u := &c.UpdateCheck
+	if u.Channel == "" {
+		u.Channel = "stable"
+	}
+	if u.Channel != "stable" && u.Channel != "prerelease" {
+		return fmt.Errorf("update_check.channel must be \"stable\" or \"prerelease\", got %q", u.Channel)
+	}
+	if u.IntervalSeconds == 0 {
+		u.IntervalSeconds = 21600 // 6h
+	}
+	if u.IntervalSeconds < 3600 {
+		return fmt.Errorf("update_check.interval_seconds must be >= 3600 (1h), got %d", u.IntervalSeconds)
+	}
+	if u.URL != "" {
+		parsed, err := url.Parse(u.URL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("update_check.url must be an http(s) URL, got %q", u.URL)
+		}
 	}
 	return nil
 }
