@@ -36,7 +36,7 @@ Umgebung Ihres Service-Managers oder eine Secrets-Datei:
 
 ```sh
 export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
-./kapkan -config configs/prod.yaml
+./kapkan -config /etc/kapkan/config.yaml
 ```
 
 Das Token in einer Umgebungsvariablen statt in der YAML aufzubewahren bedeutet, dass die
@@ -59,7 +59,7 @@ api:
 | Rolle | Darf |
 | --- | --- |
 | `viewer` | Nur lesen: Status, Angriffe, Hosts, Sperren, Metriken. |
-| `operator` | Alles, was ein viewer darf, plus manuelles Sperren/Entsperren und Neuladen der Konfiguration. |
+| `operator` | Alles, was ein viewer darf, plus manuelles Sperren/Entsperren und Neuladen der Konfiguration (das Neuladen ist [nur für Admins](/docs/multi-tenancy) — siehe unten). |
 
 `token_env` und `tokens` schließen sich **gegenseitig aus** — `token_env` ist genau ein
 Operator-Token. Eine Anfrage wird gegen jedes konfigurierte Token abgeglichen (in konstanter
@@ -68,13 +68,20 @@ funktioniert; eine Mutation mit einem viewer-Token wird mit `403 Forbidden` abge
 Anfrage ohne gültiges Token ergibt `401 Unauthorized`. Eine leere oder nicht gesetzte
 Umgebungsvariable passt niemals, sodass ein fehlkonfiguriertes Geheimnis fail-closed ist.
 
-Tokens und Rollen werden bei jeder Anfrage aus der Umgebung gelesen, sodass das Rotieren eines
-Geheimnisses oder das Ändern des Token-Satzes beim nächsten [Neuladen der Konfiguration](/docs/api)
-wirksam wird — ohne Neustart.
+Der Geheimnis-*Wert* eines Tokens wird bei jeder Anfrage aus der Umgebung gelesen, sodass sein
+Rotieren bereits bei der nächsten Anfrage wirksam wird. Das Hinzufügen oder Entfernen von Token-*Einträgen*
+in der YAML ändert den Token-Satz, was beim nächsten [Neuladen der Konfiguration](/docs/api) wirksam
+wird. Keines von beidem erfordert einen Neustart.
 
 Ein Token kann außerdem einen optionalen `tenant` tragen, der es auf die Daten eines einzelnen
 Kunden eingrenzt. Das ist die Funktion [Mandantenfähigkeit](/docs/multi-tenancy), aufgesetzt
 auf die hier beschriebenen Rollen.
+
+Manuelles Sperren/Entsperren erfordert nur ein Operator-Token, aber `POST /api/v1/config/reload`
+ist zusätzlich [nur für Admins](/docs/multi-tenancy): Das Token muss ungebunden sein (keinen
+`tenant` tragen), denn ein Neuladen schreibt die Policy jedes Mandanten sowie den Token-Satz
+selbst neu. Ein mandantengebundenes Operator-Token wird mit `403 Forbidden` abgelehnt —
+`config reload is restricted to unscoped (admin) tokens`.
 
 <Callout type="info" title="Der Token-Name ist die Operator-Identität">
 Der `name` jedes Tokens ist das, was das [Audit-Log](/docs/audit) als `operator` für jede

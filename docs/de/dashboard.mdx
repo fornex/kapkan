@@ -51,11 +51,17 @@ Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher
   Normalzustand verhält.
 - **Hostgroups** — Ihre benannten Präfixgruppen und deren Zustand.
 - **Sperrtabelle** — jede Sperre, aktiv und historisch.
+- **Traffic / Reports** — Live-Diagramme für ein- und ausgehenden Verkehr, die aus den
+  In-Memory-Ratenpuffern erstellt werden, sowie ein Abschnitt **Historische Berichte**, der die
+  persistierten ClickHouse-Tabellen liest, wenn die Speicherung aktiviert ist.
 
 Es stellt außerdem dieselben Steuerungs-Endpunkte bereit, die auch die API bietet: **manuelles
 Sperren / Entsperren** einer Adresse und **Konfigurations-Reload** (das Äquivalent zu `SIGHUP`).
-Die gesamte Ansicht funktioniert allein mit Live-Daten — für nichts davon werden ClickHouse oder
-eine andere Datenbank benötigt.
+Die Live-Diagramme funktionieren allein mit In-Memory-Daten — dafür werden weder ClickHouse noch
+eine andere Datenbank benötigt. Die einzige Ausnahme ist der Abschnitt **Historische Berichte** in
+der Ansicht Traffic / Reports: Er wird nur befüllt, wenn die
+[ClickHouse-Speicherung](/docs/storage) aktiviert ist, und rendert andernfalls einen beschrifteten
+Platzhalter, der erklärt, wie man sie aktiviert.
 
 <Callout type="success" title="Keine Datenbank erforderlich">
 Das Dashboard wird vollständig aus dem In-Memory-Zustand der Engine aufgebaut. Die historische

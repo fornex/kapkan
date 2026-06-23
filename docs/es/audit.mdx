@@ -26,11 +26,13 @@ proceso.
 
 ## Qué se registra
 
-Se auditan tres acciones, cada una tanto en caso de éxito como de fallo:
+Se auditan tres acciones. `ban` y `config_reload` se registran tanto en caso de éxito como de
+fallo; `unban` se registra solo en caso de éxito — un unban fallido o sin efecto devuelve un error
+y no se escribe en el rastro, aunque sí queda registrado en el log:
 
 | Acción | Cuándo | Resultados registrados (`result`) |
 | --- | --- | --- |
-| `ban` | `POST /api/v1/ban` | `active` (o estado de baneo `withdrawn`/`dry_run`) en caso de éxito; `rejected` cuando una protección de seguridad lo deniega. |
+| `ban` | `POST /api/v1/ban` | `active` en caso de éxito; `rejected` cuando una protección de seguridad lo deniega. Un baneo en dry-run sigue registrando `active` — la simulación se señala mediante el campo `dry_run` aparte. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` en caso de éxito. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` en caso de éxito; `error` cuando la nueva configuración no se puede parsear o validar. |
 

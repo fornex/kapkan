@@ -35,13 +35,20 @@ real pipeline, not a simulation.
 
 2. **Confirm BGP reaches `ESTABLISHED`.** Peering happens even in dry-run, so you can verify
    connectivity before announcing anything. Watch the logs for the `bgp peer state` event and
-   confirm each configured neighbor reaches `ESTABLISHED`. If a session is stuck, fix the
-   peer config (ASN, addresses, source interface, ACLs) now — while a misconfiguration is
-   harmless.
+   confirm each configured neighbor reaches `ESTABLISHED`. If a session is stuck, fix it now
+   — while a misconfiguration is harmless. The fix is on one of two sides: Kapkan's BGP config
+   (`local_asn`, the neighbor's `remote_asn` and `address`), or the router/host side (source
+   interface, firewall ACLs).
 
    ```sh
-   ./kapkan -config /etc/kapkan/config.yaml -log-format text | grep "bgp peer state"
+   # Tail the running daemon's logs (Kapkan logs to stderr, which systemd captures):
+   journalctl -u kapkan -f | grep "bgp peer state"
+
+   # Dev only — run a foreground instance instead (2>&1 because logs go to stderr):
+   ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
+
+   You can also confirm peer health without the logs via `GET /api/v1/status`.
 
 3. **Turn off dry-run and reload.** Set `dry_run: false` in your config, then reload Kapkan
    so it re-reads the file. Reload is non-disruptive: it does not restart the daemon or drop
@@ -72,7 +79,7 @@ attack now drops live traffic to the targeted address. Confirm your safety limit
 After step 3, a quick check that you are truly live and that announcements behave:
 
 - `GET /api/v1/status` shows the current mode and active attack/ban counts.
-- The `mitigate_announced_routes` metric is labeled by mode; in production, routes are
+- The `kapkan_mitigate_announced_routes` metric is labeled by mode; in production, routes are
   counted under `real` rather than `dry_run`. See [Metrics](/docs/metrics).
 - `GET /api/v1/bans` lists every ban, active and historical, so you can confirm a ban was
   announced and later auto-withdrawn after its TTL.

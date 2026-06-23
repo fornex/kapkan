@@ -76,7 +76,7 @@ internal/config/   YAML load, validation, SIGHUP hot-reload
 internal/ingest/   goflow2 library-mode ingestion -> normalized Flow
 internal/engine/   sharded per-host counters, sliding window, threshold eval
 internal/mitigate/ embedded GoBGP: RTBH announce/withdraw, TTL, caps, dry-run
-internal/notify/   Telegram + webhook notifications
+internal/notify/   Telegram, Slack, email, webhook and exec-hook notifications
 internal/api/      REST API + Prometheus metrics
 pkg/flowgen/       synthetic NetFlow/sFlow generator for tests and load
 ```
@@ -102,14 +102,15 @@ Chaque saut, dans l'ordre :
   d'échantillonnage — vers un unique type `Flow` interne, quel que soit le protocole qui l'a
   produit.
 - **Ingestion → moteur.** Les flows normalisés entrent dans le hot path. Le moteur attribue
-  chaque flow à un hôte de destination au sein de `networks`, multiplie ses compteurs par le
+  chaque flow à un hôte de destination au sein de `networks` (les préfixes protégés que vous
+  configurez — voir [Détection et seuils](/docs/detection)), multiplie ses compteurs par le
   taux d'échantillonnage afin que les débits soient exprimés en trafic réel (non
   échantillonné), et met à jour les compteurs à fenêtre glissante de cet hôte. Les
   destinations hors de `networks` sont comptabilisées dans les métriques mais ne déclenchent
   jamais d'action.
 - **Moteur → mitigation.** Lorsqu'un hôte franchit un seuil, le moteur lève un événement
   d'attaque. L'étape de mitigation décide s'il faut annoncer une route RTBH — en respectant
-  le dry-run, la liste blanche, la politique `ban` du hostgroup et le plafond de
+  le dry-run, le `protected_whitelist`, la politique `ban` du hostgroup et le plafond de
   bannissements — et planifie son retrait basé sur le TTL.
 - **Moteur → notification.** Le même événement est délivré à chaque canal configuré (Telegram,
   Slack, e-mail, webhook, exec hook) avec la classification de l'attaque et un échantillon de
@@ -166,12 +167,14 @@ rechargement de deux façons :
 - Envoyez `SIGHUP` au processus (par exemple `sudo systemctl reload kapkan`).
 - Appelez `POST /api/v1/config/reload` sur l'API.
 
-Les deux relisent et revalident le fichier sur place. Les seuils de détection, les hostgroups,
-les baselines, les paramètres de notification et le commutateur `dry_run` prennent tous effet
-au rechargement. Une poignée de paramètres structurels — notamment le dimensionnement du
-tampon de trafic sous `samples.*` — nécessitent un redémarrage complet ; voir la
-[Référence de configuration](/docs/configuration) pour savoir quelles clés se rechargent et
-lesquelles non.
+Les deux relisent et revalident le fichier sur place. Presque tout prend effet au
+rechargement — le commutateur `dry_run`, les seuils de détection, `networks`, les hostgroups,
+les baselines, les paramètres de notification et `sampling.default_rate` se rechargent tous à
+chaud. Une poignée de paramètres structurels rejettent le rechargement et nécessitent un
+redémarrage complet : les adresses d'écoute, l'identité BGP (`local_asn`, `router_id`),
+`api.listen`, ainsi que les paramètres `samples`, `storage` et `geoip`. Voir la
+[Référence de configuration](/docs/configuration) pour la liste complète des clés qui se
+rechargent et de celles qui ne le font pas.
 
 <Callout type="warning" title="Les rechargements sont validés">
 Un rechargement revalide l'intégralité du fichier. Si la nouvelle configuration est invalide,

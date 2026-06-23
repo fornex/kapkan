@@ -68,7 +68,7 @@ baseline can ever do.
 - **Floor.** The effective threshold never drops below `floor`, so a normally quiet host
   does not become a hair-trigger that fires on any small burst.
 - **Frozen under attack.** While a host is under attack — including the
-  `unban_hysteresis_seconds` tail after the rate drops — its baseline is not trained at all.
+  [`unban_hysteresis_seconds`](/docs/mitigation) tail after the rate drops — its baseline is not trained at all.
   Attack traffic never teaches the host that the attack is normal.
 - **Clamped learning.** Outside attacks, each training sample is capped at
   `baseline × factor` before it updates the EWMA. A slow attacker ramp can therefore raise
@@ -88,7 +88,10 @@ Warm-up traffic itself trains the initial baseline. A host that is *already* und
 sub-static flood the first time Kapkan sees it learns that flood as "normal" — bounded by
 the static ceiling, but there is no clean reference for a host attacked from first sight.
 Set `warmup_seconds` to at least a few multiples of `half_life_seconds` so the baseline
-converges before it starts gating.
+converges before it starts gating. The example's `600` is well below that guideline — fine
+when hosts arrive clean and you want the baseline gating sooner, but if a host might be
+flooded at first sight, raise `warmup_seconds` toward a few multiples of
+`half_life_seconds` (e.g. `10800` at the default `3600` half-life).
 </Callout>
 
 ## Visibility
@@ -121,6 +124,7 @@ per-host levels, and the same poisoning-aware rules apply to that total.
 
 - [Detection & thresholds](/docs/detection) — the static thresholds baselines sit inside.
 - [Hostgroups](/docs/hostgroups) — per-group thresholds, totals, and baseline overrides.
+- [RTBH mitigation](/docs/mitigation) — the ban lifecycle and `unban_hysteresis_seconds` tail.
 - [Configuration reference](/docs/configuration) — every key in the YAML file.
 - [REST API](/docs/api) — the `/api/v1/hosts` snapshot and its `baseline` fields.
 - [Going live](/docs/going-live) — validate detection in dry-run before announcing.

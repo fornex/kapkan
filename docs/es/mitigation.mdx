@@ -70,13 +70,13 @@ bgp:
 | `next_hop6` | El next-hop de descarte IPv6 anunciado con cada blackhole `/128`. Opcional; cuando no se establece, Kapkan recurre a `100::1` (el prefijo de descarte de la RFC 6666). |
 | `community` | La community RTBH en formato `ASN:value` (por ejemplo `65000:666`). Se analiza una sola vez al cargar y se convierte en el valor de cable enviado con cada ruta. |
 | `communities` | Lista opcional de communities que **sobreescribe** `community` cuando se establece, para upstreams que esperan un conjunto completo. |
-| `local_pref` | Atributo de ruta `LOCAL_PREF` opcional adjuntado a los blackholes (significativo para los pares iBGP). El valor predeterminado `0` lo omite. |
-| `neighbors[]` | Los pares eBGP a los que anuncia Kapkan. Cada entrada toma una `address`, un `remote_asn` y un `port` opcional (predeterminado `179`, destinado a pruebas). |
+| `local_pref` | Atributo de ruta `LOCAL_PREF` opcional adjuntado a los blackholes. Se respeta en las sesiones iBGP pero se descarta a través de eBGP (no es transitivo), por lo que solo es significativo para los vecinos iBGP. El valor predeterminado `0` lo omite. |
+| `neighbors[]` | Los pares BGP a los que anuncia Kapkan, cada uno eBGP o iBGP. Cada entrada toma una `address`, un `remote_asn` y un `port` opcional (predeterminado `179`, destinado a pruebas). |
 
 `community`, `communities`, `next_hop`, `next_hop6` y `local_pref` pueden sobreescribirse todos por
 hostgroup — consulta [Atributos BGP por hostgroup](#atributos-bgp-por-hostgroup).
 
-La ruta de blackhole que Kapkan construye para un objetivo se lee como `<prefix> next-hop <next_hop> community
+La ruta de blackhole que Kapkan construye para un objetivo se lee como `blackhole <prefix> next-hop <next_hop> community
 <community>` — exactamente la cadena que aparece en el campo `route` del [objeto de baneo](#el-objeto-de-baneo).
 Los objetivos IPv6 usan `next_hop6` (o el valor de reserva `100::1`) en lugar de `next_hop`.
 
@@ -145,6 +145,40 @@ ban:
 Un baneo también se retira anticipadamente si una recarga de configuración elimina su objetivo de
 las `networks` protegidas — Kapkan no mantendrá una ruta activa para un espacio de direcciones que
 ya no protege.
+
+## Persistencia entre reinicios
+
+Un reinicio — una actualización del kernel, una nueva versión de Kapkan — normalmente descartaría
+cada ruta activa y dejaría a las víctimas expuestas hasta que el motor vuelva a detectar cada
+ataque. Dos mecanismos complementarios y opcionales mantienen la mitigación activa durante ese
+intervalo:
+
+- **Persistencia de baneos (`ban.state_file`).** Apúntalo a una ruta escribible (por ejemplo
+  `/var/lib/kapkan/bans.json`) y Kapkan escribirá sus baneos activos en disco. En el siguiente
+  arranque los **rehidrata** y vuelve a anunciar cada ruta de inmediato, en lugar de esperar a que
+  el ataque se dispare de nuevo. Vacío (el valor predeterminado) desactiva la persistencia. La
+  [unidad de systemd](/docs/deployment) proporciona el directorio mediante `StateDirectory=kapkan`.
+- **BGP Graceful Restart (`bgp.graceful_restart`).** Activado de forma predeterminada. Un par que
+  soporta Graceful Restart (RFC 4724) **retiene** las rutas de Kapkan como *obsoletas* mientras la
+  sesión está caída, en lugar de vaciarlas en el instante en que se cae la conexión BGP — de modo
+  que el blackhole sigue en efecto durante la breve ventana de reinicio. Anunciar la capacidad es
+  inofensivo para un par que no la soporta.
+
+```yaml
+ban:
+  state_file: /var/lib/kapkan/bans.json   # persist & re-announce active bans across a restart
+
+bgp:
+  graceful_restart:
+    enabled: true              # default; set false to opt out
+    restart_seconds: 120       # how long the peer holds routes as stale (1..4095)
+    # long_lived: false        # LLGR: extend retention beyond restart_seconds
+    # long_lived_stale_seconds: 3600  # LLGR stale time when long_lived is set (<= 86400)
+```
+
+Usados en conjunto, los baneos sobreviven al reinicio del proceso (`state_file`) y las rutas
+sobreviven al intervalo de la sesión (graceful restart), de modo que una actualización ya no
+desmitiga un ataque en curso.
 
 ## Reserva cuando se rechaza un método
 
@@ -225,7 +259,7 @@ serializa el mitigador:
 | `next_hop` | string | El next-hop de descarte anunciado con la ruta. |
 | `community` | string | La community RTBH en formato `ASN:value`. |
 | `local_pref` | number | El `LOCAL_PREF` adjuntado a la ruta (se omite cuando es cero). |
-| `route` | string | La ruta completa como `<prefix> next-hop <next_hop> community <community>`, o un resumen `flowspec: ...` para baneos FlowSpec. |
+| `route` | string | La ruta completa como `blackhole <prefix> next-hop <next_hop> community <community>` (o `divert ...` para baneos de divert), o un resumen `flowspec: ...` para baneos FlowSpec. |
 | `state` | string | Uno de `active`, `withdrawn` o `rejected`. |
 | `dry_run` | boolean | Si el baneo se realizó en modo dry-run (la ruta no se envió realmente). |
 | `manual` | boolean | `true` para baneos solicitados por el operador, `false` para los automáticos. |
@@ -237,6 +271,8 @@ serializa el mitigador:
 | `flowspec` | array | Las reglas [FlowSpec](/docs/flowspec) generadas, cuando el método es `flowspec`. |
 | `escalation` | array | La [escalera de escalado](/docs/escalation) configurada, cuando hay una establecida. |
 | `escalation_step` | number | El índice del peldaño actual de la escalera. |
+| `fell_back_from` | string | El método cuyo anuncio rechazó el par, provocando que el baneo degrade a su reserva (se omite cuando no ocurrió ninguna reserva). |
+| `fell_back_reason` | string | La causa de la reserva en formato legible (se omite cuando no ocurrió ninguna reserva). |
 
 Un baneo `rejected` nunca se anuncia — registra un rechazo (en lista blanca, fuera de las `networks`
 o límite alcanzado) para que la decisión sea auditable en la API y en las notificaciones.

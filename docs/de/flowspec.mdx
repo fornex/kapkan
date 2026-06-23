@@ -46,7 +46,7 @@ Vektor abgleicht:
 | SYN-Flood | `dst=victim, proto=tcp, tcp-flags=SYN` |
 | Fragment-Flood | `dst=victim, fragment` |
 | ICMP- / UDP- / TCP-Flood | `dst=victim, proto=<icmp/udp/tcp>` |
-| gemischt / unbekannt | `dst=victim` (plus eine Regel pro dominantem Reflektor-Port in der Stichprobe) |
+| gemischt / unbekannt | `dst=victim` (plus eine Regel pro dominantem reflektiertem Quellport in der Stichprobe) |
 
 Das Opfer wird stets als `/32` (IPv4) bzw. `/128` (IPv6) abgeglichen. **IPv6-FlowSpec ist vollständig
 gleichwertig mit IPv4** — wohingegen FastNetMons eigene Roadmap IPv6-FlowSpec nach wie vor als nicht
@@ -79,7 +79,7 @@ Sie greift nur, wenn die dominanten Quellen innerhalb des 8-Regeln-Budgets minde
   `rate_limit` für TCP-Vektoren.
 - `max_active_bans` begrenzt **Bans**, nicht Regeln: Ein FlowSpec-Ban kann bis zu 8 Regeln tragen,
   sodass N Bans bis zu 8N Regeln in der RIB Ihres Upstreams bedeuten können. Beobachten Sie die
-  Metrik `mitigate_flowspec_rules` ([Metric](/docs/metrics)) gegen das FlowSpec-Routenlimit Ihrer Router.
+  Metrik `kapkan_mitigate_flowspec_rules` ([Metric](/docs/metrics)) gegen das FlowSpec-Routenlimit Ihrer Router.
 
 ## Regelaktion und Lebenszyklus
 

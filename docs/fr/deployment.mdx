@@ -7,8 +7,8 @@ export const metadata = {
 # Déploiement en production
 
 Une unité systemd renforcée et un exemple de configuration de production sont fournis dans le
-répertoire [`deploy/`](https://github.com/fornex/kapkan) du dépôt : `deploy/kapkan.service`
-et `deploy/config.example.yaml`. Cette page explique comment installer le binaire en tant que
+répertoire [`engine/deploy/`](https://github.com/fornex/kapkan/tree/main/engine/deploy) du dépôt : `engine/deploy/kapkan.service`
+et `engine/deploy/config.example.yaml`. Cette page explique comment installer le binaire en tant que
 service système, où réside chaque fichier, comment garder les secrets hors du YAML et comment
 recharger la configuration sans redémarrage.
 
@@ -21,7 +21,7 @@ pas encore compilé, consultez le [Démarrage rapide](/docs/quickstart) ou
 ## Installation
 
 Exécutez les commandes suivantes en tant que root depuis une copie locale du dépôt (afin que
-`deploy/` soit disponible). Cela installe le binaire, crée un utilisateur système non privilégié,
+`engine/deploy/` soit disponible). Cela installe le binaire, crée un utilisateur système non privilégié,
 met en place `/etc/kapkan`, installe la configuration de production, écrit le fichier d'environnement
 des secrets avec des permissions restrictives, installe l'unité systemd et active le service.
 
@@ -29,17 +29,29 @@ des secrets avec des permissions restrictives, installe l'unité systemd et acti
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
-sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
-echo 'KAPKAN_TG_TOKEN=123456:abc' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
-sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo install -m 0640 -o kapkan -g kapkan engine/deploy/config.example.yaml /etc/kapkan/config.yaml
+echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+sudo install -m 0644 engine/deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
+
+Le fichier d'environnement ci-dessus ne renseigne que `KAPKAN_API_TOKEN`, car un jeton d'API
+est recommandé avant d'exposer l'écouteur (voir [Authentification](/docs/authentication)).
+Renseigner le fichier d'environnement n'active pas l'authentification à lui seul : la configuration
+fournie lie `127.0.0.1` avec `api.token_env` mis en commentaire, de sorte que le jeton reste inerte.
+Décommentez `api.token_env` (ou ajoutez une liste `api.tokens`) pour activer l'authentification.
+Tous les canaux de notification sont optionnels — n'ajoutez `KAPKAN_TG_TOKEN`, les identifiants SMTP
+ou ClickHouse que si vous utilisez réellement ces fonctionnalités. La liste complète des clés
+`*_env` se trouve ci-dessous dans [Secrets](#secrets).
 
 L'unité s'exécute sous l'utilisateur `kapkan` avec `ExecStart=/usr/local/bin/kapkan -config
 /etc/kapkan/config.yaml -log-format json -log-level info`, redémarre en cas d'échec et est
 fortement cloisonnée : `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
-`MemoryDenyWriteExecute` et bien plus encore.
+`MemoryDenyWriteExecute` et bien plus encore. Elle déclare également `StateDirectory=kapkan`
+(mode `0700`), offrant au démon un `/var/lib/kapkan` accessible en écriture pour
+[`ban.state_file`](/docs/mitigation), tandis que `ProtectSystem=strict` maintient le reste
+du système de fichiers en lecture seule.
 
 <Callout type="info" title="Lier BGP au port 179">
 Kapkan n'a besoin d'aucun privilège particulier en dry-run ou lorsqu'il établit un peering depuis
@@ -62,6 +74,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/config.yaml` | `0640` | La configuration YAML, appartenant à `kapkan:kapkan`. |
 | `/etc/kapkan/kapkan.env` | `0600` | Fichier d'environnement des secrets (jetons, identifiants SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | L'unité systemd renforcée. |
+| `/var/lib/kapkan/` | `0700` | Répertoire d'état accessible en écriture (`StateDirectory=kapkan`) ; contient `ban.state_file` lorsque la persistance des bans est activée. |
 
 L'ensemble du répertoire `/etc/kapkan` est monté en lecture seule pour le processus via
 `ReadOnlyPaths=/etc/kapkan`, de sorte que le démon peut lire sa configuration et ses secrets mais
@@ -116,8 +129,14 @@ sudo systemctl reload kapkan
 De manière équivalente, vous pouvez déclencher le même rechargement via l'API :
 
 ```sh
-curl -s -X POST localhost:8080/api/v1/config/reload
+curl -s -X POST localhost:8080/api/v1/config/reload \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $KAPKAN_API_TOKEN"
 ```
+
+`Content-Type: application/json` est obligatoire sur chaque `POST` qui modifie l'état (le serveur
+renvoie `415` sinon), et lorsque l'authentification est activée le rechargement nécessite un jeton
+Bearer non restreint (admin) — un jeton restreint à un locataire (tenant) reçoit `403`.
 
 La plupart des clés se rechargent à chaud, notamment `dry_run`, les seuils, `networks`, les
 hostgroups, les références (baselines) et les paramètres de notification. Quelques paramètres de

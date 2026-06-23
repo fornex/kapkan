@@ -22,7 +22,7 @@ scrubbing:
   # communities: ["65000:200", "65000:201"]   # or a full set
   local_pref: 200              # often raised so the divert route wins selection
 
-mitigation: divert             # or use divert as an escalation rung (see below)
+mitigation: divert             # or use divert as an escalation rung (see below); an escalation: ladder supersedes this single mitigation: when present
 ```
 
 ## Funktionsweise
@@ -30,10 +30,13 @@ mitigation: divert             # or use divert as an escalation rung (see below)
 Divert nutzt dieselbe RTBH-Host-Route-Maschinerie wieder. Wo ein Blackhole die `/32`- oder
 `/128`-Route des Opfers in Richtung eines Discard-Next-Hops mit Ihrer RTBH-Community
 ankündigt, kündigt ein Divert **dieselbe** Host-Route in Richtung des Next-Hops des
-Scrubbing-Centers mit der Divert-Community an (sowie einem optionalen `LOCAL_PREF`,
-üblicherweise erhöht, damit die spezifischere Divert-Route die Pfadauswahl gewinnt). Ihr Edge
-trägt den Verkehr dieses Opfers dann zum Scrubber; der Scrubber verwirft den Angriff und
-speist den gesäuberten Rest wieder in Richtung des echten Ziels ein.
+Scrubbing-Centers mit der Divert-Community an (sowie einem optionalen `LOCAL_PREF`).
+Die Host-Route schlägt das übergeordnete Aggregat bereits durch ihre Spezifität;
+`LOCAL_PREF` entscheidet nur über die Best-Path-Auswahl zwischen Ankündigungen desselben
+Präfixes, sodass ein erhöhter Wert den Divert-Pfad gegenüber jeder anderen Route zu genau
+diesem Host gewinnen lässt. Ihr Edge trägt den Verkehr dieses Opfers dann zum Scrubber; der
+Scrubber verwirft den Angriff und speist den gesäuberten Rest wieder in Richtung des echten
+Ziels ein.
 
 Die Wiedereinspeisung des gesäuberten Verkehrs — über GRE, ein VRF oder einen separaten
 Routing-Kontext — ist Aufgabe des Scrubbers, außerhalb der BGP-Signalisierung von Kapkan.
@@ -54,7 +57,7 @@ nur künftige Bans, niemals die Route, die ein bereits aktiver Ban angekündigt 
 | `next_hop6` | Der IPv6-Next-Hop des Scrubbing-Centers. **Erforderlich**, wenn das Deployment IPv6-Adressraum schützt — es gibt keinen Discard-artigen Fallback für die Umleitung, der Verkehr muss einen echten Scrubber erreichen. |
 | `community` | Optionale Divert-Community in der Form `ASN:value`. Der Next-Hop führt die Umleitung durch; die Community ist ein zusätzliches Signal für Ihr Edge. |
 | `communities` | Optionale Community-**Liste**, die `community` überschreibt, wenn gesetzt. |
-| `local_pref` | Optionaler `LOCAL_PREF`, der an die Divert-Route angehängt wird, oft erhöht, damit sie die Auswahl gewinnt. Der Standardwert `0` lässt ihn weg. |
+| `local_pref` | Optionaler `LOCAL_PREF`, der an die Divert-Route angehängt wird. Er entscheidet über die Best-Path-Auswahl zwischen Ankündigungen desselben Präfixes (nicht über die Spezifität — die gewinnt die Host-Route bereits), sodass ein erhöhter Wert den Divert-Pfad gewinnen lässt. Der Standardwert `0` lässt ihn weg. |
 
 Die Divert-Route, die Kapkan erstellt, liest sich als `divert <prefix> next-hop <next_hop> community
 <community>` — die Zeichenkette, die im `route`-Feld des [Ban-Objekts](/docs/api) erscheint, mit

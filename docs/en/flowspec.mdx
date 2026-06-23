@@ -46,7 +46,7 @@ the vector:
 | SYN flood | `dst=victim, proto=tcp, tcp-flags=SYN` |
 | Fragment flood | `dst=victim, fragment` |
 | ICMP / UDP / TCP flood | `dst=victim, proto=<icmp/udp/tcp>` |
-| mixed / unknown | `dst=victim` (plus a rule per dominant reflector port in the sample) |
+| mixed / unknown | `dst=victim` (plus a rule per dominant reflected source port in the sample) |
 
 The victim is always matched as a `/32` (IPv4) or `/128` (IPv6). **IPv6 FlowSpec is at full
 parity with IPv4** — where FastNetMon's own roadmap still lists IPv6 FlowSpec as unsupported.
@@ -86,7 +86,7 @@ can never spill onto an innocent neighbor of an attacker.
   `discard` action drops the victim's outbound-initiated connections too — prefer
   `rate_limit` for TCP vectors.
 - `max_active_bans` caps **bans**, not rules: a FlowSpec ban can carry up to 8 rules, so N
-  bans can mean up to 8N rules in your upstream's RIB. Watch the `mitigate_flowspec_rules`
+  bans can mean up to 8N rules in your upstream's RIB. Watch the `kapkan_mitigate_flowspec_rules`
   [metric](/docs/metrics) against your routers' FlowSpec route limit.
 
 ## Rule action and lifecycle

@@ -73,7 +73,7 @@ internal/config/   YAML load, validation, SIGHUP hot-reload
 internal/ingest/   goflow2 library-mode ingestion -> normalized Flow
 internal/engine/   sharded per-host counters, sliding window, threshold eval
 internal/mitigate/ embedded GoBGP: RTBH announce/withdraw, TTL, caps, dry-run
-internal/notify/   Telegram + webhook notifications
+internal/notify/   Telegram, Slack, email, webhook and exec-hook notifications
 internal/api/      REST API + Prometheus metrics
 pkg/flowgen/       synthetic NetFlow/sFlow generator for tests and load
 ```
@@ -96,12 +96,13 @@ Each hop, in order:
   wire format and normalizes each record — addresses, ports, protocol, byte/packet counts,
   sampling rate — into one internal `Flow` type, regardless of which protocol produced it.
 - **Ingest → engine.** Normalized flows enter the hot path. The engine attributes each flow
-  to a destination host inside `networks`, multiplies its counts by the sampling rate so
+  to a destination host inside `networks` (the protected prefixes you configure — see
+  [Detection & thresholds](/docs/detection)), multiplies its counts by the sampling rate so
   rates are expressed in real (unsampled) traffic, and updates that host's sliding-window
   counters. Destinations outside `networks` are counted in metrics but never trigger action.
 - **Engine → mitigate.** When a host crosses a threshold, the engine raises an attack event.
   The mitigate stage decides whether to announce an RTBH route — honoring dry-run, the
-  whitelist, the hostgroup `ban` policy and the ban cap — and schedules its TTL-based
+  `protected_whitelist`, the hostgroup `ban` policy and the ban cap — and schedules its TTL-based
   withdrawal.
 - **Engine → notify.** The same event is delivered to every configured channel (Telegram,
   Slack, email, webhook, exec hook) with the attack's classification and flow sample
@@ -151,10 +152,12 @@ Configuration is **hot-reloadable** without restarting the daemon. Trigger a rel
 - Send `SIGHUP` to the process (for example `sudo systemctl reload kapkan`).
 - Call `POST /api/v1/config/reload` against the API.
 
-Both re-read and re-validate the file in place. Detection thresholds, hostgroups, baselines,
-notification settings and the `dry_run` switch all take effect on reload. A handful of
-structural settings — notably the traffic-buffer sizing under `samples.*` — require a full
-restart; see the [Configuration reference](/docs/configuration) for which keys reload and
+Both re-read and re-validate the file in place. Almost everything takes effect on reload —
+the `dry_run` switch, detection thresholds, `networks`, hostgroups, baselines, notification
+settings and `sampling.default_rate` all reload live. A handful of structural settings reject
+the reload and require a full restart: the listen addresses, BGP identity (`local_asn`,
+`router_id`), `api.listen`, and the `samples`, `storage` and `geoip` settings. See the
+[Configuration reference](/docs/configuration) for the full list of which keys reload and
 which do not.
 
 <Callout type="warning" title="Reloads are validated">

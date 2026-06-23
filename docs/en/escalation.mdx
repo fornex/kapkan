@@ -23,11 +23,15 @@ scrubbing:
   community: "65000:200"
 ```
 
+A [`bgp` block](/docs/mitigation#bgp-configuration) is required for any rung to announce; the
+`flowspec` and `scrubbing` blocks above are needed only for the `flowspec` and `divert` rungs.
+
 ## How rungs apply
 
 Each rung's `after_seconds` is measured from the attack's start. A rung applies once that
-much time has elapsed **and the attack is still active** — no end event yet, i.e. traffic is
-still above threshold through the unban hysteresis.
+much time has elapsed **and the ban has not been withdrawn yet** — withdrawal happens only
+after traffic stays below threshold for the full unban hysteresis window. The rung clock
+keeps running from the attack's start throughout.
 
 - The first rung must be at `0` seconds.
 - `action` is `none` (alert only), `flowspec`, `divert` ([scrubbing](/docs/scrubbing)), or
@@ -56,8 +60,9 @@ auto-withdrawal, the `max_active_bans` cap, the absolute whitelist, and dry-run 
 advances the ladder and logs each rung but never announces).
 
 When no `escalation` block is set, the single `mitigation` method behaves exactly as a
-one-rung ladder at `0` seconds — full backward compatibility. The current rung and method
-are visible per ban in `/api/v1/bans` (`escalation`, `escalation_step`).
+one-rung ladder at `0` seconds — full backward compatibility. Each ban in `/api/v1/bans`
+exposes the full configured ladder (`escalation`), the index of the current rung
+(`escalation_step`), and the active rung's method (`method`).
 
 ## Related
 

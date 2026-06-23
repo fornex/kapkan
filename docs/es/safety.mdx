@@ -1,16 +1,17 @@
 export const metadata = {
   title: "Modelo de seguridad",
   description:
-    "Las seis reglas de seguridad innegociables que Kapkan aplica en el código para que nunca pueda enrutar a blackhole lo que no debe.",
+    "Las seis garantías de seguridad innegociables que Kapkan aplica en el código, más una capa opcional de blast-radius, para que nunca pueda enrutar a blackhole lo que no debe.",
 };
 
 # Modelo de seguridad
 
 Enviar una ruta a blackhole es un instrumento contundente: un anuncio erróneo o
 descontrolado puede dejar tu propia infraestructura fuera de línea más rápido que cualquier
-ataque. Kapkan está diseñado para que eso no pueda ocurrir por accidente. Las seis reglas
-siguientes se aplican en el código y están cubiertas por pruebas: no son opciones de
-configuración que puedas olvidarte de definir, y son innegociables.
+ataque. Kapkan está diseñado para que eso no pueda ocurrir por accidente. Las seis garantías
+básicas siguientes se aplican en el código y están cubiertas por pruebas: no son opciones de
+configuración que puedas olvidarte de definir, y son innegociables. Por encima de ellas se
+sitúa una capa opcional de blast-radius que puedes activar para una contención adicional.
 
 Cada una de ellas se aplica por igual a los bloqueos **automáticos** impulsados por la
 detección y a los bloqueos **manuales** solicitados a través de la API. No existe ninguna vía
@@ -72,10 +73,12 @@ en las métricas, pero nunca puede desencadenar un bloqueo. No puedes enrutar a 
 accidente un prefijo que no posees, aunque una inundación atraviese tu red de camino a otro
 sitio.
 
-## 7. Límites de blast-radius (opcional)
+## Opcional: guardas de blast-radius
 
-El tope rígido (#4) acota el *número* de bloqueos, no qué parte de tu red cubren ni con qué
-rapidez se acumulan. Dos guardas opcionales de `ban` lo restringen aún más:
+Estas guardas se sitúan por encima de las seis garantías básicas y están **desactivadas por
+defecto**: son la única parte del modelo de seguridad a la que optas. El tope rígido (#4) acota
+el *número* de bloqueos, no qué parte de tu red cubren ni con qué rapidez se acumulan. Dos
+guardas opcionales de `ban` lo restringen aún más:
 
 - `max_banned_fraction` rechaza nuevos bloqueos una vez que más de esa proporción (por familia
   de direcciones) de tu espacio protegido ya está en blackhole, de modo que una línea base
@@ -100,11 +103,15 @@ infringe alguna se rechaza con un HTTP `409` en lugar de anunciarse silenciosame
 | El objetivo está en `protected_whitelist` | `409` — nunca se anuncia |
 | El objetivo está fuera del alcance de `networks` configurado | `409` — fuera de alcance |
 | Bloquear el objetivo superaría `max_active_bans` | `409` — tope alcanzado |
+| Bloquear el objetivo superaría `max_banned_fraction` | `409` — cuando está activado |
+| Bloquear el objetivo superaría `max_bans_per_window` | `409` — cuando está activado |
 
-Un bloqueo manual que supera las tres comprobaciones aún respeta las reglas de TTL y de
-histéresis: caduca automáticamente como cualquier otro anuncio. La única regla que los bloqueos
-manuales eluden es el propio *umbral de detección* —ese es el sentido completo de un bloqueo
-manual—, pero nunca las salvaguardas de seguridad que rodean al anuncio.
+Si las guardas opcionales de blast-radius están activadas, un bloqueo manual también se verifica
+contra ellas, y se rechaza con el mismo `409` cuando superaría `max_banned_fraction` o
+`max_bans_per_window`. Un bloqueo manual que supera cada una de estas comprobaciones aún respeta
+las reglas de TTL y de histéresis: caduca automáticamente como cualquier otro anuncio. La única
+regla que los bloqueos manuales eluden es el propio *umbral de detección* —ese es el sentido
+completo de un bloqueo manual—, pero nunca las salvaguardas de seguridad que rodean al anuncio.
 
 ## Relacionado
 

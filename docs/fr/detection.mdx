@@ -244,7 +244,7 @@ Le classificateur reconnaît ces valeurs de `type` :
 
 Comment un vecteur est choisi :
 
-- Une signature a besoin d'une **part dominante** — plus de la moitié du trafic fenêtré — pour l'emporter. L'amplification
+- Une signature a besoin d'une **part dominante** — au moins la moitié (>= 0.5) du trafic fenêtré — pour l'emporter. L'amplification
   est vérifiée en premier (la plus spécifique), puis les SYN purs, puis les fragments, puis les floods volumétriques ICMP, UDP
   et TCP.
 - Un vecteur d'**amplification** exige en outre des paquets de la taille d'une réponse provenant du port de service réfléchi :

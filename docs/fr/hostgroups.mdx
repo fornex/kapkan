@@ -76,8 +76,10 @@ place le débit combiné du pool.
 - **Les préfixes d'un groupe doivent se situer à l'intérieur de `networks`.** Un groupe ne
   peut que restreindre une protection que vous avez déjà déclarée ; un préfixe situé en dehors
   de vos `networks` protégés constitue une erreur de configuration.
-- **Les seuils sont facultatifs.** Omettez `thresholds` et le groupe hérite des seuils
-  globaux. Définissez-le pour les remplacer uniquement pour ce groupe.
+- **Les seuils sont facultatifs, mais c'est tout ou rien.** Omettez `thresholds` et le groupe
+  hérite des seuils globaux. Pour les remplacer pour ce groupe, définissez les trois clés `pps`,
+  `mbps` et `flows_per_sec` — un bloc partiel est rejeté. (`thresholds_outgoing` diffère : là,
+  au moins une clé suffit.)
 - **`ban: false` désactive le RTBH automatique.** Les hôtes du groupe sont toujours détectés,
   classifiés et notifiés, mais aucun blackhole automatique n'est annoncé. Les bannissements
   manuels via l'API fonctionnent toujours et s'appliquent toujours à ces hôtes.
@@ -92,10 +94,12 @@ place le débit combiné du pool.
 
 <Callout type="warning" title="Les groupes en mode total ne mettent jamais en blackhole automatiquement">
 Un groupe `calculation: total` déclenche une attaque pour l'ensemble du jeu de préfixes : il
-n'y a donc aucune adresse unique pour laquelle annoncer un `/32` ou un `/128`. Utilisez les
-groupes en mode total pour alerter sur la charge agrégée (un pool anycast ou DNS) ;
-associez-les à un groupe par hôte ou à des bannissements manuels si vous avez également besoin
-d'une mitigation automatique.
+n'y a donc aucune adresse unique pour laquelle annoncer un `/32` ou un `/128`. Définir
+`ban: true` sur un groupe en mode total n'est pas ignoré silencieusement — cela fait échouer
+le démarrage et le rechargement avec une erreur de configuration. Utilisez les groupes en mode
+total pour alerter sur la charge agrégée (un pool anycast ou DNS) ; associez-les à un groupe
+par hôte distinct ou à des bannissements manuels si vous avez également besoin d'une mitigation
+automatique.
 </Callout>
 
 ## Surcharges par groupe
@@ -121,6 +125,8 @@ hostgroups:
       - "203.0.113.192/26"
     thresholds:
       pps: 40000
+      mbps: 800
+      flows_per_sec: 20000
     thresholds_outgoing:        # watch for compromised hosts in this group
       pps: 30000
       udp_pps: 15000

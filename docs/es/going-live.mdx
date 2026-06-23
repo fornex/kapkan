@@ -37,12 +37,20 @@ pipeline real, no una simulación.
 2. **Confirma que el BGP alcanza el estado `ESTABLISHED`.** El peering ocurre incluso en dry-run, de
    modo que puedes verificar la conectividad antes de anunciar nada. Vigila en los logs el evento
    `bgp peer state` y confirma que cada vecino configurado alcanza el estado `ESTABLISHED`. Si una
-   sesión se queda atascada, corrige ahora la configuración del peer (ASN, direcciones, interfaz de
-   origen, ACLs), mientras una configuración errónea resulta inofensiva.
+   sesión se queda atascada, corrígela ahora, mientras una configuración errónea resulta inofensiva.
+   La corrección está en uno de dos lados: la configuración BGP de Kapkan (`local_asn`, el
+   `remote_asn` y la `address` del vecino) o el lado del router/host (interfaz de origen, ACLs del
+   firewall).
 
    ```sh
-   ./kapkan -config /etc/kapkan/config.yaml -log-format text | grep "bgp peer state"
+   # Sigue los logs del daemon en ejecución (Kapkan registra en stderr, que systemd captura):
+   journalctl -u kapkan -f | grep "bgp peer state"
+
+   # Solo para desarrollo: ejecuta una instancia en primer plano (2>&1 porque los logs van a stderr):
+   ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
+
+   También puedes confirmar el estado de los peers sin los logs mediante `GET /api/v1/status`.
 
 3. **Desactiva el dry-run y recarga.** Establece `dry_run: false` en tu configuración y, a
    continuación, recarga Kapkan para que vuelva a leer el archivo. La recarga no es disruptiva: no
@@ -74,7 +82,7 @@ Tras el paso 3, una comprobación rápida de que realmente estás en producción
 comportan correctamente:
 
 - `GET /api/v1/status` muestra el modo actual y los recuentos de ataques/baneos activos.
-- La métrica `mitigate_announced_routes` está etiquetada por modo; en producción, las rutas se
+- La métrica `kapkan_mitigate_announced_routes` está etiquetada por modo; en producción, las rutas se
   contabilizan bajo `real` en lugar de `dry_run`. Consulta [Métricas](/docs/metrics).
 - `GET /api/v1/bans` enumera todos los baneos, activos e históricos, de modo que puedes confirmar que
   un baneo se anunció y, más tarde, se retiró automáticamente al expirar su TTL.

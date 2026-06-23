@@ -11,7 +11,7 @@ Point Kapkan at a ClickHouse server to keep attack and traffic history — the a
 
 <Callout type="info" title="Best-effort, never blocks detection">
 Persistence runs off a bounded queue with a non-blocking send. A slow or down ClickHouse
-drops rows (counted in `storage_rows_total` with `result="dropped"`) rather than stalling
+drops rows (counted in `kapkan_storage_rows_total` with `result="dropped"`) rather than stalling
 the engine's hot path.
 </Callout>
 
@@ -59,17 +59,19 @@ writer credential lacks `ALTER` rights (fresh installs already have it).
 
 Rows go onto a bounded queue (`queue_size`) with a non-blocking send and are flushed in
 batches (`batch_size` / `flush_interval_seconds`). If ClickHouse is slow or down, rows are
-dropped — counted as `storage_rows_total` with `result="dropped"` — and the engine keeps
+dropped — counted as `kapkan_storage_rows_total` with `result="dropped"` — and the engine keeps
 running. See [Metrics](/docs/metrics).
 
 ## What is and isn't persisted
 
-The `traffic` table currently persists per-host snapshots only. Per-ASN aggregation is not
-persisted (Kapkan does not resolve ASNs from flows), and per-hostgroup totals are not yet
+The `traffic` table currently persists per-host snapshots only. When the optional `geoip`
+block is configured (a MaxMind `.mmdb` database), Kapkan resolves per-source ASNs and
+persists each attack's top ASNs in `attack_events.top_asns` (pipe-joined `"AS<n> <org>"`,
+empty when geoip is off). Per-ASN time-series and per-hostgroup totals are not yet
 snapshotted — both are candidates for a follow-up.
 
 ## Related
 
 - [Configuration reference](/docs/configuration) — the full `storage` key list.
 - [Audit log](/docs/audit) — the `audit_events` table and its read endpoint.
-- [Metrics](/docs/metrics) — the `storage_rows_total` counter.
+- [Metrics](/docs/metrics) — the `kapkan_storage_rows_total` counter.

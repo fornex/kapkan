@@ -21,7 +21,7 @@ scrubbing:
   # communities: ["65000:200", "65000:201"]   # or a full set
   local_pref: 200              # often raised so the divert route wins selection
 
-mitigation: divert             # or use divert as an escalation rung (see below)
+mitigation: divert             # or use divert as an escalation rung (see below); an escalation: ladder supersedes this single mitigation: when present
 ```
 
 ## Fonctionnement
@@ -29,8 +29,10 @@ mitigation: divert             # or use divert as an escalation rung (see below)
 La déviation réutilise la machinerie de route d'hôte de RTBH. Là où un blackhole annonce le `/32`
 ou `/128` de la victime vers un next-hop de rejet avec votre community RTBH, une déviation annonce
 la **même** route d'hôte vers le next-hop du centre de nettoyage avec la community de déviation (et
-un `LOCAL_PREF` optionnel, généralement augmenté pour que la route de déviation plus spécifique
-remporte la sélection de chemin). Votre edge achemine alors le trafic de cette victime vers le
+un `LOCAL_PREF` optionnel). La route d'hôte l'emporte déjà sur l'agrégat couvrant par sa
+spécificité ; le `LOCAL_PREF` n'arbitre que la sélection du meilleur chemin entre annonces de même
+préfixe, de sorte que l'augmenter maintient le chemin de déviation gagnant face à toute autre route
+vers cet hôte exact. Votre edge achemine alors le trafic de cette victime vers le
 scrubber ; le scrubber supprime l'attaque et réinjecte le reste nettoyé vers la véritable
 destination.
 
@@ -53,7 +55,7 @@ configuration ne modifie que les bans futurs, jamais la route qu'un ban actif a 
 | `next_hop6` | Le next-hop IPv6 du centre de nettoyage. **Requis** lorsque le déploiement protège un espace IPv6 — il n'existe pas de repli de type rejet pour la déviation, le trafic doit atteindre un véritable scrubber. |
 | `community` | Community de déviation optionnelle sous la forme `ASN:value`. Le next-hop effectue le réacheminement ; la community est un signal supplémentaire pour votre edge. |
 | `communities` | **Liste** de communities optionnelle qui remplace `community` lorsqu'elle est définie. |
-| `local_pref` | `LOCAL_PREF` optionnel attaché à la route de déviation, souvent augmenté pour qu'elle remporte la sélection. La valeur par défaut `0` l'omet. |
+| `local_pref` | `LOCAL_PREF` optionnel attaché à la route de déviation. Il arbitre la sélection du meilleur chemin entre annonces de même préfixe (pas la spécificité — la route d'hôte l'emporte déjà sur ce point), de sorte que l'augmenter maintient le chemin de déviation gagnant. La valeur par défaut `0` l'omet. |
 
 La route de déviation que Kapkan construit se lit `divert <prefix> next-hop <next_hop> community
 <community>` — la chaîne exposée dans le champ `route` de l'[objet ban](/docs/api), avec

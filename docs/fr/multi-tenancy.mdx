@@ -6,7 +6,8 @@ export const metadata = {
 
 # Multi-tenant
 
-Une seule instance Kapkan peut servir de nombreux clients (cas d'usage MSP ou IDC) et donner à
+Une seule instance Kapkan peut servir de nombreux clients (cas d'usage fournisseur de services
+managés (MSP) ou centre de données internet (IDC)) et donner à
 chacun un token qui ne voit et ne touche **que les siens** : attaques, bannissements et hôtes. Un
 tenant n'est qu'une étiquette optionnelle sur un [hostgroup](/docs/hostgroups) — il n'y a pas de
 nouvel objet de premier niveau, pas de registre de tenants distinct, et le chemin critique de
@@ -73,8 +74,10 @@ filtrer renverrait, pour un token cadré, rien du tout — jamais les données d
 - **Lectures** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` et `/audit` ne renvoient que les
   lignes dont le groupe propriétaire porte le tenant de l'appelant. `/status` est reconstruit par
   portée : un token cadré n'obtient que ses propres hostgroups et compteurs, jamais les réseaux
-  protégés globaux, les seuils globaux ni le groupe de repli à l'échelle du déploiement — ainsi un
-  tenant n'apprend jamais les préfixes ou la posture BGP d'un autre. Le [journal d'audit](/docs/audit)
+  protégés globaux, les seuils globaux ni la ligne de config du groupe de repli à l'échelle du
+  déploiement — ainsi un tenant n'apprend jamais les préfixes ou la posture BGP d'un autre. Un
+  tenant house (le groupe de repli étiqueté d'un `tenant`) voit toujours ses attaques, bannissements
+  et hôtes fourre-tout ; seule la ligne de config de ce groupe est masquée. Le [journal d'audit](/docs/audit)
   est lié au tenant de l'appelant côté serveur, et un filtre `target` nommant une adresse hors du
   tenant est refusé — pas d'oracle d'existence inter-tenant.
 - **Mutations** — un operator cadré ne peut `ban`/`unban` que dans ses propres préfixes. Une cible
@@ -87,7 +90,8 @@ filtrer renverrait, pour un token cadré, rien du tout — jamais les données d
   portée la plus large.
 
 <Callout type="info" title="/metrics et le tableau de bord">
-`/metrics` n'est pas cadré par tenant — il reste une surface de scrape admin/operator. La coquille
+`/metrics` n'est pas cadré par tenant — il reste ouvert au scraping Prometheus et ne requiert aucun token,
+même lorsque l'authentification de l'API est configurée. La coquille
 du tableau de bord est partagée (elle ne détient aucune donnée propre) ; chaque appel de données
 qu'elle effectue est filtré par le token qui y est collé, de sorte que le token viewer d'un tenant
 n'affiche que les données de ce tenant.

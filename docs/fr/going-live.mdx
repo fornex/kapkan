@@ -38,13 +38,20 @@ sessions BGP. Vous validez le pipeline réel, pas une simulation.
 2. **Confirmez que le BGP atteint l'état `ESTABLISHED`.** Le peering a lieu même en dry-run,
    ce qui vous permet de vérifier la connectivité avant d'annoncer quoi que ce soit. Surveillez
    l'événement `bgp peer state` dans les journaux et confirmez que chaque voisin configuré
-   atteint l'état `ESTABLISHED`. Si une session reste bloquée, corrigez dès maintenant la
-   configuration du pair (ASN, adresses, interface source, ACL) — tant qu'une mauvaise
-   configuration reste sans conséquence.
+   atteint l'état `ESTABLISHED`. Si une session reste bloquée, corrigez-la dès maintenant
+   — tant qu'une mauvaise configuration reste sans conséquence. La correction se situe de l'un
+   des deux côtés : la configuration BGP de Kapkan (`local_asn`, les `remote_asn` et `address`
+   du voisin), ou le côté routeur/hôte (interface source, ACL de pare-feu).
 
    ```sh
-   ./kapkan -config /etc/kapkan/config.yaml -log-format text | grep "bgp peer state"
+   # Suivez les journaux du démon en cours d'exécution (Kapkan journalise sur stderr, capturé par systemd) :
+   journalctl -u kapkan -f | grep "bgp peer state"
+
+   # Dev uniquement — exécutez plutôt une instance au premier plan (2>&1 car les journaux vont sur stderr) :
+   ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
+
+   Vous pouvez aussi confirmer l'état de santé du pair sans les journaux via `GET /api/v1/status`.
 
 3. **Désactivez le dry-run et rechargez.** Définissez `dry_run: false` dans votre configuration,
    puis rechargez Kapkan afin qu'il relise le fichier. Le rechargement est non perturbateur :
@@ -78,7 +85,7 @@ et que les annonces se comportent comme prévu :
 
 - `GET /api/v1/status` affiche le mode actuel ainsi que le nombre d'attaques et de bannissements
   actifs.
-- La métrique `mitigate_announced_routes` est étiquetée par mode ; en production, les routes
+- La métrique `kapkan_mitigate_announced_routes` est étiquetée par mode ; en production, les routes
   sont comptabilisées sous `real` plutôt que sous `dry_run`. Consultez les [Métriques](/docs/metrics).
 - `GET /api/v1/bans` liste chaque bannissement, actif et historique, ce qui vous permet de
   confirmer qu'un bannissement a bien été annoncé puis automatiquement retiré après expiration

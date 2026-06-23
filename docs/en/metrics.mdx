@@ -22,12 +22,12 @@ Bind the listener accordingly — see [Authentication](/docs/authentication).
 | Metric | Labels | Meaning |
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Total flows ingested, by flow protocol. |
-| `kapkan_ingest_packets_total` | `exporter`, `proto` | Total telemetry datagrams received, by source exporter (cardinality-bounded; see `flow_sources`) and protocol. |
+| `kapkan_ingest_packets_total` | `exporter`, `proto` | Total telemetry datagrams received, by source exporter (cardinality-bounded; see [`flow_sources`](/docs/configuration)) and protocol. |
 | `kapkan_ingest_decode_errors_total` | `proto` | Telemetry datagrams that failed to decode, by protocol. |
 | `kapkan_ingest_dropped_flows_total` | — | Flows dropped because the engine input queue was full. |
 | `kapkan_engine_active_attacks` | — | Gauge of attacks currently in progress. |
 | `kapkan_engine_attacks_total` | — | Counter of attacks detected since start. |
-| `kapkan_engine_process_latency_seconds` | — | Histogram of per-flow hot-path processing latency. |
+| `kapkan_engine_process_latency_seconds` | — | Histogram of hot-path processing latency, observed once per ingest batch (not per flow). |
 | `kapkan_engine_tracked_hosts` | — | Gauge of hosts currently tracked by the engine. |
 | `kapkan_mitigate_announced_routes` | `mode` | Gauge of blackhole routes currently announced, split by `real` / `dry_run` mode. |
 | `kapkan_mitigate_flowspec_rules` | `mode` | Gauge of [FlowSpec](/docs/flowspec) rules currently announced, split by `real` / `dry_run` mode. Watch this against your routers' FlowSpec route limit. |
@@ -35,6 +35,8 @@ Bind the listener accordingly — see [Authentication](/docs/authentication).
 | `kapkan_mitigate_fallback_total` | `from`, `to` | Mitigation announces that degraded to a fallback method because the peer rejected the primary, by `from`/`to`. A non-zero `from="flowspec"` series flags upstreams that do not honor FlowSpec. |
 | `kapkan_notify_notifications_total` | `channel`, `result` | Notifications attempted, by channel (telegram, slack, email, webhook, exec) and `result`. |
 | `kapkan_storage_rows_total` | `table`, `result` | Rows handed to the optional [ClickHouse storage](/docs/storage), by table and `written` / `dropped` / `error`. |
+| `kapkan_build_info` | `version`, `revision`, `goversion`, `goos`, `goarch` | Constant `1` info gauge carrying the running build in its labels (the `node_exporter` idiom). Query fleet version drift with `count by (version)(kapkan_build_info)` — zero phone-home. |
+| `kapkan_update_available` | `latest_version`, `security` | `1` when the opt-in [`update_check`](/docs/configuration) finds a newer release (absent otherwise); `security="true"` flags a security-relevant release. |
 
 The `mode` label on `kapkan_mitigate_announced_routes` is the fastest way to confirm dry-run
 state at a glance: while `dry_run: true`, every would-be route is counted under

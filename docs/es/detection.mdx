@@ -248,7 +248,7 @@ El clasificador reconoce estos valores de `type`:
 
 Cómo se elige un vector:
 
-- Una firma necesita una **proporción dominante** — más de la mitad del tráfico de la ventana — para
+- Una firma necesita una **proporción dominante** — al menos la mitad (>= 0.5) del tráfico de la ventana — para
   ganar. Primero se comprueba la amplificación (la más específica), luego los SYN puros, después los
   fragmentos, y finalmente los floods volumétricos ICMP, UDP y TCP.
 - Un vector de **amplificación** también requiere paquetes del tamaño de una respuesta procedentes del

@@ -6,7 +6,8 @@ export const metadata = {
 
 # Mandantenfähigkeit
 
-Eine einzelne Kapkan-Instanz kann viele Kunden bedienen (ein MSP- oder IDC-Anwendungsfall) und
+Eine einzelne Kapkan-Instanz kann viele Kunden bedienen (Anwendungsfall eines Managed Service
+Provider (MSP) oder Internet Data Center (IDC)) und
 jedem ein Token geben, das **nur dessen eigene** Angriffe, Bans und Hosts sieht und verändert.
 Ein Mandant (tenant) ist lediglich ein optionales Label an einer
 [Hostgruppe](/docs/hostgroups) — es gibt kein neues Top-Level-Objekt, keine separate
@@ -75,9 +76,12 @@ Mandanten.
 - **Lesezugriffe** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` und `/audit` geben nur
   Zeilen zurück, deren besitzende Gruppe den Mandanten des Aufrufers trägt. `/status` wird pro
   Scope neu aufgebaut: ein gebundenes Token erhält nur seine eigenen Hostgruppen und Zähler,
-  niemals die globalen geschützten Netze, die globalen Schwellenwerte oder die deployment-weite
-  Fallback-Gruppe — sodass ein Mandant nie die Präfixe oder die BGP-Aufstellung eines anderen
-  erfährt. Das [Audit-Log](/docs/audit) ist serverseitig an den Mandanten des Aufrufers gebunden,
+  niemals die globalen geschützten Netze, die globalen Schwellenwerte oder die Konfigurationszeile
+  der deployment-weiten Fallback-Gruppe — sodass ein Mandant nie die Präfixe oder die
+  BGP-Aufstellung eines anderen erfährt. Ein House-Mandant (die mit einem `tenant` beschriftete
+  Fallback-Gruppe) sieht weiterhin seine Catch-all-Angriffe, Bans und Hosts; nur die
+  Konfigurationszeile dieser Gruppe ist verborgen. Das [Audit-Log](/docs/audit) ist serverseitig
+  an den Mandanten des Aufrufers gebunden,
   und ein `target`-Filter, der eine Adresse außerhalb des Mandanten benennt, wird verweigert —
   kein mandantenübergreifendes Existenz-Orakel.
 - **Mutationen** — ein gebundener Operator darf nur innerhalb seiner eigenen Präfixe
@@ -90,7 +94,8 @@ Mandanten.
   wird die Anfrage abgelehnt, statt auf den weiteren Scope aufgelöst zu werden.
 
 <Callout type="info" title="/metrics und das Dashboard">
-`/metrics` ist nicht mandantengebunden — es bleibt eine Scrape-Oberfläche für Admin/Operator. Die
+`/metrics` ist nicht mandantengebunden — es bleibt für das Prometheus-Scraping offen und benötigt
+kein Token, selbst wenn die API-Authentifizierung konfiguriert ist. Die
 Dashboard-Shell ist geteilt (sie hält keine eigenen Daten); jeder Datenaufruf, den sie tätigt,
 wird durch das eingefügte Token gefiltert, sodass das Viewer-Token eines Mandanten nur dessen
 eigene Daten anzeigt.

@@ -70,7 +70,7 @@ faire à tout moment.
 - **Plancher.** Le seuil effectif ne descend jamais sous `floor`, de sorte qu'un hôte normalement
   peu actif ne devienne pas hypersensible et ne se déclenche pas au moindre petit pic.
 - **Gelée pendant une attaque.** Tant qu'un hôte est sous attaque — y compris pendant la traîne
-  `unban_hysteresis_seconds` après la chute du débit — sa ligne de base n'est pas du tout
+  [`unban_hysteresis_seconds`](/docs/mitigation) après la chute du débit — sa ligne de base n'est pas du tout
   entraînée. Le trafic d'attaque n'apprend jamais à l'hôte que l'attaque est normale.
 - **Apprentissage borné.** Hors attaques, chaque échantillon d'entraînement est plafonné à
   `baseline × factor` avant de mettre à jour l'EWMA. Une montée progressive d'un attaquant ne peut
@@ -91,7 +91,11 @@ Le trafic de la période de chauffe entraîne lui-même la ligne de base initial
 *déjà* sous un flood sous-statique la première fois que Kapkan le voit apprend ce flood comme
 « normal » — borné par le plafond statique, mais il n'existe aucune référence propre pour un hôte
 attaqué dès la première observation. Réglez `warmup_seconds` à au moins quelques multiples de
-`half_life_seconds` pour que la ligne de base converge avant de commencer à encadrer.
+`half_life_seconds` pour que la ligne de base converge avant de commencer à encadrer. Le `600`
+de l'exemple est bien en dessous de cette recommandation — acceptable lorsque les hôtes arrivent
+sains et que vous voulez que la ligne de base encadre plus tôt, mais si un hôte risque d'être
+inondé dès la première observation, augmentez `warmup_seconds` vers quelques multiples de
+`half_life_seconds` (p. ex. `10800` avec la demi-vie par défaut de `3600`).
 </Callout>
 
 ## Visibilité
@@ -125,6 +129,7 @@ total.
 
 - [Détection et seuils](/docs/detection) — les seuils statiques à l'intérieur desquels s'inscrivent les lignes de base.
 - [Hostgroups](/docs/hostgroups) — seuils par groupe, totaux et substitutions de ligne de base.
+- [Atténuation RTBH](/docs/mitigation) — le cycle de vie du bannissement et la traîne `unban_hysteresis_seconds`.
 - [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.
 - [API REST](/docs/api) — l'instantané `/api/v1/hosts` et ses champs `baseline`.
 - [Mise en production](/docs/going-live) — validez la détection en dry-run avant d'annoncer.

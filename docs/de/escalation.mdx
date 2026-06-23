@@ -23,11 +23,16 @@ scrubbing:
   community: "65000:200"
 ```
 
+Ein [`bgp`-Block](/docs/mitigation#bgp-configuration) ist erforderlich, damit überhaupt eine Stufe
+ankündigen kann; die `flowspec`- und `scrubbing`-Blöcke oben werden nur für die `flowspec`- und
+`divert`-Stufen benötigt.
+
 ## So greifen die Stufen
 
 Das `after_seconds` jeder Stufe wird ab dem Beginn des Angriffs gemessen. Eine Stufe greift, sobald so
-viel Zeit verstrichen ist **und der Angriff noch aktiv ist** — also noch kein Endereignis vorliegt, d. h.
-der Datenverkehr liegt durch die Unban-Hysterese hindurch weiterhin über dem Schwellenwert.
+viel Zeit verstrichen ist **und der Ban noch nicht zurückgenommen wurde** — die Rücknahme erfolgt erst,
+nachdem der Datenverkehr für das gesamte Unban-Hysteresefenster unter dem Schwellenwert geblieben ist. Die
+Stufenuhr läuft währenddessen durchgehend ab dem Beginn des Angriffs weiter.
 
 - Die erste Stufe muss bei `0` Sekunden liegen.
 - `action` ist `none` (nur Warnung), `flowspec`, `divert` ([Scrubbing](/docs/scrubbing)) oder
@@ -56,8 +61,9 @@ automatische TTL-Zurückziehen, das `max_active_bans`-Limit, die absolute Whitel
 die Leiter voranschreiten lässt und jede Stufe protokolliert, aber nie ankündigt).
 
 Ist kein `escalation`-Block gesetzt, verhält sich die einzelne `mitigation`-Methode exakt wie eine
-einstufige Leiter bei `0` Sekunden — vollständige Abwärtskompatibilität. Die aktuelle Stufe und Methode
-sind pro Ban in `/api/v1/bans` sichtbar (`escalation`, `escalation_step`).
+einstufige Leiter bei `0` Sekunden — vollständige Abwärtskompatibilität. Jeder Ban in `/api/v1/bans`
+gibt die vollständige konfigurierte Leiter (`escalation`), den Index der aktuellen Stufe
+(`escalation_step`) und die Methode der aktiven Stufe (`method`) preis.
 
 ## Verwandte Themen
 

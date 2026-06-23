@@ -257,8 +257,8 @@ Der Klassifizierer erkennt diese `type`-Werte:
 
 Wie ein Vektor ausgewählt wird:
 
-- Eine Signatur benötigt einen **dominanten Anteil** — mehr als die Hälfte des fenstergestützten
-  Datenverkehrs —, um zu gewinnen. Zuerst wird auf Amplifikation geprüft (am spezifischsten), dann
+- Eine Signatur benötigt einen **dominanten Anteil** — mindestens die Hälfte (>= 0.5) des
+  fenstergestützten Datenverkehrs —, um zu gewinnen. Zuerst wird auf Amplifikation geprüft (am spezifischsten), dann
   reine SYN, dann Fragmente, dann ICMP-, UDP- und TCP-volumetrische Floods.
 - Ein **Amplifikations**-Vektor erfordert außerdem antwortgroße Pakete vom Port des reflektierten
   Dienstes: die durchschnittliche Paketgröße von diesem Quell-Port muss groß genug sein, um als

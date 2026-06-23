@@ -1,7 +1,7 @@
 export const metadata = {
   title: "Sicherheitsmodell",
   description:
-    "Die sechs nicht verhandelbaren Sicherheitsregeln, die Kapkan im Code durchsetzt, damit niemals das Falsche per Blackhole geroutet werden kann.",
+    "Die sechs nicht verhandelbaren Sicherheitsgarantien, die Kapkan im Code durchsetzt, plus eine optionale Blast-radius-Ebene, damit niemals das Falsche per Blackhole geroutet werden kann.",
 };
 
 # Sicherheitsmodell
@@ -9,8 +9,10 @@ export const metadata = {
 Eine Route per Blackhole zu entfernen ist ein grobes Werkzeug: Eine fehlerhafte oder
 außer Kontrolle geratene Ankündigung kann Ihre eigene Infrastruktur schneller offline nehmen
 als jeder Angriff. Kapkan ist so gebaut, dass das nicht versehentlich passieren kann. Die sechs
-Regeln unten sind im Code durchgesetzt und durch Tests abgedeckt — es sind keine
+Kerngarantien unten sind im Code durchgesetzt und durch Tests abgedeckt — es sind keine
 Konfigurationsoptionen, die man zu setzen vergessen könnte, und sie sind nicht verhandelbar.
+Darüber liegt eine optionale Blast-radius-Ebene, die Sie für zusätzliche Eindämmung aktivieren
+können.
 
 Jede einzelne von ihnen gilt gleichermaßen für **automatische**, durch Erkennung ausgelöste
 Sperren wie auch für **manuelle** Sperren, die über die API angefordert werden. Es gibt keinen
@@ -74,8 +76,10 @@ aber niemals eine Sperre auslösen. Sie können nicht versehentlich ein Präfix 
 entfernen, das Ihnen nicht gehört, selbst wenn eine Flut zufällig Ihr Netzwerk auf dem Weg
 woandershin durchquert.
 
-## 7. Grenzen des Blast-radius (optional)
+## Optional: Blast-radius-Schutzmechanismen
 
+Diese Schutzmechanismen liegen über den sechs Kerngarantien und sind **standardmäßig
+deaktiviert** — sie sind der eine Teil des Sicherheitsmodells, für den Sie sich aktiv entscheiden.
 Die harte Obergrenze (#4) begrenzt die *Anzahl* der Sperren, nicht wie viel Ihres Netzwerks sie
 abdecken oder wie schnell sie anfallen. Zwei optionale `ban`-Schutzmechanismen verschärfen das
 weiter:
@@ -102,8 +106,13 @@ davon verletzt, wird mit HTTP `409` abgelehnt, statt stillschweigend angekündig
 | Ziel befindet sich in `protected_whitelist` | `409` — niemals angekündigt |
 | Ziel liegt außerhalb des konfigurierten `networks`-Bereichs | `409` — außerhalb des Bereichs |
 | Das Sperren des Ziels würde `max_active_bans` überschreiten | `409` — Obergrenze erreicht |
+| Das Sperren des Ziels würde `max_banned_fraction` überschreiten | `409` — wenn aktiviert |
+| Das Sperren des Ziels würde `max_bans_per_window` überschreiten | `409` — wenn aktiviert |
 
-Eine manuelle Sperre, die alle drei besteht, beachtet weiterhin die TTL- und Hysterese-Regeln:
+Wenn die optionalen Blast-radius-Schutzmechanismen aktiviert sind, wird eine manuelle Sperre
+auch gegen sie geprüft und mit demselben `409` abgelehnt, wenn sie `max_banned_fraction` oder
+`max_bans_per_window` überschreiten würde. Eine manuelle Sperre, die jede einzelne dieser
+Prüfungen besteht, beachtet weiterhin die TTL- und Hysterese-Regeln:
 Sie läuft automatisch ab wie jede andere Ankündigung. Die einzige Regel, die manuelle Sperren
 umgehen, ist der *Erkennungsschwellenwert* selbst — das ist der ganze Sinn einer manuellen Sperre
 —, aber niemals die Sicherheitsmechanismen rund um die Ankündigung.

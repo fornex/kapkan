@@ -12,11 +12,20 @@ hace aquí puede anunciar una ruta: dry-run es el modo predeterminado.
 
 <Callout type="info" title="Requisitos previos">
 Go 1.22 o más reciente. Para ver detecciones en vivo también necesitas un router que exporte
-NetFlow / IPFIX / sFlow, pero puedes validar el flujo de extremo a extremo sin uno usando el
-generador de flow integrado (consulta la última sección).
+NetFlow / IPFIX / sFlow, pero incluso sin uno puedes validar la detección de extremo a extremo
+ejecutando la prueba de integración incluida desde `engine/`
+(`go test ./internal/app -run TestEndToEnd -v`; consulta la última sección).
 </Callout>
 
 ## 1. Compila el binario
+
+Todos los comandos a continuación se ejecutan desde el directorio `engine` del repositorio, así que empieza por ahí:
+
+```sh
+cd engine
+```
+
+Luego compila:
 
 ```sh
 make build
@@ -38,9 +47,9 @@ make run-dev
 estructurado predeterminado a una forma legible para humanos; consulta la
 [Referencia de CLI](/docs/cli) para conocer cada flag y sus valores admitidos.
 
-La configuración de desarrollo ([`configs/dev.yaml`](/docs/configuration)) tiene `dry_run: true`, una
-red protegida de prueba de `203.0.113.0/24`, y escucha sFlow en `:6343` y
-NetFlow/IPFIX en `:2055`.
+La configuración de desarrollo ([`configs/dev.yaml`](/docs/configuration)) tiene `dry_run: true`,
+redes protegidas de prueba de `203.0.113.0/24` y `2001:db8::/32` (más un par de hostgroups de
+ejemplo), y escucha sFlow en `:6343` y NetFlow/IPFIX en `:2055`.
 
 ## 3. Apunta tus exportadores a Kapkan
 
@@ -78,7 +87,8 @@ incluyendo patrones de amplificación, SYN-flood y UDP-flood. Se usa en toda la 
 para validar la detección de extremo a extremo sin tocar un router real. La prueba de integración
 en `internal/app` reproduce una inundación de amplificación NTP a través de un socket UDP real
 contra una instancia en dry-run y comprueba que el ataque y su bloqueo (ban) virtual (que expira
-automáticamente) aparecen en la API.
+automáticamente) —el blackhole hipotético registrado que dry-run expone a través de la API sin
+llegar nunca a anunciarlo— aparecen en la API.
 
 ## Próximos pasos
 

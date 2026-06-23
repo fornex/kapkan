@@ -24,7 +24,9 @@ Bearer-Token fest. Siehe [Authentifizierung](/docs/authentication).
 Alle `/api/v1`-Routen durchlaufen die Token-Prüfung, sobald die Authentifizierung konfiguriert ist;
 ist sie einmal konfiguriert, muss jede Anfrage `Authorization: Bearer <token>` mitführen. Tokens
 tragen eine **Rolle**: Die `GET`-Routen benötigen die Rolle **viewer**, und die zustandsändernden
-Routen (`ban`, `unban`, `config/reload`) benötigen die Rolle **operator**. Ein Lesezugriff mit einem
+Routen (`ban`, `unban`, `config/reload`) benötigen die Rolle **operator**. `config/reload` geht
+noch weiter: Es erfordert ein **ungebundenes (Admin-)Token**, sodass selbst ein operator-Token, das
+tenant-bezogen ist, mit `403` abgewiesen wird. Ein Lesezugriff mit einem
 viewer-Token funktioniert; eine Änderung mit einem viewer-Token liefert `403`; ein unbekanntes Token
 liefert `401`. Die `POST`-Endpunkte verlangen zusätzlich einen JSON-Content-Type — senden Sie
 `Content-Type: application/json`. Beachten Sie, dass `/metrics` und das statische Dashboard-Gerüst
@@ -34,7 +36,9 @@ abgerufen. Siehe [Authentifizierung](/docs/authentication) zu den Token-Rollen.
 Ein Token kann zudem **tenant-bezogen** (mandantengebunden) sein: Es sieht dann auf jedem
 Lese-Endpunkt nur die Zeilen seines Tenants (`/status` wird auf die eigenen Hostgroups und
 Zählungen umgebaut) und darf nur innerhalb seines Tenants `ban`/`unban` ausführen — ein Ziel
-außerhalb des Tenants liefert ein einheitliches `403`. Siehe
+außerhalb des Tenants liefert ein einheitliches `403`. Ein tenant-bezogenes Token kann die
+Konfiguration überhaupt nicht neu laden: `config/reload` ist auf ungebundene (Admin-)Tokens
+beschränkt und liefert andernfalls `403`. Siehe
 [Mandantenfähigkeit](/docs/multi-tenancy).
 
 ## Endpunkte
@@ -45,6 +49,7 @@ außerhalb des Tenants liefert ein einheitliches `403`. Siehe
 | GET | `/api/v1/attacks` | Aktive Angriffe sowie die letzten 100 beendeten, mit Samples und Klassifizierung. |
 | GET | `/api/v1/hosts` | Snapshot der verfolgten Hosts: Raten je Richtung, gelernte Baselines, Angriffszustand. |
 | GET | `/api/v1/bans` | Alle Sperren, aktive und historische. |
+| GET | `/api/v1/traffic` | Persistierte Ratenhistorie je Host (viewer); `{available:false, points:[]}`, wenn der Speicher deaktiviert ist. |
 | GET | `/api/v1/audit` | Operator-zugeordneter Audit-Trail von Änderungen (wer wann gesperrt/neu geladen hat, mit Ergebnis). |
 | POST | `/api/v1/ban` | Eine Adresse manuell sperren. |
 | POST | `/api/v1/unban` | Eine Sperre manuell zurückziehen. |
@@ -62,6 +67,8 @@ Gibt den aktuellen Betriebsmodus und eine Zusammenfassung dessen zurück, was Ka
 {
   "dry_run": true,
   "uptime_seconds": 8123,
+  "version": "v1.2.0 · a1b2c3d",
+  "update_available": false,
   "networks": ["203.0.113.0/24", "198.51.100.0/24"],
   "active_attacks": 1,
   "active_bans": 1,
@@ -77,8 +84,11 @@ Gibt den aktuellen Betriebsmodus und eine Zusammenfassung dessen zurück, was Ka
 ```
 
 `dry_run` gibt den globalen Modus an: Bei `true` wird kein Blackhole an Ihre Router angekündigt.
-`thresholds` und `hostgroups` spiegeln die aktive Konfiguration wider; ihre vollständige Struktur
-finden Sie unter [Erkennung](/docs/detection) und [Hostgroups](/docs/hostgroups).
+`version` ist der laufende Build, stets vorhanden und ohne ausgehenden Datenverkehr. `update_available`
+ist `false`, sofern nicht der opt-in [`update_check`](/docs/configuration) aktiviert ist und eine
+neuere Version findet — dann ist es `true` und `latest_version` sowie `latest_is_security` werden
+zusätzlich mitgeliefert. `thresholds` und `hostgroups` spiegeln die aktive Konfiguration wider; ihre
+vollständige Struktur finden Sie unter [Erkennung](/docs/detection) und [Hostgroups](/docs/hostgroups).
 
 ### GET /api/v1/attacks
 
@@ -128,7 +138,7 @@ Arrays enthalten `Attack`-Objekte.
       },
       "active": true,
       "ban_state": "active",
-      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "route": "blackhole 203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
       "dry_run": false,
       "started_at": "2026-06-13T09:41:07Z",
       "sample": {
@@ -283,7 +293,7 @@ Gibt die vollständige Sperrtabelle zurück — aktive und historische. Jeder Ei
       "threshold": 80000,
       "next_hop": "192.0.2.1",
       "community": "65000:666",
-      "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+      "route": "blackhole 203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
       "state": "active",
       "dry_run": false,
       "manual": false,
@@ -327,9 +337,10 @@ und `target` (eine IP) entgegen und liefert standardmäßig die letzte Stunde:
 }
 ```
 
-Wenn der Speicher deaktiviert ist, lautet die Antwort `{"available": false, "events": []}`. Die
-vollständige Feldliste, die Query-Regeln sowie das Modell für Operator-Identität und
-Tenant-Bezug finden Sie auf der eigenen Seite [Audit-Log](/docs/audit).
+Wenn der Speicher deaktiviert ist, lautet die Antwort `{"available": false, "events": []}`. Beachten
+Sie, dass Audit-Datensätze `dry_run` als Ganzzahl (`0`/`1`) kodieren, nicht als JSON-Boolean wie an
+anderer Stelle auf dieser Seite. Die vollständige Feldliste, die Query-Regeln sowie das Modell für
+Operator-Identität und Tenant-Bezug finden Sie auf der eigenen Seite [Audit-Log](/docs/audit).
 
 ### POST /api/v1/ban
 
@@ -376,7 +387,10 @@ existiert, liefert er HTTP `404` zurück.
 ### POST /api/v1/config/reload
 
 Liest die Konfigurationsdatei neu von der Festplatte ein und wendet sie an — derselbe Effekt wie das
-Senden von `SIGHUP`. Der Body ist leer; der JSON-Content-Type ist dennoch erforderlich.
+Senden von `SIGHUP`. Der Body ist leer; der JSON-Content-Type ist dennoch erforderlich. Anders als
+`ban`/`unban` erfordert dieser Endpunkt ein **ungebundenes (Admin-)Token**: Ein Reload tauscht die
+gesamte Konfiguration aus, sodass ein tenant-bezogenes Token mit `403` und `config reload is
+restricted to unscoped (admin) tokens` abgewiesen wird.
 
 ```json
 {

@@ -71,7 +71,7 @@ llegar a hacer.
   normalmente tranquilo no se convierte en un gatillo hipersensible que se dispara ante cualquier
   ráfaga pequeña.
 - **Congelada bajo ataque.** Mientras un host está bajo ataque — incluida la cola de
-  `unban_hysteresis_seconds` posterior a la caída de la tasa — su línea base no se entrena en
+  [`unban_hysteresis_seconds`](/docs/mitigation) posterior a la caída de la tasa — su línea base no se entrena en
   absoluto. El tráfico de ataque nunca le enseña al host que el ataque es normal.
 - **Aprendizaje acotado.** Fuera de los ataques, cada muestra de entrenamiento se limita a
   `baseline × factor` antes de actualizar la EWMA. Por lo tanto, una rampa lenta de un atacante
@@ -92,7 +92,11 @@ El propio tráfico de calentamiento entrena la línea base inicial. Un host que 
 inundación por debajo del umbral estático la primera vez que Kapkan lo ve aprende esa inundación
 como "normal" — acotada por el techo estático, pero no hay una referencia limpia para un host
 atacado desde el primer instante. Configura `warmup_seconds` con al menos unos cuantos múltiplos de
-`half_life_seconds` para que la línea base converja antes de empezar a aplicar restricciones.
+`half_life_seconds` para que la línea base converja antes de empezar a aplicar restricciones. El
+`600` del ejemplo está muy por debajo de esa pauta — está bien cuando los hosts llegan limpios y
+quieres que la línea base aplique restricciones antes, pero si un host pudiera estar inundado a
+primera vista, eleva `warmup_seconds` hacia unos cuantos múltiplos de `half_life_seconds` (p. ej.
+`10800` con la semivida predeterminada de `3600`).
 </Callout>
 
 ## Visibilidad
@@ -126,6 +130,7 @@ aplican a ese total.
 
 - [Detección y umbrales](/docs/detection) — los umbrales estáticos dentro de los cuales se sitúan las líneas base.
 - [Hostgroups](/docs/hostgroups) — umbrales por grupo, totales y sobrescrituras de la línea base.
+- [Mitigación RTBH](/docs/mitigation) — el ciclo de vida del bloqueo y la cola de `unban_hysteresis_seconds`.
 - [Referencia de configuración](/docs/configuration) — cada clave del archivo YAML.
 - [API REST](/docs/api) — la instantánea de `/api/v1/hosts` y sus campos `baseline`.
 - [Puesta en marcha](/docs/going-live) — valida la detección en dry-run antes de anunciar.

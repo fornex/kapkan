@@ -7,9 +7,10 @@ export const metadata = {
 # Referencia de CLI
 
 Kapkan es un único binario. Todo lo que hace se selecciona mediante opciones de línea de comandos
-al arrancar; no hay subcomandos más allá de los dos modos de utilidad que se describen abajo. Todos
-los registros van a **stderr**, de modo que la API REST y las métricas en stdout se mantienen limpias
-para canalizarlas (piping).
+al arrancar; no hay subcomandos más allá de los modos de utilidad que se describen abajo. Todos
+los registros van a **stderr**; la API REST y las métricas de Prometheus se sirven por HTTP en
+`api.listen` (predeterminado `127.0.0.1:8080`), mientras que las flags de utilidad (`-version`,
+`-dump-schema`) imprimen su salida en **stdout**.
 
 ```sh
 kapkan [flags]
@@ -24,6 +25,8 @@ kapkan [flags]
 | `-log-level <lvl>` | `info` | Nivel mínimo de registro: `debug`, `info`, `warn`, `error`. Un valor no reconocido recae en `info`. |
 | `-check-config <path>` | — | Valida el archivo de configuración en `<path>` y termina; **no** inicia el demonio. Consulta [más abajo](#validar-una-configuración). |
 | `-dump-schema` | `false` | Imprime el esquema JSON de la configuración en stdout y termina. Consulta [más abajo](#volcar-el-esquema). |
+| `-version` | `false` | Imprime la versión de compilación y termina. La misma versión se expone en tiempo de ejecución mediante `/api/v1/status` y la [métrica](/docs/metrics) `kapkan_build_info`. |
+| `-check-update` | `false` | Ejecuta la [comprobación de actualizaciones](/docs/configuration) opcional una vez y termina: `0` actualizado, `10` hay una actualización disponible, `1` ante un error. Consulta la API de Releases de GitHub; envía solo la propia solicitud, nunca la identidad del nodo ni la configuración. |
 
 <Callout type="info" title="¿json o text?">
 Usa `-log-format text` para el desarrollo local; es el formato que emplean la Guía rápida y el
@@ -51,10 +54,11 @@ El archivo de configuración se puede recargar en tiempo de ejecución sin reini
 (`systemctl reload kapkan`) o `POST /api/v1/config/reload`. Consulta la
 [referencia de configuración](/docs/configuration) para saber qué se recarga y qué queda fijado al arrancar.
 
-## Subcomandos de utilidad
+## Flags de utilidad
 
-Estas dos flags terminan antes de que arranque el demonio; nunca abren un listener ni envían un
-anuncio, así que son seguras de ejecutar en un host de producción.
+Estas flags terminan antes de que arranque el demonio; nunca abren un listener ni envían un
+anuncio de ruta, así que son seguras de ejecutar en un host de producción. (`-check-update` realiza
+una única solicitud saliente a la API de releases; las demás son totalmente offline.)
 
 ### Validar una configuración
 
@@ -82,6 +86,29 @@ kapkan -dump-schema
 
 Imprime el esquema JSON de la configuración en stdout y termina con `0` (o con `1` ante un error
 interno). El [generador de configuración](/config) usa este esquema para validar los campos en tu navegador.
+
+### Imprimir la versión
+
+```sh
+kapkan -version
+```
+
+Imprime la versión de compilación (la etiqueta de la release más la revisión corta de VCS cuando se
+conoce) en stdout y termina. La misma cadena se sirve en tiempo de ejecución en `/api/v1/status` y
+la transporta la [métrica](/docs/metrics) `kapkan_build_info`, así que puedes confirmar la versión de
+un binario localmente sin ninguna salida de red.
+
+### Comprobar actualizaciones
+
+```sh
+kapkan -check-update
+```
+
+Ejecuta la comprobación [`update_check`](/docs/configuration) una vez bajo demanda y termina: `0` si
+está actualizado, `10` si hay una release más reciente disponible, `1` ante un error. Consulta la API
+de Releases de GitHub y envía solo la propia solicitud (tu IP y un User-Agent genérico), nunca la
+identidad del nodo, la configuración ni datos de ataques. La comprobación periódica en proceso está
+**desactivada de forma predeterminada**; esta flag funciona independientemente de ese ajuste.
 
 ## Próximos pasos
 

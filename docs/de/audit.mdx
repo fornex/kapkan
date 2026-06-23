@@ -26,11 +26,14 @@ im Prozess-Log.
 
 ## Was aufgezeichnet wird
 
-Drei Aktionen werden auditiert, jeweils sowohl bei Erfolg als auch bei Fehlschlag:
+Drei Aktionen werden auditiert. `ban` und `config_reload` werden sowohl bei Erfolg als auch bei
+Fehlschlag aufgezeichnet; `unban` wird nur bei Erfolg aufgezeichnet — ein fehlgeschlagener oder
+wirkungsloser Unban gibt einen Fehler zurück und wird nicht in die Spur geschrieben, obwohl er
+dennoch protokolliert wird:
 
 | Aktion | Wann | Aufgezeichnete Ergebnisse (`result`) |
 | --- | --- | --- |
-| `ban` | `POST /api/v1/ban` | `active` (oder `withdrawn`/`dry_run` Ban-Zustand) bei Erfolg; `rejected`, wenn eine Sicherheitsabsicherung ihn verweigert. |
+| `ban` | `POST /api/v1/ban` | `active` bei Erfolg; `rejected`, wenn eine Sicherheitsabsicherung ihn verweigert. Ein Dry-Run-Ban zeichnet weiterhin `active` auf — die Simulation wird über das separate Feld `dry_run` signalisiert. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` bei Erfolg. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` bei Erfolg; `error`, wenn die neue Konfiguration nicht geparst oder validiert werden kann. |
 

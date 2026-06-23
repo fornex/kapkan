@@ -6,7 +6,8 @@ export const metadata = {
 
 # Multi-tenancy
 
-One Kapkan instance can serve many customers (an MSP or IDC use case) and give each a token
+One Kapkan instance can serve many customers (a managed service provider (MSP) or internet
+data center (IDC) use case) and give each a token
 that sees and touches **only their own** attacks, bans and hosts. A tenant is just an optional
 label on a [hostgroup](/docs/hostgroups) — there is no new top-level object, no separate tenant
 registry, and the detection hot path is untouched.
@@ -70,8 +71,10 @@ tenant's data.
 - **Reads** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` and `/audit` return only rows
   whose owning group carries the caller's tenant. `/status` is rebuilt per scope: a scoped token
   gets only its own hostgroups and counts, never the global protected networks, the global
-  thresholds, or the deployment-wide fallback group — so a tenant never learns another's prefixes
-  or BGP posture. The [audit log](/docs/audit) is bound to the caller's tenant server-side, and a
+  thresholds, or the deployment-wide fallback group's config row — so a tenant never learns
+  another's prefixes or BGP posture. A house tenant (the fallback group labeled with a `tenant`)
+  still sees its catch-all attacks, bans and hosts; only that group's config row is hidden. The
+  [audit log](/docs/audit) is bound to the caller's tenant server-side, and a
   `target` filter naming an out-of-tenant address is refused — no cross-tenant existence oracle.
 - **Mutations** — a scoped operator may `ban`/`unban` only within its own prefixes. A target
   outside the tenant returns a uniform `403` whether or not a ban exists, so a tenant cannot
@@ -81,7 +84,8 @@ tenant's data.
   (a reused secret), the request is refused rather than resolved to the wider scope.
 
 <Callout type="info" title="/metrics and the dashboard">
-`/metrics` is not tenant-scoped — it stays an admin/operator scrape surface. The dashboard
+`/metrics` is not tenant-scoped — it stays open for Prometheus scraping and requires no token,
+even when API auth is configured. The dashboard
 shell is shared (it holds no data of its own); every data call it makes is filtered by the
 token pasted into it, so a tenant's viewer token shows only that tenant's data.
 </Callout>

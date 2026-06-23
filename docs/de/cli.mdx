@@ -7,8 +7,10 @@ export const metadata = {
 # CLI-Referenz
 
 Kapkan ist ein einzelnes Binary. Alles, was es tut, wird beim Start über Kommandozeilen-Flags
-ausgewählt — es gibt keine Subcommands über die beiden Hilfsmodi unten hinaus. Alle Logs gehen
-nach **stderr**, sodass die REST-API und die Metriken auf stdout für das Piping sauber bleiben.
+ausgewählt — es gibt keine Subcommands über die Hilfsmodi unten hinaus. Alle Logs gehen
+nach **stderr**; die REST-API und die Prometheus-Metriken werden über HTTP auf `api.listen`
+(Standard `127.0.0.1:8080`) bereitgestellt, während die Hilfs-Flags (`-version`, `-dump-schema`)
+ihre Ausgabe nach **stdout** schreiben.
 
 ```sh
 kapkan [flags]
@@ -23,6 +25,8 @@ kapkan [flags]
 | `-log-level <lvl>` | `info` | Minimales Log-Level: `debug`, `info`, `warn`, `error`. Ein unbekannter Wert fällt auf `info` zurück. |
 | `-check-config <path>` | — | Validiert die Konfigurationsdatei unter `<path>` und beendet sich — startet den Daemon **nicht**. Siehe [unten](#eine-konfiguration-validieren). |
 | `-dump-schema` | `false` | Gibt das JSON-Schema der Konfiguration auf stdout aus und beendet sich. Siehe [unten](#das-schema-ausgeben). |
+| `-version` | `false` | Gibt die Build-Version aus und beendet sich. Dieselbe Version wird zur Laufzeit über `/api/v1/status` und die `kapkan_build_info`-[Metrik](/docs/metrics) bereitgestellt. |
+| `-check-update` | `false` | Führt die optionale [Update-Prüfung](/docs/configuration) einmalig aus und beendet sich — `0` aktuell, `10` ein Update ist verfügbar, `1` bei einem Fehler. Fragt die GitHub-Releases-API ab; sendet nur die Anfrage selbst, niemals Knotenidentität oder Konfiguration. |
 
 <Callout type="info" title="json oder text?">
 Verwenden Sie `-log-format text` für die lokale Entwicklung — es ist das Format, das der
@@ -52,10 +56,12 @@ Die Konfigurationsdatei ist zur Laufzeit ohne Neustart neu ladbar — senden Sie
 [Konfigurationsreferenz](/docs/configuration) dazu, was neu geladen wird und was beim Start
 fixiert ist.
 
-## Hilfs-Subcommands
+## Hilfs-Flags
 
-Diese beiden Flags beenden sich, bevor der Daemon startet — sie öffnen niemals einen Listener und
-senden keine Ankündigung, sodass sie sich gefahrlos auf einem Produktivhost ausführen lassen.
+Diese Flags beenden sich, bevor der Daemon startet — sie öffnen niemals einen Listener und
+senden keine Route-Ankündigung, sodass sie sich gefahrlos auf einem Produktivhost ausführen
+lassen. (`-check-update` stellt eine einzelne ausgehende Anfrage an die Releases-API; die
+übrigen sind vollständig offline.)
 
 ### Eine Konfiguration validieren
 
@@ -85,6 +91,30 @@ kapkan -dump-schema
 Gibt das JSON-Schema der Konfiguration auf stdout aus und endet mit `0` (oder `1` bei einem
 internen Fehler). Der [Konfigurations-Builder](/config) nutzt dieses Schema, um Felder direkt in
 Ihrem Browser zu prüfen.
+
+### Die Version ausgeben
+
+```sh
+kapkan -version
+```
+
+Gibt die Build-Version (Release-Tag plus kurze VCS-Revision, sofern bekannt) auf stdout aus und
+beendet sich. Dieselbe Zeichenkette wird zur Laufzeit auf `/api/v1/status` bereitgestellt und von
+der `kapkan_build_info`-[Metrik](/docs/metrics) getragen — so können Sie die Version eines Binarys
+lokal ohne jeglichen Egress bestätigen.
+
+### Nach Updates suchen
+
+```sh
+kapkan -check-update
+```
+
+Führt die [`update_check`](/docs/configuration) einmalig auf Anfrage aus und beendet sich: `0`,
+wenn aktuell, `10`, wenn ein neueres Release verfügbar ist, `1` bei einem Fehler. Es fragt die
+GitHub-Releases-API ab und sendet nur die Anfrage selbst (Ihre IP und einen generischen
+User-Agent) — niemals Knotenidentität, Konfiguration oder Angriffsdaten. Die periodische
+In-Process-Prüfung ist **standardmäßig deaktiviert**; dieses Flag funktioniert unabhängig von
+dieser Einstellung.
 
 ## Nächste Schritte
 

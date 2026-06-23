@@ -133,7 +133,8 @@ notify:
 | ataque iniciado, host con blackhole o desviado (divert) | `ban` |
 | ataque iniciado, solo alerta (sin baneo) | `attack_details` |
 | ataque finalizado, se retiró un baneo | `unban` |
-| **cualquier evento mientras `dry_run` es true** | `attack_details` |
+| **cualquier evento con alcance de host mientras `dry_run` es true** | `attack_details` |
+| evento con alcance de grupo (`calculation: total`) | *omitido — el hook no se invoca* |
 
 <Callout type="warning" title="El dry-run nunca emite ban/unban">
 En dry-run Kapkan no anuncia nada, pero un script de baneo de FastNetMon *sí* aplicaría
@@ -199,7 +200,8 @@ pueden añadir campos nuevos sin romper tu integración.
 | `mbps` | number | Megabits por segundo corregidos por muestreo. |
 | `flows_per_sec` | number | Flows por segundo corregidos por muestreo. |
 | `ban_state` | string | `active`, `withdrawn` o `rejected`, cuando se consultó la mitigación. |
-| `route` | string | El anuncio de ruta blackhole (la ruta hipotética en dry-run). |
+| `method` | string | `blackhole` o `flowspec`: el método de mitigación que produjo el baneo; se omite cuando no hay baneo. |
+| `route` | string | El anuncio (en dry-run: el que se haría): una ruta blackhole, o un resumen `flowspec: ...` de las reglas generadas. |
 | `dry_run` | boolean | Indica si la mitigación estaba en dry-run para este evento. |
 | `at` | string | Marca de tiempo RFC 3339 del evento. |
 | `classification` | object | Vector de ataque inferido; solo en `attack_started`. |
@@ -232,7 +234,7 @@ en dry-run:
   "mbps": 8421.5,
   "flows_per_sec": 9400,
   "ban_state": "active",
-  "route": "203.0.113.45/32",
+  "route": "blackhole 203.0.113.45/32 next-hop 192.0.2.1 community 65000:666",
   "dry_run": true,
   "at": "2026-06-13T14:22:07Z",
   "classification": {
@@ -274,5 +276,5 @@ en dry-run:
 ## Relacionado
 
 - [API REST](/docs/api): consulta ataques activos y recientes mediante programación.
-- [Métricas](/docs/metrics): `notify_notifications_total` por canal y resultado.
+- [Métricas](/docs/metrics): `kapkan_notify_notifications_total` por canal y resultado.
 - [Referencia de configuración](/docs/configuration): todas las claves del archivo YAML.

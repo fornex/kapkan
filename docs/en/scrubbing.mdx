@@ -21,7 +21,7 @@ scrubbing:
   # communities: ["65000:200", "65000:201"]   # or a full set
   local_pref: 200              # often raised so the divert route wins selection
 
-mitigation: divert             # or use divert as an escalation rung (see below)
+mitigation: divert             # or use divert as an escalation rung (see below); an escalation: ladder supersedes this single mitigation: when present
 ```
 
 ## How it works
@@ -29,8 +29,10 @@ mitigation: divert             # or use divert as an escalation rung (see below)
 Divert reuses the RTBH host-route machinery. Where a blackhole announces the victim's
 `/32` or `/128` toward a discard next-hop with your RTBH community, a divert announces the
 **same** host route toward the scrubbing center's next-hop with the divert community (and an
-optional `LOCAL_PREF`, usually raised so the more-specific divert route wins path
-selection). Your edge then carries that victim's traffic to the scrubber; the scrubber drops
+optional `LOCAL_PREF`). The host route already beats the covering aggregate by specificity;
+`LOCAL_PREF` only arbitrates best-path selection between same-prefix announcements, so raising
+it keeps the divert path winning over any other route to that exact host. Your edge then
+carries that victim's traffic to the scrubber; the scrubber drops
 the attack and reinjects the clean remainder toward the real destination.
 
 Reinjection of cleaned traffic — over GRE, a VRF, or a separate routing context — is the
@@ -51,7 +53,7 @@ bans, never the route a live ban already announced.
 | `next_hop6` | The scrubbing center's IPv6 next-hop. **Required** when the deployment protects IPv6 space — there is no discard-style fallback for diversion, traffic must reach a real scrubber. |
 | `community` | Optional divert community in `ASN:value` form. The next-hop does the rerouting; the community is an extra signal for your edge. |
 | `communities` | Optional community **list** that overrides `community` when set. |
-| `local_pref` | Optional `LOCAL_PREF` attached to the divert route, often raised so it wins selection. Default `0` omits it. |
+| `local_pref` | Optional `LOCAL_PREF` attached to the divert route. It arbitrates best-path selection between same-prefix announcements (not specificity — the host route already wins that), so raising it keeps the divert path winning. Default `0` omits it. |
 
 The divert route Kapkan builds reads as `divert <prefix> next-hop <next_hop> community
 <community>` — the string surfaced in the `route` field of the [ban object](/docs/api), with

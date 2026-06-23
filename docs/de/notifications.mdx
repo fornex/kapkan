@@ -135,7 +135,8 @@ Kapkan-Ereignis:
 | Angriff begonnen, Host blackholed oder umgeleitet | `ban` |
 | Angriff begonnen, nur Alarm (keine Sperre) | `attack_details` |
 | Angriff beendet, eine Sperre wurde zurückgenommen | `unban` |
-| **jedes Ereignis, während `dry_run` true ist** | `attack_details` |
+| **jedes Host-scoped-Ereignis, während `dry_run` true ist** | `attack_details` |
+| Group-scoped-Ereignis (`calculation: total`) | *übersprungen — Hook wird nicht aufgerufen* |
 
 <Callout type="warning" title="Dry-Run gibt niemals ban/unban aus">
 Im Dry-Run kündigt Kapkan nichts an — aber ein FastNetMon-Ban-Skript *würde* den Host
@@ -200,7 +201,8 @@ ohne Sie zu beeinträchtigen.
 | `mbps` | number | Sampling-korrigierte Megabit pro Sekunde. |
 | `flows_per_sec` | number | Sampling-korrigierte Flows pro Sekunde. |
 | `ban_state` | string | `active`, `withdrawn` oder `rejected`, wenn die Mitigation konsultiert wurde. |
-| `route` | string | Die angekündigte Blackhole-Route (die potenzielle Route im Dry-Run). |
+| `method` | string | `blackhole` oder `flowspec` — die Mitigationsmethode, die die Sperre erzeugt hat; entfällt, wenn keine Sperre vorliegt. |
+| `route` | string | Die (im Dry-Run: potenzielle) Ankündigung: eine Blackhole-Route oder eine `flowspec: ...`-Zusammenfassung der generierten Regeln. |
 | `dry_run` | boolean | Ob die Mitigation für dieses Ereignis im Dry-Run-Modus war. |
 | `at` | string | RFC-3339-Zeitstempel des Ereignisses. |
 | `classification` | object | Abgeleiteter Angriffsvektor — nur bei `attack_started`. |
@@ -232,7 +234,7 @@ erkannt:
   "mbps": 8421.5,
   "flows_per_sec": 9400,
   "ban_state": "active",
-  "route": "203.0.113.45/32",
+  "route": "blackhole 203.0.113.45/32 next-hop 192.0.2.1 community 65000:666",
   "dry_run": true,
   "at": "2026-06-13T14:22:07Z",
   "classification": {
@@ -274,5 +276,5 @@ erkannt:
 ## Verwandte Themen
 
 - [REST-API](/docs/api) — aktive und kürzliche Angriffe programmatisch abfragen.
-- [Metriken](/docs/metrics) — `notify_notifications_total` nach Kanal und Ergebnis.
+- [Metriken](/docs/metrics) — `kapkan_notify_notifications_total` nach Kanal und Ergebnis.
 - [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.

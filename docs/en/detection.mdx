@@ -244,7 +244,7 @@ The classifier recognizes these `type` values:
 
 How a vector is chosen:
 
-- A signature needs a **dominant share** — more than half the windowed traffic — to win. Amplification
+- A signature needs a **dominant share** — at least half (>= 0.5) the windowed traffic — to win. Amplification
   is checked first (most specific), then pure SYN, then fragments, then ICMP, UDP and TCP volumetric
   floods.
 - An **amplification** vector also requires response-sized packets from the reflected service port:
