@@ -580,6 +580,36 @@ sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 sudo systemctl reload kapkan   # SIGHUP: hot-reload config
 ```
 
+## Upgrading
+
+`deploy/update.sh` performs a safe, signed upgrade on the host:
+
+```sh
+sudo deploy/update.sh v1.3.0   # or: sudo deploy/update.sh   (latest stable)
+```
+
+It verifies the download (cosign signature over `checksums.txt`, then the
+SHA-256), **preflights the new binary against the live config as the `kapkan`
+user with the env file loaded** (so schema drift, files the daemon can't read,
+or missing secrets are caught *before* any swap — the running daemon is left
+untouched on failure), snapshots the config, swaps the binary atomically
+(keeping the previous one at `…/kapkan.old`), restarts, and **rolls back both the
+binary and the config if `/healthz` does not report ready** within the deadline.
+
+Active mitigation survives the restart: BGP Graceful Restart has the peer retain
+kapkan's routes across the gap, and persisted bans are re-announced on startup
+before End-of-RIB (set `ban.state_file`), so there is no need to wait for zero
+active bans. The `/healthz` endpoint (unauthenticated, `503` until fully started)
+is the readiness signal; the unit's `StartLimit*` turns a bad binary into a
+`failed` state the script can detect rather than a restart loop.
+
+You can also check for a newer release at any time:
+
+```sh
+kapkan -version        # the running version
+kapkan -check-update   # exit 10 if a newer release exists (0 = up to date)
+```
+
 ## Development
 
 ```sh
