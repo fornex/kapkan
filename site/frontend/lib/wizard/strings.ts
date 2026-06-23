@@ -49,6 +49,7 @@ export type WizardChrome = {
     ban: string;
     notify: string;
     api: string;
+    updates: string;
   };
   validation: WizardValidation;
 };
@@ -86,6 +87,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
       ban: "Ban lifecycle",
       notify: "Notifications (Telegram)",
       api: "API",
+      updates: "Updates",
     },
     validation: {
       required: "required",
@@ -137,6 +139,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
       ban: "Жизненный цикл бана",
       notify: "Уведомления (Telegram)",
       api: "API",
+      updates: "Обновления",
     },
     validation: {
       required: "обязательно",
@@ -188,6 +191,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
       ban: "Ban-Lebenszyklus",
       notify: "Benachrichtigungen (Telegram)",
       api: "API",
+      updates: "Updates",
     },
     validation: {
       required: "erforderlich",
@@ -239,6 +243,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
       ban: "Cycle de vie du ban",
       notify: "Notifications (Telegram)",
       api: "API",
+      updates: "Mises à jour",
     },
     validation: {
       required: "requis",
@@ -290,6 +295,7 @@ export const wizardChrome: Record<Locale, WizardChrome> = {
       ban: "Ciclo de vida del baneo",
       notify: "Notificaciones (Telegram)",
       api: "API",
+      updates: "Actualizaciones",
     },
     validation: {
       required: "obligatorio",
