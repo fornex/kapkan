@@ -53,7 +53,11 @@ stark abgeschottet: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `MemoryDenyWriteExecute` und mehr. Sie deklariert außerdem `StateDirectory=kapkan` (Modus
 `0700`) und stellt dem Daemon damit ein beschreibbares `/var/lib/kapkan` für
 [`ban.state_file`](/docs/mitigation) bereit, während `ProtectSystem=strict` den Rest des
-Dateisystems schreibgeschützt hält.
+Dateisystems schreibgeschützt hält. Ein Crash-Loop-Schutz (`StartLimitIntervalSec=60`,
+`StartLimitBurst=4`) versetzt die Unit in den Zustand `failed`, wenn das Binary innerhalb
+einer Minute viermal nicht startet, sodass ein fehlerhaftes Upgrade sichtbar wird, statt zu
+flattern — das [Upgrade-Skript](/docs/upgrading) stützt sich darauf zusammen mit der
+`/healthz`-Readiness-Probe.
 
 <Callout type="info" title="BGP an Port 179 binden">
 Kapkan benötigt im dry-run oder beim Peering von einem hohen lokalen Port keine besonderen
@@ -142,9 +146,12 @@ liefert der Server `415`), und wenn die Authentifizierung aktiviert ist, benöti
 einen ungescopeten (Admin-)Bearer-Token — ein mandantengebundener Token erhält `403`.
 
 Die meisten Schlüssel werden live neu geladen, darunter `dry_run`, Schwellenwerte,
-`networks`, hostgroups, Baselines und Benachrichtigungseinstellungen. Einige wenige
-Dimensionierungsparameter erfordern einen Neustart — namentlich die Ring-Dimensionierung
-`samples.buffer_flows` / `flows_per_attack`.
+`networks`, hostgroups, Baselines, Benachrichtigungseinstellungen und `sampling.default_rate`.
+Sechs Dinge sind beim Start fest und ein Reload, der eines davon ändert, wird abgelehnt
+(Neustart erforderlich): die `listen`-Adressen, die BGP-Identität (`bgp.local_asn` /
+`router_id`), `api.listen`, die `samples`-Einstellungen, die `storage`-Einstellungen und die
+`geoip`-Einstellungen. Siehe die [Konfigurationsreferenz](/docs/configuration) und, um das
+Binary zu wechseln, ohne die Mitigation zu unterbrechen, [Upgrade](/docs/upgrading).
 
 ## Aus dem Quellcode bauen
 

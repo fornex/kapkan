@@ -51,7 +51,11 @@ fortement cloisonnée : `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `MemoryDenyWriteExecute` et bien plus encore. Elle déclare également `StateDirectory=kapkan`
 (mode `0700`), offrant au démon un `/var/lib/kapkan` accessible en écriture pour
 [`ban.state_file`](/docs/mitigation), tandis que `ProtectSystem=strict` maintient le reste
-du système de fichiers en lecture seule.
+du système de fichiers en lecture seule. Un garde-fou contre les boucles de crash
+(`StartLimitIntervalSec=60`, `StartLimitBurst=4`) fait passer l'unité à l'état `failed` si le
+binaire échoue à démarrer quatre fois en moins d'une minute, de sorte qu'une mauvaise mise à
+niveau est observable plutôt que de s'emballer — le [script de mise à niveau](/docs/upgrading)
+s'appuie sur ce mécanisme conjointement avec la sonde de disponibilité `/healthz`.
 
 <Callout type="info" title="Lier BGP au port 179">
 Kapkan n'a besoin d'aucun privilège particulier en dry-run ou lorsqu'il établit un peering depuis
@@ -139,9 +143,12 @@ renvoie `415` sinon), et lorsque l'authentification est activée le rechargement
 Bearer non restreint (admin) — un jeton restreint à un locataire (tenant) reçoit `403`.
 
 La plupart des clés se rechargent à chaud, notamment `dry_run`, les seuils, `networks`, les
-hostgroups, les références (baselines) et les paramètres de notification. Quelques paramètres de
-dimensionnement nécessitent un redémarrage — en particulier le dimensionnement de l'anneau
-`samples.buffer_flows` / `flows_per_attack`.
+hostgroups, les références (baselines), les paramètres de notification et `sampling.default_rate`.
+Six éléments sont figés au démarrage, et un rechargement qui en modifie un est rejeté (redémarrage
+requis) : les adresses `listen`, l'identité BGP (`bgp.local_asn` / `router_id`), `api.listen`, les
+paramètres `samples`, les paramètres `storage` et les paramètres `geoip`. Consultez la
+[référence de configuration](/docs/configuration) et, pour changer le binaire sans interrompre la
+mitigation, [Mise à niveau](/docs/upgrading).
 
 ## Compilation depuis les sources
 

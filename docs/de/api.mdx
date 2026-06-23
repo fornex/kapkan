@@ -55,6 +55,7 @@ beschränkt und liefert andernfalls `403`. Siehe
 | POST | `/api/v1/unban` | Eine Sperre manuell zurückziehen. |
 | POST | `/api/v1/config/reload` | Konfigurationsdatei neu einlesen (entspricht `SIGHUP`). |
 | GET | `/metrics` | Prometheus-Metriken. |
+| GET | `/healthz` | Unauthentifizierte Liveness-/Readiness-Probe: `503`, bis vollständig gestartet, danach `200`. |
 
 Alle Antworten sind JSON. Fehler liefern ein Objekt der Form `{"error": "..."}` mit einem
 passenden HTTP-Status zurück.
@@ -86,8 +87,9 @@ Gibt den aktuellen Betriebsmodus und eine Zusammenfassung dessen zurück, was Ka
 `dry_run` gibt den globalen Modus an: Bei `true` wird kein Blackhole an Ihre Router angekündigt.
 `version` ist der laufende Build, stets vorhanden und ohne ausgehenden Datenverkehr. `update_available`
 ist `false`, sofern nicht der opt-in [`update_check`](/docs/configuration) aktiviert ist und eine
-neuere Version findet — dann ist es `true` und `latest_version` sowie `latest_is_security` werden
-zusätzlich mitgeliefert. `thresholds` und `hostgroups` spiegeln die aktive Konfiguration wider; ihre
+neuere Version findet — dann ist es `true` und `latest_version`, `latest_is_security` und `latest_url`
+werden zusätzlich mitgeliefert. Siehe [Aktualisieren](/docs/upgrading).
+`thresholds` und `hostgroups` spiegeln die aktive Konfiguration wider; ihre
 vollständige Struktur finden Sie unter [Erkennung](/docs/detection) und [Hostgroups](/docs/hostgroups).
 
 ### GET /api/v1/attacks
@@ -413,6 +415,19 @@ Konfiguration unverändert und der Endpunkt liefert HTTP `400` mit dem Fehler zu
 Stellt Prometheus-Metriken im standardmäßigen Text-Expositionsformat bereit. Dieser Endpunkt liegt
 nicht unter `/api/v1` und wird ohne das Bearer-Token bereitgestellt, damit ein Scraper ihn erreichen
 kann. Die vollständige Metrikliste finden Sie unter [Metriken](/docs/metrics).
+
+### GET /healthz
+
+Eine Liveness-/Readiness-Probe, nicht unter `/api/v1` und **ohne** Bearer-Token bereitgestellt (sie
+gibt nichts preis), damit ein Supervisor oder das Upgrade-Skript [`update.sh`](/docs/upgrading)
+bestätigen kann, dass der Daemon nach einem Neustart läuft. Sie liefert `503 starting`, bis jede
+Komponente gestartet ist, danach `200 ok`. Da der API-Listener erst zu akzeptieren beginnt, sobald
+der Daemon gestartet ist, bedeutet jedes `200` hier, dass die Konfiguration geparst wurde, die
+Komponenten laufen und Kapkan bereitsteht.
+
+```sh
+curl -fsS localhost:8080/healthz   # exits non-zero (503) until ready, then prints "ok"
+```
 
 ## Verwandt
 

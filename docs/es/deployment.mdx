@@ -50,6 +50,10 @@ fuertemente aislada en un sandbox: `NoNewPrivileges`, `ProtectSystem=strict`, `P
 `MemoryDenyWriteExecute` y más. También declara `StateDirectory=kapkan` (modo `0700`),
 lo que proporciona al daemon un `/var/lib/kapkan` escribible para [`ban.state_file`](/docs/mitigation)
 mientras que `ProtectSystem=strict` mantiene el resto del sistema de archivos en modo solo lectura.
+Una protección contra bucles de reinicio (`StartLimitIntervalSec=60`, `StartLimitBurst=4`) lleva la
+unidad al estado `failed` si el binario no logra arrancar cuatro veces en un minuto, de modo que una
+actualización defectuosa es observable en lugar de quedar reintentándose sin fin — el [script de
+actualización](/docs/upgrading) se apoya en esto junto con la sonda de disponibilidad `/healthz`.
 
 <Callout type="info" title="Enlazar BGP al puerto 179">
 Kapkan no necesita privilegios especiales en modo dry-run ni cuando establece el peering
@@ -138,9 +142,12 @@ servidor devuelve `415`), y cuando la autenticación está habilitada la recarga
 Bearer sin ámbito (de administrador) — un token con ámbito de inquilino obtiene un `403`.
 
 La mayoría de las claves se recargan en vivo, incluidas `dry_run`, los umbrales, `networks`,
-los hostgroups, las líneas base y los ajustes de notificación. Algunos parámetros de
-dimensionamiento requieren un reinicio, en particular el dimensionamiento del ring buffer
-`samples.buffer_flows` / `flows_per_attack`.
+los hostgroups, las líneas base, los ajustes de notificación y `sampling.default_rate`. Seis
+elementos quedan fijados al arrancar, y una recarga que cambie cualquiera de ellos es rechazada
+(requiere reinicio): las direcciones `listen`, la identidad BGP (`bgp.local_asn` / `router_id`),
+`api.listen`, los ajustes de `samples`, los ajustes de `storage` y los ajustes de `geoip`. Consulta
+la [referencia de configuración](/docs/configuration) y, para cambiar el binario sin perder la
+mitigación, [Actualización](/docs/upgrading).
 
 ## Compilar desde el código fuente
 

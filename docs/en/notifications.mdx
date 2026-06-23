@@ -1,7 +1,7 @@
 export const metadata = {
   title: "Notifications",
   description:
-    "Alert on attack start and end over Telegram, Slack, email, webhook and an exec hook — with a versioned JSON payload schema.",
+    "Alert on attack start and end — and on a newer release — over Telegram, Slack, email, webhook and an exec hook, with a versioned JSON payload schema.",
 };
 
 # Notifications
@@ -10,6 +10,11 @@ Kapkan fires a notification on every attack lifecycle event — when an attack i
 first detected (`attack_started`) and when it clears (`attack_ended`). Each event
 is delivered to every configured channel: Telegram, Slack, email, a generic JSON
 webhook and an exec hook.
+
+It also fires a one-off `update_available` event through those same channels when the
+opt-in update check finds a newer release and `update_check.notify` is enabled — see
+[Upgrading](/docs/upgrading). It carries the version fields instead of the attack fields,
+and the FastNetMon-format exec hook (which has no equivalent action) skips it.
 
 Delivery is best-effort and asynchronous. A slow or failing channel never stalls
 detection or mitigation, and each channel is bounded by its own worker pool — under
@@ -85,7 +90,7 @@ Set `notify.exec.command` to the absolute path of an existing executable. On eve
 event Kapkan runs it directly — **no shell** — with:
 
 - The [callback payload](#callback-payload-schema) JSON on **stdin**.
-- The event name (`attack_started` or `attack_ended`) as **`argv[1]`**.
+- The event name (`attack_started`, `attack_ended` or `update_available`) as **`argv[1]`**.
 - A **minimal environment**: only `PATH`, `HOME`, `TZ`, `LANG`, `USER` and `TMPDIR`
   are passed through. The daemon's secrets (bot tokens, SMTP credentials) are never
   inherited by the hook or its children.
@@ -129,6 +134,7 @@ notify:
 | attack ended, a ban was withdrawn | `unban` |
 | **any host-scoped event while `dry_run` is true** | `attack_details` |
 | group-scoped (`calculation: total`) event | *skipped — hook not invoked* |
+| `update_available` event | *skipped — no FastNetMon equivalent* |
 
 <Callout type="warning" title="Dry-run never emits ban/unban">
 In dry-run Kapkan announces nothing — but a FastNetMon ban script *would* firewall the
@@ -180,7 +186,7 @@ bumped only on breaking changes, so new fields can be added without breaking you
 | Field | Type | Notes |
 | --- | --- | --- |
 | `schema_version` | integer | Always `1` in this release. |
-| `event` | string | `attack_started` or `attack_ended`. |
+| `event` | string | `attack_started`, `attack_ended`, or `update_available` (a newer release exists). |
 | `scope` | string | `host` (a single `target` is under attack) or `group` (a `calculation: total` hostgroup's summed traffic; `group` set, `target` absent). |
 | `target` | string | Attacked host — or, for outgoing attacks, the attacking host. Absent for group-scoped events. |
 | `group` | string | Owning hostgroup name; `global` for the implicit fallback group. |
@@ -198,6 +204,10 @@ bumped only on breaking changes, so new fields can be added without breaking you
 | `at` | string | RFC 3339 timestamp of the event. |
 | `classification` | object | Inferred attack vector — `attack_started` only. |
 | `sample` | object | Flow sample captured before the threshold tripped — `attack_started` only, when the traffic buffer is enabled. |
+| `current_version` | string | Running build — `update_available` only. |
+| `latest_version` | string | The newer release tag — `update_available` only. |
+| `security` | boolean | `true` when the release is flagged security-relevant — `update_available` only. |
+| `release_url` | string | The release's URL — `update_available` only. |
 
 The `classification` object carries the inferred `type` (for example `ntp_amplification`,
 `syn_flood`, `udp_flood`, or `mixed` when no signature matched), a `confidence` share

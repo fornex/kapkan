@@ -1,7 +1,7 @@
 export const metadata = {
   title: "Notifications",
   description:
-    "Alertez au début et à la fin d'une attaque via Telegram, Slack, e-mail, webhook et un hook exec — avec un schéma de charge utile JSON versionné.",
+    "Alertez au début et à la fin d'une attaque — ainsi qu'à la disponibilité d'une nouvelle version — via Telegram, Slack, e-mail, webhook et un hook exec, avec un schéma de charge utile JSON versionné.",
 };
 
 # Notifications
@@ -10,6 +10,12 @@ Kapkan déclenche une notification à chaque événement du cycle de vie d'une a
 lorsqu'une attaque est détectée pour la première fois (`attack_started`) et lorsqu'elle
 prend fin (`attack_ended`). Chaque événement est transmis à tous les canaux configurés :
 Telegram, Slack, e-mail, un webhook JSON générique et un hook exec.
+
+Il déclenche également un événement ponctuel `update_available` via ces mêmes canaux
+lorsque la vérification de mise à jour optionnelle détecte une nouvelle version et que
+`update_check.notify` est activé — voir [Mise à niveau](/docs/upgrading). Il transporte les
+champs de version au lieu des champs d'attaque, et le hook exec au format FastNetMon (qui
+n'a pas d'action équivalente) l'ignore.
 
 La livraison se fait au mieux et de façon asynchrone. Un canal lent ou défaillant ne
 bloque jamais la détection ni la mitigation, et chaque canal est limité par son propre
@@ -89,7 +95,7 @@ Définissez `notify.exec.command` sur le chemin absolu d'un exécutable existant
 événement, Kapkan l'exécute directement — **sans shell** — avec :
 
 - La charge utile [callback](#schéma-de-la-charge-utile-de-callback) JSON sur **stdin**.
-- Le nom de l'événement (`attack_started` ou `attack_ended`) en tant que **`argv[1]`**.
+- Le nom de l'événement (`attack_started`, `attack_ended` ou `update_available`) en tant que **`argv[1]`**.
 - Un **environnement minimal** : seules les variables `PATH`, `HOME`, `TZ`, `LANG`, `USER`
   et `TMPDIR` sont transmises. Les secrets du démon (jetons de bot, identifiants SMTP) ne
   sont jamais hérités par le hook ni par ses enfants.
@@ -135,6 +141,7 @@ notify:
 | attaque terminée, un bannissement a été retiré | `unban` |
 | **tout événement à portée d'hôte lorsque `dry_run` est vrai** | `attack_details` |
 | événement à portée de groupe (`calculation: total`) | *ignoré — le hook n'est pas invoqué* |
+| événement `update_available` | *ignoré — pas d'équivalent FastNetMon* |
 
 <Callout type="warning" title="Le dry-run n'émet jamais ban/unban">
 En dry-run, Kapkan n'annonce rien — mais un script de bannissement FastNetMon *placerait* l'hôte
@@ -187,7 +194,7 @@ champs peuvent être ajoutés sans rien casser chez vous.
 | Champ | Type | Notes |
 | --- | --- | --- |
 | `schema_version` | entier | Toujours `1` dans cette version. |
-| `event` | chaîne | `attack_started` ou `attack_ended`. |
+| `event` | chaîne | `attack_started`, `attack_ended` ou `update_available` (une nouvelle version existe). |
 | `scope` | chaîne | `host` (un seul `target` est attaqué) ou `group` (le trafic agrégé d'un hostgroup `calculation: total` ; `group` défini, `target` absent). |
 | `target` | chaîne | Hôte attaqué — ou, pour les attaques sortantes, l'hôte attaquant. Absent pour les événements à portée de groupe. |
 | `group` | chaîne | Nom du hostgroup propriétaire ; `global` pour le groupe de repli implicite. |
@@ -205,6 +212,10 @@ champs peuvent être ajoutés sans rien casser chez vous.
 | `at` | chaîne | Horodatage RFC 3339 de l'événement. |
 | `classification` | objet | Vecteur d'attaque déduit — `attack_started` uniquement. |
 | `sample` | objet | Échantillon de flows capturé avant le franchissement du seuil — `attack_started` uniquement, lorsque le tampon de trafic est activé. |
+| `current_version` | chaîne | Build en cours d'exécution — `update_available` uniquement. |
+| `latest_version` | chaîne | Le tag de la nouvelle version — `update_available` uniquement. |
+| `security` | booléen | `true` lorsque la version est signalée comme pertinente pour la sécurité — `update_available` uniquement. |
+| `release_url` | chaîne | L'URL de la version — `update_available` uniquement. |
 
 L'objet `classification` transporte le `type` déduit (par exemple `ntp_amplification`,
 `syn_flood`, `udp_flood`, ou `mixed` lorsqu'aucune signature ne correspond), une part de

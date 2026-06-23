@@ -51,6 +51,7 @@ devuelve `403` en caso contrario. Consulta [Multi-tenencia](/docs/multi-tenancy)
 | POST | `/api/v1/unban` | Retirar un baneo manualmente. |
 | POST | `/api/v1/config/reload` | Releer el archivo de configuración (igual que `SIGHUP`). |
 | GET | `/metrics` | Métricas de Prometheus. |
+| GET | `/healthz` | Sonda de vida/disponibilidad sin autenticación: `503` hasta que arranca por completo, luego `200`. |
 
 Todas las respuestas son JSON. Los errores devuelven un objeto con la forma `{"error": "..."}` con el
 estado HTTP apropiado.
@@ -82,7 +83,8 @@ Devuelve el modo de operación actual y un resumen de lo que Kapkan está proteg
 `dry_run` indica el modo global: cuando es `true`, no se anuncia ningún blackhole a tus routers.
 `version` es el build en ejecución, siempre presente y sin tráfico de salida. `update_available` es `false`
 salvo que el opt-in [`update_check`](/docs/configuration) esté habilitado y encuentre una versión más nueva:
-entonces es `true` y `latest_version` y `latest_is_security` se incluyen junto a él.
+entonces es `true` y `latest_version`, `latest_is_security` y `latest_url` se incluyen junto a él.
+Consulta [Actualización](/docs/upgrading).
 `thresholds` y `hostgroups` reflejan la configuración activa; consulta
 [Detección](/docs/detection) y [Hostgroups](/docs/hostgroups) para conocer su forma completa.
 
@@ -406,6 +408,19 @@ endpoint devuelve HTTP `400` con el error. Consulta [Configuración](/docs/confi
 Sirve las métricas de Prometheus en el formato de exposición de texto estándar. Este endpoint no está
 bajo `/api/v1` y se sirve sin el token bearer para que un scraper pueda alcanzarlo. Consulta
 [Métricas](/docs/metrics) para conocer la lista completa de métricas.
+
+### GET /healthz
+
+Una sonda de vida/disponibilidad, no bajo `/api/v1` y servida **sin** un token bearer (no
+filtra nada) para que un supervisor o el script de actualización [`update.sh`](/docs/upgrading) puedan
+confirmar que el daemon está activo tras un reinicio. Devuelve `503 starting` hasta que cada componente
+ha arrancado, luego `200 ok`. Como el listener de la API solo empieza a aceptar peticiones una vez que el daemon
+ha arrancado, cualquier `200` aquí significa que la configuración se analizó, los componentes están activos y Kapkan está
+sirviendo.
+
+```sh
+curl -fsS localhost:8080/healthz   # exits non-zero (503) until ready, then prints "ok"
+```
 
 ## Relacionado
 

@@ -51,6 +51,7 @@ returns `403` otherwise. See [Multi-tenancy](/docs/multi-tenancy).
 | POST | `/api/v1/unban` | Manually withdraw a ban. |
 | POST | `/api/v1/config/reload` | Re-read the config file (same as `SIGHUP`). |
 | GET | `/metrics` | Prometheus metrics. |
+| GET | `/healthz` | Unauthenticated liveness/readiness probe: `503` until fully started, then `200`. |
 
 All responses are JSON. Errors return an object of the form `{"error": "..."}` with an
 appropriate HTTP status.
@@ -82,7 +83,8 @@ Returns the current operating mode and a summary of what Kapkan is protecting.
 `dry_run` reports the global mode: when `true`, no blackhole is announced to your routers.
 `version` is the running build, always present with zero egress. `update_available` is `false`
 unless the opt-in [`update_check`](/docs/configuration) is enabled and finds a newer release —
-then it is `true` and `latest_version` and `latest_is_security` are included alongside it.
+then it is `true` and `latest_version`, `latest_is_security` and `latest_url` are included
+alongside it. See [Upgrading](/docs/upgrading).
 `thresholds` and `hostgroups` mirror the active configuration; see
 [Detection](/docs/detection) and [Hostgroups](/docs/hostgroups) for their full shape.
 
@@ -406,6 +408,19 @@ endpoint returns HTTP `400` with the error. See [Configuration](/docs/configurat
 Serves Prometheus metrics in the standard text exposition format. This endpoint is not
 under `/api/v1` and is served without the bearer token so a scraper can reach it. See
 [Metrics](/docs/metrics) for the full metric list.
+
+### GET /healthz
+
+A liveness/readiness probe, not under `/api/v1` and served **without** a bearer token (it
+leaks nothing) so a supervisor or the [`update.sh`](/docs/upgrading) upgrade script can
+confirm the daemon is up after a restart. It returns `503 starting` until every component
+has started, then `200 ok`. Because the API listener only begins accepting once the daemon
+has started, any `200` here means the config parsed, the components are up, and Kapkan is
+serving.
+
+```sh
+curl -fsS localhost:8080/healthz   # exits non-zero (503) until ready, then prints "ok"
+```
 
 ## Related
 
