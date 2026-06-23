@@ -1,0 +1,119 @@
+# GoReleaser config for kapkan. Builds the single static engine binary (with the
+# operator console go:embed'd) for linux amd64/arm64, archives it alongside the
+# deploy files, writes checksums.txt, and cosign-keyless-signs the checksums.
+# Cut a release by pushing a tag:  git tag vX.Y.Z && git push origin vX.Y.Z
+version: 2
+
+project_name: kapkan
+
+# The api package go:embeds internal/api/static; the binary will not compile
+# until the canonical top-level console/ is copied there. Mirror the engine
+# Makefile's console-sync before any build. Hooks run from the repo root (where
+# this file lives); the build itself runs in engine/ (see builds[].dir).
+before:
+  hooks:
+    - sh -c 'rm -rf engine/internal/api/static && mkdir -p engine/internal/api/static && cp -R console/. engine/internal/api/static/'
+
+builds:
+  - id: kapkan
+    dir: engine
+    main: ./cmd/kapkan
+    binary: kapkan
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    # Stamp the version into internal/buildinfo (same vars the Makefile injects),
+    # so /api/v1/status, the console and `kapkan -version` report the real tag.
+    ldflags:
+      - -s -w
+      - -X github.com/kapkan-io/kapkan/internal/buildinfo.version={{ .Version }}
+      - -X github.com/kapkan-io/kapkan/internal/buildinfo.commit={{ .ShortCommit }}
+      - -X github.com/kapkan-io/kapkan/internal/buildinfo.date={{ .CommitDate }}
+    # Reproducible builds: pin embedded file timestamps to the commit.
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: kapkan
+    formats: [tar.gz]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE
+      - README.md
+      - src: engine/deploy/kapkan.service
+        dst: deploy/kapkan.service
+      - src: engine/deploy/config.example.yaml
+        dst: deploy/config.example.yaml
+      - src: engine/deploy/grafana/kapkan-overview.json
+        dst: deploy/grafana/kapkan-overview.json
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Sign checksums.txt with cosign keyless (Sigstore): no long-lived key, the
+# signature binds to this repo + release workflow's OIDC identity. Verification
+# is documented in the release footer below. Requires id-token: write and the
+# cosign CLI (both provided by the release workflow).
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: '${artifact}.sig'
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--output-signature=${signature}'
+      - '--output-certificate=${certificate}'
+      - '${artifact}'
+      - '--yes'
+    output: true
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^feat'
+      order: 0
+    - title: Fixes
+      regexp: '^fix'
+      order: 1
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - '^docs'
+      - '^test'
+      - '^chore'
+      - '^ci'
+      - '^Merge '
+
+release:
+  github:
+    owner: fornex
+    name: kapkan
+  # vX.Y.Z-rc.N and other pre-release tags publish as GitHub pre-releases.
+  prerelease: auto
+  header: |
+    Curated notes — including any **BREAKING** or **Config changes** — are in
+    [CHANGELOG.md](https://github.com/fornex/kapkan/blob/main/CHANGELOG.md).
+  footer: |
+    ## Verify the download
+
+    ```sh
+    VER={{ .Tag }}
+    base="https://github.com/fornex/kapkan/releases/download/$VER"
+    curl -fLO "$base/kapkan_${VER}_linux_amd64.tar.gz"
+    curl -fLO "$base/checksums.txt"
+    curl -fLO "$base/checksums.txt.sig"
+    curl -fLO "$base/checksums.txt.pem"
+    # 1) authenticity: signature over checksums.txt, pinned to this repo's release tag
+    cosign verify-blob checksums.txt \
+      --signature checksums.txt.sig --certificate checksums.txt.pem \
+      --certificate-identity-regexp 'https://github.com/fornex/kapkan/\.github/workflows/release\.yml@refs/tags/v.*' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+    # 2) integrity: hash of the downloaded archive (shasum -a 256 -c on macOS)
+    sha256sum -c checksums.txt --ignore-missing
+    ```
