@@ -227,6 +227,13 @@
       "se.mode": "Mitigation mode",
       "se.uptime": "Uptime",
       "se.version": "Version",
+
+      /* update-available banner */
+      "update.banner": "A new version is available: {version}",
+      "update.banner.security": "A security update is available: {version}",
+      "update.view": "View release",
+      "update.dismiss": "Dismiss",
+
       "se.networks": "Protected networks",
       "se.thresholds": "Global thresholds",
       "se.bgp": "BGP / mitigation",
