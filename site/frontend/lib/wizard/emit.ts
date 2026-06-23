@@ -33,6 +33,16 @@ export type WizardState = {
   tg_chat_id: string;
   api_listen: string;
   api_token_env: string;
+  gr_enabled: boolean;
+  gr_restart_seconds: string;
+  gr_long_lived: boolean;
+  gr_long_lived_stale: string;
+  state_file: string;
+  uc_enabled: boolean;
+  uc_interval: string;
+  uc_channel: string;
+  uc_url: string;
+  uc_notify: boolean;
 };
 
 export const initialState: WizardState = {
@@ -61,6 +71,16 @@ export const initialState: WizardState = {
   tg_chat_id: "",
   api_listen: "127.0.0.1:8080",
   api_token_env: "",
+  gr_enabled: true,
+  gr_restart_seconds: "",
+  gr_long_lived: false,
+  gr_long_lived_stale: "",
+  state_file: "",
+  uc_enabled: false,
+  uc_interval: "",
+  uc_channel: "stable",
+  uc_url: "",
+  uc_notify: false,
 };
 
 const q = (v: string) => `"${v.replace(/"/g, '\\"')}"`;
@@ -115,6 +135,9 @@ export function emitConfig(s: WizardState): string {
   L.push(`  ttl_seconds: ${num(s.ttl_seconds)}                  # every ban auto-withdraws after this`);
   L.push(`  unban_hysteresis_seconds: ${num(s.unban_hysteresis_seconds)}     # stay below threshold this long before unban`);
   L.push(`  max_active_bans: ${num(s.max_active_bans)}`);
+  if (s.state_file.trim()) {
+    L.push(`  state_file: ${q(s.state_file.trim())}   # persist active bans across a restart (needs a writable dir; pairs with graceful_restart)`);
+  }
   L.push("");
 
   L.push("bgp:");
@@ -129,6 +152,16 @@ export function emitConfig(s: WizardState): string {
     L.push(`    - address: ${q(n.address.trim())}`);
     L.push(`      remote_asn: ${num(n.remote_asn)}`);
   }
+  // graceful_restart: on by default — emit only the knobs the operator changed.
+  const gr: string[] = [];
+  if (!s.gr_enabled) gr.push("    enabled: false             # opt OUT of Graceful Restart (a restart will then flush routes)");
+  if (s.gr_restart_seconds.trim() && num(s.gr_restart_seconds) !== "0") gr.push(`    restart_seconds: ${num(s.gr_restart_seconds)}`);
+  if (s.gr_long_lived) gr.push("    long_lived: true");
+  if (s.gr_long_lived_stale.trim() && num(s.gr_long_lived_stale) !== "0") gr.push(`    long_lived_stale_seconds: ${num(s.gr_long_lived_stale)}`);
+  if (gr.length) {
+    L.push("  graceful_restart:");
+    for (const g of gr) L.push(g);
+  }
   L.push("");
 
   if (s.tg_token_env.trim()) {
@@ -136,6 +169,16 @@ export function emitConfig(s: WizardState): string {
     L.push("  telegram:");
     L.push(`    token_env: ${q(s.tg_token_env.trim())}     # NAME of the env var holding the bot token — never the token itself`);
     if (s.tg_chat_id.trim()) L.push(`    chat_id: ${q(s.tg_chat_id.trim())}`);
+    L.push("");
+  }
+
+  if (s.uc_enabled) {
+    L.push("update_check:                         # opt-in check for a newer release (no egress unless enabled)");
+    L.push("  enabled: true");
+    if (s.uc_interval.trim() && num(s.uc_interval) !== "0") L.push(`  interval_seconds: ${num(s.uc_interval)}`);
+    if (s.uc_channel && s.uc_channel !== "stable") L.push(`  channel: ${s.uc_channel}`);
+    if (s.uc_url.trim()) L.push(`  url: ${q(s.uc_url.trim())}`);
+    if (s.uc_notify) L.push("  notify: true                        # also send 'update available' via notify channels");
     L.push("");
   }
 

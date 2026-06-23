@@ -27,6 +27,7 @@
     "ban.max_banned_fraction": { "tier": "advanced", "defaultWhenAbsent": 0, "description": "Refuse new bans once more than this share (0–1, per address family) of the protected space is blackholed — bounds the blast radius of a poisoned baseline or spoofed-source storm. 0 (default) disables the guard." },
     "ban.max_bans_per_window": { "tier": "advanced", "defaultWhenAbsent": 0, "crossField": "Requires ban_window_seconds > 0 when set.", "description": "Storm guard: at most this many NEW bans may be created per ban_window_seconds. 0 (default) disables it." },
     "ban.ban_window_seconds": { "tier": "advanced", "crossField": "Required (> 0) when max_bans_per_window is set; ignored otherwise.", "description": "The sliding window for max_bans_per_window, in seconds." },
+    "ban.state_file": { "tier": "advanced", "defaultWhenAbsent": "", "description": "Writable path where active bans are persisted, so they are rehydrated and re-announced on startup — paired with bgp.graceful_restart this keeps mitigation up across a restart. Empty (default) disables persistence; the systemd unit provides a writable dir via StateDirectory=kapkan." },
 
     "mitigation": { "tier": "advanced", "description": "Default mitigation method. blackhole drops all victim traffic; flowspec is surgical; divert sends traffic to a scrubbing center." },
     "flowspec.action": { "tier": "advanced", "description": "FlowSpec rule action. rate_limit requires flowspec.rate_mbps > 0." },
@@ -74,6 +75,10 @@
     "bgp.next_hop": { "tier": "basic", "format": "ipv4", "description": "IPv4 blackhole (discard) next-hop." },
     "bgp.next_hop6": { "tier": "advanced", "format": "ipv6", "description": "IPv6 blackhole next-hop (required if IPv6 space is protected and blackholed)." },
     "bgp.community": { "tier": "basic", "format": "community", "description": "RTBH community your upstream honors, as ASN:value." },
+    "bgp.graceful_restart.enabled": { "tier": "advanced", "defaultWhenAbsent": true, "description": "Advertise BGP Graceful Restart so a peer RETAINS kapkan's mitigation routes across a restart (e.g. an upgrade) instead of flushing them. On by default; advertising costs nothing against a peer that doesn't support it. Takes effect on (re)start." },
+    "bgp.graceful_restart.restart_seconds": { "tier": "advanced", "defaultWhenAbsent": 120, "description": "How long the peer holds kapkan's routes as stale while the session is down. 0 uses the default (120); capped at 4095." },
+    "bgp.graceful_restart.long_lived": { "tier": "advanced", "defaultWhenAbsent": false, "description": "Enable Long-Lived Graceful Restart (RFC 9494), extending retention beyond restart_seconds. Off by default — long LLGR with FlowSpec can cause transient forwarding loops." },
+    "bgp.graceful_restart.long_lived_stale_seconds": { "tier": "advanced", "defaultWhenAbsent": 3600, "crossField": "Used only when long_lived is set.", "description": "LLGR stale time in seconds. 0 uses the default (3600, 1h); capped at 86400 (24h)." },
     "bgp.neighbors.address": { "tier": "basic", "format": "ip", "description": "eBGP peer address." },
     "bgp.neighbors.remote_asn": { "tier": "basic", "description": "eBGP peer AS number." },
 
@@ -103,6 +108,11 @@
     "api.tokens.name": { "tier": "advanced", "description": "Label for this role-based token." },
     "api.tokens.token_env": { "tier": "advanced", "secret": true, "description": "Env var holding this token's secret." },
     "api.tokens.role": { "tier": "advanced", "description": "viewer (read-only) or operator (read + ban/unban/reload)." },
-    "api.tokens.tenant": { "tier": "advanced", "description": "Optional tenant scope; must match a tenant used by some hostgroup." }
+    "api.tokens.tenant": { "tier": "advanced", "description": "Optional tenant scope; must match a tenant used by some hostgroup." },
+    "update_check.enabled": { "tier": "advanced", "defaultWhenAbsent": false, "description": "Opt-in check for a newer kapkan release via the GitHub Releases API. Off by default (no egress); the running version is always exposed locally regardless. Takes effect on (re)start." },
+    "update_check.interval_seconds": { "tier": "advanced", "defaultWhenAbsent": 21600, "description": "Poll interval for the update check. 0 uses the default (21600, 6h); floored at 3600 (1h)." },
+    "update_check.channel": { "tier": "advanced", "defaultWhenAbsent": "stable", "description": "Which releases count: 'stable' (latest non-prerelease) or 'prerelease' (includes -rc tags)." },
+    "update_check.url": { "tier": "advanced", "defaultWhenAbsent": "", "description": "Override the releases endpoint (mirror/proxy). Empty derives the public GitHub API URL from channel." },
+    "update_check.notify": { "tier": "advanced", "defaultWhenAbsent": false, "description": "Also send 'update available' through the configured notify channels (Telegram/webhook/Slack/email) the first time a new version is seen." }
   }
 }

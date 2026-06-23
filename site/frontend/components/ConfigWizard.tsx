@@ -198,6 +198,38 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
     );
   };
 
+  const bool = (label: string, key: keyof WizardState, path: string) => (
+    <label className="flex items-center justify-between gap-4">
+      <span>
+        <span className="block text-sm font-medium">{label}</span>
+        <span className="mt-1 block text-xs text-muted-foreground">{hp(path)}</span>
+      </span>
+      <input
+        type="checkbox"
+        className="h-5 w-5 accent-[var(--accent)]"
+        checked={s[key] as boolean}
+        onChange={(e) => set(key, e.target.checked as WizardState[typeof key])}
+      />
+    </label>
+  );
+
+  const select = (label: string, key: keyof WizardState, path: string) => {
+    const opts = fieldNode(path)?.enum ?? [];
+    return (
+      <Field label={label} help={hp(path)}>
+        <select
+          className={inputCls}
+          value={s[key] as string}
+          onChange={(e) => set(key, e.target.value as WizardState[typeof key])}
+        >
+          {opts.map((o) => (
+            <option key={o} value={o}>{o}</option>
+          ))}
+        </select>
+      </Field>
+    );
+  };
+
   const mitigationOpts = fieldNode("mitigation")?.enum ?? ["blackhole", "flowspec", "divert"];
 
   // --- per-step form content (steps 0..lastStep-1; the review step is rendered below) ---
@@ -334,6 +366,10 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
                   </button>
                 </div>
               </Field>
+              {bool("graceful_restart.enabled", "gr_enabled", "bgp.graceful_restart.enabled")}
+              {number("graceful_restart.restart_seconds", "gr_restart_seconds", "bgp.graceful_restart.restart_seconds")}
+              {bool("graceful_restart.long_lived", "gr_long_lived", "bgp.graceful_restart.long_lived")}
+              {number("graceful_restart.long_lived_stale_seconds", "gr_long_lived_stale", "bgp.graceful_restart.long_lived_stale_seconds")}
             </Section>
           </>
         );
@@ -344,10 +380,18 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
               {number("ban.ttl_seconds", "ttl_seconds", "ban.ttl_seconds", { required: true })}
               {number("ban.unban_hysteresis_seconds", "unban_hysteresis_seconds", "ban.unban_hysteresis_seconds", { required: true })}
               {number("ban.max_active_bans", "max_active_bans", "ban.max_active_bans", { required: true })}
+              {text("ban.state_file", "state_file", "ban.state_file", { mono: true })}
             </Section>
             <Section title={t.sections.notify}>
               {text("notify.telegram.token_env", "tg_token_env", "notify.telegram.token_env", { mono: true })}
               {text("notify.telegram.chat_id", "tg_chat_id", "notify.telegram.chat_id", { mono: true })}
+            </Section>
+            <Section title={t.sections.updates}>
+              {bool("update_check.enabled", "uc_enabled", "update_check.enabled")}
+              {number("update_check.interval_seconds", "uc_interval", "update_check.interval_seconds")}
+              {select("update_check.channel", "uc_channel", "update_check.channel")}
+              {text("update_check.url", "uc_url", "update_check.url", { mono: true })}
+              {bool("update_check.notify", "uc_notify", "update_check.notify")}
             </Section>
             <Section title={t.sections.api}>
               {text("api.listen", "api_listen", "api.listen", { mono: true, required: true })}
