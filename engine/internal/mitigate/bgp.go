@@ -42,7 +42,9 @@ func newBGPSpeaker(cfg *config.Config, log *slog.Logger) (*bgpSpeaker, error) {
 	return &bgpSpeaker{srv: srv, log: log.With("component", "bgp"), cfg: cfg}, nil
 }
 
-// start runs the gobgp event loop, starts BGP, and adds the configured peers.
+// start runs the gobgp event loop and starts BGP. Peers are added separately by
+// addPeers, AFTER the caller has re-announced any rehydrated routes into the
+// RIB, so a peer's initial advertisement (and its End-of-RIB) includes them.
 func (b *bgpSpeaker) start(ctx context.Context) error {
 	go b.srv.Serve() // mandatory: every API call funnels through this loop
 
@@ -80,6 +82,15 @@ func (b *bgpSpeaker) start(ctx context.Context) error {
 		return fmt.Errorf("WatchEvent: %w", err)
 	}
 
+	return nil
+}
+
+// addPeers adds the configured BGP neighbors. It is called after any rehydrated
+// mitigation routes are already in the RIB so each peer's initial advertisement
+// — and the End-of-RIB that follows — carries them, letting a Graceful Restart
+// helper refresh the routes it retained across a restart instead of purging
+// them. Adding the routes before the peers makes that ordering structural.
+func (b *bgpSpeaker) addPeers(ctx context.Context) error {
 	for _, n := range b.cfg.BGP.Neighbors {
 		if err := b.addPeer(ctx, n); err != nil {
 			return fmt.Errorf("add peer %s: %w", n.Address, err)
@@ -107,23 +118,82 @@ func (b *bgpSpeaker) addPeer(ctx context.Context, n config.Neighbor) error {
 		// Negotiate v4/v6 unicast (so /128 blackholes can ride an IPv4
 		// session) and v4/v6 FlowSpec unicast. A peer that does not support
 		// a family simply won't negotiate it; advertising costs nothing.
-		AfiSafis: []*api.AfiSafi{
-			{Config: &api.AfiSafiConfig{Family: familyV4, Enabled: true}},
-			{Config: &api.AfiSafiConfig{Family: familyV6, Enabled: true}},
-			{Config: &api.AfiSafiConfig{Family: familyV4FS, Enabled: true}},
-			{Config: &api.AfiSafiConfig{Family: familyV6FS, Enabled: true}},
-		},
+		AfiSafis: b.afiSafis(),
+	}
+	// Graceful Restart: advertise the capability so a helper peer retains
+	// kapkan's routes across a restart. NotificationEnabled (RFC 8538) makes
+	// retention survive the CEASE NOTIFICATION that a clean shutdown sends —
+	// the exact path Stop() takes — instead of being flushed as a hard reset.
+	if gr := b.cfg.BGP.GracefulRestart; gr.Enabled {
+		peer.GracefulRestart = &api.GracefulRestart{
+			Enabled:             true,
+			RestartTime:         gr.RestartSeconds,
+			NotificationEnabled: true,
+			LonglivedEnabled:    gr.LongLived,
+		}
 	}
 	return b.srv.AddPeer(ctx, &api.AddPeerRequest{Peer: peer})
 }
 
-// stop tears down peers (CEASE) and stops the server.
+// afiSafis builds the per-neighbor address families. When Graceful Restart is
+// enabled, each family is flagged GR-capable (per-AFI forwarding-state) so a
+// helper peer retains its routes across a restart; LLGR is layered on only when
+// explicitly enabled.
+func (b *bgpSpeaker) afiSafis() []*api.AfiSafi {
+	gr := b.cfg.BGP.GracefulRestart
+	families := []*api.Family{familyV4, familyV6, familyV4FS, familyV6FS}
+	out := make([]*api.AfiSafi, len(families))
+	for i, f := range families {
+		as := &api.AfiSafi{Config: &api.AfiSafiConfig{Family: f, Enabled: true}}
+		if gr.Enabled {
+			as.MpGracefulRestart = &api.MpGracefulRestart{Config: &api.MpGracefulRestartConfig{Enabled: true}}
+			if gr.LongLived {
+				as.LongLivedGracefulRestart = &api.LongLivedGracefulRestart{
+					Config: &api.LongLivedGracefulRestartConfig{Enabled: true, RestartTime: gr.LongLivedStaleSeconds},
+				}
+			}
+		}
+		out[i] = as
+	}
+	return out
+}
+
+// stop tears down peers (CEASE) and stops the server. gobgp's StopBgp deletes
+// each neighbor with a Cease/peer-deconfigured notification which, once the
+// Graceful Restart "N" capability is negotiated, it escalates to a Hard Reset
+// (RFC 8538) — telling the peer to FLUSH kapkan's routes. That is correct for a
+// deliberate teardown but wrong for a restart; use signalRestart for that.
 func (b *bgpSpeaker) stop() {
 	if b.watchCancel != nil {
 		b.watchCancel()
 	}
 	if b.srv != nil {
 		b.srv.Stop()
+	}
+}
+
+// signalRestart issues an Administrative Reset (BGP_ERROR_SUB_ADMINISTRATIVE_-
+// RESET) to every neighbor. Unlike the peer-deconfigured cease that stop()
+// triggers, gobgp does not escalate an administrative reset to a Hard Reset, so
+// with the Graceful Restart capability negotiated the peer RETAINS kapkan's
+// routes as stale (RFC 8538) across the session gap instead of flushing them
+// immediately. The speaker is left running and the routes left installed; the
+// caller exits the process next. Even if the reset notification does not flush
+// to the wire before exit, the resulting bare TCP close is itself a
+// non-Hard-Reset drop the peer retains across — so the one outcome this avoids,
+// an immediate Hard Reset flush, never happens.
+//
+// This bridges the gap while the session is down. A stock RFC 4724 helper holds
+// the stale routes only until the reconnecting instance signals End-of-RIB, then
+// purges any it has not re-advertised. Because bans are not yet rehydrated on
+// startup, fully covering an upgrade restart needs the new instance to
+// re-announce active bans before End-of-RIB — see SignalRestart.
+func (b *bgpSpeaker) signalRestart(ctx context.Context) {
+	for _, n := range b.cfg.BGP.Neighbors {
+		if err := b.srv.ResetPeer(ctx, &api.ResetPeerRequest{Address: n.Address}); err != nil {
+			b.log.Warn("bgp restart-reset failed; peer may flush routes on restart",
+				"neighbor", n.Address, "err", err)
+		}
 	}
 }
 
