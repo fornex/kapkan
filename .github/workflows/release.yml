@@ -1,0 +1,75 @@
+name: Release
+
+# Cut a release by pushing a semver tag, e.g.:
+#   git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the GitHub Release and upload assets
+  id-token: write # cosign keyless signing + build provenance (OIDC)
+  attestations: write # SLSA build-provenance attestations
+
+jobs:
+  release:
+    name: build, sign & publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the changelog can diff from the prior tag
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache: true
+          cache-dependency-path: engine/go.sum
+
+      # The api package go:embeds static/; populate it before any build (GoReleaser
+      # also does this in its before-hook, but govulncheck below compiles first).
+      - name: Sync console assets (go:embed target)
+        run: |
+          rm -rf engine/internal/api/static
+          mkdir -p engine/internal/api/static
+          cp -R console/. engine/internal/api/static/
+
+      # Release gate: a security tool must not ship a release with a reachable,
+      # non-accepted vulnerability. Mirrors the CI govulncheck job; revisit every
+      # ACCEPTED advisory at each release (each must have no upstream fix).
+      - name: govulncheck (release gate)
+        working-directory: engine
+        env:
+          ACCEPTED: "GO-2026-4736"
+        run: |
+          set -euo pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@latest -format json ./... > govuln.json
+          reachable="$(jq -rs '[.[]|select(.finding.trace[0].function!=null)|.finding.osv]|unique[]' govuln.json)"
+          echo "Reachable advisories: ${reachable:-none}"
+          fail=0
+          for id in $reachable; do
+            case " $ACCEPTED " in
+              *" $id "*) echo "::warning::Reachable advisory accepted (no upstream fix): $id" ;;
+              *) echo "::error::Reachable vulnerability not in accepted allowlist: $id"; fail=1 ;;
+            esac
+          done
+          rm -f govuln.json
+          exit $fail
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # SLSA build provenance for every released artifact, attested by the digest
+      # recorded in checksums.txt — verifiable with
+      # `gh attestation verify <archive> --repo fornex/kapkan`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-checksums: dist/checksums.txt
