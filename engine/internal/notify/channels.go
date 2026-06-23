@@ -32,6 +32,18 @@ func (n *Notifier) sendSlack(ctx context.Context, webhookURL string, p Payload) 
 
 // formatSlack renders the notification as Slack mrkdwn.
 func formatSlack(p Payload) string {
+	if p.Event == "update_available" {
+		emoji, kind := ":arrow_up:", "Update available"
+		if p.Security {
+			emoji, kind = ":red_circle:", "Security update available"
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s *kapkan: %s*\nCurrent: `%s`\nLatest: `%s`\n", emoji, kind, p.CurrentVersion, p.LatestVersion)
+		if p.ReleaseURL != "" {
+			b.WriteString(p.ReleaseURL)
+		}
+		return b.String()
+	}
 	emoji := ":red_circle:"
 	verb := "STARTED"
 	if p.Event == "attack_ended" {
@@ -172,6 +184,23 @@ func isLoopback(host string) bool {
 // emailMessage renders the RFC 5322 message: a compact subject and a
 // plain-text body mirroring the other channels.
 func emailMessage(cfg config.Email, p Payload) []byte {
+	if p.Event == "update_available" {
+		kind := "Update available"
+		if p.Security {
+			kind = "Security update available"
+		}
+		var b bytes.Buffer
+		fmt.Fprintf(&b, "From: %s\r\n", headerSafe(cfg.From))
+		fmt.Fprintf(&b, "To: %s\r\n", headerSafe(strings.Join(cfg.To, ", ")))
+		fmt.Fprintf(&b, "Subject: [kapkan] %s - %s\r\n", kind, headerSafe(p.LatestVersion))
+		fmt.Fprintf(&b, "Date: %s\r\n", p.At.Format(time.RFC1123Z))
+		b.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")
+		fmt.Fprintf(&b, "kapkan %s\r\n\r\nCurrent: %s\r\nLatest:  %s\r\n", kind, p.CurrentVersion, p.LatestVersion)
+		if p.ReleaseURL != "" {
+			fmt.Fprintf(&b, "Release: %s\r\n", p.ReleaseURL)
+		}
+		return b.Bytes()
+	}
 	verb := "STARTED"
 	if p.Event == "attack_ended" {
 		verb = "ENDED"

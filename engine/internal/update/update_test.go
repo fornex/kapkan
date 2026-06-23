@@ -253,6 +253,29 @@ func TestReadBodyRejectsOversize(t *testing.T) {
 	}
 }
 
+func TestOnAvailableFiresOncePerNewVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(releaseJSON("v1.3.0", "### Security\n- fix")))
+	}))
+	defer srv.Close()
+
+	var fired int
+	var lastSec bool
+	c := New(Config{Channel: "stable", URL: srv.URL, Current: "v1.2.0",
+		OnAvailable: func(st Status) { fired++; lastSec = st.Security }},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	c.checkAndRecord(context.Background())
+	if fired != 1 || !lastSec {
+		t.Fatalf("OnAvailable fired=%d security=%v, want 1 and true", fired, lastSec)
+	}
+	// Same version on the next poll must NOT re-fire (deduped by version).
+	c.checkAndRecord(context.Background())
+	if fired != 1 {
+		t.Errorf("OnAvailable re-fired for an unchanged version: fired=%d", fired)
+	}
+}
+
 func TestCheckAndRecordSetsMetric(t *testing.T) {
 	avail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(releaseJSON("v1.3.0", "notes")))

@@ -92,6 +92,12 @@ type Payload struct {
 	Sample *engine.AttackSample `json:"sample,omitempty"`
 	// Classification is the inferred attack vector (attack_started only).
 	Classification *engine.Classification `json:"classification,omitempty"`
+
+	// Update-availability fields (event "update_available" only).
+	CurrentVersion string `json:"current_version,omitempty"`
+	LatestVersion  string `json:"latest_version,omitempty"`
+	Security       bool   `json:"security,omitempty"`
+	ReleaseURL     string `json:"release_url,omitempty"`
 }
 
 // NotifyAttackStarted dispatches start notifications for ev and the resulting
@@ -103,6 +109,21 @@ func (n *Notifier) NotifyAttackStarted(ctx context.Context, ev engine.Event, ban
 // NotifyAttackEnded dispatches end notifications for ev and the final ban.
 func (n *Notifier) NotifyAttackEnded(ctx context.Context, ev engine.Event, ban *mitigate.Ban) {
 	n.dispatch(ctx, n.buildPayload("attack_ended", ev, ban))
+}
+
+// NotifyUpdateAvailable dispatches a one-off "a newer kapkan release exists"
+// notification through every configured channel. The update checker calls it
+// (when update_check.notify is enabled) the first time a new version is seen.
+func (n *Notifier) NotifyUpdateAvailable(ctx context.Context, current, latest string, security bool, url string) {
+	n.dispatch(ctx, Payload{
+		SchemaVersion:  SchemaVersion,
+		Event:          "update_available",
+		CurrentVersion: current,
+		LatestVersion:  latest,
+		Security:       security,
+		ReleaseURL:     url,
+		At:             time.Now(),
+	})
 }
 
 func (n *Notifier) buildPayload(event string, ev engine.Event, ban *mitigate.Ban) Payload {
@@ -245,6 +266,18 @@ func (n *Notifier) recordResult(channel string, err error) {
 
 // formatTelegram renders a human-readable HTML message for Telegram.
 func formatTelegram(p Payload) string {
+	if p.Event == "update_available" {
+		emoji, kind := "⬆️", "Update available"
+		if p.Security {
+			emoji, kind = "🔴", "Security update available"
+		}
+		msg := fmt.Sprintf("%s <b>kapkan: %s</b>\nCurrent: <code>%s</code>\nLatest: <code>%s</code>\n",
+			emoji, kind, p.CurrentVersion, p.LatestVersion)
+		if p.ReleaseURL != "" {
+			msg += p.ReleaseURL
+		}
+		return msg
+	}
 	emoji := "🔴"
 	verb := "STARTED"
 	if p.Event == "attack_ended" {
