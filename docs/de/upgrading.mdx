@@ -1,0 +1,89 @@
+export const metadata = {
+  title: "Aktualisierung",
+  description:
+    "Erfahren Sie von einer neuen Kapkan-Version und aktualisieren Sie sicher: Download verifizieren, Konfiguration vorab prüfen, atomar austauschen und zurückrollen, falls der Daemon nicht fehlerfrei startet.",
+};
+
+# Aktualisierung
+
+Kapkan wird als signierte [GitHub-Releases](https://github.com/fornex/kapkan/releases) ausgeliefert. Diese Seite beschreibt, wie Sie **erfahren**, dass eine neuere Version existiert, und wie Sie sie **anwenden**, ohne die Mitigation zu unterbrechen.
+
+## Erfahren, dass eine neue Version verfügbar ist
+
+Kapkan funkt standardmäßig niemals nach Hause. Die laufende Version wird stets lokal und ohne jeglichen ausgehenden Datenverkehr offengelegt:
+
+- `kapkan -version` gibt die Build-Version aus.
+- `GET /api/v1/status` enthält ein `version`-Feld, das in den Einstellungen der Konsole angezeigt wird.
+- Die [Metrik](/docs/metrics) `kapkan_build_info` trägt sie in einem Label, sodass der Versions-Drift einer Flotte abfragbar ist.
+
+Aktivieren Sie optional eine Update-Prüfung, um benachrichtigt zu werden, wenn ein neueres Release existiert (siehe `update_check` in der [Konfigurationsreferenz](/docs/configuration)):
+
+```sh
+kapkan -check-update      # exit 0 = up to date, 10 = a newer release exists, 1 = error
+```
+
+Wenn `update_check.enabled` gesetzt ist, fragt Kapkan die GitHub-Releases-API in einem Intervall ab und stellt das Ergebnis über `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), die Metrik `kapkan_update_available`, eine Logzeile, das Banner der Konsole und — mit `update_check.notify` — Ihre Benachrichtigungskanäle bereit. Die Prüfung übermittelt nur die Anfrage selbst (Quell-IP + einen generischen User-Agent), niemals Node-Identität, Konfiguration oder Angriffsdaten, und läuft außerhalb des Startpfads, sodass ein durch eine Firewall blockierter Endpunkt den Daemon niemals verzögert.
+
+## Aktualisieren mit `update.sh`
+
+Das Skript in [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) führt eine sichere, signierte und rückrollfähige Aktualisierung durch. Führen Sie es als root auf dem Host aus:
+
+```sh
+sudo deploy/update.sh v1.3.0     # a specific tag
+sudo deploy/update.sh            # the latest stable release
+sudo deploy/update.sh --prerelease   # the latest including -rc tags
+```
+
+Was es der Reihe nach tut:
+
+1. **Verifizieren** — lädt das Release-Archiv für Ihre Architektur sowie `checksums.txt` und dessen cosign-Signatur herunter, verifiziert die Signatur (an die release-tag-OIDC-Identität dieses Repositorys gebunden) und prüft anschließend die SHA-256-Prüfsumme des Archivs selbst. Es schlägt fehlsicher fehl, falls irgendetwas nicht übereinstimmt.
+2. **Vorabprüfung (Preflight)** — führt `kapkan -check-config` der **neuen** Binärdatei gegen Ihre aktive `/etc/kapkan/config.yaml` als Benutzer `kapkan` aus, sodass eine Konfiguration, die die neue Version ablehnt (eine [inkompatible Konfigurationsänderung](#config-changes-between-versions), eine nicht lesbare Datei), die Aktualisierung **vor** jedem Austausch abbricht. Der laufende Daemon bleibt unangetastet.
+3. **Austauschen** — kopiert die aktuelle Binärdatei nach `kapkan.old` und ersetzt `/usr/local/bin/kapkan` dann atomar durch die neue.
+4. **Neustart & Health-Check** — erstellt einen Snapshot der Konfiguration, startet den Dienst neu und fragt `/healthz` ab, bis er Bereitschaft meldet.
+5. **Rollback bei Fehler** — falls der Daemon nicht fehlerfrei startet, stellt es sowohl die vorherige Binärdatei als auch die vorherige Konfiguration wieder her und startet die alte Version neu.
+
+Die Prüf-URL wird aus Ihrem `api.listen` abgeleitet; überschreiben Sie sie (und das Timeout) bei Bedarf mit `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE`.
+
+## Die Mitigation übersteht den Neustart
+
+Ein Neustart unterbricht dank zweier Engine-Funktionen keine aktive Mitigation mehr (siehe [RTBH-Mitigation](/docs/mitigation)):
+
+- **BGP Graceful Restart** (`bgp.graceful_restart`, standardmäßig aktiviert) — ein Peer, der dies unterstützt, behält Kapkans Blackhole-/FlowSpec-Routen als veraltet (stale), während die Session ausgefallen ist, anstatt sie zu verwerfen.
+- **Ban-Persistenz** (`ban.state_file`) — aktive Bans werden persistiert und beim Start neu angekündigt, *vor* dem End-of-RIB der BGP-Session, sodass der Peer die behaltenen Routen aktualisiert, anstatt sie zu löschen. Legen Sie einen beschreibbaren Pfad fest (die systemd-Unit stellt einen über `StateDirectory=kapkan` bereit), um dies zu aktivieren.
+
+Zusammen bedeuten diese, dass Sie **nicht** das Ende eines Angriffs abwarten müssen, bevor Sie aktualisieren.
+
+## Einen Download von Hand verifizieren
+
+Falls Sie ohne `update.sh` installieren (air-gapped oder mit eigener Automatisierung), verifizieren Sie auf dieselbe Weise wie das Skript:
+
+```sh
+VER=v1.3.0
+base="https://github.com/fornex/kapkan/releases/download/$VER"
+curl -fLO "$base/kapkan_${VER}_linux_amd64.tar.gz"
+curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
+
+# 1) authenticity: the signature over checksums.txt, pinned to this repo's release tag
+cosign verify-blob checksums.txt \
+  --signature checksums.txt.sig --certificate checksums.txt.pem \
+  --certificate-identity-regexp 'https://github.com/fornex/kapkan/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+# 2) integrity: the archive's hash (shasum -a 256 -c on macOS)
+sha256sum -c checksums.txt --ignore-missing
+```
+
+Jedes Release trägt zudem eine SLSA-Build-Provenance, verifizierbar mit `gh attestation verify <archive> --repo fornex/kapkan`.
+
+## Zurückrollen
+
+`update.sh` rollt automatisch zurück, wenn die neue Version ihren Health-Check nicht besteht. Um anschließend manuell zurückzurollen: Die vorherige Binärdatei wird unter `/usr/local/bin/kapkan.old` und die vorherige Konfiguration unter `/etc/kapkan/config.yaml.preupgrade` aufbewahrt:
+
+```sh
+sudo mv /usr/local/bin/kapkan.old /usr/local/bin/kapkan
+sudo cp /etc/kapkan/config.yaml.preupgrade /etc/kapkan/config.yaml   # only if you changed the config
+sudo systemctl restart kapkan
+```
+
+## Konfigurationsänderungen zwischen Versionen
+
+Ein neues Release kann ein Konfigurationsfeld hinzufügen, voraussetzen oder verschärfen. Die Anmerkungen jedes Releases weisen auf Konfigurationsänderungen hin, und die Vorabprüfung (`kapkan -check-config` mit der neuen Binärdatei) ist die maßgebliche Kontrolle: Wenn die neue Version Ihre Konfiguration ablehnt, beheben Sie dies vor der Aktualisierung. Die Versionierung folgt [SemVer](https://semver.org/) — ein MAJOR-Sprung signalisiert eine inkompatible Konfigurations- oder API-Änderung.

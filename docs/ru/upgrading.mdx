@@ -1,0 +1,89 @@
+export const metadata = {
+  title: "Обновление",
+  description:
+    "Узнайте о новом релизе Kapkan и обновляйтесь безопасно: проверьте загрузку, выполните предварительную проверку конфигурации, замените бинарник атомарно и откатитесь, если демон не запустился исправно.",
+};
+
+# Обновление
+
+Kapkan поставляется в виде подписанных [релизов GitHub](https://github.com/fornex/kapkan/releases). На этой странице описано, как **узнать** о появлении новой версии и как **применить** её, не прерывая митигацию.
+
+## Как узнать о выходе новой версии
+
+Kapkan по умолчанию никогда не «звонит домой». Запущенная версия всегда доступна локально с нулевым исходящим трафиком:
+
+- `kapkan -version` выводит версию сборки.
+- `GET /api/v1/status` содержит поле `version`, которое отображается в настройках консоли.
+- [Метрика](/docs/metrics) `kapkan_build_info` несёт версию в метке, поэтому разброс версий по всему парку узлов можно запрашивать.
+
+Включите проверку обновлений, чтобы получать уведомления о появлении более нового релиза (см. `update_check` в [справочнике по конфигурации](/docs/configuration)):
+
+```sh
+kapkan -check-update      # exit 0 = up to date, 10 = a newer release exists, 1 = error
+```
+
+Когда задан параметр `update_check.enabled`, Kapkan с заданным интервалом опрашивает GitHub Releases API и отражает результат в `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), в метрике `kapkan_update_available`, в строке журнала, в баннере консоли и — при включённом `update_check.notify` — в ваших каналах уведомлений. Проверка передаёт только сам запрос (исходящий IP + обобщённый User-Agent), никогда не идентификатор узла, конфигурацию или данные об атаках, и выполняется вне пути запуска, так что заблокированный фаерволом эндпоинт никогда не задерживает демон.
+
+## Обновление с помощью `update.sh`
+
+Скрипт в [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) выполняет безопасное, подписанное обновление с возможностью отката. Запустите его от root на хосте:
+
+```sh
+sudo deploy/update.sh v1.3.0     # a specific tag
+sudo deploy/update.sh            # the latest stable release
+sudo deploy/update.sh --prerelease   # the latest including -rc tags
+```
+
+Что он делает, по порядку:
+
+1. **Проверка** — загружает архив релиза для вашей архитектуры, а также `checksums.txt` и его подпись cosign, проверяет подпись (привязанную к OIDC-идентичности release-тега этого репозитория), затем проверяет собственную сумму SHA-256 архива. Он завершается с ошибкой, если что-либо не совпадает.
+2. **Предварительная проверка** — запускает `kapkan -check-config` **нового** бинарника против вашей действующей `/etc/kapkan/config.yaml` от имени пользователя `kapkan`, так что конфигурация, которую новая версия отвергает (несовместимое [изменение конфигурации](#config-changes-between-versions), нечитаемый файл), прерывает обновление **до** какой-либо замены. Запущенный демон остаётся нетронутым.
+3. **Замена** — копирует текущий бинарник в `kapkan.old`, затем атомарно заменяет `/usr/local/bin/kapkan` новым.
+4. **Перезапуск и проверка работоспособности** — делает снимок конфигурации, перезапускает службу и опрашивает `/healthz`, пока тот не сообщит о готовности.
+5. **Откат при сбое** — если демон не запускается исправно, скрипт восстанавливает и предыдущий бинарник, и предыдущую конфигурацию и перезапускает старую версию.
+
+URL для проверки выводится из вашего `api.listen`; при необходимости переопределите его (и таймаут) с помощью `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE`.
+
+## Митигация переживает перезапуск
+
+Перезапуск больше не прерывает активную митигацию благодаря двум возможностям движка (см. [Митигация RTBH](/docs/mitigation)):
+
+- **BGP Graceful Restart** (`bgp.graceful_restart`, включён по умолчанию) — пир, который его поддерживает, сохраняет маршруты blackhole / FlowSpec от Kapkan как устаревшие на время простоя сессии, вместо того чтобы сбрасывать их.
+- **Сохранение банов** (`ban.state_file`) — активные баны сохраняются и заново анонсируются при запуске, *до* End-of-RIB BGP-сессии, так что пир обновляет сохранённые маршруты, а не очищает их. Задайте доступный для записи путь (юнит systemd предоставляет его через `StateDirectory=kapkan`), чтобы включить эту функцию.
+
+Вместе это означает, что вам **не** нужно ждать окончания атаки, чтобы выполнить обновление.
+
+## Проверка загрузки вручную
+
+Если вы устанавливаете без `update.sh` (изолированная сеть или собственная автоматизация), выполняйте проверку так же, как это делает скрипт:
+
+```sh
+VER=v1.3.0
+base="https://github.com/fornex/kapkan/releases/download/$VER"
+curl -fLO "$base/kapkan_${VER}_linux_amd64.tar.gz"
+curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
+
+# 1) authenticity: the signature over checksums.txt, pinned to this repo's release tag
+cosign verify-blob checksums.txt \
+  --signature checksums.txt.sig --certificate checksums.txt.pem \
+  --certificate-identity-regexp 'https://github.com/fornex/kapkan/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+# 2) integrity: the archive's hash (shasum -a 256 -c on macOS)
+sha256sum -c checksums.txt --ignore-missing
+```
+
+Каждый релиз также несёт SLSA build provenance, проверяемую с помощью `gh attestation verify <archive> --repo fornex/kapkan`.
+
+## Откат
+
+`update.sh` выполняет откат автоматически, когда новая версия не проходит проверку работоспособности. Чтобы откатиться вручную после этого, предыдущий бинарник сохраняется в `/usr/local/bin/kapkan.old`, а предыдущая конфигурация — в `/etc/kapkan/config.yaml.preupgrade`:
+
+```sh
+sudo mv /usr/local/bin/kapkan.old /usr/local/bin/kapkan
+sudo cp /etc/kapkan/config.yaml.preupgrade /etc/kapkan/config.yaml   # only if you changed the config
+sudo systemctl restart kapkan
+```
+
+## Изменения конфигурации между версиями
+
+Новый релиз может добавить, сделать обязательным или ужесточить поле конфигурации. В примечаниях к каждому релизу отмечаются изменения конфигурации, а предварительная проверка (`kapkan -check-config` нового бинарника) является авторитетной проверкой: если новая версия отвергает вашу конфигурацию, исправьте её перед обновлением. Версионирование следует [SemVer](https://semver.org/) — увеличение MAJOR-версии сигнализирует о несовместимом изменении конфигурации или API.

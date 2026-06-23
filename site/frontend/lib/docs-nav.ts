@@ -12,7 +12,7 @@ export const docsNav: DocGroup[] = [
   { key: "configuration", slugs: ["configuration", "detection", "hostgroups", "baselines"] },
   { key: "mitigation", slugs: ["mitigation", "flowspec", "scrubbing", "escalation", "safety", "going-live"] },
   { key: "operating", slugs: ["api", "dashboard", "authentication", "multi-tenancy", "audit", "notifications", "metrics", "storage"] },
-  { key: "deployment", slugs: ["deployment"] },
+  { key: "deployment", slugs: ["deployment", "upgrading"] },
 ];
 
 // Flat slug list in sidebar order — used for prev/next and static params.

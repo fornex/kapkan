@@ -95,6 +95,7 @@ export const pageTitles: Record<Locale, Record<string, string>> = {
     notifications: "Notifications",
     metrics: "Metrics",
     deployment: "Production deployment",
+    upgrading: "Upgrading",
   },
   ru: {
     introduction: "Введение",
@@ -120,6 +121,7 @@ export const pageTitles: Record<Locale, Record<string, string>> = {
     notifications: "Уведомления",
     metrics: "Метрики",
     deployment: "Развёртывание в продакшене",
+    upgrading: "Обновление",
   },
   de: {
     introduction: "Einführung",
@@ -145,6 +147,7 @@ export const pageTitles: Record<Locale, Record<string, string>> = {
     notifications: "Benachrichtigungen",
     metrics: "Metriken",
     deployment: "Produktiv-Deployment",
+    upgrading: "Aktualisierung",
   },
   fr: {
     introduction: "Introduction",
@@ -170,6 +173,7 @@ export const pageTitles: Record<Locale, Record<string, string>> = {
     notifications: "Notifications",
     metrics: "Métriques",
     deployment: "Déploiement en production",
+    upgrading: "Mise à niveau",
   },
   es: {
     introduction: "Introducción",
@@ -195,5 +199,6 @@ export const pageTitles: Record<Locale, Record<string, string>> = {
     notifications: "Notificaciones",
     metrics: "Métricas",
     deployment: "Despliegue en producción",
+    upgrading: "Actualización",
   },
 };

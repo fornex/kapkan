@@ -1,0 +1,89 @@
+export const metadata = {
+  title: "Upgrading",
+  description:
+    "Learn about a new Kapkan release and upgrade safely: verify the download, preflight the config, swap atomically, and roll back if the daemon does not come up healthy.",
+};
+
+# Upgrading
+
+Kapkan ships as signed [GitHub Releases](https://github.com/fornex/kapkan/releases). This page covers how to **learn** that a newer version exists and how to **apply** it without dropping mitigation.
+
+## Knowing a new version is out
+
+Kapkan never phones home by default. The running version is always exposed locally with zero egress:
+
+- `kapkan -version` prints the build version.
+- `GET /api/v1/status` carries a `version` field, shown in the console's Settings.
+- The `kapkan_build_info` [metric](/docs/metrics) carries it in a label, so a fleet's version drift is queryable.
+
+Opt in to an update check to be told when a newer release exists (see `update_check` in the [configuration reference](/docs/configuration)):
+
+```sh
+kapkan -check-update      # exit 0 = up to date, 10 = a newer release exists, 1 = error
+```
+
+When `update_check.enabled` is set, Kapkan polls the GitHub Releases API on an interval and surfaces the result on `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), the `kapkan_update_available` metric, a log line, the console banner, and — with `update_check.notify` — your notification channels. The check transmits only the request itself (source IP + a generic User-Agent), never node identity, config or attack data, and runs off the startup path so a firewalled endpoint never delays the daemon.
+
+## Upgrading with `update.sh`
+
+The script in [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) performs a safe, signed, rollback-capable upgrade. Run it as root on the host:
+
+```sh
+sudo deploy/update.sh v1.3.0     # a specific tag
+sudo deploy/update.sh            # the latest stable release
+sudo deploy/update.sh --prerelease   # the latest including -rc tags
+```
+
+What it does, in order:
+
+1. **Verify** — downloads the release archive for your architecture plus `checksums.txt` and its cosign signature, verifies the signature (pinned to this repo's release-tag OIDC identity), then verifies the archive's own SHA-256. It fails closed if anything does not match.
+2. **Preflight** — runs the **new** binary's `kapkan -check-config` against your live `/etc/kapkan/config.yaml`, as the `kapkan` user, so a config that the new version rejects (a [breaking config change](#config-changes-between-versions), an unreadable file) aborts the upgrade **before** any swap. The running daemon is left untouched.
+3. **Swap** — copies the current binary to `kapkan.old`, then atomically replaces `/usr/local/bin/kapkan` with the new one.
+4. **Restart & health-check** — snapshots the config, restarts the service, and polls `/healthz` until it reports ready.
+5. **Roll back on failure** — if the daemon does not come up healthy, it restores both the previous binary and the previous config and restarts the old version.
+
+The probe URL is derived from your `api.listen`; override it (and the timeout) with `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` if needed.
+
+## Mitigation survives the restart
+
+A restart no longer drops active mitigation, thanks to two engine features (see [RTBH mitigation](/docs/mitigation)):
+
+- **BGP Graceful Restart** (`bgp.graceful_restart`, on by default) — a peer that supports it retains Kapkan's blackhole / FlowSpec routes as stale while the session is down, instead of flushing them.
+- **Ban persistence** (`ban.state_file`) — active bans are persisted and re-announced on startup, *before* the BGP session's End-of-RIB, so the peer refreshes the retained routes rather than purging them. Set a writable path (the systemd unit provides one via `StateDirectory=kapkan`) to enable it.
+
+Together these mean you do **not** need to wait for an attack to end before upgrading.
+
+## Verifying a download by hand
+
+If you install without `update.sh` (air-gapped, or your own automation), verify the same way the script does:
+
+```sh
+VER=v1.3.0
+base="https://github.com/fornex/kapkan/releases/download/$VER"
+curl -fLO "$base/kapkan_${VER}_linux_amd64.tar.gz"
+curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
+
+# 1) authenticity: the signature over checksums.txt, pinned to this repo's release tag
+cosign verify-blob checksums.txt \
+  --signature checksums.txt.sig --certificate checksums.txt.pem \
+  --certificate-identity-regexp 'https://github.com/fornex/kapkan/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+# 2) integrity: the archive's hash (shasum -a 256 -c on macOS)
+sha256sum -c checksums.txt --ignore-missing
+```
+
+Each release also carries SLSA build provenance, verifiable with `gh attestation verify <archive> --repo fornex/kapkan`.
+
+## Rolling back
+
+`update.sh` rolls back automatically when the new version fails its health-check. To roll back manually afterwards, the previous binary is kept at `/usr/local/bin/kapkan.old` and the previous config at `/etc/kapkan/config.yaml.preupgrade`:
+
+```sh
+sudo mv /usr/local/bin/kapkan.old /usr/local/bin/kapkan
+sudo cp /etc/kapkan/config.yaml.preupgrade /etc/kapkan/config.yaml   # only if you changed the config
+sudo systemctl restart kapkan
+```
+
+## Config changes between versions
+
+A new release may add, require or tighten a config field. Each release's notes call out config changes, and the preflight (`kapkan -check-config` on the new binary) is the authoritative check: if the new version rejects your config, fix it before upgrading. Versioning is [SemVer](https://semver.org/) — a MAJOR bump signals a breaking config or API change.
