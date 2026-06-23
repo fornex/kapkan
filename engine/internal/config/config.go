@@ -808,8 +808,8 @@ type UpdateCheck struct {
 	// public GitHub API for this repository, derived from Channel.
 	URL string `yaml:"url"`
 	// Notify also sends "update available" through the configured notification
-	// channels (Telegram/webhook) the first time a new version is seen. Default
-	// false. (Wiring is a follow-up; the field is accepted now.)
+	// channels (Telegram/webhook/Slack/email) the first time a new version is
+	// seen. Default false.
 	Notify bool `yaml:"notify"`
 }
 
