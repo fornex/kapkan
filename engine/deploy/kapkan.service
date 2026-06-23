@@ -3,6 +3,11 @@ Description=Kapkan DDoS detection and RTBH mitigation
 Documentation=https://github.com/kapkan-io/kapkan
 After=network-online.target
 Wants=network-online.target
+# Crash-loop guard: a binary that fails to start 4 times within 60s enters the
+# "failed" state instead of restarting forever — so a bad upgrade is observable
+# (deploy/update.sh health-checks /healthz and rolls back) rather than thrashing.
+StartLimitIntervalSec=60
+StartLimitBurst=4
 
 [Service]
 Type=simple
