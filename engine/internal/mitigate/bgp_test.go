@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/engine"
 
 	api "github.com/osrg/gobgp/v3/api"
@@ -64,6 +65,41 @@ func bothFamilies() []*api.AfiSafi {
 	}
 }
 
+// grHelperFamilies are the receiver's address families flagged GR-capable, so
+// the receiver acts as a Graceful Restart HELPER and retains the speaker's
+// routes when the session drops. Mirrors bothFamilies() with per-AFI MP GR on.
+func grHelperFamilies() []*api.AfiSafi {
+	return []*api.AfiSafi{
+		{Config: &api.AfiSafiConfig{Family: familyV4, Enabled: true}, MpGracefulRestart: &api.MpGracefulRestart{Config: &api.MpGracefulRestartConfig{Enabled: true}}},
+		{Config: &api.AfiSafiConfig{Family: familyV6, Enabled: true}, MpGracefulRestart: &api.MpGracefulRestart{Config: &api.MpGracefulRestartConfig{Enabled: true}}},
+	}
+}
+
+// recvEstablished reports whether the receiver currently holds an ESTABLISHED
+// session (to observe the speaker dropping and coming back).
+func recvEstablished(t *testing.T, srv *server.BgpServer) bool {
+	t.Helper()
+	established := false
+	_ = srv.ListPeer(context.Background(), &api.ListPeerRequest{}, func(p *api.Peer) {
+		if p.State != nil && p.State.SessionState == api.PeerState_ESTABLISHED {
+			established = true
+		}
+	})
+	return established
+}
+
+func waitRecvSession(t *testing.T, srv *server.BgpServer, want bool) bool {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if recvEstablished(t, srv) == want {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}
+
 // listV4 returns the GLOBAL-RIB IPv4 prefixes currently held by srv.
 func listPrefixes(t *testing.T, srv *server.BgpServer, family *api.Family) map[string]*api.Destination {
 	t.Helper()
@@ -89,6 +125,127 @@ func waitForPrefix(t *testing.T, srv *server.BgpServer, family *api.Family, pref
 		time.Sleep(100 * time.Millisecond)
 	}
 	return false
+}
+
+// TestBGPGracefulRestartRetainsRoutes proves that SignalRestart — the path the
+// daemon takes on a SIGTERM restart — does NOT flush mitigation: it sends an
+// Administrative Reset, which gobgp does not escalate to a Hard Reset, so a
+// Graceful-Restart helper RETAINS the blackhole route across the session gap.
+// The companion negative test below proves the regular Stop (peer-deconfigured →
+// Hard Reset) instead flushes — the hazard SignalRestart exists to avoid.
+//
+// SCOPE: this verifies the session-gap bridge using the SAME speaker (whose RIB
+// still holds the route). It does NOT model a freshly-started instance: a stock
+// helper purges the stale route once the reconnecting instance signals
+// End-of-RIB, and because bans are not yet rehydrated on startup the new process
+// has nothing to re-announce. Fully covering an upgrade restart needs that
+// rehydration (a follow-up); see SignalRestart's doc comment.
+func TestBGPGracefulRestartRetainsRoutes(t *testing.T) {
+	recv, _, m := grStartPair(t, 17987)
+	defer recv.Stop()
+	defer m.Stop()
+	ctx := context.Background()
+
+	const prefix = "203.0.113.66/32"
+	if m.OnAttackStarted(startedEvent("203.0.113.66")).State != BanActive {
+		t.Fatal("ban not active")
+	}
+	if !waitForPrefix(t, recv, familyV4, prefix, true) {
+		t.Fatalf("receiver never saw announced prefix %s", prefix)
+	}
+
+	// The upgrade-restart path: ask peers to retain, then (in production) exit.
+	m.SignalRestart(ctx)
+	if !waitRecvSession(t, recv, false) {
+		t.Fatal("receiver never observed the session drop")
+	}
+
+	// THE GUARANTEE: the helper retains the route across the gap. A peer that
+	// flushed on session-down would drop it during session-down processing, so
+	// assert it stays present for a window after the drop is observed. The
+	// speaker reconnects only after IdleHoldTimeAfterReset (5s), well past this.
+	assertPrefixHeld(t, recv, familyV4, prefix, 2*time.Second)
+}
+
+// TestBGPCleanStopFlushesRoutes pins the hazard SignalRestart works around: a
+// regular Stop deletes the peer with a Cease/peer-deconfigured that gobgp
+// escalates to a Hard Reset once GR's "N" capability is negotiated, so the
+// helper FLUSHES kapkan's routes. If a future change made Stop retain (or
+// SignalRestart hard-reset), one of this pair fails.
+func TestBGPCleanStopFlushesRoutes(t *testing.T) {
+	recv, _, m := grStartPair(t, 17989)
+	defer recv.Stop()
+
+	const prefix = "203.0.113.66/32"
+	if m.OnAttackStarted(startedEvent("203.0.113.66")).State != BanActive {
+		t.Fatal("ban not active")
+	}
+	if !waitForPrefix(t, recv, familyV4, prefix, true) {
+		t.Fatalf("receiver never saw announced prefix %s", prefix)
+	}
+
+	m.Stop() // clean teardown → Hard Reset → flush
+	if !waitForPrefix(t, recv, familyV4, prefix, false) {
+		t.Fatalf("clean Stop did not flush %s — Hard Reset semantics changed", prefix)
+	}
+}
+
+// grStartPair stands up a GR-helper receiver and a started mitigator speaker
+// peered to it over loopback, with the BGP session established. The store is
+// returned for callers that need to build a second speaker.
+func grStartPair(t *testing.T, recvPort uint32) (*server.BgpServer, *config.Store, *Mitigator) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping BGP integration test in -short mode")
+	}
+	ctx := context.Background()
+
+	// Receiver: a GR-capable helper "router". NotificationEnabled (RFC 8538) so a
+	// non-Hard-Reset session drop triggers retention rather than a flush.
+	recv := server.NewBgpServer()
+	go recv.Serve()
+	if err := recv.StartBgp(ctx, &api.StartBgpRequest{Global: &api.Global{
+		Asn: 65000, RouterId: "2.2.2.2", ListenPort: int32(recvPort), ListenAddresses: []string{"127.0.0.1"},
+	}}); err != nil {
+		t.Fatalf("receiver StartBgp: %v", err)
+	}
+	if err := recv.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65001},
+		Transport:       &api.Transport{PassiveMode: true},
+		Timers:          &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120, NotificationEnabled: true},
+		AfiSafis:        grHelperFamilies(),
+	}}); err != nil {
+		t.Fatalf("receiver AddPeer: %v", err)
+	}
+
+	// Speaker: the mitigator. bgpYAML carries no graceful_restart block, so GR is
+	// on by default — exactly what a stock deployment ships.
+	store := storeFrom(t, bgpYAML(recvPort))
+	m, err := New(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New mitigator: %v", err)
+	}
+	if err := m.Start(ctx); err != nil {
+		t.Fatalf("mitigator Start: %v", err)
+	}
+	if !m.speaker.waitEstablished(ctx, 20*time.Second) {
+		t.Fatal("BGP session never established")
+	}
+	return recv, store, m
+}
+
+// assertPrefixHeld fails if prefix disappears from srv within d — the assertion
+// that a GR helper RETAINS a route rather than flushing it.
+func assertPrefixHeld(t *testing.T, srv *server.BgpServer, family *api.Family, prefix string, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if _, ok := listPrefixes(t, srv, family)[prefix]; !ok {
+			t.Fatalf("GR helper flushed %s — a restart during an attack would un-mitigate the victim", prefix)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
 }
 
 // TestBGPAnnounceWithdrawLifecycle stands up a receiving gobgp peer in-process

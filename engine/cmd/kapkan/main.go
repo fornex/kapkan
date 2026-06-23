@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/kapkan-io/kapkan/internal/app"
+	"github.com/kapkan-io/kapkan/internal/buildinfo"
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/logging"
 )
@@ -26,11 +27,16 @@ func main() {
 		logLevel    = flag.String("log-level", "info", "log level: debug, info, warn, error")
 		dumpSchema  = flag.Bool("dump-schema", false, "print the config JSON schema to stdout and exit")
 		checkConfig = flag.String("check-config", "", "validate the config file at this path and exit (0 = valid, 1 = invalid)")
+		showVersion = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
 
 	// Utility subcommands exit before the daemon starts; they never open
 	// listeners or send announcements.
+	if *showVersion {
+		fmt.Println("kapkan", buildinfo.String())
+		return
+	}
 	if *dumpSchema {
 		b, err := config.GenerateSchema()
 		if err != nil {
@@ -149,7 +155,10 @@ func run(configPath string, log *slog.Logger) error {
 		}
 	}
 
-	application.Stop()
+	// Shut down asking BGP peers to retain kapkan's mitigation routes (Graceful
+	// Restart) rather than flushing them the instant the session drops, so an
+	// upgrade restart does not immediately un-mitigate active attacks.
+	application.StopForRestart()
 	log.Info("kapkan stopped")
 	return nil
 }

@@ -74,6 +74,9 @@
           "minimum": 0,
           "type": "integer"
         },
+        "state_file": {
+          "type": "string"
+        },
         "ttl_seconds": {
           "minimum": 1,
           "type": "integer"
@@ -141,6 +144,28 @@
         },
         "community": {
           "type": "string"
+        },
+        "graceful_restart": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "long_lived": {
+              "type": "boolean"
+            },
+            "long_lived_stale_seconds": {
+              "maximum": 86400,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "restart_seconds": {
+              "maximum": 4095,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
         },
         "listen_port": {
           "type": "integer"

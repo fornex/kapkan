@@ -143,6 +143,30 @@ func (a *App) Stop() {
 	}
 }
 
+// StopForRestart shuts down like Stop but asks BGP peers to RETAIN kapkan's
+// mitigation routes as stale while the session is down (see
+// Mitigator.SignalRestart), so an upgrade restart does not flush active
+// blackholes the instant the session drops. The caller is expected to exit the
+// process promptly afterwards. Note this bridges only the session gap: until
+// active bans are rehydrated and re-announced on startup, a stock peer purges
+// the retained routes once the new instance signals End-of-RIB. All other
+// teardown (ingest, engine, storage flush, geoip) is identical to Stop.
+func (a *App) StopForRestart() {
+	a.Ingest.Stop()
+	if a.cancel != nil {
+		a.cancel()
+	}
+	a.wg.Wait()
+	a.Mitigate.SignalRestart(context.Background())
+	if a.storeCancel != nil {
+		a.storeCancel()
+	}
+	a.Storage.Stop()
+	if a.GeoIP != nil {
+		_ = a.GeoIP.Close()
+	}
+}
+
 // consumeEvents bridges engine attack events to mitigation, the API attack
 // log and notifications.
 func (a *App) consumeEvents(ctx context.Context) {

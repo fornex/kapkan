@@ -549,6 +549,15 @@ type Ban struct {
 	// BanWindowSeconds is the window for max_bans_per_window; required (> 0)
 	// when that rate is set and ignored otherwise.
 	BanWindowSeconds int `yaml:"ban_window_seconds"`
+	// StateFile is a writable path where active bans are persisted so they can be
+	// rehydrated and re-announced on startup — paired with BGP Graceful Restart,
+	// this keeps mitigation up across a restart (e.g. an upgrade) instead of
+	// dropping it until the engine re-detects. Empty (the default) disables
+	// persistence. The directory must be writable by the kapkan user (the hardened
+	// systemd unit provides one via StateDirectory=kapkan → /var/lib/kapkan); a
+	// missing/unwritable path degrades gracefully to no persistence, never a
+	// startup failure.
+	StateFile string `yaml:"state_file"`
 }
 
 // TTL returns the ban TTL as a duration.
@@ -592,6 +601,9 @@ type BGP struct {
 	// ListenPort is the local BGP listen port; -1 (default) disables
 	// listening so kapkan only dials out. Used by tests.
 	ListenPort int32 `yaml:"listen_port"`
+	// GracefulRestart advertises BGP Graceful Restart so a peer retains
+	// kapkan's mitigation routes across a kapkan restart (e.g. an upgrade).
+	GracefulRestart GracefulRestart `yaml:"graceful_restart"`
 
 	// CommunityValue is the parsed single Community, populated by validate()
 	// (kept for back-compat / single-community callers).
@@ -600,6 +612,45 @@ type BGP struct {
 	// CommunityStr its human-readable form, populated by validate().
 	CommunityValues []uint32 `yaml:"-"`
 	CommunityStr    string   `yaml:"-"`
+}
+
+// GracefulRestart configures BGP Graceful Restart (RFC 4724) and, optionally,
+// Long-Lived Graceful Restart (RFC 9494) on the embedded speaker. When enabled,
+// kapkan advertises the GR capability so a peer that supports it RETAINS the
+// blackhole / FlowSpec routes learned from kapkan as stale while the session is
+// down, instead of flushing them the instant it drops. Without it, restarting
+// kapkan during an active attack un-mitigates everything immediately.
+//
+// Note: this bridges the session gap. A stock helper holds the stale routes only
+// until the reconnecting instance signals End-of-RIB; since active bans are not
+// yet rehydrated on startup, fully covering an upgrade restart additionally
+// requires re-announcing those bans before End-of-RIB (a planned follow-up).
+//
+// Enabled defaults to true: advertising the capability costs nothing against a
+// peer that does not support it (it simply isn't negotiated), and retention is
+// bounded by RestartSeconds, so it never becomes a permanent ban. Set
+// `enabled: false` to opt out. Notification-aware retention (RFC 8538) is
+// always advertised so a clean shutdown — which sends a CEASE NOTIFICATION —
+// still triggers retention on peers that honor it.
+type GracefulRestart struct {
+	// Enabled advertises the GR capability. Defaults to true (set in Parse so an
+	// absent block keeps the safe value); set `enabled: false` to disable.
+	Enabled bool `yaml:"enabled"`
+	// RestartSeconds is the advertised GR restart timer: how long the peer keeps
+	// kapkan's routes as stale while the session is down. Must comfortably exceed
+	// kapkan's restart time. 0 (default) resolves to 120. Capped at 4095 (the
+	// 12-bit GR restart-time field).
+	RestartSeconds uint32 `yaml:"restart_seconds"`
+	// LongLived enables LLGR, extending retention beyond RestartSeconds by
+	// LongLivedStaleSeconds (per family). Off by default: RFC 9494 warns about
+	// transient forwarding loops with long LLGR for FlowSpec, so opt in only when
+	// the peer and topology are understood.
+	LongLived bool `yaml:"long_lived"`
+	// LongLivedStaleSeconds is the LLGR stale timer in seconds. 0 (default)
+	// resolves to 3600 (1h) when LongLived is set; capped at 86400 (24h) —
+	// hours, not days, so a finished attack's route is not pinned indefinitely
+	// if kapkan never recovers.
+	LongLivedStaleSeconds uint32 `yaml:"long_lived_stale_seconds"`
 }
 
 // BGPOverride overrides the global blackhole BGP attributes for a hostgroup.
@@ -795,6 +846,10 @@ func Parse(raw []byte) (*Config, error) {
 	// keeps the safe value.
 	cfg := &Config{DryRun: true}
 	cfg.BGP.ListenPort = -1
+	// Graceful Restart is on by default; an absent graceful_restart block keeps
+	// it enabled, while `enabled: false` in the file overrides this. Timers
+	// resolve to their defaults in validateBGP.
+	cfg.BGP.GracefulRestart.Enabled = true
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
@@ -1682,6 +1737,24 @@ func (c *Config) validateBGP() error {
 		}
 		if n.RemoteASN == 0 {
 			return fmt.Errorf("bgp.neighbors[%d]: remote_asn must be > 0", i)
+		}
+	}
+	gr := &b.GracefulRestart
+	// Bounds match the JSON schema and are enforced regardless of Enabled; 0
+	// means "use the default", so it is always accepted. RestartSeconds rides the
+	// 12-bit GR restart-time field (max 4095s); LLGR stale time is capped at 24h.
+	if gr.RestartSeconds > 4095 {
+		return fmt.Errorf("bgp.graceful_restart.restart_seconds must be 0..4095, got %d", gr.RestartSeconds)
+	}
+	if gr.LongLivedStaleSeconds > 86400 {
+		return fmt.Errorf("bgp.graceful_restart.long_lived_stale_seconds must be 0..86400, got %d", gr.LongLivedStaleSeconds)
+	}
+	if gr.Enabled {
+		if gr.RestartSeconds == 0 {
+			gr.RestartSeconds = 120
+		}
+		if gr.LongLived && gr.LongLivedStaleSeconds == 0 {
+			gr.LongLivedStaleSeconds = 3600
 		}
 	}
 	return nil
