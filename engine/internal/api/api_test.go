@@ -180,6 +180,19 @@ func TestStatusEndpoint(t *testing.T) {
 	}
 }
 
+func TestHealthzReflectsReadiness(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+	h := s.Handler()
+	// Unauthenticated and 503 until the daemon marks itself ready.
+	if rec := do(t, h, http.MethodGet, "/healthz", ""); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("healthz before ready = %d, want 503", rec.Code)
+	}
+	s.SetReady()
+	if rec := do(t, h, http.MethodGet, "/healthz", ""); rec.Code != http.StatusOK {
+		t.Fatalf("healthz after ready = %d, want 200", rec.Code)
+	}
+}
+
 func TestAttacksEndpoint(t *testing.T) {
 	s := testServer(t, storeFromYAML(t, apiYAML))
 	target := netip.MustParseAddr("203.0.113.50")

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/buildinfo"
@@ -84,6 +85,7 @@ type Server struct {
 	auditW  storage.Writer  // persists audit records; nil until wired (handlers nil-guard)
 	updchk  *update.Checker // optional update-availability source; nil = disabled
 	start   time.Time
+	ready   atomic.Bool // flipped true once the daemon is fully started (drives /healthz)
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -241,8 +243,26 @@ func (s *Server) Handler() http.Handler {
 	write("POST /api/v1/unban", s.handleUnban)
 	write("POST /api/v1/config/reload", s.handleReload)
 	mux.Handle("GET /metrics", promhttp.Handler())
+	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater
+	// or supervisor can confirm the daemon is fully up after a restart. 503 until
+	// every component has started; the API listener only accepts once started, so
+	// any 200 here means "config parsed, components up, serving".
+	mux.Handle("GET /healthz", http.HandlerFunc(s.handleHealthz))
 	s.registerDashboard(mux)
 	return mux
+}
+
+// SetReady marks the daemon fully started; /healthz returns 200 thereafter.
+func (s *Server) SetReady() { s.ready.Store(true) }
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if !s.ready.Load() {
+		http.Error(w, "starting", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 // requireRole enforces the configured API tokens and the route's minimum role.
