@@ -13,7 +13,8 @@
     },
     "event": {
       "type": "string",
-      "enum": ["attack_started", "attack_ended"]
+      "enum": ["attack_started", "attack_ended", "update_available"],
+      "description": "attack_started/attack_ended carry the attack + ban fields. update_available (opt-in update_check.notify) carries current_version/latest_version/security/release_url instead; the attack fields are absent or zero."
     },
     "scope": {
       "type": "string",
@@ -65,6 +66,10 @@
     },
     "dry_run": { "type": "boolean" },
     "at": { "type": "string", "format": "date-time" },
+    "current_version": { "type": "string", "description": "update_available only: the running kapkan version." },
+    "latest_version": { "type": "string", "description": "update_available only: the newer release tag." },
+    "security": { "type": "boolean", "description": "update_available only: true when the release is flagged security-relevant." },
+    "release_url": { "type": "string", "description": "update_available only: the release's html_url." },
     "classification": {
       "type": "object",
       "description": "Attack vector inferred at detection time (attack_started only).",

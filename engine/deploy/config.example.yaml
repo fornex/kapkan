@@ -306,4 +306,5 @@ api:
 #   enabled: true
 #   interval_seconds: 21600 # default 6h; floored at 3600 (1h)
 #   channel: stable         # stable | prerelease
+#   notify: false           # also send "update available" via notify channels (Telegram/webhook/Slack/email)
 #   # url: "https://api.github.com/repos/fornex/kapkan/releases/latest" # mirror/proxy override
