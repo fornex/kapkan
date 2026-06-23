@@ -60,7 +60,7 @@ If you install without `update.sh` (air-gapped, or your own automation), verify 
 ```sh
 VER=v1.3.0
 base="https://github.com/fornex/kapkan/releases/download/$VER"
-curl -fLO "$base/kapkan_${VER}_linux_amd64.tar.gz"
+curl -fLO "$base/kapkan_${VER#v}_linux_amd64.tar.gz"   # archive names drop the leading "v"
 curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
 
 # 1) authenticity: the signature over checksums.txt, pinned to this repo's release tag
