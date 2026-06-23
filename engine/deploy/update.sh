@@ -109,7 +109,9 @@ trap 'rm -rf "$WORK"' EXIT
 chmod 0755 "$WORK"
 cd "$WORK"
 
-ASSET="kapkan_${VERSION}_linux_${ARCH}.tar.gz"
+# GoReleaser names archives with the bare version (no leading "v"), while the
+# release download path uses the "v" tag — so strip "v" from the filename only.
+ASSET="kapkan_${VERSION#v}_linux_${ARCH}.tar.gz"
 BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 log "downloading ${ASSET} + checksums"
 curl -fsSL -o "$ASSET" "${BASE}/${ASSET}"
