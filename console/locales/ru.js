@@ -211,6 +211,13 @@
       "se.mode": "Режим защиты",
       "se.uptime": "Время работы",
       "se.version": "Версия",
+
+      /* update-available banner */
+      "update.banner": "Доступна новая версия: {version}",
+      "update.banner.security": "Доступно обновление безопасности: {version}",
+      "update.view": "Открыть релиз",
+      "update.dismiss": "Закрыть",
+
       "se.networks": "Защищаемые сети",
       "se.thresholds": "Глобальные пороги",
       "se.bgp": "BGP / защита",
