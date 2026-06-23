@@ -138,6 +138,16 @@ type Mitigator struct {
 	banWindowStart time.Time
 	bansInWindow   int
 
+	// persist holds active bans across a restart (nil when ban.state_file is
+	// unset). markDirty signals persistLoop via dirty; persistMu serializes the
+	// file write between persistLoop and the synchronous shutdown flush;
+	// persistDone is closed when persistLoop exits, so shutdown can wait for it
+	// before the final flush (making that flush the sole, last writer).
+	persist     *banPersistor
+	persistMu   sync.Mutex
+	dirty       chan struct{}
+	persistDone chan struct{}
+
 	now    func() time.Time
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -171,6 +181,10 @@ func New(store *config.Store, log *slog.Logger, opts ...Option) (*Mitigator, err
 		prefixBans: make(map[netip.Prefix]*Ban),
 		now:        time.Now,
 	}
+	if sf := store.Get().Ban.StateFile; sf != "" {
+		m.persist = &banPersistor{path: sf}
+		m.dirty = make(chan struct{}, 1)
+	}
 	for _, o := range opts {
 		o(m)
 	}
@@ -196,6 +210,24 @@ func (m *Mitigator) Start(ctx context.Context) error {
 			return fmt.Errorf("start bgp speaker: %w", err)
 		}
 	}
+	// Rehydrate persisted bans and re-announce them into the RIB BEFORE the peers
+	// are added below, so every retained route rides each peer's initial
+	// advertisement ahead of the session's End-of-RIB. A Graceful Restart helper
+	// then REFRESHES the routes it held across the restart instead of purging
+	// them on EOR. Doing the AddPath before AddPeer makes this ordering
+	// structural, not a race against session establishment.
+	if m.persist != nil {
+		m.persistDone = make(chan struct{})
+		m.mu.Lock()
+		m.rehydrateLocked(m.store.Get())
+		m.mu.Unlock()
+		go m.persistLoop(m.ctx)
+	}
+	if m.speaker != nil {
+		if err := m.speaker.addPeers(m.ctx); err != nil {
+			return fmt.Errorf("add bgp peers: %w", err)
+		}
+	}
 	go m.sweepLoop(m.ctx)
 	return nil
 }
@@ -206,9 +238,38 @@ func (m *Mitigator) Stop() {
 	if m.cancel != nil {
 		m.cancel()
 	}
+	m.drainPersist() // stop the persist loop, then write the final active-ban set
 	if m.speaker != nil {
 		m.speaker.stop()
 	}
+}
+
+// SignalRestart prepares for a process restart (e.g. an upgrade). Instead of the
+// clean Stop teardown — which gobgp escalates to a Hard Reset once Graceful
+// Restart is negotiated, telling the peer to flush every route the instant the
+// session drops — it asks each peer to RETAIN kapkan's routes as stale via an
+// Administrative Reset (see bgpSpeaker.signalRestart). It stops the sweeper but
+// leaves the routes installed and the speaker running; the caller exits the
+// process next.
+//
+// IMPORTANT — this bridges only the session gap, not the whole restart. Bans
+// live in memory and are not rehydrated, so the freshly-started instance
+// reconnects with an EMPTY RIB and sends End-of-RIB before the engine
+// re-detects; a stock GR helper then purges the retained route. Closing that
+// residual gap requires re-announcing active bans on startup BEFORE End-of-RIB
+// (a follow-up): GR plumbing alone cannot keep a route the new process does not
+// know to announce. With an injected announcer (tests) there is nothing to
+// reset, so this falls back to a clean Stop.
+func (m *Mitigator) SignalRestart(ctx context.Context) {
+	if m.speaker == nil {
+		m.Stop()
+		return
+	}
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.drainPersist() // the restarted instance rehydrates from this final snapshot
+	m.speaker.signalRestart(ctx)
 }
 
 // OnAttackStarted is called when the engine reports a new attack. It returns
@@ -365,6 +426,7 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 		// A second attack direction adds its hold on the shared mitigation.
 		existing.ExpiresAt = now.Add(cfg.Ban.TTL())
 		existing.dirMask |= opts.dirMask
+		m.markDirty()
 		return copyBan(existing)
 	}
 
@@ -430,21 +492,10 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 		Escalation: group.Escalation,
 	}
 	// Precompute and FREEZE the announcement inputs for whatever stages the
-	// ladder uses: the blackhole and/or divert attribute sets (from the group's
-	// resolved BGP/scrubbing attributes, which inherit the global blocks) and
-	// the generated FlowSpec rules if any rung is flowspec. A ladder that never
-	// uses an action carries no attributes for it.
-	// Freeze the blackhole attribute set when any rung blackholes OR when the
-	// fallback policy may degrade a failed flowspec/divert announce to blackhole
-	// (so the fallback has frozen attributes to announce, like any other rung).
-	fallbackToBlackhole := cfg.Ban.FallbackMethod() != ""
-	if ladderUsesBlackhole(group.Escalation) ||
-		(fallbackToBlackhole && (ladderUsesFlowSpec(group.Escalation) || ladderUsesDivert(group.Escalation))) {
-		b.bhAttrs = groupBlackholeAttrs(group, target)
-	}
-	if ladderUsesDivert(group.Escalation) {
-		b.divAttrs = groupDivertAttrs(group, target)
-	}
+	// ladder uses: the blackhole/divert attribute sets (frozen so a config reload
+	// cannot change a live ban's route, and so a rehydrated ban matches) and the
+	// generated FlowSpec rules if any rung is flowspec.
+	freezeUnicastAttrs(b, group, target, cfg)
 	if ladderUsesFlowSpec(group.Escalation) {
 		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample,
 			group.FlowSpecAction, group.FlowSpecRateBps, group.FlowSpecSourceAnchored, group.FlowSpecMinConcentration)
@@ -463,6 +514,7 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	}
 	m.bans[target] = b
 	m.updateGaugeLocked()
+	m.markDirty()
 	return copyBan(b)
 }
 
@@ -504,6 +556,7 @@ func (m *Mitigator) banPrefix(p netip.Prefix, opts banOpts) *Ban {
 
 	if existing, ok := m.prefixBans[p]; ok && existing.State == BanActive {
 		existing.ExpiresAt = now.Add(cfg.Ban.TTL())
+		m.markDirty()
 		return copyBan(existing)
 	}
 
@@ -568,10 +621,7 @@ func (m *Mitigator) banPrefix(p netip.Prefix, opts banOpts) *Ban {
 	}
 	// Freeze blackhole attributes when the method is blackhole OR a flowspec
 	// fallback may degrade to it (the prefix is already whitelist-free).
-	fallbackToBlackhole := cfg.Ban.FallbackMethod() != ""
-	if method == config.MitigateBlackhole || (method == config.MitigateFlowSpec && fallbackToBlackhole) {
-		b.bhAttrs = groupBlackholeAttrs(g, p.Addr())
-	}
+	freezeUnicastAttrs(b, g, p.Addr(), cfg)
 	if method == config.MitigateFlowSpec {
 		// Vector-anchored on the whole prefix: drops only the attack vector to
 		// the /24, sparing non-vector traffic. The prefix is whitelist-free.
@@ -588,6 +638,7 @@ func (m *Mitigator) banPrefix(p netip.Prefix, opts banOpts) *Ban {
 	}
 	m.prefixBans[p] = b
 	m.updateGaugeLocked()
+	m.markDirty()
 	m.log.Warn("carpet mitigation applied",
 		"prefix", p.String(), "method", string(b.Method), "route", b.Route)
 	return copyBan(b)
@@ -691,6 +742,24 @@ func groupDivertAttrs(g *config.Group, target netip.Addr) blackholeAttrs {
 		communities: g.ScrubCommunities,
 		commStr:     g.ScrubCommunityStr,
 		localPref:   g.ScrubLocalPref,
+	}
+}
+
+// freezeUnicastAttrs freezes the blackhole and divert BGP attribute sets on b
+// from the group's resolved config, for whatever rungs its ladder uses (plus a
+// blackhole set when the fallback policy may degrade a flowspec/divert announce
+// to blackhole). It is shared by ban creation and rehydration so a restored ban
+// re-announces and escalates with exactly the attributes a freshly-created one
+// would. FlowSpec rules are handled separately by the caller (generated at ban
+// time from the attack sample, restored verbatim on rehydration).
+func freezeUnicastAttrs(b *Ban, group *config.Group, target netip.Addr, cfg *config.Config) {
+	fallbackToBlackhole := cfg.Ban.FallbackMethod() != ""
+	if ladderUsesBlackhole(b.Escalation) ||
+		(fallbackToBlackhole && (ladderUsesFlowSpec(b.Escalation) || ladderUsesDivert(b.Escalation))) {
+		b.bhAttrs = groupBlackholeAttrs(group, target)
+	}
+	if ladderUsesDivert(b.Escalation) {
+		b.divAttrs = groupDivertAttrs(group, target)
 	}
 }
 
@@ -951,6 +1020,7 @@ func (m *Mitigator) withdrawLocked(b *Ban, reason string, manual bool) {
 	b.Reason = reason
 	b.Manual = b.Manual || manual
 	m.updateGaugeLocked()
+	m.markDirty()
 }
 
 // escalateLocked advances a still-active ban up its ladder. It jumps straight
@@ -980,6 +1050,7 @@ func (m *Mitigator) escalateLocked(b *Ban, now time.Time, cfg *config.Config) {
 		// route is identical, so there is nothing to re-announce or withdraw.
 		// Just record that we've climbed to the higher rung.
 		b.EscalationStep = target
+		m.markDirty()
 		return
 	}
 
@@ -1012,6 +1083,7 @@ func (m *Mitigator) escalateLocked(b *Ban, now time.Time, cfg *config.Config) {
 	m.log.Warn("escalated mitigation", "target", b.Target.String(),
 		"step", target, "from", string(oldMethod), "method", string(applied.method), "route", applied.route)
 	m.updateGaugeLocked()
+	m.markDirty()
 }
 
 // sweepLoop advances escalation ladders and withdraws bans whose TTL has

@@ -77,6 +77,9 @@ var numericBounds = map[string]map[string]float64{
 
 	"bgp.local_asn":            {"minimum": 1},
 	"bgp.neighbors.remote_asn": {"minimum": 1},
+	// 0 means "use the default" (120 / 3600), so the floor is 0, not 1.
+	"bgp.graceful_restart.restart_seconds":          {"minimum": 0, "maximum": 4095},
+	"bgp.graceful_restart.long_lived_stale_seconds": {"minimum": 0, "maximum": 86400},
 
 	"flowspec.rate_mbps":                {"minimum": 0},
 	"flowspec.min_source_concentration": {"minimum": 0, "maximum": 1},
