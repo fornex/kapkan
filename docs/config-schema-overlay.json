@@ -66,7 +66,7 @@
 
     "tenant": { "tier": "advanced", "description": "Optional tenant label for the implicit global/fallback group." },
 
-    "samples.enabled": { "tier": "advanced", "defaultWhenAbsent": true, "description": "Continuous flow buffer that attaches dominant sources/ports to each attack." },
+    "samples.enabled": { "tier": "advanced", "defaultWhenAbsent": true, "reloadImmutable": true, "description": "Continuous flow buffer that attaches dominant sources/ports to each attack." },
     "samples.buffer_flows": { "tier": "advanced", "reloadImmutable": true, "description": "Total capacity of the recent-flows ring (256..1048576, default 65536). Sizing changes require a restart." },
     "samples.flows_per_attack": { "tier": "advanced", "reloadImmutable": true, "description": "Raw flow records attached to one attack event (1..500, default 20)." },
 
@@ -87,10 +87,10 @@
     "geoip.country_database": { "tier": "advanced", "format": "path", "reloadImmutable": true, "serverVerified": true, "description": "Path to a GeoLite2-Country.mmdb file on the engine host." },
 
     "storage.clickhouse.url": { "tier": "advanced", "format": "url", "reloadImmutable": true, "description": "ClickHouse HTTP endpoint, e.g. http://127.0.0.1:8123. Empty disables persistence." },
-    "storage.clickhouse.database": { "tier": "advanced", "description": "ClickHouse database name (identifier charset, default kapkan)." },
-    "storage.clickhouse.username_env": { "tier": "advanced", "secret": true, "description": "Env var holding the ClickHouse username." },
-    "storage.clickhouse.password_env": { "tier": "advanced", "secret": true, "description": "Env var holding the ClickHouse password." },
-    "storage.clickhouse.ttl_days": { "tier": "advanced", "description": "Row retention in days (1..365, default 7)." },
+    "storage.clickhouse.database": { "tier": "advanced", "reloadImmutable": true, "description": "ClickHouse database name (identifier charset, default kapkan)." },
+    "storage.clickhouse.username_env": { "tier": "advanced", "secret": true, "reloadImmutable": true, "description": "Env var holding the ClickHouse username." },
+    "storage.clickhouse.password_env": { "tier": "advanced", "secret": true, "reloadImmutable": true, "description": "Env var holding the ClickHouse password." },
+    "storage.clickhouse.ttl_days": { "tier": "advanced", "reloadImmutable": true, "description": "Row retention in days (1..365, default 7)." },
 
     "notify.telegram.token_env": { "tier": "basic", "secret": true, "description": "Env var holding the Telegram bot token (never the token itself)." },
     "notify.telegram.chat_id": { "tier": "basic", "description": "Telegram chat ID to post alerts to." },
