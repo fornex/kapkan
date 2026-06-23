@@ -12,12 +12,12 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/kapkan-io/kapkan/internal/buildinfo"
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/engine"
 	"github.com/kapkan-io/kapkan/internal/mitigate"
@@ -792,27 +792,14 @@ func (s *Server) parseIPBody(w http.ResponseWriter, r *http.Request) (netip.Addr
 	return addr, true
 }
 
-// buildVersion derives a version string from the embedded build info: the main
-// module version (a tag for released builds, else "(devel)") plus the short VCS
-// revision when the binary was built from a git checkout. Build info is static
-// for the process lifetime, so it is computed once.
+// buildVersion is the human version shown in /api/v1/status and the console
+// Settings view: the release version plus the short VCS revision when known.
+// The underlying values come from internal/buildinfo (link-time -X injection
+// for releases, build-info fallback otherwise).
 var buildVersion = sync.OnceValue(func() string {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-	v := bi.Main.Version
-	if v == "" {
-		v = "(devel)"
-	}
-	for _, s := range bi.Settings {
-		if s.Key == "vcs.revision" {
-			rev := s.Value
-			if len(rev) > 12 {
-				rev = rev[:12]
-			}
-			return v + " · " + rev
-		}
+	v := buildinfo.Version()
+	if c := buildinfo.Commit(); c != "" && !strings.Contains(v, c) {
+		return v + " · " + c
 	}
 	return v
 })

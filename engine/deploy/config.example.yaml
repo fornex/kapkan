@@ -180,6 +180,11 @@ ban:
   #   # baseline or spoofed-source storm. 0 (default) disables this guard.
   # max_bans_per_window: 100 # storm guard: at most this many NEW bans per window
   # ban_window_seconds: 60   # the window for max_bans_per_window (required when set)
+  state_file: /var/lib/kapkan/bans.json # persist active bans so a restart (e.g. an
+  #   # upgrade) rehydrates and re-announces them on startup instead of dropping
+  #   # mitigation until re-detection. Pairs with BGP Graceful Restart (bgp.graceful_restart)
+  #   # to keep routes up across the gap. The shipped systemd unit provides the
+  #   # directory via StateDirectory=kapkan. Empty disables persistence.
 
 bgp:
   local_asn: 65001
@@ -192,6 +197,18 @@ bgp:
   neighbors:
     - address: "10.0.0.254"
       remote_asn: 65000
+  # Graceful Restart: on by default. A peer that supports it RETAINS kapkan's
+  # mitigation routes as stale while the session is down (e.g. during an upgrade)
+  # instead of flushing them the instant it drops. Advertising the capability is
+  # harmless to a peer that does not support it. (Bridges the session gap; a
+  # stock peer purges the retained routes once the restarted instance signals
+  # End-of-RIB, until active bans are re-announced on startup — a planned
+  # follow-up.) Routes linger up to restart_seconds if kapkan never comes back.
+  # graceful_restart:
+  #   enabled: true             # set false to opt out
+  #   restart_seconds: 120      # how long the peer holds routes as stale (1..4095)
+  #   long_lived: false         # LLGR: extend retention beyond restart_seconds
+  #   long_lived_stale_seconds: 3600  # LLGR stale time when long_lived is set (<=86400)
 
 # Hostgroups can override the blackhole BGP attributes so different customers
 # signal their own upstreams. Each unset field inherits the global bgp block;
