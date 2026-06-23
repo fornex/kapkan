@@ -93,13 +93,22 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	// The update check is opt-in (no egress unless enabled). When on, the API
 	// surfaces its result on /api/v1/status; Start launches the poll loop.
 	if uc := store.Get().UpdateCheck; uc.Enabled {
-		a.Update = update.New(update.Config{
+		ucfg := update.Config{
 			Enabled:  true,
 			Interval: time.Duration(uc.IntervalSeconds) * time.Second,
 			Channel:  uc.Channel,
 			URL:      uc.URL,
 			Current:  buildinfo.Version(),
-		}, log)
+		}
+		// When update_check.notify is set, fan a newly-seen release out through
+		// the configured notification channels (Telegram/webhook/Slack/email).
+		if uc.Notify {
+			notifier := a.Notify
+			ucfg.OnAvailable = func(st update.Status) {
+				notifier.NotifyUpdateAvailable(context.Background(), buildinfo.Version(), st.LatestVersion, st.Security, st.URL)
+			}
+		}
+		a.Update = update.New(ucfg, log)
 		a.API.SetUpdateChecker(a.Update)
 	}
 	return a, nil

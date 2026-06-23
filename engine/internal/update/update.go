@@ -44,6 +44,11 @@ type Config struct {
 	URL       string        // endpoint override; empty derives from Channel
 	Current   string        // the running version (from internal/buildinfo)
 	UserAgent string        // empty derives "kapkan/<version> (update-check)"
+	// OnAvailable, if set, is called once each time a NEWLY-available version is
+	// first observed (same trigger as the rate-limited log). Used to fan a
+	// notification out without coupling this package to notify. Runs on the
+	// checker's goroutine, so it must not block.
+	OnAvailable func(Status)
 }
 
 // Checker polls for releases and holds the latest result.
@@ -156,6 +161,9 @@ func (c *Checker) checkAndRecord(ctx context.Context) {
 		c.log.Warn("update available",
 			"current", c.cfg.Current, "latest", st.LatestVersion,
 			"security", st.Security, "url", st.URL)
+		if c.cfg.OnAvailable != nil {
+			c.cfg.OnAvailable(st)
+		}
 	}
 }
 

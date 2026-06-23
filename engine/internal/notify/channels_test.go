@@ -294,6 +294,30 @@ func TestExecHookTimeoutKills(t *testing.T) {
 	}
 }
 
+func TestUpdateAvailableMessages(t *testing.T) {
+	p := Payload{
+		Event: "update_available", CurrentVersion: "v1.2.0", LatestVersion: "v1.3.0",
+		Security: true, ReleaseURL: "https://example.test/releases/v1.3.0", At: time.Now(),
+	}
+	tg := formatTelegram(p)
+	if !strings.Contains(tg, "v1.3.0") || !strings.Contains(tg, "Security") || !strings.Contains(tg, p.ReleaseURL) {
+		t.Errorf("telegram update message missing pieces: %q", tg)
+	}
+	sl := formatSlack(p)
+	if !strings.Contains(sl, "v1.3.0") || !strings.Contains(sl, "Security") {
+		t.Errorf("slack update message missing pieces: %q", sl)
+	}
+	em := string(emailMessage(config.Email{From: "a@b.test", To: []string{"c@d.test"}}, p))
+	if !strings.Contains(em, "Subject: [kapkan] Security update available - v1.3.0") || !strings.Contains(em, p.ReleaseURL) {
+		t.Errorf("email update message missing pieces: %q", em)
+	}
+	// Non-security uses the neutral wording in every channel.
+	p.Security = false
+	if strings.Contains(formatTelegram(p), "Security") || strings.Contains(formatSlack(p), "Security") {
+		t.Error("non-security update must not say 'Security'")
+	}
+}
+
 // schemaNode walks a parsed JSON schema along path, failing the test if any
 // segment is missing.
 func schemaNode(t *testing.T, node map[string]any, path ...string) map[string]any {
@@ -367,6 +391,24 @@ func TestPayloadMatchesPublishedSchema(t *testing.T) {
 	var got map[string]any
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
+	}
+
+	// Union in the update_available event's own fields so the top-level
+	// cross-check covers BOTH event shapes (attack and update).
+	updBody, err := json.Marshal(Payload{
+		SchemaVersion: SchemaVersion, Event: "update_available",
+		CurrentVersion: "v1.0.0", LatestVersion: "v1.1.0", Security: true,
+		ReleaseURL: "https://example.test/releases/v1.1.0", At: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotUpd map[string]any
+	if err := json.Unmarshal(updBody, &gotUpd); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range gotUpd {
+		got[k] = v
 	}
 
 	// Top level.
