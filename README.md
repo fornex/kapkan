@@ -536,9 +536,38 @@ These rules are enforced in code and covered by tests; they are non-negotiable:
 5. **Whitelist is absolute.** Addresses in `protected_whitelist` are never announced, by detection or manual request.
 6. **Scoped detection.** Only destinations inside `networks` are ever acted on; other traffic is counted in metrics but never triggers a ban.
 
+## Install
+
+Download a signed release for your architecture from
+[Releases](https://github.com/fornex/kapkan/releases) (`linux/amd64` or
+`linux/arm64`), verify it, and extract. Each release ships `checksums.txt` with a
+cosign-keyless signature; verifying is two commands (authenticity then integrity):
+
+```sh
+VER=v1.0.0   # the release you want
+base="https://github.com/fornex/kapkan/releases/download/$VER"
+curl -fLO "$base/kapkan_${VER}_linux_amd64.tar.gz"
+curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
+
+# 1) authenticity — signature over checksums.txt, pinned to this repo's release tag
+cosign verify-blob checksums.txt \
+  --signature checksums.txt.sig --certificate checksums.txt.pem \
+  --certificate-identity-regexp 'https://github.com/fornex/kapkan/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+# 2) integrity — hash of the archive (shasum -a 256 -c on macOS)
+sha256sum -c checksums.txt --ignore-missing
+
+tar xzf "kapkan_${VER}_linux_amd64.tar.gz"   # yields ./kapkan and ./deploy/
+./kapkan -version
+```
+
+(Building from source instead? See [Development](#development); `make build`
+stamps the version the same way.)
+
 ## Deployment
 
-A hardened systemd unit and a production config example live in [`deploy/`](deploy/):
+A hardened systemd unit and a production config example ship in the release
+archive's `deploy/` (and live in [`deploy/`](deploy/) in this repo):
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
