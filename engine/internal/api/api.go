@@ -459,6 +459,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp["update_available"] = u.Available
 		resp["latest_version"] = u.LatestVersion
 		resp["latest_is_security"] = u.Security
+		resp["latest_url"] = u.URL
 	} else {
 		resp["update_available"] = false
 	}

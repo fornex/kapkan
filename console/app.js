@@ -158,6 +158,39 @@
     if (rb) rb.style.display = ctx.role === "operator" ? "" : "none";
   }
 
+  /* ---------- update-available banner (opt-in update check) ---------- */
+  /* Dismissal is keyed by the latest version, so dismissing v1.3.0 hides it
+     until a DIFFERENT version appears (then the banner returns). Persisted in
+     localStorage so a reload does not re-nag. */
+  var UPD_DISMISS_KEY = "kapkan.updateDismissed";
+  function renderUpdateBanner(ctx) {
+    var slot = document.getElementById("updateBanner");
+    if (!slot) return;
+    var s = ctx.status;
+    var dismissed = false;
+    try { dismissed = localStorage.getItem(UPD_DISMISS_KEY) === s.latest_version; } catch (e) {}
+    if (!s.update_available || !s.latest_version || dismissed) {
+      K.clear(slot); slot.hidden = true; return;
+    }
+    slot.hidden = false;
+    var sec = !!s.latest_is_security;
+    var children = [
+      w.icon(sec ? "alert" : "bell"),
+      h("span", { class: "banner__txt", text: I.t(sec ? "update.banner.security" : "update.banner", { version: s.latest_version }) })
+    ];
+    if (s.latest_url) {
+      children.push(h("a", { class: "btn btn--ghost btn--sm", href: s.latest_url, target: "_blank", rel: "noopener", text: I.t("update.view") }));
+    }
+    children.push(h("button", {
+      class: "icon-btn", "aria-label": I.t("update.dismiss"),
+      onclick: function () {
+        try { localStorage.setItem(UPD_DISMISS_KEY, s.latest_version); } catch (e) {}
+        renderUpdateBanner(ctx);
+      }
+    }, w.icon("x")));
+    K.mount(slot, h("div", { class: "banner " + (sec ? "banner--error" : "banner--info") }, children));
+  }
+
   /* ---------- view render ---------- */
   function renderView(ctx) {
     ctx = ctx || buildCtx();
@@ -267,6 +300,7 @@
     var st = API.getStatus(); if (st && st.role) state.role = st.role;
     var ctx = buildCtx();
     renderShellDynamic(ctx);
+    renderUpdateBanner(ctx);
     renderView(ctx);
     if (state.drawer.open) renderDrawer();
     announceRung(ctx);

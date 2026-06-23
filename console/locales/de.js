@@ -211,6 +211,13 @@
       "se.mode": "Abwehrmodus",
       "se.uptime": "Laufzeit",
       "se.version": "Version",
+
+      /* update-available banner */
+      "update.banner": "Eine neue Version ist verfügbar: {version}",
+      "update.banner.security": "Ein Sicherheitsupdate ist verfügbar: {version}",
+      "update.view": "Release ansehen",
+      "update.dismiss": "Schließen",
+
       "se.networks": "Geschützte Netze",
       "se.thresholds": "Globale Schwellenwerte",
       "se.bgp": "BGP / Abwehr",
