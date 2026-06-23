@@ -60,6 +60,9 @@
 
     <!-- ============ MAIN ============ -->
     <main class="main" id="main">
+      <!-- opt-in update-available banner (populated by app.js when the update
+           check reports a newer release; hidden otherwise) -->
+      <div class="updbanner-slot" id="updateBanner" hidden></div>
       <section class="view" id="view-overview" data-screen-label="Overview"></section>
       <section class="view" id="view-attacks" data-screen-label="Attacks" hidden></section>
       <section class="view" id="view-bans" data-screen-label="Bans / Mitigation" hidden></section>

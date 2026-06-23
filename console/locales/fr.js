@@ -226,6 +226,13 @@
       "se.mode": "Mode d'atténuation",
       "se.uptime": "Disponibilité",
       "se.version": "Version",
+
+      /* update-available banner */
+      "update.banner": "Une nouvelle version est disponible : {version}",
+      "update.banner.security": "Une mise à jour de sécurité est disponible : {version}",
+      "update.view": "Voir la version",
+      "update.dismiss": "Fermer",
+
       "se.networks": "Réseaux protégés",
       "se.thresholds": "Seuils globaux",
       "se.bgp": "BGP / atténuation",

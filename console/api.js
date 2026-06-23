@@ -231,6 +231,11 @@
         unscoped: !!status.unscoped,
         /* Settings view fields (admin-only ones are absent for scoped tokens) */
         version: status.version || "",
+        /* update availability (opt-in update check; false/empty when disabled) */
+        update_available: !!status.update_available,
+        latest_version: status.latest_version || "",
+        latest_is_security: !!status.latest_is_security,
+        latest_url: status.latest_url || "",
         bgp: status.bgp || null,
         scrubbing: status.scrubbing || null,
         notify: status.notify || null
