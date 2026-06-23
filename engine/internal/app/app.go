@@ -140,6 +140,11 @@ func (a *App) Start(ctx context.Context) error {
 	if a.Update != nil {
 		go a.Update.Run(runCtx)
 	}
+
+	// Everything is up: flip /healthz to 200 so a supervisor or update script can
+	// distinguish "fully started" from the bare "process forked" that Type=simple
+	// would otherwise report.
+	a.API.SetReady()
 	return nil
 }
 
