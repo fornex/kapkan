@@ -965,6 +965,32 @@
       },
       "type": "object",
       "x-optional": true
+    },
+    "update_check": {
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "enum": [
+            "stable",
+            "prerelease"
+          ],
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "interval_seconds": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "notify": {
+          "type": "boolean"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "type": "object"
     }
   },
   "title": "Kapkan configuration",

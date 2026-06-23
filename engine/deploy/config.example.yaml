@@ -293,3 +293,17 @@ api:
   #   - {name: automation, token_env: "KAPKAN_API_RW", role: operator}
   #   # add `tenant: "<name>"` to scope a token to one tenant (multi-tenancy):
   #   - {name: custA, token_env: "KAPKAN_API_CUSTA", role: viewer, tenant: "customerA"}
+
+# Optional, opt-in check for a newer kapkan release. OFF by default: kapkan never
+# phones home unless you enable this. The running version is always exposed
+# locally (the kapkan_build_info metric and /api/v1/status) with zero egress.
+# When enabled, kapkan polls the GitHub Releases API and surfaces "a newer
+# version exists" on /api/v1/status, the kapkan_update_available metric and a
+# log line. It sends only the request itself (IP + a generic User-Agent) — never
+# node identity, config or attack data — off the startup path with a bounded
+# timeout. (`kapkan -check-update` runs the same check once, on demand.)
+# update_check:
+#   enabled: true
+#   interval_seconds: 21600 # default 6h; floored at 3600 (1h)
+#   channel: stable         # stable | prerelease
+#   # url: "https://api.github.com/repos/fornex/kapkan/releases/latest" # mirror/proxy override
