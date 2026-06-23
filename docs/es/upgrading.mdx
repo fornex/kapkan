@@ -1,0 +1,89 @@
+export const metadata = {
+  title: "Actualización",
+  description:
+    "Conozca una nueva versión de Kapkan y actualice de forma segura: verifique la descarga, valide la configuración previamente, intercambie de forma atómica y revierta si el demonio no arranca correctamente.",
+};
+
+# Actualización
+
+Kapkan se distribuye como [GitHub Releases](https://github.com/fornex/kapkan/releases) firmadas. Esta página explica cómo **enterarse** de que existe una versión más reciente y cómo **aplicarla** sin interrumpir la mitigación.
+
+## Saber que hay una nueva versión
+
+Kapkan nunca se comunica de vuelta de forma predeterminada. La versión en ejecución siempre se expone localmente sin tráfico saliente:
+
+- `kapkan -version` imprime la versión de la compilación.
+- `GET /api/v1/status` incluye un campo `version`, que se muestra en los Ajustes de la consola.
+- La [métrica](/docs/metrics) `kapkan_build_info` la incluye en una etiqueta, de modo que la deriva de versiones de una flota es consultable.
+
+Active una comprobación de actualizaciones para que se le avise cuando exista una versión más reciente (consulte `update_check` en la [referencia de configuración](/docs/configuration)):
+
+```sh
+kapkan -check-update      # exit 0 = up to date, 10 = a newer release exists, 1 = error
+```
+
+Cuando `update_check.enabled` está activado, Kapkan consulta la API de GitHub Releases en un intervalo y expone el resultado en `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), la métrica `kapkan_update_available`, una línea de registro, el banner de la consola y —con `update_check.notify`— sus canales de notificación. La comprobación transmite únicamente la petición en sí (IP de origen + un User-Agent genérico), nunca la identidad del nodo, la configuración ni los datos de ataque, y se ejecuta fuera de la ruta de arranque, de modo que un endpoint protegido por un cortafuegos nunca retrasa el demonio.
+
+## Actualizar con `update.sh`
+
+El script en [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) realiza una actualización segura, firmada y con capacidad de reversión. Ejecútelo como root en el host:
+
+```sh
+sudo deploy/update.sh v1.3.0     # a specific tag
+sudo deploy/update.sh            # the latest stable release
+sudo deploy/update.sh --prerelease   # the latest including -rc tags
+```
+
+Lo que hace, en orden:
+
+1. **Verificar** — descarga el archivo de la versión para su arquitectura junto con `checksums.txt` y su firma de cosign, verifica la firma (fijada a la identidad OIDC de la etiqueta de versión de este repositorio) y luego verifica el propio SHA-256 del archivo. Falla de forma cerrada si algo no coincide.
+2. **Comprobación previa** — ejecuta el `kapkan -check-config` del binario **nuevo** contra su `/etc/kapkan/config.yaml` activo, como el usuario `kapkan`, de modo que una configuración que la nueva versión rechace (un [cambio de configuración incompatible](#config-changes-between-versions), un archivo ilegible) aborta la actualización **antes** de cualquier intercambio. El demonio en ejecución queda intacto.
+3. **Intercambiar** — copia el binario actual a `kapkan.old` y luego reemplaza atómicamente `/usr/local/bin/kapkan` por el nuevo.
+4. **Reiniciar y comprobar el estado** — toma una instantánea de la configuración, reinicia el servicio y consulta `/healthz` hasta que indique que está listo.
+5. **Revertir en caso de fallo** — si el demonio no arranca correctamente, restaura tanto el binario anterior como la configuración anterior y reinicia la versión antigua.
+
+La URL de la sonda se deriva de su `api.listen`; anúlela (y el tiempo de espera) con `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` si es necesario.
+
+## La mitigación sobrevive al reinicio
+
+Un reinicio ya no interrumpe la mitigación activa, gracias a dos características del motor (consulte [Mitigación RTBH](/docs/mitigation)):
+
+- **BGP Graceful Restart** (`bgp.graceful_restart`, activado de forma predeterminada) — un par que lo admite conserva como obsoletas las rutas de blackhole / FlowSpec de Kapkan mientras la sesión está caída, en lugar de eliminarlas.
+- **Persistencia de baneos** (`ban.state_file`) — los baneos activos se persisten y se vuelven a anunciar en el arranque, *antes* del End-of-RIB de la sesión BGP, de modo que el par actualiza las rutas conservadas en lugar de purgarlas. Establezca una ruta con permisos de escritura (la unidad de systemd proporciona una mediante `StateDirectory=kapkan`) para activarlo.
+
+En conjunto, esto significa que **no** necesita esperar a que termine un ataque antes de actualizar.
+
+## Verificar una descarga manualmente
+
+Si instala sin `update.sh` (entorno aislado, o su propia automatización), verifique de la misma forma que lo hace el script:
+
+```sh
+VER=v1.3.0
+base="https://github.com/fornex/kapkan/releases/download/$VER"
+curl -fLO "$base/kapkan_${VER}_linux_amd64.tar.gz"
+curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
+
+# 1) authenticity: the signature over checksums.txt, pinned to this repo's release tag
+cosign verify-blob checksums.txt \
+  --signature checksums.txt.sig --certificate checksums.txt.pem \
+  --certificate-identity-regexp 'https://github.com/fornex/kapkan/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+# 2) integrity: the archive's hash (shasum -a 256 -c on macOS)
+sha256sum -c checksums.txt --ignore-missing
+```
+
+Cada versión también incluye procedencia de compilación SLSA, verificable con `gh attestation verify <archive> --repo fornex/kapkan`.
+
+## Revertir
+
+`update.sh` revierte automáticamente cuando la nueva versión no supera su comprobación de estado. Para revertir manualmente después, el binario anterior se conserva en `/usr/local/bin/kapkan.old` y la configuración anterior en `/etc/kapkan/config.yaml.preupgrade`:
+
+```sh
+sudo mv /usr/local/bin/kapkan.old /usr/local/bin/kapkan
+sudo cp /etc/kapkan/config.yaml.preupgrade /etc/kapkan/config.yaml   # only if you changed the config
+sudo systemctl restart kapkan
+```
+
+## Cambios de configuración entre versiones
+
+Una nueva versión puede añadir, exigir o endurecer un campo de configuración. Las notas de cada versión señalan los cambios de configuración, y la comprobación previa (`kapkan -check-config` en el binario nuevo) es la verificación autoritativa: si la nueva versión rechaza su configuración, corríjala antes de actualizar. El versionado sigue [SemVer](https://semver.org/) — un incremento MAYOR señala un cambio incompatible de configuración o de API.
