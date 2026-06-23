@@ -55,6 +55,7 @@ sinon. Voir [Multi-tenant](/docs/multi-tenancy).
 | POST | `/api/v1/unban` | Retirer manuellement un bannissement. |
 | POST | `/api/v1/config/reload` | Relire le fichier de configuration (équivalent à `SIGHUP`). |
 | GET | `/metrics` | Métriques Prometheus. |
+| GET | `/healthz` | Sonde de vivacité/disponibilité non authentifiée : `503` jusqu'au démarrage complet, puis `200`. |
 
 Toutes les réponses sont au format JSON. Les erreurs renvoient un objet de la forme
 `{"error": "..."}` accompagné d'un statut HTTP approprié.
@@ -87,7 +88,7 @@ Renvoie le mode de fonctionnement actuel et un résumé de ce que Kapkan protèg
 routeurs. `version` est le build en cours d'exécution, toujours présent et sans aucune sortie
 réseau. `update_available` vaut `false` à moins que la vérification optionnelle
 [`update_check`](/docs/configuration) ne soit activée et ne détecte une version plus récente —
-il vaut alors `true` et `latest_version` ainsi que `latest_is_security` sont inclus à ses côtés.
+il vaut alors `true` et `latest_version`, `latest_is_security` et `latest_url` sont inclus à ses côtés. Voir [Mise à niveau](/docs/upgrading).
 `thresholds` et `hostgroups` reflètent la configuration active ; voir
 [Détection](/docs/detection) et [Hostgroups](/docs/hostgroups) pour leur forme complète.
 
@@ -415,6 +416,19 @@ Voir [Configuration](/docs/configuration).
 Sert les métriques Prometheus au format d'exposition texte standard. Ce point de terminaison n'est
 pas sous `/api/v1` et est servi sans le jeton bearer afin qu'un scraper puisse l'atteindre. Voir
 [Métriques](/docs/metrics) pour la liste complète des métriques.
+
+### GET /healthz
+
+Une sonde de vivacité/disponibilité, non sous `/api/v1` et servie **sans** jeton bearer (elle ne
+divulgue rien), afin qu'un superviseur ou le script de mise à niveau [`update.sh`](/docs/upgrading)
+puisse confirmer que le démon est opérationnel après un redémarrage. Elle renvoie `503 starting`
+jusqu'à ce que chaque composant ait démarré, puis `200 ok`. Comme l'écouteur de l'API ne commence à
+accepter des connexions qu'une fois le démon démarré, tout `200` ici signifie que la configuration a
+été analysée, que les composants sont opérationnels et que Kapkan répond.
+
+```sh
+curl -fsS localhost:8080/healthz   # exits non-zero (503) until ready, then prints "ok"
+```
 
 ## Voir aussi
 

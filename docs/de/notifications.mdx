@@ -1,7 +1,7 @@
 export const metadata = {
   title: "Benachrichtigungen",
   description:
-    "Alarmierung bei Angriffsbeginn und -ende über Telegram, Slack, E-Mail, Webhook und einen Exec-Hook — mit einem versionierten JSON-Payload-Schema.",
+    "Alarmierung bei Angriffsbeginn und -ende — sowie bei einer neueren Version — über Telegram, Slack, E-Mail, Webhook und einen Exec-Hook, mit einem versionierten JSON-Payload-Schema.",
 };
 
 # Benachrichtigungen
@@ -10,6 +10,12 @@ Kapkan löst bei jedem Ereignis im Lebenszyklus eines Angriffs eine Benachrichti
 aus — wenn ein Angriff erstmals erkannt wird (`attack_started`) und wenn er abklingt
 (`attack_ended`). Jedes Ereignis wird an jeden konfigurierten Kanal zugestellt:
 Telegram, Slack, E-Mail, einen generischen JSON-Webhook und einen Exec-Hook.
+
+Außerdem löst es ein einmaliges `update_available`-Ereignis über dieselben Kanäle aus, wenn
+die optionale Update-Prüfung eine neuere Version findet und `update_check.notify` aktiviert
+ist — siehe [Upgrade](/docs/upgrading). Es trägt die Versionsfelder anstelle der
+Angriffsfelder, und der Exec-Hook im FastNetMon-Format (der keine entsprechende Aktion hat)
+überspringt es.
 
 Die Zustellung erfolgt nach dem Best-Effort-Prinzip und asynchron. Ein langsamer oder
 fehlschlagender Kanal blockiert niemals die Erkennung oder Mitigation, und jeder Kanal
@@ -90,7 +96,7 @@ Setzen Sie `notify.exec.command` auf den absoluten Pfad einer vorhandenen ausfü
 Datei. Bei jedem Ereignis führt Kapkan diese direkt aus — **ohne Shell** — mit:
 
 - Dem [Callback-Payload](#callback-payload-schema) als JSON auf **stdin**.
-- Dem Ereignisnamen (`attack_started` oder `attack_ended`) als **`argv[1]`**.
+- Dem Ereignisnamen (`attack_started`, `attack_ended` oder `update_available`) als **`argv[1]`**.
 - Einer **minimalen Umgebung**: nur `PATH`, `HOME`, `TZ`, `LANG`, `USER` und `TMPDIR`
   werden durchgereicht. Die Geheimnisse des Daemons (Bot-Tokens, SMTP-Zugangsdaten) werden
   niemals an den Hook oder dessen Kindprozesse vererbt.
@@ -137,6 +143,7 @@ Kapkan-Ereignis:
 | Angriff beendet, eine Sperre wurde zurückgenommen | `unban` |
 | **jedes Host-scoped-Ereignis, während `dry_run` true ist** | `attack_details` |
 | Group-scoped-Ereignis (`calculation: total`) | *übersprungen — Hook wird nicht aufgerufen* |
+| `update_available`-Ereignis | *übersprungen — kein FastNetMon-Äquivalent* |
 
 <Callout type="warning" title="Dry-Run gibt niemals ban/unban aus">
 Im Dry-Run kündigt Kapkan nichts an — aber ein FastNetMon-Ban-Skript *würde* den Host
@@ -189,7 +196,7 @@ ohne Sie zu beeinträchtigen.
 | Feld | Typ | Hinweise |
 | --- | --- | --- |
 | `schema_version` | integer | In diesem Release immer `1`. |
-| `event` | string | `attack_started` oder `attack_ended`. |
+| `event` | string | `attack_started`, `attack_ended` oder `update_available` (eine neuere Version existiert). |
 | `scope` | string | `host` (ein einzelnes `target` wird angegriffen) oder `group` (der summierte Traffic einer Hostgroup mit `calculation: total`; `group` gesetzt, `target` fehlt). |
 | `target` | string | Angegriffener Host — oder, bei ausgehenden Angriffen, der angreifende Host. Bei Ereignissen mit Group-Scope nicht vorhanden. |
 | `group` | string | Name der zugehörigen Hostgroup; `global` für die implizite Fallback-Gruppe. |
@@ -207,6 +214,10 @@ ohne Sie zu beeinträchtigen.
 | `at` | string | RFC-3339-Zeitstempel des Ereignisses. |
 | `classification` | object | Abgeleiteter Angriffsvektor — nur bei `attack_started`. |
 | `sample` | object | Flow-Sample, das erfasst wurde, bevor der Schwellwert überschritten wurde — nur bei `attack_started`, wenn der Traffic-Puffer aktiviert ist. |
+| `current_version` | string | Laufender Build — nur bei `update_available`. |
+| `latest_version` | string | Das Tag der neueren Version — nur bei `update_available`. |
+| `security` | boolean | `true`, wenn die Version als sicherheitsrelevant markiert ist — nur bei `update_available`. |
+| `release_url` | string | Die URL der Version — nur bei `update_available`. |
 
 Das `classification`-Objekt trägt den abgeleiteten `type` (zum Beispiel `ntp_amplification`,
 `syn_flood`, `udp_flood` oder `mixed`, wenn keine Signatur passte), einen `confidence`-Anteil

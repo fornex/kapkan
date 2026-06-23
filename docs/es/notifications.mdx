@@ -1,7 +1,7 @@
 export const metadata = {
   title: "Notificaciones",
   description:
-    "Alerta al inicio y al final de un ataque a través de Telegram, Slack, correo, webhook y un hook de ejecución, con un esquema de payload JSON versionado.",
+    "Alerta al inicio y al final de un ataque —y ante una versión más reciente— a través de Telegram, Slack, correo, webhook y un hook de ejecución, con un esquema de payload JSON versionado.",
 };
 
 # Notificaciones
@@ -10,6 +10,12 @@ Kapkan emite una notificación en cada evento del ciclo de vida de un ataque: cu
 un ataque se detecta por primera vez (`attack_started`) y cuando se disipa
 (`attack_ended`). Cada evento se entrega a todos los canales configurados: Telegram,
 Slack, correo, un webhook JSON genérico y un hook de ejecución.
+
+También emite un evento puntual `update_available` a través de esos mismos canales cuando
+la comprobación de actualizaciones opcional encuentra una versión más reciente y
+`update_check.notify` está habilitado; consulta [Actualización](/docs/upgrading). Transporta
+los campos de versión en lugar de los campos del ataque, y el hook de ejecución en formato
+FastNetMon (que no tiene una acción equivalente) lo omite.
 
 La entrega es de mejor esfuerzo (best-effort) y asíncrona. Un canal lento o que falla
 nunca detiene la detección ni la mitigación, y cada canal está acotado por su propio
@@ -90,7 +96,7 @@ Establece `notify.exec.command` con la ruta absoluta de un ejecutable existente.
 cada evento Kapkan lo ejecuta directamente, **sin shell**, con:
 
 - El JSON del [payload de callback](#esquema-del-payload-de-callback) por **stdin**.
-- El nombre del evento (`attack_started` o `attack_ended`) como **`argv[1]`**.
+- El nombre del evento (`attack_started`, `attack_ended` o `update_available`) como **`argv[1]`**.
 - Un **entorno mínimo**: solo se transmiten `PATH`, `HOME`, `TZ`, `LANG`, `USER` y
   `TMPDIR`. Los secretos del daemon (tokens de bot, credenciales SMTP) nunca los heredan
   el hook ni sus procesos hijos.
@@ -135,6 +141,7 @@ notify:
 | ataque finalizado, se retiró un baneo | `unban` |
 | **cualquier evento con alcance de host mientras `dry_run` es true** | `attack_details` |
 | evento con alcance de grupo (`calculation: total`) | *omitido — el hook no se invoca* |
+| evento `update_available` | *omitido — sin equivalente en FastNetMon* |
 
 <Callout type="warning" title="El dry-run nunca emite ban/unban">
 En dry-run Kapkan no anuncia nada, pero un script de baneo de FastNetMon *sí* aplicaría
@@ -188,7 +195,7 @@ pueden añadir campos nuevos sin romper tu integración.
 | Campo | Tipo | Notas |
 | --- | --- | --- |
 | `schema_version` | integer | Siempre `1` en esta versión. |
-| `event` | string | `attack_started` o `attack_ended`. |
+| `event` | string | `attack_started`, `attack_ended` o `update_available` (existe una versión más reciente). |
 | `scope` | string | `host` (un único `target` está bajo ataque) o `group` (el tráfico sumado de un hostgroup con `calculation: total`; `group` presente, `target` ausente). |
 | `target` | string | Host atacado o, para ataques salientes, el host atacante. Ausente en eventos con alcance de grupo. |
 | `group` | string | Nombre del hostgroup propietario; `global` para el grupo de respaldo implícito. |
@@ -206,6 +213,10 @@ pueden añadir campos nuevos sin romper tu integración.
 | `at` | string | Marca de tiempo RFC 3339 del evento. |
 | `classification` | object | Vector de ataque inferido; solo en `attack_started`. |
 | `sample` | object | Muestra de flows capturada antes de superar el umbral; solo en `attack_started`, cuando el búfer de tráfico está habilitado. |
+| `current_version` | string | Build en ejecución; solo en `update_available`. |
+| `latest_version` | string | La etiqueta de la versión más reciente; solo en `update_available`. |
+| `security` | boolean | `true` cuando la versión está marcada como relevante para la seguridad; solo en `update_available`. |
+| `release_url` | string | La URL de la versión; solo en `update_available`. |
 
 El objeto `classification` transporta el `type` inferido (por ejemplo
 `ntp_amplification`, `syn_flood`, `udp_flood`, o `mixed` cuando ninguna firma

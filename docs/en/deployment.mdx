@@ -48,7 +48,11 @@ heavily sandboxed: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
 `MemoryDenyWriteExecute` and more. It also declares `StateDirectory=kapkan` (mode `0700`),
 giving the daemon a writable `/var/lib/kapkan` for [`ban.state_file`](/docs/mitigation)
-while `ProtectSystem=strict` keeps the rest of the filesystem read-only.
+while `ProtectSystem=strict` keeps the rest of the filesystem read-only. A crash-loop guard
+(`StartLimitIntervalSec=60`, `StartLimitBurst=4`) sends the unit to the `failed` state if the
+binary fails to start four times within a minute, so a bad upgrade is observable rather than
+thrashing — the [upgrade script](/docs/upgrading) leans on this together with the `/healthz`
+readiness probe.
 
 <Callout type="info" title="Binding BGP to port 179">
 Kapkan needs no special privileges in dry-run or when peering from a high local port. If
@@ -133,9 +137,12 @@ curl -s -X POST localhost:8080/api/v1/config/reload \
 `415` otherwise), and when auth is enabled the reload needs an unscoped (admin) Bearer
 token — a tenant-scoped token gets `403`.
 
-Most keys reload live, including `dry_run`, thresholds, `networks`, hostgroups, baselines
-and notification settings. A few sizing parameters require a restart — notably the
-`samples.buffer_flows` / `flows_per_attack` ring sizing.
+Most keys reload live, including `dry_run`, thresholds, `networks`, hostgroups, baselines,
+notification settings and `sampling.default_rate`. Six things are fixed at startup, and a
+reload that changes any of them is rejected (restart required): the `listen` addresses, BGP
+identity (`bgp.local_asn` / `router_id`), `api.listen`, the `samples` settings, `storage`
+settings and `geoip` settings. See the [configuration reference](/docs/configuration) and,
+for changing the binary without dropping mitigation, [Upgrading](/docs/upgrading).
 
 ## Building from source
 
