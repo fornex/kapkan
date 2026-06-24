@@ -93,7 +93,7 @@
     "storage.clickhouse.ttl_days": { "tier": "advanced", "reloadImmutable": true, "description": "Row retention in days (1..365, default 7)." },
 
     "notify.telegram.token_env": { "tier": "basic", "secret": true, "description": "Env var holding the Telegram bot token (never the token itself)." },
-    "notify.telegram.chat_id": { "tier": "basic", "description": "Telegram chat ID to post alerts to." },
+    "notify.telegram.chat_id": { "tier": "basic", "description": "Telegram chat ID to post alerts to (look it up via @getmyid_bot)." },
     "notify.slack.webhook_url": { "tier": "advanced", "format": "url", "secret": true, "description": "Slack incoming webhook URL (https; the path is a bearer secret)." },
     "notify.email.smtp_host": { "tier": "advanced", "format": "hostport", "crossField": "When set, from and at least one to recipient are required.", "description": "SMTP server host:port; empty disables email." },
     "notify.email.username_env": { "tier": "advanced", "secret": true, "description": "Env var holding the SMTP username." },

@@ -36,6 +36,12 @@ bot token, and `notify.telegram.chat_id` to the target chat. The token is read f
 that variable at send time; it is never stored in the file. Messages are sent as
 HTML and include the attack target, classification, triggering metric and ban state.
 
+<Callout type="info" title="Finding the chat ID">
+To look up a chat's numeric ID, message [@getmyid_bot](https://t.me/getmyid_bot)
+directly for a personal chat, or add it to the target group to read the group ID
+(group IDs are negative, e.g. `-1001234567890`).
+</Callout>
+
 ### Slack
 
 Set `notify.slack.webhook_url` to a Slack

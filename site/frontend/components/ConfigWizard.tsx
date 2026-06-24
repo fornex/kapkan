@@ -105,7 +105,7 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "kapkan.yaml";
+    a.download = "config.yaml";
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -459,7 +459,7 @@ export function ConfigWizard({ lang }: { lang: Locale }) {
 
       <p className="text-xs text-muted-foreground">
         {t.checkHint}{" "}
-        <code className="rounded bg-muted px-1.5 py-0.5 font-mono">kapkan -check-config kapkan.yaml</code>
+        <code className="rounded bg-muted px-1.5 py-0.5 font-mono">kapkan -check-config config.yaml</code>
       </p>
     </>
   );
