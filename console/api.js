@@ -45,6 +45,11 @@
     if (opts.body != null) init.body = opts.body;
     return fetch(path, init).then(function (res) {
       if (res.status === 401 && !retried) {
+        /* refresh() fires four reads in parallel, so a first load gets four
+           simultaneous 401s. Each w.prompt is synchronous and blocking, so the
+           first 401 handler stores the token before the others run — they see
+           it changed and retry silently instead of prompting again. */
+        if (getToken() !== t) return request(path, opts, true);
         var entered = w.prompt("Kapkan API token");
         if (entered) { setToken(entered); return request(path, opts, true); }
       }
