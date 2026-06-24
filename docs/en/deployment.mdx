@@ -75,11 +75,13 @@ list) to turn authentication on. Every notification channel is optional — add
 The full list of `*_env` keys is under [Secrets](#secrets) below.
 
 The unit runs as the `kapkan` user with `ExecStart=/usr/local/bin/kapkan -config
-/etc/kapkan/config.yaml -log-format json -log-level info`, restarts on failure, and is
+/etc/kapkan/config.yaml -log-format json -log-level info -pid-file /run/kapkan/kapkan.pid`,
+restarts on failure, and is
 heavily sandboxed: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
 `MemoryDenyWriteExecute` and more. It also declares `StateDirectory=kapkan` (mode `0700`),
-giving the daemon a writable `/var/lib/kapkan` for [`ban.state_file`](/docs/mitigation)
+giving the daemon a writable `/var/lib/kapkan` for [`ban.state_file`](/docs/mitigation),
+and `RuntimeDirectory=kapkan`, giving it a writable `/run/kapkan` for the pid file —
 while `ProtectSystem=strict` keeps the rest of the filesystem read-only. A crash-loop guard
 (`StartLimitIntervalSec=60`, `StartLimitBurst=4`) sends the unit to the `failed` state if the
 binary fails to start four times within a minute, so a bad upgrade is observable rather than
@@ -108,6 +110,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/kapkan.env` | `0600` | Secrets env file (tokens, SMTP credentials). |
 | `/etc/systemd/system/kapkan.service` | `0644` | The hardened systemd unit. The `.deb`/`.rpm` install it to `/usr/lib/systemd/system/kapkan.service` (vendor location) instead. |
 | `/var/lib/kapkan/` | `0700` | Writable state directory (`StateDirectory=kapkan`); holds `ban.state_file` when ban persistence is enabled. |
+| `/run/kapkan/` | `0755` | Runtime directory (`RuntimeDirectory=kapkan`), created on start and removed on stop; holds `kapkan.pid` so [`kapkan -s reload`](/docs/cli#controlling-a-running-daemon) can find the daemon. |
 
 The whole `/etc/kapkan` directory is mounted read-only to the process via
 `ReadOnlyPaths=/etc/kapkan`, so the daemon can read its config and secrets but cannot
@@ -157,7 +160,16 @@ systemd unit wires this up with `ExecReload=/bin/kill -HUP $MAINPID`, so you rel
 sudo systemctl reload kapkan
 ```
 
-Equivalently, you can trigger the same reload over the API:
+Off the box's service manager, the daemon also answers the nginx-style local control flag,
+which reads the pid file the unit writes to `/run/kapkan/kapkan.pid`:
+
+```sh
+sudo kapkan -s reload    # re-read the config (SIGHUP)
+sudo kapkan -s stop      # graceful shutdown (SIGTERM)
+```
+
+See [Controlling a running daemon](/docs/cli#controlling-a-running-daemon) for the full
+behaviour and exit codes. Equivalently, you can trigger the same reload over the API:
 
 ```sh
 curl -s -X POST localhost:8080/api/v1/config/reload \
