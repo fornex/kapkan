@@ -123,6 +123,49 @@ api: {listen: "127.0.0.1:8080"}
 			wantErr: "carpet.mitigation",
 		},
 		{
+			name: "duplicate boundary exporter",
+			yaml: `
+listen: {sflow: ":6343"}
+sampling:
+  default_rate: 1000
+  boundary:
+    - {exporter: "10.0.0.2", external_ifindexes: [1]}
+    - {exporter: "10.0.0.2", external_ifindexes: [2]}
+networks: ["203.0.113.0/24"]
+thresholds: {pps: 1000, mbps: 100, flows_per_sec: 500}
+ban: {ttl_seconds: 600, unban_hysteresis_seconds: 60, max_active_bans: 50}
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"
+  next_hop: "192.0.2.1"
+  community: "65000:666"
+  neighbors: [{address: "10.0.0.254", remote_asn: 65000}]
+api: {listen: "127.0.0.1:8080"}
+`,
+			wantErr: "duplicate exporter",
+		},
+		{
+			name: "boundary entry with no external interfaces",
+			yaml: `
+listen: {sflow: ":6343"}
+sampling:
+  default_rate: 1000
+  boundary:
+    - {exporter: "10.0.0.2", external_ifindexes: []}
+networks: ["203.0.113.0/24"]
+thresholds: {pps: 1000, mbps: 100, flows_per_sec: 500}
+ban: {ttl_seconds: 600, unban_hysteresis_seconds: 60, max_active_bans: 50}
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"
+  next_hop: "192.0.2.1"
+  community: "65000:666"
+  neighbors: [{address: "10.0.0.254", remote_asn: 65000}]
+api: {listen: "127.0.0.1:8080"}
+`,
+			wantErr: "external_ifindexes",
+		},
+		{
 			name:    "unknown key is rejected (closed schema)",
 			yaml:    validBase + "\nbogus_key: 1\n",
 			wantErr: "not found",

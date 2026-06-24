@@ -7,6 +7,10 @@
     "listen.netflow": { "tier": "basic", "format": "hostport", "reloadImmutable": true, "description": "UDP listen address for NetFlow v5/v9 and IPFIX (shared socket), e.g. \":2055\"." },
 
     "sampling.default_rate": { "tier": "basic", "description": "Sampling rate assumed when an exporter does not report its own. Wrong here scales EVERY threshold — set it to what your routers actually export." },
+    "sampling.boundary_debug": { "tier": "advanced", "description": "Temporarily export the kapkan_engine_boundary_debug_bytes_total{exporter,iface,dir} metric (bytes toward/from protected hosts per exporter+interface) to discover which interfaces are the external boundary. Not cardinality-bounded — enable briefly, then turn off." },
+    "sampling.boundary.exporter": { "tier": "advanced", "format": "ip", "crossField": "Each exporter may appear once; external_ifindexes must be non-empty. Exporters without a boundary entry keep counting every sample.", "description": "Sampler/agent IP this boundary rule applies to." },
+    "sampling.boundary.external_ifindexes": { "tier": "advanced", "description": "ifIndex values of this exporter's external (uplink/border) interfaces. A flow is counted toward a protected host only when it crosses one — inbound on an external input interface, outbound on an external output one — deduplicating flows seen at multiple vantage points." },
+    "sampling.boundary.egress_sampling": { "tier": "advanced", "description": "Set true when the exporter also samples on egress (e.g. Arista `sflow sample output`); the boundary-counted rate is halved to undo the in+out double-count." },
 
     "networks": { "tier": "basic", "format": "cidr", "crossField": "Prefixes must not overlap each other. Detection applies ONLY to destinations inside these.", "description": "Protected prefixes." },
     "protected_whitelist": { "tier": "basic", "format": "ip", "description": "Addresses that are never banned, regardless of traffic (gateways, nameservers)." },
