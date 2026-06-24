@@ -46,8 +46,62 @@ archives:
         dst: deploy/kapkan.service
       - src: engine/deploy/config.example.yaml
         dst: deploy/config.example.yaml
+      - src: engine/deploy/update.sh
+        dst: deploy/update.sh
       - src: engine/deploy/grafana/kapkan-overview.json
         dst: deploy/grafana/kapkan-overview.json
+
+# Native Linux packages built from the same binary: `apt install ./kapkan_*.deb`
+# (or the matching .rpm) lays out the systemd unit, an unprivileged kapkan user,
+# /etc/kapkan with a dry-run config seeded from the example, and the writable
+# state dir — no build toolchain on the box. The binary goes to /usr/local/bin
+# to match the shipped unit and deploy/update.sh, so a tarball install and a
+# package install share ONE on-disk layout (and update.sh upgrades either). The
+# packages land in checksums.txt, so the cosign signature covers them too.
+nfpms:
+  - id: kapkan
+    ids: [kapkan] # include the kapkan build's binary
+    package_name: kapkan
+    vendor: Kapkan
+    homepage: https://github.com/fornex/kapkan
+    maintainer: Kapkan <fornex@fornex.com>
+    description: |
+      DDoS detection and RTBH/FlowSpec mitigation daemon.
+      Ingests NetFlow/IPFIX/sFlow, detects volumetric attacks against protected
+      prefixes, and announces blackhole or FlowSpec routes over BGP. Ships an
+      embedded operator console; safe by default (dry_run).
+    license: Apache-2.0
+    formats: [deb, rpm]
+    section: net
+    priority: optional
+    bindir: /usr/local/bin # {bindir}/kapkan — matches kapkan.service & update.sh
+    contents:
+      - src: engine/deploy/kapkan.service
+        dst: /usr/lib/systemd/system/kapkan.service
+        file_info: { mode: 0644 }
+      # Reference config (replaced on upgrade). postinstall seeds
+      # /etc/kapkan/config.yaml from this on first install only.
+      - src: engine/deploy/config.example.yaml
+        dst: /etc/kapkan/config.example.yaml
+        file_info: { mode: 0644 }
+      - src: engine/deploy/update.sh
+        dst: /usr/share/kapkan/update.sh
+        file_info: { mode: 0755 }
+      - src: engine/deploy/grafana/kapkan-overview.json
+        dst: /usr/share/doc/kapkan/grafana/kapkan-overview.json
+        file_info: { mode: 0644 }
+      - src: LICENSE
+        dst: /usr/share/doc/kapkan/LICENSE
+        file_info: { mode: 0644 }
+    scripts:
+      postinstall: engine/deploy/nfpm/postinstall.sh
+      preremove: engine/deploy/nfpm/preremove.sh
+      postremove: engine/deploy/nfpm/postremove.sh
+    deb:
+      # We manage /etc/kapkan/config.yaml from postinstall (only the example is
+      # packaged), so there are no dpkg conffiles to prompt about on upgrade.
+      fields:
+        Bugs: https://github.com/fornex/kapkan/issues
 
 checksum:
   name_template: checksums.txt
@@ -100,12 +154,28 @@ release:
     Curated notes — including any **BREAKING** or **Config changes** — are in
     [CHANGELOG.md](https://github.com/fornex/kapkan/blob/main/CHANGELOG.md).
   footer: |
+    ## Install
+
+    No build toolchain needed — grab a prebuilt artifact for `linux` `amd64`/`arm64`.
+
+    **Debian / Ubuntu (.deb)** — sets up the systemd unit, the `kapkan` user, and a
+    dry-run config under `/etc/kapkan`:
+    ```sh
+    VER={{ .Tag }}
+    curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.deb"
+    sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"
+    ```
+    **RHEL / Fedora (.rpm)**: `sudo dnf install ./kapkan_<ver>_linux_amd64.rpm`
+
+    **Tarball** (any distro): download `kapkan_<ver>_linux_<arch>.tar.gz` below, `tar xzf`
+    it, and run `./kapkan`. See the [Quickstart](https://kapkan.io/en/docs/quickstart).
+
     ## Verify the download
 
     ```sh
     VER={{ .Tag }}
     base="https://github.com/fornex/kapkan/releases/download/$VER"
-    curl -fLO "$base/kapkan_${VER}_linux_amd64.tar.gz"
+    curl -fLO "$base/kapkan_${VER#v}_linux_amd64.tar.gz"   # archive names drop the leading "v"
     curl -fLO "$base/checksums.txt"
     curl -fLO "$base/checksums.txt.sig"
     curl -fLO "$base/checksums.txt.pem"
