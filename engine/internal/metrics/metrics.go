@@ -82,6 +82,19 @@ var (
 		Name:      "tracked_hosts",
 		Help:      "Destination hosts currently tracked in the sliding window.",
 	})
+
+	// BoundaryDebugBytes is a discovery aid for interface-boundary counting,
+	// emitted only while sampling.boundary_debug is true. It reports the
+	// sampling-corrected bytes seen toward (dir=in) or from (dir=out) protected
+	// hosts, broken down by exporter and interface (ifIndex), so an operator
+	// can identify which interfaces are the external/edge boundary. It is NOT
+	// cardinality-bounded — enable it briefly, read the breakdown, disable it.
+	BoundaryDebugBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "engine",
+		Name:      "boundary_debug_bytes_total",
+		Help:      "Sampling-corrected bytes toward/from protected hosts by exporter and interface (only while sampling.boundary_debug is set).",
+	}, []string{"exporter", "iface", "dir"})
 )
 
 // Mitigation metrics.

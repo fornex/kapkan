@@ -299,6 +299,8 @@ func convert(pm *protoproducer.ProtoProducerMessage, defaultRate uint64) (flow.F
 		Bytes:        pm.Bytes,
 		Packets:      pm.Packets,
 		SamplingRate: rate,
+		InIf:         pm.InIf,
+		OutIf:        pm.OutIf,
 		SrcPort:      uint16(pm.SrcPort),
 		DstPort:      uint16(pm.DstPort),
 		IPProto:      uint8(pm.Proto),

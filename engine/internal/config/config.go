@@ -92,6 +92,10 @@ type Config struct {
 	// FlowSourceSet is the parsed FlowSources allowlist. Empty/nil means no
 	// allowlist is configured (the exporter-label cardinality cap applies).
 	FlowSourceSet map[netip.Addr]struct{} `yaml:"-"`
+	// boundary is the resolved sampling.boundary config, keyed by exporter
+	// address. nil/empty means interface-boundary counting is disabled (every
+	// sample counted). Populated by validate().
+	boundary map[netip.Addr]exporterBoundary `yaml:"-"`
 	// Groups are the resolved hostgroups; Groups[0] is always the implicit
 	// global fallback group carrying the top-level thresholds.
 	Groups []Group `yaml:"-"`
@@ -120,6 +124,44 @@ type Listen struct {
 type Sampling struct {
 	// DefaultRate is used when an exporter does not report its own rate.
 	DefaultRate uint64 `yaml:"default_rate"`
+	// Boundary optionally enables interface-boundary counting, which
+	// deduplicates a flow seen at multiple sampling vantage points (redundant
+	// exporters, ingress+egress sampling, transit/peer-links). Each entry
+	// classifies one exporter's external/edge interfaces; a flow is then
+	// counted toward a protected host only when it crosses the boundary —
+	// inbound when its input interface is external, outbound when its output
+	// interface is external. Exporters without an entry keep legacy behavior
+	// (every sample counted), so this is safe to enable per exporter.
+	Boundary []ExporterBoundary `yaml:"boundary"`
+	// BoundaryDebug, when true, exports the
+	// kapkan_boundary_debug_bytes_total{exporter,iface,dir} metric: the
+	// sampling-corrected bytes seen toward/from protected hosts, broken down
+	// by exporter and interface. It is a discovery aid for picking the
+	// external interfaces to list under Boundary; enable it briefly, read the
+	// breakdown, then turn it off (the metric is not cardinality-bounded).
+	BoundaryDebug bool `yaml:"boundary_debug"`
+}
+
+// ExporterBoundary classifies the external (edge/uplink/border) interfaces of
+// one flow exporter for interface-boundary counting. See Sampling.Boundary.
+type ExporterBoundary struct {
+	// Exporter is the sampler/agent IP this rule applies to.
+	Exporter string `yaml:"exporter"`
+	// ExternalIfindexes are the ifIndex values of that exporter's external
+	// interfaces (the uplinks/border ports where traffic enters/leaves the
+	// protected network).
+	ExternalIfindexes []uint32 `yaml:"external_ifindexes"`
+	// EgressSampling marks an exporter that also samples on egress (e.g.
+	// Arista `sflow sample output`), which makes every boundary-crossing
+	// packet appear twice. When true, the sampling rate of boundary-counted
+	// traffic for this exporter is halved, correcting the double back to one.
+	EgressSampling bool `yaml:"egress_sampling"`
+}
+
+// exporterBoundary is the resolved, lookup-ready form of one ExporterBoundary.
+type exporterBoundary struct {
+	external map[uint32]struct{}
+	egress   bool
 }
 
 // Thresholds are per-host limits after sampling correction. The base trio
@@ -906,6 +948,9 @@ func (c *Config) validate() error {
 
 	if c.Sampling.DefaultRate < 1 {
 		return fmt.Errorf("sampling.default_rate must be >= 1, got %d", c.Sampling.DefaultRate)
+	}
+	if err := c.resolveBoundary(); err != nil {
+		return err
 	}
 
 	if len(c.Networks) == 0 {
@@ -2113,6 +2158,72 @@ func (c *Config) InNetworks(addr netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// resolveBoundary parses sampling.boundary into the lookup-ready c.boundary
+// map. It rejects malformed exporter addresses, empty interface lists and
+// duplicate exporter entries.
+func (c *Config) resolveBoundary() error {
+	c.boundary = nil
+	if len(c.Sampling.Boundary) == 0 {
+		return nil
+	}
+	c.boundary = make(map[netip.Addr]exporterBoundary, len(c.Sampling.Boundary))
+	for i := range c.Sampling.Boundary {
+		eb := &c.Sampling.Boundary[i]
+		addr, err := netip.ParseAddr(eb.Exporter)
+		if err != nil {
+			return fmt.Errorf("sampling.boundary[%d].exporter: invalid IP %q: %w", i, eb.Exporter, err)
+		}
+		addr = addr.Unmap()
+		if _, dup := c.boundary[addr]; dup {
+			return fmt.Errorf("sampling.boundary: duplicate exporter %q", eb.Exporter)
+		}
+		if len(eb.ExternalIfindexes) == 0 {
+			return fmt.Errorf("sampling.boundary[%d] (%s): external_ifindexes must list at least one interface", i, eb.Exporter)
+		}
+		ext := make(map[uint32]struct{}, len(eb.ExternalIfindexes))
+		for _, idx := range eb.ExternalIfindexes {
+			ext[idx] = struct{}{}
+		}
+		c.boundary[addr] = exporterBoundary{external: ext, egress: eb.EgressSampling}
+	}
+	return nil
+}
+
+// BoundaryDebugEnabled reports whether the boundary-discovery metric is on.
+func (c *Config) BoundaryDebugEnabled() bool { return c.Sampling.BoundaryDebug }
+
+// InboundRate decides whether a sample from exporter arriving on input
+// interface inIf should be counted toward a protected destination, and at what
+// effective sampling rate. Without a boundary entry for the exporter it returns
+// (rate, true) — legacy behavior, every sample counted. With an entry it counts
+// only samples entering on an external interface, halving the rate when that
+// exporter also samples on egress (each boundary-crossing packet is then seen
+// twice, so halving restores the true volume).
+func (c *Config) InboundRate(exporter netip.Addr, inIf uint32, rate uint64) (uint64, bool) {
+	return c.boundaryRate(exporter, inIf, rate)
+}
+
+// OutboundRate is the egress-direction counterpart of InboundRate: it gates a
+// sample by its output interface (traffic leaving a protected source crosses
+// the boundary on egress).
+func (c *Config) OutboundRate(exporter netip.Addr, outIf uint32, rate uint64) (uint64, bool) {
+	return c.boundaryRate(exporter, outIf, rate)
+}
+
+func (c *Config) boundaryRate(exporter netip.Addr, iface uint32, rate uint64) (uint64, bool) {
+	b, ok := c.boundary[exporter.Unmap()]
+	if !ok {
+		return rate, true // exporter not classified: count every sample
+	}
+	if _, external := b.external[iface]; !external {
+		return 0, false // internal/transit/peer-link sample: a duplicate, drop it
+	}
+	if b.egress && rate > 1 {
+		rate /= 2
+	}
+	return rate, true
 }
 
 // ProtectedAddrs returns the total number of addresses in the protected
