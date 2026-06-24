@@ -1,55 +1,86 @@
 export const metadata = {
   title: "Inicio rápido",
   description:
-    "Compila el binario de Kapkan, ejecútalo en modo dry-run con la configuración de desarrollo y observa tu primera detección.",
+    "Descarga una versión preconstruida de Kapkan, ejecútala en modo dry-run con la configuración de ejemplo incluida y observa tu primera detección.",
 };
 
 # Inicio rápido
 
-Esto te lleva desde una descarga limpia del repositorio hasta una instancia de Kapkan en
-ejecución, en modo dry-run, que detecta ataques contra un prefijo de prueba. Nada de lo que se
-hace aquí puede anunciar una ruta: dry-run es el modo predeterminado.
+Esto te lleva desde cero hasta una instancia de Kapkan en ejecución, en modo dry-run, que detecta
+ataques contra un prefijo de prueba. No hay paso de compilación — Kapkan se distribuye como un
+único binario preconstruido y firmado — y nada de lo que se hace aquí puede anunciar una ruta,
+porque dry-run es el modo predeterminado.
 
 <Callout type="info" title="Requisitos previos">
-Go 1.22 o más reciente. Para ver detecciones en vivo también necesitas un router que exporte
-NetFlow / IPFIX / sFlow, pero incluso sin uno puedes validar la detección de extremo a extremo
-ejecutando la prueba de integración incluida desde `engine/`
-(`go test ./internal/app -run TestEndToEnd -v`; consulta la última sección).
+Un host Linux (`amd64` o `arm64`). Para ver detecciones *en vivo* también necesitas un router que
+exporte NetFlow / IPFIX / sFlow, pero incluso sin uno puedes validar la detección de extremo a
+extremo con las herramientas de ataques sintéticos incluidas (la
+[última sección](#5-no-tienes-router-genera-ataques-sintéticos), que se ejecuta desde una copia del
+código fuente). Solo necesitas un toolchain de Go si eliges
+[compilar desde el código fuente](/docs/deployment#compilar-desde-el-código-fuente) en lugar de descargar.
 </Callout>
 
-## 1. Compila el binario
+## 1. Instala Kapkan
 
-Todos los comandos a continuación se ejecutan desde el directorio `engine` del repositorio, así que empieza por ahí:
+Elige la opción que se adapte a tu host — cada versión se distribuye preconstruida y firmada para
+`linux` `amd64`/`arm64`, de modo que nunca compilas nada.
 
-```sh
-cd engine
-```
-
-Luego compila:
+### Debian / Ubuntu (`.deb`)
 
 ```sh
-make build
+VER=v1.0.0
+curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.deb"
+sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"
 ```
 
-Esto produce un único binario estático `kapkan`.
+El paquete instala el binario en `/usr/local/bin/kapkan`, crea un usuario `kapkan` sin privilegios,
+prepara `/etc/kapkan` con un `config.yaml` en dry-run e instala la unidad systemd reforzada —
+dejada **detenida** para que puedas revisar primero la configuración. La página de
+[Despliegue en producción](/docs/deployment) cubre el servicio a partir de ahí. RHEL / Fedora es
+igual con el `.rpm`: `sudo dnf install ./kapkan_<ver>_linux_amd64.rpm`.
+
+### Tarball (cualquier distro)
+
+```sh
+VER=v1.0.0
+curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.tar.gz"
+tar xzf "kapkan_${VER#v}_linux_amd64.tar.gz"
+```
+
+Eso desempaqueta el binario `kapkan` más un directorio `deploy/` (la unidad systemd, una
+configuración de ejemplo y `update.sh`). El resto de esta página usa el tarball. Antes de
+ejecutarlo en producción conviene [verificar la descarga](/docs/upgrading#verificar-una-descarga-manualmente)
+— la firma de cosign y el SHA-256.
+
+<Callout type="info" title="Usa la última versión">
+Sustituye `v1.0.0` por la etiqueta más reciente de la
+[página de versiones](https://github.com/fornex/kapkan/releases/latest), y `amd64` por `arm64` en
+hosts ARM. Los nombres del archivo y del paquete eliminan la `v` inicial (p. ej. `kapkan_1.0.0_linux_amd64.tar.gz`).
+</Callout>
 
 ## 2. Ejecuta en modo dry-run
 
-Inicia Kapkan con la configuración de desarrollo incluida y registros (logs) legibles para humanos:
+Desde el tarball desempaquetado, inicia Kapkan con la configuración de ejemplo incluida y registros
+(logs) legibles para humanos:
 
 ```sh
-make run-dev
-# equivalent to:
-./kapkan -config configs/dev.yaml -log-format text
+./kapkan -config deploy/config.example.yaml -log-format text
 ```
 
 `-config` apunta a la configuración YAML y `-log-format text` cambia los registros del formato JSON
 estructurado predeterminado a una forma legible para humanos; consulta la
 [Referencia de CLI](/docs/cli) para conocer cada flag y sus valores admitidos.
 
-La configuración de desarrollo ([`configs/dev.yaml`](/docs/configuration)) tiene `dry_run: true`,
-redes protegidas de prueba de `203.0.113.0/24` y `2001:db8::/32` (más un par de hostgroups de
-ejemplo), y escucha sFlow en `:6343` y NetFlow/IPFIX en `:2055`.
+La [`deploy/config.example.yaml`](/docs/configuration) incluida tiene `dry_run: true`, redes
+protegidas de prueba de `203.0.113.0/24` y `2001:db8::/32`, una `protected_whitelist`, y escucha
+sFlow en `:6343` y NetFlow/IPFIX en `:2055`. Como dry-run está activado, Kapkan registra los
+blackholes hipotéticos pero nunca anuncia una ruta.
+
+<Callout type="info" title="¿Instalaste el paquete?">
+Si instalaste el `.deb`/`.rpm`, el mismo daemon se ejecuta como servicio contra
+`/etc/kapkan/config.yaml` en su lugar — `sudo systemctl start kapkan`, y luego
+`journalctl -u kapkan -f`. Consulta [Despliegue en producción](/docs/deployment).
+</Callout>
 
 ## 3. Apunta tus exportadores a Kapkan
 
@@ -82,16 +113,24 @@ También puedes abrir el [dashboard](/docs/dashboard) integrado en
 
 ## 5. ¿No tienes router? Genera ataques sintéticos
 
-Kapkan incluye `pkg/flowgen`, que construye datagramas reales en formato de cable NetFlow / sFlow,
-incluyendo patrones de amplificación, SYN-flood y UDP-flood. Se usa en toda la batería de pruebas
-para validar la detección de extremo a extremo sin tocar un router real. La prueba de integración
-en `internal/app` reproduce una inundación de amplificación NTP a través de un socket UDP real
-contra una instancia en dry-run y comprueba que el ataque y su bloqueo (ban) virtual (que expira
-automáticamente) —el blackhole hipotético registrado que dry-run expone a través de la API sin
-llegar nunca a anunciarlo— aparecen en la API.
+Este último paso se ejecuta desde una **copia del código fuente** (ejercita la batería de pruebas),
+así que necesita el repositorio y un toolchain de Go. Kapkan incluye `pkg/flowgen`, que construye
+datagramas reales en formato de cable NetFlow / sFlow — incluyendo patrones de amplificación,
+SYN-flood y UDP-flood. Se usa en toda la batería de pruebas para validar la detección de extremo a
+extremo sin tocar un router real. La prueba de integración en `internal/app` reproduce una
+inundación de amplificación NTP a través de un socket UDP real contra una instancia en dry-run y
+comprueba que el ataque y su bloqueo (ban) virtual (que expira automáticamente) —el blackhole
+hipotético registrado que dry-run expone a través de la API sin llegar nunca a anunciarlo— aparecen
+en la API:
+
+```sh
+git clone https://github.com/fornex/kapkan && cd kapkan/engine
+go test ./internal/app -run TestEndToEnd -v
+```
 
 ## Próximos pasos
 
-- [Referencia de configuración](/docs/configuration): adapta la configuración a tu red.
-- [Detección y umbrales](/docs/detection): ajusta qué cuenta como un ataque.
-- [Puesta en producción](/docs/going-live): valida y luego desactiva dry-run.
+- [Despliegue en producción](/docs/deployment) — ejecuta Kapkan como un servicio systemd reforzado.
+- [Referencia de configuración](/docs/configuration) — adapta la configuración a tu red.
+- [Detección y umbrales](/docs/detection) — ajusta qué cuenta como un ataque.
+- [Puesta en producción](/docs/going-live) — valida y luego desactiva dry-run.

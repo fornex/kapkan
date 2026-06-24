@@ -28,8 +28,8 @@ kapkan [flags]
 | `-check-update` | `false` | Run the opt-in [update check](/docs/configuration) once and exit — `0` up to date, `10` an update is available, `1` on error. Polls the GitHub Releases API; sends only the request itself, never node identity or config. |
 
 <Callout type="info" title="json or text?">
-Use `-log-format text` for local development — it is the format the Quickstart and the
-[`make run-dev`](/docs/quickstart) target use. Keep the default `json` in production so a log
+Use `-log-format text` for local development — it is the format the
+[Quickstart](/docs/quickstart) uses. Keep the default `json` in production so a log
 collector can parse the structured fields; the [systemd unit](/docs/deployment) ships with
 `-log-format json -log-level info`.
 </Callout>
@@ -109,6 +109,6 @@ setting.
 
 ## Next steps
 
-- [Quickstart](/docs/quickstart) — build the binary and run it in dry-run.
+- [Quickstart](/docs/quickstart) — download Kapkan and run it in dry-run.
 - [Configuration reference](/docs/configuration) — every key in the YAML file.
 - [Production deployment](/docs/deployment) — the systemd unit and its flags.

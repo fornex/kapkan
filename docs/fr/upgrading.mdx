@@ -44,6 +44,8 @@ Ce qu'il fait, dans l'ordre :
 
 L'URL de la sonde est dérivée de votre `api.listen` ; remplacez-la (ainsi que le délai d'expiration) par `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` si nécessaire.
 
+Installé depuis le `.deb` / `.rpm` ? Vous pouvez à la place effectuer la mise à niveau en installant un paquet plus récent (`sudo apt install ./kapkan_<newer>.deb`), ce qui remplace le binaire tout en conservant votre `/etc/kapkan/config.yaml` modifié. `update.sh` reste la méthode pour les installations par tarball (et fonctionne aussi pour les installations par paquet, puisque les deux placent le binaire au même emplacement `/usr/local/bin/kapkan`).
+
 ## L'atténuation survit au redémarrage
 
 Un redémarrage n'interrompt plus l'atténuation active, grâce à deux fonctionnalités du moteur (voir [Atténuation RTBH](/docs/mitigation)) :

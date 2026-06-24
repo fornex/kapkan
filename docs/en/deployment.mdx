@@ -12,25 +12,57 @@ and `engine/deploy/config.example.yaml`. This page walks through installing the 
 system service, where each file lives, how secrets are kept out of the YAML, and how to
 reload configuration without a restart.
 
-<Callout type="info" title="Build first">
-The steps below assume you already have a `kapkan` binary. If you have not built it yet,
-see the [Quickstart](/docs/quickstart) or [Building from source](#building-from-source).
+<Callout type="info" title="No build required">
+The fastest path is a prebuilt package: `apt install ./kapkan_*.deb` (or the `.rpm`) does
+everything in this section for you — see [Install the package](#install-the-package) below. The
+manual steps after it are for the [release tarball](/docs/quickstart#1-install-kapkan). Either
+way there is nothing to compile; [Building from source](#building-from-source) is only if you
+want to.
 </Callout>
 
 ## Install
 
-Run the following as root from a checkout of the repository (so that `engine/deploy/` is
-available). It installs the binary, creates an unprivileged system user, lays out
-`/etc/kapkan`, installs the production config, writes the secrets env file at restrictive
-permissions, installs the systemd unit, and enables the service.
+### Install the package
+
+On Debian/Ubuntu (`.deb`) or RHEL/Fedora (`.rpm`) the package does everything the manual steps
+below do: it installs the binary to `/usr/local/bin/kapkan`, creates the unprivileged `kapkan`
+user, lays out `/etc/kapkan` with a dry-run `config.yaml` seeded from the example, creates the
+writable state directory, and installs the hardened systemd unit (to `/usr/lib/systemd/system`).
+
+```sh
+VER=v1.0.0
+curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.deb"
+sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"   # RHEL/Fedora: dnf install ./kapkan_<ver>_linux_amd64.rpm
+```
+
+The service is installed but **left stopped** — a mitigation daemon should not start before you
+have looked at its config. The shipped `config.yaml` has `dry_run: true`. Review it, (recommended)
+[set an API token](#secrets) in `/etc/kapkan/kapkan.env`, then start it on boot and now:
+
+```sh
+sudoedit /etc/kapkan/config.yaml          # adapt networks, BGP and thresholds
+sudo systemctl enable --now kapkan
+```
+
+Upgrade with a newer package (`apt install ./kapkan_<newer>.deb`) or with
+[`update.sh`](/docs/upgrading) — both keep your edited `/etc/kapkan/config.yaml`. `apt purge
+kapkan` removes every trace, including config and state.
+
+### Manual install (tarball)
+
+Prefer to place files yourself, or on a distro without `apt`/`dnf`? After unpacking the
+[release tarball](/docs/quickstart#1-install-kapkan) (so the `deploy/` directory sits next to
+the `kapkan` binary), run the equivalent as root. It installs the binary, creates an
+unprivileged system user, lays out `/etc/kapkan`, installs the production config, writes the
+secrets env file at restrictive permissions, installs the systemd unit, and enables the service.
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
-sudo install -m 0640 -o kapkan -g kapkan engine/deploy/config.example.yaml /etc/kapkan/config.yaml
+sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
 echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
-sudo install -m 0644 engine/deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
 
@@ -74,7 +106,7 @@ sudo journalctl -u kapkan -f
 | `/usr/local/bin/kapkan` | `0755` | The single static daemon binary. |
 | `/etc/kapkan/config.yaml` | `0640` | The YAML configuration, owned by `kapkan:kapkan`. |
 | `/etc/kapkan/kapkan.env` | `0600` | Secrets env file (tokens, SMTP credentials). |
-| `/etc/systemd/system/kapkan.service` | `0644` | The hardened systemd unit. |
+| `/etc/systemd/system/kapkan.service` | `0644` | The hardened systemd unit. The `.deb`/`.rpm` install it to `/usr/lib/systemd/system/kapkan.service` (vendor location) instead. |
 | `/var/lib/kapkan/` | `0700` | Writable state directory (`StateDirectory=kapkan`); holds `ban.state_file` when ban persistence is enabled. |
 
 The whole `/etc/kapkan` directory is mounted read-only to the process via
