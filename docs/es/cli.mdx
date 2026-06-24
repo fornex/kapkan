@@ -1,7 +1,7 @@
 export const metadata = {
   title: "Referencia de CLI",
   description:
-    "Cada opción de línea de comandos del binario de Kapkan: ruta de la configuración, formato y nivel de los registros, y los subcomandos de utilidad para el esquema y la validación.",
+    "Cada opción de línea de comandos del binario de Kapkan: ruta de la configuración, formato y nivel de los registros, el pid file y el control de proceso al estilo nginx con `-s`, y los subcomandos de utilidad para el esquema y la validación.",
 };
 
 # Referencia de CLI
@@ -27,6 +27,8 @@ kapkan [flags]
 | `-dump-schema` | `false` | Imprime el esquema JSON de la configuración en stdout y termina. Consulta [más abajo](#volcar-el-esquema). |
 | `-version` | `false` | Imprime la versión de compilación y termina. La misma versión se expone en tiempo de ejecución mediante `/api/v1/status` y la [métrica](/docs/metrics) `kapkan_build_info`. |
 | `-check-update` | `false` | Ejecuta la [comprobación de actualizaciones](/docs/configuration) opcional una vez y termina: `0` actualizado, `10` hay una actualización disponible, `1` ante un error. Consulta la API de Releases de GitHub; envía solo la propia solicitud, nunca la identidad del nodo ni la configuración. |
+| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Dónde escribe el demonio su id de proceso al arrancar (se elimina al apagarse limpiamente); lo lee `-s` para localizar el demonio en ejecución. Un fallo de escritura no es fatal: el demonio sigue ejecutándose, solo que `-s` no está disponible. |
+| `-s <signal>` | — | Envía una señal a un demonio en ejecución y termina, leyendo `-pid-file`: `reload`, `stop` o `quit`. **No** inicia un demonio. Consulta [más abajo](#controlar-un-demonio-en-ejecución). |
 
 <Callout type="info" title="¿json o text?">
 Usa `-log-format text` para el desarrollo local; es el formato que emplea la
@@ -50,9 +52,39 @@ kapkan -config configs/dev.yaml -log-format text
 kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
-El archivo de configuración se puede recargar en tiempo de ejecución sin reiniciar: envía `SIGHUP`
+El archivo de configuración se puede recargar en tiempo de ejecución sin reiniciar: ejecuta
+[`kapkan -s reload`](#controlar-un-demonio-en-ejecución), envía `SIGHUP` directamente
 (`systemctl reload kapkan`) o `POST /api/v1/config/reload`. Consulta la
 [referencia de configuración](/docs/configuration) para saber qué se recarga y qué queda fijado al arrancar.
+
+## Controlar un demonio en ejecución
+
+```sh
+kapkan -s reload    # re-read the config file (SIGHUP)
+kapkan -s stop      # graceful shutdown (SIGTERM)
+```
+
+`-s` lee el id de proceso de `-pid-file` (predeterminado `/run/kapkan/kapkan.pid`, escrito por el
+demonio al arrancar) y entrega la señal correspondiente a ese proceso: el mismo control local al
+estilo nginx que `nginx -s reload`. No necesita conexión de red ni token de API, así que funciona
+incluso si la API REST está caída; sí necesita permiso para enviar señales al demonio, así que
+ejecútalo como `root` o como el usuario `kapkan`.
+
+| Valor de `-s` | Señal | Efecto |
+| --- | --- | --- |
+| `reload` | `SIGHUP` | Recarga en caliente el archivo de configuración. Igual que `systemctl reload kapkan` o `POST /api/v1/config/reload`. |
+| `stop` / `quit` | `SIGTERM` | Apagado graceful. Igual que `systemctl stop kapkan`. Los dos son alias: el apagado de Kapkan siempre es graceful (pide a los peers BGP que conserven las rutas de mitigación mediante [Graceful Restart](/docs/mitigation)). |
+
+Si el pid file falta o está obsoleto (no existe tal proceso), o si no tienes permiso para enviarle
+señales, `-s` imprime el motivo en stderr y termina con `1`.
+
+<Callout type="info" title="Dónde vive el pid file">
+La [unidad de systemd](/docs/deployment) incluida establece `RuntimeDirectory=kapkan`, de modo que
+`/run/kapkan` existe y el usuario `kapkan` puede escribir en él; el demonio escribe ahí
+`/run/kapkan/kapkan.pid` y lo elimina al detenerse limpiamente. En una ejecución de desarrollo local
+ese directorio puede no existir: el demonio registra una advertencia y continúa, y `-s` informará de
+"no pid file". Pasa `-pid-file /tmp/kapkan.pid` tanto al demonio como a `-s` si quieres el atajo en local.
+</Callout>
 
 ## Flags de utilidad
 

@@ -1,7 +1,7 @@
 export const metadata = {
   title: "Référence CLI",
   description:
-    "Chaque option de ligne de commande du binaire kapkan — chemin de configuration, format et niveau des journaux, et les sous-commandes utilitaires de schéma/validation.",
+    "Chaque option de ligne de commande du binaire kapkan — chemin de configuration, format et niveau des journaux, le pid file et le contrôle de processus `-s` à la manière de nginx, et les sous-commandes utilitaires de schéma/validation.",
 };
 
 # Référence CLI
@@ -27,6 +27,8 @@ kapkan [flags]
 | `-dump-schema` | `false` | Affiche le schéma JSON de la configuration sur stdout puis se termine. Voir [ci-dessous](#exporter-le-schéma). |
 | `-version` | `false` | Affiche la version de build puis se termine. La même version est exposée à l'exécution via `/api/v1/status` et la [métrique](/docs/metrics) `kapkan_build_info`. |
 | `-check-update` | `false` | Exécute une fois la [vérification de mise à jour](/docs/configuration) optionnelle puis se termine — `0` à jour, `10` une mise à jour est disponible, `1` en cas d'erreur. Interroge l'API GitHub Releases ; n'envoie que la requête elle-même, jamais l'identité du nœud ni la configuration. |
+| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Emplacement où le démon écrit son identifiant de processus au démarrage (supprimé lors d'un arrêt propre) ; lu par `-s` pour localiser le démon en cours d'exécution. Un échec d'écriture n'est pas fatal — le démon tourne quand même, seul `-s` devient indisponible. |
+| `-s <signal>` | — | Envoie un signal à un démon en cours d'exécution puis se termine, en lisant `-pid-file` : `reload`, `stop` ou `quit`. Ne démarre **pas** de démon. Voir [ci-dessous](#contrôler-un-démon-en-cours-dexécution). |
 
 <Callout type="info" title="json ou text ?">
 Utilisez `-log-format text` pour le développement local — c'est le format utilisé par le
@@ -50,10 +52,41 @@ kapkan -config configs/dev.yaml -log-format text
 kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
-Le fichier de configuration est rechargeable à l'exécution sans redémarrage — envoyez `SIGHUP`
+Le fichier de configuration est rechargeable à l'exécution sans redémarrage — exécutez
+[`kapkan -s reload`](#contrôler-un-démon-en-cours-dexécution), envoyez directement `SIGHUP`
 (`systemctl reload kapkan`) ou `POST /api/v1/config/reload`. Voir la
 [référence de configuration](/docs/configuration) pour ce qui se recharge et ce qui est figé au
 démarrage.
+
+## Contrôler un démon en cours d'exécution
+
+```sh
+kapkan -s reload    # re-read the config file (SIGHUP)
+kapkan -s stop      # graceful shutdown (SIGTERM)
+```
+
+`-s` lit l'identifiant de processus depuis `-pid-file` (par défaut `/run/kapkan/kapkan.pid`, écrit
+par le démon au démarrage) et délivre le signal correspondant à ce processus — le même contrôle
+local à la manière de nginx que `nginx -s reload`. Il ne nécessite ni connexion réseau ni jeton
+d'API, il fonctionne donc même si l'API REST est indisponible ; il a besoin de la permission de
+signaler le démon, exécutez-le donc en tant que `root` ou avec l'utilisateur `kapkan`.
+
+| Valeur de `-s` | Signal | Effet |
+| --- | --- | --- |
+| `reload` | `SIGHUP` | Recharge à chaud le fichier de configuration. Équivaut à `systemctl reload kapkan` ou `POST /api/v1/config/reload`. |
+| `stop` / `quit` | `SIGTERM` | Arrêt gracieux. Équivaut à `systemctl stop kapkan`. Les deux sont des alias — l'arrêt de Kapkan est toujours gracieux (il demande aux pairs BGP de conserver les routes d'atténuation via [Graceful Restart](/docs/mitigation)). |
+
+Si le pid file est absent ou périmé (aucun processus de ce type), ou si vous n'avez pas la
+permission de le signaler, `-s` affiche la raison sur stderr et se termine avec le code `1`.
+
+<Callout type="info" title="Où se trouve le pid file">
+L'[unité systemd](/docs/deployment) fournie définit `RuntimeDirectory=kapkan`, de sorte que
+`/run/kapkan` existe et est accessible en écriture par l'utilisateur `kapkan` ; le démon y écrit
+`/run/kapkan/kapkan.pid` et le supprime lors d'un arrêt propre. Dans une exécution de développement
+locale, ce répertoire peut ne pas exister — le démon émet un avertissement et continue, et `-s`
+signalera « no pid file ». Passez `-pid-file /tmp/kapkan.pid` à la fois au démon et à `-s` si vous
+voulez ce raccourci en local.
+</Callout>
 
 ## Options utilitaires
 

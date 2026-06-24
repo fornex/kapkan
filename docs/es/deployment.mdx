@@ -79,11 +79,12 @@ solo si realmente usas esas funciones. La lista completa de claves `*_env` está
 [Secretos](#secretos).
 
 La unidad se ejecuta como el usuario `kapkan` con `ExecStart=/usr/local/bin/kapkan -config
-/etc/kapkan/config.yaml -log-format json -log-level info`, se reinicia ante fallos y está
+/etc/kapkan/config.yaml -log-format json -log-level info -pid-file /run/kapkan/kapkan.pid`, se reinicia ante fallos y está
 fuertemente aislada en un sandbox: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
 `MemoryDenyWriteExecute` y más. También declara `StateDirectory=kapkan` (modo `0700`),
-lo que proporciona al daemon un `/var/lib/kapkan` escribible para [`ban.state_file`](/docs/mitigation)
+lo que proporciona al daemon un `/var/lib/kapkan` escribible para [`ban.state_file`](/docs/mitigation),
+y `RuntimeDirectory=kapkan`, lo que le proporciona un `/run/kapkan` escribible para el pid file
 mientras que `ProtectSystem=strict` mantiene el resto del sistema de archivos en modo solo lectura.
 Una protección contra bucles de reinicio (`StartLimitIntervalSec=60`, `StartLimitBurst=4`) lleva la
 unidad al estado `failed` si el binario no logra arrancar cuatro veces en un minuto, de modo que una
@@ -113,6 +114,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/kapkan.env` | `0600` | Archivo de entorno con secretos (tokens, credenciales SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | La unidad systemd reforzada. El `.deb`/`.rpm` la instalan en su lugar en `/usr/lib/systemd/system/kapkan.service` (ubicación del proveedor). |
 | `/var/lib/kapkan/` | `0700` | Directorio de estado escribible (`StateDirectory=kapkan`); contiene `ban.state_file` cuando la persistencia de baneos está habilitada. |
+| `/run/kapkan/` | `0755` | Directorio de runtime (`RuntimeDirectory=kapkan`), creado al arrancar y eliminado al detenerse; contiene `kapkan.pid` para que [`kapkan -s reload`](/docs/cli) pueda encontrar el daemon. |
 
 Todo el directorio `/etc/kapkan` se monta en modo solo lectura para el proceso mediante
 `ReadOnlyPaths=/etc/kapkan`, de modo que el daemon puede leer su configuración y sus secretos
@@ -164,7 +166,16 @@ de modo que puedes recargar con:
 sudo systemctl reload kapkan
 ```
 
-De forma equivalente, puedes desencadenar la misma recarga a través de la API:
+Fuera del gestor de servicios de la máquina, el daemon también responde al flag de control local
+al estilo de nginx, que lee el pid file que la unidad escribe en `/run/kapkan/kapkan.pid`:
+
+```sh
+sudo kapkan -s reload    # re-read the config (SIGHUP)
+sudo kapkan -s stop      # graceful shutdown (SIGTERM)
+```
+
+Consulta [Controlar un daemon en ejecución](/docs/cli) para conocer el comportamiento completo
+y los códigos de salida. De forma equivalente, puedes desencadenar la misma recarga a través de la API:
 
 ```sh
 curl -s -X POST localhost:8080/api/v1/config/reload \
