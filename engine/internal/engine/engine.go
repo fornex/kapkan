@@ -15,6 +15,7 @@ import (
 	"context"
 	"log/slog"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -322,11 +323,27 @@ func (e *Engine) Process(f flow.Flow) {
 	}
 	epoch := e.now().Unix()
 
+	debug := cfg.BoundaryDebugEnabled()
+
 	if f.DstAddr.IsValid() && cfg.InNetworks(f.DstAddr) {
-		e.record(f.DstAddr, dirIn, f, rate, epoch)
+		if debug {
+			metrics.BoundaryDebugBytes.WithLabelValues(
+				f.Exporter.String(), strconv.FormatUint(uint64(f.InIf), 10), "in",
+			).Add(float64(f.Bytes * rate))
+		}
+		if r, ok := cfg.InboundRate(f.Exporter, f.InIf, rate); ok {
+			e.record(f.DstAddr, dirIn, f, r, epoch)
+		}
 	}
 	if cfg.OutgoingEnabled && f.SrcAddr.IsValid() && cfg.InNetworks(f.SrcAddr) {
-		e.record(f.SrcAddr, dirOut, f, rate, epoch)
+		if debug {
+			metrics.BoundaryDebugBytes.WithLabelValues(
+				f.Exporter.String(), strconv.FormatUint(uint64(f.OutIf), 10), "out",
+			).Add(float64(f.Bytes * rate))
+		}
+		if r, ok := cfg.OutboundRate(f.Exporter, f.OutIf, rate); ok {
+			e.record(f.SrcAddr, dirOut, f, r, epoch)
+		}
 	}
 }
 

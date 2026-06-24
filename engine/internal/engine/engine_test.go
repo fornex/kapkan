@@ -525,6 +525,93 @@ func TestFlowsThresholdTrigger(t *testing.T) {
 	}
 }
 
+const boundaryYAML = `
+listen:
+  netflow: ":2055"
+sampling:
+  default_rate: 1000
+  boundary:
+    - exporter: "10.0.0.2"
+      external_ifindexes: [100]
+      egress_sampling: true
+networks:
+  - "203.0.113.0/24"
+thresholds:
+  pps: 80000
+  mbps: 1000
+  flows_per_sec: 35000
+ban:
+  ttl_seconds: 600
+  unban_hysteresis_seconds: 3
+  max_active_bans: 50
+bgp:
+  local_asn: 65001
+  router_id: "10.0.0.1"
+  next_hop: "192.0.2.1"
+  community: "65000:666"
+  neighbors:
+    - address: "10.0.0.254"
+      remote_asn: 65000
+notify: {}
+api:
+  listen: "127.0.0.1:8080"
+`
+
+// inPPS reads a tracked host's inbound windowed PPS; ok is false when the host
+// was never recorded (e.g. its samples were all dropped by boundary counting).
+func inPPS(e *Engine, addr netip.Addr, nowSec int64) (float64, bool) {
+	sh := e.shardFor(addr)
+	sh.mu.Lock()
+	hs := sh.hosts[addr]
+	sh.mu.Unlock()
+	if hs == nil {
+		return 0, false
+	}
+	in, _, ok := e.windowedRates(hs, nowSec)
+	return in.PPS, ok
+}
+
+// TestBoundaryInterfaceCounting verifies interface-boundary counting: a sample
+// is counted only when it crosses an external interface of a classified
+// exporter (halved when that exporter also samples on egress), internal/transit
+// samples are dropped, and exporters without a boundary entry keep counting
+// every sample at full rate.
+func TestBoundaryInterfaceCounting(t *testing.T) {
+	clk := newMockClock()
+	cfg, err := config.Parse([]byte(boundaryYAML))
+	if err != nil {
+		t.Fatalf("parse boundary config: %v", err)
+	}
+	e := New(config.NewStore("", cfg), WithClock(clk.Now), WithWindow(5))
+
+	ex := netip.MustParseAddr("10.0.0.2")    // classified, egress sampling
+	other := netip.MustParseAddr("10.0.0.9") // unclassified -> legacy
+	extDst := netip.MustParseAddr("203.0.113.10")
+	intDst := netip.MustParseAddr("203.0.113.11")
+	legacyDst := netip.MustParseAddr("203.0.113.12")
+
+	for s := 0; s < 5; s++ {
+		// external interface on the egress-sampling exporter -> counted, halved.
+		e.Process(flow.Flow{Exporter: ex, DstAddr: extDst, IPProto: 17, Bytes: 100, Packets: 1, SamplingRate: 1000, InIf: 100, OutIf: 7, Wire: flow.ProtoSFlow5})
+		// internal interface on the same exporter -> dropped as a duplicate.
+		e.Process(flow.Flow{Exporter: ex, DstAddr: intDst, IPProto: 17, Bytes: 100, Packets: 1, SamplingRate: 1000, InIf: 7, OutIf: 100, Wire: flow.ProtoSFlow5})
+		// unclassified exporter -> legacy, counted regardless of interface.
+		e.Process(flow.Flow{Exporter: other, DstAddr: legacyDst, IPProto: 17, Bytes: 100, Packets: 1, SamplingRate: 1000, InIf: 7, OutIf: 7, Wire: flow.ProtoSFlow5})
+		clk.Advance(time.Second)
+	}
+	nowSec := clk.Now().Unix()
+
+	if pps, ok := inPPS(e, extDst, nowSec); !ok || pps != 500 {
+		t.Errorf("external dst PPS = %v (ok=%v), want 500 (rate halved by egress_sampling)", pps, ok)
+	}
+	if pps, ok := inPPS(e, intDst, nowSec); ok {
+		t.Errorf("internal-interface dst should be dropped, got PPS=%v", pps)
+	}
+	if pps, ok := inPPS(e, legacyDst, nowSec); !ok || pps != 1000 {
+		t.Errorf("unclassified-exporter dst PPS = %v (ok=%v), want 1000 (legacy full rate)", pps, ok)
+	}
+}
+
 // ipv6Store returns a store whose protected networks include an IPv6 prefix.
 func ipv6Store(t *testing.T) *config.Store {
 	t.Helper()

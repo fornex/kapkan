@@ -14,6 +14,28 @@ listen:
 sampling:
   default_rate: 1000 # used only when an exporter does not report its own rate
 
+  # boundary: optional interface-boundary counting. Without it, every received
+  # sample is counted — which OVER-COUNTS when the same packet is seen at more
+  # than one sampling vantage point: redundant exporters (e.g. an MLAG pair),
+  # ingress+egress sampling (Arista `sflow sample output`), or transit/peer
+  # links. List each exporter's EXTERNAL (uplink/border) interfaces and a flow
+  # is then counted toward a protected host only when it crosses the boundary:
+  # inbound when it ENTERS on an external interface, outbound when it LEAVES on
+  # one. Exporters not listed keep counting every sample, so this is safe to
+  # roll out per exporter. Set egress_sampling: true for exporters that also
+  # sample on egress (the rate is then halved to undo the in+out double).
+  # Tip: enable boundary_debug, watch kapkan_engine_boundary_debug_bytes_total
+  # to see traffic per (exporter, iface), pick the high-volume uplinks, then
+  # turn boundary_debug off.
+  # boundary_debug: false
+  # boundary:
+  #   - exporter: "10.1.32.2"
+  #     external_ifindexes: [1000025]
+  #     egress_sampling: true
+  #   - exporter: "10.1.32.3"
+  #     external_ifindexes: [1000025]
+  #     egress_sampling: true
+
 # flow_sources: optional allowlist of trusted flow-exporter (router) source
 # addresses. Telemetry is unauthenticated UDP, so the source address is
 # spoofable; listing your exporters here keeps the per-exporter `packets_total`
