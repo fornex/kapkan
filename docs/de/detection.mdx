@@ -80,6 +80,13 @@ Wenn Ihre Exporter ihre Sampling-Rate nicht ankündigen, muss `sampling.default_
 niedrig und verzögert die Erkennung; ein zu hoher zählt zu hoch und löst zu früh aus.
 </Callout>
 
+Die Korrektur setzt voraus, dass jedes Paket einmal gesampelt wird. Wird dasselbe Paket an mehreren
+Beobachtungspunkten erfasst — redundante Exporter, ingress **und** egress Sampling auf einem Gerät
+oder Transit-Links —, würde Kapkan jede Kopie aufsummieren und zu hoch zählen. Die
+Interface-Boundary-Zählung dedupliziert dies, indem ein Flow nur dort gezählt wird, wo er eine
+externe (uplink-/Border-)Schnittstelle überquert; siehe
+[Interface-Boundary-Zählung](/docs/configuration) für die Konfiguration.
+
 ## Schwellenwerte pro Protokoll
 
 Über die Kern-Summen hinaus können Sie optionale Limits pro Protokoll festlegen. Damit lassen sich

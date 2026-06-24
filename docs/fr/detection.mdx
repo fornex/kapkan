@@ -78,6 +78,12 @@ Si vos exportateurs n'annoncent pas leur taux d'échantillonnage, `sampling.defa
 élevée le surestime et déclenche trop tôt.
 </Callout>
 
+La correction suppose que chaque paquet est échantillonné une seule fois. Si le même paquet est observé à plusieurs points
+d'observation — exportateurs redondants, échantillonnage en ingress **et** en egress sur un même équipement, ou liens de transit —
+Kapkan additionnerait chaque copie et surestimerait. Le comptage à la frontière d'interface (interface-boundary counting) déduplique cela en ne comptant
+un flow que là où il franchit une interface externe (uplink/border) ; voir
+[interface-boundary counting](/docs/configuration) pour savoir comment le configurer.
+
 ## Seuils par protocole
 
 Au-delà des totaux de base, vous pouvez définir des limites optionnelles par protocole. Elles permettent de détecter une attaque
