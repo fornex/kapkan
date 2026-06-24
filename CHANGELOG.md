@@ -19,8 +19,26 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-24
+
+### Config changes
+
+- Added `sampling.boundary` (optional, per-exporter interface-boundary counting)
+  and `sampling.boundary_debug`. Existing configs validate unchanged — absent
+  means every sample is counted, the prior behavior.
+
 ### Added
 
+- Interface-boundary counting (`sampling.boundary`): deduplicates a flow observed
+  at more than one sampling vantage point — redundant exporters (MLAG pairs),
+  ingress+egress sampling (Arista `sflow sample output`), and transit/peer-links —
+  which otherwise over-counts `pps`/`mbps`/`flows_per_sec` by a constant factor.
+  Classify each exporter's external (uplink/border) interfaces and a flow is
+  counted only when it crosses the boundary; `egress_sampling` halves the rate for
+  exporters that also sample on egress. `sampling.boundary_debug` exports the
+  `kapkan_engine_boundary_debug_bytes_total` metric (bytes per exporter and
+  interface) to help identify the external interfaces. Opt-in: exporters without a
+  `boundary` entry keep counting every sample.
 - Prebuilt `.deb` and `.rpm` packages for `linux` `amd64`/`arm64`, built by
   GoReleaser alongside the existing tarballs and covered by the same
   `checksums.txt` + cosign signature. `apt install ./kapkan_*.deb` (or the
