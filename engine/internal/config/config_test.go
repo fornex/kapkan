@@ -1366,3 +1366,80 @@ func TestFlowSourcesParsed(t *testing.T) {
 		t.Errorf("Parse(invalid flow_sources) error = %v, want contains \"flow_sources\"", err)
 	}
 }
+
+// withBoundary injects a sampling.boundary block into validYAML.
+func withBoundary(block string) string {
+	return strings.Replace(validYAML, "default_rate: 1000", "default_rate: 1000"+block, 1)
+}
+
+func TestBoundaryRate(t *testing.T) {
+	cfg, err := Parse([]byte(withBoundary(`
+  boundary:
+    - exporter: "10.1.32.2"
+      external_ifindexes: [100, 101]
+      egress_sampling: true
+    - exporter: "10.1.32.3"
+      external_ifindexes: [200]`)))
+	if err != nil {
+		t.Fatalf("Parse(boundary) error = %v", err)
+	}
+	ex2 := netip.MustParseAddr("10.1.32.2") // egress sampling
+	ex3 := netip.MustParseAddr("10.1.32.3") // no egress sampling
+	other := netip.MustParseAddr("10.9.9.9")
+
+	// External interface on an egress-sampling exporter: counted, rate halved.
+	if r, ok := cfg.InboundRate(ex2, 100, 1000); !ok || r != 500 {
+		t.Errorf("InboundRate(ex2, external, egress) = (%d, %v), want (500, true)", r, ok)
+	}
+	// Internal interface: dropped.
+	if r, ok := cfg.InboundRate(ex2, 999, 1000); ok || r != 0 {
+		t.Errorf("InboundRate(ex2, internal) = (%d, %v), want (0, false)", r, ok)
+	}
+	// External interface, no egress sampling: full rate.
+	if r, ok := cfg.InboundRate(ex3, 200, 1000); !ok || r != 1000 {
+		t.Errorf("InboundRate(ex3, external) = (%d, %v), want (1000, true)", r, ok)
+	}
+	// Outbound is gated by the output interface.
+	if r, ok := cfg.OutboundRate(ex2, 101, 1000); !ok || r != 500 {
+		t.Errorf("OutboundRate(ex2, external, egress) = (%d, %v), want (500, true)", r, ok)
+	}
+	if _, ok := cfg.OutboundRate(ex3, 999, 1000); ok {
+		t.Errorf("OutboundRate(ex3, internal) should be dropped")
+	}
+	// Unclassified exporter: legacy, count every sample at full rate.
+	if r, ok := cfg.InboundRate(other, 12345, 1000); !ok || r != 1000 {
+		t.Errorf("InboundRate(unclassified) = (%d, %v), want (1000, true)", r, ok)
+	}
+}
+
+func TestBoundaryDisabled(t *testing.T) {
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse error = %v", err)
+	}
+	if cfg.BoundaryDebugEnabled() {
+		t.Error("BoundaryDebugEnabled() = true, want false by default")
+	}
+	// With no boundary configured every sample counts at full rate.
+	if r, ok := cfg.InboundRate(netip.MustParseAddr("10.0.0.1"), 0, 1000); !ok || r != 1000 {
+		t.Errorf("InboundRate(no boundary) = (%d, %v), want (1000, true)", r, ok)
+	}
+}
+
+func TestValidateBoundaryErrors(t *testing.T) {
+	cases := []struct {
+		name, block, wantErr string
+	}{
+		{"bad exporter ip", "\n  boundary:\n    - exporter: \"nope\"\n      external_ifindexes: [1]", "exporter"},
+		{"empty ifindexes", "\n  boundary:\n    - exporter: \"10.0.0.2\"\n      external_ifindexes: []", "external_ifindexes"},
+		{"duplicate exporter", "\n  boundary:\n    - exporter: \"10.0.0.2\"\n      external_ifindexes: [1]\n    - exporter: \"10.0.0.2\"\n      external_ifindexes: [2]", "duplicate"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(withBoundary(tc.block)))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Parse error = %v, want contains %q", err, tc.wantErr)
+			}
+		})
+	}
+}

@@ -50,8 +50,14 @@ type Flow struct {
 	// guarantees it is >= 1, substituting the configured default when the
 	// exporter does not report one.
 	SamplingRate uint64
-	SrcPort      uint16
-	DstPort      uint16
+	// InIf and OutIf are the input/output interface indices (ifIndex) the
+	// exporter reported for this flow. 0 means unknown/unset. They let the
+	// engine deduplicate flows seen at multiple sampling vantage points via
+	// interface-boundary counting (see config.Sampling.Boundary).
+	InIf    uint32
+	OutIf   uint32
+	SrcPort uint16
+	DstPort uint16
 	// IPProto is the IP protocol number (6 TCP, 17 UDP, ...).
 	IPProto  uint8
 	TCPFlags uint8
