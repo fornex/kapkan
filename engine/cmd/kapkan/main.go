@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -30,6 +31,8 @@ func main() {
 		checkConfig = flag.String("check-config", "", "validate the config file at this path and exit (0 = valid, 1 = invalid)")
 		showVersion = flag.Bool("version", false, "print the version and exit")
 		checkUpdate = flag.Bool("check-update", false, "check for a newer release and exit (0 = up to date, 10 = update available, 1 = error)")
+		pidFile     = flag.String("pid-file", "/run/kapkan/kapkan.pid", "path to the pid file (written on start; read by -s)")
+		signalCmd   = flag.String("s", "", "send a signal to the running kapkan and exit: "+signalNames)
 	)
 	flag.Parse()
 
@@ -57,9 +60,18 @@ func main() {
 	if *checkConfig != "" {
 		os.Exit(checkConfigFile(*checkConfig))
 	}
+	// `kapkan -s reload|stop|quit` signals a running daemon (via its pid file)
+	// and exits — it never starts a daemon of its own.
+	if *signalCmd != "" {
+		if err := runSignalCommand(*signalCmd, *pidFile); err != nil {
+			fmt.Fprintln(os.Stderr, "kapkan -s:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	log := logging.New(*logFormat, *logLevel)
-	if err := run(*configPath, log); err != nil {
+	if err := run(*configPath, *pidFile, log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
@@ -141,12 +153,28 @@ func ladderString(stages []config.EscalationStage) string {
 	return "mitigation=" + strings.Join(parts, " -> ")
 }
 
-func run(configPath string, log *slog.Logger) error {
+func run(configPath, pidPath string, log *slog.Logger) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 	store := config.NewStore(configPath, cfg)
+
+	// Record our pid so `kapkan -s reload|stop` can find us. A failure here is
+	// not fatal — the daemon runs fine, only the CLI signalling shortcut is
+	// unavailable (e.g. in dev, where /run/kapkan does not exist). The file is
+	// removed on clean shutdown.
+	if pidPath != "" {
+		if err := writePIDFile(pidPath); err != nil {
+			log.Warn("could not write pid file; `kapkan -s reload` will not work", "path", pidPath, "err", err)
+		} else {
+			defer func() {
+				if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					log.Warn("could not remove pid file on shutdown", "path", pidPath, "err", err)
+				}
+			}()
+		}
+	}
 
 	log.Info("starting kapkan",
 		"dry_run", cfg.DryRun, "networks", cfg.Networks, "thresholds", cfg.Thresholds)
