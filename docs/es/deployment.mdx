@@ -12,25 +12,60 @@ se incluyen una unidad systemd reforzada y un ejemplo de configuración de produ
 el binario como servicio del sistema, dónde reside cada archivo, cómo mantener los secretos
 fuera del YAML y cómo recargar la configuración sin reiniciar.
 
-<Callout type="info" title="Compila primero">
-Los pasos siguientes asumen que ya dispones de un binario `kapkan`. Si todavía no lo has
-compilado, consulta la [Guía rápida](/docs/quickstart) o [Compilar desde el código fuente](#compilar-desde-el-código-fuente).
+<Callout type="info" title="No requiere compilación">
+La vía más rápida es un paquete preconstruido: `apt install ./kapkan_*.deb` (o el `.rpm`) hace
+por ti todo lo de esta sección — consulta [Instalar el paquete](#instalar-el-paquete) más abajo.
+Los pasos manuales que vienen después son para el [tarball de la versión](/docs/quickstart#1-instala-kapkan).
+En cualquier caso no hay nada que compilar; [Compilar desde el código fuente](#compilar-desde-el-código-fuente)
+es solo si así lo deseas.
 </Callout>
 
 ## Instalación
 
-Ejecuta lo siguiente como root desde una copia de trabajo del repositorio (para que
-`engine/deploy/` esté disponible). Instala el binario, crea un usuario del sistema sin privilegios,
-prepara `/etc/kapkan`, instala la configuración de producción, escribe el archivo de entorno
-de secretos con permisos restrictivos, instala la unidad systemd y habilita el servicio.
+### Instalar el paquete
+
+En Debian/Ubuntu (`.deb`) o RHEL/Fedora (`.rpm`) el paquete hace todo lo que hacen los pasos
+manuales de más abajo: instala el binario en `/usr/local/bin/kapkan`, crea el usuario `kapkan`
+sin privilegios, prepara `/etc/kapkan` con un `config.yaml` en dry-run sembrado a partir del
+ejemplo, crea el directorio de estado escribible e instala la unidad systemd reforzada (en
+`/usr/lib/systemd/system`).
+
+```sh
+VER=v1.0.0
+curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.deb"
+sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"   # RHEL/Fedora: dnf install ./kapkan_<ver>_linux_amd64.rpm
+```
+
+El servicio queda instalado pero **detenido** — un daemon de mitigación no debería arrancar
+antes de que hayas revisado su configuración. El `config.yaml` incluido tiene `dry_run: true`.
+Revísalo, (recomendado) [establece un token de API](#secretos) en `/etc/kapkan/kapkan.env`, y
+luego arráncalo al inicio y ahora mismo:
+
+```sh
+sudoedit /etc/kapkan/config.yaml          # adapt networks, BGP and thresholds
+sudo systemctl enable --now kapkan
+```
+
+Actualiza con un paquete más reciente (`apt install ./kapkan_<newer>.deb`) o con
+[`update.sh`](/docs/upgrading) — ambos conservan tu `/etc/kapkan/config.yaml` editado. `apt purge
+kapkan` elimina todo rastro, incluidas la configuración y el estado.
+
+### Instalación manual (tarball)
+
+¿Prefieres colocar los archivos tú mismo, o estás en una distro sin `apt`/`dnf`? Tras desempaquetar
+el [tarball de la versión](/docs/quickstart#1-instala-kapkan) (de modo que el directorio `deploy/`
+quede junto al binario `kapkan`), ejecuta el equivalente como root. Instala el binario, crea un
+usuario del sistema sin privilegios, prepara `/etc/kapkan`, instala la configuración de producción,
+escribe el archivo de entorno de secretos con permisos restrictivos, instala la unidad systemd y
+habilita el servicio.
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
-sudo install -m 0640 -o kapkan -g kapkan engine/deploy/config.example.yaml /etc/kapkan/config.yaml
+sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
 echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
-sudo install -m 0644 engine/deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
 
@@ -76,7 +111,7 @@ sudo journalctl -u kapkan -f
 | `/usr/local/bin/kapkan` | `0755` | El único binario estático del daemon. |
 | `/etc/kapkan/config.yaml` | `0640` | La configuración YAML, propiedad de `kapkan:kapkan`. |
 | `/etc/kapkan/kapkan.env` | `0600` | Archivo de entorno con secretos (tokens, credenciales SMTP). |
-| `/etc/systemd/system/kapkan.service` | `0644` | La unidad systemd reforzada. |
+| `/etc/systemd/system/kapkan.service` | `0644` | La unidad systemd reforzada. El `.deb`/`.rpm` la instalan en su lugar en `/usr/lib/systemd/system/kapkan.service` (ubicación del proveedor). |
 | `/var/lib/kapkan/` | `0700` | Directorio de estado escribible (`StateDirectory=kapkan`); contiene `ban.state_file` cuando la persistencia de baneos está habilitada. |
 
 Todo el directorio `/etc/kapkan` se monta en modo solo lectura para el proceso mediante

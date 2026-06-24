@@ -13,26 +13,60 @@ Installation des Binaries als Systemdienst, zeigt, wo die einzelnen Dateien lieg
 Geheimnisse aus der YAML-Datei herausgehalten werden und wie sich die Konfiguration ohne
 Neustart neu laden lässt.
 
-<Callout type="info" title="Zuerst bauen">
-Die folgenden Schritte setzen voraus, dass Sie bereits ein `kapkan`-Binary haben. Falls Sie
-es noch nicht gebaut haben, lesen Sie den [Schnelleinstieg](/docs/quickstart) oder
-[Aus dem Quellcode bauen](#aus-dem-quellcode-bauen).
+<Callout type="info" title="Kein Bauen erforderlich">
+Der schnellste Weg ist ein vorgefertigtes Paket: `apt install ./kapkan_*.deb` (oder das `.rpm`)
+erledigt alles in diesem Abschnitt für Sie — siehe [Das Paket installieren](#das-paket-installieren)
+unten. Die manuellen Schritte danach gelten für den [Release-Tarball](/docs/quickstart#1-kapkan-installieren).
+So oder so gibt es nichts zu kompilieren; [Aus dem Quellcode bauen](#aus-dem-quellcode-bauen) ist
+nur dann nötig, wenn Sie es möchten.
 </Callout>
 
 ## Installation
 
-Führen Sie das Folgende als root aus einem Checkout des Repositorys aus (damit `engine/deploy/`
-verfügbar ist). Es installiert das Binary, legt einen unprivilegierten Systembenutzer an,
-richtet `/etc/kapkan` ein, installiert die Produktivkonfiguration, schreibt die Geheimnis-Env-Datei
-mit restriktiven Berechtigungen, installiert die systemd-Unit und aktiviert den Dienst.
+### Das Paket installieren
+
+Unter Debian/Ubuntu (`.deb`) oder RHEL/Fedora (`.rpm`) erledigt das Paket alles, was die manuellen
+Schritte unten tun: Es installiert das Binary nach `/usr/local/bin/kapkan`, legt den unprivilegierten
+Benutzer `kapkan` an, richtet `/etc/kapkan` mit einer aus dem Beispiel erzeugten Dry-Run-`config.yaml`
+ein, erstellt das beschreibbare Zustandsverzeichnis und installiert die gehärtete systemd-Unit
+(nach `/usr/lib/systemd/system`).
+
+```sh
+VER=v1.0.0
+curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.deb"
+sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"   # RHEL/Fedora: dnf install ./kapkan_<ver>_linux_amd64.rpm
+```
+
+Der Dienst ist installiert, wird aber **gestoppt belassen** — ein Mitigation-Daemon sollte nicht
+starten, bevor Sie seine Konfiguration angesehen haben. Die mitgelieferte `config.yaml` hat
+`dry_run: true`. Prüfen Sie sie, (empfohlen) [setzen Sie einen API-Token](#geheimnisse) in
+`/etc/kapkan/kapkan.env` und starten Sie ihn dann beim Boot und jetzt:
+
+```sh
+sudoedit /etc/kapkan/config.yaml          # adapt networks, BGP and thresholds
+sudo systemctl enable --now kapkan
+```
+
+Aktualisieren Sie mit einem neueren Paket (`apt install ./kapkan_<newer>.deb`) oder mit
+[`update.sh`](/docs/upgrading) — beide behalten Ihre bearbeitete `/etc/kapkan/config.yaml`.
+`apt purge kapkan` entfernt jede Spur, einschließlich Konfiguration und Zustand.
+
+### Manuelle Installation (Tarball)
+
+Möchten Sie die Dateien lieber selbst platzieren, oder sind Sie auf einer Distribution ohne
+`apt`/`dnf`? Nach dem Entpacken des [Release-Tarballs](/docs/quickstart#1-kapkan-installieren) (sodass
+das Verzeichnis `deploy/` neben dem `kapkan`-Binary liegt) führen Sie das Äquivalent als root aus.
+Es installiert das Binary, legt einen unprivilegierten Systembenutzer an, richtet `/etc/kapkan` ein,
+installiert die Produktivkonfiguration, schreibt die Geheimnis-Env-Datei mit restriktiven
+Berechtigungen, installiert die systemd-Unit und aktiviert den Dienst.
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
-sudo install -m 0640 -o kapkan -g kapkan engine/deploy/config.example.yaml /etc/kapkan/config.yaml
+sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
 echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
-sudo install -m 0644 engine/deploy/kapkan.service /etc/systemd/system/kapkan.service
+sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
 
@@ -80,7 +114,7 @@ sudo journalctl -u kapkan -f
 | `/usr/local/bin/kapkan` | `0755` | Das einzelne statische Daemon-Binary. |
 | `/etc/kapkan/config.yaml` | `0640` | Die YAML-Konfiguration, im Besitz von `kapkan:kapkan`. |
 | `/etc/kapkan/kapkan.env` | `0600` | Geheimnis-Env-Datei (Tokens, SMTP-Zugangsdaten). |
-| `/etc/systemd/system/kapkan.service` | `0644` | Die gehärtete systemd-Unit. |
+| `/etc/systemd/system/kapkan.service` | `0644` | Die gehärtete systemd-Unit. Das `.deb`/`.rpm` installiert sie stattdessen nach `/usr/lib/systemd/system/kapkan.service` (Hersteller-Verzeichnis). |
 | `/var/lib/kapkan/` | `0700` | Beschreibbares Zustandsverzeichnis (`StateDirectory=kapkan`); enthält `ban.state_file`, wenn die ban-Persistenz aktiviert ist. |
 
 Das gesamte Verzeichnis `/etc/kapkan` wird dem Prozess über `ReadOnlyPaths=/etc/kapkan`

@@ -44,6 +44,8 @@ Was es der Reihe nach tut:
 
 Die Prüf-URL wird aus Ihrem `api.listen` abgeleitet; überschreiben Sie sie (und das Timeout) bei Bedarf mit `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE`.
 
+Aus dem `.deb` / `.rpm` installiert? Sie können stattdessen aktualisieren, indem Sie ein neueres Paket installieren (`sudo apt install ./kapkan_<newer>.deb`), wodurch die Binärdatei ersetzt wird und Ihre bearbeitete `/etc/kapkan/config.yaml` erhalten bleibt. `update.sh` bleibt der Weg für Tarball-Installationen (und funktioniert auch für Paket-Installationen, da beide die Binärdatei an denselben Ort `/usr/local/bin/kapkan` legen).
+
 ## Die Mitigation übersteht den Neustart
 
 Ein Neustart unterbricht dank zweier Engine-Funktionen keine aktive Mitigation mehr (siehe [RTBH-Mitigation](/docs/mitigation)):

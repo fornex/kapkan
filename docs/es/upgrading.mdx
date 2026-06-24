@@ -44,6 +44,8 @@ Lo que hace, en orden:
 
 La URL de la sonda se deriva de su `api.listen`; anúlela (y el tiempo de espera) con `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` si es necesario.
 
+¿Instaló desde el `.deb` / `.rpm`? Como alternativa, puede actualizar instalando un paquete más reciente (`sudo apt install ./kapkan_<newer>.deb`), lo que reemplaza el binario y conserva su `/etc/kapkan/config.yaml` editado. `update.sh` sigue siendo la vía para las instalaciones por tarball (y también funciona para las instalaciones por paquete, ya que ambas colocan el binario en la misma ruta `/usr/local/bin/kapkan`).
+
 ## La mitigación sobrevive al reinicio
 
 Un reinicio ya no interrumpe la mitigación activa, gracias a dos características del motor (consulte [Mitigación RTBH](/docs/mitigation)):

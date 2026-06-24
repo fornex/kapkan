@@ -44,6 +44,8 @@ What it does, in order:
 
 The probe URL is derived from your `api.listen`; override it (and the timeout) with `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` if needed.
 
+Installed from the `.deb` / `.rpm`? You can instead upgrade by installing a newer package (`sudo apt install ./kapkan_<newer>.deb`), which replaces the binary and keeps your edited `/etc/kapkan/config.yaml`. `update.sh` remains the path for tarball installs (and works for package installs too, since both put the binary at the same `/usr/local/bin/kapkan`).
+
 ## Mitigation survives the restart
 
 A restart no longer drops active mitigation, thanks to two engine features (see [RTBH mitigation](/docs/mitigation)):

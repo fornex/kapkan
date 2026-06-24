@@ -28,14 +28,19 @@ is logged and exposed via the API but never announced to your routers.
 
 ## Quickstart
 
-```sh
-# Build the static binary (Go 1.22+).
-make build
+No build step — grab a prebuilt, signed release (see [Install](#install) to verify it first):
 
-# Run in dry-run with the development config (text logs).
-make run-dev
-# or: ./kapkan -config configs/dev.yaml -log-format text
+```sh
+# Download and unpack a release (linux amd64/arm64) — or `apt install ./kapkan_*.deb`.
+VER=v1.0.0
+curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.tar.gz"
+tar xzf "kapkan_${VER#v}_linux_amd64.tar.gz"   # yields ./kapkan and ./deploy/
+
+# Run in dry-run with the bundled example config (text logs).
+./kapkan -config deploy/config.example.yaml -log-format text
 ```
+
+(Building from source instead? See [Development](#development).)
 
 Point your routers' flow exporters at the configured ports (sFlow `:6343`, NetFlow/IPFIX
 `:2055`), then watch:
@@ -538,15 +543,26 @@ These rules are enforced in code and covered by tests; they are non-negotiable:
 
 ## Install
 
-Download a signed release for your architecture from
-[Releases](https://github.com/fornex/kapkan/releases) (`linux/amd64` or
-`linux/arm64`), verify it, and extract. Each release ships `checksums.txt` with a
-cosign-keyless signature; verifying is two commands (authenticity then integrity):
+Every release ships prebuilt and signed for `linux/amd64` and `linux/arm64` — no
+build toolchain needed. The simplest path is a native package:
+
+```sh
+VER=v1.0.0
+# Debian / Ubuntu — sets up the kapkan user, /etc/kapkan and the systemd unit.
+curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.deb"
+sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"
+# RHEL / Fedora: sudo dnf install ./kapkan_<ver>_linux_amd64.rpm
+```
+
+Prefer a tarball? Download it from
+[Releases](https://github.com/fornex/kapkan/releases), verify, and extract. Each
+release ships `checksums.txt` with a cosign-keyless signature; verifying is two
+commands (authenticity then integrity):
 
 ```sh
 VER=v1.0.0   # the release you want
 base="https://github.com/fornex/kapkan/releases/download/$VER"
-curl -fLO "$base/kapkan_${VER}_linux_amd64.tar.gz"
+curl -fLO "$base/kapkan_${VER#v}_linux_amd64.tar.gz"   # archive names drop the leading "v"
 curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
 
 # 1) authenticity — signature over checksums.txt, pinned to this repo's release tag
@@ -557,7 +573,7 @@ cosign verify-blob checksums.txt \
 # 2) integrity — hash of the archive (shasum -a 256 -c on macOS)
 sha256sum -c checksums.txt --ignore-missing
 
-tar xzf "kapkan_${VER}_linux_amd64.tar.gz"   # yields ./kapkan and ./deploy/
+tar xzf "kapkan_${VER#v}_linux_amd64.tar.gz"   # yields ./kapkan and ./deploy/
 ./kapkan -version
 ```
 

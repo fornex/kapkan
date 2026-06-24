@@ -29,8 +29,8 @@ kapkan [flags]
 | `-check-update` | `false` | Exécute une fois la [vérification de mise à jour](/docs/configuration) optionnelle puis se termine — `0` à jour, `10` une mise à jour est disponible, `1` en cas d'erreur. Interroge l'API GitHub Releases ; n'envoie que la requête elle-même, jamais l'identité du nœud ni la configuration. |
 
 <Callout type="info" title="json ou text ?">
-Utilisez `-log-format text` pour le développement local — c'est le format utilisé par le Démarrage
-rapide et la cible [`make run-dev`](/docs/quickstart). Conservez la valeur par défaut `json` en
+Utilisez `-log-format text` pour le développement local — c'est le format utilisé par le
+[Démarrage rapide](/docs/quickstart). Conservez la valeur par défaut `json` en
 production afin qu'un collecteur de journaux puisse analyser les champs structurés ; l'[unité
 systemd](/docs/deployment) est livrée avec `-log-format json -log-level info`.
 </Callout>
@@ -115,6 +115,6 @@ processus est **désactivée par défaut** ; cette option fonctionne indépendam
 
 ## Étapes suivantes
 
-- [Démarrage rapide](/docs/quickstart) — compilez le binaire et exécutez-le en dry-run.
+- [Démarrage rapide](/docs/quickstart) — téléchargez Kapkan et exécutez-le en dry-run.
 - [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.
 - [Déploiement en production](/docs/deployment) — l'unité systemd et ses options.

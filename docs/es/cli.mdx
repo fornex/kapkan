@@ -29,8 +29,8 @@ kapkan [flags]
 | `-check-update` | `false` | Ejecuta la [comprobación de actualizaciones](/docs/configuration) opcional una vez y termina: `0` actualizado, `10` hay una actualización disponible, `1` ante un error. Consulta la API de Releases de GitHub; envía solo la propia solicitud, nunca la identidad del nodo ni la configuración. |
 
 <Callout type="info" title="¿json o text?">
-Usa `-log-format text` para el desarrollo local; es el formato que emplean la Guía rápida y el
-objetivo [`make run-dev`](/docs/quickstart). Mantén el valor predeterminado `json` en producción para
+Usa `-log-format text` para el desarrollo local; es el formato que emplea la
+[Guía rápida](/docs/quickstart). Mantén el valor predeterminado `json` en producción para
 que un recolector de logs pueda analizar los campos estructurados; la [unidad de systemd](/docs/deployment)
 se entrega con `-log-format json -log-level info`.
 </Callout>
@@ -112,6 +112,6 @@ identidad del nodo, la configuración ni datos de ataques. La comprobación peri
 
 ## Próximos pasos
 
-- [Inicio rápido](/docs/quickstart): compila el binario y ejecútalo en modo dry-run.
+- [Inicio rápido](/docs/quickstart): descarga Kapkan y ejecútalo en modo dry-run.
 - [Referencia de configuración](/docs/configuration): cada clave del archivo YAML.
 - [Despliegue en producción](/docs/deployment): la unidad de systemd y sus flags.
