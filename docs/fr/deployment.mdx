@@ -79,12 +79,14 @@ ou ClickHouse que si vous utilisez réellement ces fonctionnalités. La liste co
 `*_env` se trouve ci-dessous dans [Secrets](#secrets).
 
 L'unité s'exécute sous l'utilisateur `kapkan` avec `ExecStart=/usr/local/bin/kapkan -config
-/etc/kapkan/config.yaml -log-format json -log-level info`, redémarre en cas d'échec et est
+/etc/kapkan/config.yaml -log-format json -log-level info -pid-file /run/kapkan/kapkan.pid`,
+redémarre en cas d'échec et est
 fortement cloisonnée : `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
 `MemoryDenyWriteExecute` et bien plus encore. Elle déclare également `StateDirectory=kapkan`
 (mode `0700`), offrant au démon un `/var/lib/kapkan` accessible en écriture pour
-[`ban.state_file`](/docs/mitigation), tandis que `ProtectSystem=strict` maintient le reste
+[`ban.state_file`](/docs/mitigation), et `RuntimeDirectory=kapkan`, lui offrant un `/run/kapkan`
+accessible en écriture pour le pid file, tandis que `ProtectSystem=strict` maintient le reste
 du système de fichiers en lecture seule. Un garde-fou contre les boucles de crash
 (`StartLimitIntervalSec=60`, `StartLimitBurst=4`) fait passer l'unité à l'état `failed` si le
 binaire échoue à démarrer quatre fois en moins d'une minute, de sorte qu'une mauvaise mise à
@@ -113,6 +115,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/kapkan.env` | `0600` | Fichier d'environnement des secrets (jetons, identifiants SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | L'unité systemd renforcée. Le `.deb`/`.rpm` l'installe plutôt dans `/usr/lib/systemd/system/kapkan.service` (emplacement fournisseur). |
 | `/var/lib/kapkan/` | `0700` | Répertoire d'état accessible en écriture (`StateDirectory=kapkan`) ; contient `ban.state_file` lorsque la persistance des bans est activée. |
+| `/run/kapkan/` | `0755` | Répertoire d'exécution (`RuntimeDirectory=kapkan`), créé au démarrage et supprimé à l'arrêt ; contient `kapkan.pid` pour que [`kapkan -s reload`](/docs/cli) puisse trouver le démon. |
 
 L'ensemble du répertoire `/etc/kapkan` est monté en lecture seule pour le processus via
 `ReadOnlyPaths=/etc/kapkan`, de sorte que le démon peut lire sa configuration et ses secrets mais
@@ -164,7 +167,17 @@ rechargez avec :
 sudo systemctl reload kapkan
 ```
 
-De manière équivalente, vous pouvez déclencher le même rechargement via l'API :
+En dehors du gestionnaire de services de la machine, le démon répond aussi au drapeau de
+contrôle local de style nginx, qui lit le pid file que l'unité écrit dans
+`/run/kapkan/kapkan.pid` :
+
+```sh
+sudo kapkan -s reload    # re-read the config (SIGHUP)
+sudo kapkan -s stop      # graceful shutdown (SIGTERM)
+```
+
+Consultez [Contrôler un démon en cours d'exécution](/docs/cli) pour le comportement complet et
+les codes de sortie. De manière équivalente, vous pouvez déclencher le même rechargement via l'API :
 
 ```sh
 curl -s -X POST localhost:8080/api/v1/config/reload \

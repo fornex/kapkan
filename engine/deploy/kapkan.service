@@ -13,10 +13,18 @@ StartLimitBurst=4
 Type=simple
 User=kapkan
 Group=kapkan
-ExecStart=/usr/local/bin/kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
+ExecStart=/usr/local/bin/kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info -pid-file /run/kapkan/kapkan.pid
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
+
+# Runtime directory for the pid file (/run/kapkan, owned by the kapkan user,
+# auto-created on start and removed on stop). The daemon writes its pid here so
+# operators can run `kapkan -s reload` / `kapkan -s stop` — the nginx-style
+# local control path — without looking up the pid. `systemctl reload kapkan`
+# (ExecReload above) and `kapkan -s reload` both deliver SIGHUP.
+RuntimeDirectory=kapkan
+RuntimeDirectoryMode=0755
 
 # The Telegram bot token is read from the environment, never the config file.
 # Put it in /etc/kapkan/kapkan.env as KAPKAN_TG_TOKEN=... (chmod 600).

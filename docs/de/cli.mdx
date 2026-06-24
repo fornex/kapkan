@@ -1,7 +1,7 @@
 export const metadata = {
   title: "CLI-Referenz",
   description:
-    "Jeder Kommandozeilen-Flag des Kapkan-Binarys — Konfigurationspfad, Log-Format und -Level sowie die Schema-/Validierungs-Hilfsmodi.",
+    "Jeder Kommandozeilen-Flag des Kapkan-Binarys — Konfigurationspfad, Log-Format und -Level, die pid-Datei und die nginx-artige `-s`-Prozesssteuerung sowie die Schema-/Validierungs-Hilfsmodi.",
 };
 
 # CLI-Referenz
@@ -27,6 +27,8 @@ kapkan [flags]
 | `-dump-schema` | `false` | Gibt das JSON-Schema der Konfiguration auf stdout aus und beendet sich. Siehe [unten](#das-schema-ausgeben). |
 | `-version` | `false` | Gibt die Build-Version aus und beendet sich. Dieselbe Version wird zur Laufzeit über `/api/v1/status` und die `kapkan_build_info`-[Metrik](/docs/metrics) bereitgestellt. |
 | `-check-update` | `false` | Führt die optionale [Update-Prüfung](/docs/configuration) einmalig aus und beendet sich — `0` aktuell, `10` ein Update ist verfügbar, `1` bei einem Fehler. Fragt die GitHub-Releases-API ab; sendet nur die Anfrage selbst, niemals Knotenidentität oder Konfiguration. |
+| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Wohin der Daemon beim Start seine Prozess-ID schreibt (bei sauberem Herunterfahren entfernt); wird von `-s` gelesen, um den laufenden Daemon zu finden. Ein Schreibfehler ist nicht fatal — der Daemon läuft trotzdem, nur `-s` ist nicht verfügbar. |
+| `-s <signal>` | — | Signalisiert einen laufenden Daemon und beendet sich, indem `-pid-file` gelesen wird: `reload`, `stop` oder `quit`. Startet **keinen** Daemon. Siehe [unten](#einen-laufenden-daemon-steuern). |
 
 <Callout type="info" title="json oder text?">
 Verwenden Sie `-log-format text` für die lokale Entwicklung — es ist das Format, das der
@@ -51,10 +53,41 @@ kapkan -config configs/dev.yaml -log-format text
 kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
-Die Konfigurationsdatei ist zur Laufzeit ohne Neustart neu ladbar — senden Sie `SIGHUP`
+Die Konfigurationsdatei ist zur Laufzeit ohne Neustart neu ladbar — führen Sie
+[`kapkan -s reload`](#einen-laufenden-daemon-steuern) aus, senden Sie `SIGHUP` direkt
 (`systemctl reload kapkan`) oder `POST /api/v1/config/reload`. Siehe die
 [Konfigurationsreferenz](/docs/configuration) dazu, was neu geladen wird und was beim Start
 fixiert ist.
+
+## Einen laufenden Daemon steuern
+
+```sh
+kapkan -s reload    # re-read the config file (SIGHUP)
+kapkan -s stop      # graceful shutdown (SIGTERM)
+```
+
+`-s` liest die Prozess-ID aus `-pid-file` (Standard `/run/kapkan/kapkan.pid`, beim Start vom
+Daemon geschrieben) und stellt das passende Signal an diesen Prozess zu — dieselbe nginx-artige
+lokale Steuerung wie `nginx -s reload`. Es benötigt keine Netzwerkverbindung und kein API-Token,
+funktioniert also auch, wenn die REST-API nicht erreichbar ist; es benötigt jedoch die Berechtigung,
+den Daemon zu signalisieren, führen Sie es daher als `root` oder als `kapkan`-Benutzer aus.
+
+| `-s`-Wert | Signal | Wirkung |
+| --- | --- | --- |
+| `reload` | `SIGHUP` | Lädt die Konfigurationsdatei im laufenden Betrieb neu. Wie `systemctl reload kapkan` oder `POST /api/v1/config/reload`. |
+| `stop` / `quit` | `SIGTERM` | Sauberes Herunterfahren. Wie `systemctl stop kapkan`. Die beiden sind Aliase — Kapkans Herunterfahren ist immer graceful (es bittet BGP-Peers, Mitigation-Routen via [Graceful Restart](/docs/mitigation) beizubehalten). |
+
+Wenn die pid-Datei fehlt oder veraltet ist (kein solcher Prozess) oder Ihnen die Berechtigung zum
+Signalisieren fehlt, gibt `-s` den Grund auf stderr aus und beendet sich mit `1`.
+
+<Callout type="info" title="Wo die pid-Datei liegt">
+Die mitgelieferte [systemd-Unit](/docs/deployment) setzt `RuntimeDirectory=kapkan`, sodass
+`/run/kapkan` existiert und für den `kapkan`-Benutzer beschreibbar ist; der Daemon schreibt dort
+`/run/kapkan/kapkan.pid` und entfernt es bei einem sauberen Stopp. In einem lokalen Dev-Lauf
+existiert dieses Verzeichnis möglicherweise nicht — der Daemon protokolliert eine Warnung und fährt
+fort, und `-s` meldet „no pid file". Übergeben Sie `-pid-file /tmp/kapkan.pid` sowohl an den Daemon
+als auch an `-s`, wenn Sie die Abkürzung lokal nutzen möchten.
+</Callout>
 
 ## Hilfs-Flags
 

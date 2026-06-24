@@ -1,7 +1,7 @@
 export const metadata = {
   title: "CLI reference",
   description:
-    "Every command-line flag of the kapkan binary — config path, log format and level, and the schema/validation utility subcommands.",
+    "Every command-line flag of the kapkan binary — config path, log format and level, the pid file and nginx-style `-s` process control, and the schema/validation utility subcommands.",
 };
 
 # CLI reference
@@ -26,6 +26,8 @@ kapkan [flags]
 | `-dump-schema` | `false` | Print the configuration JSON schema to stdout and exit. See [below](#dumping-the-schema). |
 | `-version` | `false` | Print the build version and exit. The same version is exposed at runtime via `/api/v1/status` and the `kapkan_build_info` [metric](/docs/metrics). |
 | `-check-update` | `false` | Run the opt-in [update check](/docs/configuration) once and exit — `0` up to date, `10` an update is available, `1` on error. Polls the GitHub Releases API; sends only the request itself, never node identity or config. |
+| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Where the daemon writes its process id on start (removed on clean shutdown); read by `-s` to locate the running daemon. A write failure is non-fatal — the daemon still runs, only `-s` is unavailable. |
+| `-s <signal>` | — | Signal a running daemon and exit, by reading `-pid-file`: `reload`, `stop` or `quit`. Does **not** start a daemon. See [below](#controlling-a-running-daemon). |
 
 <Callout type="info" title="json or text?">
 Use `-log-format text` for local development — it is the format the
@@ -48,9 +50,38 @@ kapkan -config configs/dev.yaml -log-format text
 kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
-The config file is reloadable at runtime without a restart — send `SIGHUP`
-(`systemctl reload kapkan`) or `POST /api/v1/config/reload`. See the
+The config file is reloadable at runtime without a restart — run [`kapkan -s reload`](#controlling-a-running-daemon),
+send `SIGHUP` directly (`systemctl reload kapkan`), or `POST /api/v1/config/reload`. See the
 [configuration reference](/docs/configuration) for what reloads and what is fixed at startup.
+
+## Controlling a running daemon
+
+```sh
+kapkan -s reload    # re-read the config file (SIGHUP)
+kapkan -s stop      # graceful shutdown (SIGTERM)
+```
+
+`-s` reads the process id from `-pid-file` (default `/run/kapkan/kapkan.pid`, written by the
+daemon on start) and delivers the matching signal to that process — the same nginx-style local
+control as `nginx -s reload`. It needs no network connection and no API token, so it works even
+if the REST API is down; it does need permission to signal the daemon, so run it as `root` or the
+`kapkan` user.
+
+| `-s` value | Signal | Effect |
+| --- | --- | --- |
+| `reload` | `SIGHUP` | Hot-reload the config file. Same as `systemctl reload kapkan` or `POST /api/v1/config/reload`. |
+| `stop` / `quit` | `SIGTERM` | Graceful shutdown. Same as `systemctl stop kapkan`. The two are aliases — Kapkan's shutdown is always graceful (it asks BGP peers to retain mitigation routes via [Graceful Restart](/docs/mitigation)). |
+
+If the pid file is missing or stale (no such process), or you lack permission to signal it, `-s`
+prints the reason to stderr and exits `1`.
+
+<Callout type="info" title="Where the pid file lives">
+The bundled [systemd unit](/docs/deployment) sets `RuntimeDirectory=kapkan`, so `/run/kapkan`
+exists and is writable by the `kapkan` user; the daemon writes `/run/kapkan/kapkan.pid` there and
+removes it on a clean stop. In a local dev run that directory may not exist — the daemon logs a
+warning and continues, and `-s` will report "no pid file". Pass `-pid-file /tmp/kapkan.pid` to both
+the daemon and `-s` if you want the shortcut locally.
+</Callout>
 
 ## Utility flags
 

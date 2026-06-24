@@ -81,13 +81,15 @@ Funktionen tatsächlich nutzen. Die vollständige Liste der `*_env`-Schlüssel f
 unter [Geheimnisse](#geheimnisse).
 
 Die Unit läuft als Benutzer `kapkan` mit `ExecStart=/usr/local/bin/kapkan -config
-/etc/kapkan/config.yaml -log-format json -log-level info`, startet bei Fehlern neu und ist
+/etc/kapkan/config.yaml -log-format json -log-level info -pid-file /run/kapkan/kapkan.pid`,
+startet bei Fehlern neu und ist
 stark abgeschottet: `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`,
 `ReadOnlyPaths=/etc/kapkan`, `RestrictAddressFamilies=AF_INET AF_INET6`,
 `MemoryDenyWriteExecute` und mehr. Sie deklariert außerdem `StateDirectory=kapkan` (Modus
 `0700`) und stellt dem Daemon damit ein beschreibbares `/var/lib/kapkan` für
-[`ban.state_file`](/docs/mitigation) bereit, während `ProtectSystem=strict` den Rest des
-Dateisystems schreibgeschützt hält. Ein Crash-Loop-Schutz (`StartLimitIntervalSec=60`,
+[`ban.state_file`](/docs/mitigation) bereit, sowie `RuntimeDirectory=kapkan`, das ihm ein
+beschreibbares `/run/kapkan` für die pid-Datei bereitstellt — während `ProtectSystem=strict`
+den Rest des Dateisystems schreibgeschützt hält. Ein Crash-Loop-Schutz (`StartLimitIntervalSec=60`,
 `StartLimitBurst=4`) versetzt die Unit in den Zustand `failed`, wenn das Binary innerhalb
 einer Minute viermal nicht startet, sodass ein fehlerhaftes Upgrade sichtbar wird, statt zu
 flattern — das [Upgrade-Skript](/docs/upgrading) stützt sich darauf zusammen mit der
@@ -116,6 +118,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/kapkan.env` | `0600` | Geheimnis-Env-Datei (Tokens, SMTP-Zugangsdaten). |
 | `/etc/systemd/system/kapkan.service` | `0644` | Die gehärtete systemd-Unit. Das `.deb`/`.rpm` installiert sie stattdessen nach `/usr/lib/systemd/system/kapkan.service` (Hersteller-Verzeichnis). |
 | `/var/lib/kapkan/` | `0700` | Beschreibbares Zustandsverzeichnis (`StateDirectory=kapkan`); enthält `ban.state_file`, wenn die ban-Persistenz aktiviert ist. |
+| `/run/kapkan/` | `0755` | Laufzeitverzeichnis (`RuntimeDirectory=kapkan`), beim Start angelegt und beim Stopp entfernt; enthält `kapkan.pid`, damit [`kapkan -s reload`](/docs/cli) den Daemon finden kann. |
 
 Das gesamte Verzeichnis `/etc/kapkan` wird dem Prozess über `ReadOnlyPaths=/etc/kapkan`
 schreibgeschützt eingehängt, sodass der Daemon seine Konfiguration und Geheimnisse lesen,
@@ -167,7 +170,16 @@ verlorenen flow-Status. Die systemd-Unit verdrahtet dies mit
 sudo systemctl reload kapkan
 ```
 
-Gleichwertig können Sie denselben Reload über die API auslösen:
+Außerhalb des Dienstmanagers der Maschine versteht der Daemon auch das nginx-artige lokale
+Steuerungsflag, das die pid-Datei liest, die die Unit nach `/run/kapkan/kapkan.pid` schreibt:
+
+```sh
+sudo kapkan -s reload    # re-read the config (SIGHUP)
+sudo kapkan -s stop      # graceful shutdown (SIGTERM)
+```
+
+Siehe [Einen laufenden Daemon steuern](/docs/cli) für das vollständige Verhalten und die
+Exit-Codes. Gleichwertig können Sie denselben Reload über die API auslösen:
 
 ```sh
 curl -s -X POST localhost:8080/api/v1/config/reload \
