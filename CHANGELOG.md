@@ -19,6 +19,19 @@ security-relevant.
 
 ## [Unreleased]
 
+### Added
+
+- Prebuilt `.deb` and `.rpm` packages for `linux` `amd64`/`arm64`, built by
+  GoReleaser alongside the existing tarballs and covered by the same
+  `checksums.txt` + cosign signature. `apt install ./kapkan_*.deb` (or the
+  matching `.rpm`) installs the binary to `/usr/local/bin/kapkan`, creates the
+  unprivileged `kapkan` user, lays out `/etc/kapkan` with a dry-run `config.yaml`
+  seeded from the example, creates the writable state directory, and installs the
+  hardened systemd unit — left stopped so the operator reviews the config first.
+  Upgrades keep the edited config; `apt purge` removes config, state and the user.
+- The release tarball now also bundles `deploy/update.sh`, matching what the
+  upgrading docs reference.
+
 ## [1.0.0] - 2026-06-23
 
 ### Added
