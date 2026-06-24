@@ -78,6 +78,12 @@ actually sample. A default that is too low under-counts traffic and delays detec
 high over-counts and trips early.
 </Callout>
 
+Correction assumes each packet is sampled once. If the same packet is observed at several vantage
+points — redundant exporters, ingress **and** egress sampling on one device, or transit links —
+Kapkan would sum every copy and over-count. Interface-boundary counting deduplicates this by counting
+a flow only where it crosses an external (uplink/border) interface; see
+[interface-boundary counting](/docs/configuration) for how to configure it.
+
 ## Per-protocol thresholds
 
 Beyond the core totals, you can set optional per-protocol limits. These let you catch an attack that

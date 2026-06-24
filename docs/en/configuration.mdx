@@ -78,6 +78,8 @@ summary points to the dedicated page.
 | `dry_run` | When `true` (the default, including when absent), blackholes are logged and tracked but **never announced**. |
 | `listen.sflow` / `listen.netflow` | UDP listen addresses. NetFlow v5/v9 and IPFIX share the `netflow` socket. At least one listener is required. See [How it works](/docs/how-it-works). |
 | `sampling.default_rate` | Sampling rate used when an exporter does not report its own. Must be `>= 1`. |
+| `sampling.boundary` | Optional per-exporter interface-boundary counting that deduplicates a flow seen at multiple sampling vantage points (redundant exporters, ingress+egress sampling, transit links). Each entry gives an exporter's `external_ifindexes` (and optional `egress_sampling`); a flow is then counted only when it crosses an external interface. Exporters without an entry count every sample. See Sampling correction below. |
+| `sampling.boundary_debug` | When `true`, exports `kapkan_engine_boundary_debug_bytes_total` (bytes per exporter and interface) to help identify external interfaces. Not cardinality-bounded — enable briefly, then disable. |
 | `flow_sources` | Optional allowlist of trusted exporter source addresses. Telemetry arrives over unauthenticated UDP, so when set only listed sources are labeled by exporter on metrics (everything else is bucketed under `other`), bounding metric label cardinality. Empty applies an automatic cap instead. Does not affect detection. |
 | `networks` | Protected prefixes. Detection applies **only** to destinations inside these, and they must not overlap. |
 | `protected_whitelist` | Addresses that are **never** banned, regardless of traffic. See [Safety model](/docs/safety). |
@@ -135,6 +137,14 @@ listen:
 
 sampling:
   default_rate: 1000                # used only when an exporter omits its own rate
+  # boundary: optional interface-boundary counting (deduplicates a flow seen at
+  # several vantage points). List each exporter's external/uplink interfaces;
+  # set egress_sampling when the device also samples on egress.
+  # boundary_debug: false
+  # boundary:
+  #   - exporter: "10.1.32.2"
+  #     external_ifindexes: [1000025]
+  #     egress_sampling: true
 
 networks:                           # detection applies ONLY inside these prefixes
   - "203.0.113.0/24"
@@ -221,6 +231,33 @@ An incorrect `sampling.default_rate` scales every threshold by the same factor. 
 match what your routers actually export, then confirm detection fires at the rates you expect
 in dry-run.
 </Callout>
+
+### Counting each packet once
+
+Correction assumes each packet is observed once. When the same packet is sampled at more than one
+vantage point — redundant exporters (e.g. an MLAG pair), ingress **and** egress sampling on one
+device (Arista `sflow sample output`), or transit/peer links — Kapkan would otherwise sum every
+copy and over-count `pps`, `mbps` and `flows_per_sec` by a constant factor.
+
+Interface-boundary counting fixes this without changing the exporter. Classify each exporter's
+external (uplink/border) interfaces; a flow is then counted toward a protected host only when it
+crosses the boundary — inbound on an external input interface, outbound on an external output one.
+Exporters without a `boundary` entry keep counting every sample, so you can enable this one exporter
+at a time.
+
+```yaml
+sampling:
+  default_rate: 2500
+  boundary:
+    - exporter: "10.1.32.2"          # one entry per flow exporter (sampler/agent IP)
+      external_ifindexes: [1000025]  # the uplink/border interface ifIndex values
+      egress_sampling: true          # device also samples on egress -> rate halved
+```
+
+Set `egress_sampling: true` for exporters that sample on both ingress and egress, so each
+boundary-crossing packet (then seen twice) is corrected back to one. To discover which interfaces
+are external, set `sampling.boundary_debug: true` briefly and read
+`kapkan_engine_boundary_debug_bytes_total` broken down by exporter and interface.
 
 ## Related
 

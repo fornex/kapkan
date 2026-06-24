@@ -79,6 +79,13 @@ realmente muestrean. Un valor por defecto demasiado bajo subestima el tráfico y
 uno demasiado alto lo sobreestima y dispara la detección antes de tiempo.
 </Callout>
 
+La corrección asume que cada paquete se muestrea una sola vez. Si el mismo paquete se observa en varios
+puntos de observación — exportadores redundantes, muestreo de ingress **y** egress en un mismo
+dispositivo, o enlaces de tránsito —, Kapkan sumaría cada copia y sobreestimaría. El conteo por límite de
+interfaz (interface-boundary counting) deduplica esto contando un flow solo donde cruza una interfaz
+externa (uplink/de borde); consulta [interface-boundary counting](/docs/configuration) para ver cómo
+configurarlo.
+
 ## Umbrales por protocolo
 
 Más allá de los totales principales, puedes establecer límites opcionales por protocolo. Estos te

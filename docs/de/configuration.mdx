@@ -82,6 +82,8 @@ Subsysteme verweist eine einzeilige Zusammenfassung auf die dedizierte Seite.
 | `dry_run` | Wenn `true` (der Standard, auch bei Abwesenheit), werden Blackholes protokolliert und nachverfolgt, aber **niemals angekündigt**. |
 | `listen.sflow` / `listen.netflow` | UDP-Lauschadressen. NetFlow v5/v9 und IPFIX teilen sich den `netflow`-Socket. Mindestens ein Listener ist erforderlich. Siehe [Funktionsweise](/docs/how-it-works). |
 | `sampling.default_rate` | Sampling-Rate, die verwendet wird, wenn ein Exporter seine eigene nicht meldet. Muss `>= 1` sein. |
+| `sampling.boundary` | Optionale Interface-Boundary-Zählung pro Exporter, die einen Flow dedupliziert, der an mehreren Sampling-Beobachtungspunkten gesehen wird (redundante Exporter, gleichzeitiges ingress+egress-Sampling, Transit-Links). Jeder Eintrag gibt die `external_ifindexes` eines Exporters (und optional `egress_sampling`) an; ein Flow wird dann nur gezählt, wenn er ein externes Interface überquert. Exporter ohne Eintrag zählen jedes Sample. Siehe Sampling-Korrektur weiter unten. |
+| `sampling.boundary_debug` | Wenn `true`, wird `kapkan_engine_boundary_debug_bytes_total` (Bytes pro Exporter und Interface) exportiert, um externe Interfaces zu identifizieren. Nicht kardinalitätsbegrenzt — kurz aktivieren, dann wieder deaktivieren. |
 | `flow_sources` | Optionale Erlaubnisliste vertrauenswürdiger Exporter-Quelladressen. Telemetrie kommt über nicht authentifiziertes UDP an, daher werden, wenn gesetzt, nur die aufgeführten Quellen in den Metriken nach Exporter beschriftet (alles andere wird unter `other` zusammengefasst), was die Kardinalität der Metrik-Labels begrenzt. Ist sie leer, wird stattdessen eine automatische Obergrenze angewendet. Hat keine Auswirkung auf die Erkennung. |
 | `networks` | Geschützte Präfixe. Die Erkennung gilt **nur** für Ziele innerhalb dieser Präfixe, und sie dürfen sich nicht überschneiden. |
 | `protected_whitelist` | Adressen, die **niemals** gesperrt werden, unabhängig vom Datenverkehr. Siehe [Sicherheitsmodell](/docs/safety). |
@@ -140,6 +142,14 @@ listen:
 
 sampling:
   default_rate: 1000                # used only when an exporter omits its own rate
+  # boundary: optional interface-boundary counting (deduplicates a flow seen at
+  # several vantage points). List each exporter's external/uplink interfaces;
+  # set egress_sampling when the device also samples on egress.
+  # boundary_debug: false
+  # boundary:
+  #   - exporter: "10.1.32.2"
+  #     external_ifindexes: [1000025]
+  #     egress_sampling: true
 
 networks:                           # detection applies ONLY inside these prefixes
   - "203.0.113.0/24"
@@ -227,6 +237,35 @@ Eine falsche `sampling.default_rate` skaliert jeden Schwellenwert um denselben F
 sie so ein, dass sie dem entspricht, was Ihre Router tatsächlich exportieren, und bestätigen Sie
 dann im Dry-Run, dass die Erkennung bei den von Ihnen erwarteten Raten auslöst.
 </Callout>
+
+### Jedes Paket einmal zählen
+
+Die Korrektur setzt voraus, dass jedes Paket einmal beobachtet wird. Wenn dasselbe Paket an mehr als
+einem Beobachtungspunkt gesampelt wird — redundante Exporter (z. B. ein MLAG-Paar), ingress- **und**
+egress-Sampling auf einem Gerät (Arista `sflow sample output`) oder Transit-/Peer-Links — würde
+Kapkan andernfalls jede Kopie summieren und `pps`, `mbps` sowie `flows_per_sec` um einen konstanten
+Faktor überzählen.
+
+Die Interface-Boundary-Zählung behebt dies, ohne den Exporter zu verändern. Klassifizieren Sie die
+externen Interfaces jedes Exporters (uplink/border); ein Flow wird dann nur einem geschützten Host
+zugerechnet, wenn er die Grenze überquert — eingehend auf einem externen Input-Interface, ausgehend
+auf einem externen Output-Interface. Exporter ohne `boundary`-Eintrag zählen weiterhin jedes Sample,
+sodass Sie dies Exporter für Exporter aktivieren können.
+
+```yaml
+sampling:
+  default_rate: 2500
+  boundary:
+    - exporter: "10.1.32.2"          # one entry per flow exporter (sampler/agent IP)
+      external_ifindexes: [1000025]  # the uplink/border interface ifIndex values
+      egress_sampling: true          # device also samples on egress -> rate halved
+```
+
+Setzen Sie `egress_sampling: true` für Exporter, die sowohl auf ingress als auch auf egress sampeln,
+damit jedes die Grenze überquerende Paket (das dann zweimal gesehen wird) wieder auf eines korrigiert
+wird. Um herauszufinden, welche Interfaces extern sind, setzen Sie kurz
+`sampling.boundary_debug: true` und lesen Sie `kapkan_engine_boundary_debug_bytes_total`,
+aufgeschlüsselt nach Exporter und Interface.
 
 ## Verwandte Themen
 

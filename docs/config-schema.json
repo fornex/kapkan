@@ -785,6 +785,32 @@
     "sampling": {
       "additionalProperties": false,
       "properties": {
+        "boundary": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "egress_sampling": {
+                "type": "boolean"
+              },
+              "exporter": {
+                "type": "string"
+              },
+              "external_ifindexes": {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array",
+                "x-optional": true
+              }
+            },
+            "type": "object"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "boundary_debug": {
+          "type": "boolean"
+        },
         "default_rate": {
           "minimum": 1,
           "type": "integer"
