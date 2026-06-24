@@ -19,6 +19,15 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-24
+
+### Added
+
+- Process control: `kapkan -s reload|stop|quit` (nginx-style) signals a running
+  daemon via its pid file — `reload` hot-reloads the config (SIGHUP), `stop`/`quit`
+  shut it down. A new `-pid-file` flag (default `/run/kapkan/kapkan.pid`) is
+  written on start and read by `-s`.
+
 ## [1.1.0] - 2026-06-24
 
 ### Config changes
