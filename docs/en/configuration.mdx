@@ -255,13 +255,22 @@ sampling:
   boundary:
     - exporter: "10.1.32.2"          # one entry per flow exporter (sampler/agent IP)
       external_ifindexes: [1000025]  # the uplink/border interface ifIndex values
-      egress_sampling: true          # device also samples on egress -> rate halved
+      egress_sampling: false         # only if calibration shows this ifIndex double-counts (see below)
 ```
 
-Set `egress_sampling: true` for exporters that sample on both ingress and egress, so each
-boundary-crossing packet (then seen twice) is corrected back to one. To discover which interfaces
-are external, set `sampling.boundary_debug: true` briefly and read
+To discover which interfaces are external, set `sampling.boundary_debug: true` briefly and read
 `kapkan_engine_boundary_debug_bytes_total` broken down by exporter and interface.
+
+<Callout type="warning" title="Calibrate egress_sampling — do not assume it">
+`egress_sampling: true` halves the boundary-counted rate to undo an in+out double-count, but
+**`sflow sample output` does not automatically mean you need it.** Whether an egress copy actually
+inflates the boundary depends on topology: on an Arista MLAG the egress copy of an inbound packet is
+sampled on the access port with a *different* input interface, so it never enters the boundary's
+input-interface gate — the packet is already counted once, and `egress_sampling: true` would then
+*under*-count it by half. Calibrate: compare the external interface's `boundary_debug` rate to that
+interface's real counter (e.g. `show interfaces`). Set `egress_sampling: true` only if the boundary
+interface shows ~2x the real rate; otherwise leave it `false` (the default).
+</Callout>
 
 ## Related
 
