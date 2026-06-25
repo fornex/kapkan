@@ -143,12 +143,13 @@ sampling:
   default_rate: 1000                # used only when an exporter omits its own rate
   # boundary: optional interface-boundary counting (deduplicates a flow seen at
   # several vantage points). List each exporter's external/uplink interfaces;
-  # set egress_sampling when the device also samples on egress.
+  # set egress_sampling only if calibration shows that ifIndex double-counts (see
+  # Sampling correction) — not just because the device samples on egress.
   # boundary_debug: false
   # boundary:
   #   - exporter: "10.1.32.2"
   #     external_ifindexes: [1000025]
-  #     egress_sampling: true
+  #     egress_sampling: false   # true only if boundary_debug shows ~2x
 
 networks:                           # detection applies ONLY inside these prefixes
   - "203.0.113.0/24"

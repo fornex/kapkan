@@ -148,12 +148,13 @@ sampling:
   default_rate: 1000                # used only when an exporter omits its own rate
   # boundary: optional interface-boundary counting (deduplicates a flow seen at
   # several vantage points). List each exporter's external/uplink interfaces;
-  # set egress_sampling when the device also samples on egress.
+  # set egress_sampling only if calibration shows that ifIndex double-counts (see
+  # Sampling correction) — not just because the device samples on egress.
   # boundary_debug: false
   # boundary:
   #   - exporter: "10.1.32.2"
   #     external_ifindexes: [1000025]
-  #     egress_sampling: true
+  #     egress_sampling: false   # true only if boundary_debug shows ~2x
 
 networks:                           # detection applies ONLY inside these prefixes
   - "203.0.113.0/24"
@@ -261,13 +262,23 @@ sampling:
   boundary:
     - exporter: "10.1.32.2"          # one entry per flow exporter (sampler/agent IP)
       external_ifindexes: [1000025]  # the uplink/border interface ifIndex values
-      egress_sampling: true          # device also samples on egress -> rate halved
+      egress_sampling: false         # only if calibration shows this ifIndex double-counts (see below)
 ```
 
-Establece `egress_sampling: true` para los exportadores que muestrean tanto en ingress como en egress,
-de modo que cada paquete que cruza el límite (visto entonces dos veces) se corrige de nuevo a uno. Para
-descubrir qué interfaces son externas, establece `sampling.boundary_debug: true` brevemente y lee
+Para descubrir qué interfaces son externas, establece `sampling.boundary_debug: true` brevemente y lee
 `kapkan_engine_boundary_debug_bytes_total` desglosado por exportador e interfaz.
+
+<Callout type="warning" title="Calibra egress_sampling — no lo des por sentado">
+`egress_sampling: true` reduce a la mitad la tasa contada por el límite para deshacer un doble conteo
+de entrada+salida, pero **`sflow sample output` no significa automáticamente que lo necesites.** Que
+una copia de egress realmente infle el límite depende de la topología: en un Arista MLAG la copia de
+egress de un paquete entrante se muestrea en el puerto de acceso con una interfaz de entrada
+*distinta*, por lo que nunca entra en la compuerta de interfaz de entrada del límite — el paquete ya
+se ha contado una vez, y `egress_sampling: true` lo *sub*contaría entonces a la mitad. Calibra:
+compara la tasa de `boundary_debug` de la interfaz externa con el contador real de esa interfaz (p. ej.
+`show interfaces`). Establece `egress_sampling: true` solo si la interfaz del límite muestra ~2x la
+tasa real; de lo contrario, déjalo en `false` (el valor predeterminado).
+</Callout>
 
 ## Relacionado
 
