@@ -143,12 +143,13 @@ sampling:
   default_rate: 1000                # used only when an exporter omits its own rate
   # boundary: optional interface-boundary counting (deduplicates a flow seen at
   # several vantage points). List each exporter's external/uplink interfaces;
-  # set egress_sampling when the device also samples on egress.
+  # set egress_sampling only if calibration shows that ifIndex double-counts (see
+  # Sampling correction) — not just because the device samples on egress.
   # boundary_debug: false
   # boundary:
   #   - exporter: "10.1.32.2"
   #     external_ifindexes: [1000025]
-  #     egress_sampling: true
+  #     egress_sampling: false   # true only if boundary_debug shows ~2x
 
 networks:                           # detection applies ONLY inside these prefixes
   - "203.0.113.0/24"
@@ -256,13 +257,22 @@ sampling:
   boundary:
     - exporter: "10.1.32.2"          # one entry per flow exporter (sampler/agent IP)
       external_ifindexes: [1000025]  # the uplink/border interface ifIndex values
-      egress_sampling: true          # device also samples on egress -> rate halved
+      egress_sampling: false         # only if calibration shows this ifIndex double-counts (see below)
 ```
 
-Задайте `egress_sampling: true` для экспортёров, которые сэмплируют и на ingress, и на egress, чтобы
-каждый пересекающий границу пакет (видимый тогда дважды) корректировался обратно к одному. Чтобы
-выяснить, какие интерфейсы внешние, ненадолго задайте `sampling.boundary_debug: true` и читайте
+Чтобы выяснить, какие интерфейсы внешние, ненадолго задайте `sampling.boundary_debug: true` и читайте
 `kapkan_engine_boundary_debug_bytes_total` в разбивке по экспортёру и интерфейсу.
+
+<Callout type="warning" title="Калибруйте egress_sampling — не задавайте его наугад">
+`egress_sampling: true` уменьшает вдвое учитываемую по границе скорость, чтобы отменить двойной учёт
+in+out, но **`sflow sample output` сам по себе не означает, что он вам нужен.** Действительно ли копия
+с egress завышает границу, зависит от топологии: на Arista MLAG копия входящего пакета с egress
+сэмплируется на access-порту с *другим* input-интерфейсом, поэтому она никогда не попадает во входной
+интерфейсный фильтр границы — пакет уже учтён один раз, и `egress_sampling: true` тогда *занизит* его
+вдвое. Откалибруйте: сравните скорость `boundary_debug` внешнего интерфейса с реальным счётчиком этого
+интерфейса (например, `show interfaces`). Задавайте `egress_sampling: true`, только если граничный
+интерфейс показывает ~2x реальной скорости; иначе оставьте `false` (значение по умолчанию).
+</Callout>
 
 ## Связанные материалы
 

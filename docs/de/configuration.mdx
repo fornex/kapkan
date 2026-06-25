@@ -149,12 +149,13 @@ sampling:
   default_rate: 1000                # used only when an exporter omits its own rate
   # boundary: optional interface-boundary counting (deduplicates a flow seen at
   # several vantage points). List each exporter's external/uplink interfaces;
-  # set egress_sampling when the device also samples on egress.
+  # set egress_sampling only if calibration shows that ifIndex double-counts (see
+  # Sampling correction) — not just because the device samples on egress.
   # boundary_debug: false
   # boundary:
   #   - exporter: "10.1.32.2"
   #     external_ifindexes: [1000025]
-  #     egress_sampling: true
+  #     egress_sampling: false   # true only if boundary_debug shows ~2x
 
 networks:                           # detection applies ONLY inside these prefixes
   - "203.0.113.0/24"
@@ -263,14 +264,24 @@ sampling:
   boundary:
     - exporter: "10.1.32.2"          # one entry per flow exporter (sampler/agent IP)
       external_ifindexes: [1000025]  # the uplink/border interface ifIndex values
-      egress_sampling: true          # device also samples on egress -> rate halved
+      egress_sampling: false         # only if calibration shows this ifIndex double-counts (see below)
 ```
 
-Setzen Sie `egress_sampling: true` für Exporter, die sowohl auf ingress als auch auf egress sampeln,
-damit jedes die Grenze überquerende Paket (das dann zweimal gesehen wird) wieder auf eines korrigiert
-wird. Um herauszufinden, welche Interfaces extern sind, setzen Sie kurz
-`sampling.boundary_debug: true` und lesen Sie `kapkan_engine_boundary_debug_bytes_total`,
-aufgeschlüsselt nach Exporter und Interface.
+Um herauszufinden, welche Interfaces extern sind, setzen Sie kurz `sampling.boundary_debug: true` und
+lesen Sie `kapkan_engine_boundary_debug_bytes_total`, aufgeschlüsselt nach Exporter und Interface.
+
+<Callout type="warning" title="egress_sampling kalibrieren — nicht annehmen">
+`egress_sampling: true` halbiert die an der Grenze gezählte Rate, um eine in+out-Doppelzählung
+rückgängig zu machen, aber **`sflow sample output` bedeutet nicht automatisch, dass Sie es
+brauchen.** Ob eine Egress-Kopie die Grenze tatsächlich aufbläht, hängt von der Topologie ab: Bei
+einem Arista MLAG wird die Egress-Kopie eines eingehenden Pakets auf dem Access-Port mit einem
+*anderen* Input-Interface gesampelt, sodass sie nie das Input-Interface-Gate der Grenze passiert —
+das Paket ist bereits einmal gezählt, und `egress_sampling: true` würde es dann um die Hälfte
+*unter*-zählen. Kalibrieren Sie: Vergleichen Sie die `boundary_debug`-Rate des externen Interface mit
+dem realen Zähler dieses Interface (z. B. `show interfaces`). Setzen Sie `egress_sampling: true` nur,
+wenn das Grenz-Interface ~2x die reale Rate anzeigt; andernfalls belassen Sie es bei `false` (dem
+Standard).
+</Callout>
 
 ## Verwandte Themen
 
