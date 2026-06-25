@@ -129,6 +129,11 @@ Die Erkennung verwendet ODER-Semantik — bereits ein einziger überschrittener 
 Angriff aus. Alle Werte werden in realen, nicht gesampelten Einheiten ausgedrückt (siehe
 [Sampling-Korrektur](#sampling-korrektur)).
 
+`flows_per_sec` ist nur für NetFlow/IPFIX-Exporter aussagekräftig. sFlow exportiert ein Sample pro
+Paket (keine Flow-Aggregation), sodass Hosts aus sFlow-Quellen immer `flows_per_sec = 0` melden und
+dieser Schwellenwert für sie nie auslöst — verwenden Sie stattdessen `pps`/`tcp_syn_pps`/`udp_pps`.
+Siehe [Erkennung](/docs/detection).
+
 ## Ein vollständiges Beispiel
 
 Eine realistische Produktionskonfiguration, angepasst aus `engine/deploy/config.example.yaml`:

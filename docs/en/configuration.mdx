@@ -124,6 +124,10 @@ set, ACK clear) and `frag_pps` counts non-first IP fragments. Detection uses OR 
 any single crossed threshold trips the attack. All values are expressed in real, unsampled
 units (see [Sampling correction](#sampling-correction)).
 
+`flows_per_sec` is meaningful only for NetFlow/IPFIX exporters. sFlow exports one sample per
+packet (no flow aggregation), so sFlow-sourced hosts always report `flows_per_sec = 0` and that
+threshold never trips for them — use `pps`/`tcp_syn_pps`/`udp_pps` instead. See [Detection](/docs/detection).
+
 ## A complete example
 
 A realistic production config, adapted from `engine/deploy/config.example.yaml`:

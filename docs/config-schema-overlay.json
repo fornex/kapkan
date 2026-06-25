@@ -18,7 +18,7 @@
 
     "thresholds.pps": { "tier": "basic", "description": "Per-host packets/sec threshold (real, unsampled units). Required, > 0." },
     "thresholds.mbps": { "tier": "basic", "description": "Per-host megabits/sec threshold. Required, > 0." },
-    "thresholds.flows_per_sec": { "tier": "basic", "description": "Per-host flows/sec threshold. Required, > 0." },
+    "thresholds.flows_per_sec": { "tier": "basic", "description": "Per-host flows/sec threshold. Required, > 0. NetFlow/IPFIX only: sFlow exports one sample per packet (no flow aggregation), so sFlow-sourced hosts always report 0 and this never fires for them — use pps/tcp_syn_pps/udp_pps." },
     "thresholds.tcp_syn_pps": { "tier": "advanced", "description": "Optional pure-SYN packets/sec limit; 0 or absent disables it." },
     "thresholds.udp_pps": { "tier": "advanced", "description": "Optional UDP packets/sec limit; 0 or absent disables it." },
 
@@ -44,7 +44,7 @@
     "carpet.min_hosts": { "tier": "advanced", "defaultWhenAbsent": 10, "description": "Fan-out gate: at least this many distinct hosts in the prefix must carry traffic before a carpet attack fires, so one heavy host (already caught per-host) is not reported as a carpet bomb (minimum 2)." },
     "carpet.thresholds.pps": { "tier": "advanced", "description": "Aggregate packets/sec threshold for the whole prefix (summed over its hosts). 0 disables this metric; set at least one carpet threshold. Should be well above the per-host pps." },
     "carpet.thresholds.mbps": { "tier": "advanced", "description": "Aggregate megabits/sec threshold for the prefix. 0 disables it." },
-    "carpet.thresholds.flows_per_sec": { "tier": "advanced", "description": "Aggregate flows/sec threshold for the prefix. 0 disables it." },
+    "carpet.thresholds.flows_per_sec": { "tier": "advanced", "description": "Aggregate flows/sec threshold for the prefix. 0 disables it. NetFlow/IPFIX only (sFlow-sourced hosts report 0)." },
     "carpet.mitigation": { "tier": "advanced", "defaultWhenAbsent": "", "description": "Auto-mitigate the aggregation prefix: empty (default) is alert-only; 'flowspec' announces a FlowSpec rule matching the attack vector on the whole prefix (surgical); 'blackhole' announces an RTBH route for the prefix (drops all of it). EITHER method refuses a prefix containing a protected_whitelist address — the whitelist guarantee is absolute." },
     "carpet.max_active_prefix_bans": { "tier": "advanced", "defaultWhenAbsent": 10, "description": "Cap on simultaneous carpet (prefix) bans, separate from ban.max_active_bans (host bans) so neither starves the other. A prefix ban also counts its full address span toward ban.max_banned_fraction." },
 
