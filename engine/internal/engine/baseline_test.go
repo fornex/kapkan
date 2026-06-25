@@ -477,13 +477,20 @@ baseline:
 	runTick(e, clk)
 	expectQuiet(t, events)
 
-	// 40000 pps: above factor 10 level too — now it fires.
-	floodAt(e, dst, 40, 1000)
+	// 70000 pps: above the group's factor-10 pps level (the quiet step above
+	// also fed the baseline, lifting it) yet still below the 80000 static
+	// ceiling — so a fire here proves the baseline-tightened pps threshold,
+	// not the static one. (flows_per_sec is 0 for sFlow, so the trigger must
+	// be pps.)
+	floodAt(e, dst, 70, 1000)
 	runTick(e, clk)
 	select {
 	case ev := <-events:
 		if ev.Kind != AttackStarted {
 			t.Fatalf("event = %v, want AttackStarted", ev.Kind)
+		}
+		if ev.Metric != MetricPPS {
+			t.Errorf("metric = %v, want pps", ev.Metric)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no AttackStarted above the group's factor-10 level")

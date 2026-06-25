@@ -58,7 +58,11 @@ protected_whitelist: # these addresses are never banned, regardless of traffic
 thresholds: # per destination host, after sampling correction
   pps: 80000 # packets/sec
   mbps: 1000 # megabits/sec
-  flows_per_sec: 35000 # flows/sec
+  flows_per_sec: 35000 # flows/sec — NOTE: only NetFlow/IPFIX exporters carry
+  #   flow records. sFlow exports one sample per packet (no flow aggregation),
+  #   so sFlow-sourced hosts always report flows_per_sec=0 and this threshold
+  #   never fires for them; use pps/tcp_syn_pps/udp_pps instead. The value is
+  #   still required (> 0) for the NetFlow/IPFIX case.
   # Optional per-protocol limits, 0/absent = disabled. Any crossed limit
   # triggers (OR). tcp_syn counts pure SYNs; frag counts non-first fragments.
   # tcp_pps: 0

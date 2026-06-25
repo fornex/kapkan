@@ -35,6 +35,26 @@ func (p Proto) String() string {
 	}
 }
 
+// AggregatesFlows reports whether one record of this protocol represents an
+// aggregated flow (a distinct 5-tuple conversation) rather than a single
+// sampled packet. NetFlow/IPFIX aggregate packets into flow records; sFlow
+// exports one record per sampled packet (goflow2 hard-codes Packets=1), so an
+// sFlow record is a packet sample, not a flow.
+//
+// The engine consults this so the flows_per_sec metric stays meaningful:
+// counting each sFlow sample as a "flow" would make flows_per_sec a structural
+// duplicate of pps (every sample adds the same `rate` to both counters), which
+// fires the flows_per_sec threshold at a packet rate far below the pps
+// threshold and mislabels ordinary sampled traffic as a flow flood.
+func (p Proto) AggregatesFlows() bool {
+	switch p {
+	case ProtoNetFlow5, ProtoNetFlow9, ProtoIPFIX:
+		return true
+	default: // sFlow and unknown carry one sampled packet per record, not a flow
+		return false
+	}
+}
+
 // Flow is one normalized flow record. Rates derived from Bytes/Packets must
 // be multiplied by SamplingRate before threshold comparison.
 type Flow struct {
