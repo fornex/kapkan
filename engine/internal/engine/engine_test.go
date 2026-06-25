@@ -105,7 +105,9 @@ func TestWindowedRateMath(t *testing.T) {
 
 	// Inject a steady 100 sampled pps for 5 complete seconds, sampling
 	// rate 10 => 1000 corrected pps; 1000 bytes/pkt => 1000*1000*8/1e6 =
-	// 8 Mbps; flows = rate per record = 10/record * 100 records = 1000 fps.
+	// 8 Mbps. udpFlow is sFlow, which exports one sample per packet and so
+	// does not feed the flows counter => flows_per_sec = 0 (see
+	// TestFlowsPerSecByProtocol for the NetFlow contrast).
 	for s := 0; s < 5; s++ {
 		for i := 0; i < 100; i++ {
 			e.Process(udpFlow(dst, 1000, 1, 10))
@@ -124,8 +126,51 @@ func TestWindowedRateMath(t *testing.T) {
 	if rates.Mbps != 8 {
 		t.Errorf("Mbps = %v, want 8", rates.Mbps)
 	}
-	if rates.FlowsPerSec != 1000 {
-		t.Errorf("FlowsPerSec = %v, want 1000", rates.FlowsPerSec)
+	if rates.FlowsPerSec != 0 {
+		t.Errorf("FlowsPerSec = %v, want 0 (sFlow has no flow aggregation)", rates.FlowsPerSec)
+	}
+}
+
+// TestFlowsPerSecByProtocol pins the flows_per_sec semantics: NetFlow/IPFIX
+// records are aggregated flows and feed the flows counter, while sFlow samples
+// (one per packet) do not — otherwise flows_per_sec would be a structural
+// duplicate of pps and trip below the pps threshold on ordinary traffic.
+func TestFlowsPerSecByProtocol(t *testing.T) {
+	mk := func(wire flow.Proto) Rates {
+		clk := newMockClock()
+		e := New(testStore(t), WithClock(clk.Now), WithWindow(5))
+		dst := netip.MustParseAddr("203.0.113.9")
+		for s := 0; s < 5; s++ {
+			for i := 0; i < 100; i++ {
+				f := udpFlow(dst.String(), 1000, 1, 10)
+				f.Wire = wire
+				e.Process(f)
+			}
+			clk.Advance(time.Second)
+		}
+		hs := e.shardFor(dst).hosts[dst]
+		in, _, _ := e.windowedRates(hs, clk.Now().Unix())
+		return in
+	}
+
+	// sFlow: one sample per packet => no flows, but pps still corrected.
+	sf := mk(flow.ProtoSFlow5)
+	if sf.FlowsPerSec != 0 {
+		t.Errorf("sFlow FlowsPerSec = %v, want 0", sf.FlowsPerSec)
+	}
+	if sf.PPS != 1000 {
+		t.Errorf("sFlow PPS = %v, want 1000", sf.PPS)
+	}
+
+	// NetFlow/IPFIX: each record is an aggregated flow => flows advance by rate.
+	for _, wire := range []flow.Proto{flow.ProtoNetFlow5, flow.ProtoNetFlow9, flow.ProtoIPFIX} {
+		got := mk(wire)
+		if got.FlowsPerSec != 1000 {
+			t.Errorf("%s FlowsPerSec = %v, want 1000", wire, got.FlowsPerSec)
+		}
+		if got.PPS != 1000 {
+			t.Errorf("%s PPS = %v, want 1000", wire, got.PPS)
+		}
 	}
 }
 
@@ -501,13 +546,15 @@ func TestFlowsThresholdTrigger(t *testing.T) {
 	e := New(testStore(t), WithClock(clk.Now), WithWindow(5))
 	events := drain(e)
 	dst := netip.MustParseAddr("203.0.113.71")
+	// NetFlow: each record is an aggregated flow, so flows_per_sec is a real
+	// metric (sFlow would contribute 0 — see TestFlowsPerSecByProtocol).
 	// 40 records/sec, rate 1000, 1 pkt, 64 bytes => 40000 pps (<80000),
 	// 40000 fps (>35000), ~20 Mbps (<1000). Only flows_per_sec is crossed.
 	inject := func() {
 		for i := 0; i < 40; i++ {
 			e.Process(flow.Flow{
 				SrcAddr: netip.MustParseAddr("198.51.100.6"), DstAddr: dst,
-				IPProto: 17, Bytes: 64, Packets: 1, SamplingRate: 1000, Wire: flow.ProtoSFlow5,
+				IPProto: 17, Bytes: 64, Packets: 1, SamplingRate: 1000, Wire: flow.ProtoNetFlow9,
 			})
 		}
 	}

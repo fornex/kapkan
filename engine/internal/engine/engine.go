@@ -5,10 +5,13 @@
 // second evaluates a sliding window against the configured thresholds,
 // emitting AttackStarted / AttackEnded events.
 //
-// Sampling correction: every flow contributes f.Bytes*rate bytes,
-// f.Packets*rate packets, and rate flows, where rate is the flow's
-// sampling rate. This makes all downstream rates estimates of the real
-// (unsampled) traffic, per the project's sampling policy.
+// Sampling correction: every flow contributes f.Bytes*rate bytes and
+// f.Packets*rate packets, where rate is the flow's sampling rate. This makes
+// all downstream rates estimates of the real (unsampled) traffic, per the
+// project's sampling policy. The flows counter advances by rate only for
+// flow-aggregating protocols (NetFlow/IPFIX); sFlow exports one sample per
+// packet, so counting its samples as flows would make flows_per_sec a
+// structural duplicate of pps (see flow.Proto.AggregatesFlows).
 package engine
 
 import (
@@ -45,8 +48,9 @@ const (
 )
 
 // counters is one second of sampling-corrected traffic for one direction.
-// Flows are counted for the total class only; per-protocol thresholds are
-// expressed in pps/mbps, mirroring the config.
+// Flows are counted for the total class only and only from flow-aggregating
+// protocols (NetFlow/IPFIX); per-protocol thresholds are expressed in
+// pps/mbps, mirroring the config.
 type counters struct {
 	bytes   [numClasses]uint64
 	packets [numClasses]uint64
@@ -365,7 +369,12 @@ func (e *Engine) record(addr netip.Addr, dir int, f flow.Flow, rate uint64, epoc
 	packets := f.Packets * rate
 	c.bytes[clTotal] += bytes
 	c.packets[clTotal] += packets
-	c.flows += rate
+	// sFlow exports one sample per packet; only flow-aggregating protocols
+	// (NetFlow/IPFIX) contribute to the flows counter, so flows_per_sec does
+	// not collapse into a duplicate of pps for sampled-packet telemetry.
+	if f.Wire.AggregatesFlows() {
+		c.flows += rate
+	}
 	switch f.IPProto {
 	case 6: // TCP
 		c.bytes[clTCP] += bytes
