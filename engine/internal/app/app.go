@@ -111,6 +111,16 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 		a.Update = update.New(ucfg, log)
 		a.API.SetUpdateChecker(a.Update)
 	}
+
+	// flows_per_sec is mandatory in config (validate requires it > 0) but is
+	// meaningless for sFlow: sFlow exports one sample per packet, so the engine
+	// reports flows_per_sec=0 for sFlow-sourced hosts (counting samples as flows
+	// would make it a duplicate of pps). Warn once at startup so an operator on
+	// sFlow knows the metric is inert for that traffic and relies on
+	// pps/tcp_syn_pps/udp_pps instead.
+	if store.Get().Listen.SFlow != "" {
+		log.Warn("flows_per_sec does not apply to sFlow traffic: sFlow exports one sample per packet (no flow aggregation), so sFlow-sourced hosts report flows_per_sec=0; only NetFlow/IPFIX hosts are evaluated against the flows_per_sec threshold. Use pps/tcp_syn_pps/udp_pps to catch sampled-packet floods.")
+	}
 	return a, nil
 }
 
