@@ -22,19 +22,22 @@ sampling:
   # is then counted toward a protected host only when it crosses the boundary:
   # inbound when it ENTERS on an external interface, outbound when it LEAVES on
   # one. Exporters not listed keep counting every sample, so this is safe to
-  # roll out per exporter. Set egress_sampling: true for exporters that also
-  # sample on egress (the rate is then halved to undo the in+out double).
+  # roll out per exporter. egress_sampling: true halves the boundary rate to undo
+  # an in+out double-count, but CALIBRATE before setting it — do NOT assume it
+  # from `sflow sample output` alone. On some topologies (e.g. an MLAG pair) the
+  # egress copy of an inbound packet uses a different input interface, so the
+  # boundary already counts it once and true would HALVE a correct figure.
   # Tip: enable boundary_debug, watch kapkan_engine_boundary_debug_bytes_total
-  # to see traffic per (exporter, iface), pick the high-volume uplinks, then
-  # turn boundary_debug off.
+  # per (exporter, iface) and compare an external ifIndex to its real interface
+  # counter; set egress_sampling: true only if it shows ~2x. Then turn debug off.
   # boundary_debug: false
   # boundary:
   #   - exporter: "10.1.32.2"
   #     external_ifindexes: [1000025]
-  #     egress_sampling: true
+  #     egress_sampling: false   # true ONLY if boundary_debug shows ~2x (calibrate)
   #   - exporter: "10.1.32.3"
   #     external_ifindexes: [1000025]
-  #     egress_sampling: true
+  #     egress_sampling: false   # true ONLY if boundary_debug shows ~2x (calibrate)
 
 # flow_sources: optional allowlist of trusted flow-exporter (router) source
 # addresses. Telemetry is unauthenticated UDP, so the source address is
