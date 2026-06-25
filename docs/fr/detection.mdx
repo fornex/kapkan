@@ -31,7 +31,7 @@ au sein de vos `networks` protégés. Trois métriques de base sont toujours év
 | --- | --- | --- |
 | `pps` | paquets/sec | Débit total de paquets entrants vers l'hôte. |
 | `mbps` | mégabits/sec | Débit binaire total entrant vers l'hôte. |
-| `flows_per_sec` | flows/sec | Enregistrements de flow distincts/sec vers l'hôte. |
+| `flows_per_sec` | flows/sec | Enregistrements de flow distincts/sec vers l'hôte. **NetFlow/IPFIX uniquement** — voir la note ci-dessous. |
 
 ```yaml
 thresholds:
@@ -42,6 +42,15 @@ thresholds:
 
 Les trois seuils de base doivent tous être supérieurs à `0`. Un hôte passe « sous attaque » dès que
 l'un d'eux est dépassé sur la fenêtre glissante.
+
+<Callout type="warning" title="flows_per_sec ne s'applique qu'à NetFlow/IPFIX">
+`flows_per_sec` compte les enregistrements de flow agrégés. sFlow n'agrège pas — il exporte un échantillon
+par paquet — c'est pourquoi Kapkan compte **0** flow pour le trafic provenant de sFlow, et le seuil
+`flows_per_sec` ne se déclenche jamais pour les hôtes sFlow (leur `flows_per_sec` affiche `0` dans l'API et le tableau de bord).
+Compter chaque échantillon comme un flow ne ferait que dupliquer `pps`. Sur les déploiements sFlow, appuyez-vous sur `pps`,
+`tcp_syn_pps` et `udp_pps` pour détecter les floods de paquets et de connexions. La valeur reste tout de même requise
+(`> 0`) car des exportateurs NetFlow/IPFIX peuvent alimenter le même moteur.
+</Callout>
 
 <Callout type="info" title="Surcharges par groupe">
 Ces seuils globaux constituent la valeur de repli. Vous pouvez attribuer à des préfixes spécifiques des limites plus strictes ou plus souples,

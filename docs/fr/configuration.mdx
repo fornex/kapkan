@@ -126,6 +126,11 @@ Les trois seuils de base — `pps`, `mbps`, `flows_per_sec` — sont obligatoire
 une sémantique OU — n'importe quel seuil franchi déclenche l'attaque. Toutes les valeurs sont exprimées
 en unités réelles, non échantillonnées (voir [Correction de l'échantillonnage](#correction-de-léchantillonnage)).
 
+`flows_per_sec` n'a de sens que pour les exportateurs NetFlow/IPFIX. sFlow exporte un échantillon
+(sample) par paquet (sans agrégation en flows), de sorte que les hôtes alimentés par sFlow rapportent
+toujours `flows_per_sec = 0` et que ce seuil ne se déclenche jamais pour eux — utilisez plutôt
+`pps`/`tcp_syn_pps`/`udp_pps`. Voir [Détection](/docs/detection).
+
 ## Un exemple complet
 
 Une configuration de production réaliste, adaptée de `engine/deploy/config.example.yaml` :

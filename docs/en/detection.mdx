@@ -31,7 +31,7 @@ inside your protected `networks`. Three core metrics are always evaluated:
 | --- | --- | --- |
 | `pps` | packets/sec | Total inbound packet rate to the host. |
 | `mbps` | megabits/sec | Total inbound bit rate to the host. |
-| `flows_per_sec` | flows/sec | Distinct flow records/sec toward the host. |
+| `flows_per_sec` | flows/sec | Distinct flow records/sec toward the host. **NetFlow/IPFIX only** — see the note below. |
 
 ```yaml
 thresholds:
@@ -42,6 +42,15 @@ thresholds:
 
 All three core thresholds must be greater than `0`. A host crosses into "under attack" as soon as
 any one of them is exceeded over the sliding window.
+
+<Callout type="warning" title="flows_per_sec applies to NetFlow/IPFIX only">
+`flows_per_sec` counts aggregated flow records. sFlow does not aggregate — it exports one sample
+per packet — so Kapkan counts **0** flows for sFlow-sourced traffic, and the `flows_per_sec`
+threshold never fires for sFlow hosts (their `flows_per_sec` reads `0` in the API and dashboard).
+Counting each sample as a flow would just duplicate `pps`. On sFlow deployments, rely on `pps`,
+`tcp_syn_pps` and `udp_pps` to catch packet and connection floods. The value is still required
+(`> 0`) because NetFlow/IPFIX exporters can feed the same engine.
+</Callout>
 
 <Callout type="info" title="Per-group overrides">
 These global thresholds are the fallback. You can give specific prefixes tighter or looser limits,

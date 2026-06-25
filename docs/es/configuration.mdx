@@ -128,6 +128,11 @@ primero. La detección usa semántica OR: cualquier umbral superado de forma ind
 ataque. Todos los valores se expresan en unidades reales, sin muestrear (consulta
 [Corrección de muestreo](#corrección-de-muestreo)).
 
+`flows_per_sec` solo tiene sentido para los exportadores NetFlow/IPFIX. sFlow exporta una muestra
+por paquete (sin agregación de flows), por lo que los hosts cuya telemetría proviene de sFlow siempre
+informan `flows_per_sec = 0` y ese umbral nunca se dispara para ellos — usa
+`pps`/`tcp_syn_pps`/`udp_pps` en su lugar. Consulta [Detección](/docs/detection).
+
 ## Un ejemplo completo
 
 Una configuración de producción realista, adaptada de `engine/deploy/config.example.yaml`:

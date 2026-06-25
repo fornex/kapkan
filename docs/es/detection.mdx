@@ -31,7 +31,7 @@ destino** dentro de tus `networks` protegidas. Siempre se evalúan tres métrica
 | --- | --- | --- |
 | `pps` | paquetes/seg | Tasa total de paquetes entrantes hacia el host. |
 | `mbps` | megabits/seg | Tasa total de bits entrantes hacia el host. |
-| `flows_per_sec` | flows/seg | Registros de flow distintos por segundo hacia el host. |
+| `flows_per_sec` | flows/seg | Registros de flow distintos por segundo hacia el host. **Solo NetFlow/IPFIX** — consulta la nota más abajo. |
 
 ```yaml
 thresholds:
@@ -42,6 +42,15 @@ thresholds:
 
 Los tres umbrales principales deben ser mayores que `0`. Un host pasa a estado "bajo ataque" en cuanto
 se supera cualquiera de ellos sobre la ventana deslizante.
+
+<Callout type="warning" title="flows_per_sec aplica solo a NetFlow/IPFIX">
+`flows_per_sec` cuenta registros de flow agregados. sFlow no agrega — exporta una muestra (sample) por
+paquete —, así que Kapkan cuenta **0** flows para el tráfico procedente de sFlow, y el umbral
+`flows_per_sec` nunca se dispara para los hosts de sFlow (su `flows_per_sec` marca `0` en la API y el
+panel). Contar cada muestra como un flow simplemente duplicaría `pps`. En despliegues de sFlow, apóyate en
+`pps`, `tcp_syn_pps` y `udp_pps` para detectar floods de paquetes y de conexiones. El valor sigue siendo
+obligatorio (`> 0`) porque exportadores NetFlow/IPFIX pueden alimentar el mismo motor.
+</Callout>
 
 <Callout type="info" title="Anulaciones por grupo">
 Estos umbrales globales son el valor de reserva. Puedes asignar a prefijos específicos límites más

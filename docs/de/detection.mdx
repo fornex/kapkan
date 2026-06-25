@@ -32,7 +32,7 @@ Ihrer geschützten `networks` angewendet werden. Drei Kernmetriken werden immer 
 | --- | --- | --- |
 | `pps` | Pakete/Sek. | Gesamte eingehende Paketrate zum Host. |
 | `mbps` | Megabit/Sek. | Gesamte eingehende Bitrate zum Host. |
-| `flows_per_sec` | flows/sec | Anzahl eindeutiger Flow-Datensätze/Sek. in Richtung des Hosts. |
+| `flows_per_sec` | flows/sec | Anzahl eindeutiger Flow-Datensätze/Sek. in Richtung des Hosts. **Nur NetFlow/IPFIX** — siehe den Hinweis unten. |
 
 ```yaml
 thresholds:
@@ -43,6 +43,16 @@ thresholds:
 
 Alle drei Kern-Schwellenwerte müssen größer als `0` sein. Ein Host gilt als „unter Angriff", sobald
 einer von ihnen über das gleitende Fenster überschritten wird.
+
+<Callout type="warning" title="flows_per_sec gilt nur für NetFlow/IPFIX">
+`flows_per_sec` zählt aggregierte Flow-Datensätze. sFlow aggregiert nicht — es exportiert ein Sample
+pro Paket —, daher zählt Kapkan **0** Flows für sFlow-basierten Datenverkehr, und der
+`flows_per_sec`-Schwellenwert löst bei sFlow-Hosts niemals aus (ihr `flows_per_sec` zeigt `0` in der
+API und im Dashboard an). Jedes Sample als Flow zu zählen würde lediglich `pps` duplizieren. Bei
+sFlow-Deployments verlassen Sie sich auf `pps`, `tcp_syn_pps` und `udp_pps`, um Paket- und
+Verbindungsfluten zu erkennen. Der Wert ist dennoch erforderlich (`> 0`), weil NetFlow/IPFIX-Exporter
+dieselbe Engine speisen können.
+</Callout>
 
 <Callout type="info" title="Overrides pro Gruppe">
 Diese globalen Schwellenwerte sind der Rückfallwert. Sie können bestimmten Präfixen strengere oder
