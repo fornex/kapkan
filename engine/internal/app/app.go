@@ -236,6 +236,11 @@ func (a *App) consumeEvents(ctx context.Context) {
 				a.API.RecordAttackEnded(ev, ban)
 				a.Notify.NotifyAttackEnded(ctx, ev, ban)
 				a.Storage.WriteAttack(attackRow(ev, ban))
+			case engine.AttackOngoing:
+				// Refresh-only: keep the live ban alive for a sustained attack.
+				// Deliberately no notify/storage/API record — this is not a new
+				// attack, just a TTL heartbeat for an already-recorded one.
+				a.Mitigate.OnAttackOngoing(ev)
 			}
 		}
 	}
