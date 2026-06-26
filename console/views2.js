@@ -317,16 +317,16 @@
         h("div", { class: "card__body" }, h("div", { class: "cols-2" }, [bigIn, bigOut]))
       ]),
       h("div", { class: "card mt-4" }, [
+        h("div", { class: "card__head" }, [h("div", { class: "card__title" }, [w.icon("activity"), h("span", { text: I.t("tr.aggregate.pps") })]), K.badge("badge--calm", I.t("tr.live"), "dot")]),
+        h("div", { class: "card__body" }, h("div", { class: "cols-2" }, [bigInPps, bigOutPps]))
+      ]),
+      h("div", { class: "card mt-4" }, [
         h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("server"), h("span", { text: I.t("tr.perhost.mbps") })])),
         h("div", { class: "card__body" }, h("div", { class: "cols-3" }, hostCardsMbps))
       ]),
       h("div", { class: "card mt-4" }, [
         h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("server"), h("span", { text: I.t("tr.perhost.pps") })])),
         h("div", { class: "card__body" }, h("div", { class: "cols-3" }, hostCards))
-      ]),
-      h("div", { class: "card mt-4" }, [
-        h("div", { class: "card__head" }, [h("div", { class: "card__title" }, [w.icon("activity"), h("span", { text: I.t("tr.aggregate.pps") })]), K.badge("badge--calm", I.t("tr.live"), "dot")]),
-        h("div", { class: "card__body" }, h("div", { class: "cols-2" }, [bigInPps, bigOutPps]))
       ]),
       historyBlock
     ]);
