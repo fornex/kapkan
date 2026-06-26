@@ -197,7 +197,7 @@
       "ho.inattack": "Sous attaque",
       "ho.empty.title": "Aucun hôte suivi pour l'instant",
       "ho.empty.sub": "Les principaux émetteurs se remplissent à partir des échantillons de flux. Sur une nouvelle installation, cela se remplit en quelques cycles d'interrogation.",
-      "ho.headline": "Classés par débit par rapport à la référence apprise",
+      "ho.headline": "Classés par débit (Mbit/s)",
 
       /* hostgroups */
       "hg.policy": "Politique",
