@@ -185,7 +185,7 @@
       "ho.inattack": "Im Angriff",
       "ho.empty.title": "Noch keine überwachten Hosts",
       "ho.empty.sub": "Top-Talker füllen sich aus Flussstichproben. Bei einer Neuinstallation geschieht dies innerhalb weniger Abfragezyklen.",
-      "ho.headline": "Sortiert nach Rate über erlernter Grundlinie",
+      "ho.headline": "Sortiert nach Durchsatz (Mbit/s)",
 
       "hg.policy": "Richtlinie",
       "hg.calc": "Berechnungsmodus",

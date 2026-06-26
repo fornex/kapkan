@@ -197,7 +197,7 @@
       "ho.inattack": "Bajo ataque",
       "ho.empty.title": "Aún no hay hosts monitorizados",
       "ho.empty.sub": "Los principales emisores se llenan a partir de las muestras de flujo. En una instalación nueva, esto se llena en unos pocos ciclos de sondeo.",
-      "ho.headline": "Ordenados por tasa respecto a la referencia aprendida",
+      "ho.headline": "Ordenados por rendimiento (Mbit/s)",
 
       /* hostgroups */
       "hg.policy": "Política",
