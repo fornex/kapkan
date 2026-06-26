@@ -40,18 +40,17 @@ keeps running the last good config, so a typo can't take you down mid-attack.
 
 ## 2. No permanent bans
 
-Every announcement carries a TTL (`ban.ttl_seconds`, a required setting with no default) and is
-automatically withdrawn when it expires. There is no code path that produces a route without an
-expiry. A stuck process, a lost notification, or an operator who walks away can never leave a host
-blackholed forever.
+Every announcement carries a TTL (`ban.ttl_seconds`, a required setting with no default). While an
+attack is still being detected, Kapkan re-reports it every detection window and the ban's TTL is
+refreshed — so the route stays up for as long as the flood lasts, however long that is. The moment
+detection stops, the TTL is no longer refreshed and the ban is withdrawn automatically within one
+TTL window. There is no code path that produces a route without an expiry: a stuck process, a lost
+notification, or an operator who walks away can never leave a host blackholed forever.
 
-<Callout type="warning" title="Set the TTL longer than a typical attack">
-The TTL is refreshed only when detection *re-fires*. A single, continuously-detected attack
-announces the route once and the TTL becomes its entire lifetime — the route is **not** silently
-re-announced while the same attack keeps running. So if the TTL expires mid-flood, the route comes
-down and the victim is exposed again until the attack stops and later re-triggers. Set
-`ttl_seconds` comfortably longer than a typical attack (e.g. `1800`–`3600`); too short a TTL
-withdraws the route in the middle of an ongoing attack.
+<Callout type="info" title="You don't have to size the TTL to the attack">
+Because a sustained attack refreshes its own TTL, `ban.ttl_seconds` is not a bet on how long an
+attack will last — it is how long a ban lingers *after* the traffic is already gone. A short value
+(e.g. `1800`) frees a recovered host quickly and still never cuts protection short during the flood.
 </Callout>
 
 ## 3. Unban hysteresis

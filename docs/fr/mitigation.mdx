@@ -133,10 +133,11 @@ permanent ou incontrôlé.
    enregistre la route potentielle) et le ban entre dans l'état `active`. Une seconde attaque — par
    exemple un flood entrant et un flood sortant sur le même hôte simultanément — partage l'unique route
    RTBH plutôt que de l'annoncer deux fois.
-2. **Retrait automatique à la TTL.** Chaque annonce porte une TTL. Après `ban.ttl_seconds`, la route
-   est retirée automatiquement même si l'attaque est toujours en cours ; une attaque qui persiste
-   rafraîchit la TTL, mais jamais au-delà d'une nouvelle TTL à partir de maintenant. **Il n'existe aucun
-   ban permanent.**
+2. **Retrait automatique à la TTL.** Chaque annonce porte une TTL. Tant que l'attaque est toujours
+   détectée, chaque fenêtre de détection rafraîchit la TTL du ban (jamais au-delà d'une nouvelle
+   `ban.ttl_seconds` à partir de maintenant), de sorte que la route reste active pendant toute la durée
+   de l'attaque. Une fois la détection arrêtée, la route est retirée automatiquement en l'espace d'une
+   TTL. **Il n'existe aucun ban permanent.**
 3. **Débannissement avec hystérésis.** Un ban provoqué par une attaque n'est retiré qu'après que le
    trafic est resté sous le seuil pendant `ban.unban_hysteresis_seconds`. Ce délai anti-oscillation
    empêche une attaque limite d'annoncer et de retirer rapidement la même route.

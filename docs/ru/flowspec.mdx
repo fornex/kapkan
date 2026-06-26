@@ -94,15 +94,15 @@ flowspec:
     action: rate_limit            # rate-cap the vector instead of dropping it
     rate_mbps: 100                # ceiling, megabits/s
   ```
-- `max_active_bans` ограничивает **баны**, а не правила: FlowSpec-бан может нести до 8 правил, поэтому N
-  банов могут означать до 8N правил в RIB вашего апстрима. Следите за [метрикой](/docs/metrics) `kapkan_mitigate_flowspec_rules`
+- `max_active_bans` ограничивает **блокировки**, а не правила: FlowSpec-блокировка может нести до 8 правил, поэтому N
+  блокировок могут означать до 8N правил в RIB вашего апстрима. Следите за [метрикой](/docs/metrics) `kapkan_mitigate_flowspec_rules`
   относительно лимита FlowSpec-маршрутов на ваших маршрутизаторах.
 
 ## Действие правила и жизненный цикл
 
 Каждое правило несёт extended community traffic-rate: `discard` (rate 0) или потолок `rate_limit`.
-FlowSpec-баны используют тот же TTL, тот же гистерезис разбана и тот же жизненный цикл `max_active_bans`,
-что и blackhole-баны, — см. [RTBH: подавление атак](/docs/mitigation).
+FlowSpec-блокировки используют тот же TTL, тот же гистерезис снятия блокировки и тот же жизненный цикл `max_active_bans`,
+что и blackhole-блокировки, — см. [RTBH: подавление атак](/docs/mitigation).
 
 FlowSpec работает через **те же BGP-соседи**, что и RTBH: он согласовывается как дополнительная
 способность поверх тех же BGP-сессий (AFI/SAFI для FlowSpec), а пир, который его не поддерживает,
@@ -112,12 +112,12 @@ FlowSpec работает через **те же BGP-соседи**, что и R
 Чтобы убедиться, что ваш апстрим действительно принимает правила: в режиме dry-run проверьте, что поле
 `flowspec` заполнено в `/api/v1/attacks`. После запуска в эксплуатацию [метрика](/docs/metrics)
 `kapkan_mitigate_flowspec_rules` с `mode="real"` должна быть ненулевой. Если пир отклоняет FlowSpec,
-Kapkan откатывает бан на blackhole и отражает это в `/api/v1/bans` (поля `fell_back_from`
+Kapkan откатывает блокировку на blackhole и отражает это в `/api/v1/bans` (поля `fell_back_from`
 и `fell_back_reason`) и в уведомлениях — так что молчаливо не поддерживающий апстрим остаётся
 заметным.
 
 ## Связанные материалы
 
-- [RTBH: подавление атак](/docs/mitigation) — метод blackhole и общий жизненный цикл банов.
+- [RTBH: подавление атак](/docs/mitigation) — метод blackhole и общий жизненный цикл блокировок.
 - [Лестницы эскалации](/docs/escalation) — постепенный переход от оповещения к FlowSpec и затем к blackhole.
 - [Справочник по конфигурации](/docs/configuration) · [Метрики](/docs/metrics) · [REST API](/docs/api)

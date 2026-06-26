@@ -76,6 +76,29 @@ El panel de control se construye por completo a partir del estado en memoria del
 histórico de flows es una función separada y opcional: no es necesaria para ver ataques en vivo, top talkers o bloqueos.
 </Callout>
 
+## Detalle del ataque
+
+Haz clic en un ataque de la lista **Ataques activos** (ataques activos y recientes) para abrir su
+panel de detalle. Además de la clasificación, el desglose de «por qué se disparó», la escala de
+escalado y la ruta de mitigación, dos secciones atribuyen el tráfico:
+
+- **Muestra capturada** — las **Fuentes principales** dominantes (renombradas **Destinos
+  principales** en un ataque saliente), los **Protocolos** y los **Puertos de origen / destino
+  principales** destilados de la muestra de flow, además del total de paquetes muestreados. Con
+  GeoIP habilitado también muestra una fila **Top ASN** (**Top ASN de destino** en los ataques
+  salientes): los sistemas autónomos más activos por paquetes corregidos por muestreo, listados
+  como `AS<número> <organización>`.
+- **Flujos en bruto** — una tabla de los flows capturados individualmente (origen, protocolo,
+  destino, banderas, fragmentación, paquetes). Con una base de datos de países cargada, cada origen
+  lleva una pequeña insignia de código de país como `US` o `DE`; pasa el cursor por encima para ver
+  la organización (la red) del origen.
+
+La fila **Top ASN** y las insignias de país por flujo solo aparecen cuando la atribución GeoIP está
+habilitada. Apunta `geoip.asn_database` a una base de datos ASN de MaxMind GeoLite2/GeoIP2 para los
+ASN y los nombres de organización, y `geoip.country_database` a una base de datos de países para las
+insignias de país; consulta el bloque `geoip` en [Configuración](/docs/configuration). Sin ellas, el
+panel se muestra igualmente, solo que sin la fila de ASN ni las etiquetas de país.
+
 ## Autenticación
 
 De forma predeterminada, la API y el panel de control no están autenticados, lo cual es seguro únicamente porque el valor

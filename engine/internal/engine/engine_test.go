@@ -240,40 +240,98 @@ func TestAttackLifecycle(t *testing.T) {
 	}
 
 	// Traffic stops. The flood ages out of the 5s window over the next few
-	// ticks; only then does the hysteresis (3s) countdown begin. The attack
-	// must NOT end on the very first quiet tick (flood still dominates the
-	// window), but must end once the window has drained and hysteresis has
-	// elapsed.
+	// ticks; only then does the hysteresis (3s) countdown begin. While the
+	// flood still dominates the window the attack stays above threshold, so each
+	// tick re-reports an AttackOngoing (a TTL heartbeat for mitigation) — but
+	// the attack must NOT end on the very first quiet tick, and must end only
+	// once the window has drained and hysteresis has elapsed.
 	runTick(e, clk)
 	select {
 	case ev := <-events:
-		t.Fatalf("premature %v on first quiet tick; flood still in window", ev.Kind)
-	case <-time.After(50 * time.Millisecond):
+		if ev.Kind != AttackOngoing {
+			t.Fatalf("first quiet tick emitted %v; flood still in window, want AttackOngoing", ev.Kind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no AttackOngoing on first quiet tick; the flood still fills the window so the attack is still above threshold and must re-report")
 	}
 
 	var ended bool
 	for i := 0; i < 12 && !ended; i++ {
 		runTick(e, clk)
-		select {
-		case ev := <-events:
-			if ev.Kind != AttackEnded {
-				t.Fatalf("event = %v, want AttackEnded", ev.Kind)
+	drain:
+		for {
+			select {
+			case ev := <-events:
+				if ev.Kind == AttackOngoing {
+					continue // TTL heartbeat while the flood ages out; not terminal
+				}
+				if ev.Kind != AttackEnded {
+					t.Fatalf("event = %v, want AttackEnded", ev.Kind)
+				}
+				if ev.StartedAt.IsZero() {
+					t.Error("AttackEnded.StartedAt must be set")
+				}
+				if ev.Metric != MetricPPS {
+					t.Errorf("AttackEnded.Metric = %v, want the original trigger pps", ev.Metric)
+				}
+				if ev.Threshold <= 0 {
+					t.Error("AttackEnded.Threshold must carry the configured threshold")
+				}
+				ended = true
+				break drain
+			case <-time.After(20 * time.Millisecond):
+				break drain
 			}
-			if ev.StartedAt.IsZero() {
-				t.Error("AttackEnded.StartedAt must be set")
-			}
-			if ev.Metric != MetricPPS {
-				t.Errorf("AttackEnded.Metric = %v, want the original trigger pps", ev.Metric)
-			}
-			if ev.Threshold <= 0 {
-				t.Error("AttackEnded.Threshold must carry the configured threshold")
-			}
-			ended = true
-		case <-time.After(20 * time.Millisecond):
 		}
 	}
 	if !ended {
 		t.Fatal("AttackEnded never emitted after traffic stopped")
+	}
+
+	// Once the attack has fully ended (st.inAttack cleared) the heartbeat must
+	// stop: no more AttackOngoing, so the ban is free to lapse — the "no
+	// permanent bans" half of the fix. Quiet ticks must now be silent.
+	for i := 0; i < 3; i++ {
+		runTick(e, clk)
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("event %v emitted after the attack ended; want silence (no more refreshes)", ev.Kind)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestAttackOngoingDuringHysteresis proves the heartbeat keeps firing through
+// the hysteresis tail — while traffic is below threshold but the attack is not
+// yet declared over. Without this, a hysteresis window >= ban.ttl_seconds would
+// let the ban's TTL lapse and the route be withdrawn before the attack ends.
+func TestAttackOngoingDuringHysteresis(t *testing.T) {
+	clk := newMockClock()
+	e := New(testStore(t), WithClock(clk.Now), WithWindow(1))
+	events := drain(e)
+	dst := netip.MustParseAddr("203.0.113.22")
+
+	// Establish the attack: flood second S, evaluate at S+1.
+	for i := 0; i < 200; i++ {
+		e.Process(udpFlow(dst.String(), 100, 1, 1000))
+	}
+	runTick(e, clk)
+	if ev := <-events; ev.Kind != AttackStarted {
+		t.Fatalf("first event = %v, want AttackStarted", ev.Kind)
+	}
+
+	// Next tick: traffic stopped and the 1s window is already empty, so the host
+	// is BELOW threshold but still inAttack (hysteresis, 3s, counting down). The
+	// engine must still re-report AttackOngoing so mitigation keeps refreshing
+	// the ban's TTL through the tail.
+	runTick(e, clk)
+	select {
+	case ev := <-events:
+		if ev.Kind != AttackOngoing {
+			t.Fatalf("hysteresis-tail tick emitted %v, want AttackOngoing", ev.Kind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no AttackOngoing during the hysteresis tail; the ban TTL would not refresh before the attack is declared over")
 	}
 }
 

@@ -135,9 +135,10 @@ baneo permanente o descontrolado.
    habría anunciado) y el baneo entra en el estado `active`. Un segundo ataque — por ejemplo una
    inundación entrante y otra saliente sobre el mismo host a la vez — comparte la única ruta RTBH en
    lugar de anunciarla dos veces.
-2. **Retirada automática por TTL.** Cada anuncio lleva un TTL. Después de `ban.ttl_seconds` la ruta
-   se retira automáticamente incluso si el ataque sigue en curso; un ataque que persiste refresca el
-   TTL, pero nunca más allá de un TTL nuevo a partir de ahora. **No hay baneos permanentes.**
+2. **Retirada automática por TTL.** Cada anuncio lleva un TTL. Mientras el ataque sigue detectándose,
+   cada ventana de detección refresca el TTL del baneo (nunca más allá de un `ban.ttl_seconds` nuevo a
+   partir de ahora), por lo que la ruta se mantiene activa durante todo el ataque. Una vez que la
+   detección se detiene, la ruta se retira automáticamente en un TTL. **No hay baneos permanentes.**
 3. **Desbaneo con histéresis.** Un baneo impulsado por un ataque se retira solo después de que el
    tráfico permanezca por debajo del umbral durante `ban.unban_hysteresis_seconds`. Este retardo
    anti-oscilación evita que un ataque límite anuncie y retire rápidamente la misma ruta.
