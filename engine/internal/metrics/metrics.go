@@ -66,6 +66,17 @@ var (
 		Help:      "AttackStarted events emitted since start.",
 	})
 
+	// EventsDroppedTotal counts lifecycle events shed because the event channel
+	// was full, labelled by kind. A dropped attack_started/attack_ended is a
+	// real loss (the episode's mitigation/notification is missed); a dropped
+	// attack_ongoing self-heals on the next tick.
+	EventsDroppedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "engine",
+		Name:      "events_dropped_total",
+		Help:      "Engine lifecycle events dropped due to a full event channel, by kind.",
+	}, []string{"kind"})
+
 	// ProcessLatency observes per-flow hot-path processing time.
 	ProcessLatency = promauto.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "kapkan",

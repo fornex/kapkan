@@ -265,6 +265,9 @@ func TestSimultaneousInOutAttacks(t *testing.T) {
 		for ends < 2 {
 			select {
 			case ev := <-events:
+				if ev.Kind == AttackOngoing {
+					continue // TTL heartbeat while the flood drains; not terminal
+				}
 				if ev.Kind != AttackEnded {
 					t.Fatalf("event = %v, want AttackEnded", ev.Kind)
 				}
