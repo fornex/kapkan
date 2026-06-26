@@ -361,12 +361,169 @@ func TestTTLRefreshedWhileAttackPersists(t *testing.T) {
 	ev := startedEvent("203.0.113.66")
 	m.OnAttackStarted(ev)
 	clk.Advance(8 * time.Second)
-	// Re-report (engine re-emit / ongoing): refreshes TTL.
+	// Re-report through ban() (e.g. a manual re-ban, or a fresh AttackStarted
+	// after the attack flapped): refreshes the TTL. The engine's own
+	// re-mitigation of a *sustained* attack goes through AttackOngoing instead —
+	// see TestOnAttackOngoingRefreshesTTL.
 	m.OnAttackStarted(ev)
 	clk.Advance(5 * time.Second) // 13s since first ban, but only 5s since refresh
 	m.sweepExpired()
 	if len(m.ActiveBans()) != 1 {
 		t.Errorf("ban expired despite refresh; active = %d, want 1", len(m.ActiveBans()))
+	}
+}
+
+// ongoingEvent is the heartbeat the engine emits every detection window while
+// an attack it already reported stays above threshold.
+func ongoingEvent(target string) engine.Event {
+	return engine.Event{
+		Kind:       engine.AttackOngoing,
+		Scope:      engine.ScopeHost,
+		Target:     netip.MustParseAddr(target),
+		Group:      "global",
+		BanEnabled: true,
+		At:         time.Now(),
+	}
+}
+
+// TestOnAttackOngoingRefreshesTTL: a sustained attack that outlives
+// ban.ttl_seconds stays mitigated — the per-window AttackOngoing heartbeat
+// refreshes the live ban's TTL without re-announcing the (already up) route.
+func TestOnAttackOngoingRefreshesTTL(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	yaml := strings.Replace(liveYAML(), "ttl_seconds: 600", "ttl_seconds: 10", 1)
+	rec := newRecorder()
+	m := newMitigator(t, yaml, rec, clk)
+
+	m.OnAttackStarted(startedEvent("203.0.113.66"))
+	if rec.announceCount("203.0.113.66/32") != 1 {
+		t.Fatalf("announce count after start = %d, want 1", rec.announceCount("203.0.113.66/32"))
+	}
+
+	// 8s in, still attacking: refresh the TTL, but do NOT re-announce the route.
+	clk.Advance(8 * time.Second)
+	m.OnAttackOngoing(ongoingEvent("203.0.113.66"))
+	if rec.announceCount("203.0.113.66/32") != 1 {
+		t.Errorf("ongoing re-announced the live route; announce count = %d, want 1", rec.announceCount("203.0.113.66/32"))
+	}
+
+	// 13s since the original ban (> 10s TTL) but only 5s since the refresh: the
+	// ban must still be up. Without the refresh it would have been swept.
+	clk.Advance(5 * time.Second)
+	m.sweepExpired()
+	if len(m.ActiveBans()) != 1 {
+		t.Errorf("ban lapsed mid-attack despite ongoing refresh; active = %d, want 1", len(m.ActiveBans()))
+	}
+}
+
+// TestOnAttackOngoingNoBanIsNoOp: an ongoing heartbeat never CREATES a ban —
+// that is AttackStarted's job (full safety checks + the attack sample).
+func TestOnAttackOngoingNoBanIsNoOp(t *testing.T) {
+	rec := newRecorder()
+	m := newMitigator(t, liveYAML(), rec, nil)
+
+	m.OnAttackOngoing(ongoingEvent("203.0.113.66"))
+	if len(m.ActiveBans()) != 0 {
+		t.Errorf("ongoing created a ban from nothing; active = %d, want 0", len(m.ActiveBans()))
+	}
+	if rec.announceCount("203.0.113.66/32") != 0 {
+		t.Errorf("ongoing announced a route with no ban; count = %d, want 0", rec.announceCount("203.0.113.66/32"))
+	}
+}
+
+// TestOnAttackOngoingRespectsPolicy: ongoing events that policy forbids
+// (ban disabled, or group scope) must be ignored — they must not refresh a TTL.
+func TestOnAttackOngoingRespectsPolicy(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	yaml := strings.Replace(liveYAML(), "ttl_seconds: 600", "ttl_seconds: 10", 1)
+	rec := newRecorder()
+	m := newMitigator(t, yaml, rec, clk)
+	m.OnAttackStarted(startedEvent("203.0.113.66"))
+
+	clk.Advance(8 * time.Second)
+	noBan := ongoingEvent("203.0.113.66")
+	noBan.BanEnabled = false
+	m.OnAttackOngoing(noBan) // alert-only: ignored
+	// Group scope: ignored even though Target matches the active host ban — a
+	// group-total event has no single host to keep mitigated. The matching
+	// Target makes this non-vacuous: drop the ScopeGroup guard and the ban would
+	// be refreshed and survive, failing the assertion below.
+	m.OnAttackOngoing(engine.Event{Kind: engine.AttackOngoing, Scope: engine.ScopeGroup,
+		Target: netip.MustParseAddr("203.0.113.66"), Group: "pool", BanEnabled: true, At: clk.Now()})
+
+	// Neither refreshed the TTL, so by 11s (> 10s TTL) the ban lapses.
+	clk.Advance(3 * time.Second)
+	m.sweepExpired()
+	if len(m.ActiveBans()) != 0 {
+		t.Errorf("ban survived despite only ignored ongoing events; active = %d, want 0", len(m.ActiveBans()))
+	}
+}
+
+// TestOnAttackOngoingRefreshesPrefixTTL: the carpet (prefix) ban lifecycle gets
+// the same sustained-attack protection as per-host bans.
+func TestOnAttackOngoingRefreshesPrefixTTL(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	yaml := strings.Replace(carpetMitigYAML("blackhole", ""), "ttl_seconds: 600", "ttl_seconds: 10", 1)
+	rec := newRecorder()
+	m := newMitigator(t, yaml, rec, clk)
+
+	if b := m.OnAttackStarted(carpetEvent("203.0.113.0/24")); b == nil || b.State != BanActive {
+		t.Fatalf("carpet ban = %+v, want active", b)
+	}
+
+	clk.Advance(8 * time.Second)
+	ev := carpetEvent("203.0.113.0/24")
+	ev.Kind = engine.AttackOngoing
+	m.OnAttackOngoing(ev)
+
+	clk.Advance(5 * time.Second) // 13s since ban, 5s since refresh
+	m.sweepExpired()
+	if len(m.ActiveBans()) != 1 {
+		t.Errorf("carpet ban lapsed despite ongoing refresh; active = %d, want 1", len(m.ActiveBans()))
+	}
+}
+
+// TestOnAttackOngoingPreservesBothDirections: a host attacked in both
+// directions holds one shared ban; an ongoing refresh from a single direction
+// must keep BOTH holds (dirMask OR, not replace) as well as refresh the TTL.
+func TestOnAttackOngoingPreservesBothDirections(t *testing.T) {
+	clk := &mockClock{t: time.Unix(1_700_000_000, 0)}
+	yaml := strings.Replace(liveYAML(), "ttl_seconds: 600", "ttl_seconds: 10", 1)
+	rec := newRecorder()
+	m := newMitigator(t, yaml, rec, clk)
+	target := "203.0.113.66"
+
+	in := startedEvent(target)
+	in.Direction = engine.DirIncoming
+	out := startedEvent(target)
+	out.Direction = engine.DirOutgoing
+	m.OnAttackStarted(in)
+	m.OnAttackStarted(out) // one shared ban held by both directions
+
+	// 8s in, only the outgoing direction re-reports: refresh the shared ban's
+	// TTL while keeping both direction holds.
+	clk.Advance(8 * time.Second)
+	ongoingOut := ongoingEvent(target)
+	ongoingOut.Direction = engine.DirOutgoing
+	m.OnAttackOngoing(ongoingOut)
+
+	clk.Advance(5 * time.Second) // 13s since ban (> 10s TTL), 5s since refresh
+	m.sweepExpired()
+	if len(m.ActiveBans()) != 1 {
+		t.Fatalf("shared ban lapsed despite ongoing refresh; active = %d, want 1", len(m.ActiveBans()))
+	}
+
+	// Both holds survived the refresh: ending ONE direction keeps the ban up,
+	// ending the second withdraws it.
+	endIn := engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr(target), Direction: engine.DirIncoming, At: clk.Now()}
+	if b := m.OnAttackEnded(endIn); b == nil || b.State != BanActive {
+		t.Fatalf("ban after incoming ended = %+v, want still active (outgoing hold survived refresh)", b)
+	}
+	endOut := engine.Event{Kind: engine.AttackEnded, Scope: engine.ScopeHost,
+		Target: netip.MustParseAddr(target), Direction: engine.DirOutgoing, At: clk.Now()}
+	if b := m.OnAttackEnded(endOut); b == nil || b.State != BanWithdrawn {
+		t.Fatalf("ban after outgoing ended = %+v, want withdrawn", b)
 	}
 }
 

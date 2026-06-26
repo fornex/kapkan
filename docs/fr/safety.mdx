@@ -48,18 +48,19 @@ attaque.
 
 ## 2. Aucun bannissement permanent
 
-Chaque annonce porte une TTL (`ban.ttl_seconds`, un paramètre requis sans valeur par défaut) et est
-automatiquement retirée à son expiration. Aucun chemin de code ne produit une route sans expiration.
-Un processus bloqué, une notification perdue ou un opérateur qui s'éloigne ne peuvent jamais laisser
-un hôte blackholé pour toujours.
+Chaque annonce porte une TTL (`ban.ttl_seconds`, un paramètre requis sans valeur par défaut). Tant
+qu'une attaque est toujours détectée, Kapkan la re-signale à chaque fenêtre de détection et la TTL du
+bannissement est rafraîchie — la route reste donc active aussi longtemps que dure le flood, quelle
+que soit sa durée. Dès que la détection s'arrête, la TTL n'est plus rafraîchie et le bannissement est
+retiré automatiquement dans l'intervalle d'une fenêtre de TTL. Aucun chemin de code ne produit une
+route sans expiration : un processus bloqué, une notification perdue ou un opérateur qui s'éloigne ne
+peuvent jamais laisser un hôte blackholé pour toujours.
 
-<Callout type="warning" title="Réglez la TTL plus longue qu'une attaque type">
-La TTL n'est rafraîchie que lorsque la détection se *redéclenche*. Une attaque unique détectée en
-continu annonce la route une seule fois et la TTL devient toute sa durée de vie — la route n'est
-**pas** silencieusement réannoncée tant que la même attaque se poursuit. Donc si la TTL expire en
-plein flood, la route est retirée et la victime est de nouveau exposée jusqu'à ce que l'attaque
-cesse puis se redéclenche plus tard. Réglez `ttl_seconds` confortablement plus longue qu'une attaque
-type (par ex. `1800`–`3600`) ; une TTL trop courte retire la route au milieu d'une attaque en cours.
+<Callout type="info" title="Vous n'avez pas à dimensionner la TTL en fonction de l'attaque">
+Comme une attaque soutenue rafraîchit sa propre TTL, `ban.ttl_seconds` n'est pas un pari sur la durée
+d'une attaque — c'est la durée pendant laquelle un bannissement subsiste *après* que le trafic a déjà
+disparu. Une valeur courte (par ex. `1800`) libère rapidement un hôte rétabli tout en ne coupant
+jamais la protection trop tôt pendant le flood.
 </Callout>
 
 ## 3. Hystérésis de débannissement

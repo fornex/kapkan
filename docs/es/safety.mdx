@@ -45,19 +45,19 @@ dejarte fuera en mitad de un ataque.
 
 ## 2. Sin bloqueos permanentes
 
-Todo anuncio lleva un TTL (`ban.ttl_seconds`, un ajuste obligatorio sin valor por defecto) y se
-retira automáticamente cuando expira. No existe ninguna ruta de código que produzca un anuncio
-sin caducidad. Un proceso bloqueado, una notificación perdida o un operador que se ausenta nunca
-pueden dejar un host en blackhole para siempre.
+Todo anuncio lleva un TTL (`ban.ttl_seconds`, un ajuste obligatorio sin valor por defecto).
+Mientras un ataque siga detectándose, Kapkan lo vuelve a reportar en cada ventana de detección y
+el TTL del bloqueo se refresca, de modo que la ruta se mantiene activa durante todo lo que dure la
+inundación, sea cual sea su duración. En el momento en que la detección cesa, el TTL deja de
+refrescarse y el bloqueo se retira automáticamente en una ventana de TTL. No existe ninguna ruta de
+código que produzca un anuncio sin caducidad: un proceso bloqueado, una notificación perdida o un
+operador que se ausenta nunca pueden dejar un host en blackhole para siempre.
 
-<Callout type="warning" title="Define el TTL más largo que un ataque típico">
-El TTL solo se refresca cuando la detección *se vuelve a disparar*. Un único ataque detectado de
-forma continua anuncia la ruta una vez y el TTL se convierte en toda su vida útil: la ruta **no** se
-vuelve a anunciar de forma silenciosa mientras el mismo ataque sigue en curso. Así que si el TTL
-expira en mitad de la inundación, la ruta se retira y la víctima queda expuesta de nuevo hasta que
-el ataque cesa y más tarde se vuelve a disparar. Define `ttl_seconds` cómodamente más largo que un
-ataque típico (p. ej. `1800`–`3600`); un TTL demasiado corto retira la ruta en mitad de un ataque
-en curso.
+<Callout type="info" title="No tienes que dimensionar el TTL en función del ataque">
+Dado que un ataque sostenido refresca su propio TTL, `ban.ttl_seconds` no es una apuesta sobre
+cuánto durará un ataque: es cuánto tiempo persiste un bloqueo *después* de que el tráfico ya haya
+desaparecido. Un valor corto (p. ej. `1800`) libera rápidamente un host recuperado y aun así nunca
+recorta la protección durante la inundación.
 </Callout>
 
 ## 3. Histéresis de desbloqueo

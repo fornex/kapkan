@@ -107,14 +107,26 @@ type EventKind int
 const (
 	AttackStarted EventKind = iota
 	AttackEnded
+	// AttackOngoing is emitted once per detection window for an attack that is
+	// still above threshold after its AttackStarted. It carries no sample,
+	// classification or reason (those describe the moment of detection) — it
+	// exists solely so mitigation can refresh a live ban's TTL and keep the
+	// route up for the whole duration of a sustained attack, rather than letting
+	// the ban lapse mid-attack when ban.ttl_seconds elapses. Only the host and
+	// carpet (prefix) lifecycles emit it, since only those produce bans.
+	AttackOngoing
 )
 
 // String returns the event kind name used in logs and notifications.
 func (k EventKind) String() string {
-	if k == AttackStarted {
+	switch k {
+	case AttackStarted:
 		return "attack_started"
+	case AttackOngoing:
+		return "attack_ongoing"
+	default:
+		return "attack_ended"
 	}
-	return "attack_ended"
 }
 
 // Event is an attack lifecycle notification emitted on the engine's event

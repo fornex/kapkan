@@ -205,18 +205,35 @@ func TestEndToEndNTPAmplification(t *testing.T) {
 		t.Error("status dry_run = false, want true")
 	}
 
-	// 3) The ban must auto-expire by TTL (3s), even though the flood
-	// continues — proving no permanent bans.
-	if !waitFor(t, 10*time.Second, func() bool {
-		return getJSON(t, base+"/api/v1/status", &st) && st.ActiveBans == 0
-	}) {
-		close(stopFlood)
-		<-floodDone
-		t.Fatalf("ban never expired; status=%+v", st)
+	// 3) While the flood continues the ban must PERSIST past its 3s TTL: the
+	// engine re-reports the ongoing attack every window (AttackOngoing), which
+	// refreshes the ban so the victim stays protected for the whole attack.
+	// Regression guard: a sustained attack that outlives ban.ttl_seconds must
+	// not be left exposed by the ban lapsing mid-attack.
+	persistDeadline := time.Now().Add(8 * time.Second) // > 2× TTL
+	for time.Now().Before(persistDeadline) {
+		ok := getJSON(t, base+"/api/v1/status", &st)
+		// The ban must stay up, and the per-window AttackOngoing heartbeat must
+		// NOT be recorded as additional attacks (it is routed to mitigation only,
+		// never to the API/storage/notify) — active attacks stays exactly 1.
+		if !ok || st.ActiveBans < 1 || st.ActiveAttacks != 1 {
+			close(stopFlood)
+			<-floodDone
+			t.Fatalf("sustained-attack state wrong (want ban up, exactly 1 active attack); status=%+v", st)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
+	// 4) Once the flood stops, the ban must auto-withdraw — proving no permanent
+	// bans. The attack ends after the window drains and hysteresis elapses, the
+	// TTL is no longer refreshed, and the route comes down.
 	close(stopFlood)
 	<-floodDone
+	if !waitFor(t, 20*time.Second, func() bool {
+		return getJSON(t, base+"/api/v1/status", &st) && st.ActiveBans == 0
+	}) {
+		t.Fatalf("ban never withdrawn after flood stopped; status=%+v", st)
+	}
 }
 
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {

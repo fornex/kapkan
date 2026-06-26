@@ -149,9 +149,10 @@ func (a *App) Start(ctx context.Context) error {
 
 	go func() { a.apiErr <- a.API.ListenAndServe(runCtx) }()
 
-	a.wg.Add(3)
+	a.wg.Add(4)
 	go func() { defer a.wg.Done(); a.Engine.Run(runCtx) }()
 	go func() { defer a.wg.Done(); a.consumeEvents(runCtx) }()
+	go func() { defer a.wg.Done(); a.consumeOngoing(runCtx) }()
 	go func() { defer a.wg.Done(); a.persistTraffic(runCtx) }()
 
 	// Update check (opt-in): detached, never on the startup path, stops on ctx.
@@ -237,6 +238,23 @@ func (a *App) consumeEvents(ctx context.Context) {
 				a.Notify.NotifyAttackEnded(ctx, ev, ban)
 				a.Storage.WriteAttack(attackRow(ev, ban))
 			}
+		}
+	}
+}
+
+// consumeOngoing drains the engine's AttackOngoing heartbeats on a goroutine
+// separate from consumeEvents, so heartbeat processing (and any contention on
+// the mitigator lock with the sweeper) can never back up the lifecycle channel.
+// Heartbeats are refresh-only: they keep a live ban's TTL fresh for a sustained
+// attack and are deliberately NOT recorded as attacks or notified — this is not
+// a new attack, just a heartbeat for an already-recorded one.
+func (a *App) consumeOngoing(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-a.Engine.OngoingEvents():
+			a.Mitigate.OnAttackOngoing(ev)
 		}
 	}
 }

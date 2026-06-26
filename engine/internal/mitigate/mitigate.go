@@ -138,6 +138,13 @@ type Mitigator struct {
 	banWindowStart time.Time
 	bansInWindow   int
 
+	// lastOngoingPersist throttles state-file writes driven by per-window TTL
+	// refreshes (OnAttackOngoing): a sustained attack refreshes every second,
+	// but the on-disk ExpiresAt only needs to stay ahead of now for a mid-attack
+	// restart, so we persist at most ~twice per TTL instead of every tick.
+	// Guarded by mu.
+	lastOngoingPersist time.Time
+
 	// persist holds active bans across a restart (nil when ban.state_file is
 	// unset). markDirty signals persistLoop via dirty; persistMu serializes the
 	// file write between persistLoop and the synchronous shutdown flush;
@@ -358,6 +365,65 @@ func (m *Mitigator) OnAttackEnded(ev engine.Event) *Ban {
 	}
 	m.withdrawLocked(b, "attack ended", false)
 	return copyBan(b)
+}
+
+// OnAttackOngoing is called once per detection window for an attack the engine
+// already reported (via AttackStarted) and that is still above threshold. It
+// refreshes the live ban's TTL — bounded to a fresh TTL from now, exactly like
+// a re-report through ban() — so a sustained attack that outlives
+// ban.ttl_seconds keeps its route/rules up instead of being auto-withdrawn
+// mid-attack by the sweeper. It NEVER creates a ban: that is AttackStarted's
+// job, with its full safety checks and the attack sample (FlowSpec rules are
+// frozen there). It is a deliberate no-op when policy forbids mitigation
+// (group scope or ban disabled) or no active ban is currently held — there is
+// nothing to keep alive. "No permanent bans" is preserved: refreshes stop the
+// moment the engine stops reporting the attack (no more AttackOngoing), and the
+// ban then lapses one TTL later.
+func (m *Mitigator) OnAttackOngoing(ev engine.Event) {
+	if ev.Scope == engine.ScopeGroup || !ev.BanEnabled {
+		return
+	}
+	cfg := m.store.Get()
+	now := m.now()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var refreshed bool
+	if ev.Scope == engine.ScopePrefix {
+		p, err := netip.ParsePrefix(ev.Prefix)
+		if err != nil {
+			return
+		}
+		// SAFETY RULE: the whitelist is absolute and may have changed under us.
+		// A reload can add a whitelisted member into a prefix mid carpet-attack;
+		// banPrefix() refuses such a prefix at creation, so stop refreshing it
+		// here too and let the ban lapse at its current TTL.
+		if cfg.PrefixContainsWhitelisted(p) {
+			return
+		}
+		if b, ok := m.prefixBans[p]; ok && b.State == BanActive {
+			b.ExpiresAt = now.Add(cfg.Ban.TTL())
+			refreshed = true
+		}
+	} else if b, ok := m.bans[ev.Target]; ok && b.State == BanActive {
+		b.ExpiresAt = now.Add(cfg.Ban.TTL())
+		b.dirMask |= dirBit(ev.Direction)
+		refreshed = true
+	}
+	if !refreshed {
+		return
+	}
+
+	// Persist the refreshed TTL only periodically, not on every heartbeat: a
+	// continuous attack would otherwise rewrite the whole state file every
+	// second for its full duration. Persisting at most ~twice per TTL keeps the
+	// on-disk ExpiresAt at least TTL/2 in the future, so a restart mid-attack
+	// rehydrates a still-valid ban (and re-detection refreshes it anyway).
+	if now.Sub(m.lastOngoingPersist) >= cfg.Ban.TTL()/2 {
+		m.lastOngoingPersist = now
+		m.markDirty()
+	}
 }
 
 // ManualBan bans target by operator request, respecting the whitelist and the
@@ -1146,6 +1212,16 @@ func (m *Mitigator) sweepExpired() {
 			m.log.Warn("carpet ban prefix no longer in configured networks; auto-withdrawing",
 				"route", b.Route, "prefix", b.Prefix.String())
 			m.withdrawLocked(b, "prefix left configured networks", false)
+			continue
+		}
+		// SAFETY RULE: the whitelist is absolute. A reload can add a whitelisted
+		// member into a prefix mid carpet-attack; withdraw promptly rather than
+		// keep a protected address blackholed as collateral until the TTL lapses.
+		// OnAttackOngoing already stops refreshing such a ban; this takes it down.
+		if cfg.PrefixContainsWhitelisted(b.Prefix) {
+			m.log.Warn("carpet ban prefix now contains a whitelisted member; auto-withdrawing",
+				"route", b.Route, "prefix", b.Prefix.String())
+			m.withdrawLocked(b, "prefix contains whitelisted member", false)
 			continue
 		}
 		m.escalateLocked(b, now, cfg)

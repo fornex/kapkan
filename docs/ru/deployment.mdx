@@ -115,7 +115,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/config.yaml` | `0640` | Конфигурация в YAML, владелец `kapkan:kapkan`. |
 | `/etc/kapkan/kapkan.env` | `0600` | Файл секретов в окружении (токены, учётные данные SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | Защищённый юнит systemd. Установка из `.deb`/`.rpm` помещает его в `/usr/lib/systemd/system/kapkan.service` (расположение поставщика). |
-| `/var/lib/kapkan/` | `0700` | Доступный для записи каталог состояния (`StateDirectory=kapkan`); хранит `ban.state_file`, когда включено сохранение банов. |
+| `/var/lib/kapkan/` | `0700` | Доступный для записи каталог состояния (`StateDirectory=kapkan`); хранит `ban.state_file`, когда включено сохранение блокировок. |
 | `/run/kapkan/` | `0755` | Каталог времени выполнения (`RuntimeDirectory=kapkan`), создаётся при запуске и удаляется при остановке; хранит `kapkan.pid`, чтобы [`kapkan -s reload`](/docs/cli#управление-работающим-демоном) мог найти демон. |
 
 Весь каталог `/etc/kapkan` монтируется для процесса только для чтения через

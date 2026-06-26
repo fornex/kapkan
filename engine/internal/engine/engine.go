@@ -204,8 +204,15 @@ type Engine struct {
 	geo geoip.Resolver
 
 	events chan Event
-	now    func() time.Time
-	log    *slog.Logger
+	// ongoing carries AttackOngoing heartbeats on a SEPARATE channel from the
+	// lifecycle events above. A sustained attack emits one heartbeat per active
+	// host/prefix every tick, so routing them here keeps that high-volume,
+	// self-healing traffic from ever filling the lifecycle buffer and dropping a
+	// (non-self-healing) AttackStarted. A dropped heartbeat is harmless: the next
+	// tick re-emits it.
+	ongoing chan Event
+	now     func() time.Time
+	log     *slog.Logger
 }
 
 // Option configures an Engine.
@@ -276,6 +283,9 @@ func New(store *config.Store, opts ...Option) *Engine {
 	for _, o := range opts {
 		o(e)
 	}
+	// Size the heartbeat channel to match the (possibly overridden) lifecycle
+	// buffer; heartbeat drops self-heal, so this need not be large.
+	e.ongoing = make(chan Event, cap(e.events))
 	e.ringSize = int(e.windowSec) + 1
 	sampleCfg := store.Get().SampleCfg
 	perShard := 0
@@ -295,9 +305,15 @@ func New(store *config.Store, opts ...Option) *Engine {
 	return e
 }
 
-// Events returns the channel on which attack lifecycle events are emitted.
-// The engine never closes it; consumers should select on ctx.Done too.
+// Events returns the channel on which attack lifecycle events (AttackStarted /
+// AttackEnded) are emitted. The engine never closes it; consumers should select
+// on ctx.Done too.
 func (e *Engine) Events() <-chan Event { return e.events }
+
+// OngoingEvents returns the channel of AttackOngoing heartbeats, kept separate
+// from Events so a flood of heartbeats can never displace a lifecycle event.
+// Consume it on its own goroutine; the engine never closes it.
+func (e *Engine) OngoingEvents() <-chan Event { return e.ongoing }
 
 // shardFor returns the shard owning addr. The hash is an FNV-1a over the
 // 16-byte address form, computed without heap allocation.
@@ -609,6 +625,11 @@ func (e *Engine) evalTick(now time.Time) {
 							Classification: cls,
 							Reason:         buildReason(metric, rates[d], *th, &hs.baselines[d], g.Baseline, nowSec),
 						})
+					} else {
+						// Attack still active after its start: re-report so mitigation
+						// refreshes the ban's TTL and the route is not withdrawn out from
+						// under a sustained attack that outlives ban.ttl_seconds.
+						e.emitHostOngoing(addr, g, d, now)
 					}
 					st.belowSince = time.Time{}
 					active++
@@ -619,6 +640,11 @@ func (e *Engine) evalTick(now time.Time) {
 					if now.Sub(st.belowSince) >= hysteresis {
 						e.endAttack(addr, hs, d, rates[d], g, now, "below threshold")
 					} else {
+						// Below threshold but not yet ended (hysteresis tail): the attack
+						// is still active, so keep refreshing the ban. Otherwise a long
+						// hysteresis (>= ttl_seconds) would let the route lapse before
+						// the attack is declared over.
+						e.emitHostOngoing(addr, g, d, now)
 						active++ // still considered active during hysteresis
 					}
 				}
@@ -876,6 +902,10 @@ func (e *Engine) evalCarpets(cfg *config.Config, agg map[netip.Prefix]*carpetAcc
 					Classification: cls,
 					Reason:         buildReason(metric, acc.rates, th, nil, nil, now.Unix()),
 				})
+			} else {
+				// Sustained carpet attack: re-report so mitigation refreshes the
+				// prefix ban's TTL (same rationale as the per-host AttackOngoing).
+				e.emitCarpetOngoing(cfg, prefix, now)
 			}
 			st.belowSince = time.Time{}
 			active++
@@ -888,6 +918,8 @@ func (e *Engine) evalCarpets(cfg *config.Config, agg map[netip.Prefix]*carpetAcc
 			if now.Sub(cs.attack.belowSince) >= hysteresis {
 				e.endCarpet(prefix, cs, acc.rates, now, "below threshold")
 			} else {
+				// Hysteresis tail: still active, keep the prefix ban refreshed.
+				e.emitCarpetOngoing(cfg, prefix, now)
 				active++
 			}
 		}
@@ -905,6 +937,8 @@ func (e *Engine) evalCarpets(cfg *config.Config, agg map[netip.Prefix]*carpetAcc
 		if now.Sub(cs.attack.belowSince) >= hysteresis {
 			e.endCarpet(prefix, cs, Rates{}, now, "below threshold")
 		} else {
+			// Hysteresis tail (prefix went quiet): still active, keep refreshed.
+			e.emitCarpetOngoing(cfg, prefix, now)
 			active++
 		}
 	}
@@ -1080,16 +1114,72 @@ func addRates(a, b Rates) Rates {
 	}
 }
 
+// emitHostOngoing re-reports a still-active host attack so the mitigator can
+// refresh the ban's TTL (see AttackOngoing). It is gated on the group's
+// ban policy: with banning disabled there is no ban to keep alive, so emitting
+// would only add no-op pressure to the shared event channel.
+func (e *Engine) emitHostOngoing(addr netip.Addr, g *config.Group, d int, now time.Time) {
+	if !g.BanEnabled {
+		return
+	}
+	e.emitOngoing(Event{
+		Kind:       AttackOngoing,
+		Scope:      ScopeHost,
+		Target:     addr,
+		Group:      g.Name,
+		Direction:  dirName(d),
+		BanEnabled: true,
+		At:         now,
+	})
+}
+
+// emitCarpetOngoing is the carpet (prefix) counterpart of emitHostOngoing,
+// gated on carpet mitigation being configured (alert-only carpets create no
+// ban to refresh). cfg.Carpet is non-nil whenever evalCarpets runs.
+func (e *Engine) emitCarpetOngoing(cfg *config.Config, prefix netip.Prefix, now time.Time) {
+	if cfg.Carpet.Mitigation == "" {
+		return
+	}
+	e.emitOngoing(Event{
+		Kind:       AttackOngoing,
+		Scope:      ScopePrefix,
+		Target:     prefix.Addr(),
+		Prefix:     prefix.String(),
+		Direction:  DirIncoming,
+		Group:      cfg.GroupFor(prefix.Addr()).Name,
+		BanEnabled: true,
+		At:         now,
+	})
+}
+
 // emit delivers an event without blocking the evaluation loop. If the
 // consumer has fallen a full buffer behind, the event is dropped with an
-// error log: a stalled evaluator would freeze detection for every host,
-// which is worse than one lost notification.
+// error log and a metric: a stalled evaluator would freeze detection for every
+// host, which is worse than one lost notification. The drop is labelled by kind
+// so operators can alert on a dropped AttackStarted/AttackEnded (a real
+// lifecycle event, lost for the whole episode) distinctly from a dropped
+// AttackOngoing (self-healing — re-emitted on the next tick).
 func (e *Engine) emit(ev Event) {
 	select {
 	case e.events <- ev:
 	default:
+		metrics.EventsDroppedTotal.WithLabelValues(ev.Kind.String()).Inc()
 		e.log.Error("engine event channel full, dropping event",
 			"kind", ev.Kind.String(), "target", ev.Target.String())
+	}
+}
+
+// emitOngoing delivers an AttackOngoing heartbeat on the dedicated heartbeat
+// channel. A drop is benign — the next tick re-emits while the attack persists —
+// so it is logged at debug, not error, but still counted so the metric reflects
+// real heartbeat shedding under load.
+func (e *Engine) emitOngoing(ev Event) {
+	select {
+	case e.ongoing <- ev:
+	default:
+		metrics.EventsDroppedTotal.WithLabelValues(ev.Kind.String()).Inc()
+		e.log.Debug("engine heartbeat channel full, dropping ongoing event",
+			"target", ev.Target.String())
 	}
 }
 

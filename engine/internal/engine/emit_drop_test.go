@@ -8,12 +8,15 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/kapkan-io/kapkan/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // dropCountHandler is a thread-safe slog.Handler that counts records whose
-// message matches a target string. emit() does not increment any metric when
-// it drops an event — it only logs at Error level — so observing this log is
-// the only way to assert the drop branch ran.
+// message matches a target string. emit() logs the drop at Error level AND
+// increments metrics.EventsDroppedTotal{kind}; this handler asserts the log,
+// the test below also asserts the metric.
 type dropCountHandler struct {
 	target string
 	mu     *sync.Mutex
@@ -93,6 +96,10 @@ func TestEmitDropsWhenBufferFull(t *testing.T) {
 	inject()
 	clk.Advance(time.Second)
 
+	// Baseline the process-global drop counter; assert the delta below (the vec
+	// is shared across tests, so absolute values are not meaningful).
+	dropsBefore := testutil.ToFloat64(metrics.EventsDroppedTotal.WithLabelValues("attack_started"))
+
 	// A single evalTick walks every tracked host and emits one AttackStarted
 	// per detection. This is the call that must not block when the buffer
 	// fills. Run it on a watched goroutine so a hang surfaces as a test
@@ -128,6 +135,13 @@ func TestEmitDropsWhenBufferFull(t *testing.T) {
 	if got := h.Count(); got != wantDrops {
 		t.Errorf("dropped-event logs = %d, want %d (hostCount %d - bufCap %d)",
 			got, wantDrops, hostCount, bufCap)
+	}
+
+	// (4) The same drops were counted in EventsDroppedTotal under the
+	// attack_started kind (every dropped event here is an AttackStarted).
+	dropsAfter := testutil.ToFloat64(metrics.EventsDroppedTotal.WithLabelValues("attack_started"))
+	if delta := dropsAfter - dropsBefore; delta != float64(wantDrops) {
+		t.Errorf("EventsDroppedTotal{kind=attack_started} delta = %v, want %d", delta, wantDrops)
 	}
 }
 
