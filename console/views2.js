@@ -28,6 +28,10 @@
     ]);
 
     var sample = a.sample;
+    // For outgoing attacks the host itself is the single source, so the engine
+    // ranks the remote *destinations* (the victims) under top_sources/top_asns.
+    // Relabel accordingly so the panel doesn't call destinations "sources".
+    var isOut = a.direction === "outgoing";
     var body = h("div", { class: "drawer__body" }, [
       actions.length ? h("div", { class: "row", style: { justifyContent: "flex-end" } }, actions) : null,
 
@@ -52,8 +56,8 @@
 
       sample ? section("ac.sample", "target", h("div", {}, [
         h("div", { class: "shares" }, [
-          K.shareGroup(I.t("ac.topsources"), sample.top_sources, { src: true }),
-          (sample.top_asns && sample.top_asns.length) ? K.shareGroup(I.t("ac.topasns"), sample.top_asns, { src: true }) : null,
+          K.shareGroup(I.t(isOut ? "ac.topdest" : "ac.topsources"), sample.top_sources, { src: true }),
+          (sample.top_asns && sample.top_asns.length) ? K.shareGroup(I.t(isOut ? "ac.topdestasns" : "ac.topasns"), sample.top_asns, { src: true }) : null,
           K.shareGroup(I.t("ac.protocols"), sample.protocols, {}),
           K.shareGroup(I.t("ac.topsrcports"), sample.top_src_ports, {}),
           K.shareGroup(I.t("ac.topdstports"), sample.top_dst_ports, {})
