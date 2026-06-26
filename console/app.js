@@ -66,6 +66,13 @@
     };
   }
 
+  /* ---------- mobile nav drawer ----------
+     Below 900px the sidebar is an off-canvas drawer (see components.css). The
+     hamburger toggles it there; on desktop the same button still collapses the
+     rail. */
+  function isNavMobile() { return !!(w.matchMedia && w.matchMedia("(max-width: 900px)").matches); }
+  function setNavOpen(open) { document.getElementById("app").classList.toggle("is-nav-open", open); }
+
   /* ---------- shell (built once / on locale change) ---------- */
   function buildShell() {
     K.clear(document.getElementById("brandMark")).appendChild(w.icon("brandmark"));
@@ -86,9 +93,18 @@
     /* role indicator slot (read-only; the real role comes from the API token) */
     K.clear(document.getElementById("roleToggle"));
 
-    /* collapse */
+    /* collapse / nav-drawer toggle */
     var cb = K.clear(document.getElementById("collapseBtn")); cb.appendChild(w.icon("menu"));
-    cb.onclick = function () { state.collapsed = !state.collapsed; document.getElementById("app").classList.toggle("is-collapsed", state.collapsed); };
+    cb.onclick = function () {
+      var app = document.getElementById("app");
+      if (isNavMobile()) {
+        app.classList.remove("is-collapsed"); /* drawer always shows full labels */
+        setNavOpen(!app.classList.contains("is-nav-open"));
+      } else {
+        state.collapsed = !state.collapsed;
+        app.classList.toggle("is-collapsed", state.collapsed);
+      }
+    };
 
     /* live indicator label */
     document.querySelector("#liveInd .live__txt").textContent = I.t("live.label");
@@ -256,7 +272,7 @@
 
   /* ---------- actions ---------- */
   var actions = {
-    setView: function (v) { state.view = v; renderView(); },
+    setView: function (v) { state.view = v; setNavOpen(false); renderView(); },
     setLocale: function (loc) { I.set(loc); state.localeOpen = false; buildShell(); renderShellDynamic(buildCtx()); renderView(); if (state.drawer.open) renderDrawer(); },
     setFilter: function (k, v) { state.filters[k] = v; renderView(); },
     setHostDir: function (d) { state.hostDir = d; renderView(); },
@@ -330,8 +346,9 @@
     if (state.localeOpen && !document.getElementById("localeMenu").contains(e.target)) { state.localeOpen = false; buildLocaleMenu(); }
   });
   document.getElementById("scrim").addEventListener("click", closeDrawer);
+  document.getElementById("navScrim").addEventListener("click", function () { setNavOpen(false); });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") { closeDrawer(); K.closeConfirm(); if (state.localeOpen) { state.localeOpen = false; buildLocaleMenu(); } return; }
+    if (e.key === "Escape") { closeDrawer(); setNavOpen(false); K.closeConfirm(); if (state.localeOpen) { state.localeOpen = false; buildLocaleMenu(); } return; }
     /* trap Tab within the open drawer (skip while a confirm popover is up) */
     if (e.key === "Tab" && state.drawer.open && !document.getElementById("__confirm")) {
       var d = document.getElementById("drawer");
