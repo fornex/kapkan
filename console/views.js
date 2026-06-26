@@ -454,9 +454,15 @@
       var mult = blPps ? r.pps / blPps : null;
       return { host: host, r: r, blPps: blPps, mult: mult, attacked: host.in_attack && dir === "incoming" };
     });
+    /* attacked hosts first, then by throughput (mbps) desc; tie-break on the
+       target so the order is STABLE across the 3s poll re-render — otherwise
+       hosts tied on rate (e.g. all still LEARNING) reshuffle every poll, which
+       makes rows jump out from under the cursor and expand-clicks miss. */
     list.sort(function (a, b) {
       if (a.attacked !== b.attacked) return a.attacked ? -1 : 1;
-      return (b.mult || 0) - (a.mult || 0);
+      var dm = (b.r.mbps || 0) - (a.r.mbps || 0);
+      if (dm) return dm;
+      return a.host.target < b.host.target ? -1 : a.host.target > b.host.target ? 1 : 0;
     });
 
     var dirSeg = h("div", { class: "seg" }, ["incoming", "outgoing"].map(function (d) {

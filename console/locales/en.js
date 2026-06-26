@@ -198,7 +198,7 @@
       "ho.inattack": "In attack",
       "ho.empty.title": "No tracked hosts yet",
       "ho.empty.sub": "Top talkers populate from flow samples. On a fresh install this fills within a few polling cycles.",
-      "ho.headline": "Ranked by rate over learned baseline",
+      "ho.headline": "Ranked by throughput (Mbit/s)",
 
       /* hostgroups */
       "hg.policy": "Policy",
