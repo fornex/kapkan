@@ -202,7 +202,8 @@
 
       "tr.live": "Live (Abfragepuffer)",
       "tr.aggregate": "Gesamt: eingehend / ausgehend",
-      "tr.perhost": "Top-Hosts — Live-Rate",
+      "tr.perhost.mbps": "Top-Hosts — nach Bandbreite",
+      "tr.perhost.pps": "Top-Hosts — nach Paketrate",
       "tr.window": "Letzte {n} Stichproben · 3-Sek-Takt",
       "tr.history.title": "Historische Berichte",
       "tr.history.note": "Langzeit-Bandbreite, pps und die Angriffs-Zeitleiste stammen aus ClickHouse. Aktivieren Sie den Speicher in der Engine-Konfiguration, um diese Ansicht zu füllen.",

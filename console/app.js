@@ -25,7 +25,7 @@
     expanded: new Set(),
     drawer: { open: false, live: false, key: null, attack: null },
     localeOpen: false,
-    buf: { aggIn: [], aggOut: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {} },
+    buf: { aggIn: [], aggOut: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {}, hostMbps: {} },
     traffic: { key: null, available: false, points: [], loading: false, fetchedAt: 0 },
     last: { rung: -1 }
   };
@@ -40,6 +40,8 @@
     hostsData.forEach(function (host) {
       if (!b.hostPps[host.target]) b.hostPps[host.target] = [];
       push(b.hostPps[host.target], host.rates.pps);
+      if (!b.hostMbps[host.target]) b.hostMbps[host.target] = [];
+      push(b.hostMbps[host.target], host.rates.mbps);
     });
   }
   function push(arr, v) { arr.push(v); if (arr.length > WINDOW) arr.shift(); }

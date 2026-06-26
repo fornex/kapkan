@@ -242,7 +242,19 @@
       h("div", { class: "tcard__chart", style: { height: "130px" } }, K.areaChart(b.aggOut.length ? b.aggOut : [0, 0], { color: "var(--chart-out)", height: 130 }))
     ]);
 
-    /* top host sparklines from per-host buffer */
+    /* top host sparklines from per-host buffer — ranked by bandwidth */
+    var hostCardsMbps = ctx.hosts.slice().sort(function (x, y) { return y.rates.mbps - x.rates.mbps; }).slice(0, 6).map(function (host) {
+      var series = (b.hostMbps[host.target] || [host.rates.mbps]);
+      return h("div", { class: "tcard" }, [
+        h("div", { class: "tcard__head" }, [
+          h("div", { class: "tcard__label mono", text: host.target }),
+          h("div", { class: "tcard__now", style: { fontSize: "var(--t-md)" }, text: I.mbps(host.rates.mbps) })
+        ]),
+        h("div", { class: "tcard__chart", style: { height: "44px" } }, K.sparkline(series, { color: host.in_attack ? "var(--active)" : "var(--chart-in)", height: 44 }))
+      ]);
+    });
+
+    /* top host sparklines from per-host buffer — ranked by packet rate */
     var hostCards = ctx.hosts.slice().sort(function (x, y) { return y.rates.pps - x.rates.pps; }).slice(0, 6).map(function (host) {
       var series = (b.hostPps[host.target] || [host.rates.pps]);
       return h("div", { class: "tcard" }, [
@@ -289,7 +301,11 @@
         h("div", { class: "card__body" }, h("div", { class: "cols-2" }, [bigIn, bigOut]))
       ]),
       h("div", { class: "card mt-4" }, [
-        h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("server"), h("span", { text: I.t("tr.perhost") })])),
+        h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("server"), h("span", { text: I.t("tr.perhost.mbps") })])),
+        h("div", { class: "card__body" }, h("div", { class: "cols-3" }, hostCardsMbps))
+      ]),
+      h("div", { class: "card mt-4" }, [
+        h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("server"), h("span", { text: I.t("tr.perhost.pps") })])),
         h("div", { class: "card__body" }, h("div", { class: "cols-3" }, hostCards))
       ]),
       historyBlock

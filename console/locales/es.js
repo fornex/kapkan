@@ -216,7 +216,8 @@
       /* traffic */
       "tr.live": "En vivo (búfer de sondeo)",
       "tr.aggregate": "Entrante / saliente agregado",
-      "tr.perhost": "Principales hosts — tasa en vivo",
+      "tr.perhost.mbps": "Principales hosts — por ancho de banda",
+      "tr.perhost.pps": "Principales hosts — por paquetes/s",
       "tr.window": "Últimas {n} muestras · cadencia 3 s",
       "tr.history.title": "Informes históricos",
       "tr.history.note": "El ancho de banda de largo plazo, los pps y la cronología de ataques provienen de ClickHouse. Activa el almacenamiento en la configuración del motor para llenar esta vista.",
