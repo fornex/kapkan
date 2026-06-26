@@ -19,6 +19,34 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-26
+
+### Added
+
+- Operator console: a **top-hosts-by-bandwidth** table (ranked by mbps) above the
+  existing top-hosts-by-pps table, plus an **aggregate ingress/egress pps** card
+  summarizing total packet rate, placed directly beneath the bandwidth card.
+
+### Fixed
+
+- The operator console is now usable on mobile: a responsive layout for narrow
+  viewports, with filter-dropdown chevrons given breathing room from the right edge.
+- Top-hosts tables rank by throughput with a stable sort, so equal-rate hosts no
+  longer reorder between refreshes.
+- Outgoing-attack remote endpoints are labeled as destinations rather than sources.
+- Sustained attacks: the ban TTL is refreshed while an attack is ongoing so the
+  mitigation is not withdrawn mid-attack, AttackOngoing heartbeats are isolated
+  from one another, and the carpet-bombing whitelist is tightened — with a new
+  `events_dropped` drop metric.
+
+## [1.2.1] - 2026-06-24
+
+### Fixed
+
+- sFlow samples are no longer counted as flows: `flows_per_sec` was effectively a
+  duplicate of `pps` for sFlow exporters (which carry no flow records). It is now
+  NetFlow/IPFIX-only and reports 0 for sFlow.
+
 ## [1.2.0] - 2026-06-24
 
 ### Added
