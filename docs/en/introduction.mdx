@@ -6,15 +6,24 @@ export const metadata = {
 
 # Introduction
 
-**Kapkan is free, open-source DDoS detection and RTBH mitigation for ISPs and hosting providers.**
+**Kapkan is free, open-source DDoS (Distributed Denial of Service) detection and [RTBH](/docs/glossary) mitigation for ISPs and hosting providers.**
 
 It is a single Go binary that ingests flow telemetry — NetFlow v5/v9, IPFIX and sFlow v5 —
-from your routers, detects volumetric attacks against the prefixes you protect in seconds,
-and triggers automated BGP RTBH (remotely-triggered blackhole) mitigation. It ships with a
+from your routers, detects volumetric attacks against the [prefixes](/docs/glossary) (IP ranges
+in CIDR form, e.g. `203.0.113.0/24`) you protect in seconds, and triggers automated
+[BGP](/docs/glossary) (Border Gateway Protocol — how routers exchange routes)
+[RTBH](/docs/glossary) (remotely-triggered blackhole) mitigation. It ships with a
 REST API, a built-in web dashboard, Prometheus metrics, and Telegram / Slack / email /
 webhook / exec-hook notifications.
 
 Kapkan is a free replacement for the features commercial flow-DDoS products charge for.
+
+<Callout type="info" title="New to BGP, RTBH or NetFlow?">
+That's fine — the [Quickstart](/docs/quickstart) walks you through it, the
+[Glossary](/docs/glossary) explains every term, and Kapkan won't touch a single route until
+you say so. Kapkan handles *volumetric* attacks (floods that try to saturate your link or
+host with raw packet and bit volume), not application-layer attacks.
+</Callout>
 
 <Callout type="warning" title="Dry-run by default">
 Until you explicitly set `dry_run: false`, every would-be blackhole is logged and exposed
@@ -36,7 +45,8 @@ production telemetry and validate detection before it can touch a single route. 
   [GoBGP](https://github.com/osrg/gobgp) speaker, drop only the attack vector with
   surgical [BGP FlowSpec](/docs/flowspec) rules (RFC 8955/8956), or divert the victim to a
   [scrubbing centre](/docs/scrubbing) instead of dropping its traffic — optionally stepped up
-  over time with [escalation ladders](/docs/escalation).
+  over time with [escalation ladders](/docs/escalation). Kapkan tracks each mitigation
+  decision as a **ban**; for the default method a ban *is* a blackhole route (RTBH).
 - **Observe** — a REST API, an embedded web dashboard, Prometheus `/metrics`, and
   notifications over Telegram, Slack, email, webhook and an exec hook.
 - **Persist (optional)** — keep attack and traffic history in
@@ -45,8 +55,8 @@ production telemetry and validate detection before it can touch a single route. 
 ## Who it is for
 
 Network operators — ISPs, hosting providers and anyone running BGP — who need automated
-volumetric-attack mitigation without a commercial license. If you currently run FastNetMon
-Community, Kapkan is designed so you lose nothing and gain Advanced-grade detection.
+volumetric-attack mitigation without a commercial license (including FastNetMon Community
+users looking for an open-source alternative).
 
 ## Why Kapkan
 
@@ -65,11 +75,16 @@ but **not** in the current release:
 
 - Built-in high-availability deduplication across instances
 - Port-mirror (SPAN / AF_PACKET / XDP) capture as an ingest source
-- Per-tenant notification routing (tenant **API** scoping ships today, see [Multi-tenancy](/docs/multi-tenancy))
+- Per-tenant notification routing (today, notifications are global; tenant scoping applies to the [API](/docs/multi-tenancy) only)
 
 ## Next steps
 
-- [Quickstart](/docs/quickstart) — download Kapkan and see your first detection in a few minutes.
+**New here? Start with the [Quickstart](/docs/quickstart)** — download Kapkan, point a router
+at it, and see your first detection. (No router yet? You can still drive synthetic attack
+traffic from source — the Quickstart shows how.)
+
+Then:
+
 - [How it works](/docs/how-it-works) — the ingest → engine → mitigate pipeline.
 - [Configuration reference](/docs/configuration) — every key in the YAML file.
 - [Going live](/docs/going-live) — how to safely turn off dry-run.

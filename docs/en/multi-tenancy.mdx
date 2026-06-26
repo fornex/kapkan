@@ -35,25 +35,39 @@ api:
     - { name: b-ops,    token_env: KAPKAN_B,     role: operator, tenant: "customerB" }
 ```
 
+## How to set it up
+
+Three steps map directly to the YAML above:
+
+1. **Tag each customer's hostgroup(s)** with `tenant: "customerA"` (the same label can repeat across several groups — a customer's web and DNS groups, say).
+2. **Add an API token** under `api.tokens` carrying that same `tenant:` plus a `role:` — `viewer` is read-only, `operator` can also ban/unban.
+3. **Hand the customer that token.** They now see and touch only their own prefixes; everything else (other tenants, untagged groups) is invisible to them.
+
+That's the whole workflow. The rest of this page explains how ownership is resolved and exactly what a scoped token can and can't do.
+
 ## The model
 
 "Which tenant owns this IP" is answered by the **same** longest-prefix hostgroup lookup the
-engine and mitigator already use to attribute traffic — there is one source of truth for IP
-ownership, and the resolution never runs on the per-flow detection path. A tenant can span
-several hostgroups (a customer with separate web and DNS groups). The implicit
-global/fallback group can carry a top-level `tenant` so catch-all traffic is attributed to a
-house tenant; a hostgroup with **no** `tenant` is unlabeled and visible only to admin tokens.
+engine and mitigator already use to attribute traffic — when prefixes overlap, the most specific
+matching hostgroup wins ([longest-prefix match](/docs/glossary)). A tenant can span
+several hostgroups (a customer with separate web and DNS groups).
+
+Any IP that falls outside every named hostgroup is handled by the implicit **global/fallback
+group** (the catch-all). That global group can carry a top-level `tenant` so this catch-all
+traffic is attributed to a "house" tenant; a named hostgroup with **no** `tenant` is unlabeled
+and visible only to admin tokens.
 
 A tenant label is **not** a unit of mitigation policy — thresholds, BGP attributes and
 escalation stay per-hostgroup. It is purely an ownership tag used to scope the API.
 
 ## Token scope
 
-An [API token](/docs/authentication) gains an optional `tenant`, building on its role:
+An [API token](/docs/authentication) gains an optional `tenant`, building on its role: a
+`viewer` can read but not change anything; an `operator` can also ban/unban.
 
 | Token | Sees | May mutate |
 | --- | --- | --- |
-| unscoped (no `tenant`) | all tenants (admin) | per its role |
+| unscoped (no `tenant`) | all tenants (admin) | everything its role allows (a viewer reads all tenants; an operator may ban/unban in all tenants) |
 | `tenant: customerA`, `role: viewer` | only customerA | nothing |
 | `tenant: customerA`, `role: operator` | only customerA | only customerA |
 
@@ -63,10 +77,9 @@ silently see nothing).
 
 ## Enforcement
 
-Scoping is **default-deny for scoped tokens** at a single choke point: the request's tenant is
-derived once during authentication, and one visibility predicate decides every row. A new read
-endpoint that forgets to filter would, for a scoped token, return nothing — never another
-tenant's data.
+Scoping is **default-deny: a scoped token only ever sees its own tenant.** The tenant is derived
+once during authentication and applied to every row, so a scoped token can never fall through to
+another tenant's data.
 
 - **Reads** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` and `/audit` return only rows
   whose owning group carries the caller's tenant. `/status` is rebuilt per scope: a scoped token
@@ -82,6 +95,25 @@ tenant's data.
   every tenant's policy and the token set itself.
 - **Ambiguity fails closed** — if one bearer secret matches tokens of different role or tenant
   (a reused secret), the request is refused rather than resolved to the wider scope.
+
+### Verify isolation
+
+Hand the scoped token to `curl` and confirm it only sees its own tenant. `/api/v1/status`
+returns just that tenant's hostgroups:
+
+```bash
+curl -H "Authorization: Bearer $KAPKAN_A" http://127.0.0.1:8080/api/v1/status
+# → only customerA's hostgroups and counts; no other tenant, no global config
+```
+
+Then confirm a cross-tenant ban is refused — banning an address outside the token's tenant
+returns `403`:
+
+```bash
+curl -X POST -H "Authorization: Bearer $KAPKAN_A" \
+  -d '{"ip":"198.51.100.5"}' http://127.0.0.1:8080/api/v1/ban
+# → 403 {"error":"target is outside your tenant"}
+```
 
 <Callout type="info" title="/metrics and the dashboard">
 `/metrics` is not tenant-scoped — it stays open for Prometheus scraping and requires no token,

@@ -6,10 +6,11 @@ export const metadata = {
 
 # Mitigación FlowSpec
 
-El blackholing RTBH deja a toda la víctima fuera de línea: cambia el ataque por una caída del
-servicio. BGP FlowSpec (RFC 8955 para IPv4, RFC 8956 para IPv6) distribuye en su lugar una regla
-que descarta solo el tráfico de ataque coincidente, de modo que la víctima sigue sirviendo todo
-lo demás.
+El blackholing [RTBH](/docs/glossary) (remotely-triggered blackhole: una ruta BGP que descarta
+todo el tráfico hacia la víctima) deja a toda la víctima fuera de línea: cambia el ataque por una
+caída del servicio. BGP [FlowSpec](/docs/glossary) (RFC 8955 para IPv4, RFC 8956 para IPv6)
+distribuye en su lugar una regla que descarta solo el tráfico de ataque coincidente, de modo que
+la víctima sigue sirviendo todo lo demás.
 
 <Callout type="info" title="Primero en dry-run">
 Las reglas generadas aparecen en `/api/v1/attacks` (`method`, `flowspec`), en `/api/v1/bans` y
@@ -26,7 +27,7 @@ Establece el método de mitigación en `flowspec`. El método predeterminado es 
 mitigation: flowspec            # default method for all groups (default: blackhole)
 flowspec:
   action: discard               # or rate_limit
-  rate_mbps: 100                # required for rate_limit
+  rate_mbps: 100                # only used when action: rate_limit (inert under discard)
 hostgroups:
   - name: web
     networks: ["203.0.113.0/26"]
@@ -51,8 +52,8 @@ víctima como destino más el vector:
 | mixto / desconocido | `dst=victim` (más una regla por cada puerto de origen reflejado dominante en la muestra) |
 
 La víctima siempre se hace coincidir como un `/32` (IPv4) o un `/128` (IPv6). **FlowSpec para IPv6
-está a plena paridad con IPv4**, mientras que la propia hoja de ruta de FastNetMon todavía lista
-FlowSpec para IPv6 como no soportado.
+funciona de forma idéntica a IPv4**: se generan las mismas reglas, con la víctima coincidida como
+un `/128`.
 
 ## Ataques salientes
 
@@ -88,7 +89,14 @@ inocente de un atacante.
 
 - La coincidencia `tcp-flags` para los SYN floods es una máscara de bits que también coincide con
   SYN-ACK, por lo que una acción `discard` descarta también las conexiones iniciadas de forma
-  saliente por la víctima; prefiere `rate_limit` para los vectores TCP.
+  saliente por la víctima; prefiere `rate_limit` para los vectores TCP. Para usarlo, establece
+  `action: rate_limit` y un techo en `rate_mbps` (los ejemplos anteriores usan `discard`):
+
+  ```yaml
+  flowspec:
+    action: rate_limit            # rate-cap the vector instead of dropping it
+    rate_mbps: 100                # ceiling, megabits/s
+  ```
 - `max_active_bans` limita los **bans**, no las reglas: un ban de FlowSpec puede transportar hasta
   8 reglas, así que N bans pueden suponer hasta 8N reglas en el RIB de tu upstream. Vigila la
   [métrica](/docs/metrics) `kapkan_mitigate_flowspec_rules` frente al límite de rutas FlowSpec de tus
@@ -105,6 +113,13 @@ FlowSpec circula sobre los **mismos vecinos BGP** que RTBH: el AFI/SAFI de FlowS
 forma aditiva, y un par que no lo soporte simplemente no lo negociará. FlowSpec **no es válido para
 los hostgroups con `calculation: total`**: no hay un único prefijo de víctima al que hacer
 coincidir.
+
+Para confirmar que tu upstream realmente acepta las reglas: en dry-run, comprueba que el campo
+`flowspec` esté poblado en `/api/v1/attacks`. Tras la puesta en producción, la
+[métrica](/docs/metrics) `kapkan_mitigate_flowspec_rules` con `mode="real"` debería ser distinta de
+cero. Si un par rechaza FlowSpec, Kapkan revierte el ban a blackhole y lo expone en `/api/v1/bans`
+(los campos `fell_back_from` y `fell_back_reason`) y en las notificaciones, de modo que un upstream
+silenciosamente no compatible permanece visible.
 
 ## Relacionado
 

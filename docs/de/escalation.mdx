@@ -8,7 +8,11 @@ export const metadata = {
 
 Eine einzelne `mitigation`-Methode löst in dem Moment, in dem ein Angriff erkannt wird, immer dieselbe
 Reaktion aus. Eine Eskalationsstufenleiter hingegen **verstärkt die Reaktion, je länger ein Angriff
-andauert** — deklarativ, dort, wo FastNetMon Sie ein Callback-Skript schreiben lässt.
+andauert** — deklarativ, ohne Callback-Skripte.
+
+Die meisten Deployments kommen mit einer einzelnen `mitigation:`-Methode aus. Greifen Sie nur dann zu
+einer Leiter, wenn Sie zunächst eine sanftere Reaktion wünschen (z. B. erst eine Warnung, dann gezieltes
+Filtern), bevor Sie zu einem vollständigen [Blackhole](/docs/glossary) greifen.
 
 ```yaml
 escalation:                         # supersedes `mitigation` when present
@@ -30,11 +34,14 @@ ankündigen kann; die `flowspec`- und `scrubbing`-Blöcke oben werden nur für d
 ## So greifen die Stufen
 
 Das `after_seconds` jeder Stufe wird ab dem Beginn des Angriffs gemessen. Eine Stufe greift, sobald so
-viel Zeit verstrichen ist **und der Ban noch nicht zurückgenommen wurde** — die Rücknahme erfolgt erst,
-nachdem der Datenverkehr für das gesamte Unban-Hysteresefenster unter dem Schwellenwert geblieben ist. Die
-Stufenuhr läuft währenddessen durchgehend ab dem Beginn des Angriffs weiter.
+viel Zeit verstrichen ist **und der Ban noch aktiv ist**. (Ein Ban wird erst zurückgenommen, nachdem der
+Datenverkehr für die konfigurierte Abkühlphase, `ban.unban_hysteresis_seconds`, unter dem Schwellenwert
+geblieben ist — siehe [Konfiguration](/docs/configuration).) Die Stufenuhr läuft währenddessen durchgehend
+ab dem Beginn des Angriffs weiter.
 
 - Die erste Stufe muss bei `0` Sekunden liegen.
+- Eine Leiter darf höchstens **5 Stufen** haben — das ist eine harte Grenze; der Daemon verweigert den
+  Start bei einer längeren Leiter.
 - `action` ist `none` (nur Warnung), `flowspec`, `divert` ([Scrubbing](/docs/scrubbing)) oder
   `blackhole`.
 - Eine Leiter darf die Reaktion nur **halten oder verstärken**: `none` < `flowspec` < `divert` <
@@ -49,16 +56,22 @@ funktionierende Stufe und wiederholt den Versuch beim nächsten Tick. Werden meh
 fällig (ein lang andauernder Angriff oder der Daemon, der nach einer Pause aufholt), springt der Ban
 direkt zur höchsten fälligen Stufe und kündigt die übersprungenen Stufen nie an.
 
-Die einzige Ausnahme ist `divert → blackhole`: Beide nutzen dasselbe Host-Route-NLRI, sodass die
-erneute Blackhole-Ankündigung die Divert-Route atomar ersetzt — kein separates Zurückziehen, keine
-Lücke. Wechsel zwischen Adressfamilien (von FlowSpec-Regeln zu einer Host-Route oder zurück) sind der
-oben beschriebene Make-before-break-Fall.
+Eine `flowspec`- oder `divert`-Stufe, deren Ankündigung der Upstream-Peer ablehnt, fällt auf Blackhole
+zurück (es sei denn, Sie setzen `ban.fallback: none` in der [Konfiguration](/docs/configuration)); die API
+und Benachrichtigungen weisen dies über das Feld `fell_back_from` aus. Blackhole- und reine
+Warnungs-Stufen haben kein Fallback.
+
+Die einzige Ausnahme vom Ablauf „erst ankündigen, dann zurückziehen“ ist `divert → blackhole`: Beide
+kündigen dieselbe Host-Route an (das `/32` oder `/128` des Opfers), sodass die Blackhole-Ankündigung die
+Divert-Route atomar ersetzt — kein separates Zurückziehen, keine Lücke. Wechsel zwischen Adressfamilien
+(FlowSpec-Regeln vs. eine Host-Route) folgen dem oben beschriebenen Make-before-break-Fall.
 
 ## Lebenszyklus und Kompatibilität
 
 Die Leiter ist **pro Hostgroup überschreibbar** und teilt sich den restlichen Ban-Lebenszyklus: das
-automatische TTL-Zurückziehen, das `max_active_bans`-Limit, die absolute Whitelist und den Dry-run (der
-die Leiter voranschreiten lässt und jede Stufe protokolliert, aber nie ankündigt).
+automatische TTL-Zurückziehen, das `max_active_bans`-Limit, die Blast-Radius-Limits
+(`max_banned_fraction`, `max_bans_per_window`), die absolute Whitelist und den Dry-run (der die Leiter
+voranschreiten lässt und jede Stufe protokolliert, aber nie ankündigt).
 
 Ist kein `escalation`-Block gesetzt, verhält sich die einzelne `mitigation`-Methode exakt wie eine
 einstufige Leiter bei `0` Sekunden — vollständige Abwärtskompatibilität. Jeder Ban in `/api/v1/bans`
@@ -71,3 +84,4 @@ gibt die vollständige konfigurierte Leiter (`escalation`), den Index der aktuel
 - [FlowSpec-Mitigation](/docs/flowspec) — die chirurgische Methode, die eine Leiter durchlaufen kann.
 - [Traffic-Umleitung](/docs/scrubbing) — die `divert`-Stufe, die scrubbt, statt zu verwerfen.
 - [Konfigurationsreferenz](/docs/configuration) · [REST-API](/docs/api)
+- [Glossar](/docs/glossary) — BGP, RTBH/Blackhole, FlowSpec, Host-Route und die übrigen hier verwendeten Begriffe.

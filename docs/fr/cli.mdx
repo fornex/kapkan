@@ -63,6 +63,7 @@ démarrage.
 ```sh
 kapkan -s reload    # re-read the config file (SIGHUP)
 kapkan -s stop      # graceful shutdown (SIGTERM)
+kapkan -s quit      # alias of stop
 ```
 
 `-s` lit l'identifiant de processus depuis `-pid-file` (par défaut `/run/kapkan/kapkan.pid`, écrit
@@ -103,7 +104,8 @@ kapkan -check-config /etc/kapkan/config.yaml
 
 Effectue exactement la même analyse et la même validation que le moteur — y compris les règles
 inter-champs qu'un schéma statique ne peut pas exprimer — puis affiche la configuration résolue (mode,
-réseaux protégés et l'atténuation effective par [hostgroup](/docs/hostgroups)) et se termine :
+réseaux protégés, les écouteurs de flow configurés, le nombre de groupes, et l'atténuation effective
+par [hostgroup](/docs/hostgroups)) et se termine :
 
 | Code de sortie | Signification |
 | --- | --- |

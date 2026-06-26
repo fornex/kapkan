@@ -6,15 +6,25 @@ export const metadata = {
 
 # Einführung
 
-**Kapkan ist eine kostenlose, quelloffene DDoS-Erkennung und RTBH-Mitigation für ISPs und Hosting-Anbieter.**
+**Kapkan ist eine kostenlose, quelloffene DDoS-Erkennung (Distributed Denial of Service) und [RTBH](/docs/glossary)-Mitigation für ISPs und Hosting-Anbieter.**
 
 Es ist ein einzelnes Go-Binary, das Flow-Telemetrie — NetFlow v5/v9, IPFIX und sFlow v5 —
-von Ihren Routern aufnimmt, volumetrische Angriffe auf die von Ihnen geschützten Präfixe
-in Sekunden erkennt und eine automatisierte BGP-RTBH-Mitigation (Remotely-Triggered Blackhole)
-auslöst. Es wird mit einer REST-API, einem integrierten Web-Dashboard, Prometheus-Metriken und
-Benachrichtigungen über Telegram / Slack / E-Mail / Webhook / Exec-Hook ausgeliefert.
+von Ihren Routern aufnimmt, volumetrische Angriffe auf die von Ihnen geschützten [Präfixe](/docs/glossary) (IP-Bereiche
+in CIDR-Form, z. B. `203.0.113.0/24`) in Sekunden erkennt und eine automatisierte
+[BGP](/docs/glossary)- (Border Gateway Protocol — wie Router Routen austauschen)
+[RTBH](/docs/glossary)-Mitigation (Remotely-Triggered Blackhole) auslöst. Es wird mit einer
+REST-API, einem integrierten Web-Dashboard, Prometheus-Metriken und Benachrichtigungen über
+Telegram / Slack / E-Mail / Webhook / Exec-Hook ausgeliefert.
 
 Kapkan ist ein kostenloser Ersatz für die Funktionen, für die kommerzielle Flow-DDoS-Produkte Geld verlangen.
+
+<Callout type="info" title="Neu bei BGP, RTBH oder NetFlow?">
+Kein Problem — der [Schnellstart](/docs/quickstart) führt Sie Schritt für Schritt durch, das
+[Glossar](/docs/glossary) erklärt jeden Begriff, und Kapkan rührt keine einzige Route an, bevor
+Sie es nicht erlauben. Kapkan behandelt *volumetrische* Angriffe (Floods, die versuchen, Ihre
+Leitung oder Ihren Host mit roher Paket- und Bitmenge zu sättigen), keine Angriffe auf
+Anwendungsebene.
+</Callout>
 
 <Callout type="warning" title="Standardmäßig im Dry-run">
 Bis Sie explizit `dry_run: false` setzen, wird jeder potenzielle Blackhole protokolliert und
@@ -36,7 +46,8 @@ einzige Route berühren kann. Siehe das [Sicherheitsmodell](/docs/safety).
   [GoBGP](https://github.com/osrg/gobgp)-Speaker, gezieltes Verwerfen ausschließlich des
   Angriffsvektors mit chirurgisch präzisen [BGP-FlowSpec](/docs/flowspec)-Regeln (RFC 8955/8956)
   oder Umleitung des Opfers in ein [Scrubbing-Center](/docs/scrubbing), statt seinen Verkehr zu verwerfen —
-  optional über die Zeit hochgestuft mit [Eskalationsstufen](/docs/escalation).
+  optional über die Zeit hochgestuft mit [Eskalationsstufen](/docs/escalation). Kapkan verfolgt jede
+  Mitigation-Entscheidung als **Ban**; bei der Standardmethode *ist* ein Ban eine Blackhole-Route (RTBH).
 - **Beobachten** — eine REST-API, ein eingebettetes Web-Dashboard, Prometheus `/metrics` und
   Benachrichtigungen über Telegram, Slack, E-Mail, Webhook und einen Exec-Hook.
 - **Persistieren (optional)** — Angriffs- und Datenverkehrshistorie in
@@ -45,9 +56,8 @@ einzige Route berühren kann. Siehe das [Sicherheitsmodell](/docs/safety).
 ## Für wen es gedacht ist
 
 Netzwerkbetreiber — ISPs, Hosting-Anbieter und alle, die BGP betreiben — die eine automatisierte
-Mitigation volumetrischer Angriffe ohne kommerzielle Lizenz benötigen. Wenn Sie derzeit FastNetMon
-Community einsetzen, ist Kapkan so konzipiert, dass Sie nichts verlieren und eine Erkennung auf
-Advanced-Niveau gewinnen.
+Mitigation volumetrischer Angriffe ohne kommerzielle Lizenz benötigen (einschließlich Nutzern von
+FastNetMon Community, die eine quelloffene Alternative suchen).
 
 ## Warum Kapkan
 
@@ -66,11 +76,16 @@ sind aber **nicht** im aktuellen Release enthalten:
 
 - Integrierte Hochverfügbarkeits-Deduplizierung über Instanzen hinweg
 - Port-Mirror-Erfassung (SPAN / AF_PACKET / XDP) als Aufnahmequelle
-- Benachrichtigungs-Routing pro Mandant (das Scoping der **API** pro Mandant gibt es bereits, siehe [Mandantenfähigkeit](/docs/multi-tenancy))
+- Benachrichtigungs-Routing pro Mandant (heute sind Benachrichtigungen global; das Scoping pro Mandant gilt nur für die [API](/docs/multi-tenancy))
 
 ## Nächste Schritte
 
-- [Schnellstart](/docs/quickstart) — laden Sie Kapkan herunter und sehen Sie Ihre erste Erkennung in wenigen Minuten.
+**Neu hier? Beginnen Sie mit dem [Schnellstart](/docs/quickstart)** — laden Sie Kapkan herunter, richten
+Sie einen Router darauf aus und sehen Sie Ihre erste Erkennung. (Noch kein Router? Sie können
+synthetischen Angriffsverkehr auch direkt von der Quelle erzeugen — der Schnellstart zeigt, wie.)
+
+Dann:
+
 - [Funktionsweise](/docs/how-it-works) — die Pipeline Aufnahme → Engine → Mitigation.
 - [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.
 - [In Betrieb gehen](/docs/going-live) — wie Sie Dry-run sicher abschalten.

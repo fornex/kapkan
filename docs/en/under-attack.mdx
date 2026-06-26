@@ -1,0 +1,105 @@
+export const metadata = {
+  title: "Under attack now",
+  description:
+    "A short, copy-paste runbook for an operator whose network is being attacked right now and already has Kapkan running.",
+};
+
+# Under attack now
+
+This page is for one situation: **traffic is flooding in, and you already have Kapkan
+installed and ingesting flows.** It is a checklist, not an explanation — follow it top to
+bottom. If Kapkan is not installed yet, start at the [Quickstart](/docs/quickstart); if you
+have time to read, the [Mitigation](/docs/mitigation) and [Safety model](/docs/safety) pages
+cover the *why*.
+
+<Callout type="info" title="Did you set an API token?">
+If you configured [authentication](/docs/authentication), add `-H "Authorization: Bearer $TOKEN"`
+to every `curl` below (use an **operator** token for `ban`/`unban`). With no token configured,
+the default API is open on `127.0.0.1:8080` and the commands work as written.
+</Callout>
+
+## 1. See what Kapkan is detecting
+
+```sh
+curl -s localhost:8080/api/v1/attacks | jq
+```
+
+Each entry is an attack Kapkan has detected: the `target` being hit, the `metric` that tripped
+(`pps`, `mbps` or `flows_per_sec`), the [classification](/docs/detection) (e.g. NTP
+amplification, SYN flood), and the `route` it would announce or has announced. If this list is
+empty while you are clearly under attack, jump to
+[Troubleshooting → I don't see any attacks](/docs/troubleshooting#i-dont-see-any-attacks).
+
+## 2. Confirm whether Kapkan is actually mitigating
+
+This is the step people miss. Kapkan ships **dry-run by default** — it detects and records but
+announces nothing until you turn dry-run off.
+
+```sh
+curl -s localhost:8080/api/v1/status | jq '.dry_run'
+```
+
+- `true` → Kapkan is **only watching**. No routes are being announced, and a manual ban
+  (step 3) will be *recorded but not sent*. To actually drop attack traffic you must
+  [go live](/docs/going-live) — set `dry_run: false` and reload.
+- `false` → Kapkan is live. Detected attacks are being blackholed automatically.
+
+## 3. Ban a specific victim immediately
+
+If a host is being hammered and you want it blackholed now without waiting for (or tuning) a
+threshold, ban it by hand. This drops **all** traffic to that address — use it on the victim
+of the flood, not on infrastructure you need to keep reachable.
+
+```sh
+curl -s -X POST localhost:8080/api/v1/ban \
+  -H 'Content-Type: application/json' \
+  -d '{"ip": "203.0.113.5"}' | jq
+```
+
+A successful ban returns the ban object (`state: "active"`). A request that is **refused**
+returns HTTP `409` with a reason — the manual ban hit a [safety guard](/docs/safety): the
+target is whitelisted, is outside your `networks` scope, or would exceed `max_active_bans`.
+That is the system protecting you, not a bug. Remove a manual ban with
+`POST /api/v1/unban` and the same `{"ip": ...}` body.
+
+## 4. Make sure the route can actually reach your routers
+
+A blackhole only works if Kapkan's BGP session to your router is up. If it is down, Kapkan
+records the ban but no router ever hears it.
+
+```sh
+journalctl -u kapkan -f | grep "bgp peer state"
+```
+
+Every configured neighbor should reach `ESTABLISHED`. If one is stuck, see
+[Troubleshooting → BGP won't reach ESTABLISHED](/docs/troubleshooting#bgp-wont-reach-established).
+(`GET /api/v1/status` shows your BGP *configuration* but not live session state — that lives
+only in the logs.)
+
+## 5. Watch bans expire on their own
+
+```sh
+curl -s localhost:8080/api/v1/bans | jq
+```
+
+Every ban carries a TTL (`ban.ttl_seconds`) and is withdrawn automatically when it expires —
+there are no permanent bans. You do not need to clean up by hand.
+
+## You are protected from your own mistakes
+
+While you work, these guards are enforced in code and cannot be switched off
+(see the [Safety model](/docs/safety)):
+
+- **`max_active_bans`** caps how many hosts can be blackholed at once — Kapkan will refuse new
+  bans rather than null-route half your network.
+- **`protected_whitelist`** can never be banned, by detection or by you.
+- Bans only ever apply **inside your configured `networks`**.
+- Every ban **auto-expires** on its TTL.
+
+## After the storm
+
+- [Going live](/docs/going-live) — if step 2 showed `dry_run: true` and you want automatic
+  mitigation next time.
+- [Detection & thresholds](/docs/detection) — tune what counts as an attack so Kapkan catches
+  it without a manual ban.
+- [Troubleshooting](/docs/troubleshooting) — when something above didn't behave as described.

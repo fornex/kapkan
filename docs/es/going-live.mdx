@@ -34,12 +34,18 @@ pipeline real, no una simulación.
    curl -s localhost:8080/api/v1/attacks | jq
    ```
 
+   <Callout type="info" title="Si configuraste tokens de API">
+   Estos comandos asumen la API sin tokens predeterminada sobre un bind de confianza en `127.0.0.1`. Si
+   configuraste `api.tokens` o `api.token_env`, añade `-H 'Authorization: Bearer <token>'` a
+   cada curl; de lo contrario, obtendrás un `401`/`403`.
+   </Callout>
+
 2. **Confirma que el BGP alcanza el estado `ESTABLISHED`.** El peering ocurre incluso en dry-run, de
    modo que puedes verificar la conectividad antes de anunciar nada. Vigila en los logs el evento
    `bgp peer state` y confirma que cada vecino configurado alcanza el estado `ESTABLISHED`. Si una
-   sesión se queda atascada, corrígela ahora, mientras una configuración errónea resulta inofensiva.
-   La corrección está en uno de dos lados: la configuración BGP de Kapkan (`local_asn`, el
-   `remote_asn` y la `address` del vecino) o el lado del router/host (interfaz de origen, ACLs del
+   sesión se queda atascada, corrígela ahora, mientras todavía resulta inofensiva. Las sesiones
+   atascadas casi siempre se deben a una de dos causas: la configuración BGP de Kapkan (`local_asn`,
+   el `remote_asn` y la `address` del vecino) o el lado del router/host (interfaz de origen, ACLs del
    firewall).
 
    ```sh
@@ -50,11 +56,19 @@ pipeline real, no una simulación.
    ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
 
-   También puedes confirmar el estado de los peers sin los logs mediante `GET /api/v1/status`.
+   El estado de los peers solo se informa hoy en los logs: `GET /api/v1/status` muestra tu
+   *configuración* BGP (ASN local, router ID, next hop, community, direcciones de los vecinos), no el
+   estado en vivo de la sesión. Para saber si una sesión realmente se estableció, vigila el evento
+   `bgp peer state`.
 
 3. **Desactiva el dry-run y recarga.** Establece `dry_run: false` en tu configuración y, a
    continuación, recarga Kapkan para que vuelva a leer el archivo. La recarga no es disruptiva: no
    reinicia el daemon ni interrumpe las sesiones BGP.
+
+   Valida primero el archivo con `kapkan -check-config /etc/kapkan/config.yaml` (salida `0` =
+   válido). Una recarga que no supere la validación se rechaza: Kapkan registra `config reload failed;
+   keeping previous config` y sigue ejecutando la última configuración válida, de modo que un error
+   tipográfico no puede dejarte fuera de servicio en pleno ataque.
 
    ```sh
    # Either signal the process:

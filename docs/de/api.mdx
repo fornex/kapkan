@@ -29,7 +29,9 @@ noch weiter: Es erfordert ein **ungebundenes (Admin-)Token**, sodass selbst ein 
 tenant-bezogen ist, mit `403` abgewiesen wird. Ein Lesezugriff mit einem
 viewer-Token funktioniert; eine Änderung mit einem viewer-Token liefert `403`; ein unbekanntes Token
 liefert `401`. Die `POST`-Endpunkte verlangen zusätzlich einen JSON-Content-Type — senden Sie
-`Content-Type: application/json`. Beachten Sie, dass `/metrics` und das statische Dashboard-Gerüst
+`Content-Type: application/json`. Ein `POST` ohne diesen Header wird mit
+HTTP `415 Unsupported Media Type` abgewiesen, sodass ein fehlender Header fast immer der Grund ist,
+wenn ein `curl`-Ban mit einem 415 fehlschlägt. Beachten Sie, dass `/metrics` und das statische Dashboard-Gerüst
 ohne Token bereitgestellt werden; die Daten, die das Dashboard lädt, werden über die geschützte API
 abgerufen. Siehe [Authentifizierung](/docs/authentication) zu den Token-Rollen.
 
@@ -62,7 +64,13 @@ passenden HTTP-Status zurück.
 
 ### GET /api/v1/status
 
-Gibt den aktuellen Betriebsmodus und eine Zusammenfassung dessen zurück, was Kapkan schützt.
+Gibt den aktuellen Betriebsmodus und eine Zusammenfassung dessen zurück, was Kapkan schützt. Zum
+Auslesen (lassen Sie den `Authorization`-Header weg, wenn kein Token konfiguriert ist):
+
+```sh
+curl -fsS localhost:8080/api/v1/status \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
 
 ```json
 {
@@ -70,6 +78,8 @@ Gibt den aktuellen Betriebsmodus und eine Zusammenfassung dessen zurück, was Ka
   "uptime_seconds": 8123,
   "version": "v1.2.0 · a1b2c3d",
   "update_available": false,
+  "role": "operator",
+  "unscoped": true,
   "networks": ["203.0.113.0/24", "198.51.100.0/24"],
   "active_attacks": 1,
   "active_bans": 1,
@@ -91,6 +101,15 @@ neuere Version findet — dann ist es `true` und `latest_version`, `latest_is_se
 werden zusätzlich mitgeliefert. Siehe [Aktualisieren](/docs/upgrading).
 `thresholds` und `hostgroups` spiegeln die aktive Konfiguration wider; ihre
 vollständige Struktur finden Sie unter [Erkennung](/docs/detection) und [Hostgroups](/docs/hostgroups).
+`role` und `unscoped` sind stets vorhanden — sie teilen dem Dashboard mit, welches Token es
+verwendet. Die Felder `networks`, `thresholds`, `bgp`, `scrubbing` und `notify` sind
+deploymentweite Konfiguration und werden nur an ein ungebundenes (Admin-)Token zurückgegeben; ein
+tenant-bezogenes Token erhält ein Status-Objekt ohne sie (nur `dry_run`, `version`,
+`uptime_seconds`, `update_available`, `role`, `unscoped`, seine eigenen `hostgroups` und die
+Zählungen). Ein Admin-Token erhält zusätzlich `bgp`-, `scrubbing`- und `notify`-Objekte — `notify`
+gibt nur preis, welche Kanäle aktiviert sind, niemals Tokens oder URLs. Wenn ein Feld also zu
+„fehlen“ scheint, prüfen Sie, ob Ihr Token tenant-bezogen ist, statt anzunehmen, dass Kapkan defekt
+ist.
 
 ### GET /api/v1/attacks
 
@@ -269,7 +288,7 @@ Gibt die vollständige Sperrtabelle zurück — aktive und historische. Jeder Ei
 | `rate` | number | Beobachtete Rate zum Sperrzeitpunkt; entfällt, wenn null. |
 | `threshold` | number | Überschrittener Schwellenwert; entfällt, wenn null. |
 | `next_hop` | string | Der Discard-Next-Hop. |
-| `community` | string | Die RTBH-Community. |
+| `community` | string | Die an die Route angehängte Community-Menge — die RTBH-Community bei einem Blackhole, die Divert-(Scrubbing-)Community bei einer Divert-Sperre — bei mehr als einer durch Leerzeichen verbunden. |
 | `local_pref` | number | Der an die Route angehängte `LOCAL_PREF`; entfällt, wenn null. |
 | `route` | string | Der vollständige Routen-String oder eine `flowspec: ...`-Zusammenfassung bei FlowSpec-Sperren. |
 | `state` | string | `active`, `withdrawn` oder `rejected`. |
@@ -353,6 +372,15 @@ POST /api/v1/ban
 Content-Type: application/json
 
 {"ip": "203.0.113.66"}
+```
+
+Als ausführbarer Befehl (lassen Sie den `Authorization`-Header weg, wenn Sie noch kein Token konfiguriert haben):
+
+```sh
+curl -fsS -X POST localhost:8080/api/v1/ban \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ip":"203.0.113.66"}'
 ```
 
 Die Antwort ist das resultierende `Ban`-Objekt. Eine manuelle Sperre beachtet jede Sicherheitsregel,

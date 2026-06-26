@@ -35,12 +35,18 @@ sessions BGP. Vous validez le pipeline réel, pas une simulation.
    curl -s localhost:8080/api/v1/attacks | jq
    ```
 
+   <Callout type="info" title="Si vous avez configuré des jetons d'API">
+   Ces commandes supposent l'API par défaut sans jeton, sur un bind `127.0.0.1` de confiance. Si
+   vous avez configuré `api.tokens` ou `api.token_env`, ajoutez `-H 'Authorization: Bearer <token>'`
+   à chaque curl — sinon vous obtiendrez une erreur `401`/`403`.
+   </Callout>
+
 2. **Confirmez que le BGP atteint l'état `ESTABLISHED`.** Le peering a lieu même en dry-run,
    ce qui vous permet de vérifier la connectivité avant d'annoncer quoi que ce soit. Surveillez
    l'événement `bgp peer state` dans les journaux et confirmez que chaque voisin configuré
-   atteint l'état `ESTABLISHED`. Si une session reste bloquée, corrigez-la dès maintenant
-   — tant qu'une mauvaise configuration reste sans conséquence. La correction se situe de l'un
-   des deux côtés : la configuration BGP de Kapkan (`local_asn`, les `remote_asn` et `address`
+   atteint l'état `ESTABLISHED`. Si une session reste bloquée, corrigez-la dès maintenant,
+   tant qu'elle est encore sans conséquence. Les sessions bloquées relèvent presque toujours de
+   l'un des deux cas : la configuration BGP de Kapkan (`local_asn`, les `remote_asn` et `address`
    du voisin), ou le côté routeur/hôte (interface source, ACL de pare-feu).
 
    ```sh
@@ -51,11 +57,19 @@ sessions BGP. Vous validez le pipeline réel, pas une simulation.
    ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
 
-   Vous pouvez aussi confirmer l'état de santé du pair sans les journaux via `GET /api/v1/status`.
+   L'état du pair n'est aujourd'hui reporté que dans les journaux — `GET /api/v1/status` affiche
+   votre *configuration* BGP (ASN local, router ID, next hop, communauté, adresses des voisins),
+   et non l'état en direct des sessions. Pour savoir si une session s'est réellement établie,
+   surveillez l'événement `bgp peer state`.
 
 3. **Désactivez le dry-run et rechargez.** Définissez `dry_run: false` dans votre configuration,
    puis rechargez Kapkan afin qu'il relise le fichier. Le rechargement est non perturbateur :
    il ne redémarre pas le démon et n'interrompt pas les sessions BGP.
+
+   Validez d'abord le fichier avec `kapkan -check-config /etc/kapkan/config.yaml` (code de sortie
+   `0` = valide). Un rechargement qui échoue à la validation est refusé : Kapkan journalise
+   `config reload failed; keeping previous config` et continue d'exécuter la dernière configuration
+   valide, de sorte qu'une faute de frappe ne peut pas vous faire tomber en pleine attaque.
 
    ```sh
    # Soit en signalant le processus :
@@ -67,8 +81,8 @@ sessions BGP. Vous validez le pipeline réel, pas une simulation.
    ```
 
    `SIGHUP` et `POST /api/v1/config/reload` effectuent tous deux le même rechargement à chaud.
-   Après le rechargement, `GET /api/v1/status` indique le mode actif et la prochaine détection
-   qui franchit un seuil annonce une véritable route blackhole.
+   Après le rechargement, `GET /api/v1/status` indique le mode en production et la prochaine
+   détection qui franchit un seuil annonce une véritable route blackhole.
 
 <Callout type="danger" title="C'est le point de non-retour">
 Une fois `dry_run` à false, de véritables routes blackhole sont annoncées à vos routeurs. Une

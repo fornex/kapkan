@@ -7,11 +7,10 @@ export const metadata = {
 # Mandantenfähigkeit
 
 Eine einzelne Kapkan-Instanz kann viele Kunden bedienen (Anwendungsfall eines Managed Service
-Provider (MSP) oder Internet Data Center (IDC)) und
-jedem ein Token geben, das **nur dessen eigene** Angriffe, Bans und Hosts sieht und verändert.
-Ein Mandant (tenant) ist lediglich ein optionales Label an einer
-[Hostgruppe](/docs/hostgroups) — es gibt kein neues Top-Level-Objekt, keine separate
-Mandantenregistrierung, und der heiße Erkennungspfad bleibt unberührt.
+Provider (MSP) oder Internet Data Center (IDC)) und jedem ein Token geben, das **nur dessen
+eigene** Angriffe, Bans und Hosts sieht und verändert. Ein Mandant (tenant) ist lediglich ein
+optionales Label an einer [Hostgruppe](/docs/hostgroups) — es gibt kein neues Top-Level-Objekt,
+keine separate Mandantenregistrierung, und der heiße Erkennungspfad bleibt unberührt.
 
 ```yaml
 tenant: "house"                 # optional: label the global/fallback group
@@ -36,15 +35,29 @@ api:
     - { name: b-ops,    token_env: KAPKAN_B,     role: operator, tenant: "customerB" }
 ```
 
+## So richten Sie es ein
+
+Drei Schritte entsprechen direkt dem YAML oben:
+
+1. **Markieren Sie die Hostgruppe(n) jedes Kunden** mit `tenant: "customerA"` (dasselbe Label kann sich über mehrere Gruppen wiederholen — etwa die Web- und DNS-Gruppe eines Kunden).
+2. **Fügen Sie ein API-Token** unter `api.tokens` hinzu, das denselben `tenant:` plus eine `role:` trägt — `viewer` ist schreibgeschützt, `operator` kann zusätzlich bannen/entbannen.
+3. **Übergeben Sie dem Kunden dieses Token.** Er sieht und verändert nun nur seine eigenen Präfixe; alles andere (andere Mandanten, unmarkierte Gruppen) ist für ihn unsichtbar.
+
+Das ist der gesamte Workflow. Der Rest dieser Seite erklärt, wie Eigentümerschaft aufgelöst wird und was ein gebundenes Token genau tun und nicht tun kann.
+
 ## Das Modell
 
 „Welcher Mandant besitzt diese IP" wird durch **denselben** Longest-Prefix-Hostgruppen-Lookup
-beantwortet, den Engine und Mitigator bereits zur Zuordnung von Traffic verwenden — es gibt
-eine einzige Quelle der Wahrheit für IP-Eigentümerschaft, und die Auflösung läuft nie auf dem
-Per-Flow-Erkennungspfad. Ein Mandant kann sich über mehrere Hostgruppen erstrecken (ein Kunde
-mit getrennten Web- und DNS-Gruppen). Die implizite globale/Fallback-Gruppe kann ein
-Top-Level-`tenant` tragen, sodass Catch-all-Traffic einem House-Mandanten zugeordnet wird; eine
-Hostgruppe **ohne** `tenant` ist unbeschriftet und nur für Admin-Tokens sichtbar.
+beantwortet, den Engine und Mitigator bereits zur Zuordnung von Traffic verwenden — wenn sich
+Präfixe überlappen, gewinnt die spezifischste passende Hostgruppe
+([Longest-Prefix-Match](/docs/glossary)). Ein Mandant kann sich über mehrere Hostgruppen
+erstrecken (ein Kunde mit getrennten Web- und DNS-Gruppen).
+
+Jede IP, die außerhalb jeder benannten Hostgruppe liegt, wird von der impliziten
+**globalen/Fallback-Gruppe** (dem Catch-all) behandelt. Diese globale Gruppe kann ein
+Top-Level-`tenant` tragen, sodass dieser Catch-all-Traffic einem „House"-Mandanten zugeordnet
+wird; eine benannte Hostgruppe **ohne** `tenant` ist unbeschriftet und nur für Admin-Tokens
+sichtbar.
 
 Ein Mandanten-Label ist **keine** Einheit der Mitigation-Policy — Schwellenwerte,
 BGP-Attribute und Eskalation bleiben pro Hostgruppe. Es ist rein ein Eigentümerschafts-Tag, das
@@ -53,11 +66,12 @@ zum Eingrenzen der API dient.
 ## Token-Scope
 
 Ein [API-Token](/docs/authentication) erhält einen optionalen `tenant`, der auf seiner Rolle
-aufbaut:
+aufbaut: ein `viewer` kann lesen, aber nichts ändern; ein `operator` kann zusätzlich
+bannen/entbannen.
 
 | Token | Sieht | Darf verändern |
 | --- | --- | --- |
-| ungebunden (kein `tenant`) | alle Mandanten (Admin) | gemäß seiner Rolle |
+| ungebunden (kein `tenant`) | alle Mandanten (Admin) | alles, was seine Rolle erlaubt (ein Viewer liest alle Mandanten; ein Operator darf in allen Mandanten bannen/entbannen) |
 | `tenant: customerA`, `role: viewer` | nur customerA | nichts |
 | `tenant: customerA`, `role: operator` | nur customerA | nur customerA |
 
@@ -67,11 +81,9 @@ Laden der Konfiguration abgelehnt (ein Tippfehler würde sonst stillschweigend n
 
 ## Durchsetzung
 
-Das Scoping ist **default-deny für gebundene Tokens** an einem einzigen Engpass: Der Mandant der
-Anfrage wird einmal während der Authentifizierung abgeleitet, und ein einziges
-Sichtbarkeitsprädikat entscheidet über jede Zeile. Ein neuer Lese-Endpoint, der das Filtern
-vergisst, würde für ein gebundenes Token nichts zurückgeben — niemals die Daten eines anderen
-Mandanten.
+Das Scoping ist **default-deny: ein gebundenes Token sieht immer nur seinen eigenen Mandanten.**
+Der Mandant wird einmal während der Authentifizierung abgeleitet und auf jede Zeile angewendet,
+sodass ein gebundenes Token niemals auf die Daten eines anderen Mandanten durchfallen kann.
 
 - **Lesezugriffe** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` und `/audit` geben nur
   Zeilen zurück, deren besitzende Gruppe den Mandanten des Aufrufers trägt. `/status` wird pro
@@ -92,6 +104,25 @@ Mandanten.
 - **Mehrdeutigkeit schlägt geschlossen fehl** — wenn ein einzelnes Bearer-Secret zu Tokens
   unterschiedlicher Rolle oder unterschiedlichen Mandanten passt (ein wiederverwendetes Secret),
   wird die Anfrage abgelehnt, statt auf den weiteren Scope aufgelöst zu werden.
+
+### Isolation überprüfen
+
+Übergeben Sie das gebundene Token an `curl` und bestätigen Sie, dass es nur seinen eigenen
+Mandanten sieht. `/api/v1/status` gibt nur die Hostgruppen dieses Mandanten zurück:
+
+```bash
+curl -H "Authorization: Bearer $KAPKAN_A" http://127.0.0.1:8080/api/v1/status
+# → only customerA's hostgroups and counts; no other tenant, no global config
+```
+
+Bestätigen Sie dann, dass ein mandantenübergreifender Ban verweigert wird — das Bannen einer
+Adresse außerhalb des Mandanten des Tokens gibt `403` zurück:
+
+```bash
+curl -X POST -H "Authorization: Bearer $KAPKAN_A" \
+  -d '{"ip":"198.51.100.5"}' http://127.0.0.1:8080/api/v1/ban
+# → 403 {"error":"target is outside your tenant"}
+```
 
 <Callout type="info" title="/metrics und das Dashboard">
 `/metrics` ist nicht mandantengebunden — es bleibt für das Prometheus-Scraping offen und benötigt

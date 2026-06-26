@@ -7,11 +7,10 @@ export const metadata = {
 # Multi-tenencia
 
 Una instancia de Kapkan puede atender a muchos clientes (un caso de uso de proveedor de
-servicios gestionados (MSP) o de centro de datos de internet (IDC)) y dar a
-cada uno un token que ve y modifica **solo sus propios** ataques, baneos y hosts. Un tenant es
-solo una etiqueta opcional en un [hostgroup](/docs/hostgroups) — no hay ningún objeto nuevo de
-nivel superior, ni un registro de tenants aparte, y el camino crítico de detección permanece
-intacto.
+servicios gestionados (MSP) o de centro de datos de internet (IDC)) y dar a cada uno un token
+que ve y modifica **solo sus propios** ataques, baneos y hosts. Un tenant es solo una etiqueta
+opcional en un [hostgroup](/docs/hostgroups) — no hay ningún objeto nuevo de nivel superior, ni
+un registro de tenants aparte, y el camino crítico de detección permanece intacto.
 
 ```yaml
 tenant: "house"                 # optional: label the global/fallback group
@@ -36,15 +35,28 @@ api:
     - { name: b-ops,    token_env: KAPKAN_B,     role: operator, tenant: "customerB" }
 ```
 
+## Cómo configurarlo
+
+Tres pasos se corresponden directamente con el YAML de arriba:
+
+1. **Etiqueta el o los hostgroup(s) de cada cliente** con `tenant: "customerA"` (la misma etiqueta puede repetirse en varios grupos — los grupos de web y DNS de un cliente, por ejemplo).
+2. **Añade un token de API** bajo `api.tokens` que lleve ese mismo `tenant:` más un `role:` — `viewer` es de solo lectura, `operator` también puede banear/desbanear.
+3. **Entrega ese token al cliente.** Ahora ve y modifica solo sus propios prefijos; todo lo demás (otros tenants, grupos sin etiquetar) le es invisible.
+
+Ese es todo el flujo de trabajo. El resto de esta página explica cómo se resuelve la propiedad y exactamente qué puede y qué no puede hacer un token con alcance.
+
 ## El modelo
 
 "Qué tenant es dueño de esta IP" se responde mediante la **misma** búsqueda de hostgroup por
-prefijo más largo que el motor y el mitigador ya usan para atribuir el tráfico — hay una única
-fuente de verdad para la propiedad de las IP, y la resolución nunca se ejecuta en el camino de
-detección por flow. Un tenant puede abarcar varios hostgroups (un cliente con grupos separados
-de web y DNS). El grupo global/de respaldo implícito puede llevar un `tenant` de nivel superior
-para que el tráfico catch-all se atribuya a un tenant house; un hostgroup **sin** `tenant` está
-sin etiquetar y solo es visible para los tokens de administrador.
+prefijo más largo que el motor y el mitigador ya usan para atribuir el tráfico — cuando los
+prefijos se solapan, gana el hostgroup coincidente más específico
+([longest-prefix match](/docs/glossary)). Un tenant puede abarcar varios hostgroups (un cliente
+con grupos separados de web y DNS).
+
+Cualquier IP que quede fuera de todos los hostgroups con nombre la maneja el **grupo global/de
+respaldo** implícito (el catch-all). Ese grupo global puede llevar un `tenant` de nivel superior
+para que el tráfico catch-all se atribuya a un tenant "house"; un hostgroup con nombre y **sin**
+`tenant` está sin etiquetar y solo es visible para los tokens de administrador.
 
 Una etiqueta de tenant **no** es una unidad de política de mitigación — los umbrales, los
 atributos BGP y el escalado siguen siendo por hostgroup. Es puramente una etiqueta de propiedad
@@ -52,11 +64,12 @@ usada para acotar el alcance de la API.
 
 ## Alcance del token
 
-Un [token de API](/docs/authentication) gana un `tenant` opcional, que se apoya en su rol:
+Un [token de API](/docs/authentication) gana un `tenant` opcional, que se apoya en su rol: un
+`viewer` puede leer pero no cambiar nada; un `operator` también puede banear/desbanear.
 
 | Token | Ve | Puede modificar |
 | --- | --- | --- |
-| sin alcance (sin `tenant`) | todos los tenants (admin) | según su rol |
+| sin alcance (sin `tenant`) | todos los tenants (admin) | todo lo que su rol permita (un viewer lee todos los tenants; un operator puede banear/desbanear en todos los tenants) |
 | `tenant: customerA`, `role: viewer` | solo customerA | nada |
 | `tenant: customerA`, `role: operator` | solo customerA | solo customerA |
 
@@ -66,10 +79,9 @@ configuración (de lo contrario, una errata vería silenciosamente nada).
 
 ## Aplicación
 
-El acotamiento es **deny por defecto para los tokens con alcance** en un único punto de
-estrangulamiento: el tenant de la solicitud se deriva una sola vez durante la autenticación, y
-un único predicado de visibilidad decide cada fila. Un nuevo endpoint de lectura que olvide
-filtrar devolvería, para un token con alcance, nada — nunca los datos de otro tenant.
+El acotamiento es **deny por defecto: un token con alcance solo ve jamás su propio tenant.** El
+tenant se deriva una sola vez durante la autenticación y se aplica a cada fila, de modo que un
+token con alcance nunca puede caer hacia los datos de otro tenant.
 
 - **Lecturas** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` y `/audit` devuelven solo las
   filas cuyo grupo propietario lleva el tenant de quien llama. `/status` se reconstruye por
@@ -89,6 +101,25 @@ filtrar devolvería, para un token con alcance, nada — nunca los datos de otro
 - **La ambigüedad falla cerrada** — si un secreto bearer coincide con tokens de distinto rol o
   tenant (un secreto reutilizado), la solicitud se rechaza en lugar de resolverse al alcance más
   amplio.
+
+### Verificar el aislamiento
+
+Entrega el token con alcance a `curl` y confirma que solo ve su propio tenant. `/api/v1/status`
+devuelve únicamente los hostgroups de ese tenant:
+
+```bash
+curl -H "Authorization: Bearer $KAPKAN_A" http://127.0.0.1:8080/api/v1/status
+# → only customerA's hostgroups and counts; no other tenant, no global config
+```
+
+Luego confirma que un baneo entre tenants se rechaza — banear una dirección fuera del tenant del
+token devuelve `403`:
+
+```bash
+curl -X POST -H "Authorization: Bearer $KAPKAN_A" \
+  -d '{"ip":"198.51.100.5"}' http://127.0.0.1:8080/api/v1/ban
+# → 403 {"error":"target is outside your tenant"}
+```
 
 <Callout type="info" title="/metrics y el panel de control">
 `/metrics` no está acotado por tenant — permanece abierto para el scraping de Prometheus y no

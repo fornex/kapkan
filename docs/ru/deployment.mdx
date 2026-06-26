@@ -1,12 +1,12 @@
 export const metadata = {
-  title: "Развёртывание в продакшене",
+  title: "Промышленное развёртывание",
   description:
     "Разверните Kapkan как защищённый сервис systemd: размещение файлов, секреты и перезагрузка конфигурации.",
 };
 
-# Развёртывание в продакшене
+# Промышленное развёртывание
 
-Защищённый юнит systemd и пример продакшен-конфигурации поставляются в каталоге
+Защищённый юнит systemd и пример промышленной конфигурации поставляются в каталоге
 [`engine/deploy/`](https://github.com/fornex/kapkan/tree/main/engine/deploy) репозитория: `engine/deploy/kapkan.service`
 и `engine/deploy/config.example.yaml`. На этой странице описано, как установить бинарный файл как
 системный сервис, где располагается каждый файл, как хранить секреты вне YAML и как
@@ -36,10 +36,11 @@ curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#
 sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"   # RHEL/Fedora: dnf install ./kapkan_<ver>_linux_amd64.rpm
 ```
 
-Сервис устанавливается, но **остаётся остановленным** — демон митигации не должен запускаться
-прежде, чем вы посмотрите его конфигурацию. Поставляемая `config.yaml` содержит `dry_run: true`.
-Просмотрите её, (рекомендуется) [задайте API-токен](#secrets) в `/etc/kapkan/kapkan.env`, затем
-включите автозапуск и запустите его сейчас:
+Сервис устанавливается, но **остаётся остановленным** — демон подавления атак не должен запускаться
+прежде, чем вы посмотрите его конфигурацию. Поставляемая `config.yaml` содержит `dry_run: true`
+(Kapkan вычисляет blackhole-маршруты, но не анонсирует их вашему маршрутизатору). Просмотрите её,
+(рекомендуется) [задайте API-токен](#secrets) в `/etc/kapkan/kapkan.env`, затем включите автозапуск
+и запустите его сейчас:
 
 ```sh
 sudoedit /etc/kapkan/config.yaml          # adapt networks, BGP and thresholds
@@ -54,17 +55,16 @@ sudo systemctl enable --now kapkan
 
 Предпочитаете размещать файлы самостоятельно или работаете на дистрибутиве без `apt`/`dnf`? После
 распаковки [release-tarball](/docs/quickstart#1-установка-kapkan) (чтобы каталог `deploy/` оказался
-рядом с бинарником `kapkan`) выполните эквивалент от имени root. Он устанавливает бинарный файл,
-создаёт непривилегированного системного пользователя, формирует структуру `/etc/kapkan`,
-устанавливает продакшен-конфигурацию, записывает файл с секретами с ограничительными правами,
-устанавливает юнит systemd и включает сервис.
+рядом с бинарником `kapkan`) выполните эквивалент от имени root:
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo groupadd --system kapkan
+sudo useradd --system --gid kapkan --no-create-home --home-dir /var/lib/kapkan --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
 sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
-echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+# generate a real random API token, never deploy the literal placeholder
+echo "KAPKAN_API_TOKEN=$(openssl rand -hex 32)" | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
 sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
@@ -95,7 +95,8 @@ SMTP или ClickHouse только если действительно испо
 
 <Callout type="info" title="Привязка BGP к порту 179">
 Kapkan не требует особых привилегий в режиме dry-run или при пиринге с высокого локального порта.
-Если вы привязываете BGP-спикер к общеизвестному порту 179, предоставьте соответствующую
+Если вы привязываете BGP-спикер (компонент, анонсирующий blackhole-маршруты вашему маршрутизатору)
+([BGP](/docs/glossary)) к общеизвестному порту 179, предоставьте соответствующую
 возможность, добавив `AmbientCapabilities=CAP_NET_BIND_SERVICE` в секцию `[Service]` юнита.
 </Callout>
 
@@ -115,7 +116,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/kapkan.env` | `0600` | Файл секретов в окружении (токены, учётные данные SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | Защищённый юнит systemd. Установка из `.deb`/`.rpm` помещает его в `/usr/lib/systemd/system/kapkan.service` (расположение поставщика). |
 | `/var/lib/kapkan/` | `0700` | Доступный для записи каталог состояния (`StateDirectory=kapkan`); хранит `ban.state_file`, когда включено сохранение банов. |
-| `/run/kapkan/` | `0755` | Каталог времени выполнения (`RuntimeDirectory=kapkan`), создаётся при запуске и удаляется при остановке; хранит `kapkan.pid`, чтобы [`kapkan -s reload`](/docs/cli) мог найти демон. |
+| `/run/kapkan/` | `0755` | Каталог времени выполнения (`RuntimeDirectory=kapkan`), создаётся при запуске и удаляется при остановке; хранит `kapkan.pid`, чтобы [`kapkan -s reload`](/docs/cli#управление-работающим-демоном) мог найти демон. |
 
 Весь каталог `/etc/kapkan` монтируется для процесса только для чтения через
 `ReadOnlyPaths=/etc/kapkan`, поэтому демон может читать свою конфигурацию и секреты, но не может
@@ -131,7 +132,7 @@ sudo journalctl -u kapkan -f
 
 - `notify.telegram.token_env` — например `KAPKAN_TG_TOKEN`, токен бота Telegram.
 - `notify.email.username_env` / `notify.email.password_env` — учётные данные SMTP.
-- `api.token_env` — bearer-токен API (см. [Аутентификацию](/docs/authentication)).
+- `api.token_env` — bearer-токен API (см. [Аутентификация](/docs/authentication)).
 - `storage.clickhouse.username_env` / `password_env` — учётные данные ClickHouse, если вы
   включаете опциональное хранилище истории.
 
@@ -147,7 +148,7 @@ notify:
 ```text
 # /etc/kapkan/kapkan.env  (mode 0600)
 KAPKAN_TG_TOKEN=123456:abcdef
-KAPKAN_API_TOKEN=a-long-random-string
+KAPKAN_API_TOKEN=...   # a real random token, e.g. from: openssl rand -hex 32
 ```
 
 <Callout type="success" title="Почему это важно">
@@ -159,8 +160,9 @@ KAPKAN_API_TOKEN=a-long-random-string
 
 ## Config reload
 
-Kapkan перезагружает конфигурацию «на лету» по сигналу `SIGHUP` — без перезапуска и без потери
-состояния flow. Юнит systemd настраивает это через `ExecReload=/bin/kill -HUP $MAINPID`, поэтому
+Kapkan перезагружает конфигурацию «на лету» по сигналу `SIGHUP` (сигнал Unix, который указывает
+демону перечитать конфигурацию без перезапуска) — без перезапуска и без потери состояния потоков.
+Юнит systemd настраивает это через `ExecReload=/bin/kill -HUP $MAINPID`, поэтому
 перезагрузка выполняется так:
 
 ```sh
@@ -175,8 +177,8 @@ sudo kapkan -s reload    # re-read the config (SIGHUP)
 sudo kapkan -s stop      # graceful shutdown (SIGTERM)
 ```
 
-См. [Управление работающим демоном](/docs/cli) для полного описания поведения и кодов выхода.
-Эквивалентно, ту же перезагрузку можно запустить через API:
+См. [Управление работающим демоном](/docs/cli#управление-работающим-демоном) для полного описания
+поведения и кодов выхода. Эквивалентно, ту же перезагрузку можно запустить через API:
 
 ```sh
 curl -s -X POST localhost:8080/api/v1/config/reload \
@@ -186,7 +188,8 @@ curl -s -X POST localhost:8080/api/v1/config/reload \
 
 `Content-Type: application/json` обязателен для каждого изменяющего `POST` (иначе сервер
 возвращает `415`), а при включённой аутентификации перезагрузка требует bearer-токена без
-ограничения области (admin) — токен, ограниченный тенантом, получает `403`.
+ограничения области (admin) — токен, [ограниченный тенантом](/docs/multi-tenancy) (один заказчик
+и его сети), получает `403`.
 
 Большинство ключей перезагружается без перезапуска, включая `dry_run`, пороги, `networks`,
 hostgroups, базовые линии (baselines), настройки уведомлений и `sampling.default_rate`. Шесть
@@ -194,11 +197,11 @@ hostgroups, базовые линии (baselines), настройки уведо
 (требуется перезапуск): адреса `listen`, идентичность BGP (`bgp.local_asn` / `router_id`),
 `api.listen`, настройки `samples`, настройки `storage` и настройки `geoip`. См.
 [справочник по конфигурации](/docs/configuration), а для смены бинарного файла без потери
-митигации — [Обновление](/docs/upgrading).
+подавления атак — [Обновление](/docs/upgrading).
 
 ## Building from source
 
-Для сборки требуется **Go 1.22 или новее**. `Makefile` предоставляет стандартные цели:
+Для сборки требуется **Go 1.26 или новее**. `Makefile` предоставляет стандартные цели:
 
 ```sh
 make build  # static binary
@@ -213,14 +216,14 @@ make bench  # engine hot-path benchmarks
 обращений никогда не происходит.
 
 <Callout type="warning" title="Прежде чем открывать доступ к Kapkan">
-Держите `dry_run: true`, пока не проверите детектирование на живой телеметрии — см.
+Держите `dry_run: true`, пока не проверите обнаружение на живой телеметрии — см.
 [Запуск в боевом режиме](/docs/going-live). И задайте токен API, прежде чем привязывать слушатель
-за пределами `127.0.0.1`, иначе API и дашборд будут доступны без аутентификации — см.
-[Аутентификацию](/docs/authentication).
+за пределами `127.0.0.1`, иначе API и панель будут доступны без аутентификации — см.
+[Аутентификация](/docs/authentication).
 </Callout>
 
 ## Related
 
 - [Справочник по конфигурации](/docs/configuration) — каждый ключ в файле YAML.
 - [Аутентификация](/docs/authentication) — задайте bearer-токен, прежде чем открывать доступ к API.
-- [Запуск в боевом режиме](/docs/going-live) — проверьте детектирование, затем отключите dry-run.
+- [Запуск в боевом режиме](/docs/going-live) — проверьте обнаружение, затем отключите dry-run.

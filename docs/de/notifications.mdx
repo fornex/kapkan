@@ -85,11 +85,20 @@ Warnung aus. Setzen Sie `require_tls: true`, damit dieser Fall stattdessen fehls
 
 ### Webhook
 
-Setzen Sie `notify.webhook.url` auf einen beliebigen HTTPS-Endpunkt. Kapkan sendet bei
-jedem Angriffsbeginn und -ende ein HTTP-`POST` mit einem `Content-Type: application/json`-Body
-— dem unten beschriebenen [Callback-Payload](#callback-payload-schema). Nicht-2xx-Antworten
-werden als Zustellfehler behandelt und gezählt. Die Anfrage trägt ein begrenztes Timeout,
-sodass ein hängender Empfänger keinen Zustell-Slot blockieren kann.
+Setzen Sie `notify.webhook.url` auf Ihre Empfänger-URL (verwenden Sie HTTPS — der
+Payload kann Angriffsdetails enthalten). Kapkan sendet bei jedem Ereignis (Angriffsbeginn,
+Angriffsende und `update_available`) ein HTTP-`POST` mit einem
+`Content-Type: application/json`-Body — dem unten beschriebenen
+[Callback-Payload](#callback-payload-schema). Nicht-2xx-Antworten werden als Zustellfehler
+behandelt und gezählt. Die Anfrage trägt ein begrenztes Timeout, sodass ein hängender
+Empfänger keinen Zustell-Slot blockieren kann.
+
+<Callout type="warning" title="Das URL-Schema des Webhooks wird nicht validiert">
+Anders als bei Slack (das Kapkan als HTTPS verlangt) wird das URL-Schema des generischen
+Webhooks nicht geprüft. Eine `http://`-URL wird akzeptiert, und der Payload — der
+Angriffsziele und Quelldetails enthalten kann — wird im Klartext gesendet. Verwenden Sie
+einen `https://`-Endpunkt.
+</Callout>
 
 ```http
 POST /your/endpoint HTTP/1.1
@@ -180,7 +189,7 @@ notify:
     to: []                         # ["ops@example.com"]
     username_env: "KAPKAN_SMTP_USER"
     password_env: "KAPKAN_SMTP_PASS"
-    require_tls: false             # STARTTLS is auto-required when credentials are set
+    require_tls: false             # set true to fail (not send cleartext) if the server has no STARTTLS
   exec:                            # hook run on every attack event (no shell)
     command: ""                    # absolute path to an existing executable
     timeout_seconds: 10
@@ -214,7 +223,7 @@ ohne Sie zu beeinträchtigen.
 | `mbps` | number | Sampling-korrigierte Megabit pro Sekunde. |
 | `flows_per_sec` | number | Sampling-korrigierte Flows pro Sekunde. |
 | `ban_state` | string | `active`, `withdrawn` oder `rejected`, wenn die Mitigation konsultiert wurde. |
-| `method` | string | `blackhole` oder `flowspec` — die Mitigationsmethode, die die Sperre erzeugt hat; entfällt, wenn keine Sperre vorliegt. |
+| `method` | string | `blackhole`, `flowspec` oder `divert` — die Mitigationsmethode, die die Sperre erzeugt hat; entfällt, wenn keine Sperre vorliegt. |
 | `route` | string | Die (im Dry-Run: potenzielle) Ankündigung: eine Blackhole-Route oder eine `flowspec: ...`-Zusammenfassung der generierten Regeln. |
 | `dry_run` | boolean | Ob die Mitigation für dieses Ereignis im Dry-Run-Modus war. |
 | `at` | string | RFC-3339-Zeitstempel des Ereignisses. |
@@ -251,6 +260,7 @@ erkannt:
   "mbps": 8421.5,
   "flows_per_sec": 9400,
   "ban_state": "active",
+  "method": "blackhole",
   "route": "blackhole 203.0.113.45/32 next-hop 192.0.2.1 community 65000:666",
   "dry_run": true,
   "at": "2026-06-13T14:22:07Z",

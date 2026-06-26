@@ -7,7 +7,7 @@ export const metadata = {
 # Metrics
 
 Kapkan exposes Prometheus metrics under the `kapkan_` namespace at `GET /metrics` on the
-API listener (`api.listen`, default `127.0.0.1:8080`). They cover the full pipeline —
+API listener (`api.listen`, conventionally `127.0.0.1:8080` — the value in the example config; the field is required, so set it). They cover the full pipeline —
 flow ingest, the detection engine, RTBH mitigation, and notifications — so you can scrape
 throughput, latency, active attacks and announced routes into your existing monitoring.
 
@@ -29,12 +29,13 @@ Bind the listener accordingly — see [Authentication](/docs/authentication).
 | `kapkan_engine_attacks_total` | — | Counter of attacks detected since start. |
 | `kapkan_engine_process_latency_seconds` | — | Histogram of hot-path processing latency, observed once per ingest batch (not per flow). |
 | `kapkan_engine_tracked_hosts` | — | Gauge of hosts currently tracked by the engine. |
+| `kapkan_engine_boundary_debug_bytes_total` | `exporter`, `iface`, `dir` | Sampling-corrected bytes toward (`dir=in`) or from (`dir=out`) protected hosts, broken down by `exporter` and interface (`iface` = ifIndex). Only appears while [`sampling.boundary_debug: true`](/docs/configuration) — a temporary aid to find your edge interfaces. It is NOT cardinality-bounded; disable it again after reading the breakdown. |
 | `kapkan_mitigate_announced_routes` | `mode` | Gauge of blackhole routes currently announced, split by `real` / `dry_run` mode. |
 | `kapkan_mitigate_flowspec_rules` | `mode` | Gauge of [FlowSpec](/docs/flowspec) rules currently announced, split by `real` / `dry_run` mode. Watch this against your routers' FlowSpec route limit. |
 | `kapkan_mitigate_bans_rejected_total` | `reason` | Bans refused by a safety guard, by `reason`: `max_active_bans`, `blast_radius_fraction`, `blast_radius_rate`, or `max_active_prefix_bans` (carpet). |
 | `kapkan_mitigate_fallback_total` | `from`, `to` | Mitigation announces that degraded to a fallback method because the peer rejected the primary, by `from`/`to`. A non-zero `from="flowspec"` series flags upstreams that do not honor FlowSpec. |
-| `kapkan_notify_notifications_total` | `channel`, `result` | Notifications attempted, by channel (telegram, slack, email, webhook, exec) and `result`. |
-| `kapkan_storage_rows_total` | `table`, `result` | Rows handed to the optional [ClickHouse storage](/docs/storage), by table and `written` / `dropped` / `error`. |
+| `kapkan_notify_notifications_total` | `channel`, `result` | Notifications attempted, by channel (telegram, slack, email, webhook, exec) and `result` (`ok`, `error`, or `dropped` when delivery slots were saturated). |
+| `kapkan_storage_rows_total` | `table`, `result` | Rows handed to the optional [ClickHouse storage](/docs/storage), by table and `written` / `dropped` / `error`. `dropped` = the storage queue was full (storage never blocks detection, so flows are still processed and mitigated). |
 | `kapkan_build_info` | `version`, `revision`, `goversion`, `goos`, `goarch` | Constant `1` info gauge carrying the running build in its labels (the `node_exporter` idiom). Query fleet version drift with `count by (version)(kapkan_build_info)` — zero phone-home. |
 | `kapkan_update_available` | `latest_version`, `security` | `1` when the opt-in [`update_check`](/docs/configuration) finds a newer release (absent otherwise); `security="true"` flags a security-relevant release. |
 
@@ -42,6 +43,9 @@ The `mode` label on `kapkan_mitigate_announced_routes` is the fastest way to con
 state at a glance: while `dry_run: true`, every would-be route is counted under
 `mode="dry_run"` and nothing under `mode="real"`. See [Mitigation](/docs/mitigation) and the
 [Safety model](/docs/safety).
+
+The `proto` label is the wire protocol the flow arrived on: `sflow5`, `netflow5`,
+`netflow9`, or `ipfix` (e.g. `kapkan_ingest_flows_total{proto="sflow5"}`).
 
 ## Scraping
 
@@ -55,7 +59,7 @@ scrape_configs:
       - targets: ["127.0.0.1:8080"]
 ```
 
-Use the host and port from your `api.listen` value. If you expose the listener beyond
+Use the host and port from your `api.listen` value (conventionally `127.0.0.1:8080`). If you expose the listener beyond
 localhost, set an API token — `/metrics` stays reachable without it, so your scraper needs
 no credentials.
 

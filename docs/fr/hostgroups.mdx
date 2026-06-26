@@ -68,7 +68,10 @@ place le débit combiné du pool.
 - **Appartenance par correspondance du préfixe le plus long (longest-prefix-match).** Chaque
   hôte appartient à un seul groupe : celui dont le préfixe correspondant est le plus
   spécifique (le plus long). Un hôte présent à la fois dans un groupe `/24` et dans un groupe
-  `/26` contenu dans ce dernier appartient au `/26`.
+  `/26` contenu dans ce dernier appartient au `/26`. Deux groupes ne peuvent pas déclarer le
+  *même* préfixe — c'est une erreur de configuration. Le chevauchement n'est résolu que
+  lorsqu'un préfixe est strictement plus long (plus spécifique) que l'autre ; les préfixes
+  identiques sont rejetés au démarrage.
 - **Repli implicite sur le global.** Les hôtes ne correspondant à aucun groupe tombent dans
   un groupe `global` implicite qui porte les `thresholds` de premier niveau (ainsi que
   `thresholds_outgoing` / `baseline` s'ils sont définis). Vous n'avez jamais à énumérer chaque
@@ -82,7 +85,9 @@ place le débit combiné du pool.
   au moins une clé suffit.)
 - **`ban: false` désactive le RTBH automatique.** Les hôtes du groupe sont toujours détectés,
   classifiés et notifiés, mais aucun blackhole automatique n'est annoncé. Les bannissements
-  manuels via l'API fonctionnent toujours et s'appliquent toujours à ces hôtes.
+  manuels via l'API fonctionnent toujours et s'appliquent toujours à ces hôtes (envoyez un
+  bannissement manuel via l'API REST — voir [Atténuation et RTBH](/docs/mitigation) /
+  [API REST](/docs/api)).
 - **`calculation: total` additionne le groupe.** Au lieu d'évaluer chaque hôte, le trafic
   combiné du groupe est comparé aux seuils. Les groupes en mode total signalent
   `scope: "group"` dans les événements, les notifications et l'API, et **ne bannissent jamais
@@ -137,6 +142,10 @@ hostgroups:
 Les surcharges par groupe sont indépendantes : un groupe peut définir `thresholds` tout en
 héritant de la `baseline` globale, ou définir sa propre `baseline` tout en héritant des
 `thresholds` globaux. Tout ce qui reste non défini se replie sur la valeur globale.
+
+Un groupe peut également surcharger la méthode de mitigation, le palier flowspec/escalade et
+les attributs bgp/scrubbing — voir la [Référence de configuration](/docs/configuration) pour
+la liste complète des champs.
 
 ## Voir aussi
 

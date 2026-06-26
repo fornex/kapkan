@@ -8,8 +8,11 @@ export const metadata = {
 
 Une méthode `mitigation` unique déclenche la même réponse à l'instant même où une attaque est
 détectée. Un palier d'escalade, lui, **renforce progressivement la réponse à mesure qu'une
-attaque persiste** — de manière déclarative, là où FastNetMon vous oblige à écrire un script
-de rappel.
+attaque persiste** — de manière déclarative, sans aucun script de rappel.
+
+La plupart des déploiements se contentent d'une seule méthode `mitigation:`. N'utilisez un
+palier que lorsque vous voulez d'abord une réponse plus douce (par exemple une alerte, puis un
+filtrage chirurgical) avant de recourir à un [blackhole](/docs/glossary) complet.
 
 ```yaml
 escalation:                         # supersedes `mitigation` when present
@@ -31,12 +34,15 @@ paliers `flowspec` et `divert`.
 ## Application des paliers
 
 Le `after_seconds` de chaque palier est mesuré à partir du début de l'attaque. Un palier
-s'applique une fois ce délai écoulé **et tant que le bannissement n'a pas encore été levé** —
-la levée n'intervient qu'après que le trafic est resté sous le seuil pendant toute la fenêtre
-d'hystérésis de levée du bannissement (unban). L'horloge du palier continue de tourner depuis
-le début de l'attaque tout du long.
+s'applique une fois ce délai écoulé **et tant que le bannissement est encore actif**. (Un
+bannissement n'est levé qu'après que le trafic est resté sous le seuil pendant toute la période
+de refroidissement configurée, `ban.unban_hysteresis_seconds` — voir
+[Configuration](/docs/configuration).) L'horloge du palier continue de tourner depuis le début
+de l'attaque tout du long.
 
 - Le premier palier doit être à `0` seconde.
+- Un palier peut comporter au plus **5 échelons** — c'est une limite stricte ; le démon refuse
+  de démarrer avec un palier plus long.
 - `action` vaut `none` (alerte seule), `flowspec`, `divert` ([scrubbing](/docs/scrubbing)) ou
   `blackhole`.
 - Un palier ne peut que **maintenir ou renforcer** la réponse : `none` < `flowspec` < `divert` <
@@ -52,16 +58,23 @@ paliers arrivent à échéance en même temps (attaque de longue durée, ou dém
 retard après une pause), le bannissement saute directement au palier dû le plus élevé et
 n'annonce jamais les paliers qu'il franchit.
 
-La seule exception est `divert → blackhole` : tous deux empruntent le même NLRI de route d'hôte,
-de sorte que la réannonce du blackhole remplace atomiquement la route de divert — sans retrait
-distinct, sans interruption. Les basculements entre familles (règles FlowSpec vers une route
-d'hôte, ou inversement) relèvent du cas make-before-break ci-dessus.
+Un palier `flowspec` ou `divert` dont l'annonce est rejetée par le pair amont bascule vers le
+blackhole (sauf si vous définissez `ban.fallback: none` dans
+[Configuration](/docs/configuration)) ; l'API et les notifications le signalent via le champ
+`fell_back_from`. Les paliers blackhole et alerte seule n'ont pas de repli.
+
+La seule exception au ballet annonce-puis-retrait est `divert → blackhole` : tous deux
+annoncent la même route d'hôte (le `/32` ou le `/128` de la victime), de sorte que l'annonce du
+blackhole remplace atomiquement la route de divert — sans retrait distinct, sans interruption.
+Les basculements entre familles (règles FlowSpec vs route d'hôte) relèvent du cas
+make-before-break ci-dessus.
 
 ## Cycle de vie et compatibilité
 
 Le palier est **surchargeable par hostgroup** et partage le reste du cycle de vie du
-bannissement : retrait automatique au TTL, plafond `max_active_bans`, liste blanche absolue et
-dry-run (qui fait avancer le palier et journalise chaque échelon, mais sans jamais annoncer).
+bannissement : retrait automatique au TTL, plafond `max_active_bans`, les plafonds de rayon
+d'impact (`max_banned_fraction`, `max_bans_per_window`), la liste blanche absolue et le dry-run
+(qui fait avancer le palier et journalise chaque échelon, mais sans jamais annoncer).
 
 Lorsqu'aucun bloc `escalation` n'est défini, la méthode `mitigation` unique se comporte
 exactement comme un palier à un seul échelon à `0` seconde — compatibilité ascendante totale.
@@ -74,3 +87,4 @@ l'indice de l'échelon courant (`escalation_step`) et la méthode de l'échelon 
 - [Atténuation FlowSpec](/docs/flowspec) — la méthode chirurgicale qu'un palier peut parcourir.
 - [Déviation du trafic](/docs/scrubbing) — le palier `divert` qui scrube au lieu de jeter.
 - [Référence de configuration](/docs/configuration) · [API REST](/docs/api)
+- [Glossaire](/docs/glossary) — BGP, RTBH/blackhole, FlowSpec, route d'hôte et les autres termes utilisés ici.

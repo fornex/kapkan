@@ -41,6 +41,9 @@ export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
 Keeping the token in an environment variable rather than the YAML means the config remains
 safe to commit to git and diff alongside the rest of your [configuration](/docs/configuration).
 
+That single token is all most deployments need — the rest of this page (roles, tenants) is
+optional and can wait.
+
 ## Roles
 
 For role-based access use `tokens` instead of `token_env` — a list where each entry names the
@@ -54,16 +57,26 @@ api:
     - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
 ```
 
+`name`, `token_env` and `role` are all required for each entry; `role` must be exactly
+`viewer` or `operator`. A missing or misspelled value is a hard validation error at startup,
+not a silent default.
+
 | Role | May do |
 | --- | --- |
 | `viewer` | Read only: status, attacks, hosts, bans, metrics. |
-| `operator` | Everything a viewer can, plus manual ban/unban and config reload (reload is [admin-only](/docs/multi-tenancy) — see below). |
+| `operator` | Everything a viewer can, plus manual ban/unban and config reload (reload is admin-only — see below). |
+
+There is no separate `admin` role to assign — an *admin* is simply an operator token with no `tenant` set. The only role values the engine accepts are `viewer` and `operator`; the admin/scoped distinction is the [Multi-tenancy](/docs/multi-tenancy) axis, covered below.
 
 `token_env` and `tokens` are **mutually exclusive** — `token_env` is exactly one operator
 token. A request is matched against every configured token (in constant time); the highest
 matching role applies. A read with a viewer token works; a mutation with a viewer token is
 refused with `403 Forbidden`; a request with no valid token is `401 Unauthorized`. An
 empty or unset env var never matches, so a misconfigured secret fails closed.
+
+Give every token a distinct secret — if one secret value is configured for two tokens with
+different roles or tenants, the request is refused (`401 Unauthorized`) rather than guessing
+which one you meant. The daemon logs `ambiguous API token` when this happens.
 
 A token's secret *value* is read from the environment on every request, so rotating it
 takes effect on the next request. Adding or removing token *entries* in the YAML changes the

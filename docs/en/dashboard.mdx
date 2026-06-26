@@ -6,11 +6,12 @@ export const metadata = {
 
 # Dashboard
 
-Kapkan ships with a self-contained web UI embedded directly in the binary via `go:embed`.
-There is no build step, no bundler, and no external assets to fetch — the same static `kapkan`
-binary serves the dashboard alongside the JSON API and Prometheus metrics. It is plain
-JavaScript that polls the REST API, not a React application, so it runs entirely from live
-data with no database required.
+Open **http://localhost:8080** in a browser running on the Kapkan host. When you are under
+attack, look first at the **Live mode** banner (is Kapkan actually announcing, or only
+watching?) and the **Active attacks** list (what is being hit, and how hard).
+
+The web UI is built into the `kapkan` binary itself, so there is nothing extra to install or
+deploy — the same process serves the dashboard, the JSON API and Prometheus metrics.
 
 <Callout type="info" title="One binary, one listener">
 The dashboard, the JSON API and `/metrics` are all served by the same process on the same
@@ -22,6 +23,18 @@ address. There is no separate web service to deploy or keep in sync.
 The dashboard is served at `/` on the same address as the REST API — the `api.listen`
 value from your config. With the default of `127.0.0.1:8080`, you open it at
 [http://localhost:8080](http://localhost:8080).
+
+Because the default binds `127.0.0.1`, the dashboard is reachable only from the Kapkan host
+itself — opening `localhost:8080` on your own laptop will show nothing. To view it from your
+workstation, forward the port over SSH rather than rebinding `api.listen` to a public address:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@kapkan-host
+```
+
+Then open [http://localhost:8080](http://localhost:8080) on your workstation. (Rebinding the
+listener to a public address needs an API token first — see the [Authentication](#authentication)
+caveat below.)
 
 To serve only the JSON API and metrics without the UI, disable it:
 
@@ -41,9 +54,9 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
 - **Live mode** — whether the instance is running in dry-run or live, so you can see at a
   glance whether a detected attack would actually be announced.
 - **Active and recent attacks** — currently firing attacks plus the recently ended ones,
-  each with its classification (amplification vectors such as NTP / DNS / CLDAP / memcached /
-  SSDP / chargen, and SYN / UDP / TCP / ICMP / fragment floods) and the dominant sources,
-  ports and protocols captured from the flow samples.
+  each with its classification of the attack type (for example, NTP/DNS amplification or a
+  SYN flood — see the [Detection](/docs/detection) page for what each type means) and the
+  dominant sources, ports and protocols captured from the flow samples.
 - **Top talkers** — the tracked-host snapshot with per-direction rates and learned
   baselines, so you can see who is loudest and how it compares to normal.
 - **Hostgroups** — your named prefix groups and their state.
@@ -51,13 +64,12 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
 - **Traffic / Reports** — live ingress/egress charts built from the in-memory rate
   buffers, plus a **Historical reports** section that reads the persisted ClickHouse
   tables when storage is enabled.
+- **Controls** — the same actions the API offers: **manual ban / unban** of an address and
+  **config reload** (the equivalent of sending `SIGHUP`).
 
-It also exposes the same control endpoints the API offers: **manual ban / unban** of an
-address and **config reload** (the equivalent of `SIGHUP`). The live charts work on
-in-memory data alone — no ClickHouse or other database is needed for them. The one exception
-is the **Historical reports** section on the Traffic / Reports view: it is populated only when
-[ClickHouse storage](/docs/storage) is enabled, and otherwise renders a labeled placeholder
-explaining how to turn it on.
+The **Historical reports** section on the Traffic / Reports view is the one part that needs
+storage: it is populated only when [ClickHouse storage](/docs/storage) is enabled, and
+otherwise renders a labeled placeholder explaining how to turn it on.
 
 <Callout type="success" title="No database required">
 The dashboard is built entirely from the engine's in-memory state. Historical flow storage

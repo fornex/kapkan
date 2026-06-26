@@ -11,10 +11,12 @@ a test prefix. There is no build step — Kapkan ships as a single prebuilt, sig
 nothing here can announce a route, because dry-run is the default.
 
 <Callout type="info" title="What you need">
-A Linux host (`amd64` or `arm64`). To see *live* detections you also need a router exporting
-NetFlow / IPFIX / sFlow — but even without one you can validate detection end-to-end with the
-bundled synthetic-attack tooling (the [last section](#5-no-router-generate-synthetic-attacks),
-which runs from a source checkout). You only need a Go toolchain if you choose to
+A Linux host (`amd64` or `arm64`). To see *real* detections you need a router exporting flow
+telemetry — NetFlow, IPFIX or sFlow (records of who is sending traffic to whom; see the
+[glossary](/docs/glossary)). With no router and a source checkout, you can still confirm
+detection works by running the test suite — see the
+[last section](#5-optional-no-router-validate-detection-from-source). You only need a Go
+toolchain if you go that route, or if you
 [build from source](/docs/deployment#building-from-source) instead of downloading.
 </Callout>
 
@@ -22,6 +24,13 @@ which runs from a source checkout). You only need a Go toolchain if you choose t
 
 Pick whichever fits your host — every release ships prebuilt and signed for `linux`
 `amd64`/`arm64`, so you never compile anything.
+
+<Callout type="info" title="Use the latest release — replace v1.0.0">
+Before you copy-paste, replace `v1.0.0` in every command below with the newest tag from the
+[releases page](https://github.com/fornex/kapkan/releases/latest) (copying `v1.0.0` verbatim
+will 404 if it is not the current release), and `amd64` with `arm64` on ARM hosts. Archive and
+package names drop the leading `v` (e.g. `kapkan_1.0.0_linux_amd64.tar.gz`).
+</Callout>
 
 ### Debian / Ubuntu (`.deb`)
 
@@ -50,12 +59,6 @@ config, and `update.sh`). The rest of this page uses the tarball. Before running
 production it is worth [verifying the download](/docs/upgrading#verifying-a-download-by-hand) —
 the cosign signature and SHA-256.
 
-<Callout type="info" title="Use the latest release">
-Replace `v1.0.0` with the newest tag from the
-[releases page](https://github.com/fornex/kapkan/releases/latest), and `amd64` with `arm64` on
-ARM hosts. Archive and package names drop the leading `v` (e.g. `kapkan_1.0.0_linux_amd64.tar.gz`).
-</Callout>
-
 ## 2. Run in dry-run
 
 From the unpacked tarball, start Kapkan with the bundled example config and human-readable
@@ -65,9 +68,15 @@ logs:
 ./kapkan -config deploy/config.example.yaml -log-format text
 ```
 
+It runs in the foreground and prints logs to your terminal; press Ctrl-C to stop it cleanly.
+
 `-config` points at the YAML config and `-log-format text` switches logs from the default
 structured JSON to a human-readable form — see the [CLI reference](/docs/cli) for every flag
 and its accepted values.
+
+In dry-run, Kapkan needs no special privileges and can run as a normal user. (Going live binds
+BGP to port 179, which needs root or the `CAP_NET_BIND_SERVICE` capability — the shipped systemd
+unit handles this; see [Production deployment](/docs/deployment).)
 
 The bundled [`deploy/config.example.yaml`](/docs/configuration) has `dry_run: true`, test
 protected networks of `203.0.113.0/24` and `2001:db8::/32`, a `protected_whitelist`, and
@@ -109,24 +118,32 @@ curl -s localhost:8080/metrics | grep kapkan_
 You can also open the embedded [dashboard](/docs/dashboard) at
 [http://localhost:8080](http://localhost:8080) in a browser.
 
-## 5. No router? Generate synthetic attacks
+## 5. Optional: no router? Validate detection from source
 
-This last step runs from a **source checkout** (it exercises the test suite), so it needs the
-repository and a Go toolchain. Kapkan ships with `pkg/flowgen`, which builds real NetFlow /
-sFlow wire-format datagrams — including amplification, SYN-flood and UDP-flood patterns. It is
-used throughout the test suite to validate detection end-to-end without touching a real router.
-The integration test in `internal/app` replays an NTP-amplification flood over a real UDP
-socket against a dry-run instance and asserts the attack and its (auto-expiring) virtual ban —
-the recorded would-be blackhole that dry-run exposes through the API without ever announcing it
-— appear in the API:
+<Callout type="info" title="This is a developer path, not the binary path">
+This step does **not** use the prebuilt binary you downloaded above. It runs Kapkan's test
+suite, so it needs a source checkout and a [Go toolchain](https://go.dev/dl/). If you only have
+the `.deb`/`.rpm`/tarball and no router yet, skip this — point a router at the listen ports
+(step 3) when you have one. The synthetic-attack tooling (`pkg/flowgen`) is a test-suite
+package, not a command the shipped binary exposes.
+</Callout>
+
+What this proves: Kapkan detects an attack and would have blacklisted the victim — all without
+sending anything to a real router, since dry-run only records the would-be block (a *virtual
+ban* — a [blackhole](/docs/glossary) route Kapkan exposes through the API but never announces).
+
+The test sends a fake NTP-amplification flood at a dry-run instance over a real UDP socket and
+checks the attack shows up in the API, with a virtual ban that later auto-expires by its TTL.
+Run it from a source checkout:
 
 ```sh
 git clone https://github.com/fornex/kapkan && cd kapkan/engine
-go test ./internal/app -run TestEndToEnd -v
+go test ./internal/app -run TestEndToEndNTPAmplification -v
 ```
 
 ## Next steps
 
+- [Under attack right now?](/docs/under-attack) — the copy-paste runbook for when traffic is already hitting you.
 - [Production deployment](/docs/deployment) — run Kapkan as a hardened systemd service.
 - [Configuration reference](/docs/configuration) — adapt the config to your network.
 - [Detection & thresholds](/docs/detection) — tune what counts as an attack.

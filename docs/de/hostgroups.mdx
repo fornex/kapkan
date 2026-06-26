@@ -67,7 +67,10 @@ stattdessen die kombinierte Rate des Pools.
 
 - **Zuordnung per Longest-Prefix-Match.** Jeder Host gehört zu genau einer Gruppe: derjenigen
   mit dem spezifischsten (längsten) passenden Präfix. Ein Host, der sowohl in einer
-  `/24`-Gruppe als auch in einer darin enthaltenen `/26`-Gruppe liegt, gehört zur `/26`.
+  `/24`-Gruppe als auch in einer darin enthaltenen `/26`-Gruppe liegt, gehört zur `/26`. Zwei
+  Gruppen dürfen *nicht* dasselbe Präfix deklarieren — das ist ein Konfigurationsfehler. Eine
+  Überlappung wird nur aufgelöst, wenn ein Präfix strikt länger (spezifischer) als das andere
+  ist; identische Präfixe werden beim Start abgelehnt.
 - **Impliziter globaler Fallback.** Hosts, die von keiner Gruppe erfasst werden, fallen in eine
   implizite `global`-Gruppe, die die `thresholds` der obersten Ebene trägt (sowie
   `thresholds_outgoing` / `baseline`, falls gesetzt). Sie müssen niemals jedes Präfix
@@ -81,7 +84,9 @@ stattdessen die kombinierte Rate des Pools.
   abgelehnt. (`thresholds_outgoing` verhält sich anders: dort genügt mindestens ein Schlüssel.)
 - **`ban: false` deaktiviert automatisches RTBH.** Die Hosts der Gruppe werden weiterhin
   erkannt, klassifiziert und gemeldet, aber es wird kein automatisches Blackhole angekündigt.
-  Manuelle Bans über die API funktionieren weiterhin und gelten weiterhin für diese Hosts.
+  Manuelle Bans über die API funktionieren weiterhin und gelten weiterhin für diese Hosts
+  (POSTen Sie einen manuellen Ban über die REST-API — siehe
+  [Mitigation & RTBH](/docs/mitigation) / [REST API](/docs/api)).
 - **`calculation: total` summiert die Gruppe.** Statt jeden Host einzeln auszuwerten, wird der
   kombinierte Verkehr der Gruppe mit den Schwellenwerten verglichen. Total-Gruppen melden
   `scope: "group"` in Events, Benachrichtigungen und der API und **bannen niemals automatisch**
@@ -137,6 +142,10 @@ hostgroups:
 Überschreibungen pro Gruppe sind voneinander unabhängig: Eine Gruppe kann `thresholds` setzen,
 aber die globale `baseline` erben, oder ihre eigene `baseline` setzen, während sie die globalen
 `thresholds` erbt. Alles, was nicht gesetzt ist, fällt auf den globalen Wert zurück.
+
+Eine Gruppe kann außerdem die Mitigationsmethode, die FlowSpec-/Eskalationsstufe sowie
+BGP-/Scrubbing-Attribute überschreiben — die vollständige Feldliste finden Sie in der
+[Konfigurationsreferenz](/docs/configuration).
 
 ## Verwandte Themen
 

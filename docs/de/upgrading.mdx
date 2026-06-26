@@ -19,30 +19,32 @@ Kapkan funkt standardmäßig niemals nach Hause. Die laufende Version wird stets
 Aktivieren Sie optional eine Update-Prüfung, um benachrichtigt zu werden, wenn ein neueres Release existiert (siehe `update_check` in der [Konfigurationsreferenz](/docs/configuration)):
 
 ```sh
-kapkan -check-update      # exit 0 = up to date, 10 = a newer release exists, 1 = error
+kapkan -check-update -config /etc/kapkan/config.yaml   # exit 0 = up to date, 10 = a newer release exists, 1 = error
 ```
+
+`-check-update` lädt Ihre Konfiguration, um `update_check.channel` / `update_check.url` zu lesen, also lassen Sie `-config` auf Ihre echte Datei zeigen. Ohne diese Angabe verwendet der Befehl standardmäßig den Entwicklungspfad (`configs/dev.yaml`) und beendet sich mit 1 und einem „no such file"-Fehler — derselbe Vorbehalt gilt für ein nacktes `kapkan -check-config`.
 
 Wenn `update_check.enabled` gesetzt ist, fragt Kapkan die GitHub-Releases-API in einem Intervall ab und stellt das Ergebnis über `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), die Metrik `kapkan_update_available`, eine Logzeile, das Banner der Konsole und — mit `update_check.notify` — Ihre Benachrichtigungskanäle bereit. Die Prüfung übermittelt nur die Anfrage selbst (Quell-IP + einen generischen User-Agent), niemals Node-Identität, Konfiguration oder Angriffsdaten, und läuft außerhalb des Startpfads, sodass ein durch eine Firewall blockierter Endpunkt den Daemon niemals verzögert.
 
 ## Aktualisieren mit `update.sh`
 
-Das Skript in [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) führt eine sichere, signierte und rückrollfähige Aktualisierung durch. Führen Sie es als root auf dem Host aus:
+Das Skript in [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) führt eine sichere, signierte und rückrollfähige Aktualisierung durch. Es benötigt `curl`, `cosign`, `tar` und systemd auf dem Host (es verifiziert eine echte Signatur) — installieren Sie zuerst `cosign`, falls es fehlt, sonst bricht der erste Lauf mit `required command not found: cosign` ab. Führen Sie es als root aus Ihrem kapkan-Checkout aus:
 
 ```sh
-sudo deploy/update.sh v1.3.0     # a specific tag
-sudo deploy/update.sh            # the latest stable release
-sudo deploy/update.sh --prerelease   # the latest including -rc tags
+sudo ./engine/deploy/update.sh v1.3.0       # a specific tag
+sudo ./engine/deploy/update.sh              # the latest stable release
+sudo ./engine/deploy/update.sh --prerelease   # the latest including -rc tags
 ```
 
 Was es der Reihe nach tut:
 
 1. **Verifizieren** — lädt das Release-Archiv für Ihre Architektur sowie `checksums.txt` und dessen cosign-Signatur herunter, verifiziert die Signatur (an die release-tag-OIDC-Identität dieses Repositorys gebunden) und prüft anschließend die SHA-256-Prüfsumme des Archivs selbst. Es schlägt fehlsicher fehl, falls irgendetwas nicht übereinstimmt.
-2. **Vorabprüfung (Preflight)** — führt `kapkan -check-config` der **neuen** Binärdatei gegen Ihre aktive `/etc/kapkan/config.yaml` als Benutzer `kapkan` aus, sodass eine Konfiguration, die die neue Version ablehnt (eine [inkompatible Konfigurationsänderung](#config-changes-between-versions), eine nicht lesbare Datei), die Aktualisierung **vor** jedem Austausch abbricht. Der laufende Daemon bleibt unangetastet.
+2. **Vorabprüfung (Preflight)** — führt `kapkan -check-config` der **neuen** Binärdatei gegen Ihre aktive `/etc/kapkan/config.yaml` als Benutzer `kapkan` aus, sodass eine Konfiguration, die die neue Version ablehnt (eine [inkompatible Konfigurationsänderung](#konfigurationsänderungen-zwischen-versionen), eine nicht lesbare Datei), die Aktualisierung **vor** jedem Austausch abbricht. Der laufende Daemon bleibt unangetastet.
 3. **Austauschen** — kopiert die aktuelle Binärdatei nach `kapkan.old` und ersetzt `/usr/local/bin/kapkan` dann atomar durch die neue.
 4. **Neustart & Health-Check** — erstellt einen Snapshot der Konfiguration, startet den Dienst neu und fragt `/healthz` ab, bis er Bereitschaft meldet.
 5. **Rollback bei Fehler** — falls der Daemon nicht fehlerfrei startet, stellt es sowohl die vorherige Binärdatei als auch die vorherige Konfiguration wieder her und startet die alte Version neu.
 
-Die Prüf-URL wird aus Ihrem `api.listen` abgeleitet; überschreiben Sie sie (und das Timeout) bei Bedarf mit `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE`.
+Standardmäßig wartet es bis zu 60 s darauf, dass `/healthz` Bereitschaft meldet, bevor es aufgibt und zurückrollt. Die Prüf-URL wird aus Ihrem `api.listen` abgeleitet; überschreiben Sie sie (und die Frist) bei Bedarf mit `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE`. Erhöhen Sie `KAPKAN_HEALTH_DEADLINE` bei großen Deployments — eine große GeoIP-Datenbank plus viele persistierte Bans, die rehydriert werden, können den Start über 60 s hinaus verlangsamen.
 
 Aus dem `.deb` / `.rpm` installiert? Sie können stattdessen aktualisieren, indem Sie ein neueres Paket installieren (`sudo apt install ./kapkan_<newer>.deb`), wodurch die Binärdatei ersetzt wird und Ihre bearbeitete `/etc/kapkan/config.yaml` erhalten bleibt. `update.sh` bleibt der Weg für Tarball-Installationen (und funktioniert auch für Paket-Installationen, da beide die Binärdatei an denselben Ort `/usr/local/bin/kapkan` legen).
 
@@ -51,7 +53,7 @@ Aus dem `.deb` / `.rpm` installiert? Sie können stattdessen aktualisieren, inde
 Ein Neustart unterbricht dank zweier Engine-Funktionen keine aktive Mitigation mehr (siehe [RTBH-Mitigation](/docs/mitigation)):
 
 - **BGP Graceful Restart** (`bgp.graceful_restart`, standardmäßig aktiviert) — ein Peer, der dies unterstützt, behält Kapkans Blackhole-/FlowSpec-Routen als veraltet (stale), während die Session ausgefallen ist, anstatt sie zu verwerfen.
-- **Ban-Persistenz** (`ban.state_file`) — aktive Bans werden persistiert und beim Start neu angekündigt, *vor* dem End-of-RIB der BGP-Session, sodass der Peer die behaltenen Routen aktualisiert, anstatt sie zu löschen. Legen Sie einen beschreibbaren Pfad fest (die systemd-Unit stellt einen über `StateDirectory=kapkan` bereit), um dies zu aktivieren.
+- **Ban-Persistenz** (`ban.state_file`) — aktive Bans werden persistiert und beim Start neu angekündigt, *vor* dem [End-of-RIB](/docs/glossary)-Marker der BGP-Session (das Signal, das sagt „Ich habe alle meine Routen fertig gesendet"), sodass der Peer die behaltenen Routen aktualisiert, anstatt sie zu löschen. Legen Sie einen beschreibbaren Pfad fest (die systemd-Unit stellt einen über `StateDirectory=kapkan` bereit), um dies zu aktivieren.
 
 Zusammen bedeuten diese, dass Sie **nicht** das Ende eines Angriffs abwarten müssen, bevor Sie aktualisieren.
 
@@ -63,7 +65,7 @@ Falls Sie ohne `update.sh` installieren (air-gapped oder mit eigener Automatisie
 VER=v1.3.0
 base="https://github.com/fornex/kapkan/releases/download/$VER"
 curl -fLO "$base/kapkan_${VER#v}_linux_amd64.tar.gz"   # archive names drop the leading "v"
-curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
+for f in checksums.txt checksums.txt.sig checksums.txt.pem; do curl -fLO "$base/$f"; done
 
 # 1) authenticity: the signature over checksums.txt, pinned to this repo's release tag
 cosign verify-blob checksums.txt \

@@ -74,3 +74,51 @@ body {
 :target {
   scroll-margin-top: 5rem;
 }
+
+/* Per-heading deep links (rehype-autolink-headings, behavior: "append").
+   The anchor is always present, but its "#" glyph (the inner <span>) stays
+   invisible until the heading is hovered or the link is keyboard-focused.
+   Clicking copies the section URL to the clipboard and flashes the "copied"
+   bubble — both handled in DocsChrome, which sets data-copied + data-tip.
+   We toggle a data-* attribute rather than a class because React owns the
+   anchor's className and would reset a class on re-render. Fading the inner
+   span (not the anchor) keeps the bubble — an ::after on the anchor —
+   visible regardless of hover state. */
+.heading-anchor {
+  position: relative;
+  margin-left: 0.4rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+.heading-anchor > span {
+  color: var(--muted-foreground);
+  font-weight: 400;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+:is(h1, h2, h3, h4):hover > .heading-anchor > span,
+.heading-anchor:focus-visible > span,
+.heading-anchor[data-copied] > span {
+  opacity: 1;
+}
+.heading-anchor:hover > span,
+.heading-anchor[data-copied] > span {
+  color: var(--accent);
+}
+/* Transient "Link copied" bubble shown right after a click. */
+.heading-anchor[data-copied]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: var(--foreground);
+  color: var(--background);
+  font-size: 0.7rem;
+  font-weight: 500;
+  line-height: 1;
+  padding: 0.3rem 0.45rem;
+  border-radius: 0.3rem;
+  pointer-events: none;
+}

@@ -33,6 +33,12 @@ reale Pipeline, keine Simulation.
    curl -s localhost:8080/api/v1/attacks | jq
    ```
 
+   <Callout type="info" title="Falls Sie API-Tokens eingerichtet haben">
+   Diese Befehle gehen von der standardmäßig tokenlosen API auf einem vertrauenswürdigen `127.0.0.1`-Bind aus.
+   Falls Sie `api.tokens` oder `api.token_env` konfiguriert haben, fügen Sie jedem curl-Aufruf
+   `-H 'Authorization: Bearer <token>'` hinzu – andernfalls erhalten Sie einen `401`/`403`.
+   </Callout>
+
 2. **Bestätigen, dass BGP den Zustand `ESTABLISHED` erreicht.** Das Peering findet auch im Dry-Run statt,
    sodass Sie die Konnektivität verifizieren können, bevor Sie etwas ankündigen. Achten Sie in den Logs auf
    das Ereignis `bgp peer state` und bestätigen Sie, dass jeder konfigurierte Nachbar den Zustand
@@ -49,11 +55,19 @@ reale Pipeline, keine Simulation.
    ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
 
-   Sie können den Zustand der Peers auch ohne die Logs über `GET /api/v1/status` bestätigen.
+   Der Peer-Zustand wird heute ausschließlich in den Logs gemeldet – `GET /api/v1/status` zeigt Ihre
+   BGP-*Konfiguration* (lokale ASN, Router-ID, Next Hop, Community, Nachbar-Adressen), nicht den
+   Live-Sitzungszustand. Um zu wissen, ob eine Sitzung tatsächlich zustande gekommen ist, achten Sie auf
+   das Ereignis `bgp peer state`.
 
 3. **Dry-Run deaktivieren und neu laden.** Setzen Sie `dry_run: false` in Ihrer Konfiguration und laden Sie
    Kapkan anschließend neu, damit die Datei erneut eingelesen wird. Das Neuladen ist unterbrechungsfrei: Es
    startet weder den Daemon neu noch trennt es BGP-Sitzungen.
+
+   Validieren Sie die Datei zuerst mit `kapkan -check-config /etc/kapkan/config.yaml` (Exit-Code `0` =
+   gültig). Ein Neuladen, das die Validierung nicht besteht, wird abgelehnt: Kapkan loggt `config reload failed;
+   keeping previous config` und betreibt weiterhin die letzte gültige Konfiguration, sodass ein Tippfehler Sie
+   nicht mitten in einem Angriff lahmlegen kann.
 
    ```sh
    # Either signal the process:

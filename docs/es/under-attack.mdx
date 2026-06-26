@@ -1,0 +1,105 @@
+export const metadata = {
+  title: "Ataque en curso",
+  description:
+    "Un manual breve para copiar y pegar, dirigido a un operador cuya red está siendo atacada ahora mismo y que ya tiene Kapkan en marcha.",
+};
+
+# Ataque en curso
+
+Esta página es para una sola situación: **el tráfico está entrando a raudales y ya tienes Kapkan
+instalado e ingiriendo flujos.** Es una lista de comprobación, no una explicación: síguela de
+arriba abajo. Si todavía no tienes Kapkan instalado, empieza por el [Inicio rápido](/docs/quickstart); si
+tienes tiempo para leer, las páginas de [Mitigación](/docs/mitigation) y [Modelo de seguridad](/docs/safety)
+cubren el *porqué*.
+
+<Callout type="info" title="¿Configuraste un token de API?">
+Si configuraste la [autenticación](/docs/authentication), añade `-H "Authorization: Bearer $TOKEN"`
+a cada `curl` de abajo (usa un token de **operador** para `ban`/`unban`). Sin ningún token configurado,
+la API por defecto está abierta en `127.0.0.1:8080` y los comandos funcionan tal cual.
+</Callout>
+
+## 1. Mira qué está detectando Kapkan
+
+```sh
+curl -s localhost:8080/api/v1/attacks | jq
+```
+
+Cada entrada es un ataque que Kapkan ha detectado: el `target` que está siendo golpeado, la `metric` que se
+disparó (`pps`, `mbps` o `flows_per_sec`), la [clasificación](/docs/detection) (p. ej. amplificación
+NTP, inundación SYN) y la `route` que anunciaría o ya ha anunciado. Si esta lista está
+vacía mientras estás claramente bajo ataque, salta a
+[Resolución de problemas → No veo ningún ataque](/docs/troubleshooting#no-veo-ningún-ataque).
+
+## 2. Confirma si Kapkan está realmente mitigando
+
+Este es el paso que la gente se salta. Kapkan se entrega en **modo de simulación (dry-run) por defecto**: detecta y
+registra, pero no anuncia nada hasta que desactivas el dry-run.
+
+```sh
+curl -s localhost:8080/api/v1/status | jq '.dry_run'
+```
+
+- `true` → Kapkan **solo está observando**. No se está anunciando ninguna ruta, y un ban manual
+  (paso 3) será *registrado pero no enviado*. Para descartar de verdad el tráfico de ataque debes
+  [ponerlo en producción](/docs/going-live): establece `dry_run: false` y recarga.
+- `false` → Kapkan está en producción. Los ataques detectados se enrutan a un agujero negro (blackhole) automáticamente.
+
+## 3. Banea de inmediato a una víctima concreta
+
+Si un host está siendo machacado y quieres enviarlo al agujero negro ahora mismo sin esperar (ni ajustar) un
+umbral, banéalo a mano. Esto descarta **todo** el tráfico hacia esa dirección: úsalo con la víctima
+de la inundación, no con infraestructura que necesites mantener accesible.
+
+```sh
+curl -s -X POST localhost:8080/api/v1/ban \
+  -H 'Content-Type: application/json' \
+  -d '{"ip": "203.0.113.5"}' | jq
+```
+
+Un ban exitoso devuelve el objeto del ban (`state: "active"`). Una solicitud que es **rechazada**
+devuelve HTTP `409` con un motivo: el ban manual chocó con una [protección de seguridad](/docs/safety): el
+objetivo está en la lista blanca, está fuera del alcance de tus `networks` o excedería `max_active_bans`.
+Eso es el sistema protegiéndote, no un error. Elimina un ban manual con
+`POST /api/v1/unban` y el mismo cuerpo `{"ip": ...}`.
+
+## 4. Asegúrate de que la ruta puede llegar realmente a tus routers
+
+Un agujero negro solo funciona si la sesión BGP de Kapkan con tu router está activa. Si está caída, Kapkan
+registra el ban pero ningún router llega a enterarse.
+
+```sh
+journalctl -u kapkan -f | grep "bgp peer state"
+```
+
+Cada vecino configurado debería alcanzar `ESTABLISHED`. Si alguno se queda atascado, consulta
+[Resolución de problemas → BGP no llega a ESTABLISHED](/docs/troubleshooting#bgp-no-llega-a-established).
+(`GET /api/v1/status` muestra tu *configuración* de BGP pero no el estado de la sesión en vivo: eso vive
+únicamente en los logs.)
+
+## 5. Observa cómo los bans expiran por sí solos
+
+```sh
+curl -s localhost:8080/api/v1/bans | jq
+```
+
+Cada ban lleva un TTL (`ban.ttl_seconds`) y se retira automáticamente cuando expira:
+no hay bans permanentes. No necesitas limpiar nada a mano.
+
+## Estás protegido de tus propios errores
+
+Mientras trabajas, estas protecciones se aplican en el código y no se pueden desactivar
+(consulta el [Modelo de seguridad](/docs/safety)):
+
+- **`max_active_bans`** limita cuántos hosts pueden enviarse al agujero negro a la vez: Kapkan rechazará nuevos
+  bans antes que dejar sin ruta a media red.
+- **`protected_whitelist`** nunca puede ser baneada, ni por detección ni por ti.
+- Los bans solo se aplican **dentro de tus `networks` configuradas**.
+- Cada ban **expira automáticamente** según su TTL.
+
+## Después de la tormenta
+
+- [Poner en producción](/docs/going-live) — si el paso 2 mostró `dry_run: true` y quieres mitigación
+  automática la próxima vez.
+- [Detección y umbrales](/docs/detection) — ajusta qué cuenta como un ataque para que Kapkan lo cace
+  sin un ban manual.
+- [Resolución de problemas](/docs/troubleshooting) — cuando algo de lo anterior no se comportó como se describe.

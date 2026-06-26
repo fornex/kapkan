@@ -43,6 +43,9 @@ Das Token in einer Umgebungsvariablen statt in der YAML aufzubewahren bedeutet, 
 Konfiguration sicher in Git committet und zusammen mit dem Rest Ihrer
 [Konfiguration](/docs/configuration) verglichen werden kann.
 
+Dieses eine Token ist alles, was die meisten Deployments brauchen — der Rest dieser Seite
+(Rollen, Mandanten) ist optional und kann warten.
+
 ## Rollen
 
 Für rollenbasierten Zugriff verwenden Sie `tokens` anstelle von `token_env` — eine Liste, in
@@ -56,10 +59,19 @@ api:
     - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
 ```
 
+`name`, `token_env` und `role` sind für jeden Eintrag erforderlich; `role` muss exakt
+`viewer` oder `operator` sein. Ein fehlender oder falsch geschriebener Wert ist beim Start ein
+harter Validierungsfehler, kein stiller Default.
+
 | Rolle | Darf |
 | --- | --- |
 | `viewer` | Nur lesen: Status, Angriffe, Hosts, Sperren, Metriken. |
-| `operator` | Alles, was ein viewer darf, plus manuelles Sperren/Entsperren und Neuladen der Konfiguration (das Neuladen ist [nur für Admins](/docs/multi-tenancy) — siehe unten). |
+| `operator` | Alles, was ein viewer darf, plus manuelles Sperren/Entsperren und Neuladen der Konfiguration (das Neuladen ist nur für Admins — siehe unten). |
+
+Es gibt keine separate `admin`-Rolle zum Zuweisen — ein *Admin* ist schlicht ein Operator-Token
+ohne gesetzten `tenant`. Die einzigen Rollenwerte, die die Engine akzeptiert, sind `viewer` und
+`operator`; die Unterscheidung admin/eingegrenzt ist die Achse [Mandantenfähigkeit](/docs/multi-tenancy),
+die unten behandelt wird.
 
 `token_env` und `tokens` schließen sich **gegenseitig aus** — `token_env` ist genau ein
 Operator-Token. Eine Anfrage wird gegen jedes konfigurierte Token abgeglichen (in konstanter
@@ -67,6 +79,11 @@ Zeit); es gilt die höchste passende Rolle. Ein Lesezugriff mit einem viewer-Tok
 funktioniert; eine Mutation mit einem viewer-Token wird mit `403 Forbidden` abgelehnt; eine
 Anfrage ohne gültiges Token ergibt `401 Unauthorized`. Eine leere oder nicht gesetzte
 Umgebungsvariable passt niemals, sodass ein fehlkonfiguriertes Geheimnis fail-closed ist.
+
+Geben Sie jedem Token ein eindeutiges Geheimnis — wenn ein Geheimniswert für zwei Tokens mit
+unterschiedlichen Rollen oder Mandanten konfiguriert ist, wird die Anfrage abgelehnt
+(`401 Unauthorized`), statt zu raten, welches Sie gemeint haben. Der Daemon protokolliert in
+diesem Fall `ambiguous API token`.
 
 Der Geheimnis-*Wert* eines Tokens wird bei jeder Anfrage aus der Umgebung gelesen, sodass sein
 Rotieren bereits bei der nächsten Anfrage wirksam wird. Das Hinzufügen oder Entfernen von Token-*Einträgen*

@@ -7,7 +7,7 @@ export const metadata = {
 # Lignes de base
 
 Avec un bloc `baseline`, Kapkan apprend en continu le niveau de trafic normal de chaque hôte et
-y resserre la détection. Il maintient une EWMA (moyenne mobile à pondération exponentielle) du
+y resserre la détection. Il maintient une [EWMA](/docs/glossary) (moyenne mobile à pondération exponentielle) du
 débit réel, corrigé de l'échantillonnage, **par hôte et par direction** — ainsi qu'un total par
 groupe pour les hostgroups en `calculation: total` — puis en dérive un seuil effectif de
 `learned_normal × factor`. Un hôte qui fait normalement 10k pps est signalé à environ 30k
@@ -51,10 +51,12 @@ seuils statiques (le plafond).
 
 | Clé | Valeur par défaut | Signification |
 | --- | --- | --- |
-| `factor` | `3` | Multiplicateur sur le niveau normal appris. Le seuil effectif est `learned_normal × factor`. |
-| `half_life_seconds` | `3600` | Demi-vie de l'EWMA. La durée au bout de laquelle une ancienne observation perd la moitié de son poids ; des valeurs plus grandes rendent la ligne de base plus lente et plus stable. |
-| `warmup_seconds` | `600` | Un hôte fraîchement observé est encadré par les seuils statiques uniquement pendant cette durée, comptée à partir de son premier trafic réel. |
-| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | exemple `5000` / `50` / `2000` | Borne inférieure du seuil effectif par métrique, afin que les hôtes peu actifs ne deviennent jamais hypersensibles. |
+| `factor` | `3` | Multiplicateur sur le niveau normal appris. Le seuil effectif est `learned_normal × factor`. Autorisé `1.5`–`100`. |
+| `half_life_seconds` | `3600` | Demi-vie de l'EWMA. La durée au bout de laquelle une ancienne observation perd la moitié de son poids ; des valeurs plus grandes rendent la ligne de base plus lente et plus stable. Autorisé `10`–`604800` (10s–7j). |
+| `warmup_seconds` | `600` | Un hôte fraîchement observé est encadré par les seuils statiques uniquement pendant cette durée, comptée à partir de son premier trafic réel. Autorisé `0`–`86400` (jusqu'à 24h). |
+| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | exemple `5000` / `50` / `2000` | Borne inférieure du seuil effectif par métrique, afin que les hôtes peu actifs ne deviennent jamais hypersensibles. **Obligatoire : les trois doivent être > 0** dès que les lignes de base sont activées. |
+
+Les valeurs hors plage sont rejetées au démarrage. Le bloc `floor` est obligatoire dès que les lignes de base sont activées — un bloc baseline avec l'un de `pps`, `mbps` ou `flows_per_sec` laissé à `0` (ou omis) échoue au chargement avec `floor: pps, mbps and flows_per_sec must all be > 0 (hair-trigger guard)`.
 
 ## Conception résistante à l'empoisonnement
 
@@ -74,8 +76,9 @@ faire à tout moment.
   entraînée. Le trafic d'attaque n'apprend jamais à l'hôte que l'attaque est normale.
 - **Apprentissage borné.** Hors attaques, chaque échantillon d'entraînement est plafonné à
   `baseline × factor` avant de mettre à jour l'EWMA. Une montée progressive d'un attaquant ne peut
-  donc relever la ligne de base que de `2^(factor−1)` au plus par demi-vie — environ `4×` par heure
-  avec les valeurs par défaut (`factor: 3`, `half_life_seconds: 3600`). Cela représente des heures
+  donc relever la ligne de base que de façon géométrique au plus, sur la période de demi-vie — en
+  règle générale environ `2^(factor−1)` par demi-vie, soit environ `4×` par heure avec les valeurs
+  par défaut (`factor: 3`, `half_life_seconds: 3600`). Cela représente des heures
   pour passer d'un niveau normal au plafond statique, et jamais au-delà. Des réglages agressifs (un
   `factor` élevé ou un `half_life_seconds` court) réduisent cette fenêtre, alors choisissez-les
   délibérément.
@@ -95,7 +98,10 @@ attaqué dès la première observation. Réglez `warmup_seconds` à au moins que
 de l'exemple est bien en dessous de cette recommandation — acceptable lorsque les hôtes arrivent
 sains et que vous voulez que la ligne de base encadre plus tôt, mais si un hôte risque d'être
 inondé dès la première observation, augmentez `warmup_seconds` vers quelques multiples de
-`half_life_seconds` (p. ex. `10800` avec la demi-vie par défaut de `3600`).
+`half_life_seconds` (p. ex. `10800` avec la demi-vie par défaut de `3600`). Notez que
+`warmup_seconds` est plafonné à `86400` (24h), de sorte que cette recommandation de quelques
+multiples de la demi-vie ne tient qu'avec des demi-vies plus courtes — une demi-vie longue peut
+pousser « quelques multiples » au-delà du plafond et la configuration ne se chargera pas.
 </Callout>
 
 ## Visibilité

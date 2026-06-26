@@ -6,7 +6,11 @@ export const metadata = {
 
 # Detección y umbrales
 
-Kapkan detecta ataques volumétricos **por host de destino** sobre una ventana de tiempo deslizante.
+Kapkan detecta ataques volumétricos &mdash; floods que intentan saturar un host con volumen bruto de
+paquetes o de bits, a diferencia de los ataques de capa de aplicación &mdash; **por host de destino**
+sobre una ventana de tiempo deslizante. Las tasas se evalúan como promedios por segundo sobre esa
+ventana (5 segundos por defecto), de modo que un pico de duración inferior a un segundo que no se
+sostenga a lo largo de la ventana no abrirá, por sí solo, un ataque.
 Para cada dirección protegida mantiene contadores de tasa por ventana, y en el momento en que se
 cruza cualquier umbral configurado abre un ataque, adjunta una muestra de flow, clasifica el vector y
 entrega el evento a la mitigación, las notificaciones y la API.
@@ -37,7 +41,7 @@ destino** dentro de tus `networks` protegidas. Siempre se evalúan tres métrica
 thresholds:
   pps: 80000
   mbps: 1000
-  flows_per_sec: 40000
+  flows_per_sec: 35000
 ```
 
 Los tres umbrales principales deben ser mayores que `0`. Un host pasa a estado "bajo ataque" en cuanto
@@ -116,7 +120,7 @@ Cada protocolo tiene una variante `pps` y una `mbps`. Los nombres de las métric
 thresholds:
   pps: 80000
   mbps: 1000
-  flows_per_sec: 40000
+  flows_per_sec: 35000
   tcp_syn_pps: 50000
   udp_mbps: 800
   frag_pps: 30000
@@ -136,14 +140,15 @@ Algunas reglas rigen su comportamiento:
 
 ## Alcance
 
-La detección está **acotada a tus prefijos protegidos**. Solo se actúa sobre destinos dentro de las
-`networks` configuradas. El tráfico hacia cualquier otro destino sigue contándose en las métricas de
+La detección está **acotada a tus prefijos protegidos** (los rangos de IP en formato
+[CIDR](/docs/glossary), p. ej. `203.0.113.0/24`, que proteges). Solo se actúa sobre destinos dentro de
+las `networks` configuradas. El tráfico hacia cualquier otro destino sigue contándose en las métricas de
 Prometheus para tener visibilidad, pero nunca puede abrir un ataque ni disparar un bloqueo.
 
 ```yaml
 networks:
   - 203.0.113.0/24
-  - 2001:db8::/48
+  - 2001:db8::/32
 ```
 
 Esta es una de las reglas de seguridad impuestas: un destino fuera de `networks` queda por completo
@@ -176,8 +181,10 @@ y la clasificación habituales.
 
 <Callout type="info" title="La mitigación es opcional (opt-in)">
 Los ataques de carpet son de solo alerta por defecto. Establece `carpet.mitigation` para mitigar de forma
-automática el prefijo de agregación — `flowspec` descarta el vector de ataque sobre todo el prefijo
-(quirúrgico), o `blackhole` le aplica un RTBH. Cualquiera de los dos métodos **rechaza de plano un prefijo
+automática el prefijo de agregación — `flowspec` instala reglas de filtrado que coinciden con el patrón de
+tráfico del ataque en todo el prefijo (quirúrgico: el tráfico legítimo hacia esos hosts sigue fluyendo), o
+`blackhole` aplica un RTBH a todo el prefijo (contundente: todos los hosts que contiene quedan a oscuras).
+Cualquiera de los dos métodos **rechaza de plano un prefijo
 que contenga una dirección de `protected_whitelist`**: una mitigación de prefijo no puede eximir a un solo
 miembro y la garantía de la lista blanca es absoluta. Un bloqueo de prefijo también computa todo su rango de
 direcciones para `ban.max_banned_fraction` y tiene su propio límite `carpet.max_active_prefix_bans`. Consulta
@@ -210,10 +217,13 @@ algunos detalles que importan:
   siquiera se cuenta: no hay sobrecarga en la ruta crítica.
 
 <Callout type="warning" title="El RTBH se basa en el destino">
-Hacer blackhole de un atacante saliente descarta el tráfico hacia el host, lo que lo deja fuera de línea
-y normalmente detiene el abuso, pero solo detiene el flood saliente de forma directa cuando tu borde
-también descarta los orígenes en los prefijos en blackhole (por ejemplo, con uRPF). Establece
-`ban: false` en el hostgroup si quieres la alerta sin la ruta. Consulta [Mitigación](/docs/mitigation).
+El [RTBH](/docs/glossary) se basa en el destino: descarta el tráfico *hacia* el host. Para un ataque
+saliente, eso deja fuera de línea al host comprometido, lo que normalmente detiene el abuso &mdash; pero
+no descarta, por sí mismo, los paquetes salientes. Solo detiene el flood saliente si tu borde descarta
+por separado los paquetes cuyo *origen* está en un prefijo en blackhole &mdash; p. ej. con
+[uRPF](/docs/glossary) (unicast Reverse Path Forwarding, una función del router que descarta los paquetes
+que llegan desde una dirección hacia la que no enrutaría de vuelta). Establece `ban: false` en el
+hostgroup si quieres la alerta sin la ruta. Consulta [Mitigación](/docs/mitigation).
 </Callout>
 
 ## Muestras de ataque
@@ -265,12 +275,14 @@ El clasificador reconoce estos valores de `type`:
 Cómo se elige un vector:
 
 - Una firma necesita una **proporción dominante** — al menos la mitad (>= 0.5) del tráfico de la ventana — para
-  ganar. Primero se comprueba la amplificación (la más específica), luego los SYN puros, después los
-  fragmentos, y finalmente los floods volumétricos ICMP, UDP y TCP.
+  ganar. Cuando UDP es el protocolo dominante, Kapkan comprueba primero si hay una firma de amplificación
+  (la más específica). De lo contrario — o si ningún puerto de amplificación califica —, recurre a los SYN
+  puros, después los fragmentos, y finalmente los floods volumétricos ICMP, UDP y TCP.
 - Un vector de **amplificación** también requiere paquetes del tamaño de una respuesta procedentes del
-  puerto del servicio reflejado: el tamaño medio de paquete de ese puerto de origen debe ser lo bastante
-  grande como para interpretarse como una respuesta reflejada. Los paquetes del tamaño de una solicitud
-  procedentes de un puerto de servicio se clasifican, en cambio, como un flood normal.
+  puerto del servicio reflejado: el tamaño medio de paquete de ese puerto de origen debe ser de al menos
+  ~200 bytes para interpretarse como una respuesta reflejada (los paquetes del tamaño de una solicitud
+  procedentes de un puerto de servicio se clasifican, en cambio, como un flood normal), y ese único puerto
+  de origen debe llevar por sí mismo al menos la mitad de los paquetes muestreados.
 - Cuando ninguna firma alcanza la proporción dominante, el ataque se etiqueta como `mixed` y `confidence`
   es `0`.
 

@@ -7,7 +7,7 @@ export const metadata = {
 # Líneas base
 
 Con un bloque `baseline`, Kapkan aprende de forma continua el nivel de tráfico normal de cada
-host y ajusta la detección a él. Mantiene una EWMA (media móvil ponderada exponencialmente) de
+host y ajusta la detección a él. Mantiene una [EWMA](/docs/glossary) (media móvil ponderada exponencialmente) de
 la tasa real, corregida por muestreo, **por host y por dirección** — y un total por grupo para
 los hostgroups con `calculation: total` — y a partir de ahí deriva un umbral efectivo de
 `learned_normal × factor`. Un host que normalmente alcanza 10k pps se marca en torno a los 30k
@@ -51,10 +51,12 @@ umbrales estáticos (el techo).
 
 | Clave | Predeterminado | Significado |
 | --- | --- | --- |
-| `factor` | `3` | Multiplicador sobre el nivel normal aprendido. El umbral efectivo es `learned_normal × factor`. |
-| `half_life_seconds` | `3600` | Semivida de la EWMA. El tiempo durante el cual una observación antigua pierde la mitad de su peso; valores mayores hacen que la línea base sea más lenta y estable. |
-| `warmup_seconds` | `600` | Un host recién observado se rige únicamente por los umbrales estáticos durante este tiempo, contado desde su primer tráfico real. |
-| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | ejemplo `5000` / `50` / `2000` | Cota inferior del umbral efectivo por métrica, para que los hosts tranquilos nunca se conviertan en gatillos hipersensibles. |
+| `factor` | `3` | Multiplicador sobre el nivel normal aprendido. El umbral efectivo es `learned_normal × factor`. Permitido `1.5`–`100`. |
+| `half_life_seconds` | `3600` | Semivida de la EWMA. El tiempo durante el cual una observación antigua pierde la mitad de su peso; valores mayores hacen que la línea base sea más lenta y estable. Permitido `10`–`604800` (10s–7d). |
+| `warmup_seconds` | `600` | Un host recién observado se rige únicamente por los umbrales estáticos durante este tiempo, contado desde su primer tráfico real. Permitido `0`–`86400` (hasta 24h). |
+| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | ejemplo `5000` / `50` / `2000` | Cota inferior del umbral efectivo por métrica, para que los hosts tranquilos nunca se conviertan en gatillos hipersensibles. **Obligatorio: los tres deben ser > 0** siempre que las líneas base estén habilitadas. |
+
+Los valores fuera de rango se rechazan al arrancar. El bloque `floor` es obligatorio siempre que las líneas base estén habilitadas — un bloque baseline con cualquiera de `pps`, `mbps` o `flows_per_sec` dejado en `0` (u omitido) no se carga y falla con `floor: pps, mbps and flows_per_sec must all be > 0 (hair-trigger guard)`.
 
 ## Diseño con protección frente al envenenamiento
 
@@ -75,7 +77,8 @@ llegar a hacer.
   absoluto. El tráfico de ataque nunca le enseña al host que el ataque es normal.
 - **Aprendizaje acotado.** Fuera de los ataques, cada muestra de entrenamiento se limita a
   `baseline × factor` antes de actualizar la EWMA. Por lo tanto, una rampa lenta de un atacante
-  puede elevar la línea base, como mucho, en `2^(factor−1)` por semivida — alrededor de `4×` por
+  puede elevar la línea base, como mucho, de forma geométrica con el periodo de semivida — como
+  regla general, aproximadamente `2^(factor−1)` por semivida, alrededor de `4×` por
   hora con los valores predeterminados (`factor: 3`, `half_life_seconds: 3600`). Eso supone horas
   para escalar desde un nivel normal hasta el techo estático, y nunca por encima de él. Los ajustes
   agresivos (un `factor` grande o un `half_life_seconds` corto) reducen esa ventana, así que
@@ -96,7 +99,10 @@ atacado desde el primer instante. Configura `warmup_seconds` con al menos unos c
 `600` del ejemplo está muy por debajo de esa pauta — está bien cuando los hosts llegan limpios y
 quieres que la línea base aplique restricciones antes, pero si un host pudiera estar inundado a
 primera vista, eleva `warmup_seconds` hacia unos cuantos múltiplos de `half_life_seconds` (p. ej.
-`10800` con la semivida predeterminada de `3600`).
+`10800` con la semivida predeterminada de `3600`). Ten en cuenta que `warmup_seconds` está limitado
+a `86400` (24h), por lo que esta pauta de múltiplos de la semivida solo se cumple con semividas más
+cortas — una semivida larga puede empujar "unos cuantos múltiplos" más allá del límite y la
+configuración no se cargará.
 </Callout>
 
 ## Visibilidad

@@ -6,15 +6,24 @@ export const metadata = {
 
 # Introduction
 
-**Kapkan est une solution gratuite et open source de détection de DDoS et de mitigation par RTBH destinée aux FAI et aux hébergeurs.**
+**Kapkan est une solution gratuite et open source de détection de DDoS (Distributed Denial of Service, déni de service distribué) et de mitigation par [RTBH](/docs/glossary) destinée aux FAI et aux hébergeurs.**
 
 Il s'agit d'un binaire Go unique qui ingère la télémétrie de flux — NetFlow v5/v9, IPFIX et sFlow v5 —
-depuis vos routeurs, détecte en quelques secondes les attaques volumétriques visant les préfixes que vous protégez,
-et déclenche une mitigation BGP RTBH (remotely-triggered blackhole, trou noir déclenché à distance) automatisée. Il est livré avec une
+depuis vos routeurs, détecte en quelques secondes les attaques volumétriques visant les [préfixes](/docs/glossary) (plages
+d'adresses IP au format CIDR, par exemple `203.0.113.0/24`) que vous protégez,
+et déclenche une mitigation [BGP](/docs/glossary) (Border Gateway Protocol — la façon dont les routeurs échangent leurs routes)
+[RTBH](/docs/glossary) (remotely-triggered blackhole, trou noir déclenché à distance) automatisée. Il est livré avec une
 API REST, un tableau de bord web intégré, des métriques Prometheus et des notifications par Telegram / Slack / e-mail /
 webhook / exec-hook.
 
 Kapkan remplace gratuitement les fonctionnalités que les produits commerciaux de protection DDoS basés sur les flux facturent.
+
+<Callout type="info" title="Nouveau dans BGP, RTBH ou NetFlow ?">
+Pas de souci — le [Démarrage rapide](/docs/quickstart) vous guide pas à pas, le
+[Glossaire](/docs/glossary) explique chaque terme, et Kapkan ne touchera pas la moindre route tant que
+vous ne le lui aurez pas demandé. Kapkan gère les attaques *volumétriques* (déluges qui tentent de saturer votre lien ou
+votre hôte par un volume brut de paquets et de bits), et non les attaques de la couche applicative.
+</Callout>
 
 <Callout type="warning" title="Dry-run par défaut">
 Tant que vous ne définissez pas explicitement `dry_run: false`, chaque blackhole potentiel est journalisé et exposé
@@ -36,7 +45,8 @@ production et valider la détection avant qu'elle ne puisse toucher la moindre r
   [GoBGP](https://github.com/osrg/gobgp) embarqué, suppression du seul vecteur d'attaque grâce à
   des règles chirurgicales [BGP FlowSpec](/docs/flowspec) (RFC 8955/8956), ou détournement de la victime vers un
   [centre de nettoyage (scrubbing)](/docs/scrubbing) au lieu de supprimer son trafic — éventuellement renforcés au fil du
-  temps par des [échelles d'escalade](/docs/escalation).
+  temps par des [échelles d'escalade](/docs/escalation). Kapkan suit chaque décision de mitigation
+  comme un **bannissement** ; pour la méthode par défaut, un bannissement *est* une route blackhole (RTBH).
 - **Observation** — une API REST, un tableau de bord web embarqué, l'endpoint Prometheus `/metrics` et des
   notifications par Telegram, Slack, e-mail, webhook et un exec hook.
 - **Persistance (optionnelle)** — conservation de l'historique des attaques et du trafic dans
@@ -45,8 +55,8 @@ production et valider la détection avant qu'elle ne puisse toucher la moindre r
 ## À qui il s'adresse
 
 Les opérateurs réseau — FAI, hébergeurs et toute personne exploitant BGP — qui ont besoin d'une mitigation
-automatisée des attaques volumétriques sans licence commerciale. Si vous utilisez actuellement FastNetMon
-Community, Kapkan est conçu pour que vous ne perdiez rien et gagniez une détection de niveau Advanced.
+automatisée des attaques volumétriques sans licence commerciale (y compris les utilisateurs de FastNetMon
+Community à la recherche d'une alternative open source).
 
 ## Pourquoi Kapkan
 
@@ -65,11 +75,16 @@ mais **pas** dans la version actuelle :
 
 - Déduplication intégrée en haute disponibilité entre instances
 - Capture par port-mirror (SPAN / AF_PACKET / XDP) comme source d'ingestion
-- Routage des notifications par tenant (le cloisonnement de l'**API** par tenant existe déjà, voir [Multi-tenant](/docs/multi-tenancy))
+- Routage des notifications par tenant (aujourd'hui, les notifications sont globales ; le cloisonnement par tenant ne s'applique qu'à l'[API](/docs/multi-tenancy))
 
 ## Étapes suivantes
 
-- [Démarrage rapide](/docs/quickstart) — téléchargez Kapkan et observez votre première détection en quelques minutes.
+**Nouveau ici ? Commencez par le [Démarrage rapide](/docs/quickstart)** — téléchargez Kapkan, pointez un routeur
+vers lui et observez votre première détection. (Pas encore de routeur ? Vous pouvez tout de même générer du trafic
+d'attaque synthétique depuis la source — le Démarrage rapide montre comment.)
+
+Ensuite :
+
 - [Fonctionnement](/docs/how-it-works) — le pipeline ingestion → moteur → mitigation.
 - [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.
 - [Mise en production](/docs/going-live) — comment désactiver le dry-run en toute sécurité.

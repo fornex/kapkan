@@ -6,12 +6,14 @@ export const metadata = {
 
 # Dashboard
 
-Kapkan bringt eine eigenständige Web-Oberfläche mit, die per `go:embed` direkt in die Binärdatei
-eingebettet ist. Es gibt keinen Build-Schritt, keinen Bundler und keine externen Assets, die
-geladen werden müssten — dieselbe statische `kapkan`-Binärdatei stellt das Dashboard zusammen mit
-der JSON-API und den Prometheus-Metriken bereit. Es handelt sich um reines JavaScript, das die
-REST-API abfragt (Polling), nicht um eine React-Anwendung, sodass es vollständig aus Live-Daten
-läuft und keine Datenbank benötigt.
+Öffnen Sie **http://localhost:8080** in einem Browser, der auf dem Kapkan-Host läuft. Wenn Sie
+unter Angriff stehen, schauen Sie zuerst auf das Banner **Live-Modus** (kündigt Kapkan tatsächlich
+an, oder beobachtet es nur?) und auf die Liste **Aktive Angriffe** (was wird getroffen, und wie
+heftig).
+
+Die Web-Oberfläche ist direkt in die `kapkan`-Binärdatei eingebaut, sodass nichts zusätzlich zu
+installieren oder bereitzustellen ist — derselbe Prozess stellt das Dashboard, die JSON-API und die
+Prometheus-Metriken bereit.
 
 <Callout type="info" title="Eine Binärdatei, ein Listener">
 Das Dashboard, die JSON-API und `/metrics` werden alle vom selben Prozess unter derselben Adresse
@@ -24,6 +26,19 @@ werden müsste.
 Das Dashboard wird unter `/` auf derselben Adresse wie die REST-API bereitgestellt — dem Wert
 `api.listen` aus Ihrer Konfiguration. Mit der Standardeinstellung `127.0.0.1:8080` öffnen Sie es
 unter [http://localhost:8080](http://localhost:8080).
+
+Da die Standardeinstellung an `127.0.0.1` bindet, ist das Dashboard nur vom Kapkan-Host selbst aus
+erreichbar — wenn Sie `localhost:8080` auf Ihrem eigenen Laptop öffnen, sehen Sie nichts. Um es von
+Ihrer Arbeitsstation aus anzuzeigen, leiten Sie den Port über SSH weiter, anstatt `api.listen` auf
+eine öffentliche Adresse umzubinden:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@kapkan-host
+```
+
+Öffnen Sie dann [http://localhost:8080](http://localhost:8080) auf Ihrer Arbeitsstation. (Das
+Umbinden des Listeners auf eine öffentliche Adresse erfordert zuerst ein API-Token — siehe den
+Hinweis unter [Authentifizierung](#authentifizierung) weiter unten.)
 
 Um nur die JSON-API und die Metriken ohne die Oberfläche bereitzustellen, deaktivieren Sie es:
 
@@ -43,9 +58,9 @@ Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher
 - **Live-Modus** — ob die Instanz im Dry-run- oder im Live-Betrieb läuft, sodass Sie auf einen
   Blick sehen, ob ein erkannter Angriff tatsächlich angekündigt würde.
 - **Aktive und kürzliche Angriffe** — aktuell laufende Angriffe sowie die kürzlich beendeten,
-  jeweils mit ihrer Klassifizierung (Amplification-Vektoren wie NTP / DNS / CLDAP / memcached /
-  SSDP / chargen sowie SYN- / UDP- / TCP- / ICMP- / Fragment-Floods) und den dominierenden
-  Quellen, Ports und Protokollen, die aus den Flow-Samples erfasst wurden.
+  jeweils mit ihrer Klassifizierung des Angriffstyps (zum Beispiel NTP/DNS-Amplification oder ein
+  SYN-Flood — siehe die Seite [Erkennung](/docs/detection) für die Bedeutung jedes Typs) und den
+  dominierenden Quellen, Ports und Protokollen, die aus den Flow-Samples erfasst wurden.
 - **Top-Talker** — der Snapshot der verfolgten Hosts mit Raten je Richtung und gelernten
   Baselines, sodass Sie sehen können, wer am lautesten ist und wie sich das im Vergleich zum
   Normalzustand verhält.
@@ -54,14 +69,13 @@ Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher
 - **Traffic / Reports** — Live-Diagramme für ein- und ausgehenden Verkehr, die aus den
   In-Memory-Ratenpuffern erstellt werden, sowie ein Abschnitt **Historische Berichte**, der die
   persistierten ClickHouse-Tabellen liest, wenn die Speicherung aktiviert ist.
+- **Steuerungen** — dieselben Aktionen, die auch die API bietet: **manuelles Sperren / Entsperren**
+  einer Adresse und **Konfigurations-Reload** (das Äquivalent zum Senden von `SIGHUP`).
 
-Es stellt außerdem dieselben Steuerungs-Endpunkte bereit, die auch die API bietet: **manuelles
-Sperren / Entsperren** einer Adresse und **Konfigurations-Reload** (das Äquivalent zu `SIGHUP`).
-Die Live-Diagramme funktionieren allein mit In-Memory-Daten — dafür werden weder ClickHouse noch
-eine andere Datenbank benötigt. Die einzige Ausnahme ist der Abschnitt **Historische Berichte** in
-der Ansicht Traffic / Reports: Er wird nur befüllt, wenn die
-[ClickHouse-Speicherung](/docs/storage) aktiviert ist, und rendert andernfalls einen beschrifteten
-Platzhalter, der erklärt, wie man sie aktiviert.
+Der Abschnitt **Historische Berichte** in der Ansicht Traffic / Reports ist der einzige Teil, der
+Speicherung benötigt: Er wird nur befüllt, wenn die [ClickHouse-Speicherung](/docs/storage)
+aktiviert ist, und rendert andernfalls einen beschrifteten Platzhalter, der erklärt, wie man sie
+aktiviert.
 
 <Callout type="success" title="Keine Datenbank erforderlich">
 Das Dashboard wird vollständig aus dem In-Memory-Zustand der Engine aufgebaut. Die historische

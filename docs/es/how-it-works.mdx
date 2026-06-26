@@ -8,7 +8,9 @@ export const metadata = {
 
 Kapkan es un único binario de Go enlazado estáticamente con una estructura interna modular.
 No hay sidecar, ni base de datos, ni un servicio web independiente que ejecutar: la ingesta de
-flows, el motor de detección, la mitigación BGP, la API REST, el panel de control y los
+flows, el motor de detección, la mitigación BGP (BGP, el [Border Gateway Protocol](/docs/glossary),
+es la forma en que los routers intercambian rutas — Kapkan actúa como un BGP speaker que indica a
+tus routers qué rutas instalar), la API REST, el panel de control y los
 notificadores son todos paquetes compilados en un solo proceso. Lo apuntas a una configuración
 YAML, apuntas los exportadores de tus routers hacia él, y se ejecuta.
 
@@ -32,9 +34,11 @@ normalizados a la siguiente, y el motor distribuye sus resultados a las tres eta
    se evalúa contra los umbrales activos (globales, por protocolo, por hostgroup y líneas base
    aprendidas). Esta es la etapa crítica para el rendimiento; consulta [Rendimiento](#rendimiento).
 3. **Mitigate / notify / api** — cuando se supera un umbral, el motor emite un evento de ataque.
-   La etapa mitigate anuncia o retira rutas RTBH a través del speaker BGP integrado, la etapa notify
-   distribuye el evento a tus canales, y la etapa API expone el estado en vivo al panel de control y
-   a los consumidores.
+   La etapa mitigate anuncia o retira rutas [RTBH](/docs/glossary) (Remotely Triggered Black Hole —
+   una ruta BGP que indica a tus routers que descarten todo el tráfico hacia la IP atacada) a través
+   del speaker BGP integrado; Kapkan rastrea cada una de esas decisiones como un *baneo*. La etapa
+   notify distribuye el evento a tus canales, y la etapa API expone el estado en vivo al panel de
+   control y a los consumidores.
 
 El flujo de datos, en una línea:
 
@@ -99,7 +103,8 @@ Cada salto, en orden:
   que lo produjo.
 - **Ingest → engine.** Los flows normalizados entran en la ruta caliente. El motor atribuye cada flow
   a un host de destino dentro de `networks` (los prefijos protegidos que configuras — consulta
-  [Detección y umbrales](/docs/detection)), multiplica sus recuentos por la tasa de muestreo para que
+  [Detección y umbrales](/docs/detection)), multiplica sus recuentos por la tasa de muestreo efectiva
+  (la tasa del exportador, ajustada por la deduplicación de frontera donde está configurada) para que
   las tasas se expresen en tráfico real (sin muestrear), y actualiza los contadores de ventana
   deslizante de ese host. Los destinos fuera de `networks` se contabilizan en las métricas pero nunca
   desencadenan ninguna acción.
@@ -107,7 +112,10 @@ Cada salto, en orden:
   etapa mitigate decide si anunciar una ruta RTBH — respetando dry-run, la `protected_whitelist`, la política `ban`
   del hostgroup y el límite de baneos — y programa su retirada basada en TTL.
 - **Engine → notify.** El mismo evento se entrega a cada canal configurado (Telegram, Slack, email,
-  webhook, exec hook) con la clasificación del ataque y una muestra de flow adjunta.
+  webhook, exec hook) con la clasificación del ataque y una muestra de flow adjunta. El motor clasifica
+  cada ataque por vector (SYN flood, amplificación UDP/NTP/DNS, ICMP flood, fragment flood, etc.) a
+  partir de la mezcla de tráfico por protocolo y la muestra de flow, y ese vector es lo que aparece como
+  el `type` del ataque en la notificación.
 - **Engine → api.** El estado en vivo — ataques activos y recientes, hosts rastreados, baneos — lo lee
   la API REST y el panel de control integrado desde la memoria del motor.
 
@@ -152,7 +160,8 @@ un registro diffeable y revisable de cada umbral y cada peer.
 La configuración es **recargable en caliente** sin reiniciar el daemon. Hay dos maneras de
 desencadenar una recarga:
 
-- Enviar `SIGHUP` al proceso (por ejemplo `sudo systemctl reload kapkan`).
+- Enviar `SIGHUP` al proceso (por ejemplo `sudo systemctl reload kapkan`, o `kill -HUP <pid>` en una
+  instalación no-systemd o manual).
 - Llamar a `POST /api/v1/config/reload` contra la API.
 
 Ambas vuelven a leer y a validar el archivo en su lugar. Casi todo surte efecto al recargar —

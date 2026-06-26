@@ -65,7 +65,10 @@ individuales y vigila en su lugar la tasa combinada del pool.
 
 - **Propiedad por coincidencia de prefijo más largo.** Cada host pertenece a exactamente un grupo:
   el que tiene el prefijo coincidente más específico (más largo). Un host que está dentro de un
-  grupo `/24` y de un grupo `/26` contenido en él pertenece al `/26`.
+  grupo `/24` y de un grupo `/26` contenido en él pertenece al `/26`. Dos grupos no pueden declarar
+  el *mismo* prefijo: eso es un error de configuración. El solapamiento solo se resuelve cuando un
+  prefijo es estrictamente más largo (más específico) que el otro; los prefijos idénticos se
+  rechazan al arrancar.
 - **Respaldo global implícito.** Los hosts que no coinciden con ningún grupo caen en un grupo
   `global` implícito que lleva los `thresholds` de nivel superior (y `thresholds_outgoing` /
   `baseline` si están definidos). Nunca tienes que enumerar todos los prefijos: cualquier resto
@@ -79,7 +82,9 @@ individuales y vigila en su lugar la tasa combinada del pool.
   basta con al menos una clave.)
 - **`ban: false` deshabilita el RTBH automático.** Los hosts del grupo siguen siendo detectados,
   clasificados y notificados, pero no se anuncia ningún blackhole automático. Los baneos manuales
-  a través de la API siguen funcionando y siguen aplicándose a esos hosts.
+  a través de la API siguen funcionando y siguen aplicándose a esos hosts (envía un baneo manual con
+  un POST a través de la API REST: consulta [Mitigación y RTBH](/docs/mitigation) /
+  [API REST](/docs/api)).
 - **`calculation: total` suma el grupo.** En lugar de evaluar cada host, el tráfico combinado del
   grupo se compara con los umbrales. Los grupos de tipo total reportan `scope: "group"` en los
   eventos, las notificaciones y la API, y **nunca banean automáticamente**: no hay un único host
@@ -133,6 +138,10 @@ hostgroups:
 Las sobrescrituras por grupo son independientes: un grupo puede definir `thresholds` pero heredar
 el `baseline` global, o definir su propio `baseline` mientras hereda los `thresholds` globales.
 Todo lo que quede sin definir vuelve al valor global.
+
+Un grupo también puede sobrescribir el método de mitigación, la escalera de flowspec/escalado y los
+atributos de bgp/scrubbing: consulta la [Referencia de configuración](/docs/configuration) para ver
+la lista completa de campos.
 
 ## Relacionado
 

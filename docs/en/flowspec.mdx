@@ -6,9 +6,11 @@ export const metadata = {
 
 # FlowSpec mitigation
 
-RTBH blackholing takes the whole victim offline — it trades the attack for an outage. BGP
-FlowSpec (RFC 8955 for IPv4, RFC 8956 for IPv6) instead distributes a rule that drops only
-the matching attack traffic, so the victim keeps serving everything else.
+[RTBH](/docs/glossary) blackholing (remotely-triggered blackhole — a BGP route that drops
+all traffic to the victim) takes the whole victim offline — it trades the attack for an
+outage. BGP [FlowSpec](/docs/glossary) (RFC 8955 for IPv4, RFC 8956 for IPv6) instead
+distributes a rule that drops only the matching attack traffic, so the victim keeps serving
+everything else.
 
 <Callout type="info" title="Dry-run first">
 The generated rules appear in `/api/v1/attacks` (`method`, `flowspec`), in `/api/v1/bans`,
@@ -24,7 +26,7 @@ Set the mitigation method to `flowspec`. The default method is `blackhole` (RTBH
 mitigation: flowspec            # default method for all groups (default: blackhole)
 flowspec:
   action: discard               # or rate_limit
-  rate_mbps: 100                # required for rate_limit
+  rate_mbps: 100                # only used when action: rate_limit (inert under discard)
 hostgroups:
   - name: web
     networks: ["203.0.113.0/26"]
@@ -48,8 +50,8 @@ the vector:
 | ICMP / UDP / TCP flood | `dst=victim, proto=<icmp/udp/tcp>` |
 | mixed / unknown | `dst=victim` (plus a rule per dominant reflected source port in the sample) |
 
-The victim is always matched as a `/32` (IPv4) or `/128` (IPv6). **IPv6 FlowSpec is at full
-parity with IPv4** — where FastNetMon's own roadmap still lists IPv6 FlowSpec as unsupported.
+The victim is always matched as a `/32` (IPv4) or `/128` (IPv6). **IPv6 FlowSpec works
+identically to IPv4** — the same rules are generated, with the victim matched as a `/128`.
 
 ## Outgoing attacks
 
@@ -84,7 +86,14 @@ can never spill onto an innocent neighbor of an attacker.
 
 - The `tcp-flags` match for SYN floods is a bitmask that also matches SYN-ACK, so a
   `discard` action drops the victim's outbound-initiated connections too — prefer
-  `rate_limit` for TCP vectors.
+  `rate_limit` for TCP vectors. To use it, set `action: rate_limit` and a ceiling in
+  `rate_mbps` (the examples above use `discard`):
+
+  ```yaml
+  flowspec:
+    action: rate_limit            # rate-cap the vector instead of dropping it
+    rate_mbps: 100                # ceiling, megabits/s
+  ```
 - `max_active_bans` caps **bans**, not rules: a FlowSpec ban can carry up to 8 rules, so N
   bans can mean up to 8N rules in your upstream's RIB. Watch the `kapkan_mitigate_flowspec_rules`
   [metric](/docs/metrics) against your routers' FlowSpec route limit.
@@ -95,10 +104,17 @@ Each rule carries a traffic-rate extended community: `discard` (rate 0) or a `ra
 ceiling. FlowSpec bans share the same TTL, unban hysteresis, and `max_active_bans` lifecycle
 as blackhole bans — see [RTBH mitigation](/docs/mitigation).
 
-FlowSpec rides the **same BGP neighbors** as RTBH: the FlowSpec AFI/SAFI is advertised
-additively, and a peer that does not support it simply will not negotiate it. FlowSpec is
-**not valid for `calculation: total` hostgroups** — there is no single victim prefix to
-match.
+FlowSpec rides the **same BGP neighbors** as RTBH: it is negotiated as an additional
+capability over the same BGP sessions (the FlowSpec AFI/SAFI), and a peer that does not
+support it simply will not enable it. FlowSpec is **not valid for `calculation: total`
+hostgroups** — there is no single victim prefix to match.
+
+To confirm your upstream actually accepts the rules: in dry-run, check that the `flowspec`
+field is populated in `/api/v1/attacks`. After going live, the `kapkan_mitigate_flowspec_rules`
+[metric](/docs/metrics) with `mode="real"` should be non-zero. If a peer rejects FlowSpec,
+Kapkan falls the ban back to blackhole and surfaces it in `/api/v1/bans` (the `fell_back_from`
+and `fell_back_reason` fields) and in notifications — so a silent unsupported upstream stays
+visible.
 
 ## Related
 

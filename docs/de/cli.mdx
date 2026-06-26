@@ -64,6 +64,7 @@ fixiert ist.
 ```sh
 kapkan -s reload    # re-read the config file (SIGHUP)
 kapkan -s stop      # graceful shutdown (SIGTERM)
+kapkan -s quit      # alias of stop
 ```
 
 `-s` liest die Prozess-ID aus `-pid-file` (Standard `/run/kapkan/kapkan.pid`, beim Start vom
@@ -104,8 +105,8 @@ kapkan -check-config /etc/kapkan/config.yaml
 
 Führt exakt dasselbe Parsen und dieselbe Validierung der Engine aus — einschließlich der
 feldübergreifenden Regeln, die ein statisches Schema nicht ausdrücken kann — gibt dann die
-aufgelöste Konfiguration aus (Modus, geschützte Netze und die effektive Mitigation pro
-[Hostgroup](/docs/hostgroups)) und beendet sich:
+aufgelöste Konfiguration aus (Modus, geschützte Netze, die konfigurierten Flow-Listener, die
+Gruppenanzahl und die effektive Mitigation pro [Hostgroup](/docs/hostgroups)) und beendet sich:
 
 | Exit-Code | Bedeutung |
 | --- | --- |

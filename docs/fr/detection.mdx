@@ -6,7 +6,11 @@ export const metadata = {
 
 # Détection et seuils
 
-Kapkan détecte les attaques volumétriques **par hôte de destination** sur une fenêtre temporelle glissante.
+Kapkan détecte les attaques volumétriques &mdash; les floods qui cherchent à saturer un hôte par
+un volume brut de paquets ou de bits, par opposition aux attaques de couche applicative &mdash; **par hôte
+de destination** sur une fenêtre temporelle glissante. Les débits sont évalués en moyennes par seconde sur
+cette fenêtre (5 secondes par défaut), de sorte qu'un pic infra-seconde qui ne se maintient pas sur toute la
+fenêtre n'ouvrira pas, à lui seul, une attaque.
 Pour chaque adresse protégée, il tient à jour des compteurs de débit fenêtrés, et dès qu'un seuil
 configuré est franchi, il ouvre une attaque, lui attache un échantillon de flow, classe le vecteur, puis
 transmet l'événement à la mitigation, aux notifications et à l'API.
@@ -37,7 +41,7 @@ au sein de vos `networks` protégés. Trois métriques de base sont toujours év
 thresholds:
   pps: 80000
   mbps: 1000
-  flows_per_sec: 40000
+  flows_per_sec: 35000
 ```
 
 Les trois seuils de base doivent tous être supérieurs à `0`. Un hôte passe « sous attaque » dès que
@@ -113,7 +117,7 @@ Chaque protocole possède une variante `pps` et une variante `mbps`. Les noms de
 thresholds:
   pps: 80000
   mbps: 1000
-  flows_per_sec: 40000
+  flows_per_sec: 35000
   tcp_syn_pps: 50000
   udp_mbps: 800
   frag_pps: 30000
@@ -133,14 +137,15 @@ Quelques règles régissent leur comportement :
 
 ## Périmètre
 
-La détection est **limitée à vos préfixes protégés**. Seules les destinations situées au sein des `networks`
+La détection est **limitée à vos préfixes protégés** (les plages d'adresses IP au format [CIDR](/docs/glossary),
+par exemple `203.0.113.0/24`, que vous protégez). Seules les destinations situées au sein des `networks`
 configurés font l'objet d'actions. Le trafic vers toute autre destination est tout de même comptabilisé dans les métriques
 Prometheus à des fins de visibilité, mais il ne peut jamais ouvrir une attaque ni déclencher un bannissement.
 
 ```yaml
 networks:
   - 203.0.113.0/24
-  - 2001:db8::/48
+  - 2001:db8::/32
 ```
 
 C'est l'une des règles de sûreté appliquées : une destination en dehors de `networks` est entièrement hors
@@ -173,8 +178,10 @@ l'échantillon et de la classification habituels.
 
 <Callout type="info" title="L'atténuation est en option">
 Les attaques carpet sont en alerte seule par défaut. Définissez `carpet.mitigation` pour atténuer automatiquement le préfixe
-d'agrégation — `flowspec` ne supprime que le vecteur d'attaque sur l'ensemble du préfixe (chirurgical), ou `blackhole` le met en
-RTBH. Chacune des deux méthodes **refuse catégoriquement un préfixe contenant une adresse `protected_whitelist`** : une atténuation
+d'agrégation — `flowspec` installe des règles de filtrage correspondant au motif de trafic de l'attaque sur l'ensemble du
+préfixe (chirurgical — le trafic légitime vers ces hôtes continue de circuler), ou `blackhole` met l'ensemble du préfixe
+en RTBH (brutal — chaque hôte qu'il contient devient injoignable).
+Chacune des deux méthodes **refuse catégoriquement un préfixe contenant une adresse `protected_whitelist`** : une atténuation
 de préfixe ne peut pas exempter un seul membre et la garantie de liste blanche est absolue. Un bannissement de préfixe compte aussi
 toute son étendue d'adresses dans `ban.max_banned_fraction` et possède son propre plafond `carpet.max_active_prefix_bans`.
 Voir [Mitigation](/docs/mitigation).
@@ -206,10 +213,12 @@ importent :
   comptabilisé — il n'y a aucune surcharge sur le chemin critique.
 
 <Callout type="warning" title="Le RTBH est basé sur la destination">
-Le blackholing d'un attaquant sortant rejette le trafic vers l'hôte, ce qui le met hors ligne et arrête généralement
-l'abus, mais n'arrête le flood sortant directement que là où votre bordure rejette aussi les sources des préfixes
-blackholés (par exemple avec uRPF). Définissez `ban: false` sur le hostgroup si vous voulez l'alerte
-sans la route. Voir [Mitigation](/docs/mitigation).
+Le [RTBH](/docs/glossary) est basé sur la destination : il rejette le trafic *vers* l'hôte. Pour une attaque sortante,
+cela met l'hôte compromis hors ligne, ce qui arrête généralement l'abus &mdash; mais cela ne rejette pas, à soi seul,
+les paquets sortants. Il n'arrête le flood sortant que si votre bordure rejette séparément les paquets dont la *source*
+se trouve dans un préfixe blackholé &mdash; par exemple avec l'[uRPF](/docs/glossary) (unicast Reverse Path Forwarding,
+une fonctionnalité de routeur qui écarte les paquets arrivant d'une adresse vers laquelle il ne saurait pas router en retour).
+Définissez `ban: false` sur le hostgroup si vous voulez l'alerte sans la route. Voir [Mitigation](/docs/mitigation).
 </Callout>
 
 ## Échantillons d'attaque
@@ -259,12 +268,14 @@ Le classificateur reconnaît ces valeurs de `type` :
 
 Comment un vecteur est choisi :
 
-- Une signature a besoin d'une **part dominante** — au moins la moitié (>= 0.5) du trafic fenêtré — pour l'emporter. L'amplification
-  est vérifiée en premier (la plus spécifique), puis les SYN purs, puis les fragments, puis les floods volumétriques ICMP, UDP
-  et TCP.
+- Une signature a besoin d'une **part dominante** — au moins la moitié (>= 0.5) du trafic fenêtré — pour l'emporter. Lorsque
+  l'UDP est le protocole dominant, Kapkan vérifie d'abord la présence d'une signature d'amplification (la plus spécifique).
+  Sinon — ou si aucun port d'amplification ne se qualifie — il retombe sur les SYN purs, puis les fragments, puis les floods
+  volumétriques ICMP, UDP et TCP.
 - Un vecteur d'**amplification** exige en outre des paquets de la taille d'une réponse provenant du port de service réfléchi :
-  la taille moyenne des paquets issus de ce port source doit être suffisamment grande pour être interprétée comme une réponse réfléchie.
-  Des paquets de la taille d'une requête issus d'un port de service sont classés comme un simple flood.
+  la taille moyenne des paquets issus de ce port source doit être d'au moins ~200 octets pour être interprétée comme une réponse
+  réfléchie (des paquets de la taille d'une requête issus d'un port de service sont classés comme un simple flood), et ce
+  port source unique doit lui-même porter au moins la moitié des paquets échantillonnés.
 - Lorsqu'aucune signature n'atteint la part dominante, l'attaque est étiquetée `mixed` et `confidence` vaut `0`.
 
 <Callout type="info" title="La confiance est une part, pas une probabilité">
@@ -275,7 +286,7 @@ Comment un vecteur est choisi :
 ## Pourquoi une détection s'est déclenchée
 
 Chaque attaque porte une **raison** — un petit enregistrement, capturé à l'instant même où le seuil est franchi,
-qui explique la détection sans vous obliger à refaire les calculs. Elle permet à un operator de distinguer une véritable
+qui explique la détection sans vous obliger à refaire les calculs. Elle permet à un opérateur de distinguer une véritable
 attaque d'un artefact d'échantillonnage ou de seuil d'un seul coup d'œil. Elle est construite une fois par démarrage d'attaque à partir
 d'entrées dont le moteur dispose déjà, de sorte qu'elle ne coûte rien sur le chemin critique, et elle accompagne l'événement
 `attack_started`, le [stockage](/docs/storage), ainsi que le champ `reason` de l'[API](/docs/api).

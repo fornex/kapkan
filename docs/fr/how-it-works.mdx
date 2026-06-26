@@ -8,7 +8,9 @@ export const metadata = {
 
 Kapkan est un unique binaire Go lié statiquement, doté d'une architecture interne modulaire.
 Il n'y a aucun sidecar, aucune base de données ni service web séparé à exécuter : l'ingestion
-des flows, le moteur de détection, la mitigation BGP, l'API REST, le tableau de bord et les
+des flows, le moteur de détection, la mitigation BGP (BGP, le [Border Gateway Protocol](/docs/glossary),
+est la façon dont les routeurs échangent des routes — Kapkan agit comme un locuteur BGP qui
+indique à vos routeurs quelles routes installer), l'API REST, le tableau de bord et les
 notificateurs sont autant de packages compilés dans un seul processus. Vous le pointez vers
 une configuration YAML, vous pointez les exporteurs de vos routeurs vers lui, et il tourne.
 
@@ -34,9 +36,11 @@ consommatrices :
    baselines apprises). C'est l'étape critique pour les performances ; voir
    [Performances](#performances).
 3. **Mitigation / notification / api** — lorsqu'un seuil est franchi, le moteur émet un
-   événement d'attaque. L'étape de mitigation annonce ou retire des routes RTBH via le
-   locuteur BGP embarqué, l'étape de notification diffuse l'événement vers vos canaux, et
-   l'étape API expose l'état en direct au tableau de bord et aux appelants.
+   événement d'attaque. L'étape de mitigation annonce ou retire des routes [RTBH](/docs/glossary)
+   (Remotely Triggered Black Hole — une route BGP qui indique à vos routeurs de jeter tout le
+   trafic vers l'IP attaquée) via le locuteur BGP embarqué ; Kapkan suit chacune de ces
+   décisions comme un *bannissement*. L'étape de notification diffuse l'événement vers vos
+   canaux, et l'étape API expose l'état en direct au tableau de bord et aux appelants.
 
 Le flux de données, en une ligne :
 
@@ -114,7 +118,10 @@ Chaque saut, dans l'ordre :
   bannissements — et planifie son retrait basé sur le TTL.
 - **Moteur → notification.** Le même événement est délivré à chaque canal configuré (Telegram,
   Slack, e-mail, webhook, exec hook) avec la classification de l'attaque et un échantillon de
-  flows joints.
+  flows joints. Le moteur classe chaque attaque par vecteur (SYN flood, amplification
+  UDP/NTP/DNS, ICMP flood, fragment flood, et ainsi de suite) à partir du mélange de trafic
+  par protocole et de l'échantillon de flows, et c'est ce vecteur qui apparaît comme le `type`
+  d'attaque dans la notification.
 - **Moteur → api.** L'état en direct — attaques actives et récentes, hôtes suivis,
   bannissements — est lu dans la mémoire du moteur par l'API REST et le tableau de bord
   embarqué.
@@ -164,7 +171,8 @@ relisable de chaque seuil et de chaque peer.
 La configuration est **rechargeable à chaud** sans redémarrer le démon. Déclenchez un
 rechargement de deux façons :
 
-- Envoyez `SIGHUP` au processus (par exemple `sudo systemctl reload kapkan`).
+- Envoyez `SIGHUP` au processus (par exemple `sudo systemctl reload kapkan`, ou
+  `kill -HUP <pid>` sur une installation manuelle ou non-systemd).
 - Appelez `POST /api/v1/config/reload` sur l'API.
 
 Les deux relisent et revalident le fichier sur place. Presque tout prend effet au

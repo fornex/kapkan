@@ -6,7 +6,11 @@ export const metadata = {
 
 # Erkennung & Schwellenwerte
 
-Kapkan erkennt volumetrische Angriffe **pro Ziel-Host** über ein gleitendes Zeitfenster.
+Kapkan erkennt volumetrische Angriffe &mdash; Fluten, die versuchen, einen Host mit reinem Paket- oder
+Bit-Volumen zu sättigen, im Gegensatz zu Angriffen auf der Anwendungsschicht &mdash; **pro Ziel-Host**
+über ein gleitendes Zeitfenster. Raten werden als Durchschnittswerte pro Sekunde über dieses Fenster
+ausgewertet (standardmäßig 5 Sekunden), sodass eine Spitze im Sub-Sekunden-Bereich, die sich nicht über
+das Fenster hält, für sich genommen keinen Angriff eröffnet.
 Für jede geschützte Adresse führt es fenstergestützte Ratenzähler, und sobald ein konfigurierter
 Schwellenwert überschritten wird, eröffnet es einen Angriff, hängt ein Flow-Sample an, klassifiziert
 den Vektor und übergibt das Ereignis an Mitigation, Benachrichtigungen und die API.
@@ -38,7 +42,7 @@ Ihrer geschützten `networks` angewendet werden. Drei Kernmetriken werden immer 
 thresholds:
   pps: 80000
   mbps: 1000
-  flows_per_sec: 40000
+  flows_per_sec: 35000
 ```
 
 Alle drei Kern-Schwellenwerte müssen größer als `0` sein. Ein Host gilt als „unter Angriff", sobald
@@ -118,7 +122,7 @@ Jedes Protokoll hat eine `pps`- und eine `mbps`-Variante. Die Metriknamen lauten
 thresholds:
   pps: 80000
   mbps: 1000
-  flows_per_sec: 40000
+  flows_per_sec: 35000
   tcp_syn_pps: 50000
   udp_mbps: 800
   frag_pps: 30000
@@ -139,7 +143,8 @@ Einige Regeln bestimmen das Verhalten:
 
 ## Geltungsbereich
 
-Die Erkennung ist **auf Ihre geschützten Präfixe beschränkt**. Es wird ausschließlich auf Ziele
+Die Erkennung ist **auf Ihre geschützten Präfixe beschränkt** (die IP-Bereiche in [CIDR](/docs/glossary)-Form,
+z. B. `203.0.113.0/24`, die Sie schützen). Es wird ausschließlich auf Ziele
 innerhalb der konfigurierten `networks` reagiert. Datenverkehr zu jedem anderen Ziel wird zur
 Sichtbarkeit weiterhin in Prometheus-Metriken gezählt, kann aber niemals einen Angriff eröffnen oder
 einen Bann auslösen.
@@ -147,7 +152,7 @@ einen Bann auslösen.
 ```yaml
 networks:
   - 203.0.113.0/24
-  - 2001:db8::/48
+  - 2001:db8::/32
 ```
 
 Dies ist eine der durchgesetzten Sicherheitsregeln: ein Ziel außerhalb von `networks` liegt
@@ -182,11 +187,13 @@ in `hosts`, neben dem üblichen Sample und der Klassifizierung.
 
 <Callout type="info" title="Mitigation ist optional">
 Carpet-Angriffe sind standardmäßig nur Alarm. Setzen Sie `carpet.mitigation`, um das
-Aggregationspräfix automatisch zu mitigieren — `flowspec` verwirft den Angriffsvektor für das gesamte
-Präfix (chirurgisch), oder `blackhole` blackholet es per RTBH. Beide Methoden **verweigern ein
-Präfix, das eine `protected_whitelist`-Adresse enthält** rundheraus: eine Präfix-Mitigation kann kein
-einzelnes Mitglied ausnehmen, und die Whitelist-Garantie ist absolut. Ein Präfix-Bann zählt zudem
-seine gesamte Adressspanne auf `ban.max_banned_fraction` an und hat seine eigene
+Aggregationspräfix automatisch zu mitigieren — `flowspec` installiert Filterregeln, die dem
+Datenverkehrsmuster des Angriffs über das gesamte Präfix entsprechen (chirurgisch — legitimer
+Datenverkehr zu diesen Hosts fließt weiter), oder `blackhole` blackholet das gesamte Präfix per RTBH
+(grob — jeder Host darin geht dunkel). Beide Methoden **verweigern ein Präfix, das eine
+`protected_whitelist`-Adresse enthält** rundheraus: eine Präfix-Mitigation kann kein einzelnes Mitglied
+ausnehmen, und die Whitelist-Garantie ist absolut. Ein Präfix-Bann zählt zudem seine gesamte
+Adressspanne auf `ban.max_banned_fraction` an und hat seine eigene
 `carpet.max_active_prefix_bans`-Obergrenze. Siehe [Mitigation](/docs/mitigation).
 </Callout>
 
@@ -218,9 +225,12 @@ Einige Details sind wichtig:
   Datenverkehr nicht einmal gezählt — es gibt keinen Overhead auf dem Hot-Path.
 
 <Callout type="warning" title="RTBH ist zielbasiert">
-Das Blackholing eines ausgehenden Angreifers verwirft den Datenverkehr zum Host, was ihn offline
-nimmt und den Missbrauch meist stoppt, den ausgehenden Flood aber nur dann direkt unterbindet, wenn
-Ihr Edge auch Quellen in geblackholten Präfixen verwirft (zum Beispiel mit uRPF). Setzen Sie
+[RTBH](/docs/glossary) ist zielbasiert: es verwirft Datenverkehr *zum* Host. Bei einem ausgehenden
+Angriff nimmt das den kompromittierten Host offline, was den Missbrauch meist stoppt &mdash; es
+verwirft aber von sich aus nicht die ausgehenden Pakete. Den ausgehenden Flood unterbindet es nur dann,
+wenn Ihr Edge separat Pakete verwirft, deren *Quelle* in einem geblackholten Präfix liegt &mdash; zum
+Beispiel mit [uRPF](/docs/glossary) (unicast Reverse Path Forwarding, eine Router-Funktion, die Pakete
+verwirft, die von einer Adresse eintreffen, zu der sie nicht zurückrouten würde). Setzen Sie
 `ban: false` auf der Hostgroup, wenn Sie den Alarm ohne die Route wünschen. Siehe
 [Mitigation](/docs/mitigation).
 </Callout>
@@ -275,12 +285,15 @@ Der Klassifizierer erkennt diese `type`-Werte:
 Wie ein Vektor ausgewählt wird:
 
 - Eine Signatur benötigt einen **dominanten Anteil** — mindestens die Hälfte (>= 0.5) des
-  fenstergestützten Datenverkehrs —, um zu gewinnen. Zuerst wird auf Amplifikation geprüft (am spezifischsten), dann
-  reine SYN, dann Fragmente, dann ICMP-, UDP- und TCP-volumetrische Floods.
+  fenstergestützten Datenverkehrs —, um zu gewinnen. Wenn UDP das dominante Protokoll ist, prüft Kapkan
+  zuerst auf eine Amplifikationssignatur (am spezifischsten). Andernfalls — oder wenn kein
+  Amplifikations-Port qualifiziert — fällt es durch zu reinen SYN, dann Fragmenten, dann ICMP-, UDP-
+  und TCP-volumetrischen Floods.
 - Ein **Amplifikations**-Vektor erfordert außerdem antwortgroße Pakete vom Port des reflektierten
-  Dienstes: die durchschnittliche Paketgröße von diesem Quell-Port muss groß genug sein, um als
-  reflektierte Antwort gelesen zu werden. Anfragegroße Pakete von einem Dienst-Port klassifizieren
-  stattdessen als gewöhnlicher Flood.
+  Dienstes: die durchschnittliche Paketgröße von diesem Quell-Port muss mindestens ~200 Byte betragen,
+  um als reflektierte Antwort gelesen zu werden (anfragegroße Pakete von einem Dienst-Port
+  klassifizieren stattdessen als gewöhnlicher Flood), und dieser einzelne Quell-Port muss selbst
+  mindestens die Hälfte der gesampelten Pakete tragen.
 - Wenn keine Signatur den dominanten Anteil erreicht, wird der Angriff als `mixed` gekennzeichnet und
   `confidence` ist `0`.
 

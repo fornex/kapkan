@@ -37,9 +37,10 @@ sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"   # RHEL/Fedora: dnf instal
 ```
 
 El servicio queda instalado pero **detenido** — un daemon de mitigación no debería arrancar
-antes de que hayas revisado su configuración. El `config.yaml` incluido tiene `dry_run: true`.
-Revísalo, (recomendado) [establece un token de API](#secretos) en `/etc/kapkan/kapkan.env`, y
-luego arráncalo al inicio y ahora mismo:
+antes de que hayas revisado su configuración. El `config.yaml` incluido tiene `dry_run: true`
+(Kapkan calcula las rutas de blackhole pero no las anuncia a tu router). Revísalo, (recomendado)
+[establece un token de API](#secretos) en `/etc/kapkan/kapkan.env`, y luego arráncalo al inicio
+y ahora mismo:
 
 ```sh
 sudoedit /etc/kapkan/config.yaml          # adapt networks, BGP and thresholds
@@ -54,17 +55,16 @@ kapkan` elimina todo rastro, incluidas la configuración y el estado.
 
 ¿Prefieres colocar los archivos tú mismo, o estás en una distro sin `apt`/`dnf`? Tras desempaquetar
 el [tarball de la versión](/docs/quickstart#1-instala-kapkan) (de modo que el directorio `deploy/`
-quede junto al binario `kapkan`), ejecuta el equivalente como root. Instala el binario, crea un
-usuario del sistema sin privilegios, prepara `/etc/kapkan`, instala la configuración de producción,
-escribe el archivo de entorno de secretos con permisos restrictivos, instala la unidad systemd y
-habilita el servicio.
+quede junto al binario `kapkan`), ejecuta el equivalente como root:
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo groupadd --system kapkan
+sudo useradd --system --gid kapkan --no-create-home --home-dir /var/lib/kapkan --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
 sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
-echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+# generate a real random API token, never deploy the literal placeholder
+echo "KAPKAN_API_TOKEN=$(openssl rand -hex 32)" | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
 sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
@@ -93,9 +93,9 @@ actualización](/docs/upgrading) se apoya en esto junto con la sonda de disponib
 
 <Callout type="info" title="Enlazar BGP al puerto 179">
 Kapkan no necesita privilegios especiales en modo dry-run ni cuando establece el peering
-desde un puerto local alto. Si enlazas el hablante BGP al puerto bien conocido 179, concede
-la capacidad añadiendo `AmbientCapabilities=CAP_NET_BIND_SERVICE` a la sección `[Service]`
-de la unidad.
+desde un puerto local alto. Si enlazas el hablante [BGP](/docs/glossary) (el componente que
+anuncia las rutas de blackhole a tu router) al puerto bien conocido 179, concede la capacidad
+añadiendo `AmbientCapabilities=CAP_NET_BIND_SERVICE` a la sección `[Service]` de la unidad.
 </Callout>
 
 Una vez en ejecución, comprueba el estado y sigue los registros:
@@ -114,7 +114,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/kapkan.env` | `0600` | Archivo de entorno con secretos (tokens, credenciales SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | La unidad systemd reforzada. El `.deb`/`.rpm` la instalan en su lugar en `/usr/lib/systemd/system/kapkan.service` (ubicación del proveedor). |
 | `/var/lib/kapkan/` | `0700` | Directorio de estado escribible (`StateDirectory=kapkan`); contiene `ban.state_file` cuando la persistencia de baneos está habilitada. |
-| `/run/kapkan/` | `0755` | Directorio de runtime (`RuntimeDirectory=kapkan`), creado al arrancar y eliminado al detenerse; contiene `kapkan.pid` para que [`kapkan -s reload`](/docs/cli) pueda encontrar el daemon. |
+| `/run/kapkan/` | `0755` | Directorio de runtime (`RuntimeDirectory=kapkan`), creado al arrancar y eliminado al detenerse; contiene `kapkan.pid` para que [`kapkan -s reload`](/docs/cli#controlar-un-demonio-en-ejecución) pueda encontrar el daemon. |
 
 Todo el directorio `/etc/kapkan` se monta en modo solo lectura para el proceso mediante
 `ReadOnlyPaths=/etc/kapkan`, de modo que el daemon puede leer su configuración y sus secretos
@@ -146,7 +146,7 @@ notify:
 ```text
 # /etc/kapkan/kapkan.env  (mode 0600)
 KAPKAN_TG_TOKEN=123456:abcdef
-KAPKAN_API_TOKEN=a-long-random-string
+KAPKAN_API_TOKEN=...   # a real random token, e.g. from: openssl rand -hex 32
 ```
 
 <Callout type="success" title="Por qué esto importa">
@@ -158,8 +158,9 @@ lo que el archivo de entorno nunca es escribible por el servicio.
 
 ## Recarga de configuración
 
-Kapkan recarga su configuración en caliente al recibir `SIGHUP`: sin reinicio y sin pérdida
-del estado de flows. La unidad systemd conecta esto mediante `ExecReload=/bin/kill -HUP $MAINPID`,
+Kapkan recarga su configuración en caliente al recibir `SIGHUP` (la señal Unix que indica al
+daemon que vuelva a leer su configuración sin reiniciar): sin reinicio y sin pérdida del estado
+de flows. La unidad systemd conecta esto mediante `ExecReload=/bin/kill -HUP $MAINPID`,
 de modo que puedes recargar con:
 
 ```sh
@@ -174,8 +175,9 @@ sudo kapkan -s reload    # re-read the config (SIGHUP)
 sudo kapkan -s stop      # graceful shutdown (SIGTERM)
 ```
 
-Consulta [Controlar un daemon en ejecución](/docs/cli) para conocer el comportamiento completo
-y los códigos de salida. De forma equivalente, puedes desencadenar la misma recarga a través de la API:
+Consulta [Controlar un daemon en ejecución](/docs/cli#controlar-un-demonio-en-ejecución) para conocer
+el comportamiento completo y los códigos de salida. De forma equivalente, puedes desencadenar la
+misma recarga a través de la API:
 
 ```sh
 curl -s -X POST localhost:8080/api/v1/config/reload \
@@ -185,7 +187,8 @@ curl -s -X POST localhost:8080/api/v1/config/reload \
 
 `Content-Type: application/json` es obligatorio en cada `POST` mutante (de lo contrario el
 servidor devuelve `415`), y cuando la autenticación está habilitada la recarga necesita un token
-Bearer sin ámbito (de administrador) — un token con ámbito de inquilino obtiene un `403`.
+Bearer sin ámbito (de administrador) — un token con [ámbito de inquilino](/docs/multi-tenancy)
+(uno limitado a las redes de un solo cliente) obtiene un `403`.
 
 La mayoría de las claves se recargan en vivo, incluidas `dry_run`, los umbrales, `networks`,
 los hostgroups, las líneas base, los ajustes de notificación y `sampling.default_rate`. Seis
@@ -197,7 +200,7 @@ mitigación, [Actualización](/docs/upgrading).
 
 ## Compilar desde el código fuente
 
-La compilación requiere **Go 1.22 o más reciente**. El `Makefile` ofrece los objetivos
+La compilación requiere **Go 1.26 o más reciente**. El `Makefile` ofrece los objetivos
 estándar:
 
 ```sh

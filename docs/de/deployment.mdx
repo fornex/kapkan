@@ -39,7 +39,8 @@ sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"   # RHEL/Fedora: dnf instal
 
 Der Dienst ist installiert, wird aber **gestoppt belassen** — ein Mitigation-Daemon sollte nicht
 starten, bevor Sie seine Konfiguration angesehen haben. Die mitgelieferte `config.yaml` hat
-`dry_run: true`. Prüfen Sie sie, (empfohlen) [setzen Sie einen API-Token](#geheimnisse) in
+`dry_run: true` (Kapkan berechnet Blackhole-Routen, kündigt sie aber nicht an Ihren Router an).
+Prüfen Sie sie, (empfohlen) [setzen Sie einen API-Token](#geheimnisse) in
 `/etc/kapkan/kapkan.env` und starten Sie ihn dann beim Boot und jetzt:
 
 ```sh
@@ -55,17 +56,16 @@ Aktualisieren Sie mit einem neueren Paket (`apt install ./kapkan_<newer>.deb`) o
 
 Möchten Sie die Dateien lieber selbst platzieren, oder sind Sie auf einer Distribution ohne
 `apt`/`dnf`? Nach dem Entpacken des [Release-Tarballs](/docs/quickstart#1-kapkan-installieren) (sodass
-das Verzeichnis `deploy/` neben dem `kapkan`-Binary liegt) führen Sie das Äquivalent als root aus.
-Es installiert das Binary, legt einen unprivilegierten Systembenutzer an, richtet `/etc/kapkan` ein,
-installiert die Produktivkonfiguration, schreibt die Geheimnis-Env-Datei mit restriktiven
-Berechtigungen, installiert die systemd-Unit und aktiviert den Dienst.
+das Verzeichnis `deploy/` neben dem `kapkan`-Binary liegt) führen Sie das Äquivalent als root aus:
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo groupadd --system kapkan
+sudo useradd --system --gid kapkan --no-create-home --home-dir /var/lib/kapkan --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
 sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
-echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+# generate a real random API token, never deploy the literal placeholder
+echo "KAPKAN_API_TOKEN=$(openssl rand -hex 32)" | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
 sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
@@ -97,7 +97,8 @@ flattern — das [Upgrade-Skript](/docs/upgrading) stützt sich darauf zusammen 
 
 <Callout type="info" title="BGP an Port 179 binden">
 Kapkan benötigt im dry-run oder beim Peering von einem hohen lokalen Port keine besonderen
-Privilegien. Wenn Sie den BGP-Speaker an den well-known Port 179 binden, erteilen Sie die
+Privilegien. Wenn Sie den [BGP](/docs/glossary)-Speaker (die Komponente, die Blackhole-Routen
+an Ihren Router ankündigt) an den well-known Port 179 binden, erteilen Sie die
 nötige Capability, indem Sie `AmbientCapabilities=CAP_NET_BIND_SERVICE` zum Abschnitt
 `[Service]` der Unit hinzufügen.
 </Callout>
@@ -118,7 +119,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/kapkan.env` | `0600` | Geheimnis-Env-Datei (Tokens, SMTP-Zugangsdaten). |
 | `/etc/systemd/system/kapkan.service` | `0644` | Die gehärtete systemd-Unit. Das `.deb`/`.rpm` installiert sie stattdessen nach `/usr/lib/systemd/system/kapkan.service` (Hersteller-Verzeichnis). |
 | `/var/lib/kapkan/` | `0700` | Beschreibbares Zustandsverzeichnis (`StateDirectory=kapkan`); enthält `ban.state_file`, wenn die ban-Persistenz aktiviert ist. |
-| `/run/kapkan/` | `0755` | Laufzeitverzeichnis (`RuntimeDirectory=kapkan`), beim Start angelegt und beim Stopp entfernt; enthält `kapkan.pid`, damit [`kapkan -s reload`](/docs/cli) den Daemon finden kann. |
+| `/run/kapkan/` | `0755` | Laufzeitverzeichnis (`RuntimeDirectory=kapkan`), beim Start angelegt und beim Stopp entfernt; enthält `kapkan.pid`, damit [`kapkan -s reload`](/docs/cli#einen-laufenden-daemon-steuern) den Daemon finden kann. |
 
 Das gesamte Verzeichnis `/etc/kapkan` wird dem Prozess über `ReadOnlyPaths=/etc/kapkan`
 schreibgeschützt eingehängt, sodass der Daemon seine Konfiguration und Geheimnisse lesen,
@@ -150,7 +151,7 @@ notify:
 ```text
 # /etc/kapkan/kapkan.env  (mode 0600)
 KAPKAN_TG_TOKEN=123456:abcdef
-KAPKAN_API_TOKEN=a-long-random-string
+KAPKAN_API_TOKEN=...   # a real random token, e.g. from: openssl rand -hex 32
 ```
 
 <Callout type="success" title="Warum das wichtig ist">
@@ -162,7 +163,8 @@ für den Dienst niemals beschreibbar ist.
 
 ## Konfigurations-Reload
 
-Kapkan lädt seine Konfiguration bei `SIGHUP` im laufenden Betrieb neu — ohne Neustart, ohne
+Kapkan lädt seine Konfiguration bei `SIGHUP` im laufenden Betrieb neu (das Unix-Signal, das den
+Daemon anweist, seine Konfiguration ohne Neustart erneut einzulesen) — ohne Neustart, ohne
 verlorenen flow-Status. Die systemd-Unit verdrahtet dies mit
 `ExecReload=/bin/kill -HUP $MAINPID`, sodass Sie folgendermaßen neu laden:
 
@@ -178,7 +180,7 @@ sudo kapkan -s reload    # re-read the config (SIGHUP)
 sudo kapkan -s stop      # graceful shutdown (SIGTERM)
 ```
 
-Siehe [Einen laufenden Daemon steuern](/docs/cli) für das vollständige Verhalten und die
+Siehe [Einen laufenden Daemon steuern](/docs/cli#einen-laufenden-daemon-steuern) für das vollständige Verhalten und die
 Exit-Codes. Gleichwertig können Sie denselben Reload über die API auslösen:
 
 ```sh
@@ -189,7 +191,8 @@ curl -s -X POST localhost:8080/api/v1/config/reload \
 
 `Content-Type: application/json` ist bei jedem verändernden `POST` zwingend (andernfalls
 liefert der Server `415`), und wenn die Authentifizierung aktiviert ist, benötigt der Reload
-einen ungescopeten (Admin-)Bearer-Token — ein mandantengebundener Token erhält `403`.
+einen ungescopeten (Admin-)Bearer-Token — ein [mandantengebundener](/docs/multi-tenancy) Token
+(einer, der auf die Netzwerke eines einzelnen Kunden beschränkt ist) erhält `403`.
 
 Die meisten Schlüssel werden live neu geladen, darunter `dry_run`, Schwellenwerte,
 `networks`, hostgroups, Baselines, Benachrichtigungseinstellungen und `sampling.default_rate`.
@@ -201,7 +204,7 @@ Binary zu wechseln, ohne die Mitigation zu unterbrechen, [Upgrade](/docs/upgradi
 
 ## Aus dem Quellcode bauen
 
-Zum Bauen wird **Go 1.22 oder neuer** benötigt. Das `Makefile` stellt die üblichen Targets bereit:
+Zum Bauen wird **Go 1.26 oder neuer** benötigt. Das `Makefile` stellt die üblichen Targets bereit:
 
 ```sh
 make build  # static binary

@@ -6,7 +6,10 @@ export const metadata = {
 
 # Detection & thresholds
 
-Kapkan detects volumetric attacks **per destination host** over a sliding time window.
+Kapkan detects volumetric attacks &mdash; floods that try to saturate a host with raw packet or bit
+volume, as opposed to application-layer attacks &mdash; **per destination host** over a sliding time
+window. Rates are evaluated as per-second averages over that window (5 seconds by default), so a
+sub-second spike that does not sustain across the window will not, by itself, open an attack.
 For every protected address it keeps windowed rate counters, and the moment any configured
 threshold is crossed it opens an attack, attaches a flow sample, classifies the vector, and
 hands the event to mitigation, notifications and the API.
@@ -37,7 +40,7 @@ inside your protected `networks`. Three core metrics are always evaluated:
 thresholds:
   pps: 80000
   mbps: 1000
-  flows_per_sec: 40000
+  flows_per_sec: 35000
 ```
 
 All three core thresholds must be greater than `0`. A host crosses into "under attack" as soon as
@@ -113,7 +116,7 @@ Each protocol has a `pps` and an `mbps` variant. The metric names are exactly:
 thresholds:
   pps: 80000
   mbps: 1000
-  flows_per_sec: 40000
+  flows_per_sec: 35000
   tcp_syn_pps: 50000
   udp_mbps: 800
   frag_pps: 30000
@@ -133,14 +136,15 @@ A few rules govern how these behave:
 
 ## Scope
 
-Detection is **scoped to your protected prefixes**. Only destinations inside the configured
+Detection is **scoped to your protected prefixes** (the IP ranges in [CIDR](/docs/glossary) form,
+e.g. `203.0.113.0/24`, that you protect). Only destinations inside the configured
 `networks` are ever acted on. Traffic to any other destination is still counted in Prometheus
 metrics for visibility, but it can never open an attack or trigger a ban.
 
 ```yaml
 networks:
   - 203.0.113.0/24
-  - 2001:db8::/48
+  - 2001:db8::/32
 ```
 
 This is one of the enforced safety rules: a destination outside `networks` is out of scope for
@@ -173,7 +177,9 @@ usual sample and classification.
 
 <Callout type="info" title="Mitigation is opt-in">
 Carpet attacks are alert-only by default. Set `carpet.mitigation` to auto-mitigate the aggregation
-prefix — `flowspec` drops the attack vector to the whole prefix (surgical), or `blackhole` RTBHs it.
+prefix — `flowspec` installs filter rules matching the attack's traffic pattern across the whole
+prefix (surgical — legitimate traffic to those hosts keeps flowing), or `blackhole` RTBHs the entire
+prefix (blunt — every host in it goes dark).
 Either method **refuses a prefix that contains a `protected_whitelist` address** outright: a prefix
 mitigation cannot exempt one member and the whitelist guarantee is absolute. A prefix ban also counts
 its full address span toward `ban.max_banned_fraction` and has its own `carpet.max_active_prefix_bans`
@@ -206,10 +212,13 @@ matter:
   counted — there is no hot-path overhead.
 
 <Callout type="warning" title="RTBH is destination-based">
-Blackholing an outgoing attacker drops traffic to the host, which takes it offline and usually stops
-the abuse, but only stops the outbound flood directly where your edge also drops sources in
-blackholed prefixes (for example with uRPF). Set `ban: false` on the hostgroup if you want the alert
-without the route. See [Mitigation](/docs/mitigation).
+[RTBH](/docs/glossary) is destination-based: it drops traffic *to* the host. For an outgoing attack
+that takes the compromised host offline, which usually stops the abuse &mdash; but it does not, by
+itself, drop the outbound packets. It only stops the outbound flood if your edge separately drops
+packets whose *source* is in a blackholed prefix &mdash; e.g. with [uRPF](/docs/glossary) (unicast
+Reverse Path Forwarding, a router feature that discards packets arriving from an address it would not
+route back to). Set `ban: false` on the hostgroup if you want the alert without the route. See
+[Mitigation](/docs/mitigation).
 </Callout>
 
 ## Attack samples
@@ -259,12 +268,14 @@ The classifier recognizes these `type` values:
 
 How a vector is chosen:
 
-- A signature needs a **dominant share** — at least half (>= 0.5) the windowed traffic — to win. Amplification
-  is checked first (most specific), then pure SYN, then fragments, then ICMP, UDP and TCP volumetric
-  floods.
+- A signature needs a **dominant share** — at least half (>= 0.5) the windowed traffic — to win. When
+  UDP is the dominant protocol, Kapkan first checks for an amplification signature (most specific).
+  Otherwise — or if no amplification port qualifies — it falls through to pure SYN, then fragments,
+  then ICMP, UDP and TCP volumetric floods.
 - An **amplification** vector also requires response-sized packets from the reflected service port:
-  the average packet size from that source port must be large enough to read as a reflected response.
-  Request-sized packets from a service port classify as a plain flood instead.
+  the average packet size from that source port must be at least ~200 bytes to read as a reflected
+  response (request-sized packets from a service port classify as a plain flood instead), and that
+  single source port must itself carry at least half the sampled packets.
 - When no signature reaches the dominant share, the attack is labelled `mixed` and `confidence` is `0`.
 
 <Callout type="info" title="Confidence is a share, not a probability">

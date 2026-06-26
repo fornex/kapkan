@@ -8,9 +8,12 @@ export const metadata = {
 
 Kapkan ist eine einzelne, statisch gelinkte Go-Binärdatei mit modularem Innenleben. Es gibt
 keinen Sidecar, keine Datenbank und keinen separaten Webdienst, den man betreiben müsste:
-Flow-Ingestion, die Erkennungs-Engine, die BGP-Mitigation, die REST-API, das Dashboard und die
-Notifier sind allesamt Pakete, die zu einem einzigen Prozess kompiliert werden. Sie verweisen es
-auf eine YAML-Konfiguration, richten die Exporter Ihrer Router darauf aus, und es läuft.
+Flow-Ingestion, die Erkennungs-Engine, die BGP-Mitigation (BGP, das
+[Border Gateway Protocol](/docs/glossary), ist die Art, wie Router Routen austauschen — Kapkan
+agiert als BGP-Speaker, der Ihren Routern mitteilt, welche Routen sie installieren sollen), die
+REST-API, das Dashboard und die Notifier sind allesamt Pakete, die zu einem einzigen Prozess
+kompiliert werden. Sie verweisen es auf eine YAML-Konfiguration, richten die Exporter Ihrer Router
+darauf aus, und es läuft.
 
 Alles, was Sie beobachten — Angriffe, Top-Talker, gelernte Baselines, Sperren — liegt im
 Prozessspeicher und wird direkt von dort ausgeliefert. Für den Betrieb ist nichts Externes
@@ -32,9 +35,12 @@ Consumer-Stufen:
    (global, pro Protokoll, pro Hostgroup und gelernte Baselines) ausgewertet. Dies ist die
    performance-kritische Stufe; siehe [Performance](#performance).
 3. **Mitigate / notify / api** — wenn ein Schwellwert überschritten wird, gibt die Engine ein
-   Angriffsereignis aus. Die Mitigate-Stufe kündigt RTBH-Routen über den eingebetteten BGP-Speaker
-   an oder zieht sie zurück, die Notify-Stufe verteilt das Ereignis an Ihre Kanäle, und die
-   API-Stufe stellt den Live-Zustand für das Dashboard und für aufrufende Clients bereit.
+   Angriffsereignis aus. Die Mitigate-Stufe kündigt [RTBH](/docs/glossary)-Routen (Remotely
+   Triggered Black Hole — eine BGP-Route, die Ihren Routern mitteilt, sämtlichen Traffic zur
+   angegriffenen IP zu verwerfen) über den eingebetteten BGP-Speaker an oder zieht sie zurück;
+   Kapkan verfolgt jede solche Entscheidung als *Sperre*. Die Notify-Stufe verteilt das Ereignis an
+   Ihre Kanäle, und die API-Stufe stellt den Live-Zustand für das Dashboard und für aufrufende
+   Clients bereit.
 
 Der Datenfluss in einer Zeile:
 
@@ -100,8 +106,10 @@ Jeder Sprung, der Reihe nach:
   hat.
 - **Ingest → Engine.** Normalisierte Flows treten in den Hot Path ein. Die Engine ordnet jeden Flow
   einem Ziel-Host innerhalb von `networks` zu (den geschützten Präfixen, die Sie konfigurieren — siehe
-  [Erkennung & Schwellwerte](/docs/detection)), multipliziert seine Zähler mit der Sampling-Rate,
-  sodass die Raten in realem (ungesampeltem) Traffic ausgedrückt sind, und aktualisiert die Zähler
+  [Erkennung & Schwellwerte](/docs/detection)), multipliziert seine Zähler mit der effektiven
+  Sampling-Rate (der Rate des Exporters, dort wo konfiguriert um die Boundary-Deduplizierung
+  angepasst), sodass die Raten in realem (ungesampeltem) Traffic ausgedrückt sind, und aktualisiert
+  die Zähler
   des gleitenden Fensters dieses Hosts. Ziele außerhalb von `networks` werden in den Metriken
   gezählt, lösen aber niemals eine Aktion aus.
 - **Engine → Mitigate.** Wenn ein Host einen Schwellwert überschreitet, löst die Engine ein
@@ -110,7 +118,9 @@ Jeder Sprung, der Reihe nach:
   deren TTL-basierte Rücknahme.
 - **Engine → Notify.** Dasselbe Ereignis wird an jeden konfigurierten Kanal (Telegram, Slack,
   E-Mail, Webhook, Exec-Hook) zugestellt, samt der Klassifikation des Angriffs und einem angehängten
-  Flow-Sample.
+  Flow-Sample. Die Engine klassifiziert jeden Angriff anhand des Per-Protokoll-Traffic-Mix und des
+  Flow-Samples nach Vektor (SYN-Flood, UDP-/NTP-/DNS-Amplification, ICMP-Flood, Fragment-Flood und so
+  weiter), und genau dieser Vektor erscheint als Angriffs-`type` in der Benachrichtigung.
 - **Engine → API.** Der Live-Zustand — aktive und kürzliche Angriffe, beobachtete Hosts, Sperren —
   wird von der REST-API und dem eingebetteten Dashboard aus dem Engine-Speicher gelesen.
 
@@ -157,7 +167,8 @@ Schwellwerts und Peers.
 Die Konfiguration ist **hot-reloadbar**, ohne den Daemon neu zu starten. Lösen Sie einen Reload auf
 zwei Wegen aus:
 
-- Senden Sie `SIGHUP` an den Prozess (zum Beispiel `sudo systemctl reload kapkan`).
+- Senden Sie `SIGHUP` an den Prozess (zum Beispiel `sudo systemctl reload kapkan` oder
+  `kill -HUP <pid>` bei einer Installation ohne systemd oder einer manuellen Installation).
 - Rufen Sie `POST /api/v1/config/reload` gegen die API auf.
 
 Beide lesen und validieren die Datei direkt neu. Nahezu alles wird beim Reload wirksam — der

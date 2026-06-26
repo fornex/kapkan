@@ -12,18 +12,27 @@ vorgefertigtes, signiertes Binary ausgeliefert — und nichts hier kann eine Rou
 Dry-Run ist die Voreinstellung.
 
 <Callout type="info" title="Voraussetzungen">
-Ein Linux-Host (`amd64` oder `arm64`). Um *Live*-Erkennungen zu sehen, benötigen Sie außerdem
-einen Router, der NetFlow / IPFIX / sFlow exportiert — aber auch ohne einen solchen können Sie die
-Erkennung durchgängig mit dem mitgelieferten Werkzeug für synthetische Angriffe validieren (der
-[letzte Abschnitt](#5-kein-router-synthetische-angriffe-erzeugen), der aus einem Source-Checkout läuft).
-Eine Go-Toolchain benötigen Sie nur, wenn Sie sich für das
-[Bauen aus dem Quellcode](/docs/deployment#aus-dem-quellcode-bauen) statt für den Download entscheiden.
+Ein Linux-Host (`amd64` oder `arm64`). Um *echte* Erkennungen zu sehen, benötigen Sie einen Router,
+der Flow-Telemetrie exportiert — NetFlow, IPFIX oder sFlow (Aufzeichnungen darüber, wer Traffic an
+wen sendet; siehe das [Glossar](/docs/glossary)). Ohne Router, aber mit einem Source-Checkout können
+Sie trotzdem bestätigen, dass die Erkennung funktioniert, indem Sie die Test-Suite ausführen — siehe
+den [letzten Abschnitt](#5-optional-kein-router-erkennung-aus-dem-quellcode-validieren). Eine
+Go-Toolchain benötigen Sie nur, wenn Sie diesen Weg gehen, oder wenn Sie statt des Downloads
+[aus dem Quellcode bauen](/docs/deployment#aus-dem-quellcode-bauen).
 </Callout>
 
 ## 1. Kapkan installieren
 
 Wählen Sie, was zu Ihrem Host passt — jedes Release wird vorgefertigt und signiert für `linux`
 `amd64`/`arm64` ausgeliefert, sodass Sie nie etwas kompilieren.
+
+<Callout type="info" title="Das neueste Release verwenden — ersetzen Sie v1.0.0">
+Bevor Sie etwas per Copy-Paste übernehmen, ersetzen Sie `v1.0.0` in jedem Befehl unten durch den
+neuesten Tag von der [Releases-Seite](https://github.com/fornex/kapkan/releases/latest) (`v1.0.0`
+wörtlich zu kopieren liefert einen 404, wenn es nicht das aktuelle Release ist) und `amd64` durch
+`arm64` auf ARM-Hosts. Archiv- und Paketnamen lassen das führende `v` weg (z. B.
+`kapkan_1.0.0_linux_amd64.tar.gz`).
+</Callout>
 
 ### Debian / Ubuntu (`.deb`)
 
@@ -52,12 +61,6 @@ Beispielkonfiguration und `update.sh`). Der Rest dieser Seite verwendet den Tarb
 im Produktivbetrieb ausführen, lohnt es sich, [den Download zu
 verifizieren](/docs/upgrading#einen-download-von-hand-verifizieren) — die cosign-Signatur und den SHA-256.
 
-<Callout type="info" title="Das neueste Release verwenden">
-Ersetzen Sie `v1.0.0` durch den neuesten Tag von der
-[Releases-Seite](https://github.com/fornex/kapkan/releases/latest) und `amd64` durch `arm64` auf
-ARM-Hosts. Archiv- und Paketnamen lassen das führende `v` weg (z. B. `kapkan_1.0.0_linux_amd64.tar.gz`).
-</Callout>
-
 ## 2. Im Dry-Run betreiben
 
 Starten Sie Kapkan aus dem entpackten Tarball mit der mitgelieferten Beispielkonfiguration und
@@ -67,9 +70,17 @@ menschenlesbaren Logs:
 ./kapkan -config deploy/config.example.yaml -log-format text
 ```
 
+Es läuft im Vordergrund und gibt Logs in Ihrem Terminal aus; drücken Sie Strg-C, um es sauber zu
+stoppen.
+
 `-config` verweist auf die YAML-Konfiguration und `-log-format text` stellt die Logs vom
 voreingestellten strukturierten JSON auf eine menschenlesbare Form um — siehe die
 [CLI-Referenz](/docs/cli) für jeden Flag und seine zulässigen Werte.
+
+Im Dry-Run benötigt Kapkan keine besonderen Rechte und kann als normaler Benutzer laufen. (Beim
+Live-Gang bindet sich BGP an Port 179, was root oder die Capability `CAP_NET_BIND_SERVICE`
+erfordert — die mitgelieferte systemd-Unit erledigt das; siehe
+[Produktiv-Deployment](/docs/deployment).)
 
 Die mitgelieferte [`deploy/config.example.yaml`](/docs/configuration) hat `dry_run: true`,
 geschützte Testnetze von `203.0.113.0/24` und `2001:db8::/32`, eine `protected_whitelist` und
@@ -111,24 +122,34 @@ curl -s localhost:8080/metrics | grep kapkan_
 Sie können auch das eingebettete [Dashboard](/docs/dashboard) unter
 [http://localhost:8080](http://localhost:8080) im Browser öffnen.
 
-## 5. Kein Router? Synthetische Angriffe erzeugen
+## 5. Optional: Kein Router? Erkennung aus dem Quellcode validieren
 
-Dieser letzte Schritt läuft aus einem **Source-Checkout** (er nutzt die Test-Suite), benötigt also
-das Repository und eine Go-Toolchain. Kapkan wird mit `pkg/flowgen` ausgeliefert, das echte
-NetFlow- / sFlow-Datagramme im Wire-Format erzeugt — einschließlich Amplification-, SYN-Flood- und
-UDP-Flood-Mustern. Es wird in der gesamten Test-Suite verwendet, um die Erkennung durchgängig zu
-validieren, ohne einen echten Router anzufassen. Der Integrationstest in `internal/app` spielt einen
-NTP-Amplification-Flood über einen echten UDP-Socket gegen eine Dry-Run-Instanz ab und prüft, dass
-der Angriff und sein (automatisch ablaufender) virtueller Bann — das aufgezeichnete potenzielle
-Blackhole, das der Dry-Run über die API offenlegt, ohne es je anzukündigen — in der API erscheinen:
+<Callout type="info" title="Dies ist ein Entwickler-Pfad, kein Binary-Pfad">
+Dieser Schritt nutzt **nicht** das vorgefertigte Binary, das Sie oben heruntergeladen haben. Er führt
+Kapkans Test-Suite aus und benötigt daher einen Source-Checkout und eine
+[Go-Toolchain](https://go.dev/dl/). Wenn Sie nur das `.deb`/`.rpm`/den Tarball und noch keinen Router
+haben, überspringen Sie diesen Schritt — richten Sie einen Router auf die Listen-Ports (Schritt 3),
+sobald Sie einen haben. Das Werkzeug für synthetische Angriffe (`pkg/flowgen`) ist ein
+Test-Suite-Paket, kein Befehl, den das ausgelieferte Binary bereitstellt.
+</Callout>
+
+Was dies beweist: Kapkan erkennt einen Angriff und hätte das Opfer auf die Blacklist gesetzt — und
+das alles, ohne etwas an einen echten Router zu senden, da der Dry-Run nur die potenzielle Sperre
+aufzeichnet (ein *virtueller Bann* — eine [Blackhole](/docs/glossary)-Route, die Kapkan über die API
+offenlegt, aber niemals ankündigt).
+
+Der Test schickt einen gefälschten NTP-Amplification-Flood gegen eine Dry-Run-Instanz über einen
+echten UDP-Socket und prüft, dass der Angriff in der API erscheint, mit einem virtuellen Bann, der
+später per TTL automatisch abläuft. Führen Sie ihn aus einem Source-Checkout aus:
 
 ```sh
 git clone https://github.com/fornex/kapkan && cd kapkan/engine
-go test ./internal/app -run TestEndToEnd -v
+go test ./internal/app -run TestEndToEndNTPAmplification -v
 ```
 
 ## Nächste Schritte
 
+- [Gerade unter Angriff?](/docs/under-attack) — das Copy-Paste-Runbook für den Fall, dass der Traffic Sie bereits trifft.
 - [Produktiv-Deployment](/docs/deployment) — Kapkan als gehärteten systemd-Dienst betreiben.
 - [Konfigurationsreferenz](/docs/configuration) — passen Sie die Konfiguration an Ihr Netzwerk an.
 - [Erkennung & Schwellenwerte](/docs/detection) — stellen Sie ein, was als Angriff zählt.

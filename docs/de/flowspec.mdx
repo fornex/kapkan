@@ -6,9 +6,11 @@ export const metadata = {
 
 # FlowSpec-Mitigation
 
-Ein RTBH-Blackhole nimmt das gesamte Opfer vom Netz — es tauscht den Angriff gegen einen Ausfall ein.
-BGP FlowSpec (RFC 8955 für IPv4, RFC 8956 für IPv6) verteilt stattdessen eine Regel, die nur den
-passenden Angriffsverkehr verwirft, sodass das Opfer alles Übrige weiter ausliefert.
+Ein [RTBH](/docs/glossary)-Blackhole (Remotely-Triggered Blackhole — eine BGP-Route, die
+allen Datenverkehr zum Opfer verwirft) nimmt das gesamte Opfer vom Netz — es tauscht den
+Angriff gegen einen Ausfall ein. BGP [FlowSpec](/docs/glossary) (RFC 8955 für IPv4, RFC 8956
+für IPv6) verteilt stattdessen eine Regel, die nur den passenden Angriffsverkehr verwirft,
+sodass das Opfer alles Übrige weiter ausliefert.
 
 <Callout type="info" title="Erst der Trockenlauf">
 Die generierten Regeln erscheinen in `/api/v1/attacks` (`method`, `flowspec`), in `/api/v1/bans`
@@ -24,7 +26,7 @@ Setzen Sie die Mitigation-Methode auf `flowspec`. Die Standardmethode ist `black
 mitigation: flowspec            # default method for all groups (default: blackhole)
 flowspec:
   action: discard               # or rate_limit
-  rate_mbps: 100                # required for rate_limit
+  rate_mbps: 100                # only used when action: rate_limit (inert under discard)
 hostgroups:
   - name: web
     networks: ["203.0.113.0/26"]
@@ -48,9 +50,8 @@ Vektor abgleicht:
 | ICMP- / UDP- / TCP-Flood | `dst=victim, proto=<icmp/udp/tcp>` |
 | gemischt / unbekannt | `dst=victim` (plus eine Regel pro dominantem reflektiertem Quellport in der Stichprobe) |
 
-Das Opfer wird stets als `/32` (IPv4) bzw. `/128` (IPv6) abgeglichen. **IPv6-FlowSpec ist vollständig
-gleichwertig mit IPv4** — wohingegen FastNetMons eigene Roadmap IPv6-FlowSpec nach wie vor als nicht
-unterstützt aufführt.
+Das Opfer wird stets als `/32` (IPv4) bzw. `/128` (IPv6) abgeglichen. **IPv6-FlowSpec funktioniert
+identisch zu IPv4** — es werden dieselben Regeln generiert, wobei das Opfer als `/128` abgeglichen wird.
 
 ## Ausgehende Angriffe
 
@@ -76,7 +77,14 @@ Sie greift nur, wenn die dominanten Quellen innerhalb des 8-Regeln-Budgets minde
 
 - Der `tcp-flags`-Match für SYN-Floods ist eine Bitmaske, die auch auf SYN-ACK passt, sodass eine
   `discard`-Aktion auch die vom Opfer ausgehend initiierten Verbindungen verwirft — bevorzugen Sie
-  `rate_limit` für TCP-Vektoren.
+  `rate_limit` für TCP-Vektoren. Um es zu nutzen, setzen Sie `action: rate_limit` und eine Obergrenze
+  in `rate_mbps` (die obigen Beispiele verwenden `discard`):
+
+  ```yaml
+  flowspec:
+    action: rate_limit            # rate-cap the vector instead of dropping it
+    rate_mbps: 100                # ceiling, megabits/s
+  ```
 - `max_active_bans` begrenzt **Bans**, nicht Regeln: Ein FlowSpec-Ban kann bis zu 8 Regeln tragen,
   sodass N Bans bis zu 8N Regeln in der RIB Ihres Upstreams bedeuten können. Beobachten Sie die
   Metrik `kapkan_mitigate_flowspec_rules` ([Metric](/docs/metrics)) gegen das FlowSpec-Routenlimit Ihrer Router.
@@ -87,9 +95,17 @@ Jede Regel trägt eine Traffic-Rate-Extended-Community: `discard` (Rate 0) oder 
 FlowSpec-Bans teilen sich denselben TTL-, Unban-Hysterese- und `max_active_bans`-Lebenszyklus wie
 Blackhole-Bans — siehe [RTBH-Mitigation](/docs/mitigation).
 
-FlowSpec läuft über **dieselben BGP-Nachbarn** wie RTBH: Die FlowSpec-AFI/SAFI wird additiv angekündigt,
-und ein Peer, der sie nicht unterstützt, wird sie schlicht nicht aushandeln. FlowSpec ist **nicht gültig
-für Hostgroups mit `calculation: total`** — es gibt kein einzelnes Opfer-Präfix zum Abgleichen.
+FlowSpec läuft über **dieselben BGP-Nachbarn** wie RTBH: Es wird als zusätzliche Capability über
+dieselben BGP-Sessions ausgehandelt (die FlowSpec-AFI/SAFI), und ein Peer, der sie nicht unterstützt,
+wird sie schlicht nicht aktivieren. FlowSpec ist **nicht gültig für Hostgroups mit
+`calculation: total`** — es gibt kein einzelnes Opfer-Präfix zum Abgleichen.
+
+Um zu bestätigen, dass Ihr Upstream die Regeln tatsächlich akzeptiert: Prüfen Sie im Trockenlauf, dass das
+Feld `flowspec` in `/api/v1/attacks` befüllt ist. Nach der Inbetriebnahme sollte die Metrik
+`kapkan_mitigate_flowspec_rules` ([Metric](/docs/metrics)) mit `mode="real"` ungleich null sein. Lehnt
+ein Peer FlowSpec ab, fällt Kapkan den Ban auf blackhole zurück und macht dies in `/api/v1/bans` (die Felder
+`fell_back_from` und `fell_back_reason`) sowie in Benachrichtigungen sichtbar — sodass ein stillschweigend
+nicht unterstützender Upstream sichtbar bleibt.
 
 ## Verwandte Themen
 

@@ -10,6 +10,11 @@ Verweisen Sie Kapkan auf einen ClickHouse-Server, um den Angriffs- und Verkehrsv
 festzuhalten — die Antwort auf die Frage "Was hat uns letzten Dienstag getroffen?". Ohne ihn
 läuft Kapkan vollständig prozessintern auf Live-Daten.
 
+Dafür benötigen Sie einen laufenden ClickHouse-Server (jede aktuelle Version). Kapkan
+kommuniziert mit dessen HTTP-Schnittstelle, die standardmäßig auf Port `8123` lauscht — das ist
+der Port in der Beispiel-URL weiter unten. Die Installation von ClickHouse wird hier nicht
+behandelt; siehe [clickhouse.com](https://clickhouse.com).
+
 <Callout type="info" title="Best-Effort, blockiert nie die Erkennung">
 Die Persistenz arbeitet über eine begrenzte Warteschlange mit nicht blockierendem Senden. Ein
 langsames oder ausgefallenes ClickHouse verwirft Zeilen (gezählt in `kapkan_storage_rows_total` mit
@@ -33,7 +38,29 @@ storage:
 ```
 
 Die Anmeldedaten werden aus den benannten Umgebungsvariablen (`username_env` / `password_env`)
-gelesen, niemals aus der Konfigurationsdatei.
+gelesen, niemals aus der Konfigurationsdatei. Lassen Sie beide weg, wenn Ihr ClickHouse
+nicht authentifizierte lokale Verbindungen akzeptiert (der voreingestellte Benutzer `default`
+tut das oft) — setzen Sie sie nur, wenn Ihr Server eine Authentifizierung verlangt.
+
+Das Ändern einer beliebigen Speicherungseinstellung erfordert einen vollständigen Neustart — ein
+Konfigurations-Neuladen, das den `storage`-Block berührt, wird abgelehnt
+(`reload: storage settings cannot change at runtime (restart required)`).
+
+## Überprüfung
+
+Bestätigen Sie nach dem Aktivieren der Speicherung, dass tatsächlich Zeilen ankommen — die
+Persistenz arbeitet nach dem Best-Effort-Prinzip und schlägt stillschweigend fehl. Zwei Prüfungen:
+
+- Beobachten Sie, wie die Metrik `kapkan_storage_rows_total{result="written"}` steigt (im
+  Gegensatz zu `result="dropped"` oder `result="error"`). Siehe [Metriken](/docs/metrics).
+- Fragen Sie ClickHouse direkt ab:
+  ```bash
+  curl 'http://127.0.0.1:8123/?query=SELECT%20count()%20FROM%20kapkan.attack_events'
+  ```
+
+Bei falschen Anmeldedaten oder einem Berechtigungsproblem protokolliert die Engine beim Start
+`clickhouse schema init failed` und `clickhouse insert failed`, wenn ein Batch abgelehnt wird —
+prüfen Sie zuerst die Logs, wenn die Zählwerte bei null bleiben.
 
 ## Funktionsweise
 
@@ -50,6 +77,10 @@ Beim Start erstellt Kapkan idempotent drei MergeTree-Tabellen:
 
 Jede trägt eine `ttl_days`-TTL pro Zeile, sodass die Aufbewahrung ohne Eingriff des Betreibers
 begrenzt bleibt.
+
+Die Schreib-Anmeldedaten benötigen beim ersten Lauf `CREATE`-Rechte (Datenbank + Tabellen) und
+`INSERT`-Rechte; danach genügt `INSERT`. Fehler bei der Schema-Erstellung werden beim Start
+protokolliert, sind aber nicht fatal.
 
 Die `reason`-Spalte der `attack_events`-Tabelle enthält das kompakte JSON des Erkennungs-
 [reason](/docs/detection) — warum der Angriff ausgelöst wurde (Herkunft des Schwellenwerts,

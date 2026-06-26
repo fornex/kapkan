@@ -6,11 +6,13 @@ export const metadata = {
 
 # Tableau de bord
 
-Kapkan est livré avec une interface web autonome embarquée directement dans le binaire via `go:embed`.
-Il n'y a aucune étape de build, aucun bundler et aucune ressource externe à télécharger — le même binaire
-statique `kapkan` sert le tableau de bord en parallèle de l'API JSON et des métriques Prometheus. Il s'agit
-de JavaScript pur qui interroge l'API REST, et non d'une application React ; il fonctionne donc entièrement
-à partir de données en direct, sans aucune base de données requise.
+Ouvrez **http://localhost:8080** dans un navigateur exécuté sur l'hôte Kapkan. Lorsque vous êtes
+attaqué, regardez d'abord la bannière **Mode actif** (Kapkan annonce-t-il réellement, ou se
+contente-t-il d'observer ?) et la liste des **Attaques actives** (qu'est-ce qui est touché, et avec quelle intensité).
+
+L'interface web est intégrée directement dans le binaire `kapkan` lui-même, il n'y a donc rien de
+supplémentaire à installer ou à déployer — le même processus sert le tableau de bord, l'API JSON et les
+métriques Prometheus.
 
 <Callout type="info" title="Un seul binaire, un seul écouteur">
 Le tableau de bord, l'API JSON et `/metrics` sont tous servis par le même processus à la même
@@ -22,6 +24,18 @@ adresse. Il n'y a aucun service web distinct à déployer ou à maintenir synchr
 Le tableau de bord est servi sur `/` à la même adresse que l'API REST — la valeur `api.listen`
 de votre configuration. Avec la valeur par défaut `127.0.0.1:8080`, vous l'ouvrez à l'adresse
 [http://localhost:8080](http://localhost:8080).
+
+Comme la valeur par défaut se lie à `127.0.0.1`, le tableau de bord n'est accessible que depuis l'hôte
+Kapkan lui-même — ouvrir `localhost:8080` sur votre propre portable n'affichera rien. Pour le consulter depuis
+votre poste de travail, redirigez le port via SSH plutôt que de relier `api.listen` à une adresse publique :
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@kapkan-host
+```
+
+Ouvrez ensuite [http://localhost:8080](http://localhost:8080) sur votre poste de travail. (Relier
+l'écouteur à une adresse publique nécessite d'abord un jeton d'API — voir la mise en garde
+[Authentification](#authentification) ci-dessous.)
 
 Pour ne servir que l'API JSON et les métriques sans l'interface, désactivez-la :
 
@@ -41,23 +55,22 @@ Le tableau de bord interroge l'API JSON et restitue tout ce que Kapkan suit en m
 - **Mode actif** — indique si l'instance fonctionne en dry-run ou en mode actif, afin que vous puissiez voir d'un
   coup d'œil si une attaque détectée serait réellement annoncée.
 - **Attaques actives et récentes** — les attaques en cours ainsi que celles récemment terminées,
-  chacune avec sa classification (vecteurs d'amplification tels que NTP / DNS / CLDAP / memcached /
-  SSDP / chargen, et inondations SYN / UDP / TCP / ICMP / par fragments) ainsi que les sources,
-  ports et protocoles dominants capturés à partir des échantillons de flow.
+  chacune avec sa classification du type d'attaque (par exemple, amplification NTP/DNS ou une
+  inondation SYN — voir la page [Détection](/docs/detection) pour la signification de chaque type) ainsi que les
+  sources, ports et protocoles dominants capturés à partir des échantillons de flow.
 - **Principaux émetteurs (top talkers)** — l'instantané des hôtes suivis avec les débits par direction et les
   références (baselines) apprises, afin que vous puissiez voir qui est le plus bruyant et comment cela se compare à la normale.
 - **Hostgroups** — vos groupes de préfixes nommés et leur état.
 - **Table de bannissement** — chaque bannissement, actif et historique.
 - **Trafic / Rapports** — des graphiques de trafic entrant/sortant en direct construits à partir des
-  tampons de débit en mémoire, ainsi qu'une section **Rapports historiques** qui lit les tables ClickHouse
-  persistées lorsque le stockage est activé.
+  tampons de débit en mémoire, ainsi qu'une section **Rapports historiques** qui lit les tables
+  ClickHouse persistées lorsque le stockage est activé.
+- **Contrôles** — les mêmes actions que celles offertes par l'API : **bannissement / débannissement manuel**
+  d'une adresse et **rechargement de la configuration** (l'équivalent de l'envoi de `SIGHUP`).
 
-Il expose également les mêmes points de terminaison de contrôle que l'API : **bannissement / débannissement manuel**
-d'une adresse et **rechargement de la configuration** (l'équivalent de `SIGHUP`). Les graphiques en direct
-fonctionnent uniquement à partir de données en mémoire — aucun ClickHouse ni autre base de données n'est nécessaire pour eux. La seule exception
-est la section **Rapports historiques** de la vue Trafic / Rapports : elle n'est renseignée que lorsque
-le [stockage ClickHouse](/docs/storage) est activé, et affiche sinon un espace réservé étiqueté
-expliquant comment l'activer.
+La section **Rapports historiques** de la vue Trafic / Rapports est la seule partie qui nécessite
+du stockage : elle n'est renseignée que lorsque le [stockage ClickHouse](/docs/storage) est activé, et
+affiche sinon un espace réservé étiqueté expliquant comment l'activer.
 
 <Callout type="success" title="Aucune base de données requise">
 Le tableau de bord est entièrement construit à partir de l'état en mémoire du moteur. Le stockage historique des flows

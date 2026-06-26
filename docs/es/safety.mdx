@@ -13,6 +13,10 @@ básicas siguientes se aplican en el código y están cubiertas por pruebas: no 
 configuración que puedas olvidarte de definir, y son innegociables. Por encima de ellas se
 sitúa una capa opcional de blast-radius que puedes activar para una contención adicional.
 
+Kapkan rastrea cada decisión de mitigación como un [*bloqueo*](/docs/glossary); para el método
+por defecto, un bloqueo es una [ruta de blackhole (RTBH)](/docs/glossary) anunciada por BGP. Esta
+página usa "bloqueo" para el objeto rastreado y "ruta de blackhole" para el anuncio BGP.
+
 Cada una de ellas se aplica por igual a los bloqueos **automáticos** impulsados por la
 detección y a los bloqueos **manuales** solicitados a través de la API. No existe ninguna vía
 que las omita.
@@ -31,15 +35,30 @@ Dado que una clave `dry_run` ausente significa dry-run, la única forma de empez
 rutas es escribir deliberadamente `dry_run: false` y recargar. Un error tipográfico, un archivo
 truncado o una clave olvidada fallan de forma segura. Consulta [Puesta en marcha](/docs/going-live)
 para la lista de validación antes de activarlo.
+
+Editar la configuración bajo ataque también es seguro: valida primero el archivo con
+`kapkan -check-config /etc/kapkan/config.yaml` (código de salida `0` = válido, `1` = inválido). Una
+recarga en caliente que no pasa la validación se **rechaza**: Kapkan registra `config reload failed; keeping previous config`
+y sigue ejecutando la última configuración válida, de modo que un error tipográfico no puede
+dejarte fuera en mitad de un ataque.
 </Callout>
 
 ## 2. Sin bloqueos permanentes
 
-Todo anuncio lleva un TTL (`ban.ttl_seconds`) y se retira automáticamente cuando expira,
-incluso si el ataque sigue en curso. No existe ninguna ruta de código que produzca un anuncio
-sin caducidad. Un proceso bloqueado, una notificación perdida o un operador que se ausenta
-nunca pueden dejar un host en blackhole para siempre; el peor caso es que el tráfico se
-descarte durante una ventana de TTL y luego se reevalúe.
+Todo anuncio lleva un TTL (`ban.ttl_seconds`, un ajuste obligatorio sin valor por defecto) y se
+retira automáticamente cuando expira. No existe ninguna ruta de código que produzca un anuncio
+sin caducidad. Un proceso bloqueado, una notificación perdida o un operador que se ausenta nunca
+pueden dejar un host en blackhole para siempre.
+
+<Callout type="warning" title="Define el TTL más largo que un ataque típico">
+El TTL solo se refresca cuando la detección *se vuelve a disparar*. Un único ataque detectado de
+forma continua anuncia la ruta una vez y el TTL se convierte en toda su vida útil: la ruta **no** se
+vuelve a anunciar de forma silenciosa mientras el mismo ataque sigue en curso. Así que si el TTL
+expira en mitad de la inundación, la ruta se retira y la víctima queda expuesta de nuevo hasta que
+el ataque cesa y más tarde se vuelve a disparar. Define `ttl_seconds` cómodamente más largo que un
+ataque típico (p. ej. `1800`–`3600`); un TTL demasiado corto retira la ruta en mitad de un ataque
+en curso.
+</Callout>
 
 ## 3. Histéresis de desbloqueo
 
@@ -65,6 +84,11 @@ infraestructura crítica— nunca se anuncian, sin importar cuánto tráfico atr
 solicite. La lista blanca anula la detección y anula las solicitudes de bloqueo manual. No
 existe ningún indicador que la eluda.
 
+Para la mitigación de tipo alfombra (de prefijo completo) la garantía es aún más fuerte: un prefijo
+que contiene una sola dirección de la lista blanca tiene **toda** su mitigación rechazada: Kapkan no
+enviará a blackhole ni filtrará un `/24` para atrapar un ataque si dentro de él vive un host
+protegido.
+
 ## 6. Detección con alcance acotado
 
 Kapkan actúa únicamente sobre los destinos que están dentro de los prefijos `networks`
@@ -84,7 +108,10 @@ guardas opcionales de `ban` lo restringen aún más:
   de direcciones) de tu espacio protegido ya está en blackhole, de modo que una línea base
   envenenada o una tormenta de origen falsificado no pueda enrutar a null una gran fracción de tu
   propia red de un `/32` en uno, incluso mientras cada bloqueo se mantiene por debajo del tope de
-  conteo.
+  conteo. Ejemplo: con `networks` sumando un `/22` (1024 direcciones IPv4) y
+  `max_banned_fraction: 0.25`, Kapkan rechaza nuevos bloqueos IPv4 una vez que hay unas 256
+  direcciones en blackhole. Un bloqueo de alfombra `/24` cuenta como sus 256 direcciones completas
+  para esta fracción, no como uno.
 - `max_bans_per_window` (con `ban_window_seconds`) acota con qué rapidez se acumulan los nuevos
   bloqueos, atrapando una tormenta descontrolada antes de que alcance el tope de conteo.
 
@@ -101,10 +128,14 @@ infringe alguna se rechaza con un HTTP `409` en lugar de anunciarse silenciosame
 | Solicitud de bloqueo manual | Resultado |
 | --- | --- |
 | El objetivo está en `protected_whitelist` | `409` — nunca se anuncia |
-| El objetivo está fuera del alcance de `networks` configurado | `409` — fuera de alcance |
+| El objetivo está fuera del alcance de `networks` configurado | `409` — fuera de las redes configuradas |
 | Bloquear el objetivo superaría `max_active_bans` | `409` — tope alcanzado |
 | Bloquear el objetivo superaría `max_banned_fraction` | `409` — cuando está activado |
 | Bloquear el objetivo superaría `max_bans_per_window` | `409` — cuando está activado |
+
+Con tokens de API con alcance por inquilino hay una comprobación previa: un objetivo que pertenece
+a otro inquilino devuelve `403` ("target is outside your tenant") antes de que se ejecute cualquiera
+de estas guardas. Los despliegues de un solo operador (el caso común) nunca llegan a esto.
 
 Si las guardas opcionales de blast-radius están activadas, un bloqueo manual también se verifica
 contra ellas, y se rechaza con el mismo `409` cuando superaría `max_banned_fraction` o
@@ -118,3 +149,5 @@ completo de un bloqueo manual—, pero nunca las salvaguardas de seguridad que r
 - [Mitigación y RTBH](/docs/mitigation) — cómo funcionan de principio a fin los anuncios, los TTL, la histéresis y el tope.
 - [Puesta en marcha](/docs/going-live) — valida la detección en dry-run y luego desactívalo de forma segura.
 - [Referencia de configuración](/docs/configuration) — las claves `dry_run`, `ban`, `protected_whitelist` y `networks`.
+- [Bajo ataque ahora mismo](/docs/under-attack) — el manual paso a paso para una inundación en curso, incluidos los bloqueos manuales.
+- [Resolución de problemas](/docs/troubleshooting) — qué revisar cuando un bloqueo se rechaza (`409`) o las rutas no llegan.

@@ -6,16 +6,25 @@ export const metadata = {
 
 # RTBH mitigation
 
+[BGP](/docs/glossary) (Border Gateway Protocol — how routers exchange routes) is what all of
+Kapkan's mitigation rides on: Kapkan acts as a BGP speaker that tells your routers which routes to
+install. Kapkan tracks each mitigation decision as a **ban**; for the default method a ban is a
+**blackhole route** ([RTBH](/docs/glossary)).
+
 When the engine reports an attack, Kapkan mitigates it by announcing a **remotely-triggered
 blackhole (RTBH)** route for the targeted host: a `/32` (IPv4) or `/128` (IPv6) prefix carried
 over an embedded [GoBGP](https://github.com/osrg/gobgp) speaker, tagged with your RTBH
-community and pointed at a discard next-hop. Your edge routers match the community and drop all
-traffic to that host, dropping the flood before it reaches your network's core.
+community and pointed at a [discard next-hop](/docs/glossary) — an address your routers send
+blackholed traffic to and then drop (a null route). Your edge routers match the community and drop
+all traffic to that host, dropping the flood before it reaches your network's core.
 
-Mitigation is destination-based: the blackhole kills traffic *to* the target. For an incoming
-flood this stops the attack; for an [outgoing attack](/docs/detection) from a compromised host
-it takes that host offline (which usually stops the abuse) and stops the outbound flood only
-where your edge also drops sources in blackholed prefixes, for example with uRPF.
+Mitigation is destination-based: the blackhole drops traffic *to* the target. For an incoming
+flood this stops the attack. For an [outgoing attack](/docs/detection) from a compromised host it
+takes that host offline, which usually stops the abuse — but it does not directly drop the outbound
+packets unless your edge also filters packets whose *source* is in a blackholed prefix, e.g. with
+[uRPF](/docs/glossary) (unicast Reverse Path Forwarding, a router feature that drops
+spoofed/return-path-mismatched traffic). To get the alert without the route, set `ban: false` on the
+[hostgroup](/docs/hostgroups).
 
 <Callout type="warning" title="Dry-run by default">
 Until you explicitly set `dry_run: false`, every would-be blackhole is computed, logged and
@@ -62,18 +71,19 @@ bgp:
 | `local_asn` | Kapkan's local ASN for the eBGP sessions. Required. |
 | `router_id` | The BGP router ID. Must be a valid **IPv4** address. |
 | `next_hop` | The IPv4 discard next-hop announced with each `/32` blackhole. |
-| `next_hop6` | The IPv6 discard next-hop announced with each `/128` blackhole. Optional; when unset, Kapkan falls back to `100::1` (the RFC 6666 discard prefix). |
+| `next_hop6` | The IPv6 discard next-hop announced with each `/128` blackhole. Optional; when unset, Kapkan falls back to the RFC 6666 discard address `100::1` (from the `100::/64` discard prefix). |
 | `community` | The RTBH community in `ASN:value` form (for example `65000:666`). Parsed once at load into the wire value sent with every route. |
 | `communities` | Optional list of communities that **overrides** `community` when set, for upstreams that expect a full set. |
-| `local_pref` | Optional `LOCAL_PREF` path attribute attached to blackholes. Honored on iBGP sessions but dropped across eBGP (it is non-transitive), so it is only meaningful to iBGP neighbors. Default `0` omits it. |
+| `local_pref` | Optional `LOCAL_PREF` path attribute attached to blackholes. It only travels within your own network ([iBGP](/docs/glossary) — internal BGP), not to external peers ([eBGP](/docs/glossary) — external BGP), so it is meaningful only to your internal neighbors. Default `0` omits it. |
 | `neighbors[]` | The BGP peers Kapkan announces to, each either eBGP or iBGP. Each entry takes an `address`, a `remote_asn`, and an optional `port` (default `179`, intended for testing). |
 
 `community`, `communities`, `next_hop`, `next_hop6` and `local_pref` can all be overridden per
 hostgroup — see [Per-hostgroup BGP attributes](#per-hostgroup-bgp-attributes).
 
-The blackhole route Kapkan builds for a target reads as `blackhole <prefix> next-hop <next_hop> community
-<community>` — exactly the string surfaced in the `route` field of the [ban object](#the-ban-object).
-IPv6 targets use `next_hop6` (or the `100::1` fallback) in place of `next_hop`.
+The blackhole route Kapkan builds for a target reads roughly as `blackhole <prefix> next-hop <next_hop>
+community <community>` — the string surfaced in the `route` field of the [ban object](#the-ban-object).
+The `community` segment is dropped if no community is set, and a `local-pref <n>` segment is appended
+when `local_pref` is configured. IPv6 targets use `next_hop6` (or the `100::1` fallback) in place of `next_hop`.
 
 <Callout type="info" title="Peering happens in dry-run">
 The BGP speaker peers with your neighbors even while `dry_run` is true — only route
@@ -149,7 +159,7 @@ optional mechanisms keep mitigation up across that gap:
   to trip again. Empty (the default) disables persistence. The [systemd unit](/docs/deployment)
   provides the directory via `StateDirectory=kapkan`.
 - **BGP Graceful Restart (`bgp.graceful_restart`).** On by default. A peer that supports
-  Graceful Restart (RFC 4724) **retains** Kapkan's routes as *stale* while the session is down,
+  Graceful Restart (RFC 4724) **retains** Kapkan's blackhole routes as *stale* while the session is down,
   rather than flushing them the instant the BGP connection drops — so the blackhole stays in
   effect during the brief restart window. Advertising the capability is harmless to a peer that
   does not support it.
@@ -161,12 +171,15 @@ ban:
 bgp:
   graceful_restart:
     enabled: true              # default; set false to opt out
-    restart_seconds: 120       # how long the peer holds routes as stale (1..4095)
-    # long_lived: false        # LLGR: extend retention beyond restart_seconds
+    restart_seconds: 120       # how long the peer holds routes as stale (0..4095; 0 = use the default 120)
+    # long_lived: false        # LLGR (Long-Lived Graceful Restart): extend retention beyond restart_seconds
     # long_lived_stale_seconds: 3600  # LLGR stale time when long_lived is set (<= 86400)
 ```
 
-Used together, the bans survive the process restart (`state_file`) and the routes survive the
+Graceful Restart bridges the session gap, but on its own a peer purges the stale routes once Kapkan
+reconnects and signals [End-of-RIB](/docs/glossary) (the marker that says "I've finished re-sending
+my routes"). Pair it with `state_file` so the restarted Kapkan re-announces the bans before that
+happens: used together, the bans survive the process restart (`state_file`) and the routes survive the
 session gap (graceful restart), so an upgrade no longer un-mitigates an in-progress attack.
 
 ## Fallback when a method is rejected
@@ -191,7 +204,8 @@ unsupported.
 
 In dry-run mode (`dry_run: true`, the default) Kapkan does everything *except* send the route.
 The target prefix, next-hop, community and the full `route` string are computed, the decision is
-logged as `DRY-RUN: would announce blackhole route (not sent)`, and the ban is tracked in the API
+logged as `DRY-RUN: would announce mitigation (not sent)` (and the matching withdraw line
+`DRY-RUN: would withdraw mitigation (not sent)`), and the ban is tracked in the API
 with `dry_run: true` and the live `active`/`withdrawn` states. TTL expiry and hysteresis run
 exactly as they would in production, so the entire lifecycle is observable before any route
 reaches a router.
@@ -208,7 +222,9 @@ the `route` fields are correct, then turn off dry-run. The full procedure is in
 
 ## Manual bans
 
-Operators can blackhole or release a host directly through the [REST API](/docs/api):
+Operators can blackhole or release a host directly through the [REST API](/docs/api). If you are
+mid-attack right now, start with the [under-attack runbook](/docs/under-attack), which walks the
+ban-a-host sequence step by step.
 
 ```http
 POST /api/v1/ban
@@ -224,12 +240,15 @@ Content-Type: application/json
 {"ip": "203.0.113.66"}
 ```
 
-A manual ban is created with `manual: true` and follows the same TTL and hysteresis as an
-automatic one. It honors every safety rule with no exceptions: a whitelisted target is refused
-(returns `409`, reason `whitelisted`), a target outside the configured `networks` is refused
-(returns `409`, reason `outside configured networks`), and exceeding `max_active_bans` is refused
-(returns `409`). Both POST endpoints require the `application/json` content type. See the
-[API reference](/docs/api) for the full request and response shapes.
+A manual ban is created with `manual: true` and follows the same TTL (so it still auto-expires —
+there are no permanent bans), but it is released only by an explicit unban or TTL expiry, never by
+traffic dropping below threshold. It honors every safety rule with no exceptions: a whitelisted
+target is refused (returns `409`, reason `whitelisted`), a target outside the configured `networks`
+is refused (returns `409`, reason `outside configured networks`), and any blast-radius cap —
+`max_active_bans`, `max_banned_fraction` or `max_bans_per_window` — is refused (returns `409`). The
+`reason` field names which rule fired; see the [safety model](/docs/safety). Both POST endpoints
+require the `application/json` content type. See the [API reference](/docs/api) for the full request
+and response shapes.
 
 ## The ban object
 
@@ -244,7 +263,7 @@ mitigator:
 | `rate` | number | The observed rate at ban time, in the metric's units (omitted when zero). |
 | `threshold` | number | The threshold the rate crossed (omitted when zero). |
 | `next_hop` | string | The discard next-hop announced with the route. |
-| `community` | string | The RTBH community in `ASN:value` form. |
+| `community` | string | The community set attached to the route (the RTBH community for a blackhole, the divert community for a divert ban), space-joined when more than one. |
 | `local_pref` | number | The `LOCAL_PREF` attached to the route (omitted when zero). |
 | `route` | string | The full route as `blackhole <prefix> next-hop <next_hop> community <community>` (or `divert ...` for divert bans), or a `flowspec: ...` summary for FlowSpec bans. |
 | `state` | string | One of `active`, `withdrawn`, or `rejected`. |
@@ -272,3 +291,6 @@ cap reached) so the decision is auditable in the API and notifications.
 - [Safety model](/docs/safety) — the dry-run, TTL, hysteresis, cap and whitelist rules enforced in code.
 - [Going live](/docs/going-live) — validate detection and peering, then turn off dry-run.
 - [REST API](/docs/api) — the ban endpoints, request shapes and response codes.
+- [Under attack now](/docs/under-attack) — the step-by-step runbook for an attack in progress.
+- [Troubleshooting](/docs/troubleshooting) — symptom-keyed fixes when something is not working.
+- [Glossary](/docs/glossary) — BGP, RTBH, uRPF and the other terms used on this page.
