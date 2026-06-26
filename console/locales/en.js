@@ -216,7 +216,8 @@
 
       /* traffic */
       "tr.live": "Live (polling buffer)",
-      "tr.aggregate": "Aggregate ingress / egress",
+      "tr.aggregate.mbps": "Aggregate ingress / egress — bandwidth",
+      "tr.aggregate.pps": "Aggregate ingress / egress — packet rate",
       "tr.perhost.mbps": "Top hosts — by bandwidth",
       "tr.perhost.pps": "Top hosts — by packet rate",
       "tr.window": "Last {n} samples · 3s cadence",

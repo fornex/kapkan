@@ -242,6 +242,22 @@
       h("div", { class: "tcard__chart", style: { height: "130px" } }, K.areaChart(b.aggOut.length ? b.aggOut : [0, 0], { color: "var(--chart-out)", height: 130 }))
     ]);
 
+    /* aggregate packet-rate twin of the bandwidth cards above */
+    var bigInPps = h("div", { class: "tcard" }, [
+      h("div", { class: "tcard__head" }, [
+        h("div", { class: "tcard__label" }, [(function () { var d = h("span", { class: "tcard__dir" }); d.style.background = "var(--chart-in)"; return d; })(), h("span", { text: I.t("ov.ingress") })]),
+        h("div", { class: "tcard__now" }, [I.pps(ctx.agg.in_pps)])
+      ]),
+      h("div", { class: "tcard__chart", style: { height: "130px" } }, K.areaChart(b.aggInPps.length ? b.aggInPps : [0, 0], { color: "var(--chart-in)", height: 130 }))
+    ]);
+    var bigOutPps = h("div", { class: "tcard" }, [
+      h("div", { class: "tcard__head" }, [
+        h("div", { class: "tcard__label" }, [(function () { var d = h("span", { class: "tcard__dir" }); d.style.background = "var(--chart-out)"; return d; })(), h("span", { text: I.t("ov.egress") })]),
+        h("div", { class: "tcard__now" }, [I.pps(ctx.agg.out_pps)])
+      ]),
+      h("div", { class: "tcard__chart", style: { height: "130px" } }, K.areaChart(b.aggOutPps.length ? b.aggOutPps : [0, 0], { color: "var(--chart-out)", height: 130 }))
+    ]);
+
     /* top host sparklines from per-host buffer — ranked by bandwidth */
     var hostCardsMbps = ctx.hosts.slice().sort(function (x, y) { return y.rates.mbps - x.rates.mbps; }).slice(0, 6).map(function (host) {
       var series = (b.hostMbps[host.target] || [host.rates.mbps]);
@@ -297,7 +313,7 @@
     K.mount(root, [
       V.viewHead(I.t("nav.traffic"), I.t("tr.window", { n: b.aggIn.length })),
       h("div", { class: "card" }, [
-        h("div", { class: "card__head" }, [h("div", { class: "card__title" }, [w.icon("activity"), h("span", { text: I.t("tr.aggregate") })]), K.badge("badge--calm", I.t("tr.live"), "dot")]),
+        h("div", { class: "card__head" }, [h("div", { class: "card__title" }, [w.icon("activity"), h("span", { text: I.t("tr.aggregate.mbps") })]), K.badge("badge--calm", I.t("tr.live"), "dot")]),
         h("div", { class: "card__body" }, h("div", { class: "cols-2" }, [bigIn, bigOut]))
       ]),
       h("div", { class: "card mt-4" }, [
@@ -307,6 +323,10 @@
       h("div", { class: "card mt-4" }, [
         h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("server"), h("span", { text: I.t("tr.perhost.pps") })])),
         h("div", { class: "card__body" }, h("div", { class: "cols-3" }, hostCards))
+      ]),
+      h("div", { class: "card mt-4" }, [
+        h("div", { class: "card__head" }, [h("div", { class: "card__title" }, [w.icon("activity"), h("span", { text: I.t("tr.aggregate.pps") })]), K.badge("badge--calm", I.t("tr.live"), "dot")]),
+        h("div", { class: "card__body" }, h("div", { class: "cols-2" }, [bigInPps, bigOutPps]))
       ]),
       historyBlock
     ]);
