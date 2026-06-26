@@ -57,12 +57,12 @@
     },
     "method": {
       "type": "string",
-      "enum": ["blackhole", "flowspec"],
+      "enum": ["blackhole", "flowspec", "divert"],
       "description": "Mitigation method that produced the ban."
     },
     "route": {
       "type": "string",
-      "description": "The (dry-run: would-be) announcement: a blackhole route, or a 'flowspec: ...' summary of the generated rules."
+      "description": "The (dry-run: would-be) announcement: a blackhole route, a 'flowspec: ...' summary of the generated rules, or a divert announcement."
     },
     "dry_run": { "type": "boolean" },
     "at": { "type": "string", "format": "date-time" },
