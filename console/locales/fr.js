@@ -216,7 +216,8 @@
       /* traffic */
       "tr.live": "En direct (tampon d'interrogation)",
       "tr.aggregate": "Entrant / sortant agrégé",
-      "tr.perhost": "Principaux hôtes — débit en direct",
+      "tr.perhost.mbps": "Principaux hôtes — par bande passante",
+      "tr.perhost.pps": "Principaux hôtes — par paquets/s",
       "tr.window": "{n} derniers échantillons · cadence 3 s",
       "tr.history.title": "Rapports historiques",
       "tr.history.note": "Le débit longue durée, les pps et la chronologie des attaques proviennent de ClickHouse. Activez le stockage dans la configuration du moteur pour remplir cette vue.",

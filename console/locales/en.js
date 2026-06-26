@@ -217,7 +217,8 @@
       /* traffic */
       "tr.live": "Live (polling buffer)",
       "tr.aggregate": "Aggregate ingress / egress",
-      "tr.perhost": "Top hosts — live rate",
+      "tr.perhost.mbps": "Top hosts — by bandwidth",
+      "tr.perhost.pps": "Top hosts — by packet rate",
       "tr.window": "Last {n} samples · 3s cadence",
       "tr.history.title": "Historical reports",
       "tr.history.note": "Long-range bandwidth, pps and the attack timeline come from ClickHouse. Enable storage in the engine config to populate this view.",
