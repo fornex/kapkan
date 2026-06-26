@@ -204,8 +204,15 @@ type Engine struct {
 	geo geoip.Resolver
 
 	events chan Event
-	now    func() time.Time
-	log    *slog.Logger
+	// ongoing carries AttackOngoing heartbeats on a SEPARATE channel from the
+	// lifecycle events above. A sustained attack emits one heartbeat per active
+	// host/prefix every tick, so routing them here keeps that high-volume,
+	// self-healing traffic from ever filling the lifecycle buffer and dropping a
+	// (non-self-healing) AttackStarted. A dropped heartbeat is harmless: the next
+	// tick re-emits it.
+	ongoing chan Event
+	now     func() time.Time
+	log     *slog.Logger
 }
 
 // Option configures an Engine.
@@ -276,6 +283,9 @@ func New(store *config.Store, opts ...Option) *Engine {
 	for _, o := range opts {
 		o(e)
 	}
+	// Size the heartbeat channel to match the (possibly overridden) lifecycle
+	// buffer; heartbeat drops self-heal, so this need not be large.
+	e.ongoing = make(chan Event, cap(e.events))
 	e.ringSize = int(e.windowSec) + 1
 	sampleCfg := store.Get().SampleCfg
 	perShard := 0
@@ -295,9 +305,15 @@ func New(store *config.Store, opts ...Option) *Engine {
 	return e
 }
 
-// Events returns the channel on which attack lifecycle events are emitted.
-// The engine never closes it; consumers should select on ctx.Done too.
+// Events returns the channel on which attack lifecycle events (AttackStarted /
+// AttackEnded) are emitted. The engine never closes it; consumers should select
+// on ctx.Done too.
 func (e *Engine) Events() <-chan Event { return e.events }
+
+// OngoingEvents returns the channel of AttackOngoing heartbeats, kept separate
+// from Events so a flood of heartbeats can never displace a lifecycle event.
+// Consume it on its own goroutine; the engine never closes it.
+func (e *Engine) OngoingEvents() <-chan Event { return e.ongoing }
 
 // shardFor returns the shard owning addr. The hash is an FNV-1a over the
 // 16-byte address form, computed without heap allocation.
@@ -1106,7 +1122,7 @@ func (e *Engine) emitHostOngoing(addr netip.Addr, g *config.Group, d int, now ti
 	if !g.BanEnabled {
 		return
 	}
-	e.emit(Event{
+	e.emitOngoing(Event{
 		Kind:       AttackOngoing,
 		Scope:      ScopeHost,
 		Target:     addr,
@@ -1124,7 +1140,7 @@ func (e *Engine) emitCarpetOngoing(cfg *config.Config, prefix netip.Prefix, now 
 	if cfg.Carpet.Mitigation == "" {
 		return
 	}
-	e.emit(Event{
+	e.emitOngoing(Event{
 		Kind:       AttackOngoing,
 		Scope:      ScopePrefix,
 		Target:     prefix.Addr(),
@@ -1150,6 +1166,20 @@ func (e *Engine) emit(ev Event) {
 		metrics.EventsDroppedTotal.WithLabelValues(ev.Kind.String()).Inc()
 		e.log.Error("engine event channel full, dropping event",
 			"kind", ev.Kind.String(), "target", ev.Target.String())
+	}
+}
+
+// emitOngoing delivers an AttackOngoing heartbeat on the dedicated heartbeat
+// channel. A drop is benign — the next tick re-emits while the attack persists —
+// so it is logged at debug, not error, but still counted so the metric reflects
+// real heartbeat shedding under load.
+func (e *Engine) emitOngoing(ev Event) {
+	select {
+	case e.ongoing <- ev:
+	default:
+		metrics.EventsDroppedTotal.WithLabelValues(ev.Kind.String()).Inc()
+		e.log.Debug("engine heartbeat channel full, dropping ongoing event",
+			"target", ev.Target.String())
 	}
 }
 
