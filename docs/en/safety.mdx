@@ -78,7 +78,9 @@ requests. There is no flag that bypasses it.
 
 For carpet (whole-prefix) mitigation the guarantee is even stronger: a prefix that contains a
 single whitelisted address has its **entire** mitigation refused — Kapkan will not blackhole or
-filter a `/24` to catch an attack if one protected host lives inside it.
+filter a `/24` to catch an attack if one protected host lives inside it. This holds even
+mid-attack: if a reload adds a whitelisted address into a prefix that is already under a live
+carpet ban, the ban is withdrawn within about a second rather than waiting out its TTL.
 
 ## 6. Scoped detection
 

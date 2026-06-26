@@ -87,7 +87,9 @@ existe ningún indicador que la eluda.
 Para la mitigación de tipo alfombra (de prefijo completo) la garantía es aún más fuerte: un prefijo
 que contiene una sola dirección de la lista blanca tiene **toda** su mitigación rechazada: Kapkan no
 enviará a blackhole ni filtrará un `/24` para atrapar un ataque si dentro de él vive un host
-protegido.
+protegido. Esto se mantiene incluso en pleno ataque: si una recarga añade una dirección de la lista
+blanca a un prefijo que ya está bajo un bloqueo de alfombra activo, el bloqueo se retira en
+aproximadamente un segundo en lugar de esperar a que expire su TTL.
 
 ## 6. Detección con alcance acotado
 
