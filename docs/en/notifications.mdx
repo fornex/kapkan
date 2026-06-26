@@ -18,7 +18,8 @@ and the FastNetMon-format exec hook (which has no equivalent action) skips it.
 
 Delivery is best-effort and asynchronous. A slow or failing channel never stalls
 detection or mitigation, and each channel is bounded by its own worker pool — under
-a carpet-bomb attack that emits one event per host, excess notifications are dropped
+a carpet-bomb attack (one hitting many hosts in your range at once, so Kapkan fires
+one event per host), excess notifications are dropped
 and counted rather than piling up unbounded connections or hook processes.
 
 <Callout type="info" title="Secrets come from the environment">
@@ -79,11 +80,19 @@ Kapkan will send mail in the clear to a non-loopback host and emit a warning. Se
 
 ### Webhook
 
-Set `notify.webhook.url` to any HTTPS endpoint. Kapkan sends an HTTP `POST` with a
+Set `notify.webhook.url` to your receiver URL (use HTTPS — the payload can contain
+attack detail). Kapkan sends an HTTP `POST` with a
 `Content-Type: application/json` body — the [callback payload](#callback-payload-schema)
-described below — on every attack start and end. Non-2xx responses are treated as a
+described below — on every event (attack start, attack end, and `update_available`).
+Non-2xx responses are treated as a
 delivery error and counted. The request carries a bounded timeout, so a hung receiver
 cannot tie up a delivery slot.
+
+<Callout type="warning" title="The webhook URL scheme is not validated">
+Unlike Slack (which Kapkan requires to be HTTPS), the generic webhook URL scheme is not
+checked. An `http://` URL is accepted and the payload — which can carry attack targets
+and source detail — is sent in cleartext. Use an `https://` endpoint.
+</Callout>
 
 ```http
 POST /your/endpoint HTTP/1.1
@@ -171,7 +180,7 @@ notify:
     to: []                         # ["ops@example.com"]
     username_env: "KAPKAN_SMTP_USER"
     password_env: "KAPKAN_SMTP_PASS"
-    require_tls: false             # STARTTLS is auto-required when credentials are set
+    require_tls: false             # set true to fail (not send cleartext) if the server has no STARTTLS
   exec:                            # hook run on every attack event (no shell)
     command: ""                    # absolute path to an existing executable
     timeout_seconds: 10
@@ -204,7 +213,7 @@ bumped only on breaking changes, so new fields can be added without breaking you
 | `mbps` | number | Sampling-corrected megabits per second. |
 | `flows_per_sec` | number | Sampling-corrected flows per second. |
 | `ban_state` | string | `active`, `withdrawn` or `rejected`, when mitigation was consulted. |
-| `method` | string | `blackhole` or `flowspec` — the mitigation method that produced the ban; omitted when there is no ban. |
+| `method` | string | `blackhole`, `flowspec`, or `divert` — the mitigation method that produced the ban; omitted when there is no ban. |
 | `route` | string | The (dry-run: would-be) announcement: a blackhole route, or a `flowspec: ...` summary of the generated rules. |
 | `dry_run` | boolean | Whether mitigation was in dry-run for this event. |
 | `at` | string | RFC 3339 timestamp of the event. |
@@ -240,6 +249,7 @@ A realistic `attack_started` event for an NTP-amplification flood, detected in d
   "mbps": 8421.5,
   "flows_per_sec": 9400,
   "ban_state": "active",
+  "method": "blackhole",
   "route": "blackhole 203.0.113.45/32 next-hop 192.0.2.1 community 65000:666",
   "dry_run": true,
   "at": "2026-06-13T14:22:07Z",

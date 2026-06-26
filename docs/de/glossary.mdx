@@ -1,0 +1,71 @@
+export const metadata = {
+  title: "Glossar",
+  description:
+    "Verständliche Definitionen der BGP-, Routing-, Flow-Telemetrie- und Angriffsbegriffe, die in der gesamten Kapkan-Dokumentation verwendet werden.",
+};
+
+# Glossar
+
+Einzeilige Definitionen der Begriffe, die der Rest der Dokumentation voraussetzt. Wenn auf einer Seite
+ein Wort vorkommt, das Sie nicht kennen, steht es wahrscheinlich hier. Die Definitionen sind bewusst
+praxisnah und nicht RFC-genau.
+
+## Angriffe
+
+| Begriff | Bedeutung |
+| --- | --- |
+| **DDoS** | Distributed Denial of Service — viele Quellen überfluten ein Ziel gleichzeitig, um es offline zu bringen. |
+| **Volumetrischer Angriff** | Eine Flut, die durch schiere Menge gewinnt (Pakete oder Bits pro Sekunde), im Gegensatz zu raffiniertem Protokollmissbrauch. Genau das erkennt Kapkan. |
+| **Amplification (Verstärkung)** | Der Angreifer fälscht die Adresse des Opfers und stellt einem Drittanbieterdienst (NTP, DNS, CLDAP, memcached, SSDP, chargen) eine kleine Anfrage, die eine riesige Antwort zurückgibt — so wird aus wenig Angreifer-Bandbreite eine Menge beim Opfer. |
+| **SYN-/UDP-/ICMP-Flood** | Fluten, die aus einem einzigen Pakettyp bestehen und nach dem Paket benannt sind. Eine SYN-Flood erschöpft den Verbindungsstatus; eine UDP-/ICMP-Flood überschwemmt einfach die Leitung. |
+| **Carpet Bomb (Flächenbombardement)** | Ein Angriff, der dünn über viele Adressen in einem Präfix gleichzeitig verteilt wird, sodass kein einzelner Host schlecht genug aussieht, um einen Schwellenwert pro Host auszulösen. Kapkan verfügt dafür über eine separate Erkennung der Subnetz-Streuung. |
+| **Vektor** | Die konkrete Form eines Angriffs (z. B. „NTP-Amplification“, „SYN-Flood“). FlowSpec kann einen einzelnen Vektor verwerfen, während der restliche Verkehr eines Hosts unberührt bleibt. |
+
+## Flow-Telemetrie
+
+| Begriff | Bedeutung |
+| --- | --- |
+| **Flow** | Ein Zusammenfassungsdatensatz einer Kommunikation zwischen zwei Adressen (wer, an wen, welches Protokoll, wie viele Pakete/Bytes) — von Ihrem Router exportiert anstelle einer Kopie jedes Pakets. |
+| **NetFlow / IPFIX** | Ciscos Flow-Export-Protokoll und sein IETF-Standard-Nachfolger. Kapkan lauscht auf beide auf UDP `:2055`. |
+| **sFlow** | Ein Export-Protokoll mit Paket-Sampling. Kapkan lauscht auf sFlow v5 auf UDP `:6343`. |
+| **Sampling-Rate** | Router exportieren nur 1 von *N* Paketen, um Ressourcen zu sparen. Kapkan multipliziert die Zählungen wieder mit *N* hoch, um den tatsächlichen Verkehr zu schätzen — diese Zahl muss also korrekt sein, sonst ist die Erkennung falsch. |
+
+## BGP und Routing
+
+| Begriff | Bedeutung |
+| --- | --- |
+| **BGP** | Border Gateway Protocol — wie Router einander mitteilen, welche IP-Bereiche sie erreichen können. Kapkan agiert als BGP-Speaker, der Ihren Routern sagt, dass sie Blackhole-Routen installieren (oder entfernen) sollen. |
+| **ASN** | Autonomous System Number — die numerische ID eines Netzwerks im Internet (z. B. das Ihres ISP). BGP-Sitzungen bestehen zwischen zwei ASNs. |
+| **eBGP / iBGP** | BGP zwischen *verschiedenen* ASNs (extern) versus *innerhalb* Ihres eigenen ASN (intern). Manche Attribute (wie LOCAL_PREF) werden nur über iBGP übertragen. |
+| **Präfix / CIDR** | Ein IP-Bereich, geschrieben als `Adresse/Länge`, z. B. `203.0.113.0/24` (256 Adressen) oder ein einzelner Host `203.0.113.5/32`. „CIDR“ ist einfach diese Notation. |
+| **Next-Hop** | Die Adresse, an die ein Router den passenden Verkehr senden soll. |
+| **Discard-Next-Hop** | Ein Next-Hop, den Ihre Router so konfiguriert haben, dass sie ihn verwerfen. RTBH funktioniert, indem es die Route des Opfers mit diesem Next-Hop ankündigt, sodass der Router den Verkehr verwirft. |
+| **Community** | Eine Markierung, die an eine BGP-Route angehängt wird. Upstreams verwenden eine vereinbarte „Blackhole-Community“, um „bitte null-routen Sie das für mich“ zu bedeuten. |
+| **LOCAL_PREF** | Ein BGP-Präferenzwert, der nur innerhalb Ihres eigenen Netzwerks (iBGP) eine Bedeutung hat. |
+| **NLRI** | Network Layer Reachability Information — der technische Name für „die angekündigte Route“ (das Präfix). |
+| **AFI / SAFI** | Die Adressfamilien-Bezeichnungen, die BGP verwendet, um IPv4-, IPv6- und FlowSpec-Routen in getrennten Kanälen auf einer Sitzung zu halten. |
+| **Graceful Restart / LLGR** | BGP-Funktionen, die die Routen eines Nachbarn beibehalten, während eine Sitzung kurz neu startet, sodass ein Kapkan-Neustart Ihre Blackholes nicht flappen lässt. LLGR ist die „langlebige“ Variante. |
+| **End-of-RIB** | Die Markierung, die ein BGP-Speaker sendet, um zu sagen: „Ich habe Ihnen meine Routen vollständig gesendet.“ |
+| **uRPF** | Unicast Reverse Path Forwarding — eine Router-Funktion, die Pakete verwirft, deren *Quell*-Adresse unecht aussieht. In Kombination mit RTBH kann ein Blackhole auch Verkehr *von* einem gesperrten Präfix abfangen. |
+| **Anycast** | Dieselbe Adresse, die von vielen Standorten angekündigt wird; das Netzwerk leitet jeden Nutzer zum nächstgelegenen. |
+
+## Mitigationsmethoden
+
+| Begriff | Bedeutung |
+| --- | --- |
+| **RTBH / Blackhole** | Remotely-Triggered Black Hole — kündigt das `/32` (oder `/128`) des Opfers mit einem Discard-Next-Hop an, sodass Router *jeglichen* Verkehr dorthin verwerfen. Grob, aber sofort wirksam. Kapkans Standard. |
+| **FlowSpec** | Eine BGP-Erweiterung (RFC 8955/8956), die einen *Filter* ankündigt — Protokoll, Ports, Paketgröße — sodass Router nur den Angriffsverkehr verwerfen und der Rest des Hosts erreichbar bleibt. |
+| **Scrubbing / Divert** | Statt den Verkehr des Opfers zu verwerfen, wird er über ein „Scrubbing-Center“ umgeleitet, das den Angriff herausfiltert und den sauberen Verkehr zurücksendet. Erfordert einen Scrubbing-Dienst, den Sie bereits betreiben oder einkaufen. |
+
+## Kapkan-Konzepte
+
+| Begriff | Bedeutung |
+| --- | --- |
+| **Ban (Sperre)** | Kapkans Aufzeichnung einer Mitigationsentscheidung gegen ein Ziel — ob als Blackhole, als FlowSpec-Regel oder als Divert angekündigt. |
+| **Dry-Run (Probelauf)** | Kapkans Standardmodus: alles erkennen und aufzeichnen, aber niemals eine Route ankündigen. So können Sie sicher gegen echten Verkehr validieren. |
+| **TTL** | Time To Live — wie lange eine Sperre besteht, bevor sie automatisch zurückgezogen wird. Es gibt keine dauerhaften Sperren. |
+| **Hysterese** | Die Verzögerung, bevor eine Sperre aufgehoben wird, nachdem der Verkehr abgefallen ist, sodass eine Sperre am Rand eines Angriffs nicht ein- und ausflappt. |
+| **Whitelist** | `protected_whitelist` — Adressen, die niemals gesperrt werden können, weder durch die Erkennung noch von Hand. |
+| **Hostgruppe** | Eine benannte Gruppe von Präfixen mit eigenen Schwellenwerten und eigener Mitigationsrichtlinie, sodass Sie etwa Game-Server anders schützen können als Webserver. |
+| **Baseline** | Ein gelernter „normaler“ Verkehrspegel für einen Host (mit einem EWMA — einem gleitenden Durchschnitt, der jüngeren Verkehr stärker gewichtet), sodass Schwellenwerte sich anpassen können, statt fest zu sein. |
+| **Schwellenwert** | Der Verkehrspegel (pps / Mbps / Flows pro Sekunde), oberhalb dessen Kapkan einen Angriff erklärt. |

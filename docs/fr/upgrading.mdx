@@ -19,30 +19,32 @@ Kapkan ne communique jamais avec l'extérieur par défaut. La version en cours d
 Activez une vérification des mises à jour pour être averti lorsqu'une version plus récente existe (voir `update_check` dans la [référence de configuration](/docs/configuration)) :
 
 ```sh
-kapkan -check-update      # exit 0 = up to date, 10 = a newer release exists, 1 = error
+kapkan -check-update -config /etc/kapkan/config.yaml   # exit 0 = up to date, 10 = a newer release exists, 1 = error
 ```
 
-Lorsque `update_check.enabled` est défini, Kapkan interroge l'API GitHub Releases à intervalle régulier et expose le résultat sur `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), la métrique `kapkan_update_available`, une ligne de journal, la bannière de la console et — avec `update_check.notify` — vos canaux de notification. La vérification ne transmet que la requête elle-même (IP source + un User-Agent générique), jamais l'identité du nœud, la configuration ni les données d'attaque, et s'exécute en dehors du chemin de démarrage afin qu'un point d'accès derrière un pare-feu ne retarde jamais le démon.
+`-check-update` charge votre configuration pour lire `update_check.channel` / `update_check.url`, donc faites pointer `-config` vers votre fichier réel. Sans cela, la commande utilise par défaut le chemin de développement (`configs/dev.yaml`) et se termine avec le code 1 et une erreur « no such file » — la même réserve s'applique à un simple `kapkan -check-config`.
+
+Lorsque `update_check.enabled` est défini, Kapkan interroge l'API GitHub Releases à intervalle régulier et expose le résultat à plusieurs endroits : sur `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), la métrique `kapkan_update_available`, une ligne de journal, la bannière de la console et — avec `update_check.notify` — vos canaux de notification. La vérification ne transmet que la requête elle-même (IP source + un User-Agent générique), jamais l'identité du nœud, la configuration ni les données d'attaque, et s'exécute en dehors du chemin de démarrage afin qu'un point d'accès derrière un pare-feu ne retarde jamais le démon.
 
 ## Mise à niveau avec `update.sh`
 
-Le script présent dans [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) effectue une mise à niveau sûre, signée et capable de revenir en arrière. Exécutez-le en tant que root sur l'hôte :
+Le script présent dans [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) effectue une mise à niveau sûre, signée et capable de revenir en arrière. Il nécessite `curl`, `cosign`, `tar` et systemd sur l'hôte (il vérifie une vraie signature) — installez d'abord `cosign` s'il est absent, sinon la première exécution s'interrompt avec `required command not found: cosign`. Exécutez-le en tant que root, depuis votre checkout kapkan :
 
 ```sh
-sudo deploy/update.sh v1.3.0     # a specific tag
-sudo deploy/update.sh            # the latest stable release
-sudo deploy/update.sh --prerelease   # the latest including -rc tags
+sudo ./engine/deploy/update.sh v1.3.0       # a specific tag
+sudo ./engine/deploy/update.sh              # the latest stable release
+sudo ./engine/deploy/update.sh --prerelease   # the latest including -rc tags
 ```
 
 Ce qu'il fait, dans l'ordre :
 
 1. **Vérifier** — télécharge l'archive de la version correspondant à votre architecture ainsi que `checksums.txt` et sa signature cosign, vérifie la signature (épinglée à l'identité OIDC du tag de version de ce dépôt), puis vérifie le SHA-256 propre à l'archive. Il échoue de façon sécurisée si quoi que ce soit ne correspond pas.
-2. **Contrôle préalable** — exécute le `kapkan -check-config` du **nouveau** binaire sur votre `/etc/kapkan/config.yaml` en production, sous l'utilisateur `kapkan`, de sorte qu'une configuration que la nouvelle version rejette (un [changement de configuration incompatible](#config-changes-between-versions), un fichier illisible) interrompt la mise à niveau **avant** tout basculement. Le démon en cours d'exécution reste intact.
+2. **Contrôle préalable** — exécute le `kapkan -check-config` du **nouveau** binaire sur votre `/etc/kapkan/config.yaml` en production, sous l'utilisateur `kapkan`, de sorte qu'une configuration que la nouvelle version rejette (un [changement de configuration incompatible](#changements-de-configuration-entre-les-versions), un fichier illisible) interrompt la mise à niveau **avant** tout basculement. Le démon en cours d'exécution reste intact.
 3. **Basculer** — copie le binaire actuel vers `kapkan.old`, puis remplace de façon atomique `/usr/local/bin/kapkan` par le nouveau.
 4. **Redémarrer et vérifier la santé** — prend un instantané de la configuration, redémarre le service et interroge `/healthz` jusqu'à ce qu'il se déclare prêt.
 5. **Revenir en arrière en cas d'échec** — si le démon ne démarre pas en bonne santé, il restaure à la fois le binaire précédent et la configuration précédente, et redémarre l'ancienne version.
 
-L'URL de la sonde est dérivée de votre `api.listen` ; remplacez-la (ainsi que le délai d'expiration) par `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` si nécessaire.
+Il attend par défaut jusqu'à 60 s que `/healthz` se déclare prêt avant d'abandonner et de revenir en arrière. L'URL de la sonde est dérivée de votre `api.listen` ; remplacez-la (ainsi que le délai d'expiration) par `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` si nécessaire. Augmentez `KAPKAN_HEALTH_DEADLINE` sur les déploiements de grande taille — une volumineuse base de données GeoIP ainsi que de nombreux bannissements persistés à réhydrater peuvent ralentir le démarrage au-delà de 60 s.
 
 Installé depuis le `.deb` / `.rpm` ? Vous pouvez à la place effectuer la mise à niveau en installant un paquet plus récent (`sudo apt install ./kapkan_<newer>.deb`), ce qui remplace le binaire tout en conservant votre `/etc/kapkan/config.yaml` modifié. `update.sh` reste la méthode pour les installations par tarball (et fonctionne aussi pour les installations par paquet, puisque les deux placent le binaire au même emplacement `/usr/local/bin/kapkan`).
 
@@ -50,8 +52,8 @@ Installé depuis le `.deb` / `.rpm` ? Vous pouvez à la place effectuer la mise 
 
 Un redémarrage n'interrompt plus l'atténuation active, grâce à deux fonctionnalités du moteur (voir [Atténuation RTBH](/docs/mitigation)) :
 
-- **BGP Graceful Restart** (`bgp.graceful_restart`, activé par défaut) — un pair qui le prend en charge conserve les routes blackhole / FlowSpec de Kapkan comme obsolètes pendant que la session est interrompue, au lieu de les purger.
-- **Persistance des bannissements** (`ban.state_file`) — les bannissements actifs sont conservés et réannoncés au démarrage, *avant* le End-of-RIB de la session BGP, de sorte que le pair rafraîchisse les routes conservées plutôt que de les purger. Définissez un chemin accessible en écriture (l'unité systemd en fournit un via `StateDirectory=kapkan`) pour l'activer.
+- **BGP [Graceful Restart](/docs/glossary)** (`bgp.graceful_restart`, activé par défaut) — un pair qui le prend en charge conserve les routes blackhole / FlowSpec de Kapkan comme obsolètes (conservées mais non actives) pendant que la session est interrompue, au lieu de les purger.
+- **Persistance des bannissements** (`ban.state_file`) — les bannissements actifs sont conservés et réannoncés au démarrage, *avant* le marqueur [End-of-RIB](/docs/glossary) de la session BGP (le signal qui indique « je vous ai envoyé toutes mes routes »), de sorte que le pair rafraîchisse les routes conservées plutôt que de les purger. Définissez un chemin accessible en écriture (l'unité systemd en fournit un via `StateDirectory=kapkan`) pour l'activer.
 
 Ensemble, ces fonctionnalités signifient que vous n'avez **pas** besoin d'attendre la fin d'une attaque avant de procéder à la mise à niveau.
 
@@ -63,7 +65,7 @@ Si vous installez sans `update.sh` (environnement isolé, ou votre propre automa
 VER=v1.3.0
 base="https://github.com/fornex/kapkan/releases/download/$VER"
 curl -fLO "$base/kapkan_${VER#v}_linux_amd64.tar.gz"   # archive names drop the leading "v"
-curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
+for f in checksums.txt checksums.txt.sig checksums.txt.pem; do curl -fLO "$base/$f"; done
 
 # 1) authenticity: the signature over checksums.txt, pinned to this repo's release tag
 cosign verify-blob checksums.txt \

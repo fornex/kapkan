@@ -7,7 +7,7 @@ export const metadata = {
 # Baselines
 
 With a `baseline` block, Kapkan continuously learns each host's normal traffic level and
-tightens detection to it. It keeps an EWMA (exponentially weighted moving average) of the
+tightens detection to it. It keeps an [EWMA](/docs/glossary) (exponentially weighted moving average) of the
 real, sampling-corrected rate **per host, per direction** — and a per-group total for
 `calculation: total` hostgroups — then derives an effective threshold of
 `learned_normal × factor`. A host that normally does 10k pps is flagged at roughly 30k
@@ -51,10 +51,12 @@ thresholds (the ceiling).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `factor` | `3` | Multiplier on the learned normal level. The effective threshold is `learned_normal × factor`. |
-| `half_life_seconds` | `3600` | EWMA half-life. The time over which an old observation loses half its weight; larger values make the baseline slower and steadier. |
-| `warmup_seconds` | `600` | A freshly observed host is gated by static thresholds only for this long, counted from its first real traffic. |
-| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | example `5000` / `50` / `2000` | Lower bound on the effective threshold per metric, so quiet hosts never become hair-triggers. |
+| `factor` | `3` | Multiplier on the learned normal level. The effective threshold is `learned_normal × factor`. Allowed `1.5`–`100`. |
+| `half_life_seconds` | `3600` | EWMA half-life. The time over which an old observation loses half its weight; larger values make the baseline slower and steadier. Allowed `10`–`604800` (10s–7d). |
+| `warmup_seconds` | `600` | A freshly observed host is gated by static thresholds only for this long, counted from its first real traffic. Allowed `0`–`86400` (up to 24h). |
+| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | example `5000` / `50` / `2000` | Lower bound on the effective threshold per metric, so quiet hosts never become hair-triggers. **Required: all three must be > 0** whenever baselines are enabled. |
+
+Out-of-range values are rejected at startup. The `floor` block is mandatory whenever baselines are enabled — a baseline block with any of `pps`, `mbps`, or `flows_per_sec` left at `0` (or omitted) fails to load with `floor: pps, mbps and flows_per_sec must all be > 0 (hair-trigger guard)`.
 
 ## Poisoning-aware design
 
@@ -72,7 +74,8 @@ baseline can ever do.
   Attack traffic never teaches the host that the attack is normal.
 - **Clamped learning.** Outside attacks, each training sample is capped at
   `baseline × factor` before it updates the EWMA. A slow attacker ramp can therefore raise
-  the baseline by at most `2^(factor−1)` per half-life — about `4×` per hour at the defaults
+  the baseline at most geometrically with the half-life period — as a rule of thumb roughly
+  `2^(factor−1)` per half-life, about `4×` per hour at the defaults
   (`factor: 3`, `half_life_seconds: 3600`). That is hours to climb from a normal level to
   the static ceiling, and never past it. Aggressive settings (a large `factor` or a short
   `half_life_seconds`) shrink that window, so choose them deliberately.
@@ -91,7 +94,10 @@ Set `warmup_seconds` to at least a few multiples of `half_life_seconds` so the b
 converges before it starts gating. The example's `600` is well below that guideline — fine
 when hosts arrive clean and you want the baseline gating sooner, but if a host might be
 flooded at first sight, raise `warmup_seconds` toward a few multiples of
-`half_life_seconds` (e.g. `10800` at the default `3600` half-life).
+`half_life_seconds` (e.g. `10800` at the default `3600` half-life). Note that
+`warmup_seconds` is capped at `86400` (24h), so this multiples-of-half-life
+guideline only holds with shorter half-lives — a long half-life can push "a few
+multiples" past the cap and the config will not load.
 </Callout>
 
 ## Visibility

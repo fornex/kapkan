@@ -29,7 +29,9 @@ plus loin : il exige un jeton **non rattaché (admin)**, de sorte que même un j
 rattaché à un tenant est refusé avec un `403`. Une lecture avec un jeton viewer fonctionne ; une
 mutation avec un jeton viewer renvoie `403` ; un jeton inconnu renvoie `401`. Les points de
 terminaison `POST` exigent en outre un type de contenu JSON —
-envoyez `Content-Type: application/json`. Notez que `/metrics` et l'enveloppe statique du tableau
+envoyez `Content-Type: application/json`. Un `POST` sans cet en-tête est rejeté avec un
+HTTP `415 Unsupported Media Type` ; ainsi, si un ban via `curl` échoue avec un 415, cet en-tête
+manquant en est presque toujours la cause. Notez que `/metrics` et l'enveloppe statique du tableau
 de bord sont servis sans jeton ; les données chargées par le tableau de bord sont, elles,
 récupérées via l'API protégée. Voir [Authentification](/docs/authentication) pour les rôles des
 jetons.
@@ -62,7 +64,13 @@ Toutes les réponses sont au format JSON. Les erreurs renvoient un objet de la f
 
 ### GET /api/v1/status
 
-Renvoie le mode de fonctionnement actuel et un résumé de ce que Kapkan protège.
+Renvoie le mode de fonctionnement actuel et un résumé de ce que Kapkan protège. Pour le lire
+(omettez l'en-tête `Authorization` si aucun jeton n'est configuré) :
+
+```sh
+curl -fsS localhost:8080/api/v1/status \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
 
 ```json
 {
@@ -70,6 +78,8 @@ Renvoie le mode de fonctionnement actuel et un résumé de ce que Kapkan protèg
   "uptime_seconds": 8123,
   "version": "v1.2.0 · a1b2c3d",
   "update_available": false,
+  "role": "operator",
+  "unscoped": true,
   "networks": ["203.0.113.0/24", "198.51.100.0/24"],
   "active_attacks": 1,
   "active_bans": 1,
@@ -91,6 +101,15 @@ réseau. `update_available` vaut `false` à moins que la vérification optionnel
 il vaut alors `true` et `latest_version`, `latest_is_security` et `latest_url` sont inclus à ses côtés. Voir [Mise à niveau](/docs/upgrading).
 `thresholds` et `hostgroups` reflètent la configuration active ; voir
 [Détection](/docs/detection) et [Hostgroups](/docs/hostgroups) pour leur forme complète.
+`role` et `unscoped` sont toujours présents — ils indiquent au tableau de bord quel jeton il
+utilise. Les champs `networks`, `thresholds`, `bgp`, `scrubbing` et `notify` relèvent de la
+configuration à l'échelle du déploiement et ne sont renvoyés qu'à un jeton non rattaché (admin) ;
+un jeton rattaché à un tenant reçoit un objet de statut sans eux (uniquement `dry_run`, `version`,
+`uptime_seconds`, `update_available`, `role`, `unscoped`, ses propres `hostgroups` et les
+compteurs). Un jeton admin obtient en plus des objets `bgp`, `scrubbing` et `notify` — `notify`
+n'expose que les canaux activés, jamais les jetons ou les URL. Donc, si un champ semble
+« manquant », vérifiez si votre jeton est rattaché à un tenant plutôt que de supposer que Kapkan
+est en panne.
 
 ### GET /api/v1/attacks
 
@@ -269,7 +288,7 @@ Renvoie la table complète des bannissements — actifs et historiques. Chaque e
 | `rate` | number | Débit observé au moment du bannissement ; omis lorsqu'il est nul. |
 | `threshold` | number | Seuil franchi ; omis lorsqu'il est nul. |
 | `next_hop` | string | Le next-hop de rejet. |
-| `community` | string | La community RTBH. |
+| `community` | string | L'ensemble de communities attaché à la route — la community RTBH pour un blackhole, la community de divert (scrubbing) pour un ban divert — jointes par des espaces lorsqu'il y en a plusieurs. |
 | `local_pref` | number | Le `LOCAL_PREF` attaché à la route ; omis lorsqu'il est nul. |
 | `route` | string | La chaîne de route complète, ou un résumé `flowspec: ...` pour les bannissements FlowSpec. |
 | `state` | string | `active`, `withdrawn` ou `rejected`. |
@@ -354,6 +373,15 @@ POST /api/v1/ban
 Content-Type: application/json
 
 {"ip": "203.0.113.66"}
+```
+
+Sous forme de commande exécutable (omettez l'en-tête `Authorization` si vous n'avez pas encore configuré de jeton) :
+
+```sh
+curl -fsS -X POST localhost:8080/api/v1/ban \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ip":"203.0.113.66"}'
 ```
 
 La réponse est l'objet `Ban` résultant. Un bannissement manuel respecte toutes les règles de

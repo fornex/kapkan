@@ -16,6 +16,10 @@ forme d'un unique endpoint de lecture, `GET /api/v1/audit`. Elle est persistée 
 [ClickHouse](/docs/storage) aux côtés de l'historique des attaques et du trafic, et est **limitée
 au tenant** côté serveur, exactement comme toute autre lecture.
 
+Si vous n'utilisez pas la [multi-tenancy](/docs/multi-tenancy) (un déploiement unique servant un
+seul client ou votre propre réseau), le champ `tenant` est vide et un token admin voit chaque
+enregistrement — vous pouvez ignorer les notes sur la limitation par tenant ci-dessous.
+
 <Callout type="info" title="Toujours journalisé, interrogeable lorsque le stockage est activé">
 Chaque mutation est journalisée au niveau `INFO`, indépendamment du stockage. L'historique
 interrogeable nécessite [ClickHouse](/docs/storage) : avec le stockage désactivé, l'endpoint
@@ -27,13 +31,19 @@ d'audit dans le journal du processus.
 
 Trois actions sont auditées. `ban` et `config_reload` sont enregistrées en cas de succès comme
 d'échec ; `unban` n'est enregistrée qu'en cas de succès — un unban en échec ou sans effet renvoie une
-erreur et n'est pas écrit dans la piste, bien qu'il soit tout de même journalisé :
+erreur et n'est pas écrit dans la piste, bien qu'il soit tout de même journalisé (un unban en échec est
+un `404 "no active ban"`, et non une décision de politique, il n'y a donc rien à attribuer) :
 
 | Action | Quand | Résultats enregistrés (`result`) |
 | --- | --- | --- |
 | `ban` | `POST /api/v1/ban` | `active` en cas de succès ; `rejected` lorsqu'un garde-fou de sécurité le refuse. Un bannissement en dry-run enregistre tout de même `active` — la simulation est signalée par le champ `dry_run` distinct. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` en cas de succès. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` en cas de succès ; `error` lorsque la nouvelle configuration ne peut être analysée ou validée. |
+
+`config_reload` est restreint aux tokens non limités (admin). Un opérateur limité à un tenant est refusé
+avec `403` *avant* l'exécution du rechargement, et **aucun enregistrement d'audit n'est écrit** — ce refus
+n'apparaît que dans le journal du processus. Donc si un rechargement limité à un tenant semble avoir
+disparu de la piste, c'est pour cette raison.
 
 Une action **refusée** est auditée délibérément : un bannissement rejeté par la whitelist, par les
 `networks` configurés ou par un [garde-fou de rayon d'impact (blast radius)](/docs/safety) laisse un
@@ -68,6 +78,10 @@ Renvoie les enregistrements d'audit, du plus récent au plus ancien. Cela néces
 | `to` | now | Fin RFC 3339 de la fenêtre. Doit être postérieure à `from` ; la fenêtre ne peut pas dépasser **31 days**. |
 | `action` | (toutes) | Filtre sur l'une des valeurs `ban`, `unban`, `config_reload`. |
 | `target` | (toutes) | Filtre sur une seule IP. Doit être visible par le tenant de l'appelant, sinon la requête renvoie `403`. |
+
+L'endpoint renvoie au maximum ~1000 enregistrements par requête, du plus récent au plus ancien. Si vous
+atteignez ce plafond sur une fenêtre chargée, les événements plus anciens sont silencieusement écartés de
+la réponse — réduisez la fenêtre ou utilisez les filtres `target`/`action`.
 
 ```http
 GET /api/v1/audit?from=2026-06-22T00:00:00Z&action=ban HTTP/1.1

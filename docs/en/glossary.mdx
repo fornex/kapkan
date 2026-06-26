@@ -1,0 +1,70 @@
+export const metadata = {
+  title: "Glossary",
+  description:
+    "Plain-language definitions of the BGP, routing, flow-telemetry and attack terms used throughout the Kapkan docs.",
+};
+
+# Glossary
+
+One-line definitions of the terms the rest of the docs assume. If a page uses a word you do
+not recognise, it is probably here. Definitions are deliberately practical, not RFC-precise.
+
+## Attacks
+
+| Term | Meaning |
+| --- | --- |
+| **DDoS** | Distributed Denial of Service — many sources flooding a target at once to knock it offline. |
+| **Volumetric attack** | A flood that wins by sheer volume (packets or bits per second), as opposed to clever protocol abuse. This is what Kapkan detects. |
+| **Amplification** | The attacker spoofs the victim's address and asks a third-party service (NTP, DNS, CLDAP, memcached, SSDP, chargen) a small question that returns a huge answer — so a little attacker bandwidth becomes a lot at the victim. |
+| **SYN / UDP / ICMP flood** | Floods built from a single packet type, named after the packet. A SYN flood exhausts connection state; a UDP/ICMP flood just drowns the link. |
+| **Carpet bomb** | An attack spread thinly across many addresses in a prefix at once, so no single host looks bad enough to trip a per-host threshold. Kapkan has separate subnet-spread detection for this. |
+| **Vector** | The specific shape of an attack (e.g. "NTP amplification", "SYN flood"). FlowSpec can drop a single vector while leaving the rest of a host's traffic alone. |
+
+## Flow telemetry
+
+| Term | Meaning |
+| --- | --- |
+| **Flow** | A summary record of a conversation between two addresses (who, to whom, which protocol, how many packets/bytes) — exported by your router instead of a copy of every packet. |
+| **NetFlow / IPFIX** | Cisco's flow-export protocol and its IETF standard successor. Kapkan listens for both on UDP `:2055`. |
+| **sFlow** | A packet-sampling export protocol. Kapkan listens for sFlow v5 on UDP `:6343`. |
+| **Sampling rate** | Routers export only 1 in *N* packets to save resources. Kapkan multiplies counts back up by *N* to estimate real traffic, so this number must be correct or detection is wrong. |
+
+## BGP and routing
+
+| Term | Meaning |
+| --- | --- |
+| **BGP** | Border Gateway Protocol — how routers tell each other which IP ranges they can reach. Kapkan acts as a BGP speaker that tells your routers to install (or remove) blackhole routes. |
+| **ASN** | Autonomous System Number — the numeric ID of a network on the internet (e.g. your ISP's). BGP sessions are between two ASNs. |
+| **eBGP / iBGP** | BGP between *different* ASNs (external) versus *within* your own ASN (internal). Some attributes (like LOCAL_PREF) only travel over iBGP. |
+| **Prefix / CIDR** | An IP range written as `address/length`, e.g. `203.0.113.0/24` (256 addresses) or a single host `203.0.113.5/32`. "CIDR" is just this notation. |
+| **Next-hop** | The address a router should send matching traffic to. |
+| **Discard next-hop** | A next-hop your routers are configured to drop. RTBH works by announcing the victim's route with this next-hop, so the router throws the traffic away. |
+| **Community** | A tag attached to a BGP route. Upstreams use an agreed "blackhole community" to mean "please null-route this for me". |
+| **LOCAL_PREF** | A BGP preference value that only has meaning inside your own network (iBGP). |
+| **NLRI** | Network Layer Reachability Information — the technical name for "the route being announced" (the prefix). |
+| **AFI / SAFI** | The address-family labels BGP uses to keep IPv4, IPv6 and FlowSpec routes in separate channels on one session. |
+| **Graceful Restart / LLGR** | BGP features that keep a neighbour's routes in place while a session briefly restarts, so a Kapkan restart does not flap your blackholes. LLGR is the "long-lived" variant. |
+| **End-of-RIB** | The marker a BGP speaker sends to say "I have finished sending you my routes." |
+| **uRPF** | Unicast Reverse Path Forwarding — a router feature that drops packets whose *source* address looks bogus. Pairing it with RTBH lets a blackhole also catch traffic *from* a banned prefix. |
+| **Anycast** | The same address announced from many locations; the network delivers each user to the nearest one. |
+
+## Mitigation methods
+
+| Term | Meaning |
+| --- | --- |
+| **RTBH / blackhole** | Remotely-Triggered Black Hole — announce the victim's `/32` (or `/128`) with a discard next-hop so routers drop *all* traffic to it. Blunt but instant. Kapkan's default. |
+| **FlowSpec** | A BGP extension (RFC 8955/8956) that announces a *filter* — protocol, ports, packet size — so routers drop only the attack traffic and leave the rest of the host reachable. |
+| **Scrubbing / divert** | Instead of dropping the victim's traffic, reroute it through a "scrubbing centre" that filters out the attack and sends the clean traffic back. Requires a scrubbing service you already operate or buy. |
+
+## Kapkan concepts
+
+| Term | Meaning |
+| --- | --- |
+| **Ban** | Kapkan's record of one mitigation decision against one target — whether announced as a blackhole, a FlowSpec rule, or a divert. |
+| **Dry-run** | Kapkan's default mode: detect and record everything, but never announce a route. Lets you validate against real traffic safely. |
+| **TTL** | Time To Live — how long a ban lasts before it is withdrawn automatically. There are no permanent bans. |
+| **Hysteresis** | The delay before a ban is lifted after traffic drops, so a ban does not flap on and off at the edge of an attack. |
+| **Whitelist** | `protected_whitelist` — addresses that can never be banned, by detection or by hand. |
+| **Hostgroup** | A named set of prefixes with its own thresholds and mitigation policy, so you can protect (say) game servers differently from web servers. |
+| **Baseline** | A learned "normal" traffic level for a host (using an EWMA — a moving average that weights recent traffic more), so thresholds can adapt instead of being fixed. |
+| **Threshold** | The traffic level (pps / Mbps / flows-per-second) above which Kapkan declares an attack. |

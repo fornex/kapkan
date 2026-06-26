@@ -36,7 +36,8 @@ sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"   # RHEL/Fedora: dnf instal
 ```
 
 The service is installed but **left stopped** — a mitigation daemon should not start before you
-have looked at its config. The shipped `config.yaml` has `dry_run: true`. Review it, (recommended)
+have looked at its config. The shipped `config.yaml` has `dry_run: true` (Kapkan computes
+blackhole routes but does not announce them to your router). Review it, (recommended)
 [set an API token](#secrets) in `/etc/kapkan/kapkan.env`, then start it on boot and now:
 
 ```sh
@@ -52,16 +53,16 @@ kapkan` removes every trace, including config and state.
 
 Prefer to place files yourself, or on a distro without `apt`/`dnf`? After unpacking the
 [release tarball](/docs/quickstart#1-install-kapkan) (so the `deploy/` directory sits next to
-the `kapkan` binary), run the equivalent as root. It installs the binary, creates an
-unprivileged system user, lays out `/etc/kapkan`, installs the production config, writes the
-secrets env file at restrictive permissions, installs the systemd unit, and enables the service.
+the `kapkan` binary), run the equivalent as root:
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo groupadd --system kapkan
+sudo useradd --system --gid kapkan --no-create-home --home-dir /var/lib/kapkan --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
 sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
-echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+# generate a real random API token, never deploy the literal placeholder
+echo "KAPKAN_API_TOKEN=$(openssl rand -hex 32)" | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
 sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
@@ -90,7 +91,8 @@ readiness probe.
 
 <Callout type="info" title="Binding BGP to port 179">
 Kapkan needs no special privileges in dry-run or when peering from a high local port. If
-you bind the BGP speaker to the well-known port 179, grant the capability by adding
+you bind the [BGP](/docs/glossary) speaker (the component that announces blackhole routes to
+your router) to the well-known port 179, grant the capability by adding
 `AmbientCapabilities=CAP_NET_BIND_SERVICE` to the unit's `[Service]` section.
 </Callout>
 
@@ -142,7 +144,7 @@ notify:
 ```text
 # /etc/kapkan/kapkan.env  (mode 0600)
 KAPKAN_TG_TOKEN=123456:abcdef
-KAPKAN_API_TOKEN=a-long-random-string
+KAPKAN_API_TOKEN=...   # a real random token, e.g. from: openssl rand -hex 32
 ```
 
 <Callout type="success" title="Why this matters">
@@ -153,7 +155,8 @@ unprivileged user, so the env file is never writable by the service.
 
 ## Config reload
 
-Kapkan hot-reloads its configuration on `SIGHUP` — no restart, no dropped flow state. The
+Kapkan hot-reloads its configuration on `SIGHUP` (the Unix signal that tells the daemon to
+re-read its config without restarting) — no restart, no dropped flow state. The
 systemd unit wires this up with `ExecReload=/bin/kill -HUP $MAINPID`, so you reload with:
 
 ```sh
@@ -179,7 +182,8 @@ curl -s -X POST localhost:8080/api/v1/config/reload \
 
 `Content-Type: application/json` is mandatory on every mutating `POST` (the server returns
 `415` otherwise), and when auth is enabled the reload needs an unscoped (admin) Bearer
-token — a tenant-scoped token gets `403`.
+token — a [tenant-scoped](/docs/multi-tenancy) token (one limited to a single customer's
+networks) gets `403`.
 
 Most keys reload live, including `dry_run`, thresholds, `networks`, hostgroups, baselines,
 notification settings and `sampling.default_rate`. Six things are fixed at startup, and a
@@ -190,7 +194,7 @@ for changing the binary without dropping mitigation, [Upgrading](/docs/upgrading
 
 ## Building from source
 
-Building requires **Go 1.22 or newer**. The `Makefile` provides the standard targets:
+Building requires **Go 1.26 or newer**. The `Makefile` provides the standard targets:
 
 ```sh
 make build  # static binary

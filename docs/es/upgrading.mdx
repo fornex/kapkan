@@ -19,30 +19,32 @@ Kapkan nunca se comunica de vuelta de forma predeterminada. La versión en ejecu
 Active una comprobación de actualizaciones para que se le avise cuando exista una versión más reciente (consulte `update_check` en la [referencia de configuración](/docs/configuration)):
 
 ```sh
-kapkan -check-update      # exit 0 = up to date, 10 = a newer release exists, 1 = error
+kapkan -check-update -config /etc/kapkan/config.yaml   # exit 0 = up to date, 10 = a newer release exists, 1 = error
 ```
+
+`-check-update` carga su configuración para leer `update_check.channel` / `update_check.url`, así que apunte `-config` a su archivo real. Sin ello, el comando usa de forma predeterminada la ruta de desarrollo (`configs/dev.yaml`) y sale con código 1 y un error «no such file» — la misma advertencia se aplica a un `kapkan -check-config` sin argumentos.
 
 Cuando `update_check.enabled` está activado, Kapkan consulta la API de GitHub Releases en un intervalo y expone el resultado en `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), la métrica `kapkan_update_available`, una línea de registro, el banner de la consola y —con `update_check.notify`— sus canales de notificación. La comprobación transmite únicamente la petición en sí (IP de origen + un User-Agent genérico), nunca la identidad del nodo, la configuración ni los datos de ataque, y se ejecuta fuera de la ruta de arranque, de modo que un endpoint protegido por un cortafuegos nunca retrasa el demonio.
 
 ## Actualizar con `update.sh`
 
-El script en [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) realiza una actualización segura, firmada y con capacidad de reversión. Ejecútelo como root en el host:
+El script en [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) realiza una actualización segura, firmada y con capacidad de reversión. Necesita `curl`, `cosign`, `tar` y systemd en el host (verifica una firma real) — instale `cosign` primero si falta, o la primera ejecución abortará con `required command not found: cosign`. Ejecútelo como root, desde su copia local de kapkan:
 
 ```sh
-sudo deploy/update.sh v1.3.0     # a specific tag
-sudo deploy/update.sh            # the latest stable release
-sudo deploy/update.sh --prerelease   # the latest including -rc tags
+sudo ./engine/deploy/update.sh v1.3.0       # a specific tag
+sudo ./engine/deploy/update.sh              # the latest stable release
+sudo ./engine/deploy/update.sh --prerelease   # the latest including -rc tags
 ```
 
 Lo que hace, en orden:
 
 1. **Verificar** — descarga el archivo de la versión para su arquitectura junto con `checksums.txt` y su firma de cosign, verifica la firma (fijada a la identidad OIDC de la etiqueta de versión de este repositorio) y luego verifica el propio SHA-256 del archivo. Falla de forma cerrada si algo no coincide.
-2. **Comprobación previa** — ejecuta el `kapkan -check-config` del binario **nuevo** contra su `/etc/kapkan/config.yaml` activo, como el usuario `kapkan`, de modo que una configuración que la nueva versión rechace (un [cambio de configuración incompatible](#config-changes-between-versions), un archivo ilegible) aborta la actualización **antes** de cualquier intercambio. El demonio en ejecución queda intacto.
+2. **Comprobación previa** — ejecuta el `kapkan -check-config` del binario **nuevo** contra su `/etc/kapkan/config.yaml` activo, como el usuario `kapkan`, de modo que una configuración que la nueva versión rechace (un [cambio de configuración incompatible](#cambios-de-configuración-entre-versiones), un archivo ilegible) aborta la actualización **antes** de cualquier intercambio. El demonio en ejecución queda intacto.
 3. **Intercambiar** — copia el binario actual a `kapkan.old` y luego reemplaza atómicamente `/usr/local/bin/kapkan` por el nuevo.
 4. **Reiniciar y comprobar el estado** — toma una instantánea de la configuración, reinicia el servicio y consulta `/healthz` hasta que indique que está listo.
 5. **Revertir en caso de fallo** — si el demonio no arranca correctamente, restaura tanto el binario anterior como la configuración anterior y reinicia la versión antigua.
 
-La URL de la sonda se deriva de su `api.listen`; anúlela (y el tiempo de espera) con `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` si es necesario.
+Espera hasta 60 s de forma predeterminada a que `/healthz` indique que está listo antes de rendirse y revertir. La URL de la sonda se deriva de su `api.listen`; anúlela (y el plazo) con `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` si es necesario. Aumente `KAPKAN_HEALTH_DEADLINE` en despliegues grandes — una base de datos GeoIP voluminosa más muchos baneos persistidos rehidratándose pueden ralentizar el arranque más allá de los 60 s.
 
 ¿Instaló desde el `.deb` / `.rpm`? Como alternativa, puede actualizar instalando un paquete más reciente (`sudo apt install ./kapkan_<newer>.deb`), lo que reemplaza el binario y conserva su `/etc/kapkan/config.yaml` editado. `update.sh` sigue siendo la vía para las instalaciones por tarball (y también funciona para las instalaciones por paquete, ya que ambas colocan el binario en la misma ruta `/usr/local/bin/kapkan`).
 
@@ -50,8 +52,8 @@ La URL de la sonda se deriva de su `api.listen`; anúlela (y el tiempo de espera
 
 Un reinicio ya no interrumpe la mitigación activa, gracias a dos características del motor (consulte [Mitigación RTBH](/docs/mitigation)):
 
-- **BGP Graceful Restart** (`bgp.graceful_restart`, activado de forma predeterminada) — un par que lo admite conserva como obsoletas las rutas de blackhole / FlowSpec de Kapkan mientras la sesión está caída, en lugar de eliminarlas.
-- **Persistencia de baneos** (`ban.state_file`) — los baneos activos se persisten y se vuelven a anunciar en el arranque, *antes* del End-of-RIB de la sesión BGP, de modo que el par actualiza las rutas conservadas en lugar de purgarlas. Establezca una ruta con permisos de escritura (la unidad de systemd proporciona una mediante `StateDirectory=kapkan`) para activarlo.
+- **BGP [Graceful Restart](/docs/glossary)** (`bgp.graceful_restart`, activado de forma predeterminada) — un par que lo admite conserva como obsoletas (retenidas pero no activas) las rutas de blackhole / FlowSpec de Kapkan mientras la sesión está caída, en lugar de eliminarlas.
+- **Persistencia de baneos** (`ban.state_file`) — los baneos activos se persisten y se vuelven a anunciar en el arranque, *antes* del marcador [End-of-RIB](/docs/glossary) de la sesión BGP (la señal que dice «he terminado de enviarte todas mis rutas»), de modo que el par actualiza las rutas conservadas en lugar de purgarlas. Establezca una ruta con permisos de escritura (la unidad de systemd proporciona una mediante `StateDirectory=kapkan`) para activarlo.
 
 En conjunto, esto significa que **no** necesita esperar a que termine un ataque antes de actualizar.
 
@@ -63,7 +65,7 @@ Si instala sin `update.sh` (entorno aislado, o su propia automatización), verif
 VER=v1.3.0
 base="https://github.com/fornex/kapkan/releases/download/$VER"
 curl -fLO "$base/kapkan_${VER#v}_linux_amd64.tar.gz"   # archive names drop the leading "v"
-curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
+for f in checksums.txt checksums.txt.sig checksums.txt.pem; do curl -fLO "$base/$f"; done
 
 # 1) authenticity: the signature over checksums.txt, pinned to this repo's release tag
 cosign verify-blob checksums.txt \

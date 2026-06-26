@@ -14,6 +14,11 @@ configuration que vous pourriez oublier d'activer, et elles ne sont pas négocia
 elles se trouve une couche optionnelle de rayon d'impact que vous pouvez activer pour un
 confinement supplémentaire.
 
+Kapkan suit chaque décision de mitigation comme un [*bannissement* (ban)](/docs/glossary) ; pour la
+méthode par défaut, un bannissement est une [route de blackhole (RTBH)](/docs/glossary) annoncée via
+BGP. Cette page utilise « bannissement » pour l'objet suivi et « route de blackhole » pour l'annonce
+BGP.
+
 Chacune d'elles s'applique aussi bien aux bannissements **automatiques** déclenchés par la
 détection qu'aux bannissements **manuels** demandés via l'API. Aucun chemin ne permet de les
 contourner.
@@ -32,15 +37,30 @@ Comme une clé `dry_run` manquante signifie dry-run, la seule façon de commence
 routes est d'écrire délibérément `dry_run: false` et de recharger. Une faute de frappe, un fichier
 tronqué ou une clé oubliée échouent tous de manière sûre. Consultez [Passage en production](/docs/going-live)
 pour la liste de vérification avant de basculer.
+
+Modifier la configuration pendant une attaque est également sûr : validez d'abord le fichier avec
+`kapkan -check-config /etc/kapkan/config.yaml` (code de sortie `0` = valide, `1` = invalide). Un
+rechargement à chaud qui échoue à la validation est **refusé** — Kapkan journalise
+`config reload failed; keeping previous config` et continue de fonctionner avec la dernière
+configuration valide, afin qu'une faute de frappe ne puisse pas vous mettre hors service en pleine
+attaque.
 </Callout>
 
 ## 2. Aucun bannissement permanent
 
-Chaque annonce porte une TTL (`ban.ttl_seconds`) et est automatiquement retirée à son expiration
-— même si l'attaque est toujours en cours. Aucun chemin de code ne produit une route sans
-expiration. Un processus bloqué, une notification perdue ou un opérateur qui s'éloigne ne peuvent
-jamais laisser un hôte blackholé pour toujours ; le pire des cas est que le trafic soit abandonné
-pendant une fenêtre de TTL, puis réévalué.
+Chaque annonce porte une TTL (`ban.ttl_seconds`, un paramètre requis sans valeur par défaut) et est
+automatiquement retirée à son expiration. Aucun chemin de code ne produit une route sans expiration.
+Un processus bloqué, une notification perdue ou un opérateur qui s'éloigne ne peuvent jamais laisser
+un hôte blackholé pour toujours.
+
+<Callout type="warning" title="Réglez la TTL plus longue qu'une attaque type">
+La TTL n'est rafraîchie que lorsque la détection se *redéclenche*. Une attaque unique détectée en
+continu annonce la route une seule fois et la TTL devient toute sa durée de vie — la route n'est
+**pas** silencieusement réannoncée tant que la même attaque se poursuit. Donc si la TTL expire en
+plein flood, la route est retirée et la victime est de nouveau exposée jusqu'à ce que l'attaque
+cesse puis se redéclenche plus tard. Réglez `ttl_seconds` confortablement plus longue qu'une attaque
+type (par ex. `1800`–`3600`) ; une TTL trop courte retire la route au milieu d'une attaque en cours.
+</Callout>
 
 ## 3. Hystérésis de débannissement
 
@@ -65,6 +85,10 @@ infrastructures critiques — ne sont jamais annoncées, quel que soit le volume
 attirent et quel que soit le demandeur. La whitelist a priorité sur la détection comme sur les
 demandes de bannissement manuel. Aucun indicateur ne permet de la contourner.
 
+Pour la mitigation par tapis (préfixe entier), la garantie est encore plus forte : un préfixe qui
+contient une seule adresse whitelistée voit sa mitigation **entière** refusée — Kapkan ne
+blackholera ni ne filtrera un `/24` pour attraper une attaque si un hôte protégé s'y trouve.
+
 ## 6. Détection délimitée
 
 Kapkan n'agit que sur les destinations situées à l'intérieur des préfixes `networks` configurés.
@@ -83,7 +107,10 @@ laquelle ils s'accumulent. Deux garde-fous `ban` optionnels resserrent encore ce
 - `max_banned_fraction` refuse les nouveaux bannissements dès que plus que cette part (par famille
   d'adresses) de votre espace protégé est déjà blackholée — ainsi une référence empoisonnée ou une
   tempête à sources usurpées ne peut pas null-router une large fraction de votre propre réseau un
-  `/32` à la fois, même tant que chaque bannissement reste sous le plafond de comptage.
+  `/32` à la fois, même tant que chaque bannissement reste sous le plafond de comptage. Exemple :
+  avec des `networks` totalisant un `/22` (1024 adresses IPv4) et `max_banned_fraction: 0.25`, Kapkan
+  refuse les nouveaux bannissements IPv4 dès qu'environ 256 adresses sont blackholées. Un bannissement
+  par tapis sur un `/24` compte pour ses 256 adresses complètes dans cette fraction, et non pour une.
 - `max_bans_per_window` (avec `ban_window_seconds`) borne la vitesse à laquelle les nouveaux
   bannissements s'accumulent, en attrapant une tempête incontrôlée avant qu'elle n'atteigne le
   plafond de comptage.
@@ -101,10 +128,15 @@ viole un est rejetée avec un HTTP `409` plutôt qu'annoncée silencieusement :
 | Demande de bannissement manuel | Résultat |
 | --- | --- |
 | La cible figure dans `protected_whitelist` | `409` — jamais annoncée |
-| La cible est en dehors du périmètre `networks` configuré | `409` — hors périmètre |
+| La cible est en dehors du périmètre `networks` configuré | `409` — hors des réseaux configurés |
 | Bannir la cible dépasserait `max_active_bans` | `409` — plafond atteint |
 | Bannir la cible dépasserait `max_banned_fraction` | `409` — si activé |
 | Bannir la cible dépasserait `max_bans_per_window` | `409` — si activé |
+
+Avec des jetons d'API délimités par tenant, il y a une vérification antérieure : une cible
+appartenant à un autre tenant renvoie `403` (« target is outside your tenant ») avant que ces
+garde-fous ne s'exécutent. Les déploiements à opérateur unique (le cas courant) n'atteignent jamais
+ce point.
 
 Si les garde-fous optionnels de rayon d'impact sont activés, un bannissement manuel est lui aussi
 vérifié par rapport à eux, et est rejeté avec le même `409` lorsqu'il dépasserait
@@ -116,6 +148,8 @@ sécurité entourant l'annonce.
 
 ## Liens connexes
 
-- [Mitigation & RTBH](/docs/mitigation) — comment les annonces, les TTL, l'hystérésis et le plafond fonctionnent de bout en bout.
+- [Atténuation RTBH](/docs/mitigation) — comment les annonces, les TTL, l'hystérésis et le plafond fonctionnent de bout en bout.
 - [Passage en production](/docs/going-live) — validez la détection en dry-run, puis désactivez-la en toute sécurité.
 - [Référence de configuration](/docs/configuration) — les clés `dry_run`, `ban`, `protected_whitelist` et `networks`.
+- [Attaque en cours](/docs/under-attack) — le guide pas à pas pour un flood en cours, y compris les bannissements manuels.
+- [Dépannage](/docs/troubleshooting) — quoi vérifier quand un bannissement est refusé (`409`) ou que les routes ne s'appliquent pas.

@@ -14,6 +14,11 @@ Konfigurationsoptionen, die man zu setzen vergessen könnte, und sie sind nicht 
 Darüber liegt eine optionale Blast-radius-Ebene, die Sie für zusätzliche Eindämmung aktivieren
 können.
 
+Kapkan verfolgt jede Mitigation-Entscheidung als [*Sperre* (ban)](/docs/glossary); bei der
+Standardmethode ist eine Sperre eine über BGP angekündigte
+[Blackhole-Route (RTBH)](/docs/glossary). Auf dieser Seite steht „Sperre" für das verfolgte
+Objekt und „Blackhole-Route" für die BGP-Ankündigung.
+
 Jede einzelne von ihnen gilt gleichermaßen für **automatische**, durch Erkennung ausgelöste
 Sperren wie auch für **manuelle** Sperren, die über die API angefordert werden. Es gibt keinen
 Pfad, der sie umgeht.
@@ -31,17 +36,33 @@ es ankündigen *würde*, bevor sie auch nur ein einziges Präfix berühren kann.
 Da ein fehlender `dry_run`-Schlüssel Dry-run bedeutet, besteht die einzige Möglichkeit, mit dem
 Ankündigen von Routen zu beginnen, darin, bewusst `dry_run: false` zu schreiben und neu zu laden.
 Ein Tippfehler, eine abgeschnittene Datei oder ein vergessener Schlüssel verhalten sich allesamt
-ausfallsicher. Siehe [Live gehen](/docs/going-live) für die Validierungs-Checkliste, bevor Sie
+ausfallsicher. Siehe [Inbetriebnahme](/docs/going-live) für die Validierungs-Checkliste, bevor Sie
 umschalten.
+
+Auch das Bearbeiten der Konfiguration während eines Angriffs ist sicher: Validieren Sie die Datei
+zuerst mit `kapkan -check-config /etc/kapkan/config.yaml` (Exit `0` = gültig, `1` = ungültig). Ein
+Live-Reload, der die Validierung nicht besteht, wird **verweigert** — Kapkan protokolliert
+`config reload failed; keeping previous config` und führt die letzte funktionierende Konfiguration
+weiter aus, sodass ein Tippfehler Sie nicht mitten im Angriff lahmlegen kann.
 </Callout>
 
 ## 2. Keine dauerhaften Sperren
 
-Jede Ankündigung trägt eine TTL (`ban.ttl_seconds`) und wird automatisch zurückgezogen, wenn sie
-abläuft — selbst wenn der Angriff noch andauert. Es gibt keinen Code-Pfad, der eine Route ohne
-Ablaufzeit erzeugt. Ein hängengebliebener Prozess, eine verlorene Benachrichtigung oder ein
-Operator, der sich entfernt, können einen Host niemals für immer per Blackhole entfernt lassen;
-im schlimmsten Fall wird der Datenverkehr für ein TTL-Fenster verworfen und danach neu bewertet.
+Jede Ankündigung trägt eine TTL (`ban.ttl_seconds`, eine erforderliche Einstellung ohne
+Standardwert) und wird automatisch zurückgezogen, wenn sie abläuft. Es gibt keinen Code-Pfad, der
+eine Route ohne Ablaufzeit erzeugt. Ein hängengebliebener Prozess, eine verlorene Benachrichtigung
+oder ein Operator, der sich entfernt, können einen Host niemals für immer per Blackhole entfernt
+lassen.
+
+<Callout type="warning" title="Setzen Sie die TTL länger als einen typischen Angriff">
+Die TTL wird nur aufgefrischt, wenn die Erkennung *erneut auslöst*. Ein einzelner, durchgehend
+erkannter Angriff kündigt die Route einmal an, und die TTL wird zu ihrer gesamten Lebensdauer — die
+Route wird **nicht** stillschweigend erneut angekündigt, während derselbe Angriff weiterläuft. Wenn
+die TTL also mitten in einer Flut abläuft, kommt die Route herunter und das Opfer ist wieder
+ungeschützt, bis der Angriff aufhört und später erneut auslöst. Setzen Sie `ttl_seconds` bequem
+länger als einen typischen Angriff (z. B. `1800`–`3600`); eine zu kurze TTL zieht die Route mitten
+in einem laufenden Angriff zurück.
+</Callout>
 
 ## 3. Unban-Hysterese
 
@@ -68,6 +89,11 @@ kritische Infrastruktur — werden niemals angekündigt, unabhängig davon, wie 
 anziehen und unabhängig davon, wer es verlangt. Die Whitelist hat Vorrang vor der Erkennung und
 sie hat Vorrang vor manuellen Sperranfragen. Es gibt kein Flag, das sie umgeht.
 
+Bei der Carpet-Mitigation (ganzes Präfix) ist die Garantie sogar noch stärker: Ein Präfix, das eine
+einzige Adresse aus der Whitelist enthält, wird in seiner **gesamten** Mitigation verweigert —
+Kapkan wird kein `/24` per Blackhole entfernen oder filtern, um einen Angriff abzufangen, wenn ein
+geschützter Host darin liegt.
+
 ## 6. Eingegrenzte Erkennung
 
 Kapkan handelt nur bei Zielen innerhalb der konfigurierten `networks`-Präfixe. Datenverkehr zu
@@ -88,6 +114,10 @@ weiter:
   Ihres geschützten Bereichs bereits per Blackhole entfernt ist — so kann eine vergiftete Baseline
   oder ein Sturm mit gefälschter Quelle nicht einen großen Anteil Ihres eigenen Netzwerks ein `/32`
   nach dem anderen null-routen, selbst während jede Sperre unter der Anzahl-Obergrenze bleibt.
+  Beispiel: Wenn `networks` insgesamt ein `/22` umfasst (1024 IPv4-Adressen) und
+  `max_banned_fraction: 0.25`, verweigert Kapkan neue IPv4-Sperren, sobald etwa 256 Adressen per
+  Blackhole entfernt sind. Eine Carpet-Sperre für ein `/24` zählt mit ihren vollen 256 Adressen zu
+  diesem Anteil, nicht als eine.
 - `max_bans_per_window` (mit `ban_window_seconds`) begrenzt, wie schnell neue Sperren anfallen, und
   fängt einen außer Kontrolle geratenen Sturm ab, bevor er die Anzahl-Obergrenze erreicht.
 
@@ -104,10 +134,15 @@ davon verletzt, wird mit HTTP `409` abgelehnt, statt stillschweigend angekündig
 | Manuelle Sperranfrage | Ergebnis |
 | --- | --- |
 | Ziel befindet sich in `protected_whitelist` | `409` — niemals angekündigt |
-| Ziel liegt außerhalb des konfigurierten `networks`-Bereichs | `409` — außerhalb des Bereichs |
+| Ziel liegt außerhalb des konfigurierten `networks`-Bereichs | `409` — außerhalb der konfigurierten Netzwerke |
 | Das Sperren des Ziels würde `max_active_bans` überschreiten | `409` — Obergrenze erreicht |
 | Das Sperren des Ziels würde `max_banned_fraction` überschreiten | `409` — wenn aktiviert |
 | Das Sperren des Ziels würde `max_bans_per_window` überschreiten | `409` — wenn aktiviert |
+
+Bei mandantengebundenen API-Tokens gibt es eine frühere Prüfung: Ein Ziel, das einem anderen
+Mandanten gehört, gibt `403` zurück („target is outside your tenant"), bevor irgendeiner dieser
+Schutzmechanismen läuft. Deployments mit nur einem Operator (der häufige Fall) treffen darauf
+niemals.
 
 Wenn die optionalen Blast-radius-Schutzmechanismen aktiviert sind, wird eine manuelle Sperre
 auch gegen sie geprüft und mit demselben `409` abgelehnt, wenn sie `max_banned_fraction` oder
@@ -119,6 +154,8 @@ umgehen, ist der *Erkennungsschwellenwert* selbst — das ist der ganze Sinn ein
 
 ## Verwandte Themen
 
-- [Mitigation & RTBH](/docs/mitigation) — wie Ankündigungen, TTLs, Hysterese und die Obergrenze von Anfang bis Ende zusammenwirken.
-- [Live gehen](/docs/going-live) — Erkennung im Dry-run validieren und sie dann sicher abschalten.
+- [RTBH-Mitigation](/docs/mitigation) — wie Ankündigungen, TTLs, Hysterese und die Obergrenze von Anfang bis Ende zusammenwirken.
+- [Inbetriebnahme](/docs/going-live) — Erkennung im Dry-run validieren und sie dann sicher abschalten.
 - [Konfigurationsreferenz](/docs/configuration) — die Schlüssel `dry_run`, `ban`, `protected_whitelist` und `networks`.
+- [Akuter Angriff](/docs/under-attack) — das Schritt-für-Schritt-Runbook für eine laufende Flut, einschließlich manueller Sperren.
+- [Fehlerbehebung](/docs/troubleshooting) — was zu prüfen ist, wenn eine Sperre verweigert wird (`409`) oder Routen nicht ankommen.

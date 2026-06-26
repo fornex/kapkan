@@ -8,7 +8,9 @@ export const metadata = {
 
 Kapkan is a single, statically-linked Go binary with modular internals. There is no
 sidecar, no database and no separate web service to run: flow ingestion, the detection
-engine, BGP mitigation, the REST API, the dashboard and the notifiers are all packages
+engine, BGP mitigation (BGP, the [Border Gateway Protocol](/docs/glossary), is how routers
+exchange routes — Kapkan acts as a BGP speaker that tells your routers which routes to
+install), the REST API, the dashboard and the notifiers are all packages
 compiled into one process. You point it at a YAML config, point your routers' exporters at
 it, and it runs.
 
@@ -31,9 +33,11 @@ data to the next, and the engine fans its results out to the three consumer stag
    active thresholds (global, per-protocol, per-hostgroup, and learned baselines). This is
    the performance-critical stage; see [Performance](#performance).
 3. **Mitigate / notify / api** — when a threshold trips, the engine emits an attack event.
-   The mitigate stage announces or withdraws RTBH routes through the embedded BGP speaker,
-   the notify stage fans the event out to your channels, and the API stage exposes live
-   state to the dashboard and to callers.
+   The mitigate stage announces or withdraws [RTBH](/docs/glossary) (Remotely Triggered
+   Black Hole — a BGP route that tells your routers to drop all traffic to the attacked IP)
+   routes through the embedded BGP speaker; Kapkan tracks each such decision as a *ban*. The
+   notify stage fans the event out to your channels, and the API stage exposes live state to
+   the dashboard and to callers.
 
 The data flow, in one line:
 
@@ -97,7 +101,8 @@ Each hop, in order:
   sampling rate — into one internal `Flow` type, regardless of which protocol produced it.
 - **Ingest → engine.** Normalized flows enter the hot path. The engine attributes each flow
   to a destination host inside `networks` (the protected prefixes you configure — see
-  [Detection & thresholds](/docs/detection)), multiplies its counts by the sampling rate so
+  [Detection & thresholds](/docs/detection)), multiplies its counts by the effective sampling
+  rate (the exporter's rate, adjusted for boundary deduplication where configured) so
   rates are expressed in real (unsampled) traffic, and updates that host's sliding-window
   counters. Destinations outside `networks` are counted in metrics but never trigger action.
 - **Engine → mitigate.** When a host crosses a threshold, the engine raises an attack event.
@@ -106,7 +111,10 @@ Each hop, in order:
   withdrawal.
 - **Engine → notify.** The same event is delivered to every configured channel (Telegram,
   Slack, email, webhook, exec hook) with the attack's classification and flow sample
-  attached.
+  attached. The engine classifies each attack by vector (SYN flood, UDP/NTP/DNS
+  amplification, ICMP flood, fragment flood, and so on) from the per-protocol traffic mix
+  and the flow sample, and that vector is what shows up as the attack `type` in the
+  notification.
 - **Engine → api.** Live state — active and recent attacks, tracked hosts, bans — is read
   out of engine memory by the REST API and the embedded dashboard.
 
@@ -149,7 +157,8 @@ diffable, reviewable record of every threshold and peer.
 
 Configuration is **hot-reloadable** without restarting the daemon. Trigger a reload two ways:
 
-- Send `SIGHUP` to the process (for example `sudo systemctl reload kapkan`).
+- Send `SIGHUP` to the process (for example `sudo systemctl reload kapkan`, or
+  `kill -HUP <pid>` on a non-systemd or manual install).
 - Call `POST /api/v1/config/reload` against the API.
 
 Both re-read and re-validate the file in place. Almost everything takes effect on reload —

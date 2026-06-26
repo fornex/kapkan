@@ -27,7 +27,9 @@ need the **operator** role. `config/reload` goes further: it requires an **unsco
 token, so even an operator token that is tenant-scoped is refused with `403`. A read with a
 viewer token works; a mutation with a viewer token returns `403`; an unknown token returns
 `401`. The `POST` endpoints additionally require a JSON content type — send
-`Content-Type: application/json`. Note that `/metrics` and the
+`Content-Type: application/json`. A `POST` without that header is rejected with
+HTTP `415 Unsupported Media Type`, so if a `curl` ban fails with a 415, that missing
+header is almost always why. Note that `/metrics` and the
 static dashboard shell are served without a token; the data the dashboard loads is fetched
 through the guarded API. See [Authentication](/docs/authentication) for the token roles.
 
@@ -58,7 +60,13 @@ appropriate HTTP status.
 
 ### GET /api/v1/status
 
-Returns the current operating mode and a summary of what Kapkan is protecting.
+Returns the current operating mode and a summary of what Kapkan is protecting. To read it
+(drop the `Authorization` header if no token is configured):
+
+```sh
+curl -fsS localhost:8080/api/v1/status \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
 
 ```json
 {
@@ -66,6 +74,8 @@ Returns the current operating mode and a summary of what Kapkan is protecting.
   "uptime_seconds": 8123,
   "version": "v1.2.0 · a1b2c3d",
   "update_available": false,
+  "role": "operator",
+  "unscoped": true,
   "networks": ["203.0.113.0/24", "198.51.100.0/24"],
   "active_attacks": 1,
   "active_bans": 1,
@@ -87,6 +97,14 @@ then it is `true` and `latest_version`, `latest_is_security` and `latest_url` ar
 alongside it. See [Upgrading](/docs/upgrading).
 `thresholds` and `hostgroups` mirror the active configuration; see
 [Detection](/docs/detection) and [Hostgroups](/docs/hostgroups) for their full shape.
+`role` and `unscoped` are always present — they tell the dashboard which token it is
+using. The `networks`, `thresholds`, `bgp`, `scrubbing` and `notify` fields are
+deployment-wide config and are returned only to an unscoped (admin) token; a
+tenant-scoped token receives a status object without them (just `dry_run`, `version`,
+`uptime_seconds`, `update_available`, `role`, `unscoped`, its own `hostgroups`, and counts). An admin token additionally gets
+`bgp`, `scrubbing` and `notify` objects — `notify` exposes only which channels are
+enabled, never tokens or URLs. So if a field looks "missing", check whether your token is
+tenant-scoped rather than assuming Kapkan is broken.
 
 ### GET /api/v1/attacks
 
@@ -264,7 +282,7 @@ Returns the full ban table — active and historical. Each entry is a `Ban`.
 | `rate` | number | Observed rate at ban time; omitted when zero. |
 | `threshold` | number | Threshold crossed; omitted when zero. |
 | `next_hop` | string | The discard next-hop. |
-| `community` | string | The RTBH community. |
+| `community` | string | The community set attached to the route — the RTBH community for a blackhole, the divert (scrubbing) community for a divert ban — space-joined when more than one. |
 | `local_pref` | number | The `LOCAL_PREF` attached to the route; omitted when zero. |
 | `route` | string | The full route string, or a `flowspec: ...` summary for FlowSpec bans. |
 | `state` | string | `active`, `withdrawn`, or `rejected`. |
@@ -348,6 +366,15 @@ POST /api/v1/ban
 Content-Type: application/json
 
 {"ip": "203.0.113.66"}
+```
+
+As a runnable command (drop the `Authorization` header if you have not configured a token yet):
+
+```sh
+curl -fsS -X POST localhost:8080/api/v1/ban \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ip":"203.0.113.66"}'
 ```
 
 The response is the resulting `Ban` object. A manual ban honors every safety rule that an

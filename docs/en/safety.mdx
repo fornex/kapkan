@@ -12,6 +12,10 @@ accident. The six core guarantees below are enforced in code and covered by test
 configuration options you can forget to set, and they are non-negotiable. On top of them sits an
 optional blast-radius layer you can switch on for extra containment.
 
+Kapkan tracks each mitigation decision as a [*ban*](/docs/glossary); for the default method a ban
+is a [blackhole route (RTBH)](/docs/glossary) announced over BGP. This page uses "ban" for the
+tracked object and "blackhole route" for the BGP announcement.
+
 Every one of them applies to **automatic** detection-driven bans and to **manual** bans
 requested through the API alike. There is no path that skips them.
 
@@ -27,15 +31,28 @@ route it *would* announce before it can touch a single prefix.
 Because a missing `dry_run` key means dry-run, the only way to start announcing routes is to
 deliberately write `dry_run: false` and reload. A typo, a truncated file, or a forgotten key
 all fail safe. See [Going live](/docs/going-live) for the validation checklist before you flip it.
+
+Editing the config under attack is also safe: validate the file first with
+`kapkan -check-config /etc/kapkan/config.yaml` (exit `0` = valid, `1` = invalid). A live reload that
+fails validation is **refused** — Kapkan logs `config reload failed; keeping previous config` and
+keeps running the last good config, so a typo can't take you down mid-attack.
 </Callout>
 
 ## 2. No permanent bans
 
-Every announcement carries a TTL (`ban.ttl_seconds`) and is automatically withdrawn when it
-expires — even if the attack is still ongoing. There is no code path that produces a route
-without an expiry. A stuck process, a lost notification, or an operator who walks away can
-never leave a host blackholed forever; the worst case is that traffic is dropped for one TTL
-window and then re-evaluated.
+Every announcement carries a TTL (`ban.ttl_seconds`, a required setting with no default) and is
+automatically withdrawn when it expires. There is no code path that produces a route without an
+expiry. A stuck process, a lost notification, or an operator who walks away can never leave a host
+blackholed forever.
+
+<Callout type="warning" title="Set the TTL longer than a typical attack">
+The TTL is refreshed only when detection *re-fires*. A single, continuously-detected attack
+announces the route once and the TTL becomes its entire lifetime — the route is **not** silently
+re-announced while the same attack keeps running. So if the TTL expires mid-flood, the route comes
+down and the victim is exposed again until the attack stops and later re-triggers. Set
+`ttl_seconds` comfortably longer than a typical attack (e.g. `1800`–`3600`); too short a TTL
+withdraws the route in the middle of an ongoing attack.
+</Callout>
 
 ## 3. Unban hysteresis
 
@@ -60,6 +77,10 @@ infrastructure — are never announced, regardless of how much traffic they attr
 regardless of who asks. The whitelist overrides detection and it overrides manual ban
 requests. There is no flag that bypasses it.
 
+For carpet (whole-prefix) mitigation the guarantee is even stronger: a prefix that contains a
+single whitelisted address has its **entire** mitigation refused — Kapkan will not blackhole or
+filter a `/24` to catch an attack if one protected host lives inside it.
+
 ## 6. Scoped detection
 
 Kapkan acts only on destinations inside the configured `networks` prefixes. Traffic to
@@ -76,7 +97,9 @@ of your network they cover or how fast they accrue. Two optional `ban` guards ti
 - `max_banned_fraction` refuses new bans once more than that share (per address family) of your
   protected space is already blackholed — so a poisoned baseline or a spoofed-source storm cannot
   null-route a large fraction of your own network one `/32` at a time, even while each ban stays under
-  the count cap.
+  the count cap. Example: with `networks` totaling a `/22` (1024 IPv4 addresses) and
+  `max_banned_fraction: 0.25`, Kapkan refuses new IPv4 bans once about 256 addresses are blackholed.
+  A carpet `/24` ban counts as its full 256 addresses toward this fraction, not as one.
 - `max_bans_per_window` (with `ban_window_seconds`) bounds how fast new bans accrue, catching a
   runaway storm before it reaches the count cap.
 
@@ -92,10 +115,14 @@ with HTTP `409` rather than silently announced:
 | Manual ban request | Result |
 | --- | --- |
 | Target is in `protected_whitelist` | `409` — never announced |
-| Target is outside the configured `networks` scope | `409` — out of scope |
+| Target is outside the configured `networks` scope | `409` — outside configured networks |
 | Banning the target would exceed `max_active_bans` | `409` — cap reached |
 | Banning the target would exceed `max_banned_fraction` | `409` — when enabled |
 | Banning the target would exceed `max_bans_per_window` | `409` — when enabled |
+
+With tenant-scoped API tokens there is one earlier check: a target belonging to another tenant
+returns `403` ("target is outside your tenant") before any of these guards run. Single-operator
+deployments (the common case) never hit this.
 
 If the optional blast-radius guards are enabled, a manual ban is checked against them too, and
 is rejected with the same `409` when it would push past `max_banned_fraction` or
@@ -109,3 +136,5 @@ the safety guards around the announcement.
 - [Mitigation & RTBH](/docs/mitigation) — how announcements, TTLs, hysteresis and the cap work end to end.
 - [Going live](/docs/going-live) — validate detection in dry-run, then turn it off safely.
 - [Configuration reference](/docs/configuration) — the `dry_run`, `ban`, `protected_whitelist` and `networks` keys.
+- [Under attack right now](/docs/under-attack) — the step-by-step runbook for a flood in progress, including manual bans.
+- [Troubleshooting](/docs/troubleshooting) — what to check when a ban is refused (`409`) or routes aren't landing.

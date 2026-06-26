@@ -33,11 +33,17 @@ real pipeline, not a simulation.
    curl -s localhost:8080/api/v1/attacks | jq
    ```
 
+   <Callout type="info" title="If you set up API tokens">
+   These commands assume the default token-less API on a trusted `127.0.0.1` bind. If you
+   configured `api.tokens` or `api.token_env`, add `-H 'Authorization: Bearer <token>'` to
+   every curl — otherwise you will get a `401`/`403`.
+   </Callout>
+
 2. **Confirm BGP reaches `ESTABLISHED`.** Peering happens even in dry-run, so you can verify
    connectivity before announcing anything. Watch the logs for the `bgp peer state` event and
-   confirm each configured neighbor reaches `ESTABLISHED`. If a session is stuck, fix it now
-   — while a misconfiguration is harmless. The fix is on one of two sides: Kapkan's BGP config
-   (`local_asn`, the neighbor's `remote_asn` and `address`), or the router/host side (source
+   confirm each configured neighbor reaches `ESTABLISHED`. If a session is stuck, fix it now,
+   while it is still harmless. Stuck sessions are almost always one of: Kapkan's BGP config
+   (`local_asn`, the neighbor's `remote_asn` and `address`) or the router/host side (source
    interface, firewall ACLs).
 
    ```sh
@@ -48,11 +54,18 @@ real pipeline, not a simulation.
    ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
 
-   You can also confirm peer health without the logs via `GET /api/v1/status`.
+   Peer state is reported only in the logs today — `GET /api/v1/status` shows your BGP
+   *configuration* (local ASN, router ID, next hop, community, neighbor addresses), not live
+   session state. To know whether a session actually came up, watch the `bgp peer state` event.
 
 3. **Turn off dry-run and reload.** Set `dry_run: false` in your config, then reload Kapkan
    so it re-reads the file. Reload is non-disruptive: it does not restart the daemon or drop
    BGP sessions.
+
+   Validate the file first with `kapkan -check-config /etc/kapkan/config.yaml` (exit `0` =
+   valid). A reload that fails validation is refused: Kapkan logs `config reload failed;
+   keeping previous config` and keeps running the last good config, so a typo can't take you
+   down mid-attack.
 
    ```sh
    # Either signal the process:

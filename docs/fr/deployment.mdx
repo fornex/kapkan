@@ -37,9 +37,10 @@ sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"   # RHEL/Fedora: dnf instal
 ```
 
 Le service est installé mais **laissé arrêté** — un démon de mitigation ne devrait pas démarrer
-avant que vous n'ayez examiné sa configuration. Le `config.yaml` fourni a `dry_run: true`.
-Examinez-le, (recommandé) [définissez un jeton d'API](#secrets) dans `/etc/kapkan/kapkan.env`,
-puis démarrez-le au boot et maintenant :
+avant que vous n'ayez examiné sa configuration. Le `config.yaml` fourni a `dry_run: true` (Kapkan
+calcule les routes blackhole mais ne les annonce pas à votre routeur). Examinez-le, (recommandé)
+[définissez un jeton d'API](#secrets) dans `/etc/kapkan/kapkan.env`, puis démarrez-le au boot et
+maintenant :
 
 ```sh
 sudoedit /etc/kapkan/config.yaml          # adapt networks, BGP and thresholds
@@ -55,16 +56,16 @@ Mettez à niveau avec un paquet plus récent (`apt install ./kapkan_<newer>.deb`
 Vous préférez placer les fichiers vous-même, ou êtes sur une distribution sans `apt`/`dnf` ?
 Après avoir décompressé le [tarball de release](/docs/quickstart#1-installer-kapkan) (de sorte que
 le répertoire `deploy/` se trouve à côté du binaire `kapkan`), exécutez l'équivalent en tant que
-root. Cela installe le binaire, crée un utilisateur système non privilégié, met en place
-`/etc/kapkan`, installe la configuration de production, écrit le fichier d'environnement des
-secrets avec des permissions restrictives, installe l'unité systemd et active le service.
+root :
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin kapkan
+sudo groupadd --system kapkan
+sudo useradd --system --gid kapkan --no-create-home --home-dir /var/lib/kapkan --shell /usr/sbin/nologin kapkan
 sudo install -d -o kapkan -g kapkan /etc/kapkan
 sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/config.yaml
-echo 'KAPKAN_API_TOKEN=a-long-random-string' | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
+# generate a real random API token, never deploy the literal placeholder
+echo "KAPKAN_API_TOKEN=$(openssl rand -hex 32)" | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env
 sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
@@ -95,7 +96,7 @@ s'appuie sur ce mécanisme conjointement avec la sonde de disponibilité `/healt
 
 <Callout type="info" title="Lier BGP au port 179">
 Kapkan n'a besoin d'aucun privilège particulier en dry-run ou lorsqu'il établit un peering depuis
-un port local élevé. Si vous liez le locuteur BGP au port bien connu 179, accordez la capacité en
+un port local élevé. Si vous liez le locuteur [BGP](/docs/glossary) au port bien connu 179, accordez la capacité en
 ajoutant `AmbientCapabilities=CAP_NET_BIND_SERVICE` à la section `[Service]` de l'unité.
 </Callout>
 
@@ -115,7 +116,7 @@ sudo journalctl -u kapkan -f
 | `/etc/kapkan/kapkan.env` | `0600` | Fichier d'environnement des secrets (jetons, identifiants SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | L'unité systemd renforcée. Le `.deb`/`.rpm` l'installe plutôt dans `/usr/lib/systemd/system/kapkan.service` (emplacement fournisseur). |
 | `/var/lib/kapkan/` | `0700` | Répertoire d'état accessible en écriture (`StateDirectory=kapkan`) ; contient `ban.state_file` lorsque la persistance des bans est activée. |
-| `/run/kapkan/` | `0755` | Répertoire d'exécution (`RuntimeDirectory=kapkan`), créé au démarrage et supprimé à l'arrêt ; contient `kapkan.pid` pour que [`kapkan -s reload`](/docs/cli) puisse trouver le démon. |
+| `/run/kapkan/` | `0755` | Répertoire d'exécution (`RuntimeDirectory=kapkan`), créé au démarrage et supprimé à l'arrêt ; contient `kapkan.pid` pour que [`kapkan -s reload`](/docs/cli#contrôler-un-démon-en-cours-dexécution) puisse trouver le démon. |
 
 L'ensemble du répertoire `/etc/kapkan` est monté en lecture seule pour le processus via
 `ReadOnlyPaths=/etc/kapkan`, de sorte que le démon peut lire sa configuration et ses secrets mais
@@ -147,7 +148,7 @@ notify:
 ```text
 # /etc/kapkan/kapkan.env  (mode 0600)
 KAPKAN_TG_TOKEN=123456:abcdef
-KAPKAN_API_TOKEN=a-long-random-string
+KAPKAN_API_TOKEN=...   # a real random token, e.g. from: openssl rand -hex 32
 ```
 
 <Callout type="success" title="Pourquoi c'est important">
@@ -176,7 +177,7 @@ sudo kapkan -s reload    # re-read the config (SIGHUP)
 sudo kapkan -s stop      # graceful shutdown (SIGTERM)
 ```
 
-Consultez [Contrôler un démon en cours d'exécution](/docs/cli) pour le comportement complet et
+Consultez [Contrôler un démon en cours d'exécution](/docs/cli#contrôler-un-démon-en-cours-dexécution) pour le comportement complet et
 les codes de sortie. De manière équivalente, vous pouvez déclencher le même rechargement via l'API :
 
 ```sh
@@ -187,7 +188,7 @@ curl -s -X POST localhost:8080/api/v1/config/reload \
 
 `Content-Type: application/json` est obligatoire sur chaque `POST` qui modifie l'état (le serveur
 renvoie `415` sinon), et lorsque l'authentification est activée le rechargement nécessite un jeton
-Bearer non restreint (admin) — un jeton restreint à un locataire (tenant) reçoit `403`.
+Bearer non restreint (admin) — un [jeton restreint à un locataire (tenant)](/docs/multi-tenancy) reçoit `403`.
 
 La plupart des clés se rechargent à chaud, notamment `dry_run`, les seuils, `networks`, les
 hostgroups, les références (baselines), les paramètres de notification et `sampling.default_rate`.
@@ -199,7 +200,7 @@ mitigation, [Mise à niveau](/docs/upgrading).
 
 ## Compilation depuis les sources
 
-La compilation requiert **Go 1.22 ou une version plus récente**. Le `Makefile` fournit les cibles
+La compilation requiert **Go 1.26 ou une version plus récente**. Le `Makefile` fournit les cibles
 standard :
 
 ```sh

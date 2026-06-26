@@ -10,6 +10,11 @@ Apunta Kapkan a un servidor ClickHouse para conservar el historial de ataques y 
 la respuesta a "qué nos golpeó el martes pasado". Sin él, Kapkan se ejecuta por completo en
 proceso sobre datos en vivo.
 
+Necesitas un servidor ClickHouse en ejecución (cualquier versión reciente) para esto. Kapkan se
+comunica con su interfaz HTTP, que escucha en el puerto `8123` por defecto — ese es el puerto de
+la URL de ejemplo de abajo. Instalar ClickHouse queda fuera del alcance aquí; consulta
+[clickhouse.com](https://clickhouse.com).
+
 <Callout type="info" title="Mejor esfuerzo, nunca bloquea la detección">
 La persistencia funciona a partir de una cola acotada con un envío no bloqueante. Un ClickHouse
 lento o caído descarta filas (contabilizadas en `kapkan_storage_rows_total` con `result="dropped"`) en
@@ -33,7 +38,28 @@ storage:
 ```
 
 Las credenciales se leen de las variables de entorno indicadas (`username_env` / `password_env`),
-nunca del archivo de configuración.
+nunca del archivo de configuración. Omite ambas si tu ClickHouse acepta conexiones locales sin
+autenticar (el usuario `default` predeterminado suele hacerlo) — defínelas solo cuando tu servidor
+requiera autenticación.
+
+Cambiar cualquier ajuste de almacenamiento requiere un reinicio completo — una recarga de
+configuración que toque el bloque `storage` se rechaza (`reload: storage settings cannot change at runtime (restart required)`).
+
+## Verificación
+
+Tras activar el almacenamiento, confirma que las filas realmente están llegando — la persistencia
+es de mejor esfuerzo y falla en silencio. Dos comprobaciones:
+
+- Observa cómo sube la métrica `kapkan_storage_rows_total{result="written"}` (frente a
+  `result="dropped"` o `result="error"`). Consulta [Métricas](/docs/metrics).
+- Consulta ClickHouse directamente:
+  ```bash
+  curl 'http://127.0.0.1:8123/?query=SELECT%20count()%20FROM%20kapkan.attack_events'
+  ```
+
+Ante una credencial incorrecta o un problema de permisos, el motor registra `clickhouse schema init failed`
+al arrancar y `clickhouse insert failed` cuando se rechaza un lote — revisa los registros primero si
+los recuentos se quedan en cero.
 
 ## Cómo funciona
 
@@ -50,6 +76,10 @@ Al arrancar, crea de forma idempotente tres tablas MergeTree:
 
 Cada una lleva un TTL por fila de `ttl_days`, de modo que la retención queda acotada sin
 intervención del operador.
+
+La credencial de escritura necesita derechos `CREATE` (base de datos + tablas) e `INSERT` en la
+primera ejecución; a partir de entonces basta con `INSERT`. Los fallos de creación del esquema se
+registran al arrancar, no son fatales.
 
 La columna `reason` de la tabla `attack_events` contiene el JSON compacto del
 [reason](/docs/detection) de la detección — por qué se disparó el ataque (procedencia del

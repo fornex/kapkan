@@ -42,6 +42,9 @@ export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
 Conserver le token dans une variable d'environnement plutôt que dans le YAML signifie que la
 configuration reste sûre à valider dans git et à comparer avec le reste de votre [configuration](/docs/configuration).
 
+Ce token unique est tout ce dont la plupart des déploiements ont besoin — le reste de cette page
+(rôles, tenants) est optionnel et peut attendre.
+
 ## Rôles
 
 Pour un contrôle d'accès basé sur les rôles, utilisez `tokens` au lieu de `token_env` — une liste où
@@ -55,10 +58,18 @@ api:
     - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
 ```
 
+`name`, `token_env` et `role` sont tous requis pour chaque entrée ; `role` doit valoir exactement
+`viewer` ou `operator`. Une valeur manquante ou mal orthographiée est une erreur de validation
+bloquante au démarrage, et non une valeur par défaut silencieuse.
+
 | Rôle | Autorisations |
 | --- | --- |
 | `viewer` | Lecture seule : état, attaques, hôtes, bannissements, métriques. |
-| `operator` | Tout ce qu'un viewer peut faire, plus le bannissement/débannissement manuel et le rechargement de la configuration (le rechargement est [réservé aux admins](/docs/multi-tenancy) — voir ci-dessous). |
+| `operator` | Tout ce qu'un viewer peut faire, plus le bannissement/débannissement manuel et le rechargement de la configuration (le rechargement est réservé aux admins — voir ci-dessous). |
+
+Il n'existe pas de rôle `admin` distinct à attribuer — un *admin* est simplement un token operator
+sans `tenant` défini. Les seules valeurs de rôle que le moteur accepte sont `viewer` et `operator` ;
+la distinction admin/limité relève de l'axe [Multi-tenant](/docs/multi-tenancy), abordé ci-dessous.
 
 `token_env` et `tokens` sont **mutuellement exclusifs** — `token_env` correspond à exactement un
 token operator. Une requête est comparée à chaque token configuré (en temps constant) ; le rôle le
@@ -66,6 +77,10 @@ plus élevé qui correspond s'applique. Une lecture avec un token viewer fonctio
 avec un token viewer est refusée par un `403 Forbidden` ; une requête sans token valide reçoit un
 `401 Unauthorized`. Une variable d'environnement vide ou non définie ne correspond jamais, de sorte
 qu'un secret mal configuré échoue en mode fermé.
+
+Donnez à chaque token un secret distinct — si une même valeur de secret est configurée pour deux
+tokens ayant des rôles ou des tenants différents, la requête est refusée (`401 Unauthorized`) plutôt
+que de deviner lequel vous vouliez. Le démon journalise `ambiguous API token` lorsque cela se produit.
 
 La *valeur* secrète d'un token est lue depuis l'environnement à chaque requête, de sorte que sa
 rotation prend effet à la requête suivante. Ajouter ou supprimer des *entrées* de token dans le YAML

@@ -64,7 +64,9 @@ individual resolvers and watches the pool's combined rate instead.
 
 - **Longest-prefix-match ownership.** Each host is owned by exactly one group: the one
   with the most specific (longest) matching prefix. A host inside both a `/24` group and a
-  `/26` group inside it belongs to the `/26`.
+  `/26` group inside it belongs to the `/26`. Two groups may not declare the *same* prefix —
+  that is a config error. Overlap is only resolved when one prefix is strictly longer (more
+  specific) than the other; identical prefixes are rejected at startup.
 - **Implicit global fallback.** Hosts matched by no group fall into an implicit `global`
   group that carries the top-level `thresholds` (and `thresholds_outgoing` / `baseline` if
   set). You never have to enumerate every prefix — anything left over uses the global
@@ -77,7 +79,8 @@ individual resolvers and watches the pool's combined rate instead.
   there at least one key suffices.)
 - **`ban: false` disables auto-RTBH.** The group's hosts are still detected, classified
   and notified, but no automatic blackhole is announced. Manual bans through the API still
-  work and still apply to those hosts.
+  work and still apply to those hosts (POST a manual ban via the REST API — see
+  [Mitigation & RTBH](/docs/mitigation) / [REST API](/docs/api)).
 - **`calculation: total` sums the group.** Instead of evaluating each host, the group's
   combined traffic is compared to the thresholds. Total groups report `scope: "group"` in
   events, notifications and the API, and **never auto-ban** — there is no single host to
@@ -127,6 +130,9 @@ hostgroups:
 Per-group overrides are independent: a group can set `thresholds` but inherit the global
 `baseline`, or set its own `baseline` while inheriting global `thresholds`. Anything left
 unset falls back to the global value.
+
+A group can also override mitigation method, flowspec/escalation ladder, and bgp/scrubbing
+attributes — see the [Configuration reference](/docs/configuration) for the full field list.
 
 ## Related
 

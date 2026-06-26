@@ -62,6 +62,7 @@ El archivo de configuración se puede recargar en tiempo de ejecución sin reini
 ```sh
 kapkan -s reload    # re-read the config file (SIGHUP)
 kapkan -s stop      # graceful shutdown (SIGTERM)
+kapkan -s quit      # alias of stop
 ```
 
 `-s` lee el id de proceso de `-pid-file` (predeterminado `/run/kapkan/kapkan.pid`, escrito por el
@@ -100,7 +101,8 @@ kapkan -check-config /etc/kapkan/config.yaml
 
 Ejecuta exactamente el mismo análisis y la misma validación del motor —incluidas las reglas entre
 campos que un esquema estático no puede expresar— y luego imprime la configuración resuelta (modo,
-redes protegidas y la mitigación efectiva por cada [hostgroup](/docs/hostgroups)) y termina:
+redes protegidas, los listeners de flow configurados, el recuento de grupos y la mitigación efectiva
+por cada [hostgroup](/docs/hostgroups)) y termina:
 
 | Código de salida | Significado |
 | --- | --- |

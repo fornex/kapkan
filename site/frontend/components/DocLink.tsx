@@ -23,6 +23,20 @@ export function DocLink({ href = "", children, ...props }: ComponentPropsWithout
     );
   }
 
+  // Same-page fragment (e.g. the "#" deep links rehype-autolink-headings
+  // appends to each heading). Must be a plain <a>, NOT next/link: a bare
+  // "#id" passed to <Link> resolves against the current URL *including* its
+  // existing hash, producing "path#id#id" on a second click. A real anchor
+  // replaces the fragment per the URL spec, and lets the DocsChrome click
+  // handler copy the link. No locale prefix — it points within this page.
+  if (href.startsWith("#")) {
+    return (
+      <a href={href} {...props}>
+        {children}
+      </a>
+    );
+  }
+
   // Static file under public/ (e.g. /kapkan-overview.json): a real download
   // anchor, never a Next route — not locale-prefixed and not client-routed.
   if (/^\/[^?#]*\.[a-z0-9]+(?:[?#]|$)/i.test(href)) {

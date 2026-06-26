@@ -18,14 +18,27 @@ incluye dos puntos de partida: [`configs/dev.yaml`](/docs/quickstart) para desar
 en línea y los valores predeterminados de referencia. Copia el ejemplo de producción a
 `/etc/kapkan/config.yaml` y adáptalo a tu red.
 
+<Callout type="info" title="¿Nuevo en BGP / RTBH / FlowSpec?">
+Esta página asume que sabes qué significan estos términos. Si no es así, lee primero [Cómo funciona](/docs/how-it-works),
+o mantén el [glosario](/docs/glossary) abierto en otra pestaña — cada acrónimo de más abajo está definido ahí.
+En resumen: **BGP** (Border Gateway Protocol) es la forma en que los routers intercambian rutas, y Kapkan actúa como un
+hablante (speaker) BGP que les dice a tus routers qué rutas instalar para mitigar un ataque.
+</Callout>
+
 El archivo se puede recargar en tiempo de ejecución. Envía `SIGHUP`
 (`systemctl reload kapkan`) o `POST /api/v1/config/reload` y Kapkan vuelve a leer el archivo y
 aplica la nueva configuración sin interrumpir la ingesta de flow. Casi todo se recarga en
 caliente, incluidos `dry_run`, los umbrales, `networks`, los hostgroups, las líneas base
 (baselines), las opciones de notificación y `sampling.default_rate`. Seis cosas quedan fijadas al
-arrancar, y una recarga que cambie cualquiera de ellas se rechaza (requiere reinicio): las
-direcciones de `listen`; la identidad BGP (`bgp.local_asn`, `bgp.router_id`); `api.listen`; las
-opciones de `samples`; las opciones de `storage`; y las opciones de `geoip`.
+arrancar — una recarga que cambie cualquiera de ellas se **rechaza** (no se ignora en silencio), así
+que debes reiniciar el demonio para cambiarlas:
+
+- las direcciones de `listen`;
+- la identidad BGP (`bgp.local_asn`, `bgp.router_id`);
+- `api.listen`;
+- las opciones de `samples`;
+- las opciones de `storage`;
+- las opciones de `geoip`.
 
 <Callout type="warning" title="El modo dry-run está activado por defecto">
 `dry_run` tiene el valor predeterminado `true`, y una clave `dry_run` ausente se trata como
@@ -76,6 +89,15 @@ KAPKAN_API_TOKEN=a-long-random-string
 Cada clave de nivel superior, su significado y su valor predeterminado. Para los subsistemas más
 grandes, un resumen de una línea remite a la página dedicada.
 
+<Callout type="info" title="Configuración mínima para arrancar">
+La mayoría de las claves de más abajo son opcionales. Para arrancar el demonio solo necesitas: al menos una dirección
+`listen`, `sampling.default_rate` (`>= 1`), al menos un prefijo protegido en `networks` y
+`thresholds.pps` / `.mbps` / `.flows_per_sec` (todos `> 0`). El `api.listen` predeterminado es
+`127.0.0.1:8080`, así que puedes omitirlo. Para **anunciar** realmente blackholes (es decir, una vez que desactivas
+`dry_run`) también necesitas un bloque `bgp`. Todo lo demás — `carpet`, `baseline`,
+`flowspec.source_anchored`, `flow_sources`, `geoip`, `escalation` — es un refinamiento opcional.
+</Callout>
+
 | Clave | Significado |
 | --- | --- |
 | `dry_run` | Cuando es `true` (el valor predeterminado, incluso cuando está ausente), los blackholes se registran y se rastrean, pero **nunca se anuncian**. |
@@ -84,31 +106,31 @@ grandes, un resumen de una línea remite a la página dedicada.
 | `sampling.boundary` | Conteo opcional por límite de interfaz (interface-boundary) y por exportador que deduplica un flow visto en varios puntos de muestreo (exportadores redundantes, muestreo en ingress+egress, enlaces de tránsito). Cada entrada indica los `external_ifindexes` de un exportador (y `egress_sampling` opcional); entonces un flow solo se cuenta cuando cruza una interfaz externa. Los exportadores sin una entrada cuentan cada muestra. Consulta «Corrección de muestreo» más abajo. |
 | `sampling.boundary_debug` | Cuando es `true`, exporta `kapkan_engine_boundary_debug_bytes_total` (bytes por exportador e interfaz) para ayudar a identificar las interfaces externas. No está acotado en cardinalidad — actívalo brevemente y luego desactívalo. |
 | `flow_sources` | Lista de permitidos opcional con las direcciones de origen de exportadores de confianza. La telemetría llega por UDP no autenticado, así que cuando se define, solo los orígenes listados se etiquetan por exportador en las métricas (todo lo demás se agrupa bajo `other`), acotando la cardinalidad de las etiquetas de las métricas. Si está vacía, se aplica en su lugar un límite automático. No afecta a la detección. |
-| `networks` | Prefijos protegidos. La detección se aplica **únicamente** a los destinos dentro de estos, y no deben solaparse. |
+| `networks` | [Prefijos](/docs/glossary) protegidos (rangos de IP en forma CIDR, p. ej. `203.0.113.0/24`). La detección se aplica **únicamente** a los destinos dentro de estos, y no deben solaparse. |
 | `protected_whitelist` | Direcciones que **nunca** se bloquean, sin importar el tráfico. Consulta [Modelo de seguridad](/docs/safety). |
 | `thresholds.pps` / `.mbps` / `.flows_per_sec` | Umbrales por destino tras la corrección de muestreo. Todos deben ser `> 0`. Consulta [Detección](/docs/detection). |
 | `thresholds.tcp_pps` / `udp_pps` / `icmp_pps` / `tcp_syn_pps` / `frag_pps` (y cada variante `_mbps`) | Límites opcionales por protocolo. Un valor de `0` o una clave ausente desactiva ese límite. Cualquier umbral superado dispara la detección (semántica OR). |
 | `thresholds_outgoing` | Opcional. Detecta ataques **originados por** hosts protegidos (máquinas comprometidas). Mismas claves que `thresholds`; al menos una debe estar definida. Si está ausente, el tráfico saliente no se contabiliza. Consulta [Detección](/docs/detection). |
 | `hostgroups[]` | Grupos de prefijos con nombre opcionales, con sus propios umbrales y su política de mitigación, incluido el cálculo `per_host` o `total`. Cada uno puede llevar una etiqueta `tenant`. Consulta [Grupos de hosts](/docs/hostgroups). |
 | `tenant` | Etiqueta de tenant opcional para el grupo global/de reserva implícito. Consulta [Multi-tenencia](/docs/multi-tenancy). |
-| `samples.enabled` / `buffer_flows` / `flows_per_attack` | Búfer de tráfico continuo para las muestras de ataques (valores predeterminados: `true` / `65536` / `20`). Los cambios de dimensionamiento requieren un reinicio. |
-| `baseline` | Umbrales por host aprendidos de forma continua mediante EWMA, opcionales y anulables por hostgroup. Consulta [Líneas base](/docs/baselines). |
-| `carpet` | Detección opcional de carpet-bombing (distribuido por subred): genera un ataque de ámbito de prefijo cuando el tráfico agregado sobre un `/24` (`aggregation_prefix_v4`/`v6`) supera `carpet.thresholds` en al menos `min_hosts` hosts distintos — detecta floods que permanecen bajo cada umbral por host. Solo alerta salvo que se defina `carpet.mitigation` (`flowspec`/`blackhole`), que rechaza un prefijo que contenga una dirección en la lista blanca y está limitado por `carpet.max_active_prefix_bans`. |
+| `samples.enabled` / `buffer_flows` / `flows_per_attack` | Búfer de tráfico continuo para las muestras de ataques (valores predeterminados: `true` / `65536` / `20`; máximo de `buffer_flows` `1048576`). Los cambios de dimensionamiento requieren un reinicio. |
+| `baseline` | Umbrales por host aprendidos de forma continua, opcionales (EWMA — media móvil ponderada exponencialmente), anulables por hostgroup. Consulta [Líneas base](/docs/baselines). |
+| `carpet` | Detección opcional de [carpet-bombing](/docs/glossary) (distribuido por subred: volumen repartido de forma tenue sobre muchas direcciones de un prefijo): genera un ataque de ámbito de prefijo cuando el tráfico agregado sobre un `/24` (`aggregation_prefix_v4`/`v6`) supera `carpet.thresholds` en al menos `min_hosts` hosts distintos — detecta floods que permanecen bajo cada umbral por host. Solo alerta salvo que se defina `carpet.mitigation` (`flowspec`/`blackhole`), que rechaza un prefijo que contenga una dirección en la lista blanca y está limitado por `carpet.max_active_prefix_bans`. |
 | `ban.ttl_seconds` | Cada anuncio se retira automáticamente tras este número de segundos. No hay bloqueos permanentes. |
 | `ban.unban_hysteresis_seconds` | El tráfico debe permanecer por debajo del umbral durante este tiempo antes de retirar un bloqueo, lo que evita el aleteo (flapping). |
 | `ban.max_active_bans` | Límite máximo de bloqueos simultáneos. Los nuevos bloqueos que superen el límite se rechazan. |
-| `ban.fallback` | Qué hacer cuando el par **rechaza** un anuncio `flowspec`/`divert`: `blackhole` (por defecto) degrada a una ruta RTBH para que la víctima siga mitigada; `none` rechaza el bloqueo. `blackhole` es terminal. |
+| `ban.fallback` | Qué hacer cuando el par **rechaza** un anuncio `flowspec`/`divert`: `blackhole` (por defecto) degrada a una ruta [RTBH](/docs/glossary) (Remotely-Triggered Blackhole — una ruta que dirige a null todo el tráfico hacia la IP de la víctima) para que la víctima siga mitigada; `none` rechaza el bloqueo. `blackhole` es terminal. |
 | `ban.max_banned_fraction` | Rechazar nuevos bloqueos cuando se haya puesto en blackhole más de esta fracción (`0`–`1`, por familia de direcciones) del espacio protegido — acota el radio de impacto de una baseline envenenada o una tormenta con orígenes falsificados. `0` (por defecto) lo desactiva. |
 | `ban.max_bans_per_window` / `ban_window_seconds` | Protección contra tormentas: como máximo esta cantidad de **nuevos** bloqueos por ventana (segundos). `max_bans_per_window: 0` (por defecto) lo desactiva; la ventana es obligatoria cuando se define la tasa. |
 | `ban.state_file` | Ruta de escritura opcional (p. ej. `/var/lib/kapkan/bans.json`) donde se persisten los bloqueos activos, de modo que un reinicio los rehidrate y los **vuelva a anunciar** en lugar de dejar caer la mitigación hasta una nueva detección. Se complementa con `bgp.graceful_restart`. Vacía (por defecto) desactiva la persistencia. Consulta [Mitigación](/docs/mitigation). |
-| `mitigation` | Método de mitigación: `blackhole` (predeterminado), `flowspec` o `divert`. Anulable por hostgroup. Consulta [FlowSpec](/docs/flowspec) y [Desvío de tráfico](/docs/scrubbing). |
+| `mitigation` | Método de mitigación: `blackhole` (predeterminado), `flowspec` ([FlowSpec](/docs/glossary) — una extensión de BGP que filtra por más que la IP de destino, p. ej. puerto/protocolo, de modo que puedes descartar solo el tráfico de ataque) o `divert`. Anulable por hostgroup. Consulta [FlowSpec](/docs/flowspec) y [Desvío de tráfico](/docs/scrubbing). |
 | `flowspec.action` / `rate_mbps` | Acción de la regla FlowSpec: `discard` o `rate_limit` (con `rate_mbps`). Consulta [FlowSpec](/docs/flowspec). |
 | `flowspec.source_anchored` / `min_source_concentration` | Cuando se activa, una regla FlowSpec fija **tanto** a la víctima (destino) **como** a un origen atacante dominante de la muestra — descartando solo a los atacantes y respetando a los clientes legítimos — pero solo cuando la muestra está suficientemente concentrada (por defecto `0.8`); de lo contrario, recurre al anclaje en la víctima. Desactivado por defecto. |
 | `escalation[]` | Escala opcional de peldaños `{ after_seconds, action }` (`none` / `flowspec` / `divert` / `blackhole`) que prevalece sobre `mitigation`. Consulta [Escalado progresivo](/docs/escalation). |
-| `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | Identidad BGP, next-hops de blackhole IPv4/IPv6 y community RTBH (`ASN:value`). `router_id` debe ser una dirección IPv4 en notación de cuatro octetos. Consulta [Mitigación](/docs/mitigation). |
-| `bgp.communities` / `local_pref` | **Lista** de communities opcional (anula `community`) y un `LOCAL_PREF` para pares iBGP. Todos los atributos `bgp` son anulables por hostgroup. |
-| `bgp.neighbors[]` | Pares eBGP: `address`, `remote_asn` y un `port` opcional para pruebas. |
-| `bgp.graceful_restart` | BGP Graceful Restart (RFC 4724), **activado por defecto**. Un par que lo soporta conserva las rutas de mitigación de Kapkan como obsoletas (stale) mientras la sesión está caída (p. ej. una actualización) en lugar de vaciarlas. Claves: `enabled` (por defecto `true`), `restart_seconds` (por defecto `120`, `1`–`4095`), `long_lived` (LLGR, por defecto `false`) y `long_lived_stale_seconds` (por defecto `3600`, `≤ 86400`). Consulta [Mitigación](/docs/mitigation). |
+| `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | Identidad BGP, next-hops de blackhole IPv4/IPv6 y la [community](/docs/glossary) RTBH — una etiqueta de ruta en forma `ASN:value` (p. ej. `65000:666`) que tu upstream compara para disparar el blackhole. `router_id` debe ser una dirección IPv4 en notación de cuatro octetos. `next_hop6` es opcional incluso cuando hay un prefijo IPv6 en `networks`; si no se define, los blackholes IPv6 usan el next-hop de descarte de RFC 6666 `100::1`. Consulta [Mitigación](/docs/mitigation). |
+| `bgp.communities` / `local_pref` | **Lista** de communities opcional (anula `community`) y un `LOCAL_PREF` (un atributo BGP de preferencia de ruta) para pares [iBGP](/docs/glossary) (BGP interno) — `LOCAL_PREF` solo viaja dentro de tu propia red, no a pares externos ([eBGP](/docs/glossary)), por lo que solo tiene sentido para tus vecinos internos. Todos los atributos `bgp` son anulables por hostgroup. |
+| `bgp.neighbors[]` | Pares [eBGP](/docs/glossary) (BGP externo): `address`, `remote_asn` y un `port` opcional para pruebas. |
+| `bgp.graceful_restart` | BGP Graceful Restart (RFC 4724), **activado por defecto**. Un par que lo soporta conserva las rutas de mitigación de Kapkan como obsoletas (stale) mientras la sesión está caída (p. ej. una actualización) en lugar de vaciarlas. Claves: `enabled` (por defecto `true`), `restart_seconds` (por defecto `120`, rango `0`–`4095`, donde `0` significa «usar el valor predeterminado 120»), `long_lived` (LLGR — Long-Lived Graceful Restart, por defecto `false`) y `long_lived_stale_seconds` (por defecto `3600`, `≤ 86400`). Consulta [Mitigación](/docs/mitigation). |
 | `scrubbing.next_hop` / `next_hop6` / `community` / `communities` / `local_pref` | El centro de scrubbing al que la acción `divert` desvía el tráfico. `next_hop` es obligatorio para desviar (`next_hop6` también cuando se protege IPv6); la community es opcional. Anulable por hostgroup. Consulta [Desvío de tráfico](/docs/scrubbing). |
 | `notify.*` | Canales de Telegram, Slack, correo electrónico, webhook y exec-hook. Consulta [Notificaciones](/docs/notifications). |
 | `storage.clickhouse.*` | Persistencia opcional en ClickHouse para el historial de ataques y de tráfico (`url`, `database`, `username_env`, `password_env`, `ttl_days`, …). Consulta [Almacenamiento](/docs/storage). |
@@ -117,7 +139,7 @@ grandes, un resumen de una línea remite a la página dedicada.
 | `api.dashboard` | Sirve la interfaz web integrada en `/` en el listener de la API. Predeterminado `true`. Consulta [Panel de control](/docs/dashboard). |
 | `api.token_env` | Nombra la variable de entorno que contiene un único bearer token de operator. Obligatorio antes de exponer el listener más allá de localhost. Consulta [Autenticación](/docs/authentication). |
 | `api.tokens[]` | Tokens basados en roles: cada entrada tiene un `name`, un `token_env`, un `role` (`viewer` u `operator`) y un ámbito `tenant` opcional. Prevalece sobre `token_env` (mutuamente excluyentes). Consulta [Autenticación](/docs/authentication) y [Multi-tenencia](/docs/multi-tenancy). |
-| `update_check` | Comprobación opcional y **voluntaria** (opt-in) de una versión más reciente de Kapkan — **desactivada por defecto**, de modo que Kapkan nunca llama a casa salvo que la actives. Claves: `enabled` (por defecto `false`), `interval_seconds` (por defecto `21600` = 6h, con un mínimo de `3600`), `channel` (`stable` o `prerelease`), `notify` (también envía «actualización disponible» a tus canales de notificación la primera vez que se detecta una versión nueva; por defecto `false`) y una sustitución de mirror `url` opcional. Cuando se activa, consulta la API de GitHub Releases y muestra el resultado en `/api/v1/status` y en la [métrica](/docs/metrics) `kapkan_update_available`. La versión en ejecución siempre se expone localmente, independientemente de ello. |
+| `update_check` | Comprobación opcional y **voluntaria** (opt-in) de una versión más reciente de Kapkan — **desactivada por defecto**, de modo que Kapkan nunca llama a casa salvo que la actives. Claves: `enabled` (por defecto `false`), `interval_seconds` (por defecto `21600` = 6h; debe ser `>= 3600` / 1h o la configuración se **rechaza** en la carga), `channel` (`stable` o `prerelease`), `notify` (también envía «actualización disponible» a tus canales de notificación la primera vez que se detecta una versión nueva; por defecto `false`) y una sustitución de mirror `url` opcional. Cuando se activa, consulta la API de GitHub Releases y muestra el resultado en `/api/v1/status` y en la [métrica](/docs/metrics) `kapkan_update_available`. La versión en ejecución siempre se expone localmente, independientemente de ello. También puedes ejecutar `kapkan -check-update` para realizar la comprobación una sola vez bajo demanda sin activar el sondeador (salida `10` = actualización disponible, `0` = al día, `1` = error). |
 
 ### Detalle de los umbrales
 

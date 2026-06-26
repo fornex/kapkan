@@ -1,0 +1,133 @@
+export const metadata = {
+  title: "Troubleshooting",
+  description:
+    "Symptom-keyed fixes for the things that most often go wrong: no detections, BGP that won't peer, routes that don't take effect, rejected bans and failed reloads.",
+};
+
+# Troubleshooting
+
+Find your symptom below. Each entry says how to confirm the cause and what to change. If you
+are mid-attack, start with the [Under attack now](/docs/under-attack) runbook instead.
+
+## I don't see any attacks
+
+`GET /api/v1/attacks` is empty even though traffic is clearly flooding in. Work down this list:
+
+- **Are flows arriving at all?** Check `GET /api/v1/traffic` and the `kapkan_ingest_flows_total`
+  metric (`curl -s localhost:8080/metrics | grep kapkan_ingest_flows`). If it is not climbing, no
+  telemetry is reaching Kapkan.
+- **Are your exporters pointed at the right ports?** sFlow → UDP `:6343`, NetFlow/IPFIX → UDP
+  `:2055`. Confirm the router is exporting to Kapkan's address and that no firewall drops the UDP.
+- **Is the sampling rate right?** If the exporter does not report its rate, Kapkan uses
+  `sampling.default_rate`. A wrong rate makes real traffic look tiny. See
+  [Configuration](/docs/configuration) and [How it works](/docs/how-it-works).
+- **Is the target inside your `networks`?** Kapkan only raises attacks for destinations inside
+  your configured prefixes — traffic to anything else is counted but never alerted. See the
+  [Safety model](/docs/safety).
+- **Are your thresholds too high?** Compare the rates in `GET /api/v1/traffic` against your
+  configured thresholds; lower them or use [baselines](/docs/baselines) if real attacks sit
+  below the limit.
+
+## Detection fires but nothing is announced
+
+You see attacks in the API and logs, but no routes reach your routers. This is almost always
+**dry-run** — Kapkan's default:
+
+```sh
+curl -s localhost:8080/api/v1/status | jq '.dry_run'
+```
+
+If this is `true`, Kapkan is working exactly as designed: it detects and records but announces
+nothing. To start announcing, follow [Going live](/docs/going-live).
+
+## I can't find the dry-run line in the logs
+
+Dry-run mitigations are logged at warn level with this exact message:
+
+```text
+DRY-RUN: would announce mitigation (not sent)
+```
+
+Grep for that string (`journalctl -u kapkan | grep "would announce mitigation"`). The matching
+withdrawal is `DRY-RUN: would withdraw mitigation (not sent)`. If you see neither, no mitigation
+decision has been made yet — check that detection is firing (above).
+
+## BGP won't reach ESTABLISHED
+
+Peering happens even in dry-run, so you can fix this before going live. Watch the state:
+
+```sh
+journalctl -u kapkan -f | grep "bgp peer state"
+```
+
+If a neighbor never reaches `ESTABLISHED`, the cause is on one of two sides:
+
+- **Kapkan's config** — `bgp.local_asn`, the neighbor's `remote_asn`, and its `address` must
+  match what the router expects. A mismatched ASN is the most common cause.
+- **The router / host side** — the router must be configured to accept the session, the source
+  address must be reachable, and no ACL or firewall may block TCP `179`.
+
+`GET /api/v1/status` shows your BGP *configuration* and neighbor addresses, but **not** live
+session state — peer state lives only in the logs.
+
+## Routes are announced but attack traffic still arrives
+
+Kapkan announces the route (you see it in `GET /api/v1/bans` with `state: "active"`), but the
+flood does not stop:
+
+- **Does your upstream honour the blackhole?** A `/32` or `/128` blackhole only works if the
+  router or upstream provider that carries your traffic accepts the route and its
+  [blackhole community](/docs/glossary). Confirm the community in `bgp.community` matches what
+  your provider expects, and that they accept host-length prefixes from you.
+- **Source-based attack?** RTBH drops traffic *to* the victim. To also drop traffic *from* a
+  blackholed source you need [uRPF](/docs/glossary) on your edge, or use
+  [FlowSpec](/docs/flowspec) to match the attack precisely.
+- **FlowSpec not taking effect?** The peer must have negotiated the FlowSpec capability; a peer
+  that does not support it simply ignores the rules. See [FlowSpec](/docs/flowspec).
+
+## A ban was rejected (HTTP 409)
+
+A manual `POST /api/v1/ban` returned `409`, or you see rejections on the
+`kapkan_mitigate_bans_rejected_total` metric. This is a [safety guard](/docs/safety) doing its
+job. The `reason` tells you which:
+
+- the target is in `protected_whitelist`;
+- the target is outside your configured `networks`;
+- `max_active_bans` is already reached;
+- an optional blast-radius guard (`max_banned_fraction` / `max_bans_per_window`) tripped.
+
+Raise the relevant limit only if you understand why it was set.
+
+## A config reload failed
+
+A `POST /api/v1/config/reload` (or `SIGHUP`) had no effect, or the daemon logged a validation
+error. Validate the file before reloading:
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml   # exit 0 = valid, 1 = invalid
+```
+
+The error message names the offending key. A reload that fails validation is rejected and the
+**previous good config keeps running** — Kapkan does not load a broken config.
+
+## The update check exits 1
+
+`kapkan -check-update` returns exit `1` with a "no such file" error. The check loads your
+config (to read `update_check`), and `-config` defaults to the development path
+`configs/dev.yaml`. On a real host, point it at your file:
+
+```sh
+kapkan -check-update -config /etc/kapkan/config.yaml
+```
+
+Exit codes: `0` = up to date, `10` = a newer release exists, `1` = error. See
+[Upgrading](/docs/upgrading).
+
+## ClickHouse history is empty
+
+You enabled [storage](/docs/storage) but `GET /api/v1/attacks` history or your ClickHouse
+tables stay empty:
+
+- Confirm the ClickHouse server is running and reachable from the Kapkan host.
+- Watch `kapkan_storage_rows_total` by `result`: rows under `written` should climb; rows under
+  `dropped` or `error` mean Kapkan cannot write (check the address, credentials and the logs).

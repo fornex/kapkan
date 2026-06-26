@@ -6,11 +6,12 @@ export const metadata = {
 
 # Panel de control
 
-Kapkan incluye una interfaz web autónoma incrustada directamente en el binario mediante `go:embed`.
-No hay paso de compilación, ni bundler, ni recursos externos que descargar: el mismo binario estático `kapkan`
-sirve el panel de control junto con la API JSON y las métricas de Prometheus. Es JavaScript puro que
-sondea la API REST, no una aplicación React, así que funciona por completo a partir de datos en vivo
-sin necesidad de base de datos.
+Abre **http://localhost:8080** en un navegador que se ejecute en el host de Kapkan. Cuando estés
+bajo ataque, mira primero el banner de **Modo en vivo** (¿Kapkan realmente está anunciando, o solo
+observando?) y la lista de **Ataques activos** (qué está siendo golpeado, y con qué intensidad).
+
+La interfaz web está incorporada en el propio binario `kapkan`, así que no hay nada extra que instalar ni
+desplegar: el mismo proceso sirve el panel de control, la API JSON y las métricas de Prometheus.
 
 <Callout type="info" title="Un binario, un listener">
 El panel de control, la API JSON y `/metrics` los sirve todos el mismo proceso en la misma
@@ -22,6 +23,18 @@ dirección. No hay un servicio web separado que desplegar o mantener sincronizad
 El panel de control se sirve en `/` en la misma dirección que la API REST: el valor `api.listen`
 de tu configuración. Con el valor predeterminado `127.0.0.1:8080`, lo abres en
 [http://localhost:8080](http://localhost:8080).
+
+Como el valor predeterminado enlaza con `127.0.0.1`, el panel de control solo es accesible desde el
+propio host de Kapkan: abrir `localhost:8080` en tu propia laptop no mostrará nada. Para verlo desde tu
+estación de trabajo, reenvía el puerto por SSH en lugar de reenlazar `api.listen` a una dirección pública:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@kapkan-host
+```
+
+Luego abre [http://localhost:8080](http://localhost:8080) en tu estación de trabajo. (Reenlazar el
+listener a una dirección pública requiere primero un token de API; consulta la advertencia de
+[Autenticación](#autenticación) más abajo.)
 
 Para servir únicamente la API JSON y las métricas sin la interfaz, desactívalo:
 
@@ -41,9 +54,9 @@ El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea e
 - **Modo en vivo** — si la instancia se ejecuta en dry-run o en vivo, para que veas de un
   vistazo si un ataque detectado se anunciaría realmente.
 - **Ataques activos y recientes** — los ataques que están en curso más los que han terminado
-  recientemente, cada uno con su clasificación (vectores de amplificación como NTP / DNS / CLDAP / memcached /
-  SSDP / chargen, e inundaciones SYN / UDP / TCP / ICMP / de fragmentos) y las fuentes,
-  puertos y protocolos dominantes capturados de las muestras de flow.
+  recientemente, cada uno con su clasificación del tipo de ataque (por ejemplo, amplificación
+  NTP/DNS o una inundación SYN; consulta la página de [Detección](/docs/detection) para saber qué
+  significa cada tipo) y las fuentes, puertos y protocolos dominantes capturados de las muestras de flow.
 - **Top talkers (principales emisores)** — la instantánea de hosts rastreados con tasas por dirección y
   baselines aprendidos, para que veas quién genera más tráfico y cómo se compara con lo normal.
 - **Hostgroups** — tus grupos de prefijos con nombre y su estado.
@@ -51,13 +64,12 @@ El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea e
 - **Tráfico / Informes** — gráficas de ingress/egress en vivo construidas a partir de los búferes
   de tasa en memoria, más una sección de **Informes históricos** que lee las tablas
   persistidas de ClickHouse cuando el almacenamiento está habilitado.
+- **Controles** — las mismas acciones que ofrece la API: **bloqueo / desbloqueo manual** de una
+  dirección y **recarga de configuración** (el equivalente a enviar `SIGHUP`).
 
-También expone los mismos endpoints de control que ofrece la API: **bloqueo / desbloqueo manual** de una
-dirección y **recarga de configuración** (el equivalente a `SIGHUP`). Las gráficas en vivo funcionan solo
-con datos en memoria: no se necesita ClickHouse ni ninguna otra base de datos para ellas. La única excepción
-es la sección de **Informes históricos** en la vista Tráfico / Informes: solo se rellena cuando el
-[almacenamiento de ClickHouse](/docs/storage) está habilitado y, de lo contrario, muestra un marcador
-de posición etiquetado que explica cómo activarlo.
+La sección de **Informes históricos** en la vista Tráfico / Informes es la única parte que necesita
+almacenamiento: solo se rellena cuando el [almacenamiento de ClickHouse](/docs/storage) está habilitado y,
+de lo contrario, muestra un marcador de posición etiquetado que explica cómo activarlo.
 
 <Callout type="success" title="No se requiere base de datos">
 El panel de control se construye por completo a partir del estado en memoria del motor. El almacenamiento

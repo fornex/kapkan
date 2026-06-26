@@ -13,11 +13,36 @@ const nextConfig: NextConfig = {
 };
 
 // Plugins are passed by string name so they keep working under Turbopack
-// (Next 16's default), which cannot receive JS function references.
+// (Next 16's default), which cannot receive JS function references. Options
+// must be JSON-serializable for the same reason — no functions, so the
+// autolink `content` is given as a literal hast node, not a builder fn.
 const withMDX = createMDX({
   options: {
     remarkPlugins: ["remark-gfm"],
-    rehypePlugins: ["rehype-slug"],
+    rehypePlugins: [
+      // Adds an `id` to every heading (slugified from its text).
+      "rehype-slug",
+      // Appends a copyable "#" link to each heading so readers can grab a
+      // deep link to any section. Runs after rehype-slug — it links to the
+      // id that plugin produced. The "#" is hidden until the heading is
+      // hovered/focused (styled via `.heading-anchor` in globals.css).
+      [
+        "rehype-autolink-headings",
+        {
+          behavior: "append",
+          properties: {
+            className: ["heading-anchor"],
+            "aria-label": "Link to this section",
+          },
+          content: {
+            type: "element",
+            tagName: "span",
+            properties: { "aria-hidden": "true" },
+            children: [{ type: "text", value: "#" }],
+          },
+        },
+      ],
+    ],
   },
 });
 

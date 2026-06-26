@@ -1,0 +1,105 @@
+export const metadata = {
+  title: "Attaque en cours",
+  description:
+    "Un court guide à copier-coller pour un opérateur dont le réseau est attaqué en ce moment même et qui a déjà Kapkan en service.",
+};
+
+# Attaque en cours
+
+Cette page ne couvre qu'une seule situation : **le trafic déferle, et vous avez déjà Kapkan
+installé qui ingère les flux.** C'est une liste de contrôle, pas une explication — suivez-la de
+haut en bas. Si Kapkan n'est pas encore installé, commencez par le [Démarrage rapide](/docs/quickstart) ;
+si vous avez le temps de lire, les pages [Atténuation](/docs/mitigation) et [Modèle de sécurité](/docs/safety)
+expliquent le *pourquoi*.
+
+<Callout type="info" title="Avez-vous défini un jeton d'API ?">
+Si vous avez configuré l'[authentification](/docs/authentication), ajoutez `-H "Authorization: Bearer $TOKEN"`
+à chaque `curl` ci-dessous (utilisez un jeton **operator** pour `ban`/`unban`). Sans jeton configuré,
+l'API est ouverte par défaut sur `127.0.0.1:8080` et les commandes fonctionnent telles quelles.
+</Callout>
+
+## 1. Voir ce que Kapkan détecte
+
+```sh
+curl -s localhost:8080/api/v1/attacks | jq
+```
+
+Chaque entrée est une attaque détectée par Kapkan : la `target` visée, la `metric` qui a été
+déclenchée (`pps`, `mbps` ou `flows_per_sec`), la [classification](/docs/detection) (par ex.
+amplification NTP, SYN flood) et la `route` qu'il annoncerait ou qu'il a annoncée. Si cette liste
+est vide alors que vous êtes manifestement attaqué, passez au
+[Dépannage → Je ne vois aucune attaque](/docs/troubleshooting#je-ne-vois-aucune-attaque).
+
+## 2. Vérifier si Kapkan atténue réellement
+
+C'est l'étape que les gens oublient. Kapkan est livré **en mode dry-run par défaut** — il détecte
+et enregistre mais n'annonce rien tant que vous n'avez pas désactivé le mode dry-run.
+
+```sh
+curl -s localhost:8080/api/v1/status | jq '.dry_run'
+```
+
+- `true` → Kapkan se contente d'**observer**. Aucune route n'est annoncée, et un bannissement manuel
+  (étape 3) sera *enregistré mais pas envoyé*. Pour réellement bloquer le trafic d'attaque, vous devez
+  [passer en production](/docs/going-live) — réglez `dry_run: false` et rechargez.
+- `false` → Kapkan est en service. Les attaques détectées sont automatiquement blackholées.
+
+## 3. Bannir immédiatement une victime précise
+
+Si un hôte est martelé et que vous voulez le blackholer immédiatement sans attendre (ni ajuster) un
+seuil, bannissez-le à la main. Cela bloque **tout** le trafic vers cette adresse — utilisez-le sur la
+victime de l'attaque, pas sur une infrastructure que vous devez garder accessible.
+
+```sh
+curl -s -X POST localhost:8080/api/v1/ban \
+  -H 'Content-Type: application/json' \
+  -d '{"ip": "203.0.113.5"}' | jq
+```
+
+Un bannissement réussi renvoie l'objet ban (`state: "active"`). Une requête **refusée** renvoie un
+HTTP `409` avec une raison — le bannissement manuel a heurté un [garde-fou de sécurité](/docs/safety) :
+la cible est sur liste blanche, est en dehors de votre périmètre `networks`, ou dépasserait
+`max_active_bans`. C'est le système qui vous protège, pas un bug. Supprimez un bannissement manuel avec
+`POST /api/v1/unban` et le même corps `{"ip": ...}`.
+
+## 4. S'assurer que la route peut réellement atteindre vos routeurs
+
+Un blackhole ne fonctionne que si la session BGP de Kapkan vers votre routeur est active. Si elle est
+coupée, Kapkan enregistre le bannissement mais aucun routeur ne l'entend jamais.
+
+```sh
+journalctl -u kapkan -f | grep "bgp peer state"
+```
+
+Chaque voisin configuré doit atteindre l'état `ESTABLISHED`. Si l'un d'eux reste bloqué, voyez
+[Dépannage → BGP n'atteint pas ESTABLISHED](/docs/troubleshooting#bgp-natteint-pas-létat-established).
+(`GET /api/v1/status` montre votre *configuration* BGP mais pas l'état de la session en direct — celui-ci
+ne se trouve que dans les journaux.)
+
+## 5. Regarder les bannissements expirer d'eux-mêmes
+
+```sh
+curl -s localhost:8080/api/v1/bans | jq
+```
+
+Chaque bannissement porte un TTL (`ban.ttl_seconds`) et est retiré automatiquement à son expiration —
+il n'y a pas de bannissements permanents. Vous n'avez pas besoin de nettoyer à la main.
+
+## Vous êtes protégé de vos propres erreurs
+
+Pendant que vous travaillez, ces garde-fous sont appliqués dans le code et ne peuvent pas être désactivés
+(voir le [Modèle de sécurité](/docs/safety)) :
+
+- **`max_active_bans`** plafonne le nombre d'hôtes pouvant être blackholés simultanément — Kapkan refusera
+  de nouveaux bannissements plutôt que de null-router la moitié de votre réseau.
+- **`protected_whitelist`** ne peut jamais être banni, ni par la détection ni par vous.
+- Les bannissements ne s'appliquent jamais qu'**à l'intérieur de vos `networks` configurés**.
+- Chaque bannissement **expire automatiquement** à son TTL.
+
+## Après la tempête
+
+- [Mise en production](/docs/going-live) — si l'étape 2 affichait `dry_run: true` et que vous voulez une
+  atténuation automatique la prochaine fois.
+- [Détection et seuils](/docs/detection) — ajustez ce qui compte comme une attaque pour que Kapkan la
+  détecte sans bannissement manuel.
+- [Dépannage](/docs/troubleshooting) — quand quelque chose ci-dessus ne s'est pas comporté comme décrit.

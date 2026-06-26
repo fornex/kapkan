@@ -17,6 +17,10 @@ El rastro se escribe desde los manejadores de mutación de la [API](/docs/api) y
 al historial de ataques y tráfico, y está **acotado por tenant** del lado del servidor, igual que
 cualquier otra lectura.
 
+Si no estás usando [multi-tenancy](/docs/multi-tenancy) (un único despliegue que sirve a un
+cliente o tu propia red), el campo `tenant` queda vacío y un token admin ve todos los
+registros — puedes ignorar las notas sobre acotamiento por tenant de más abajo.
+
 <Callout type="info" title="Siempre registrado, consultable cuando el almacenamiento está activo">
 Cada mutación se registra a nivel `INFO` independientemente del almacenamiento. El historial
 consultable necesita [ClickHouse](/docs/storage): con el almacenamiento deshabilitado el endpoint
@@ -35,6 +39,11 @@ y no se escribe en el rastro, aunque sí queda registrado en el log:
 | `ban` | `POST /api/v1/ban` | `active` en caso de éxito; `rejected` cuando una protección de seguridad lo deniega. Un baneo en dry-run sigue registrando `active` — la simulación se señala mediante el campo `dry_run` aparte. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` en caso de éxito. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` en caso de éxito; `error` cuando la nueva configuración no se puede parsear o validar. |
+
+`config_reload` está restringido a tokens sin alcance (admin). Un operator acotado a un tenant es
+denegado con `403` *antes* de que la recarga se ejecute, y **no se escribe ningún registro de
+auditoría** — esa denegación aparece solo en el log del proceso. Así que si una recarga acotada
+parece haber desaparecido del rastro, ese es el motivo.
 
 Una acción **rechazada** se audita deliberadamente: un baneo rechazado por la whitelist, por las
 `networks` configuradas o por una [protección de radio de impacto](/docs/safety) deja un registro
@@ -66,9 +75,13 @@ como las demás lecturas.
 | Parámetro de consulta | Por defecto | Notas |
 | --- | --- | --- |
 | `from` | ahora − 1h | Inicio RFC 3339 de la ventana. |
-| `to` | ahora | Fin RFC 3339 de la ventana. Debe ser posterior a `from`; la ventana no puede exceder **31 days**. |
+| `to` | ahora | Fin RFC 3339 de la ventana. Debe ser posterior a `from`; la ventana no puede exceder **31 días**. |
 | `action` | (todas) | Filtra a una de `ban`, `unban`, `config_reload`. |
 | `target` | (todos) | Filtra a una IP. Debe ser visible para el tenant de quien llama, o la solicitud es `403`. |
+
+El endpoint devuelve como máximo ~1000 registros por consulta, del más reciente al más antiguo. Si
+alcanzas ese tope en una ventana con mucha actividad, los eventos más antiguos se descartan
+silenciosamente de la respuesta — estrecha la ventana o usa los filtros `target`/`action`.
 
 ```http
 GET /api/v1/audit?from=2026-06-22T00:00:00Z&action=ban HTTP/1.1

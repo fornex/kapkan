@@ -122,11 +122,61 @@ function LanguageSwitcher({ lang }: { lang: Locale }) {
 
 export function DocsChrome({ lang, children }: { lang: Locale; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
+  const pathname = usePathname();
 
   // Reflect the active locale on the document for accessibility/SEO.
   useEffect(() => {
     document.documentElement.lang = lang;
   }, [lang]);
+
+  // Click-to-copy for the per-heading "#" anchors (added by
+  // rehype-autolink-headings). Clicking copies the absolute section URL to
+  // the clipboard, updates the address bar via replaceState (so the fragment
+  // is never duplicated), scrolls the heading into view, and flashes a
+  // localized "copied" bubble. Delegated on <article> so it covers every
+  // heading; re-runs on navigation to relabel the new page's anchors.
+  useEffect(() => {
+    const article = document.querySelector("article");
+    if (!article) return;
+
+    // Localize the hover/aria hint on each anchor.
+    article.querySelectorAll<HTMLAnchorElement>("a.heading-anchor").forEach((a) => {
+      a.setAttribute("title", ui[lang].copyLink);
+      a.setAttribute("aria-label", ui[lang].copyLink);
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    function onClick(event: Event) {
+      const target = event.target as HTMLElement;
+      const anchor = target.closest<HTMLAnchorElement>("a.heading-anchor");
+      if (!anchor) return;
+      event.preventDefault();
+
+      const hash = anchor.getAttribute("href") ?? ""; // "#id" — relative, no dup
+      const url = anchor.href; // absolute, percent-encoded — the shareable link
+      window.history.replaceState(null, "", hash);
+      anchor.closest("h1, h2, h3, h4")?.scrollIntoView({ behavior: "smooth", block: "start" });
+
+      navigator.clipboard?.writeText(url).then(
+        () => {
+          anchor.setAttribute("data-tip", ui[lang].copied);
+          anchor.setAttribute("data-copied", "");
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            anchor.removeAttribute("data-copied");
+            anchor.removeAttribute("data-tip");
+          }, 1400);
+        },
+        () => {},
+      );
+    }
+
+    article.addEventListener("click", onClick);
+    return () => {
+      article.removeEventListener("click", onClick);
+      if (timer) clearTimeout(timer);
+    };
+  }, [lang, pathname]);
 
   return (
     <div className="min-h-screen">

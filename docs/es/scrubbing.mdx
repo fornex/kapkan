@@ -6,11 +6,23 @@ export const metadata = {
 
 # Desvío de tráfico (scrubbing)
 
+<Callout type="warning" title="Primero necesitas un centro de scrubbing">
+Divert solo funciona si ya operas (o pagas por) un **centro de scrubbing** — una máquina o
+servicio aparte que filtra el tráfico del ataque y reinyecta el tráfico limpio sobre GRE o una
+VRF. Si no tienes uno, esta página **no** es tu punto de partida: usa
+[blackhole](/docs/mitigation) o [FlowSpec](/docs/flowspec) en su lugar. Apuntar `next_hop` a un
+scrubber que no existe desvía el tráfico de la víctima al vacío.
+</Callout>
+
+En términos simples: en vez de descartar el tráfico de la víctima, divert lo envía a una
+máquina de limpieza, que filtra el ataque y reenvía el tráfico bueno.
+
 Un blackhole termina el trabajo del atacante: descarta **todo** el tráfico de la víctima, el
 bueno junto con el malo. La acción `divert` en cambio anuncia la ruta de host de la víctima
-hacia un **centro de scrubbing** — su next-hop BGP, más una community de divert opcional — de
-modo que el tráfico se reencamina, se limpia y se reinyecta en lugar de descartarse. Es el
-peldaño natural entre [FlowSpec](/docs/flowspec) (descartes quirúrgicos de un solo vector) y
+(la única dirección de la víctima, un `/32` o `/128`) hacia un **centro de scrubbing** — su
+next-hop [BGP](/docs/glossary), más una community de divert opcional — de modo que el tráfico
+se reencamina, se limpia y se reinyecta en lugar de descartarse. Es el peldaño natural entre
+[FlowSpec](/docs/flowspec) (descartes quirúrgicos de un solo [vector](/docs/glossary)) y
 [blackhole](/docs/mitigation) (el último recurso que deja a la víctima sin conexión).
 
 ```yaml
@@ -21,19 +33,24 @@ scrubbing:
   # communities: ["65000:200", "65000:201"]   # or a full set
   local_pref: 200              # often raised so the divert route wins selection
 
-mitigation: divert             # or use divert as an escalation rung (see below); an escalation: ladder supersedes this single mitigation: when present
+mitigation: divert             # divert every detected attack on this scope
 ```
+
+Si también configuras una escalera de `escalation:` (ver [más abajo](#en-una-escalera-de-escalado)),
+esta toma el control y esta única línea `mitigation:` se ignora.
 
 ## Cómo funciona
 
-Divert reutiliza la maquinaria de rutas de host de RTBH. Donde un blackhole anuncia el
-`/32` o `/128` de la víctima hacia un next-hop de descarte con tu community RTBH, un divert
-anuncia la **misma** ruta de host hacia el next-hop del centro de scrubbing con la community
-de divert (y un `LOCAL_PREF` opcional). La ruta de host ya supera al agregado que la cubre por
-especificidad; `LOCAL_PREF` solo arbitra la selección de la mejor ruta entre anuncios del mismo
-prefijo, de modo que elevarlo mantiene la ruta de divert ganando frente a cualquier otra ruta
-hacia ese host exacto. Tu edge lleva entonces el tráfico de esa víctima al
-scrubber; el scrubber descarta el ataque y reinyecta el remanente limpio hacia el destino
+Divert reutiliza la maquinaria de rutas de host de [RTBH](/docs/glossary) (blackhole). Donde un
+blackhole anuncia el `/32` o `/128` de la víctima hacia un next-hop de descarte (una dirección
+a la que tus routers envían el tráfico hecho blackhole para luego descartarlo — una ruta nula)
+con tu community RTBH, un divert anuncia la **misma** ruta de host hacia el next-hop del centro
+de scrubbing con la community de divert (y un `LOCAL_PREF` opcional — un desempate de BGP que
+hace preferida la ruta de divert). Una ruta de host `/32`/`/128` es la coincidencia más
+específica posible, así que ya gana sobre cualquier ruta más amplia que cubra la misma
+dirección; `LOCAL_PREF` solo desempata entre anuncios de esa *misma* ruta exacta, de modo que
+elevarlo mantiene la ruta de divert ganando. Tu edge lleva entonces el tráfico de esa víctima
+al scrubber; el scrubber descarta el ataque y reinyecta el remanente limpio hacia el destino
 real.
 
 La reinyección del tráfico limpio — sobre GRE, una VRF o un contexto de enrutamiento aparte —
@@ -47,13 +64,29 @@ recarga de configuración cambia solo los bans futuros, nunca la ruta que un ban
 anunció.
 </Callout>
 
+## Verifica antes de ponerlo en producción
+
+Kapkan viene con **dry-run activado por defecto** (`dry_run: true`) — registra la ruta que
+*anunciaría* pero no envía nada a tus routers hasta que pongas explícitamente `dry_run: false`.
+Usa esa ventana para comprobar tu ruta de divert antes de que se mueva cualquier tráfico real:
+
+1. Con dry-run activado, dispara o espera un ban y busca en los logs la línea que emite Kapkan,
+   p. ej. `DRY-RUN: would announce mitigation (not sent) method=divert route="divert
+   203.0.113.5/32 next-hop 192.0.2.100 community 65000:200" ...`. La misma cadena aparece en
+   el campo `route` del [objeto ban](/docs/api).
+2. Confirma que esa línea `route` es exactamente lo que pretendías — el prefijo de víctima
+   correcto, el next-hop de scrubber correcto, la community correcta.
+3. Confirma que la sesión BGP hacia tu scrubber (y cualquier upstream que reencamine según la
+   community) está levantada.
+4. Solo entonces pon `dry_run: false` para empezar a anunciar de verdad.
+
 ## El bloque scrubbing
 
 | Clave | Significado |
 | --- | --- |
 | `next_hop` | El next-hop BGP IPv4 del centro de scrubbing. **Obligatorio** siempre que una escalera o un método desvíe. |
 | `next_hop6` | El next-hop IPv6 del centro de scrubbing. **Obligatorio** cuando el despliegue protege espacio IPv6 — no hay un fallback de estilo descarte para el desvío, el tráfico debe llegar a un scrubber real. |
-| `community` | Community de divert opcional en formato `ASN:value`. El next-hop hace el reencaminamiento; la community es una señal extra para tu edge. |
+| `community` | Community de divert opcional en formato `ASN:value` — una etiqueta adjunta a la ruta. Quien realiza el reencaminamiento (tu upstream o el proveedor de scrubbing) decide qué significa; Kapkan solo la adjunta. Déjala sin establecer si tu scrubber reencamina puramente según el next-hop. |
 | `communities` | **Lista** de communities opcional que sustituye a `community` cuando se establece. |
 | `local_pref` | `LOCAL_PREF` opcional adjunto a la ruta de divert. Arbitra la selección de la mejor ruta entre anuncios del mismo prefijo (no la especificidad — la ruta de host ya gana en eso), de modo que elevarlo mantiene la ruta de divert ganando. El valor por defecto `0` lo omite. |
 
@@ -96,10 +129,17 @@ escalation:
 ```
 
 La severidad de la escalera solo se refuerza: `none` < `flowspec` < `divert` < `blackhole`.
-Subir de `divert` a `blackhole` es transparente — ambos viajan sobre el mismo NLRI de ruta de
-host, así que el anuncio del blackhole sustituye atómicamente la ruta de divert sin retirada y
-sin hueco en la cobertura. (Los cambios entre familias, como `flowspec → divert`, siguen siendo
-[make-before-break](/docs/escalation#make-before-break).)
+Subir de `divert` a `blackhole` es transparente — ambos anuncian la misma ruta de host (el
+`/32` o `/128`), así que el anuncio del blackhole sustituye atómicamente la ruta de divert sin
+retirada y sin hueco en la cobertura. (Los cambios entre familias, como `flowspec → divert`,
+siguen siendo [make-before-break](/docs/escalation#make-before-break).)
+
+Si tu peer BGP **rechaza** la ruta de divert (por ejemplo, el next-hop del scrubber es
+inalcanzable), Kapkan recurre por defecto a un blackhole (controlado por `ban.fallback`; ponlo
+en `none` para desactivarlo) y marca el ban con `fell_back_from: divert`. Vigila eso en la
+[API](/docs/api) o los logs — significa que tu ruta de scrubber está rota y la víctima está
+siendo enviada a una ruta nula en vez de limpiada. Consulta
+[solución de problemas](/docs/troubleshooting) si te encuentras con esto.
 
 <Callout type="warning" title="Los grupos total no pueden desviar">
 Un [hostgroup](/docs/hostgroups) `total` mide el tráfico agregado y no tiene una única ruta de

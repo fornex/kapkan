@@ -6,12 +6,25 @@ export const metadata = {
 
 # Déviation du trafic (scrubbing)
 
+<Callout type="warning" title="Il vous faut d'abord un centre de nettoyage">
+La déviation ne fonctionne que si vous exploitez déjà (ou payez pour) un **centre de nettoyage
+(scrubbing center)** — une machine ou un service distinct qui filtre le trafic d'attaque et
+réinjecte le trafic propre via GRE ou un VRF. Si vous n'en avez pas, cette page n'est **pas**
+votre point de départ : utilisez plutôt le [blackhole](/docs/mitigation) ou
+[FlowSpec](/docs/flowspec). Pointer `next_hop` vers un scrubber qui n'existe pas dévie le trafic
+de la victime dans le vide.
+</Callout>
+
+En clair : au lieu de supprimer le trafic de la victime, la déviation l'envoie vers une machine
+de nettoyage, qui filtre l'attaque et transfère le bon trafic.
+
 Un blackhole termine le travail de l'attaquant : il supprime **tout** le trafic de la victime, le
-bon comme le mauvais. L'action `divert` annonce au contraire la route d'hôte de la victime vers un
-**centre de nettoyage (scrubbing center)** — son next-hop BGP, plus une community de déviation
-optionnelle — de sorte que le trafic est réacheminé, nettoyé et réinjecté plutôt que supprimé.
-C'est l'échelon naturel entre [FlowSpec](/docs/flowspec) (suppression chirurgicale d'un seul
-vecteur) et le [blackhole](/docs/mitigation) (le dernier recours qui met la victime hors ligne).
+bon comme le mauvais. L'action `divert` annonce au contraire la route d'hôte de la victime (l'unique
+adresse de la victime, un `/32` ou un `/128`) vers un **centre de nettoyage (scrubbing center)** —
+son next-hop [BGP](/docs/glossary), plus une community de déviation optionnelle — de sorte que le
+trafic est réacheminé, nettoyé et réinjecté plutôt que supprimé. C'est l'échelon naturel entre
+[FlowSpec](/docs/flowspec) (suppression chirurgicale d'un seul [vecteur](/docs/glossary)) et le
+[blackhole](/docs/mitigation) (le dernier recours qui met la victime hors ligne).
 
 ```yaml
 scrubbing:
@@ -21,20 +34,25 @@ scrubbing:
   # communities: ["65000:200", "65000:201"]   # or a full set
   local_pref: 200              # often raised so the divert route wins selection
 
-mitigation: divert             # or use divert as an escalation rung (see below); an escalation: ladder supersedes this single mitigation: when present
+mitigation: divert             # divert every detected attack on this scope
 ```
+
+Si vous définissez également un palier `escalation:` (voir [ci-dessous](#dans-un-palier-descalade)),
+celui-ci prend le relais et cette unique ligne `mitigation:` est ignorée.
 
 ## Fonctionnement
 
-La déviation réutilise la machinerie de route d'hôte de RTBH. Là où un blackhole annonce le `/32`
-ou `/128` de la victime vers un next-hop de rejet avec votre community RTBH, une déviation annonce
-la **même** route d'hôte vers le next-hop du centre de nettoyage avec la community de déviation (et
-un `LOCAL_PREF` optionnel). La route d'hôte l'emporte déjà sur l'agrégat couvrant par sa
-spécificité ; le `LOCAL_PREF` n'arbitre que la sélection du meilleur chemin entre annonces de même
-préfixe, de sorte que l'augmenter maintient le chemin de déviation gagnant face à toute autre route
-vers cet hôte exact. Votre edge achemine alors le trafic de cette victime vers le
-scrubber ; le scrubber supprime l'attaque et réinjecte le reste nettoyé vers la véritable
-destination.
+La déviation réutilise la machinerie de route d'hôte de [RTBH](/docs/glossary) (blackhole). Là où un
+blackhole annonce le `/32` ou `/128` de la victime vers un next-hop de rejet (une adresse vers
+laquelle vos routeurs envoient le trafic blackholé avant de le supprimer — une route nulle) avec
+votre community RTBH, une déviation annonce la **même** route d'hôte vers le next-hop du centre de
+nettoyage avec la community de déviation (et un `LOCAL_PREF` optionnel — un départage BGP qui rend
+le chemin de déviation préféré). Une route d'hôte `/32`/`/128` est la correspondance la plus
+spécifique possible, elle l'emporte donc déjà sur toute route plus large couvrant la même adresse ;
+le `LOCAL_PREF` n'arbitre que les égalités entre annonces de cette *même* route exacte, de sorte que
+l'augmenter maintient le chemin de déviation gagnant. Votre edge achemine alors le trafic de cette
+victime vers le scrubber ; le scrubber supprime l'attaque et réinjecte le reste nettoyé vers la
+véritable destination.
 
 La réinjection du trafic nettoyé — via GRE, un VRF ou un contexte de routage séparé — est le rôle
 du scrubber, en dehors de la signalisation BGP de Kapkan. Le rôle de Kapkan est d'orienter le
@@ -47,13 +65,30 @@ attributs de scrubbing sont **figés sur le ban au moment de sa création** — 
 configuration ne modifie que les bans futurs, jamais la route qu'un ban actif a déjà annoncée.
 </Callout>
 
+## Vérifier avant la mise en production
+
+Kapkan est livré avec le **dry-run activé par défaut** (`dry_run: true`) — il journalise la route
+qu'il *annoncerait* mais n'envoie rien à vos routeurs tant que vous n'avez pas explicitement défini
+`dry_run: false`. Profitez de cette fenêtre pour vérifier votre chemin de déviation avant qu'aucun
+trafic réel ne soit déplacé :
+
+1. Avec le dry-run activé, déclenchez ou attendez un ban et cherchez dans les logs la ligne émise
+   par Kapkan, par exemple `DRY-RUN: would announce mitigation (not sent) method=divert
+   route="divert 203.0.113.5/32 next-hop 192.0.2.100 community 65000:200" ...`. La même chaîne
+   apparaît dans le champ `route` de l'[objet ban](/docs/api).
+2. Confirmez que cette ligne `route` correspond exactement à votre intention — le bon préfixe de
+   victime, le bon next-hop de scrubber, la bonne community.
+3. Confirmez que la session BGP vers votre scrubber (et tout upstream qui réachemine sur la
+   community) est active.
+4. Ce n'est qu'alors que vous définissez `dry_run: false` pour commencer à annoncer pour de bon.
+
 ## Le bloc scrubbing
 
 | Clé | Signification |
 | --- | --- |
 | `next_hop` | Le next-hop BGP IPv4 du centre de nettoyage. **Requis** dès qu'un palier ou une méthode dévie. |
 | `next_hop6` | Le next-hop IPv6 du centre de nettoyage. **Requis** lorsque le déploiement protège un espace IPv6 — il n'existe pas de repli de type rejet pour la déviation, le trafic doit atteindre un véritable scrubber. |
-| `community` | Community de déviation optionnelle sous la forme `ASN:value`. Le next-hop effectue le réacheminement ; la community est un signal supplémentaire pour votre edge. |
+| `community` | Community de déviation optionnelle sous la forme `ASN:value` — une étiquette attachée à la route. Celui qui effectue le réacheminement (votre upstream ou le fournisseur de scrubbing) décide de sa signification ; Kapkan se contente de l'attacher. Laissez-la non définie si votre scrubber réachemine uniquement sur le next-hop. |
 | `communities` | **Liste** de communities optionnelle qui remplace `community` lorsqu'elle est définie. |
 | `local_pref` | `LOCAL_PREF` optionnel attaché à la route de déviation. Il arbitre la sélection du meilleur chemin entre annonces de même préfixe (pas la spécificité — la route d'hôte l'emporte déjà sur ce point), de sorte que l'augmenter maintient le chemin de déviation gagnant. La valeur par défaut `0` l'omet. |
 
@@ -96,10 +131,17 @@ escalation:
 ```
 
 La sévérité du palier ne fait que se renforcer : `none` < `flowspec` < `divert` < `blackhole`.
-Passer de `divert` à `blackhole` est transparent — les deux empruntent le même NLRI de route
-d'hôte, de sorte que l'annonce du blackhole remplace atomiquement la route de déviation, sans
-retrait et sans interruption de couverture. (Les changements entre familles, comme
+Passer de `divert` à `blackhole` est transparent — les deux annoncent la même route d'hôte (le
+`/32` ou le `/128`), de sorte que l'annonce du blackhole remplace atomiquement la route de
+déviation, sans retrait et sans interruption de couverture. (Les changements entre familles, comme
 `flowspec → divert`, restent en [make-before-break](/docs/escalation#make-before-break).)
+
+Si votre pair BGP **rejette** la route de déviation (par exemple, le next-hop du scrubber est
+injoignable), Kapkan se replie sur un blackhole par défaut (contrôlé par `ban.fallback` ; mettez-le
+à `none` pour le désactiver) et marque le ban avec `fell_back_from: divert`. Surveillez cela dans
+l'[API](/docs/api) ou les logs — cela signifie que votre chemin de scrubber est rompu et que la
+victime est null-routée au lieu d'être nettoyée. Consultez le
+[dépannage](/docs/troubleshooting) si vous rencontrez ce cas.
 
 <Callout type="warning" title="Les groupes total ne peuvent pas dévier">
 Un [hostgroup](/docs/hostgroups) `total` mesure le trafic agrégé et n'a pas de route de victime

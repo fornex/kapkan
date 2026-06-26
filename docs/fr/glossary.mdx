@@ -1,0 +1,71 @@
+export const metadata = {
+  title: "Glossaire",
+  description:
+    "Définitions en langage clair des termes BGP, de routage, de télémétrie de flux et d'attaque utilisés dans toute la documentation Kapkan.",
+};
+
+# Glossaire
+
+Définitions en une ligne des termes que le reste de la documentation suppose connus. Si une page
+utilise un mot que vous ne reconnaissez pas, il est probablement ici. Les définitions sont
+délibérément pratiques, pas conformes à la précision d'un RFC.
+
+## Attaques
+
+| Terme | Signification |
+| --- | --- |
+| **DDoS** | Distributed Denial of Service (déni de service distribué) — de nombreuses sources inondent une cible en même temps pour la mettre hors ligne. |
+| **Attaque volumétrique** | Une inondation qui l'emporte par le volume brut (paquets ou bits par seconde), par opposition à un abus astucieux du protocole. C'est ce que Kapkan détecte. |
+| **Amplification** | L'attaquant usurpe l'adresse de la victime et pose une petite question à un service tiers (NTP, DNS, CLDAP, memcached, SSDP, chargen) qui renvoie une réponse énorme — ainsi un peu de bande passante de l'attaquant devient beaucoup chez la victime. |
+| **Flood SYN / UDP / ICMP** | Des inondations construites à partir d'un seul type de paquet, nommées d'après le paquet. Un flood SYN épuise l'état des connexions ; un flood UDP/ICMP se contente de noyer le lien. |
+| **Carpet bomb** | Une attaque étalée finement sur de nombreuses adresses d'un préfixe en même temps, de sorte qu'aucun hôte isolé ne paraît assez anormal pour déclencher un seuil par hôte. Kapkan dispose d'une détection distincte de l'étalement sur sous-réseau pour ce cas. |
+| **Vecteur** | La forme spécifique d'une attaque (par exemple « amplification NTP », « flood SYN »). FlowSpec peut écarter un seul vecteur tout en laissant intact le reste du trafic d'un hôte. |
+
+## Télémétrie de flux
+
+| Terme | Signification |
+| --- | --- |
+| **Flux (flow)** | Un enregistrement résumé d'une conversation entre deux adresses (qui, vers qui, quel protocole, combien de paquets/octets) — exporté par votre routeur au lieu d'une copie de chaque paquet. |
+| **NetFlow / IPFIX** | Le protocole d'export de flux de Cisco et son successeur normalisé par l'IETF. Kapkan écoute les deux sur le port UDP `:2055`. |
+| **sFlow** | Un protocole d'export par échantillonnage de paquets. Kapkan écoute sFlow v5 sur le port UDP `:6343`. |
+| **Taux d'échantillonnage** | Les routeurs n'exportent qu'un paquet sur *N* pour économiser des ressources. Kapkan multiplie les comptes par *N* pour estimer le trafic réel, donc ce nombre doit être correct sinon la détection est erronée. |
+
+## BGP et routage
+
+| Terme | Signification |
+| --- | --- |
+| **BGP** | Border Gateway Protocol — la façon dont les routeurs s'indiquent mutuellement quelles plages d'IP ils peuvent atteindre. Kapkan agit comme un locuteur BGP qui indique à vos routeurs d'installer (ou de retirer) des routes de trou noir. |
+| **ASN** | Autonomous System Number (numéro de système autonome) — l'identifiant numérique d'un réseau sur internet (par exemple celui de votre FAI). Les sessions BGP s'établissent entre deux ASN. |
+| **eBGP / iBGP** | BGP entre des ASN *différents* (externe) par opposition à *au sein de* votre propre ASN (interne). Certains attributs (comme LOCAL_PREF) ne circulent que sur iBGP. |
+| **Préfixe / CIDR** | Une plage d'IP écrite sous la forme `adresse/longueur`, par exemple `203.0.113.0/24` (256 adresses) ou un hôte unique `203.0.113.5/32`. « CIDR » désigne simplement cette notation. |
+| **Next-hop** | L'adresse vers laquelle un routeur doit envoyer le trafic correspondant. |
+| **Discard next-hop** | Un next-hop que vos routeurs sont configurés pour écarter. Le RTBH fonctionne en annonçant la route de la victime avec ce next-hop, de sorte que le routeur jette le trafic. |
+| **Community** | Une étiquette attachée à une route BGP. Les opérateurs en amont utilisent une « blackhole community » convenue pour signifier « merci de mettre ceci en null-route pour moi ». |
+| **LOCAL_PREF** | Une valeur de préférence BGP qui n'a de sens qu'à l'intérieur de votre propre réseau (iBGP). |
+| **NLRI** | Network Layer Reachability Information — le nom technique de « la route en cours d'annonce » (le préfixe). |
+| **AFI / SAFI** | Les étiquettes de famille d'adresses que BGP utilise pour garder les routes IPv4, IPv6 et FlowSpec dans des canaux séparés sur une même session. |
+| **Graceful Restart / LLGR** | Des fonctionnalités BGP qui maintiennent en place les routes d'un voisin pendant qu'une session redémarre brièvement, afin qu'un redémarrage de Kapkan ne fasse pas battre vos trous noirs. LLGR est la variante « longue durée » (long-lived). |
+| **End-of-RIB** | Le marqueur qu'un locuteur BGP envoie pour dire « j'ai terminé de vous envoyer mes routes ». |
+| **uRPF** | Unicast Reverse Path Forwarding — une fonctionnalité de routeur qui écarte les paquets dont l'adresse *source* paraît factice. L'associer au RTBH permet à un trou noir d'attraper aussi le trafic *provenant* d'un préfixe banni. |
+| **Anycast** | La même adresse annoncée depuis de nombreux emplacements ; le réseau achemine chaque utilisateur vers le plus proche. |
+
+## Méthodes d'atténuation
+
+| Terme | Signification |
+| --- | --- |
+| **RTBH / trou noir** | Remotely-Triggered Black Hole (trou noir déclenché à distance) — annoncer le `/32` (ou `/128`) de la victime avec un discard next-hop pour que les routeurs écartent *tout* le trafic vers elle. Brutal mais instantané. Le réglage par défaut de Kapkan. |
+| **FlowSpec** | Une extension BGP (RFC 8955/8956) qui annonce un *filtre* — protocole, ports, taille de paquet — afin que les routeurs n'écartent que le trafic d'attaque et laissent le reste de l'hôte joignable. |
+| **Scrubbing / déviation** | Au lieu d'écarter le trafic de la victime, le rerouter à travers un « centre de scrubbing » qui filtre l'attaque et renvoie le trafic propre. Nécessite un service de scrubbing que vous exploitez ou achetez déjà. |
+
+## Concepts Kapkan
+
+| Terme | Signification |
+| --- | --- |
+| **Ban** | L'enregistrement par Kapkan d'une décision d'atténuation contre une cible — qu'elle soit annoncée comme un trou noir, une règle FlowSpec ou une déviation. |
+| **Dry-run** | Le mode par défaut de Kapkan : détecter et tout enregistrer, mais ne jamais annoncer de route. Permet de valider sur du trafic réel en toute sécurité. |
+| **TTL** | Time To Live — la durée d'un ban avant qu'il ne soit retiré automatiquement. Il n'y a pas de bans permanents. |
+| **Hystérésis** | Le délai avant qu'un ban ne soit levé après la chute du trafic, afin qu'un ban ne batte pas (s'active et se désactive) en bordure d'une attaque. |
+| **Whitelist** | `protected_whitelist` — des adresses qui ne peuvent jamais être bannies, ni par la détection ni à la main. |
+| **Hostgroup (groupe d'hôtes)** | Un ensemble nommé de préfixes avec ses propres seuils et sa propre politique d'atténuation, afin de protéger (par exemple) les serveurs de jeu différemment des serveurs web. |
+| **Baseline (ligne de base)** | Un niveau de trafic « normal » appris pour un hôte (à l'aide d'une EWMA — une moyenne mobile qui pondère davantage le trafic récent), afin que les seuils puissent s'adapter au lieu d'être fixes. |
+| **Seuil** | Le niveau de trafic (pps / Mbps / flux par seconde) au-dessus duquel Kapkan déclare une attaque. |

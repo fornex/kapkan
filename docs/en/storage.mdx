@@ -9,6 +9,10 @@ export const metadata = {
 Point Kapkan at a ClickHouse server to keep attack and traffic history — the answer to
 "what hit us last Tuesday". Without it, Kapkan runs entirely in-process on live data.
 
+You need a running ClickHouse server (any recent version) for this. Kapkan talks to its
+HTTP interface, which listens on port `8123` by default — that is the port in the example
+URL below. Installing ClickHouse is out of scope here; see [clickhouse.com](https://clickhouse.com).
+
 <Callout type="info" title="Best-effort, never blocks detection">
 Persistence runs off a bounded queue with a non-blocking send. A slow or down ClickHouse
 drops rows (counted in `kapkan_storage_rows_total` with `result="dropped"`) rather than stalling
@@ -32,7 +36,27 @@ storage:
 ```
 
 Credentials are read from the named environment variables (`username_env` / `password_env`),
-never from the config file.
+never from the config file. Omit both if your ClickHouse accepts unauthenticated local
+connections (the default `default` user often does) — set them only when your server requires auth.
+
+Changing any storage setting requires a full restart — a config reload that touches the
+`storage` block is rejected (`reload: storage settings cannot change at runtime (restart required)`).
+
+## Verify
+
+After enabling storage, confirm rows are actually landing — persistence is best-effort and
+fails quietly. Two checks:
+
+- Watch the `kapkan_storage_rows_total{result="written"}` metric climb (vs `result="dropped"`
+  or `result="error"`). See [Metrics](/docs/metrics).
+- Query ClickHouse directly:
+  ```bash
+  curl 'http://127.0.0.1:8123/?query=SELECT%20count()%20FROM%20kapkan.attack_events'
+  ```
+
+On a bad credential or permission problem the engine logs `clickhouse schema init failed`
+at startup and `clickhouse insert failed` when a batch is rejected — check the logs first if
+counts stay at zero.
 
 ## How it works
 
@@ -48,6 +72,9 @@ On start it idempotently creates three MergeTree tables:
 | `audit_events` | Operator-attributed mutations: who issued each ban/unban/config-reload, when, and the outcome. See [Audit log](/docs/audit). |
 
 Each carries a `ttl_days` per-row TTL, so retention is bounded without operator intervention.
+
+The writer credential needs `CREATE` (database + tables) and `INSERT` rights on first run;
+thereafter `INSERT` is enough. Schema-creation failures are logged at startup, not fatal.
 
 The `attack_events` table's `reason` column holds the compact JSON of the detection
 [reason](/docs/detection) — why the attack fired (threshold provenance,

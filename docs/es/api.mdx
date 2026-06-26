@@ -27,7 +27,9 @@ necesitan el rol **operator**. `config/reload` va más allá: requiere un token 
 por lo que incluso un token operator que está acotado a un tenant se rechaza con `403`. Una lectura con un
 token viewer funciona; una modificación con un token viewer devuelve `403`; un token desconocido devuelve
 `401`. Los endpoints `POST` requieren además un tipo de contenido JSON: envía
-`Content-Type: application/json`. Ten en cuenta que `/metrics` y el
+`Content-Type: application/json`. Un `POST` sin esa cabecera se rechaza con
+HTTP `415 Unsupported Media Type`, así que si un `ban` con `curl` falla con un 415, esa cabecera
+ausente es casi siempre el motivo. Ten en cuenta que `/metrics` y el
 armazón estático del panel se sirven sin token; los datos que el panel carga se obtienen
 a través de la API protegida. Consulta [Autenticación](/docs/authentication) para conocer los roles de los tokens.
 
@@ -58,7 +60,13 @@ estado HTTP apropiado.
 
 ### GET /api/v1/status
 
-Devuelve el modo de operación actual y un resumen de lo que Kapkan está protegiendo.
+Devuelve el modo de operación actual y un resumen de lo que Kapkan está protegiendo. Para leerlo
+(omite la cabecera `Authorization` si no hay ningún token configurado):
+
+```sh
+curl -fsS localhost:8080/api/v1/status \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
 
 ```json
 {
@@ -66,6 +74,8 @@ Devuelve el modo de operación actual y un resumen de lo que Kapkan está proteg
   "uptime_seconds": 8123,
   "version": "v1.2.0 · a1b2c3d",
   "update_available": false,
+  "role": "operator",
+  "unscoped": true,
   "networks": ["203.0.113.0/24", "198.51.100.0/24"],
   "active_attacks": 1,
   "active_bans": 1,
@@ -87,6 +97,14 @@ entonces es `true` y `latest_version`, `latest_is_security` y `latest_url` se in
 Consulta [Actualización](/docs/upgrading).
 `thresholds` y `hostgroups` reflejan la configuración activa; consulta
 [Detección](/docs/detection) y [Hostgroups](/docs/hostgroups) para conocer su forma completa.
+`role` y `unscoped` siempre están presentes: le indican al panel qué token está
+usando. Los campos `networks`, `thresholds`, `bgp`, `scrubbing` y `notify` son
+configuración de todo el despliegue y solo se devuelven a un token sin acotar (admin); un
+token acotado a un tenant recibe un objeto de estado sin ellos (solo `dry_run`, `version`,
+`uptime_seconds`, `update_available`, `role`, `unscoped`, sus propios `hostgroups` y los recuentos). Un token admin obtiene además
+objetos `bgp`, `scrubbing` y `notify`: `notify` expone únicamente qué canales están
+habilitados, nunca tokens ni URLs. Así que si un campo parece "faltar", comprueba si tu token está
+acotado a un tenant en lugar de asumir que Kapkan está roto.
 
 ### GET /api/v1/attacks
 
@@ -264,7 +282,7 @@ Devuelve la tabla completa de baneos: activos e históricos. Cada entrada es un 
 | `rate` | number | Tasa observada en el momento del baneo; se omite cuando es cero. |
 | `threshold` | number | Umbral cruzado; se omite cuando es cero. |
 | `next_hop` | string | El next-hop de descarte. |
-| `community` | string | La community RTBH. |
+| `community` | string | El conjunto de communities adjunto a la ruta — la community RTBH para un blackhole, la community de desvío (scrubbing) para un baneo de desvío — unidas por espacios cuando hay más de una. |
 | `local_pref` | number | El `LOCAL_PREF` adjunto a la ruta; se omite cuando es cero. |
 | `route` | string | La cadena de ruta completa, o un resumen `flowspec: ...` para baneos FlowSpec. |
 | `state` | string | `active`, `withdrawn` o `rejected`. |
@@ -348,6 +366,15 @@ POST /api/v1/ban
 Content-Type: application/json
 
 {"ip": "203.0.113.66"}
+```
+
+Como comando ejecutable (omite la cabecera `Authorization` si aún no has configurado un token):
+
+```sh
+curl -fsS -X POST localhost:8080/api/v1/ban \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ip":"203.0.113.66"}'
 ```
 
 La respuesta es el objeto `Ban` resultante. Un baneo manual respeta todas las reglas de seguridad que respeta un

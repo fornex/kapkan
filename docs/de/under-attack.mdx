@@ -1,0 +1,109 @@
+export const metadata = {
+  title: "Akuter Angriff",
+  description:
+    "Ein kurzes Runbook zum Kopieren und Einfügen für Betreiber, deren Netzwerk gerade angegriffen wird und die Kapkan bereits laufen haben.",
+};
+
+# Akuter Angriff
+
+Diese Seite ist für genau eine Situation gedacht: **Traffic strömt in Massen herein, und Sie
+haben Kapkan bereits installiert und nehmen Flows entgegen.** Es ist eine Checkliste, keine
+Erklärung — arbeiten Sie sie von oben nach unten ab. Falls Kapkan noch nicht installiert ist,
+beginnen Sie mit dem [Schnellstart](/docs/quickstart); falls Sie Zeit zum Lesen haben, behandeln
+die Seiten [Mitigation](/docs/mitigation) und [Sicherheitsmodell](/docs/safety) das *Warum*.
+
+<Callout type="info" title="Haben Sie ein API-Token gesetzt?">
+Falls Sie die [Authentifizierung](/docs/authentication) konfiguriert haben, fügen Sie jedem
+`curl` unten `-H "Authorization: Bearer $TOKEN"` hinzu (verwenden Sie ein **operator**-Token für
+`ban`/`unban`). Ohne konfiguriertes Token ist die Standard-API offen auf `127.0.0.1:8080`, und
+die Befehle funktionieren wie angegeben.
+</Callout>
+
+## 1. Sehen, was Kapkan erkennt
+
+```sh
+curl -s localhost:8080/api/v1/attacks | jq
+```
+
+Jeder Eintrag ist ein Angriff, den Kapkan erkannt hat: das angegriffene `target`, die `metric`,
+die ausgelöst hat (`pps`, `mbps` oder `flows_per_sec`), die [Klassifikation](/docs/detection)
+(z. B. NTP-Amplification, SYN-Flood) und die `route`, die es ankündigen würde oder bereits
+angekündigt hat. Falls diese Liste leer ist, während Sie eindeutig angegriffen werden, springen
+Sie zu [Fehlerbehebung → Ich sehe keine Angriffe](/docs/troubleshooting#ich-sehe-keine-angriffe).
+
+## 2. Prüfen, ob Kapkan tatsächlich mitigiert
+
+Diesen Schritt übersehen viele. Kapkan wird **standardmäßig im Dry-Run-Modus ausgeliefert** — es
+erkennt und protokolliert, kündigt aber nichts an, bis Sie den Dry-Run-Modus abschalten.
+
+```sh
+curl -s localhost:8080/api/v1/status | jq '.dry_run'
+```
+
+- `true` → Kapkan **beobachtet nur**. Es werden keine Routen angekündigt, und ein manueller Ban
+  (Schritt 3) wird *protokolliert, aber nicht gesendet*. Um Angriffs-Traffic tatsächlich zu
+  verwerfen, müssen Sie [in Betrieb gehen](/docs/going-live) — setzen Sie `dry_run: false` und
+  laden Sie neu.
+- `false` → Kapkan ist live. Erkannte Angriffe werden automatisch geblackholt.
+
+## 3. Ein bestimmtes Opfer sofort sperren
+
+Falls ein Host beschossen wird und Sie ihn jetzt blackholen wollen, ohne auf einen Schwellenwert
+zu warten (oder ihn zu justieren), sperren Sie ihn von Hand. Das verwirft **den gesamten** Traffic
+zu dieser Adresse — wenden Sie es auf das Opfer der Flut an, nicht auf Infrastruktur, die
+erreichbar bleiben muss.
+
+```sh
+curl -s -X POST localhost:8080/api/v1/ban \
+  -H 'Content-Type: application/json' \
+  -d '{"ip": "203.0.113.5"}' | jq
+```
+
+Ein erfolgreicher Ban gibt das Ban-Objekt zurück (`state: "active"`). Eine **abgelehnte** Anfrage
+gibt HTTP `409` mit einer Begründung zurück — der manuelle Ban ist auf einen
+[Sicherheitsschutz](/docs/safety) gestoßen: das Ziel steht auf der Whitelist, liegt außerhalb
+Ihres `networks`-Bereichs oder würde `max_active_bans` überschreiten. Das ist das System, das Sie
+schützt, kein Fehler. Entfernen Sie einen manuellen Ban mit `POST /api/v1/unban` und demselben
+`{"ip": ...}`-Body.
+
+## 4. Sicherstellen, dass die Route Ihre Router tatsächlich erreichen kann
+
+Ein Blackhole funktioniert nur, wenn Kapkans BGP-Sitzung zu Ihrem Router aktiv ist. Ist sie
+ausgefallen, protokolliert Kapkan den Ban, aber kein Router erfährt jemals davon.
+
+```sh
+journalctl -u kapkan -f | grep "bgp peer state"
+```
+
+Jeder konfigurierte Neighbor sollte `ESTABLISHED` erreichen. Falls einer hängenbleibt, siehe
+[Fehlerbehebung → BGP erreicht ESTABLISHED nicht](/docs/troubleshooting#bgp-erreicht-nicht-established).
+(`GET /api/v1/status` zeigt Ihre BGP-*Konfiguration*, aber nicht den Live-Zustand der Sitzung —
+der steht nur in den Logs.)
+
+## 5. Bans von selbst ablaufen lassen
+
+```sh
+curl -s localhost:8080/api/v1/bans | jq
+```
+
+Jeder Ban trägt eine TTL (`ban.ttl_seconds`) und wird beim Ablauf automatisch zurückgezogen — es
+gibt keine permanenten Bans. Sie müssen nichts von Hand aufräumen.
+
+## Sie sind vor Ihren eigenen Fehlern geschützt
+
+Während Sie arbeiten, sind diese Schutzmechanismen im Code erzwungen und können nicht abgeschaltet
+werden (siehe [Sicherheitsmodell](/docs/safety)):
+
+- **`max_active_bans`** begrenzt, wie viele Hosts gleichzeitig geblackholt werden können — Kapkan
+  lehnt neue Bans ab, anstatt das halbe Netzwerk per Null-Route lahmzulegen.
+- **`protected_whitelist`** kann niemals gesperrt werden, weder durch Erkennung noch durch Sie.
+- Bans gelten immer nur **innerhalb Ihrer konfigurierten `networks`**.
+- Jeder Ban **läuft automatisch ab**, gemäß seiner TTL.
+
+## Nach dem Sturm
+
+- [Inbetriebnahme](/docs/going-live) — falls Schritt 2 `dry_run: true` gezeigt hat und Sie
+  beim nächsten Mal automatische Mitigation wollen.
+- [Erkennung & Schwellenwerte](/docs/detection) — justieren Sie, was als Angriff zählt, damit
+  Kapkan ihn ohne manuellen Ban abfängt.
+- [Fehlerbehebung](/docs/troubleshooting) — wenn sich etwas oben nicht wie beschrieben verhalten hat.

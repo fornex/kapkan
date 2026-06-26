@@ -17,6 +17,10 @@ einzelnen Lese-Endpoint, `GET /api/v1/audit`, bereitgestellt. Sie wird in
 [ClickHouse](/docs/storage) neben der Angriffs- und Traffic-Historie persistiert und ist
 serverseitig **mandantengebunden** (tenant-scoped), genau wie jeder andere Lesezugriff.
 
+Wenn Sie keine [Mandantenfähigkeit](/docs/multi-tenancy) verwenden (ein einzelnes Deployment, das
+einen Kunden oder Ihr eigenes Netzwerk bedient), ist das Feld `tenant` leer und ein Admin-Token
+sieht jeden Eintrag — Sie können die Hinweise zum Mandanten-Scoping weiter unten ignorieren.
+
 <Callout type="info" title="Immer protokolliert, abfragbar wenn Speicherung aktiv ist">
 Jede Mutation wird unabhängig von der Speicherung auf `INFO`-Ebene protokolliert. Die abfragbare
 Historie benötigt [ClickHouse](/docs/storage): bei deaktivierter Speicherung gibt der Endpoint
@@ -29,7 +33,8 @@ im Prozess-Log.
 Drei Aktionen werden auditiert. `ban` und `config_reload` werden sowohl bei Erfolg als auch bei
 Fehlschlag aufgezeichnet; `unban` wird nur bei Erfolg aufgezeichnet — ein fehlgeschlagener oder
 wirkungsloser Unban gibt einen Fehler zurück und wird nicht in die Spur geschrieben, obwohl er
-dennoch protokolliert wird:
+dennoch protokolliert wird (ein fehlgeschlagener Unban ist ein `404 "no active ban"`, keine
+Richtlinienentscheidung, es gibt also nichts zu attribuieren):
 
 | Aktion | Wann | Aufgezeichnete Ergebnisse (`result`) |
 | --- | --- | --- |
@@ -41,6 +46,11 @@ Eine **abgelehnte** Aktion wird bewusst auditiert: ein Ban, der von der Whitelis
 konfigurierten `networks` oder einer [Blast-Radius-Absicherung](/docs/safety) zurückgewiesen wird,
 hinterlässt einen Audit-Eintrag mit `result: "rejected"` und der Ablehnung in `reason`. Die
 Audit-Spur zeigt daher sowohl versuchte als auch angewendete Änderungen.
+
+`config_reload` ist auf ungebundene (Admin-)Tokens beschränkt. Ein mandantengebundener Operator
+wird mit `403` verweigert, *bevor* der Reload läuft, und **es wird kein Audit-Eintrag geschrieben**
+— diese Ablehnung erscheint nur im Prozess-Log. Falls ein gebundener Reload also scheinbar aus der
+Spur verschwunden ist, ist das der Grund.
 
 ## Operator-Identität
 
@@ -70,6 +80,11 @@ Lesezugriffe.
 | `to` | now | RFC 3339 Ende des Fensters. Muss nach `from` liegen; das Fenster darf **31 days** nicht überschreiten. |
 | `action` | (alle) | Filter auf eines von `ban`, `unban`, `config_reload`. |
 | `target` | (alle) | Filter auf eine IP. Muss für den Mandanten des Aufrufers sichtbar sein, sonst ist die Anfrage `403`. |
+
+Der Endpoint gibt höchstens ~1000 Einträge pro Abfrage zurück, neueste zuerst. Wenn Sie dieses
+Limit bei einem stark frequentierten Fenster erreichen, werden ältere Ereignisse stillschweigend
+aus der Antwort verworfen — grenzen Sie das Fenster ein oder nutzen Sie die Filter
+`target`/`action`.
 
 ```http
 GET /api/v1/audit?from=2026-06-22T00:00:00Z&action=ban HTTP/1.1

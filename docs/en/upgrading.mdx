@@ -19,19 +19,21 @@ Kapkan never phones home by default. The running version is always exposed local
 Opt in to an update check to be told when a newer release exists (see `update_check` in the [configuration reference](/docs/configuration)):
 
 ```sh
-kapkan -check-update      # exit 0 = up to date, 10 = a newer release exists, 1 = error
+kapkan -check-update -config /etc/kapkan/config.yaml   # exit 0 = up to date, 10 = a newer release exists, 1 = error
 ```
 
-When `update_check.enabled` is set, Kapkan polls the GitHub Releases API on an interval and surfaces the result on `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), the `kapkan_update_available` metric, a log line, the console banner, and — with `update_check.notify` — your notification channels. The check transmits only the request itself (source IP + a generic User-Agent), never node identity, config or attack data, and runs off the startup path so a firewalled endpoint never delays the daemon.
+`-check-update` loads your config to read `update_check.channel` / `update_check.url`, so point `-config` at your real file. Without it the command defaults to the dev path (`configs/dev.yaml`) and exits 1 with a "no such file" error — the same caveat applies to a bare `kapkan -check-config`.
+
+When `update_check.enabled` is set, Kapkan polls the GitHub Releases API on an interval and surfaces the result in several places: on `/api/v1/status` (`update_available` / `latest_version` / `latest_is_security`), the `kapkan_update_available` metric, a log line, the console banner, and — with `update_check.notify` — your notification channels. The check transmits only the request itself (source IP + a generic User-Agent), never node identity, config or attack data, and runs off the startup path so a firewalled endpoint never delays the daemon.
 
 ## Upgrading with `update.sh`
 
-The script in [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) performs a safe, signed, rollback-capable upgrade. Run it as root on the host:
+The script in [`deploy/`](https://github.com/fornex/kapkan/blob/main/engine/deploy/update.sh) performs a safe, signed, rollback-capable upgrade. It needs `curl`, `cosign`, `tar` and systemd on the host (it verifies a real signature) — install `cosign` first if it is missing, or the first run aborts with `required command not found: cosign`. Run it as root, from your kapkan checkout:
 
 ```sh
-sudo deploy/update.sh v1.3.0     # a specific tag
-sudo deploy/update.sh            # the latest stable release
-sudo deploy/update.sh --prerelease   # the latest including -rc tags
+sudo ./engine/deploy/update.sh v1.3.0       # a specific tag
+sudo ./engine/deploy/update.sh              # the latest stable release
+sudo ./engine/deploy/update.sh --prerelease   # the latest including -rc tags
 ```
 
 What it does, in order:
@@ -42,7 +44,7 @@ What it does, in order:
 4. **Restart & health-check** — snapshots the config, restarts the service, and polls `/healthz` until it reports ready.
 5. **Roll back on failure** — if the daemon does not come up healthy, it restores both the previous binary and the previous config and restarts the old version.
 
-The probe URL is derived from your `api.listen`; override it (and the timeout) with `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` if needed.
+It waits up to 60s by default for `/healthz` to report ready before giving up and rolling back. The probe URL is derived from your `api.listen`; override it (and the deadline) with `KAPKAN_HEALTH_URL` / `KAPKAN_HEALTH_DEADLINE` if needed. Raise `KAPKAN_HEALTH_DEADLINE` on large deployments — a big GeoIP database plus many persisted bans rehydrating can slow startup past 60s.
 
 Installed from the `.deb` / `.rpm`? You can instead upgrade by installing a newer package (`sudo apt install ./kapkan_<newer>.deb`), which replaces the binary and keeps your edited `/etc/kapkan/config.yaml`. `update.sh` remains the path for tarball installs (and works for package installs too, since both put the binary at the same `/usr/local/bin/kapkan`).
 
@@ -50,8 +52,8 @@ Installed from the `.deb` / `.rpm`? You can instead upgrade by installing a newe
 
 A restart no longer drops active mitigation, thanks to two engine features (see [RTBH mitigation](/docs/mitigation)):
 
-- **BGP Graceful Restart** (`bgp.graceful_restart`, on by default) — a peer that supports it retains Kapkan's blackhole / FlowSpec routes as stale while the session is down, instead of flushing them.
-- **Ban persistence** (`ban.state_file`) — active bans are persisted and re-announced on startup, *before* the BGP session's End-of-RIB, so the peer refreshes the retained routes rather than purging them. Set a writable path (the systemd unit provides one via `StateDirectory=kapkan`) to enable it.
+- **BGP [Graceful Restart](/docs/glossary)** (`bgp.graceful_restart`, on by default) — a peer that supports it retains Kapkan's blackhole / FlowSpec routes as stale (held but not active) while the session is down, instead of flushing them.
+- **Ban persistence** (`ban.state_file`) — active bans are persisted and re-announced on startup, *before* the BGP session's [End-of-RIB](/docs/glossary) marker (the signal that says "I've finished sending you all my routes"), so the peer refreshes the retained routes rather than purging them. Set a writable path (the systemd unit provides one via `StateDirectory=kapkan`) to enable it.
 
 Together these mean you do **not** need to wait for an attack to end before upgrading.
 
@@ -63,7 +65,7 @@ If you install without `update.sh` (air-gapped, or your own automation), verify 
 VER=v1.3.0
 base="https://github.com/fornex/kapkan/releases/download/$VER"
 curl -fLO "$base/kapkan_${VER#v}_linux_amd64.tar.gz"   # archive names drop the leading "v"
-curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
+for f in checksums.txt checksums.txt.sig checksums.txt.pem; do curl -fLO "$base/$f"; done
 
 # 1) authenticity: the signature over checksums.txt, pinned to this repo's release tag
 cosign verify-blob checksums.txt \

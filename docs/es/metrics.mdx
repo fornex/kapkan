@@ -7,7 +7,7 @@ export const metadata = {
 # Métricas
 
 Kapkan expone métricas de Prometheus bajo el espacio de nombres `kapkan_` en `GET /metrics` en el
-listener de la API (`api.listen`, por defecto `127.0.0.1:8080`). Cubren todo el pipeline —
+listener de la API (`api.listen`, convencionalmente `127.0.0.1:8080` — el valor en la configuración de ejemplo; el campo es obligatorio, así que defínelo). Cubren todo el pipeline —
 ingesta de flows, el motor de detección, la mitigación RTBH y las notificaciones — para que puedas
 recopilar (scrape) el throughput, la latencia, los ataques activos y las rutas anunciadas en tu
 monitorización existente.
@@ -30,12 +30,13 @@ Vincula (bind) el listener en consecuencia — consulta [Autenticación](/docs/a
 | `kapkan_engine_attacks_total` | — | Contador de ataques detectados desde el arranque. |
 | `kapkan_engine_process_latency_seconds` | — | Histograma de la latencia de procesamiento en la ruta crítica (hot-path), observada una vez por lote de ingesta (no por flow). |
 | `kapkan_engine_tracked_hosts` | — | Gauge de hosts actualmente rastreados por el motor. |
+| `kapkan_engine_boundary_debug_bytes_total` | `exporter`, `iface`, `dir` | Bytes corregidos por muestreo hacia (`dir=in`) o desde (`dir=out`) los hosts protegidos, desglosados por `exporter` e interfaz (`iface` = ifIndex). Solo aparece mientras [`sampling.boundary_debug: true`](/docs/configuration) — una ayuda temporal para encontrar tus interfaces de borde. NO tiene cardinalidad acotada; desactívala de nuevo después de leer el desglose. |
 | `kapkan_mitigate_announced_routes` | `mode` | Gauge de rutas de blackhole anunciadas actualmente, separadas por el modo `real` / `dry_run`. |
 | `kapkan_mitigate_flowspec_rules` | `mode` | Gauge de reglas de [FlowSpec](/docs/flowspec) anunciadas actualmente, separadas por el modo `real` / `dry_run`. Vigílalo frente al límite de rutas FlowSpec de tus routers. |
 | `kapkan_mitigate_bans_rejected_total` | `reason` | Bloqueos (bans) rechazados por una regla de seguridad, por `reason`: `max_active_bans`, `blast_radius_fraction`, `blast_radius_rate`, o `max_active_prefix_bans` (carpet). |
 | `kapkan_mitigate_fallback_total` | `from`, `to` | Anuncios de mitigación que degradaron a un método de fallback porque el peer rechazó el primario, por `from`/`to`. Una serie con `from="flowspec"` distinta de cero señala upstreams que no respetan FlowSpec. |
-| `kapkan_notify_notifications_total` | `channel`, `result` | Notificaciones intentadas, por canal (telegram, slack, email, webhook, exec) y `result`. |
-| `kapkan_storage_rows_total` | `table`, `result` | Filas entregadas al [almacenamiento opcional en ClickHouse](/docs/storage), por tabla y `written` / `dropped` / `error`. |
+| `kapkan_notify_notifications_total` | `channel`, `result` | Notificaciones intentadas, por canal (telegram, slack, email, webhook, exec) y `result` (`ok`, `error`, o `dropped` cuando los slots de entrega estaban saturados). |
+| `kapkan_storage_rows_total` | `table`, `result` | Filas entregadas al [almacenamiento opcional en ClickHouse](/docs/storage), por tabla y `written` / `dropped` / `error`. `dropped` = la cola de almacenamiento estaba llena (el almacenamiento nunca bloquea la detección, por lo que los flows se siguen procesando y mitigando). |
 | `kapkan_build_info` | `version`, `revision`, `goversion`, `goos`, `goarch` | Gauge informativo constante en `1` que lleva el build en ejecución en sus etiquetas (el idiom de `node_exporter`). Consulta la dispersión de versiones de la flota con `count by (version)(kapkan_build_info)` — sin phone-home. |
 | `kapkan_update_available` | `latest_version`, `security` | `1` cuando la comprobación opcional [`update_check`](/docs/configuration) encuentra una versión más reciente (ausente en caso contrario); `security="true"` señala una versión relevante para la seguridad. |
 
@@ -43,6 +44,9 @@ La etiqueta `mode` en `kapkan_mitigate_announced_routes` es la forma más rápid
 de dry-run de un vistazo: mientras `dry_run: true`, cada ruta que se habría anunciado se cuenta bajo
 `mode="dry_run"` y nada bajo `mode="real"`. Consulta [Mitigación](/docs/mitigation) y el
 [Modelo de seguridad](/docs/safety).
+
+La etiqueta `proto` es el protocolo de transporte por el que llegó el flow: `sflow5`, `netflow5`,
+`netflow9` o `ipfix` (p. ej. `kapkan_ingest_flows_total{proto="sflow5"}`).
 
 ## Scraping
 
@@ -56,7 +60,7 @@ scrape_configs:
       - targets: ["127.0.0.1:8080"]
 ```
 
-Usa el host y el puerto de tu valor `api.listen`. Si expones el listener más allá de
+Usa el host y el puerto de tu valor `api.listen` (convencionalmente `127.0.0.1:8080`). Si expones el listener más allá de
 localhost, configura un token de API — `/metrics` sigue siendo accesible sin él, por lo que tu scraper no
 necesita credenciales.
 

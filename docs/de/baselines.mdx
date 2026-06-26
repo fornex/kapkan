@@ -7,8 +7,8 @@ export const metadata = {
 # Baselines
 
 Mit einem `baseline`-Block lernt Kapkan kontinuierlich das normale Verkehrsniveau jedes
-Hosts und passt die Erkennung daran an. Es führt einen EWMA (exponentiell gewichteten
-gleitenden Mittelwert) der realen, um das Sampling korrigierten Rate **pro Host und pro
+Hosts und passt die Erkennung daran an. Es führt einen [EWMA](/docs/glossary) (exponentiell
+gewichteten gleitenden Mittelwert) der realen, um das Sampling korrigierten Rate **pro Host und pro
 Richtung** — sowie eine Gruppensumme für Hostgroups mit `calculation: total` — und leitet
 daraus einen effektiven Schwellenwert von `learned_normal × factor` ab. Ein Host, der
 normalerweise 10k pps verarbeitet, wird bei rund 30k markiert, statt auf die globalen 80k
@@ -53,10 +53,12 @@ die statischen Schwellenwerte (die Obergrenze).
 
 | Schlüssel | Standard | Bedeutung |
 | --- | --- | --- |
-| `factor` | `3` | Multiplikator auf das gelernte normale Niveau. Der effektive Schwellenwert ist `learned_normal × factor`. |
-| `half_life_seconds` | `3600` | EWMA-Halbwertszeit. Die Zeitspanne, über die eine alte Beobachtung die Hälfte ihres Gewichts verliert; größere Werte machen die Baseline langsamer und stabiler. |
-| `warmup_seconds` | `600` | Ein frisch beobachteter Host wird für diese Dauer ausschließlich durch statische Schwellenwerte abgesichert, gezählt ab seinem ersten realen Verkehr. |
-| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | Beispiel `5000` / `50` / `2000` | Untergrenze für den effektiven Schwellenwert pro Metrik, damit ruhige Hosts nie zu überempfindlichen Auslösern werden. |
+| `factor` | `3` | Multiplikator auf das gelernte normale Niveau. Der effektive Schwellenwert ist `learned_normal × factor`. Erlaubt `1.5`–`100`. |
+| `half_life_seconds` | `3600` | EWMA-Halbwertszeit. Die Zeitspanne, über die eine alte Beobachtung die Hälfte ihres Gewichts verliert; größere Werte machen die Baseline langsamer und stabiler. Erlaubt `10`–`604800` (10s–7d). |
+| `warmup_seconds` | `600` | Ein frisch beobachteter Host wird für diese Dauer ausschließlich durch statische Schwellenwerte abgesichert, gezählt ab seinem ersten realen Verkehr. Erlaubt `0`–`86400` (bis zu 24h). |
+| `floor.pps` / `floor.mbps` / `floor.flows_per_sec` | Beispiel `5000` / `50` / `2000` | Untergrenze für den effektiven Schwellenwert pro Metrik, damit ruhige Hosts nie zu überempfindlichen Auslösern werden. **Erforderlich: alle drei müssen > 0 sein**, sobald Baselines aktiviert sind. |
+
+Werte außerhalb des erlaubten Bereichs werden beim Start abgewiesen. Der `floor`-Block ist zwingend erforderlich, sobald Baselines aktiviert sind — ein Baseline-Block, bei dem eines von `pps`, `mbps` oder `flows_per_sec` auf `0` belassen (oder weggelassen) wird, kann nicht geladen werden und schlägt mit `floor: pps, mbps and flows_per_sec must all be > 0 (hair-trigger guard)` fehl.
 
 ## Manipulationssicheres Design (Poisoning-aware)
 
@@ -78,8 +80,9 @@ mehrere Regeln begrenzen, was die Baseline überhaupt jemals tun kann.
   Angriff normal sei.
 - **Begrenztes Lernen (Clamping).** Außerhalb von Angriffen wird jedes Trainings-Sample auf
   `baseline × factor` gekappt, bevor es den EWMA aktualisiert. Eine langsame Angreifer-Rampe
-  kann die Baseline daher um höchstens `2^(factor−1)` pro Halbwertszeit anheben — bei den
-  Standardwerten (`factor: 3`, `half_life_seconds: 3600`) etwa `4×` pro Stunde. Das bedeutet
+  kann die Baseline daher höchstens geometrisch mit der Halbwertszeit-Periode anheben — als
+  Faustregel grob `2^(factor−1)` pro Halbwertszeit, bei den Standardwerten
+  (`factor: 3`, `half_life_seconds: 3600`) etwa `4×` pro Stunde. Das bedeutet
   Stunden, um von einem normalen Niveau bis zur statischen Obergrenze zu klettern, und
   niemals darüber hinaus. Aggressive Einstellungen (ein großer `factor` oder ein kurzes
   `half_life_seconds`) verkleinern dieses Fenster, wählen Sie sie also bewusst.
@@ -101,7 +104,10 @@ sie mit dem Absichern beginnt. Die `600` im Beispiel liegen deutlich unter diese
 Richtlinie — in Ordnung, wenn Hosts sauber ankommen und Sie das Absichern durch die Baseline
 früher wünschen, aber falls ein Host schon beim ersten Anblick geflutet sein könnte, erhöhen
 Sie `warmup_seconds` auf einige Vielfache von `half_life_seconds` (z. B. `10800` bei der
-Standard-Halbwertszeit von `3600`).
+Standard-Halbwertszeit von `3600`). Beachten Sie, dass `warmup_seconds` auf `86400` (24h)
+begrenzt ist, sodass diese Faustregel von „einigen Vielfachen der Halbwertszeit“ nur bei
+kürzeren Halbwertszeiten gilt — eine lange Halbwertszeit kann „einige Vielfache“ über die
+Obergrenze hinaus treiben, und die Konfiguration lässt sich dann nicht laden.
 </Callout>
 
 ## Sichtbarkeit

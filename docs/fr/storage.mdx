@@ -10,6 +10,11 @@ Pointez Kapkan vers un serveur ClickHouse pour conserver l'historique des attaqu
 — la réponse à « qu'est-ce qui nous a frappés mardi dernier ? ». Sans lui, Kapkan fonctionne
 entièrement en mémoire sur des données en temps réel.
 
+Vous avez besoin pour cela d'un serveur ClickHouse en cours d'exécution (toute version récente).
+Kapkan dialogue avec son interface HTTP, qui écoute par défaut sur le port `8123` — c'est le port
+de l'URL d'exemple ci-dessous. L'installation de ClickHouse sort du cadre de cette page ; voir
+[clickhouse.com](https://clickhouse.com).
+
 <Callout type="info" title="Au mieux des efforts, ne bloque jamais la détection">
 La persistance s'appuie sur une file d'attente bornée avec envoi non bloquant. Un ClickHouse
 lent ou indisponible abandonne des lignes (comptabilisées dans `kapkan_storage_rows_total` avec
@@ -33,7 +38,29 @@ storage:
 ```
 
 Les identifiants sont lus à partir des variables d'environnement nommées (`username_env` /
-`password_env`), jamais depuis le fichier de configuration.
+`password_env`), jamais depuis le fichier de configuration. Omettez les deux si votre ClickHouse
+accepte les connexions locales non authentifiées (l'utilisateur `default` par défaut le fait
+souvent) — ne les renseignez que lorsque votre serveur exige une authentification.
+
+Modifier un quelconque paramètre de stockage nécessite un redémarrage complet — un rechargement
+de configuration qui touche au bloc `storage` est rejeté (`reload: storage settings cannot change
+at runtime (restart required)`).
+
+## Vérification
+
+Après avoir activé le stockage, confirmez que les lignes arrivent bien — la persistance est au
+mieux des efforts et échoue silencieusement. Deux vérifications :
+
+- Surveillez la métrique `kapkan_storage_rows_total{result="written"}` qui augmente (par rapport à
+  `result="dropped"` ou `result="error"`). Voir [Métriques](/docs/metrics).
+- Interrogez ClickHouse directement :
+  ```bash
+  curl 'http://127.0.0.1:8123/?query=SELECT%20count()%20FROM%20kapkan.attack_events'
+  ```
+
+En cas de problème d'identifiant ou de permission, le moteur consigne `clickhouse schema init
+failed` au démarrage et `clickhouse insert failed` lorsqu'un lot est rejeté — vérifiez d'abord les
+journaux si les compteurs restent à zéro.
 
 ## Fonctionnement
 
@@ -50,6 +77,10 @@ Au démarrage, il crée de manière idempotente trois tables MergeTree :
 
 Chacune porte un TTL par ligne `ttl_days`, ce qui borne la rétention sans intervention de
 l'opérateur.
+
+L'identifiant d'écriture a besoin des droits `CREATE` (base de données + tables) et `INSERT` lors
+de la première exécution ; ensuite, `INSERT` suffit. Les échecs de création de schéma sont
+consignés au démarrage, mais ne sont pas fatals.
 
 La colonne `reason` de la table `attack_events` contient le JSON compact du
 [reason](/docs/detection) de la détection — pourquoi l'attaque s'est déclenchée (provenance du

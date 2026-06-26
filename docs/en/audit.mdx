@@ -15,6 +15,10 @@ The trail is written from the [API](/docs/api) mutation handlers and exposed as 
 read endpoint, `GET /api/v1/audit`. It is persisted to [ClickHouse](/docs/storage) alongside
 attack and traffic history, and is **tenant-scoped** server-side just like every other read.
 
+If you are not using [multi-tenancy](/docs/multi-tenancy) (a single deployment serving one
+customer or your own network), the `tenant` field is empty and an admin token sees every
+record — you can ignore the tenant-scoping notes below.
+
 <Callout type="info" title="Always logged, queryable when storage is on">
 Every mutation is logged at `INFO` level regardless of storage. The queryable history needs
 [ClickHouse](/docs/storage): with storage disabled the endpoint returns `available: false`
@@ -25,13 +29,19 @@ Every mutation is logged at `INFO` level regardless of storage. The queryable hi
 
 Three actions are audited. `ban` and `config_reload` are recorded on both success and
 failure; `unban` is recorded only on success — a failed or no-op unban returns an error and is
-not written to the trail, though it is still logged:
+not written to the trail, though it is still logged (a failed unban is a `404 "no active
+ban"`, not a policy decision, so there is nothing to attribute):
 
 | Action | When | Recorded outcomes (`result`) |
 | --- | --- | --- |
 | `ban` | `POST /api/v1/ban` | `active` on success; `rejected` when a safety guard refuses it. A dry-run ban still records `active` — the simulation is signalled by the separate `dry_run` field. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` on success. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` on success; `error` when the new config fails to parse or validate. |
+
+`config_reload` is restricted to unscoped (admin) tokens. A tenant-scoped operator is refused
+with `403` *before* the reload runs, and **no audit record is written** — that refusal appears
+only in the process log. So if a scoped reload seems to have vanished from the trail, that is
+why.
 
 A **refused** action is audited deliberately: a ban rejected by the whitelist, the configured
 `networks`, or a [blast-radius guard](/docs/safety) leaves an audit record with `result:
@@ -65,6 +75,10 @@ Returns audit records newest-first. It needs the **viewer** role, like the other
 | `to` | now | RFC 3339 end of the window. Must be after `from`; the window may not exceed **31 days**. |
 | `action` | (all) | Filter to one of `ban`, `unban`, `config_reload`. |
 | `target` | (all) | Filter to one IP. Must be visible to the caller's tenant, or the request is `403`. |
+
+The endpoint returns at most ~1000 records per query, newest-first. If you hit that cap on a
+busy window, older events are silently dropped from the response — narrow the window or use the
+`target`/`action` filters.
 
 ```http
 GET /api/v1/audit?from=2026-06-22T00:00:00Z&action=ban HTTP/1.1

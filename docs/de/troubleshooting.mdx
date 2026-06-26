@@ -1,0 +1,144 @@
+export const metadata = {
+  title: "Fehlerbehebung",
+  description:
+    "Nach Symptomen sortierte Lösungen für die häufigsten Probleme: keine Erkennungen, BGP baut keine Sitzung auf, Routen werden nicht wirksam, abgelehnte Sperren und fehlgeschlagene Reloads.",
+};
+
+# Fehlerbehebung
+
+Suchen Sie unten Ihr Symptom. Jeder Eintrag erklärt, wie Sie die Ursache bestätigen und was Sie
+ändern müssen. Wenn Sie mitten in einem Angriff stecken, beginnen Sie stattdessen mit dem
+Runbook [Angriff läuft gerade](/docs/under-attack).
+
+## Ich sehe keine Angriffe
+
+`GET /api/v1/attacks` ist leer, obwohl eindeutig Traffic hereinströmt. Arbeiten Sie diese Liste
+ab:
+
+- **Kommen überhaupt Flows an?** Prüfen Sie `GET /api/v1/traffic` und die Metrik
+  `kapkan_ingest_flows_total` (`curl -s localhost:8080/metrics | grep kapkan_ingest_flows`). Wenn
+  sie nicht steigt, erreicht Kapkan keine Telemetrie.
+- **Zeigen Ihre Exporter auf die richtigen Ports?** sFlow → UDP `:6343`, NetFlow/IPFIX → UDP
+  `:2055`. Stellen Sie sicher, dass der Router an Kapkans Adresse exportiert und keine Firewall
+  das UDP verwirft.
+- **Stimmt die Sampling-Rate?** Wenn der Exporter seine Rate nicht meldet, verwendet Kapkan
+  `sampling.default_rate`. Eine falsche Rate lässt echten Traffic winzig erscheinen. Siehe
+  [Konfiguration](/docs/configuration) und [Funktionsweise](/docs/how-it-works).
+- **Liegt das Ziel innerhalb Ihrer `networks`?** Kapkan meldet Angriffe nur für Ziele innerhalb
+  Ihrer konfigurierten Präfixe — Traffic zu allem anderen wird gezählt, aber nie alarmiert. Siehe
+  [Sicherheitsmodell](/docs/safety).
+- **Sind Ihre Schwellenwerte zu hoch?** Vergleichen Sie die Raten in `GET /api/v1/traffic` mit
+  Ihren konfigurierten Schwellenwerten; senken Sie sie oder nutzen Sie
+  [Baselines](/docs/baselines), wenn echte Angriffe unterhalb der Grenze liegen.
+
+## Erkennung greift, aber nichts wird angekündigt
+
+Sie sehen Angriffe in der API und in den Logs, aber keine Routen erreichen Ihre Router. Das ist
+fast immer **Dry-Run** — Kapkans Standardeinstellung:
+
+```sh
+curl -s localhost:8080/api/v1/status | jq '.dry_run'
+```
+
+Wenn dies `true` ist, arbeitet Kapkan genau wie vorgesehen: es erkennt und protokolliert, kündigt
+aber nichts an. Um mit dem Ankündigen zu beginnen, folgen Sie [Live gehen](/docs/going-live).
+
+## Ich finde die Dry-Run-Zeile in den Logs nicht
+
+Dry-Run-Mitigationen werden auf Warn-Level mit genau dieser Nachricht protokolliert:
+
+```text
+DRY-RUN: would announce mitigation (not sent)
+```
+
+Suchen Sie nach dieser Zeichenkette (`journalctl -u kapkan | grep "would announce mitigation"`).
+Der passende Rückzug ist `DRY-RUN: would withdraw mitigation (not sent)`. Wenn Sie keines von
+beiden sehen, wurde noch keine Mitigationsentscheidung getroffen — prüfen Sie, ob die Erkennung
+greift (siehe oben).
+
+## BGP erreicht nicht ESTABLISHED
+
+Peering findet auch im Dry-Run statt, sodass Sie dies vor dem Live-Gang beheben können. Beobachten
+Sie den Zustand:
+
+```sh
+journalctl -u kapkan -f | grep "bgp peer state"
+```
+
+Wenn ein Nachbar nie `ESTABLISHED` erreicht, liegt die Ursache auf einer von zwei Seiten:
+
+- **Kapkans Konfiguration** — `bgp.local_asn`, der `remote_asn` des Nachbarn und seine `address`
+  müssen mit dem übereinstimmen, was der Router erwartet. Eine nicht übereinstimmende ASN ist die
+  häufigste Ursache.
+- **Die Router- / Host-Seite** — der Router muss so konfiguriert sein, dass er die Sitzung
+  akzeptiert, die Quelladresse muss erreichbar sein, und keine ACL oder Firewall darf TCP `179`
+  blockieren.
+
+`GET /api/v1/status` zeigt Ihre BGP-*Konfiguration* und die Nachbaradressen, aber **nicht** den
+Live-Sitzungszustand — der Peer-Zustand existiert nur in den Logs.
+
+## Routen werden angekündigt, aber Angriffstraffic kommt weiterhin an
+
+Kapkan kündigt die Route an (Sie sehen sie in `GET /api/v1/bans` mit `state: "active"`), aber die
+Flut hört nicht auf:
+
+- **Beachtet Ihr Upstream das Blackhole?** Ein `/32`- oder `/128`-Blackhole funktioniert nur,
+  wenn der Router oder Upstream-Provider, der Ihren Traffic trägt, die Route und ihre
+  [Blackhole-Community](/docs/glossary) akzeptiert. Stellen Sie sicher, dass die Community in
+  `bgp.community` mit dem übereinstimmt, was Ihr Provider erwartet, und dass er Präfixe in
+  Host-Länge von Ihnen akzeptiert.
+- **Quellenbasierter Angriff?** RTBH verwirft Traffic *zum* Opfer. Um auch Traffic *von* einer
+  per Blackhole gesperrten Quelle zu verwerfen, benötigen Sie [uRPF](/docs/glossary) an Ihrem
+  Edge, oder nutzen Sie [FlowSpec](/docs/flowspec), um den Angriff präzise zu treffen.
+- **FlowSpec wird nicht wirksam?** Der Peer muss die FlowSpec-Capability ausgehandelt haben; ein
+  Peer, der sie nicht unterstützt, ignoriert die Regeln einfach. Siehe [FlowSpec](/docs/flowspec).
+
+## Eine Sperre wurde abgelehnt (HTTP 409)
+
+Ein manueller `POST /api/v1/ban` gab `409` zurück, oder Sie sehen Ablehnungen in der Metrik
+`kapkan_mitigate_bans_rejected_total`. Das ist ein [Sicherheits-Wächter](/docs/safety), der seine
+Arbeit tut. Der `reason` sagt Ihnen, welcher:
+
+- das Ziel steht in `protected_whitelist`;
+- das Ziel liegt außerhalb Ihrer konfigurierten `networks`;
+- `max_active_bans` ist bereits erreicht;
+- ein optionaler Blast-Radius-Wächter (`max_banned_fraction` / `max_bans_per_window`) hat
+  ausgelöst.
+
+Erhöhen Sie das betreffende Limit nur, wenn Sie verstehen, warum es gesetzt wurde.
+
+## Ein Konfigurations-Reload ist fehlgeschlagen
+
+Ein `POST /api/v1/config/reload` (oder `SIGHUP`) hatte keine Wirkung, oder der Daemon hat einen
+Validierungsfehler protokolliert. Validieren Sie die Datei vor dem Reload:
+
+```sh
+kapkan -check-config /etc/kapkan/config.yaml   # exit 0 = valid, 1 = invalid
+```
+
+Die Fehlermeldung nennt den fehlerhaften Schlüssel. Ein Reload, der die Validierung nicht besteht,
+wird abgelehnt und die **vorherige gültige Konfiguration läuft weiter** — Kapkan lädt keine
+kaputte Konfiguration.
+
+## Die Update-Prüfung beendet sich mit 1
+
+`kapkan -check-update` gibt Exit `1` mit einem "no such file"-Fehler zurück. Die Prüfung lädt Ihre
+Konfiguration (um `update_check` zu lesen), und `-config` zeigt standardmäßig auf den
+Entwicklungspfad `configs/dev.yaml`. Verweisen Sie auf einem echten Host auf Ihre Datei:
+
+```sh
+kapkan -check-update -config /etc/kapkan/config.yaml
+```
+
+Exit-Codes: `0` = aktuell, `10` = eine neuere Version existiert, `1` = Fehler. Siehe
+[Aktualisieren](/docs/upgrading).
+
+## Der ClickHouse-Verlauf ist leer
+
+Sie haben [Speicherung](/docs/storage) aktiviert, aber der Verlauf von `GET /api/v1/attacks` oder
+Ihre ClickHouse-Tabellen bleiben leer:
+
+- Stellen Sie sicher, dass der ClickHouse-Server läuft und vom Kapkan-Host erreichbar ist.
+- Beobachten Sie `kapkan_storage_rows_total` nach `result`: Zeilen unter `written` sollten steigen;
+  Zeilen unter `dropped` oder `error` bedeuten, dass Kapkan nicht schreiben kann (prüfen Sie
+  Adresse, Zugangsdaten und die Logs).

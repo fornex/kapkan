@@ -83,12 +83,21 @@ avertissement. Définissez `require_tls: true` pour faire échouer ce cas à la 
 
 ### Webhook
 
-Définissez `notify.webhook.url` sur n'importe quel point de terminaison HTTPS. Kapkan envoie
-une requête HTTP `POST` avec un corps `Content-Type: application/json` — la
+Définissez `notify.webhook.url` sur l'URL de votre récepteur (utilisez HTTPS — la charge utile
+peut contenir des détails d'attaque). Kapkan envoie une requête HTTP `POST` avec un corps
+`Content-Type: application/json` — la
 [charge utile de callback](#schéma-de-la-charge-utile-de-callback) décrite ci-dessous — à
-chaque début et fin d'attaque. Les réponses non 2xx sont traitées comme une erreur de
-livraison et comptabilisées. La requête est assortie d'un délai d'expiration borné, de sorte
-qu'un récepteur bloqué ne peut pas immobiliser un emplacement de livraison.
+chaque événement (début d'attaque, fin d'attaque et `update_available`). Les réponses non 2xx
+sont traitées comme une erreur de livraison et comptabilisées. La requête est assortie d'un
+délai d'expiration borné, de sorte qu'un récepteur bloqué ne peut pas immobiliser un
+emplacement de livraison.
+
+<Callout type="warning" title="Le schéma d'URL du webhook n'est pas validé">
+Contrairement à Slack (que Kapkan exige en HTTPS), le schéma d'URL du webhook générique n'est
+pas vérifié. Une URL `http://` est acceptée et la charge utile — qui peut transporter des
+cibles d'attaque et des détails de source — est envoyée en clair. Utilisez un point de
+terminaison `https://`.
+</Callout>
 
 ```http
 POST /your/endpoint HTTP/1.1
@@ -178,7 +187,7 @@ notify:
     to: []                         # ["ops@example.com"]
     username_env: "KAPKAN_SMTP_USER"
     password_env: "KAPKAN_SMTP_PASS"
-    require_tls: false             # STARTTLS is auto-required when credentials are set
+    require_tls: false             # set true to fail (not send cleartext) if the server has no STARTTLS
   exec:                            # hook run on every attack event (no shell)
     command: ""                    # absolute path to an existing executable
     timeout_seconds: 10
@@ -212,7 +221,7 @@ champs peuvent être ajoutés sans rien casser chez vous.
 | `mbps` | nombre | Mégabits par seconde, corrigés du sampling. |
 | `flows_per_sec` | nombre | Flows par seconde, corrigés du sampling. |
 | `ban_state` | chaîne | `active`, `withdrawn` ou `rejected`, lorsque la mitigation a été consultée. |
-| `method` | chaîne | `blackhole` ou `flowspec` — la méthode de mitigation à l'origine du bannissement ; omis lorsqu'il n'y a pas de bannissement. |
+| `method` | chaîne | `blackhole`, `flowspec` ou `divert` — la méthode de mitigation à l'origine du bannissement ; omis lorsqu'il n'y a pas de bannissement. |
 | `route` | chaîne | L'annonce (en dry-run : potentielle) : une route blackhole, ou un résumé `flowspec: ...` des règles générées. |
 | `dry_run` | booléen | Indique si la mitigation était en dry-run pour cet événement. |
 | `at` | chaîne | Horodatage RFC 3339 de l'événement. |
@@ -248,6 +257,7 @@ Un événement `attack_started` réaliste pour un flood par amplification NTP, d
   "mbps": 8421.5,
   "flows_per_sec": 9400,
   "ban_state": "active",
+  "method": "blackhole",
   "route": "blackhole 203.0.113.45/32 next-hop 192.0.2.1 community 65000:666",
   "dry_run": true,
   "at": "2026-06-13T14:22:07Z",

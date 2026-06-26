@@ -42,6 +42,9 @@ export KAPKAN_API_TOKEN="$(openssl rand -hex 32)"
 Mantener el token en una variable de entorno en lugar de en el YAML significa que la configuración
 sigue siendo segura para confirmarla en git y compararla junto con el resto de tu [configuración](/docs/configuration).
 
+Ese único token es todo lo que necesitan la mayoría de los despliegues: el resto de esta página
+(roles, tenants) es opcional y puede esperar.
+
 ## Roles
 
 Para el control de acceso basado en roles usa `tokens` en lugar de `token_env`: una lista donde cada
@@ -55,10 +58,16 @@ api:
     - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
 ```
 
+`name`, `token_env` y `role` son obligatorios en cada entrada; `role` debe ser exactamente
+`viewer` u `operator`. Un valor ausente o mal escrito es un error de validación grave al arrancar,
+no un valor predeterminado silencioso.
+
 | Rol | Qué puede hacer |
 | --- | --- |
 | `viewer` | Solo lectura: estado, ataques, hosts, baneos, métricas. |
-| `operator` | Todo lo que puede hacer un viewer, además de baneo/desbaneo manual y recarga de configuración (la recarga es [exclusiva de admin](/docs/multi-tenancy); consulta más abajo). |
+| `operator` | Todo lo que puede hacer un viewer, además de baneo/desbaneo manual y recarga de configuración (la recarga es exclusiva de admin; consulta más abajo). |
+
+No hay un rol `admin` aparte que asignar: un *admin* es simplemente un token de operator sin ningún `tenant` definido. Los únicos valores de rol que el motor acepta son `viewer` y `operator`; la distinción admin/acotado es el eje de [Multi-tenencia](/docs/multi-tenancy), que se trata más abajo.
 
 `token_env` y `tokens` son **mutuamente excluyentes**: `token_env` es exactamente un único token de
 operator. Una solicitud se coteja con cada token configurado (en tiempo constante); se aplica el rol
@@ -66,6 +75,10 @@ coincidente más alto. Una lectura con un token de viewer funciona; una mutació
 se rechaza con `403 Forbidden`; una solicitud sin un token válido es `401 Unauthorized`. Una variable
 de entorno vacía o sin definir nunca coincide, de modo que un secreto mal configurado falla de forma
 cerrada.
+
+Dale a cada token un secreto distinto: si un mismo valor secreto se configura para dos tokens con
+roles o tenants diferentes, la solicitud se rechaza (`401 Unauthorized`) en lugar de adivinar
+cuál querías. El daemon registra `ambiguous API token` cuando esto ocurre.
 
 El *valor* secreto de un token se lee del entorno en cada solicitud, así que rotarlo surte efecto en
 la siguiente solicitud. Añadir o quitar *entradas* de token en el YAML cambia el conjunto de tokens, lo

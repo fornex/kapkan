@@ -59,6 +59,7 @@ send `SIGHUP` directly (`systemctl reload kapkan`), or `POST /api/v1/config/relo
 ```sh
 kapkan -s reload    # re-read the config file (SIGHUP)
 kapkan -s stop      # graceful shutdown (SIGTERM)
+kapkan -s quit      # alias of stop
 ```
 
 `-s` reads the process id from `-pid-file` (default `/run/kapkan/kapkan.pid`, written by the
@@ -96,8 +97,9 @@ kapkan -check-config /etc/kapkan/config.yaml
 ```
 
 Runs the engine's exact parse and validation — including cross-field rules a static schema
-cannot express — then prints the resolved configuration (mode, protected networks, and the
-effective mitigation per [hostgroup](/docs/hostgroups)) and exits:
+cannot express — then prints the resolved configuration (mode, protected networks, the
+configured flow listeners, the group count, and the effective mitigation per
+[hostgroup](/docs/hostgroups)) and exits:
 
 | Exit code | Meaning |
 | --- | --- |
