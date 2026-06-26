@@ -77,7 +77,7 @@
     "bgp.local_asn": { "tier": "basic", "reloadImmutable": true, "description": "Kapkan's local BGP AS number." },
     "bgp.router_id": { "tier": "basic", "format": "ipv4", "reloadImmutable": true, "description": "BGP router ID; must be an IPv4 dotted-quad." },
     "bgp.next_hop": { "tier": "basic", "format": "ipv4", "description": "IPv4 blackhole (discard) next-hop." },
-    "bgp.next_hop6": { "tier": "advanced", "format": "ipv6", "description": "IPv6 blackhole next-hop (required if IPv6 space is protected and blackholed)." },
+    "bgp.next_hop6": { "tier": "advanced", "format": "ipv6", "description": "IPv6 blackhole next-hop. Optional even when IPv6 space is protected: left unset, blackholes use the RFC 6666 discard next-hop 100::1." },
     "bgp.community": { "tier": "basic", "format": "community", "description": "RTBH community your upstream honors, as ASN:value." },
     "bgp.graceful_restart.enabled": { "tier": "advanced", "defaultWhenAbsent": true, "description": "Advertise BGP Graceful Restart so a peer RETAINS kapkan's mitigation routes across a restart (e.g. an upgrade) instead of flushing them. On by default; advertising costs nothing against a peer that doesn't support it. Takes effect on (re)start." },
     "bgp.graceful_restart.restart_seconds": { "tier": "advanced", "defaultWhenAbsent": 120, "description": "How long the peer holds kapkan's routes as stale while the session is down. 0 uses the default (120); capped at 4095." },
@@ -114,7 +114,7 @@
     "api.tokens.role": { "tier": "advanced", "description": "viewer (read-only) or operator (read + ban/unban/reload)." },
     "api.tokens.tenant": { "tier": "advanced", "description": "Optional tenant scope; must match a tenant used by some hostgroup." },
     "update_check.enabled": { "tier": "advanced", "defaultWhenAbsent": false, "description": "Opt-in check for a newer kapkan release via the GitHub Releases API. Off by default (no egress); the running version is always exposed locally regardless. Takes effect on (re)start." },
-    "update_check.interval_seconds": { "tier": "advanced", "defaultWhenAbsent": 21600, "description": "Poll interval for the update check. 0 uses the default (21600, 6h); floored at 3600 (1h)." },
+    "update_check.interval_seconds": { "tier": "advanced", "defaultWhenAbsent": 21600, "description": "Poll interval for the update check. 0 uses the default (21600, 6h); otherwise must be >= 3600 (1h) or the config is rejected at load." },
     "update_check.channel": { "tier": "advanced", "defaultWhenAbsent": "stable", "description": "Which releases count: 'stable' (latest non-prerelease) or 'prerelease' (includes -rc tags)." },
     "update_check.url": { "tier": "advanced", "defaultWhenAbsent": "", "description": "Override the releases endpoint (mirror/proxy). Empty derives the public GitHub API URL from channel." },
     "update_check.notify": { "tier": "advanced", "defaultWhenAbsent": false, "description": "Also send 'update available' through the configured notify channels (Telegram/webhook/Slack/email) the first time a new version is seen." }
