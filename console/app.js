@@ -25,7 +25,7 @@
     expanded: new Set(),
     drawer: { open: false, live: false, key: null, attack: null },
     localeOpen: false,
-    buf: { aggIn: [], aggOut: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {}, hostMbps: {} },
+    buf: { aggIn: [], aggOut: [], aggInPps: [], aggOutPps: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {}, hostMbps: {} },
     traffic: { key: null, available: false, points: [], loading: false, fetchedAt: 0 },
     last: { rung: -1 }
   };
@@ -35,6 +35,7 @@
     var s = API.getStatus(), agg = API.aggregate(), hostsData = API.getHosts().hosts;
     var b = state.buf;
     push(b.aggIn, agg.in_mbps); push(b.aggOut, agg.out_mbps);
+    push(b.aggInPps, agg.in_pps); push(b.aggOutPps, agg.out_pps);
     push(b.attacks, s.active_attacks); push(b.bans, s.active_bans);
     push(b.hosts, hostsData.length); push(b.inAttack, s.active_attacks > 0);
     hostsData.forEach(function (host) {

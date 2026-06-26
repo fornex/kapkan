@@ -215,7 +215,8 @@
 
       /* traffic */
       "tr.live": "En vivo (búfer de sondeo)",
-      "tr.aggregate": "Entrante / saliente agregado",
+      "tr.aggregate.mbps": "Entrante / saliente agregado — ancho de banda",
+      "tr.aggregate.pps": "Entrante / saliente agregado — paquetes/s",
       "tr.perhost.mbps": "Principales hosts — por ancho de banda",
       "tr.perhost.pps": "Principales hosts — por paquetes/s",
       "tr.window": "Últimas {n} muestras · cadencia 3 s",

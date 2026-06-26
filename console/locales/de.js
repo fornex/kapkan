@@ -201,7 +201,8 @@
       "hg.readonly": "Die Host-Gruppen-Richtlinie wird in der Engine-Konfigurationsdatei festgelegt und ist hier schreibgeschützt.",
 
       "tr.live": "Live (Abfragepuffer)",
-      "tr.aggregate": "Gesamt: eingehend / ausgehend",
+      "tr.aggregate.mbps": "Gesamt: eingehend / ausgehend — Bandbreite",
+      "tr.aggregate.pps": "Gesamt: eingehend / ausgehend — Paketrate",
       "tr.perhost.mbps": "Top-Hosts — nach Bandbreite",
       "tr.perhost.pps": "Top-Hosts — nach Paketrate",
       "tr.window": "Letzte {n} Stichproben · 3-Sek-Takt",

@@ -215,7 +215,8 @@
 
       /* traffic */
       "tr.live": "En direct (tampon d'interrogation)",
-      "tr.aggregate": "Entrant / sortant agrégé",
+      "tr.aggregate.mbps": "Entrant / sortant agrégé — débit",
+      "tr.aggregate.pps": "Entrant / sortant agrégé — paquets/s",
       "tr.perhost.mbps": "Principaux hôtes — par bande passante",
       "tr.perhost.pps": "Principaux hôtes — par paquets/s",
       "tr.window": "{n} derniers échantillons · cadence 3 s",
