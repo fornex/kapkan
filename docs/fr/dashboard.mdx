@@ -77,6 +77,30 @@ Le tableau de bord est entièrement construit à partir de l'état en mémoire d
 est une fonctionnalité distincte et optionnelle — il n'est pas nécessaire pour voir les attaques en direct, les principaux émetteurs ou les bannissements.
 </Callout>
 
+## Détail d'une attaque
+
+Cliquez sur une attaque dans la liste **Attaques actives** (attaques actives et récentes) pour ouvrir
+son panneau de détail. Outre la classification, l'analyse du « pourquoi elle s'est déclenchée »,
+l'échelle d'escalade et la route de mitigation, deux sections attribuent le trafic :
+
+- **Échantillon capturé** — les **Sources principales** dominantes (renommées **Destinations
+  principales** pour une attaque sortante), les **Protocoles** et les **Ports source / destination
+  principaux**, distillés à partir de l'échantillon de flow, ainsi que le total des paquets
+  échantillonnés. Lorsque GeoIP est activé, une ligne **Top ASN** s'affiche également (**Top ASN
+  destination** pour les attaques sortantes) : les systèmes autonomes les plus actifs en paquets
+  corrigés de l'échantillonnage, listés sous la forme `AS<numéro> <organisation>`.
+- **Flux bruts** — un tableau des flows capturés individuellement (source, protocole, destination,
+  drapeaux, fragmentation, paquets). Lorsqu'une base de données de pays est chargée, chaque source
+  porte un petit badge de code pays tel que `US` ou `DE` ; survolez-le pour voir l'organisation
+  (le réseau) de la source.
+
+La ligne **Top ASN** et les badges de pays par flux n'apparaissent que lorsque l'attribution GeoIP
+est activée. Faites pointer `geoip.asn_database` vers une base de données ASN MaxMind
+GeoLite2/GeoIP2 pour les ASN et les noms d'organisation, et `geoip.country_database` vers une base
+de données de pays pour les badges de pays — voir le bloc `geoip` dans
+[Configuration](/docs/configuration). Sans elles, le panneau s'affiche quand même, simplement sans
+la ligne ASN ni les étiquettes de pays.
+
 ## Authentification
 
 Par défaut, l'API et le tableau de bord ne sont pas authentifiés, ce qui n'est sûr que parce que la valeur par défaut
