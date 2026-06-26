@@ -114,7 +114,7 @@
     var sources = a.sample ? h("div", {}, [
       h("div", { class: "section-label" }, [w.icon("target"), h("span", { text: I.t("ac.sample") })]),
       h("div", { class: "shares" }, [
-        K.shareGroup(I.t("ac.topsources"), a.sample.top_sources, { src: true }),
+        K.shareGroup(I.t(a.direction === "outgoing" ? "ac.topdest" : "ac.topsources"), a.sample.top_sources, { src: true }),
         K.shareGroup(I.t("ac.topdstports"), a.sample.top_dst_ports, {})
       ])
     ]) : null;
