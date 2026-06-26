@@ -90,8 +90,17 @@ func udpFlow(dst string, bytes, packets, rate uint64) flow.Flow {
 // drain collects events without blocking the test.
 func drain(e *Engine) chan Event {
 	out := make(chan Event, 64)
+	// Merge the lifecycle and heartbeat channels so tests see the full event
+	// stream (AttackStarted/AttackEnded on Events, AttackOngoing on
+	// OngoingEvents) as one ordered-per-channel sequence, as they did before
+	// heartbeats were split onto their own channel.
 	go func() {
 		for ev := range e.Events() {
+			out <- ev
+		}
+	}()
+	go func() {
+		for ev := range e.OngoingEvents() {
 			out <- ev
 		}
 	}()
@@ -332,6 +341,42 @@ func TestAttackOngoingDuringHysteresis(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no AttackOngoing during the hysteresis tail; the ban TTL would not refresh before the attack is declared over")
+	}
+}
+
+// TestAttackOngoingUsesSeparateChannel proves heartbeats are emitted on
+// OngoingEvents, never on the lifecycle Events channel — so a flood of
+// heartbeats can never displace an AttackStarted/AttackEnded.
+func TestAttackOngoingUsesSeparateChannel(t *testing.T) {
+	clk := newMockClock()
+	e := New(testStore(t), WithClock(clk.Now), WithWindow(1))
+	dst := netip.MustParseAddr("203.0.113.23")
+	for i := 0; i < 200; i++ {
+		e.Process(udpFlow(dst.String(), 100, 1, 1000))
+	}
+
+	// First tick: AttackStarted on the lifecycle channel.
+	runTick(e, clk)
+	if ev := <-e.Events(); ev.Kind != AttackStarted {
+		t.Fatalf("lifecycle channel first event = %v, want AttackStarted", ev.Kind)
+	}
+
+	// Next tick, still in attack (1s window now empty -> hysteresis tail): a
+	// heartbeat must arrive on OngoingEvents, and the lifecycle channel must
+	// stay empty.
+	runTick(e, clk)
+	select {
+	case ev := <-e.OngoingEvents():
+		if ev.Kind != AttackOngoing {
+			t.Fatalf("heartbeat channel event = %v, want AttackOngoing", ev.Kind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no AttackOngoing on OngoingEvents")
+	}
+	select {
+	case ev := <-e.Events():
+		t.Fatalf("lifecycle channel received %v; heartbeats must not land here", ev.Kind)
+	default:
 	}
 }
 
