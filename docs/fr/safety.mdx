@@ -88,7 +88,10 @@ demandes de bannissement manuel. Aucun indicateur ne permet de la contourner.
 
 Pour la mitigation par tapis (préfixe entier), la garantie est encore plus forte : un préfixe qui
 contient une seule adresse whitelistée voit sa mitigation **entière** refusée — Kapkan ne
-blackholera ni ne filtrera un `/24` pour attraper une attaque si un hôte protégé s'y trouve.
+blackholera ni ne filtrera un `/24` pour attraper une attaque si un hôte protégé s'y trouve. Cela
+vaut même en pleine attaque : si un rechargement ajoute une adresse de la liste blanche à un préfixe
+déjà sous un blocage carpet actif, le blocage est retiré en une seconde environ au lieu d'attendre
+l'expiration de son TTL.
 
 ## 6. Détection délimitée
 

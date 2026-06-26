@@ -92,7 +92,9 @@ sie hat Vorrang vor manuellen Sperranfragen. Es gibt kein Flag, das sie umgeht.
 Bei der Carpet-Mitigation (ganzes Präfix) ist die Garantie sogar noch stärker: Ein Präfix, das eine
 einzige Adresse aus der Whitelist enthält, wird in seiner **gesamten** Mitigation verweigert —
 Kapkan wird kein `/24` per Blackhole entfernen oder filtern, um einen Angriff abzufangen, wenn ein
-geschützter Host darin liegt.
+geschützter Host darin liegt. Das gilt auch mitten im Angriff: Fügt ein Reload eine
+Whitelist-Adresse zu einem Präfix hinzu, das bereits unter einer aktiven Carpet-Sperre steht, wird
+die Sperre innerhalb von etwa einer Sekunde zurückgezogen, statt ihr TTL abzuwarten.
 
 ## 6. Eingegrenzte Erkennung
 
