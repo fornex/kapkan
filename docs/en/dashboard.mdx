@@ -76,6 +76,27 @@ The dashboard is built entirely from the engine's in-memory state. Historical fl
 is a separate, optional feature — it is not needed to see live attacks, top talkers or bans.
 </Callout>
 
+## Attack detail
+
+Click an attack in the **Active and recent attacks** list to open its detail drawer. Alongside
+the classification, the "why it fired" breakdown, the escalation ladder and the mitigation route,
+two sections attribute the traffic:
+
+- **Captured sample** — the dominant **Top sources** (relabeled **Top destinations** for an
+  outgoing attack), **Protocols** and **Top source / dest ports** distilled from the flow sample,
+  plus the total packets sampled. With GeoIP enabled it also shows a **Top ASNs** row (**Top dest
+  ASNs** for outgoing attacks): the busiest autonomous systems by sampling-corrected packets,
+  listed as `AS<number> <organization>`.
+- **Raw flows** — a table of individual captured flows (source, protocol, destination, flags,
+  fragmentation, packets). With a country database loaded, each source carries a small
+  country-code badge such as `US` or `DE`; hover it to see the source's network organization.
+
+The **Top ASNs** row and the per-flow country badges appear only when GeoIP attribution is enabled.
+Point `geoip.asn_database` at a MaxMind GeoLite2/GeoIP2 ASN database for the ASNs and organization
+names, and `geoip.country_database` at a country database for the country badges — see the `geoip`
+block in [Configuration](/docs/configuration). Without them the drawer still renders, just without
+the ASN row and country tags.
+
 ## Authentication
 
 By default the API and dashboard are unauthenticated, which is safe only because the default

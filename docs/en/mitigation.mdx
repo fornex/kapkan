@@ -126,9 +126,10 @@ step by the [safety model](/docs/safety) — there is no path to a permanent or 
    permits banning, Kapkan announces the blackhole route (or, in dry-run, records the would-be
    route) and the ban enters the `active` state. A second attack — for example an incoming and an
    outgoing flood on the same host at once — shares the one RTBH route rather than announcing twice.
-2. **Auto-withdraw on TTL.** Every announcement carries a TTL. After `ban.ttl_seconds` the route
-   is auto-withdrawn even if the attack is still ongoing; a persisting attack refreshes the TTL,
-   but never beyond a fresh TTL from now. **There are no permanent bans.**
+2. **Auto-withdraw on TTL.** Every announcement carries a TTL. While the attack is still detected,
+   each detection window refreshes the ban's TTL (never beyond a fresh `ban.ttl_seconds` from now),
+   so the route stays up for the whole attack. Once detection stops, the route is auto-withdrawn
+   within one TTL. **There are no permanent bans.**
 3. **Unban with hysteresis.** A ban driven by an attack is withdrawn only after traffic stays
    below threshold for `ban.unban_hysteresis_seconds`. This anti-flap delay prevents a borderline
    attack from rapidly announcing and withdrawing the same route.

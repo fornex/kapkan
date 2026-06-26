@@ -49,19 +49,19 @@ weiter aus, sodass ein Tippfehler Sie nicht mitten im Angriff lahmlegen kann.
 ## 2. Keine dauerhaften Sperren
 
 Jede Ankündigung trägt eine TTL (`ban.ttl_seconds`, eine erforderliche Einstellung ohne
-Standardwert) und wird automatisch zurückgezogen, wenn sie abläuft. Es gibt keinen Code-Pfad, der
-eine Route ohne Ablaufzeit erzeugt. Ein hängengebliebener Prozess, eine verlorene Benachrichtigung
-oder ein Operator, der sich entfernt, können einen Host niemals für immer per Blackhole entfernt
-lassen.
+Standardwert). Solange ein Angriff weiterhin erkannt wird, meldet Kapkan ihn in jedem
+Erkennungsfenster erneut und die TTL der Sperre wird aufgefrischt — die Route bleibt also so lange
+oben, wie die Flut anhält, egal wie lange das ist. In dem Moment, in dem die Erkennung aufhört,
+wird die TTL nicht mehr aufgefrischt und die Sperre wird automatisch innerhalb eines TTL-Fensters
+zurückgezogen. Es gibt keinen Code-Pfad, der eine Route ohne Ablaufzeit erzeugt: Ein
+hängengebliebener Prozess, eine verlorene Benachrichtigung oder ein Operator, der sich entfernt,
+können einen Host niemals für immer per Blackhole entfernt lassen.
 
-<Callout type="warning" title="Setzen Sie die TTL länger als einen typischen Angriff">
-Die TTL wird nur aufgefrischt, wenn die Erkennung *erneut auslöst*. Ein einzelner, durchgehend
-erkannter Angriff kündigt die Route einmal an, und die TTL wird zu ihrer gesamten Lebensdauer — die
-Route wird **nicht** stillschweigend erneut angekündigt, während derselbe Angriff weiterläuft. Wenn
-die TTL also mitten in einer Flut abläuft, kommt die Route herunter und das Opfer ist wieder
-ungeschützt, bis der Angriff aufhört und später erneut auslöst. Setzen Sie `ttl_seconds` bequem
-länger als einen typischen Angriff (z. B. `1800`–`3600`); eine zu kurze TTL zieht die Route mitten
-in einem laufenden Angriff zurück.
+<Callout type="info" title="Sie müssen die TTL nicht auf den Angriff abstimmen">
+Da ein andauernder Angriff seine eigene TTL auffrischt, ist `ban.ttl_seconds` keine Wette darauf,
+wie lange ein Angriff dauern wird — es ist, wie lange eine Sperre noch bestehen bleibt, *nachdem*
+der Datenverkehr bereits weg ist. Ein kurzer Wert (z. B. `1800`) gibt einen erholten Host schnell
+wieder frei und verkürzt den Schutz während der Flut dennoch niemals.
 </Callout>
 
 ## 3. Unban-Hysterese

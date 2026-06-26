@@ -135,10 +135,11 @@ permanenten oder außer Kontrolle geratenen Ban.
    potenzielle Route auf) und der Ban geht in den Zustand `active` über. Ein zweiter Angriff — zum
    Beispiel eine eingehende und eine ausgehende Flut auf demselben Host gleichzeitig — teilt sich die eine
    RTBH-Route, anstatt zweimal anzukündigen.
-2. **Automatischer Rückzug bei TTL.** Jede Ankündigung trägt eine TTL. Nach `ban.ttl_seconds` wird die
-   Route automatisch zurückgezogen, selbst wenn der Angriff noch andauert; ein fortbestehender Angriff
-   frischt die TTL auf, aber niemals über eine neue, ab jetzt gerechnete TTL hinaus. **Es gibt keine
-   permanenten Bans.**
+2. **Automatischer Rückzug bei TTL.** Jede Ankündigung trägt eine TTL. Solange der Angriff noch
+   erkannt wird, frischt jedes Erkennungsfenster die TTL des Bans auf (jedoch niemals über eine neue,
+   ab jetzt gerechnete `ban.ttl_seconds` hinaus), sodass die Route während des gesamten Angriffs
+   bestehen bleibt. Sobald die Erkennung aufhört, wird die Route innerhalb einer TTL automatisch
+   zurückgezogen. **Es gibt keine permanenten Bans.**
 3. **Unban mit Hysterese.** Ein durch einen Angriff ausgelöster Ban wird erst zurückgezogen, nachdem der
    Datenverkehr für `ban.unban_hysteresis_seconds` unter dem Schwellenwert geblieben ist. Diese
    Anti-Flapping-Verzögerung verhindert, dass ein Grenzfall-Angriff dieselbe Route schnell ankündigt und

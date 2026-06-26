@@ -83,6 +83,29 @@ Flow-Speicherung ist eine separate, optionale Funktion — sie ist nicht erforde
 Live-Angriffe, Top-Talker oder Sperren zu sehen.
 </Callout>
 
+## Angriffsdetails
+
+Klicken Sie in der Liste **Aktive Angriffe** (aktive und kürzliche Angriffe) auf einen Angriff, um
+dessen Detail-Drawer zu öffnen. Neben der Klassifizierung, der Aufschlüsselung „warum er ausgelöst
+wurde", der Eskalationsleiter und der Mitigationsroute ordnen zwei Abschnitte den Datenverkehr zu:
+
+- **Erfasste Stichprobe** — die dominierenden **Top-Quellen** (bei einem ausgehenden Angriff in
+  **Top-Ziele** umbenannt), **Protokolle** und **Top-Quell- / Ziel-Ports**, destilliert aus der
+  Flow-Stichprobe, sowie die insgesamt erfassten Pakete. Wenn GeoIP aktiviert ist, wird zusätzlich
+  eine Zeile **Top-ASNs** angezeigt (bei ausgehenden Angriffen **Top-Ziel-ASNs**): die aktivsten
+  autonomen Systeme nach Stichproben-korrigierten Paketen, aufgeführt als
+  `AS<Nummer> <Organisation>`.
+- **Rohe Flüsse** — eine Tabelle einzelner erfasster Flows (Quelle, Protokoll, Ziel, Flags,
+  Fragmentierung, Pakete). Wenn eine Länderdatenbank geladen ist, trägt jede Quelle ein kleines
+  Ländercode-Abzeichen wie `US` oder `DE`; fahren Sie mit der Maus darüber, um die Organisation
+  (das Netz) der Quelle zu sehen.
+
+Die Zeile **Top-ASNs** und die Länder-Abzeichen pro Flow erscheinen nur, wenn die GeoIP-Zuordnung
+aktiviert ist. Verweisen Sie `geoip.asn_database` auf eine MaxMind-GeoLite2/GeoIP2-ASN-Datenbank für
+die ASNs und Organisationsnamen und `geoip.country_database` auf eine Länderdatenbank für die
+Länder-Abzeichen — siehe den `geoip`-Block unter [Konfiguration](/docs/configuration). Ohne sie wird
+der Drawer trotzdem gerendert, nur ohne die ASN-Zeile und die Länder-Tags.
+
 ## Authentifizierung
 
 Standardmäßig sind die API und das Dashboard nicht authentifiziert, was nur deshalb sicher ist,
