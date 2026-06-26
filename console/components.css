@@ -316,6 +316,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
    ========================================================================== */
 .scrim { position: fixed; inset: 0; background: #00060cb3; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease); z-index: 100; }
 .scrim.is-open { opacity: 1; pointer-events: auto; }
+/* nav drawer backdrop — desktop never shows it; the mobile rules below light it up */
+.nav-scrim { display: none; }
 .drawer {
   position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 94vw);
   background: var(--base); border-left: 1px solid var(--border); box-shadow: var(--shadow-drawer);
@@ -427,16 +429,61 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
   .cols-3 { grid-template-columns: 1fr 1fr; }
   .counters .counter:nth-child(n+5) { display: none; }
 }
+
+/* ===== Tablet / phone: sidebar becomes an off-canvas drawer =====
+   The desktop grid reserves a column for the rail; below 900px the viewport is
+   too narrow to spare it, so the layout drops to a single column (top + main)
+   and the sidebar slides in over the content from the hamburger. Reclaiming the
+   rail's width is also what stops the topbar's min-content from forcing the
+   `1fr` column wider than the viewport (which clipped every view on the right). */
 @media (max-width: 900px) {
-  .app { grid-template-columns: var(--sidebar-w-collapsed) 1fr; }
-  .app .brand__name, .app .nav__item__txt, .app .nav__count, .app .role__btn__txt { display: none; }
-  .app .nav__item { justify-content: center; }
-  .counters { display: none; }
+  .app { grid-template-columns: 1fr; grid-template-areas: "top" "main"; }
+  /* let both items shrink below their content so the column can never exceed
+     the viewport (otherwise .app's overflow:hidden chops the right edge off) */
+  .main, .topbar { min-width: 0; }
+
+  .sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0;
+    width: min(290px, 84vw);
+    transform: translateX(-100%);
+    transition: transform var(--dur-slow) var(--ease-out);
+    box-shadow: var(--shadow-drawer);
+    z-index: 110;
+  }
+  .app.is-nav-open .sidebar { transform: none; }
+  /* the drawer always shows full labels, even if the desktop session left the
+     rail collapsed (is-collapsed) */
+  .app.is-collapsed .brand__name,
+  .app.is-collapsed .nav__item__txt,
+  .app.is-collapsed .nav__count { display: revert; }
+  .app.is-collapsed .nav__item { justify-content: flex-start; padding-left: var(--s-2); padding-right: var(--s-2); }
+
+  /* backdrop behind the nav drawer */
+  .nav-scrim {
+    display: block; position: fixed; inset: 0; background: #00060cb3;
+    opacity: 0; pointer-events: none;
+    transition: opacity var(--dur) var(--ease); z-index: 105;
+  }
+  .app.is-nav-open .nav-scrim { opacity: 1; pointer-events: auto; }
+
+  /* topbar: trim to what fits a phone — posture + mode + language stay; the
+     live label/clock and counters drop (the pulsing dot keeps the heartbeat) */
+  .counters, .counter__sep, .live__txt, .live__time { display: none; }
+  .topbar { gap: var(--s-2); padding: 0 var(--s-3); }
+  .topbar__left { gap: var(--s-2); min-width: 0; }
+  #reloadBtn span { display: none; }
+
   .view { padding: var(--s-4) var(--s-4) var(--s-8); }
-  .host-row { grid-template-columns: 1.4fr 70px 1fr; }
+  .host-row { grid-template-columns: 1.4fr 64px 1.2fr; }
   .host-rates { display: none; }
 }
+
 @media (max-width: 560px) {
   .cols-3, .stats { grid-template-columns: 1fr; }
   .posture-banner__meta { display: none; }
+  .posture-banner { padding: var(--s-4); gap: var(--s-3); }
+  .view-head__title { font-size: var(--t-xl); }
+  /* stack the baseline bar full-width under the IP + multiplier */
+  .host-row { grid-template-columns: 1fr auto; gap: var(--s-2) var(--s-3); }
+  .host-row .bl-bar { grid-column: 1 / -1; }
 }
