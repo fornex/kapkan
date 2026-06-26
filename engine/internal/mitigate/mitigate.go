@@ -1214,6 +1214,16 @@ func (m *Mitigator) sweepExpired() {
 			m.withdrawLocked(b, "prefix left configured networks", false)
 			continue
 		}
+		// SAFETY RULE: the whitelist is absolute. A reload can add a whitelisted
+		// member into a prefix mid carpet-attack; withdraw promptly rather than
+		// keep a protected address blackholed as collateral until the TTL lapses.
+		// OnAttackOngoing already stops refreshing such a ban; this takes it down.
+		if cfg.PrefixContainsWhitelisted(b.Prefix) {
+			m.log.Warn("carpet ban prefix now contains a whitelisted member; auto-withdrawing",
+				"route", b.Route, "prefix", b.Prefix.String())
+			m.withdrawLocked(b, "prefix contains whitelisted member", false)
+			continue
+		}
 		m.escalateLocked(b, now, cfg)
 	}
 }
