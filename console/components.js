@@ -47,9 +47,31 @@
     out.push(c.nodeType ? c : document.createTextNode(String(c)));
   }
   function syncAttrs(oldEl, newEl) {
-    var na = newEl.attributes, oa = oldEl.attributes, i;
-    for (i = 0; i < na.length; i++) { if (oldEl.getAttribute(na[i].name) !== na[i].value) oldEl.setAttribute(na[i].name, na[i].value); }
-    for (i = oa.length - 1; i >= 0; i--) { if (!newEl.hasAttribute(oa[i].name)) oldEl.removeAttribute(oa[i].name); }
+    var na = newEl.attributes, oa = oldEl.attributes, i, name;
+    for (i = 0; i < na.length; i++) {
+      name = na[i].name;
+      /* The strict dashboard CSP (style-src 'self') blocks setAttribute('style',…)
+         — it counts as an inline style. So sync style through the CSSOM, exactly
+         like h() builds it (e.style.* is script-driven and CSP-permitted).
+         Without this, every re-render silently failed to change an inline style:
+         most visibly the host-detail expand (display:none -> block never applied). */
+      if (name === "style") { syncStyle(oldEl.style, newEl.style); continue; }
+      if (oldEl.getAttribute(name) !== na[i].value) oldEl.setAttribute(name, na[i].value);
+    }
+    for (i = oa.length - 1; i >= 0; i--) {
+      name = oa[i].name;
+      if (newEl.hasAttribute(name)) continue;
+      if (name === "style") syncStyle(oldEl.style, newEl.style); /* newEl has none -> clears via CSSOM */
+      else oldEl.removeAttribute(name);
+    }
+  }
+  /* Reconcile one CSSStyleDeclaration into another via setProperty/removeProperty
+     (CSSOM, not the style attribute) so the strict CSP never blocks it. */
+  function syncStyle(os, ns) {
+    if (os.cssText === ns.cssText) return;
+    var i, p;
+    for (i = os.length - 1; i >= 0; i--) { p = os[i]; if (!ns.getPropertyValue(p)) os.removeProperty(p); }
+    for (i = 0; i < ns.length; i++) { p = ns[i]; os.setProperty(p, ns.getPropertyValue(p), ns.getPropertyPriority(p)); }
   }
   function morphNode(oldN, newN) {
     if (oldN.nodeType !== newN.nodeType) return newN;
