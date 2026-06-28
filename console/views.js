@@ -522,7 +522,9 @@
     return h("div", {}, [
       h("div", { class: "section-label", style: { marginTop: "var(--s-2)" } }, [w.icon("layers"), h("span", { text: I.t("ho.protocols") })]),
       h("div", { class: "proto-grid" }, cells.map(function (c) {
-        return h("div", { class: "proto-cell" }, [h("div", { class: "proto-cell__name", text: c[0] }), h("div", { class: "proto-cell__val", text: I.abbr(c[1], c[2]) })]);
+        /* per-protocol fields are omitempty: absent (undefined) means zero, not
+           NaN — coerce so a calm/TCP-only host shows "0 pps", never "NaN pps". */
+        return h("div", { class: "proto-cell" }, [h("div", { class: "proto-cell__name", text: c[0] }), h("div", { class: "proto-cell__val", text: I.abbr(c[1] || 0, c[2]) })]);
       }))
     ]);
   }
