@@ -19,6 +19,20 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-06-28
+
+### Fixed
+
+- Operator console: clicking a host row in **Hosts** now opens the per-protocol
+  breakdown panel. The DOM-morph applied inline styles via `setAttribute('style')`,
+  which the dashboard's strict CSP (`style-src 'self'`) blocks, so the panel's
+  show/hide never took effect; styles are now applied through the CSSOM.
+- Console assets are served with `Cache-Control: no-cache` and a content-hash
+  ETag, so a redeployed binary's updated UI reaches the browser instead of a
+  stale cached copy lingering after an upgrade.
+- Per-protocol cells for a host with no traffic on a protocol now read `0 pps`
+  instead of `NaN pps`.
+
 ## [1.3.0] - 2026-06-26
 
 ### Added
