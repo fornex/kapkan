@@ -752,6 +752,57 @@ func TestDashboardServing(t *testing.T) {
 	}
 }
 
+// TestDashboardCaching: assets carry Cache-Control: no-cache + a content-hash
+// ETag, and honour conditional requests. This is what makes a redeployed
+// binary's new console reach the browser instead of leaving a stale views.js
+// running (the "I upgraded but the UI didn't change" trap).
+func TestDashboardCaching(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+	h := s.Handler()
+
+	rec := reqWith(h, http.MethodGet, "/views.js", "", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("views.js status = %d, want 200", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", cc)
+	}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("views.js missing ETag")
+	}
+
+	// Same ETag -> 304 with no body.
+	r := httptest.NewRequest(http.MethodGet, "/views.js", nil)
+	r.Header.Set("If-None-Match", etag)
+	rec304 := httptest.NewRecorder()
+	h.ServeHTTP(rec304, r)
+	if rec304.Code != http.StatusNotModified {
+		t.Errorf("conditional GET status = %d, want 304", rec304.Code)
+	}
+	if rec304.Body.Len() != 0 {
+		t.Errorf("304 response wrote %d body bytes, want 0", rec304.Body.Len())
+	}
+
+	// Stale ETag -> full 200 with the asset.
+	r2 := httptest.NewRequest(http.MethodGet, "/views.js", nil)
+	r2.Header.Set("If-None-Match", `"deadbeefdeadbeefdeadbeefdeadbeef"`)
+	rec200 := httptest.NewRecorder()
+	h.ServeHTTP(rec200, r2)
+	if rec200.Code != http.StatusOK {
+		t.Errorf("stale conditional GET status = %d, want 200", rec200.Code)
+	}
+	if rec200.Body.Len() == 0 {
+		t.Error("stale conditional GET returned empty body, want asset")
+	}
+
+	// Distinct assets hash to distinct ETags (no accidental shared constant).
+	other := reqWith(h, http.MethodGet, "/app.js", "", "", "").Header().Get("ETag")
+	if other == "" || other == etag {
+		t.Errorf("app.js ETag = %q, views.js ETag = %q; want distinct non-empty", other, etag)
+	}
+}
+
 func tenantAPIYAML() string {
 	y := strings.Replace(apiYAML, "  listen: \"127.0.0.1:8080\"\n",
 		"  listen: \"127.0.0.1:8080\"\n  tokens:\n"+
