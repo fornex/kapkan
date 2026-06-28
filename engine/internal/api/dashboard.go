@@ -1,8 +1,11 @@
 package api
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"net/http"
+	"strings"
 )
 
 // dashboardFS holds the embedded single-page UI. It is a handful of static
@@ -48,25 +51,57 @@ const dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self'; c
 // registerDashboard mounts the embedded UI. Each handler re-checks the
 // config per request, so a reload that toggles api.dashboard takes effect
 // without a restart.
+//
+// Assets are sent with Cache-Control: no-cache plus a content-hash ETag. The
+// embedded bytes are immutable per build, so the ETag is stable while the
+// binary runs (cheap 304s) but changes the moment a redeployed binary embeds a
+// new console — which forces the browser to drop its cached JS/CSS instead of
+// silently running the old UI after an upgrade.
 func (s *Server) registerDashboard(mux *http.ServeMux) {
 	for pattern, a := range dashboardAssets {
 		asset := a
+		var etag string
+		if b, err := dashboardFS.ReadFile(asset.file); err == nil {
+			sum := sha256.Sum256(b)
+			etag = `"` + hex.EncodeToString(sum[:16]) + `"`
+		}
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			if !s.store.Get().API.DashboardEnabled() {
 				http.NotFound(w, r)
 				return
+			}
+			h := w.Header()
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("Content-Security-Policy", dashboardCSP)
+			h.Set("Referrer-Policy", "no-referrer")
+			h.Set("Cache-Control", "no-cache")
+			if etag != "" {
+				h.Set("ETag", etag)
+				if etagMatches(r.Header.Get("If-None-Match"), etag) {
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
 			}
 			b, err := dashboardFS.ReadFile(asset.file)
 			if err != nil {
 				http.Error(w, "dashboard asset missing", http.StatusInternalServerError)
 				return
 			}
-			h := w.Header()
 			h.Set("Content-Type", asset.contentType)
-			h.Set("X-Content-Type-Options", "nosniff")
-			h.Set("Content-Security-Policy", dashboardCSP)
-			h.Set("Referrer-Policy", "no-referrer")
 			_, _ = w.Write(b)
 		})
 	}
+}
+
+// etagMatches reports whether an If-None-Match header lists the given strong
+// ETag (or "*"). Browsers echo back exactly what we sent; the weak prefix is
+// tolerated for completeness.
+func etagMatches(ifNoneMatch, etag string) bool {
+	for _, part := range strings.Split(ifNoneMatch, ",") {
+		part = strings.TrimSpace(part)
+		if part == "*" || strings.TrimPrefix(part, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }
