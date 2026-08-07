@@ -58,9 +58,9 @@ const (
 // fragment extension header) is not supported and Build rejects it.
 //
 // The following fields survive a Build -> WritePcap -> ReadPcap round trip
-// unchanged: SrcMAC, DstMAC, VLANs, SrcIP, DstIP, Proto, SrcPort, DstPort,
-// TCPFlags, ICMPType, ICMPCode, IPID, DontFragment, MoreFragments, FragOffset,
-// TTL (once defaulted) and Payload.
+// unchanged: SrcMAC, DstMAC, VLANs, SrcIP, DstIP, IPv4Options, Proto, SrcPort,
+// DstPort, TCPFlags, ICMPType, ICMPCode, IPID, DontFragment, MoreFragments,
+// FragOffset, TTL (once defaulted) and Payload.
 type Frame struct {
 	SrcMAC, DstMAC [6]byte
 	// VLANs is an optional 802.1Q tag stack, outermost first. Each entry is a
@@ -68,6 +68,16 @@ type Frame struct {
 	VLANs []uint16
 
 	SrcIP, DstIP netip.Addr
+
+	// IPv4Options are the bytes between the fixed 20-byte IPv4 header and the
+	// L4 header, already padded by the caller to a 4-byte boundary (IHL counts
+	// 32-bit words). Build sets IHL accordingly and checksums the whole header
+	// including the options. At most 40 bytes, the maximum IHL 15 allows; an
+	// odd length or any value on an IPv6 frame is rejected.
+	//
+	// This exists so a parser can be driven with a header whose L4 offset is
+	// not 34: an option-skipping bug is invisible to every other shape.
+	IPv4Options []byte
 
 	Proto    uint8  // ProtoTCP, ProtoUDP, ProtoICMP or ProtoICMPv6
 	SrcPort  uint16 // TCP/UDP only
@@ -106,6 +116,17 @@ func (f Frame) Build() ([]byte, error) {
 	isV6 := src.Is6()
 	if isV6 && (f.FragOffset != 0 || f.MoreFragments) {
 		return nil, fmt.Errorf("pktgen: IPv6 fragmentation is not supported")
+	}
+	if n := len(f.IPv4Options); n > 0 {
+		if isV6 {
+			return nil, fmt.Errorf("pktgen: IPv4Options set on an IPv6 frame")
+		}
+		if n%4 != 0 {
+			return nil, fmt.Errorf("pktgen: IPv4Options length %d is not a multiple of 4", n)
+		}
+		if n > 40 {
+			return nil, fmt.Errorf("pktgen: IPv4Options length %d exceeds the 40 bytes IHL allows", n)
+		}
 	}
 
 	ttl := f.TTL
@@ -146,12 +167,14 @@ func (f Frame) Build() ([]byte, error) {
 	return out, nil
 }
 
-// appendIPv4 appends a 20-byte IPv4 header (no options) with a correct header
-// checksum. totalLen covers the header plus l4.
+// appendIPv4 appends the IPv4 header — 20 bytes plus any IPv4Options — with a
+// correct header checksum. The total-length field covers the header, the
+// options and l4. Build has already validated the option length.
 func (f Frame) appendIPv4(out []byte, src, dst netip.Addr, ttl uint8, l4 []byte) []byte {
 	start := len(out)
-	out = append(out, 0x45, 0x00) // version 4, IHL 5, DSCP/ECN 0
-	out = appendU16(out, uint16(20+len(l4)))
+	hdrLen := 20 + len(f.IPv4Options)
+	out = append(out, byte(0x40|hdrLen/4), 0x00) // version 4, IHL, DSCP/ECN 0
+	out = appendU16(out, uint16(hdrLen+len(l4)))
 	out = appendU16(out, f.IPID)
 	frag := f.FragOffset & 0x1fff
 	if f.DontFragment {
@@ -166,6 +189,7 @@ func (f Frame) appendIPv4(out []byte, src, dst netip.Addr, ttl uint8, l4 []byte)
 	s4, d4 := src.As4(), dst.As4()
 	out = append(out, s4[:]...)
 	out = append(out, d4[:]...)
+	out = append(out, f.IPv4Options...)
 	binary.BigEndian.PutUint16(out[start+10:], checksum(out[start:]))
 	return out
 }
@@ -324,6 +348,7 @@ func parseIPv4(f Frame, b []byte) (Frame, error) {
 	f.FragOffset = frag & 0x1fff
 	f.SrcIP = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
 	f.DstIP = netip.AddrFrom4([4]byte{b[16], b[17], b[18], b[19]})
+	f.IPv4Options = clone(b[20:ihl])
 	total := int(binary.BigEndian.Uint16(b[2:]))
 	if total < ihl || total > len(b) {
 		total = len(b)

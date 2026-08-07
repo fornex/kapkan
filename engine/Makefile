@@ -15,7 +15,23 @@ LDFLAGS := -s -w \
 	-X $(BUILDINFO).commit=$(COMMIT) \
 	-X $(BUILDINFO).date=$(DATE)
 
-.PHONY: build test lint bench run-dev clean console-sync schema
+# Toolchain for regenerating the XDP data plane. Apple's clang has no bpf
+# target; Homebrew's LLVM does. Override on other hosts (a Linux CI box usually
+# just needs BPF_CLANG=clang BPF_STRIP=llvm-strip).
+BPF_CLANG ?= /usr/local/opt/llvm@21/bin/clang
+BPF_STRIP ?= /usr/local/opt/llvm@21/bin/llvm-strip
+
+# Where the kernel-side smoke tests run. eBPF needs a Linux kernel, so on macOS
+# the test binary is cross-compiled and executed in a privileged container.
+BPF_TEST_ARCH  ?= arm64
+BPF_TEST_IMAGE ?= alpine:3.20
+
+# Iterations for `make dataplane-bench`. The kernel runs the program this many
+# times inside one syscall, so it is a fixed count rather than Go's adaptive b.N.
+BPF_BENCH_N ?= 300000
+
+.PHONY: build test lint bench run-dev clean console-sync schema \
+	dataplane-sync dataplane-test dataplane-bench
 
 # The operator console lives in the repository's top-level console/ folder; the Go
 # binary go:embeds internal/api/static. Copy console/ there before any compile
@@ -46,6 +62,46 @@ run-dev: build
 schema: console-sync
 	go run ./cmd/kapkan -dump-schema > ../docs/config-schema.json
 
+# Regenerate the XDP object and its bpf2go bindings from bpf/*.c. Unlike
+# console-sync this is deliberately NOT a prerequisite of build/test: the .o and
+# the generated .go are committed, so clang is a contributor/CI dependency and
+# never an operator one. `make build` must work on a box with nothing but Go.
+# Commit the result — TestAllMapsMatchesObject and TestContractMatchesC fail
+# until the object and the Go contract agree again.
+dataplane-sync:
+	@test -x "$(BPF_CLANG)" || { \
+		echo "BPF_CLANG=$(BPF_CLANG) not found or not executable."; \
+		echo "On macOS: brew install llvm@21 (Apple's clang has no bpf target)."; \
+		exit 1; }
+	BPF2GO_CC=$(BPF_CLANG) BPF2GO_STRIP=$(BPF_STRIP) go generate ./internal/dataplane/...
+
+# Run the data-plane tests against a real kernel. The verifier is the whole
+# risk in BPF work, and it only exists on Linux: `make test` on macOS skips the
+# kernel-side cases, so this is the target that actually proves the program
+# loads. Needs Docker (Desktop is fine) and runs privileged because loading an
+# XDP program and BPF_PROG_TEST_RUN both want CAP_BPF/CAP_SYS_ADMIN. The repo
+# root is mounted so the C/Go drift tests can read bpf/include/kapkan_maps.h.
+dataplane-test:
+	GOOS=linux GOARCH=$(BPF_TEST_ARCH) CGO_ENABLED=0 \
+		go test -c -o .dataplane.test ./internal/dataplane/
+	docker run --rm --privileged \
+		-v "$(CURDIR)/..:/w" -w /w/engine/internal/dataplane \
+		$(BPF_TEST_IMAGE) /w/engine/.dataplane.test -test.v
+	rm -f .dataplane.test
+
+# Capacity numbers for the data plane, via the kernel's own PROG_TEST_RUN
+# repeat loop. Same container as dataplane-test. The absolute figures depend on
+# the host (on macOS this is a VM); the SCALING with rule count is the part
+# that transfers.
+dataplane-bench:
+	GOOS=linux GOARCH=$(BPF_TEST_ARCH) CGO_ENABLED=0 \
+		go test -c -o .dataplane.test ./internal/dataplane/
+	docker run --rm --privileged \
+		-v "$(CURDIR)/..:/w" -w /w/engine/internal/dataplane \
+		$(BPF_TEST_IMAGE) /w/engine/.dataplane.test \
+		-test.run '^$$' -test.bench . -test.benchtime $(BPF_BENCH_N)x
+	rm -f .dataplane.test
+
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) .dataplane.test
 	rm -rf internal/api/static

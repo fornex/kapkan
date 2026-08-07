@@ -20,8 +20,8 @@ import (
 // notices. This file is the only guard: it compares the key sets of every
 // catalog against en.js and fails with the exact missing/extra keys.
 //
-// It reads the CANONICAL console/ source, never the generated copy the engine
-// go:embeds at internal/api/static/ (gitignored, refreshed by `make
+// It reads the CANONICAL console/ source, never the generated copy that the
+// engine embeds from internal/api/static/ (gitignored, refreshed by `make
 // console-sync`) — a stale copy would let the gate pass on the wrong bytes.
 //
 // Because those inputs live outside the module, `go test` can serve a cached

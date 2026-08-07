@@ -55,6 +55,147 @@ jobs:
           version: latest
           working-directory: engine
 
+  bpf:
+    name: XDP data plane
+    # Pinned, not ubuntu-latest. This job makes claims about the machine it runs
+    # on — that the kernel exposes BTF, that BPF_PROG_TEST_RUN works with three
+    # capabilities and no more, that apt.llvm.org publishes for this codename —
+    # so a silent runner-image rotation should be a deliberate bump here, not a
+    # surprise on an unrelated PR.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache: true
+          cache-dependency-path: engine/go.sum
+
+      # The drift gate below compares BYTES, so the compiler is part of the
+      # contract: a different LLVM major reorders instructions and renumbers BTF
+      # for reasons that have nothing to do with kapkan_xdp.c. 21 is what
+      # engine/bpf/README.md documents and what dataplane.pinnedClangMajor
+      # pins. The runner image ships clang 16/17/18 only, hence apt.llvm.org.
+      #
+      # Verified byte-identical across hosts at this major: Homebrew clang
+      # 21.1.8 (darwin/x86_64) and this repo's clang 21.1.8 (linux/aarch64)
+      # produce the same object, because bpf2go compiles with -fno-ident,
+      # -fdebug-prefix-map and -fdebug-compilation-dir.
+      - name: Install clang 21 (pinned toolchain)
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg]" \
+               "http://apt.llvm.org/${VERSION_CODENAME}/" \
+               "llvm-toolchain-${VERSION_CODENAME}-21 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-21 llvm-21
+          clang-21 --version
+
+      # Licensing gate. Every Kapkan-authored C/H file must say what it is under,
+      # and the vendored libbpf headers must still be the bytes we recorded.
+      - name: Lint SPDX identifiers and vendored-header provenance
+        run: |
+          set -euo pipefail
+          fail=0
+
+          # libbpf generates bpf_helper_defs.h from the kernel's bpf.h and ships
+          # it with no SPDX tag of its own. It is the single allowed exception;
+          # its licence is recorded in bpf/README.md and its bytes are checked
+          # immediately below, so the exception costs no coverage.
+          allow=bpf/include/bpf_helper_defs.h
+          while IFS= read -r f; do
+            if [ "$f" = "$allow" ]; then continue; fi
+            if ! grep -q 'SPDX-License-Identifier:' "$f"; then
+              echo "::error file=engine/$f::missing SPDX-License-Identifier"
+              fail=1
+            fi
+          done < <(find bpf -type f \( -name '*.c' -o -name '*.h' \) | sort)
+
+          if [ ! -f "$allow" ]; then
+            echo "::error::SPDX allowlist names $allow, which no longer exists — drop the exception"
+            fail=1
+          fi
+
+          # Checksums come out of the provenance table in bpf/README.md rather
+          # than being repeated here, so there is one place to update when a
+          # header is re-vendored and no way for the two to disagree.
+          sums=$(awk -F'|' '/`include\/bpf_.*\.h`/ {
+                   gsub(/[ `]/, "", $2); gsub(/[ `]/, "", $4); print $4 "  " $2 }' bpf/README.md)
+          if [ "$(printf '%s\n' "$sums" | grep -c .)" -ne 3 ]; then
+            echo "::error::expected 3 vendored headers in the bpf/README.md provenance table, got:"
+            printf '%s\n' "$sums"
+            fail=1
+          else
+            printf '%s\n' "$sums" | (cd bpf && sha256sum -c -) || fail=1
+          fi
+
+          exit $fail
+
+      # The committed .o is what an operator's kernel actually runs, so it — not
+      # the C — is the artifact of record, exactly as docs/config-schema.json is
+      # for the config (TestSchemaMatchesGenerated). Regenerate and byte-compare;
+      # a C change that never made it into the object is a shipping bug.
+      #
+      # The test self-skips without a toolchain so it is a no-op for contributors
+      # on macOS-without-Homebrew-LLVM and inside the container `make
+      # dataplane-test` uses. KAPKAN_BPF_DRIFT=require turns those skips into
+      # failures, which is what makes this job the enforcement point.
+      - name: Drift gate (regenerate the BPF object, byte-compare)
+        env:
+          KAPKAN_BPF_DRIFT: require
+        run: |
+          go test -count=1 -v \
+            -run 'TestGeneratedArtifactsMatchSource|TestGenerateDirectiveMatches' \
+            ./internal/dataplane/
+
+      # Logged, not asserted. When the kernel tests below start failing after a
+      # runner-image bump, these three lines say whether the kernel moved,
+      # whether BTF went away, or whether the sysctl was tightened.
+      - name: Kernel prerequisites
+        run: |
+          uname -r
+          ls -l /sys/kernel/btf/vmlinux
+          cat /proc/sys/kernel/unprivileged_bpf_disabled
+
+      # Least privilege, established by experiment rather than assumed — and
+      # each of the three is load-bearing (measured on 6.12, cap sets varied one
+      # at a time):
+      #   no caps                -> map create EPERM
+      #   CAP_BPF                -> maps create, prog load EPERM
+      #   CAP_BPF+CAP_PERFMON    -> prog load EPERM (XDP needs CAP_NET_ADMIN)
+      #   CAP_BPF+CAP_NET_ADMIN  -> verifier REJECTS: "R7 pointer -= pointer
+      #                             prohibited". The parser computes
+      #                             data_end - data, and pointer arithmetic
+      #                             between two pointers is gated on
+      #                             allow_ptr_leaks == perfmon_capable().
+      #   all three              -> passes, as a non-root uid
+      # BPF_PROG_TEST_RUN itself needs nothing beyond those. Running the job
+      # under plain `sudo` would hide a future dependency on CAP_SYS_ADMIN;
+      # this way CI keeps engine/docs/dataplane-operations.md honest.
+      - name: Data-plane tests (CAP_BPF + CAP_NET_ADMIN + CAP_PERFMON, non-root)
+        working-directory: engine/internal/dataplane
+        run: |
+          set -euo pipefail
+          go test -c -o dataplane.test .
+          drop=(sudo setpriv
+                --reuid="$(id -u)" --regid="$(id -g)" --clear-groups
+                --inh-caps=+bpf,+net_admin,+perfmon
+                --ambient-caps=+bpf,+net_admin,+perfmon)
+          # Print the capability sets first: if the run below ever fails, this
+          # line is the difference between a one-minute diagnosis and an
+          # afternoon. Expect CapEff=000000c000001000 — bits 39 (CAP_BPF),
+          # 38 (CAP_PERFMON) and 12 (CAP_NET_ADMIN), and nothing else.
+          "${drop[@]}" sh -c 'id; grep -E "^Cap(Eff|Bnd|Amb)" /proc/self/status'
+          "${drop[@]}" ./dataplane.test -test.v -test.count=1
+          rm -f dataplane.test
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest

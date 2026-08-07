@@ -133,6 +133,9 @@ func equalFrame(a, b Frame) bool {
 	if a.DontFragment != b.DontFragment || a.MoreFragments != b.MoreFragments || a.FragOffset != b.FragOffset {
 		return false
 	}
+	if !bytes.Equal(a.IPv4Options, b.IPv4Options) {
+		return false
+	}
 	return bytes.Equal(a.Payload, b.Payload)
 }
 
@@ -177,6 +180,19 @@ func TestBuildParseRoundTrip(t *testing.T) {
 			SrcIP: netip.MustParseAddr("198.51.100.2"), DstIP: netip.MustParseAddr("203.0.113.4"),
 			Proto: ProtoUDP, TTL: 64, IPID: 0x4321, FragOffset: 185, Payload: bytes.Repeat([]byte{0x44}, 800),
 		},
+		"v4 tcp with options": {
+			SrcIP: netip.MustParseAddr("198.51.100.3"), DstIP: netip.MustParseAddr("203.0.113.5"),
+			Proto: ProtoTCP, TCPFlags: TCPSyn, SrcPort: 1234, DstPort: 80, TTL: 64,
+			// NOP, NOP, NOP, End of Option List: the shortest legal 4-byte
+			// option block, so IHL becomes 6 and L4 starts at 38, not 34.
+			IPv4Options: []byte{0x01, 0x01, 0x01, 0x00},
+			Payload:     []byte("x"),
+		},
+		"v4 udp with maximum options": {
+			SrcIP: netip.MustParseAddr("198.51.100.4"), DstIP: netip.MustParseAddr("203.0.113.6"),
+			Proto: ProtoUDP, SrcPort: 53, DstPort: 33333, TTL: 64,
+			IPv4Options: bytes.Repeat([]byte{0x01}, 40), // IHL 15, the ceiling
+		},
 	}
 	for name, f := range frames {
 		t.Run(name, func(t *testing.T) {
@@ -190,6 +206,49 @@ func TestBuildParseRoundTrip(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIPv4OptionsHeader checks the three things an option block has to get
+// right: IHL counts the longer header, the header checksum covers the options,
+// and the transport checksum (whose pseudo-header does NOT include them) stays
+// valid. A frame that fails any of these would silently mis-drive a parser
+// under test instead of exercising its option-skipping path.
+func TestIPv4OptionsHeader(t *testing.T) {
+	for _, n := range []int{4, 12, 40} {
+		t.Run(itoa(n), func(t *testing.T) {
+			f := Frame{
+				SrcIP: netip.MustParseAddr("198.51.100.7"), DstIP: netip.MustParseAddr("203.0.113.9"),
+				Proto: ProtoTCP, TCPFlags: TCPSyn, SrcPort: 1024, DstPort: 80, TTL: 64,
+				IPv4Options: bytes.Repeat([]byte{0x01}, n),
+			}
+			pkt := mustBuild(t, f)
+			ip := pkt[14:]
+			if got, want := int(ip[0]&0x0f), (20+n)/4; got != want {
+				t.Errorf("IHL = %d, want %d", got, want)
+			}
+			if got, want := int(binary.BigEndian.Uint16(ip[2:])), 20+n+20; got != want {
+				t.Errorf("total length = %d, want %d", got, want)
+			}
+			if got := checksum(ip[:20+n]); got != 0 {
+				t.Errorf("header checksum over the header+options = %#04x, want 0", got)
+			}
+			if got := l4Checksum(f.SrcIP, f.DstIP, ProtoTCP, pkt[14+20+n:]); got != 0 {
+				t.Errorf("TCP checksum = %#04x, want 0 (options are not in the pseudo-header)", got)
+			}
+		})
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
 }
 
 // TestPcapRoundTrip verifies a generated set survives WritePcap/ReadPcap
@@ -304,6 +363,18 @@ func TestBuildErrors(t *testing.T) {
 		"invalid addr":    {Proto: ProtoUDP},
 		"bad proto":       {SrcIP: netip.MustParseAddr("192.0.2.1"), DstIP: netip.MustParseAddr("192.0.2.2"), Proto: 99},
 		"v6 fragment":     {SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"), Proto: ProtoUDP, MoreFragments: true},
+		"unaligned options": {
+			SrcIP: netip.MustParseAddr("192.0.2.1"), DstIP: netip.MustParseAddr("192.0.2.2"),
+			Proto: ProtoUDP, IPv4Options: []byte{0x01, 0x01, 0x00},
+		},
+		"oversized options": {
+			SrcIP: netip.MustParseAddr("192.0.2.1"), DstIP: netip.MustParseAddr("192.0.2.2"),
+			Proto: ProtoUDP, IPv4Options: bytes.Repeat([]byte{0x01}, 44),
+		},
+		"options on v6": {
+			SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"),
+			Proto: ProtoUDP, IPv4Options: []byte{0x01, 0x01, 0x01, 0x00},
+		},
 	}
 	for name, f := range cases {
 		t.Run(name, func(t *testing.T) {

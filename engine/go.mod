@@ -3,6 +3,7 @@ module github.com/kapkan-io/kapkan
 go 1.26.4
 
 require (
+	github.com/cilium/ebpf v0.22.0
 	github.com/netsampler/goflow2/v2 v2.2.6
 	github.com/oschwald/maxminddb-golang/v2 v2.4.0
 	github.com/osrg/gobgp/v3 v3.37.0
@@ -30,11 +31,11 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
-	github.com/sirupsen/logrus v1.9.3 // indirect
+	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
+	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/spf13/viper v1.16.0 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/vishvananda/netlink v1.2.1 // indirect
