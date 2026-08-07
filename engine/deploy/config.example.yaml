@@ -261,7 +261,7 @@ thresholds: # per destination host, after sampling correction
 #       profile: icmp_cap
 #
 #   limits:
-#     max_dynamic_rules: 4096      # must exceed ban.max_active_bans * 8
+#     max_dynamic_rules: 4096      # must be >= ban.max_active_bans * 8
 #     max_static_rules: 256
 #     max_ratelimit_sources: 1048576   # per-source token buckets (kernel memory)
 
