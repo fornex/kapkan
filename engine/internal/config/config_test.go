@@ -1187,7 +1187,7 @@ func TestDivertScrubbingResolution(t *testing.T) {
 		{"de-escalate blackhole→divert",
 			validYAML + scrub + "escalation:\n  - {after_seconds: 0, action: blackhole}\n  - {after_seconds: 5, action: divert}\n", "de-escalates"},
 		{"unknown action label",
-			validYAML + "escalation:\n  - {after_seconds: 0, action: scrub}\n", "none|flowspec|divert|blackhole"},
+			validYAML + "escalation:\n  - {after_seconds: 0, action: scrub}\n", "none|dataplane|flowspec|divert|blackhole"},
 	}
 	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {

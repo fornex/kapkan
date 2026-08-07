@@ -62,6 +62,12 @@ func TestSchemaEnumsPresent(t *testing.T) {
 		{"hostgroups", "calculation"},
 		{"api", "tokens", "role"},
 		{"notify", "exec", "format"},
+		{"scrubbing", "node_selection"},
+		{"scrubbing", "on_all_nodes_lost"},
+		{"dataplane", "xdp_mode"},
+		{"dataplane", "on_exit"},
+		{"dataplane", "static_rules", "action"},
+		{"dataplane", "static_rules", "match", "proto"},
 	} {
 		node := resolveField(t, doc, segs...)
 		enum, ok := node["enum"].([]any)

@@ -39,6 +39,13 @@ api:
   listen: "127.0.0.1:8080"
 `
 
+// dataplaneBlock is the smallest data-plane stanza that validates, appended by
+// the cases that need the feature present rather than under test themselves.
+const dataplaneBlock = `
+dataplane:
+  interfaces: ["eth0"]
+`
+
 func TestParseAcceptsValidBase(t *testing.T) {
 	if _, err := Parse([]byte(validBase)); err != nil {
 		t.Fatalf("validBase should parse, got: %v", err)
@@ -73,6 +80,77 @@ api: {listen: "127.0.0.1:8080"}
 			name:    "de-escalating ladder",
 			yaml:    validBase + "\nescalation:\n  - {after_seconds: 0, action: blackhole}\n  - {after_seconds: 30, action: flowspec}\n",
 			wantErr: "de-escalates",
+		},
+		{
+			// dataplane is the most surgical rung, so climbing from flowspec
+			// back down to it is a de-escalation like any other.
+			name:    "de-escalating from flowspec to dataplane",
+			yaml:    validBase + dataplaneBlock + "\nescalation:\n  - {after_seconds: 0, action: flowspec}\n  - {after_seconds: 30, action: dataplane}\n",
+			wantErr: "de-escalates",
+		},
+		{
+			name:    "dataplane rung without a dataplane block",
+			yaml:    validBase + "\nescalation:\n  - {after_seconds: 0, action: dataplane}\n",
+			wantErr: "requires a dataplane block",
+		},
+		{
+			name:    "dataplane rung with the block disabled",
+			yaml:    validBase + "\ndataplane:\n  enabled: false\n  interfaces: [\"eth0\"]\n" + "\nescalation:\n  - {after_seconds: 0, action: dataplane}\n",
+			wantErr: "requires dataplane.enabled",
+		},
+		{
+			name:    "dataplane enabled without interfaces",
+			yaml:    validBase + "\ndataplane:\n  interfaces: []\n",
+			wantErr: "at least one interface",
+		},
+		{
+			name:    "static rule ratelimit without a profile",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - name: cap\n      match: {proto: icmp}\n      action: ratelimit\n",
+			wantErr: "requires profile",
+		},
+		{
+			name:    "static rule references an undeclared profile",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - name: cap\n      match: {proto: icmp}\n      action: ratelimit\n      profile: nope\n",
+			wantErr: "is not declared",
+		},
+		{
+			name:    "duplicate static rule names",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - {name: r, match: {proto: udp}, action: drop}\n    - {name: r, match: {proto: tcp}, action: drop}\n",
+			wantErr: "duplicate rule name",
+		},
+		{
+			name:    "ratelimit profile with neither pps nor mbps",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  ratelimit_profiles:\n    - {name: idle}\n",
+			wantErr: "set pps, mbps or both",
+		},
+		{
+			// max_active_bans is 50 in validBase, so the dynamic map must hold
+			// 400 entries; sizing it below that guarantees mid-attack failures.
+			name:    "dynamic rule map too small for max_active_bans",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  limits: {max_dynamic_rules: 8}\n",
+			wantErr: "below ban.max_active_bans",
+		},
+		{
+			name:    "unknown xdp_mode",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  xdp_mode: turbo\n",
+			wantErr: "xdp_mode must be",
+		},
+		{
+			name:    "duplicate scrubbing node names",
+			yaml:    validBase + "\nscrubbing:\n  nodes:\n    - {name: n, next_hop: \"192.0.2.9\"}\n    - {name: n, next_hop: \"192.0.2.10\"}\n",
+			wantErr: "duplicate node name",
+		},
+		{
+			name:    "node selection without any nodes",
+			yaml:    validBase + "\nscrubbing:\n  node_selection: least_loaded\n",
+			wantErr: "require at least one scrubbing.nodes entry",
+		},
+		{
+			// A managed node satisfies the divert target, so this ladder is
+			// valid even though the scalar next_hop is unset.
+			name:    "divert with neither a next-hop nor a node",
+			yaml:    validBase + "\nescalation:\n  - {after_seconds: 0, action: divert}\n",
+			wantErr: "divert requires scrubbing.next_hop",
 		},
 		{
 			name:    "flowspec on a total hostgroup",

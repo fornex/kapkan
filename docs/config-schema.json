@@ -286,6 +286,140 @@
       "type": "object",
       "x-optional": true
     },
+    "dataplane": {
+      "additionalProperties": false,
+      "properties": {
+        "allowlist": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "drop_malformed": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean",
+          "x-optional": true
+        },
+        "interfaces": {
+          "items": {
+            "pattern": "^[A-Za-z0-9._@:-]{1,15}$",
+            "type": "string"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "limits": {
+          "additionalProperties": false,
+          "properties": {
+            "max_dynamic_rules": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_ratelimit_sources": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_static_rules": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "on_exit": {
+          "enum": [
+            "keep",
+            "detach"
+          ],
+          "type": "string"
+        },
+        "pin_path": {
+          "type": "string"
+        },
+        "ratelimit_profiles": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "mbps": {
+                "type": "integer"
+              },
+              "name": {
+                "pattern": "^[A-Za-z0-9._-]{1,64}$",
+                "type": "string"
+              },
+              "pps": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "static_rules": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "enum": [
+                  "pass",
+                  "drop",
+                  "ratelimit"
+                ],
+                "type": "string"
+              },
+              "match": {
+                "additionalProperties": false,
+                "properties": {
+                  "dst_port": {
+                    "type": "integer"
+                  },
+                  "proto": {
+                    "enum": [
+                      "tcp",
+                      "udp",
+                      "icmp",
+                      "icmp6"
+                    ],
+                    "type": "string"
+                  },
+                  "src": {
+                    "type": "string"
+                  },
+                  "src_port": {
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "name": {
+                "pattern": "^[A-Za-z0-9._-]{1,64}$",
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "xdp_mode": {
+          "enum": [
+            "auto",
+            "native",
+            "generic"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "x-optional": true
+    },
     "dry_run": {
       "type": "boolean"
     },
@@ -296,6 +430,7 @@
           "action": {
             "enum": [
               "none",
+              "dataplane",
               "flowspec",
               "divert",
               "blackhole"
@@ -451,6 +586,7 @@
                 "action": {
                   "enum": [
                     "none",
+                    "dataplane",
                     "flowspec",
                     "divert",
                     "blackhole"
@@ -498,7 +634,8 @@
             "enum": [
               "blackhole",
               "flowspec",
-              "divert"
+              "divert",
+              "dataplane"
             ],
             "type": "string"
           },
@@ -658,7 +795,8 @@
       "enum": [
         "blackhole",
         "flowspec",
-        "divert"
+        "divert",
+        "dataplane"
       ],
       "type": "string"
     },
@@ -839,6 +977,56 @@
         },
         "next_hop6": {
           "type": "string"
+        },
+        "node_selection": {
+          "enum": [
+            "affinity",
+            "least_loaded",
+            "ecmp"
+          ],
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "capacity_mbps": {
+                "type": "integer"
+              },
+              "hostgroups": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "x-optional": true
+              },
+              "name": {
+                "pattern": "^[A-Za-z0-9._-]{1,64}$",
+                "type": "string"
+              },
+              "next_hop": {
+                "type": "string"
+              },
+              "next_hop6": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "on_all_nodes_lost": {
+          "enum": [
+            "withdraw",
+            "blackhole",
+            "flowspec"
+          ],
+          "type": "string"
+        },
+        "stale_after_seconds": {
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "type": "object"
