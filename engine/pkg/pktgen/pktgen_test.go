@@ -1,0 +1,346 @@
+package pktgen
+
+import (
+	"bytes"
+	"encoding/binary"
+	"net/netip"
+	"testing"
+)
+
+// mustBuild builds f or fails the test.
+func mustBuild(t *testing.T, f Frame) []byte {
+	t.Helper()
+	b, err := f.Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	return b
+}
+
+// TestIPv4HeaderChecksumVector cross-checks the IPv4 header checksum against a
+// well-known hand vector: the header
+//
+//	45 00 00 73 00 00 40 00 40 11 b8 61 c0 a8 00 01 c0 a8 00 c7
+//
+// (192.168.0.1 -> 192.168.0.199, proto 17, DF, total length 115) has header
+// checksum 0xB861. This is the canonical example from the Wikipedia "IPv4
+// header checksum" worked calculation; the one's-complement sum of the ten
+// 16-bit words (checksum field zeroed) is 0x479E, whose complement is 0xB861.
+func TestIPv4HeaderChecksumVector(t *testing.T) {
+	// total length 115 = 20 (IP) + 95 (UDP); UDP payload = 95 - 8 = 87 bytes.
+	f := Frame{
+		SrcIP:        netip.MustParseAddr("192.168.0.1"),
+		DstIP:        netip.MustParseAddr("192.168.0.199"),
+		Proto:        ProtoUDP,
+		TTL:          64,
+		DontFragment: true,
+		SrcPort:      1, DstPort: 2,
+		Payload: make([]byte, 87),
+	}
+	pkt := mustBuild(t, f)
+	// IPv4 header starts after the 14-byte Ethernet header; checksum at +10.
+	if got := binary.BigEndian.Uint16(pkt[14+2:]); got != 0x0073 {
+		t.Fatalf("total length = %#04x, want 0x0073 (vector precondition)", got)
+	}
+	if got := binary.BigEndian.Uint16(pkt[14+10:]); got != 0xb861 {
+		t.Errorf("IPv4 header checksum = %#04x, want 0xb861", got)
+	}
+	// Self-check: the sum over the header *including* the checksum is zero.
+	if got := checksum(pkt[14:34]); got != 0 {
+		t.Errorf("checksum over complete header = %#04x, want 0", got)
+	}
+}
+
+// TestUDPChecksumVector cross-checks the transport checksum against a hand
+// vector computed for a UDP datagram 10.0.0.1:8080 -> 10.0.0.2:53 carrying the
+// 2-byte payload {0x48,0x69}. The one's-complement sum of the IPv4
+// pseudo-header (0A000001 0A000002 0011 000A) and the UDP header+payload
+// (1F90 0035 000A 0000 4869) is 0x7C56, whose complement is 0x83A9.
+func TestUDPChecksumVector(t *testing.T) {
+	f := Frame{
+		SrcIP:   netip.MustParseAddr("10.0.0.1"),
+		DstIP:   netip.MustParseAddr("10.0.0.2"),
+		Proto:   ProtoUDP,
+		TTL:     64,
+		SrcPort: 8080, DstPort: 53,
+		Payload: []byte{0x48, 0x69},
+	}
+	pkt := mustBuild(t, f)
+	// UDP header starts at 14 (Ethernet) + 20 (IPv4); checksum at +6.
+	if got := binary.BigEndian.Uint16(pkt[34+6:]); got != 0x83a9 {
+		t.Errorf("UDP checksum = %#04x, want 0x83a9", got)
+	}
+}
+
+// TestL4ChecksumSelfConsistent verifies that recomputing a transport checksum
+// over the segment (checksum field left in place) yields 0 — the standard
+// receiver-side validity test — for every protocol and both address families.
+func TestL4ChecksumSelfConsistent(t *testing.T) {
+	cases := []struct {
+		name        string
+		f           Frame
+		l4Off       int
+		pseudoProto uint8 // 0 => plain checksum (ICMPv4), else pseudo-header
+	}{
+		{"v4 tcp", Frame{SrcIP: netip.MustParseAddr("192.0.2.1"), DstIP: netip.MustParseAddr("192.0.2.2"), Proto: ProtoTCP, TCPFlags: TCPSyn, SrcPort: 1234, DstPort: 80, Payload: []byte("abc")}, 34, ProtoTCP},
+		{"v4 udp", Frame{SrcIP: netip.MustParseAddr("192.0.2.1"), DstIP: netip.MustParseAddr("192.0.2.2"), Proto: ProtoUDP, SrcPort: 5, DstPort: 6, Payload: []byte("hello!")}, 34, ProtoUDP},
+		{"v4 icmp", Frame{SrcIP: netip.MustParseAddr("192.0.2.1"), DstIP: netip.MustParseAddr("192.0.2.2"), Proto: ProtoICMP, ICMPType: 8, Payload: []byte("ping")}, 34, 0},
+		{"v6 udp", Frame{SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"), Proto: ProtoUDP, SrcPort: 7, DstPort: 8, Payload: []byte("world!!")}, 54, ProtoUDP},
+		{"v6 icmp6", Frame{SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"), Proto: ProtoICMPv6, ICMPType: 128, Payload: []byte("pong")}, 54, ProtoICMPv6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pkt := mustBuild(t, tc.f)
+			l4 := pkt[tc.l4Off:]
+			var got uint16
+			if tc.pseudoProto == 0 {
+				got = checksum(l4)
+			} else {
+				got = l4Checksum(tc.f.SrcIP, tc.f.DstIP, tc.pseudoProto, l4)
+			}
+			if got != 0 {
+				t.Errorf("recomputed checksum = %#04x, want 0", got)
+			}
+		})
+	}
+}
+
+// equalFrame reports whether two frames match on every round-trippable field.
+func equalFrame(a, b Frame) bool {
+	if a.SrcMAC != b.SrcMAC || a.DstMAC != b.DstMAC {
+		return false
+	}
+	if len(a.VLANs) != len(b.VLANs) {
+		return false
+	}
+	for i := range a.VLANs {
+		if a.VLANs[i] != b.VLANs[i] {
+			return false
+		}
+	}
+	if a.SrcIP != b.SrcIP || a.DstIP != b.DstIP {
+		return false
+	}
+	if a.Proto != b.Proto || a.SrcPort != b.SrcPort || a.DstPort != b.DstPort {
+		return false
+	}
+	if a.TCPFlags != b.TCPFlags || a.ICMPType != b.ICMPType || a.ICMPCode != b.ICMPCode {
+		return false
+	}
+	if a.TTL != b.TTL || a.IPID != b.IPID {
+		return false
+	}
+	if a.DontFragment != b.DontFragment || a.MoreFragments != b.MoreFragments || a.FragOffset != b.FragOffset {
+		return false
+	}
+	return bytes.Equal(a.Payload, b.Payload)
+}
+
+// TestBuildParseRoundTrip checks that Build then Parse recovers the frame for
+// v4/v6, TCP/UDP/ICMP, VLAN-tagged and fragmented frames.
+func TestBuildParseRoundTrip(t *testing.T) {
+	frames := map[string]Frame{
+		"v4 tcp": {
+			DstMAC: [6]byte{1, 2, 3, 4, 5, 6}, SrcMAC: [6]byte{7, 8, 9, 10, 11, 12},
+			SrcIP: netip.MustParseAddr("198.51.100.7"), DstIP: netip.MustParseAddr("203.0.113.9"),
+			Proto: ProtoTCP, TCPFlags: TCPSyn | TCPAck, SrcPort: 44321, DstPort: 443, TTL: 64,
+			Payload: []byte("GET / HTTP/1.0\r\n"),
+		},
+		"v4 tcp single vlan": {
+			VLANs: []uint16{0x0064}, // VID 100
+			SrcIP: netip.MustParseAddr("198.51.100.1"), DstIP: netip.MustParseAddr("203.0.113.1"),
+			Proto: ProtoTCP, TCPFlags: TCPAck, SrcPort: 1000, DstPort: 80, TTL: 32,
+		},
+		"v4 udp qinq": {
+			VLANs: []uint16{0x2064, 0x000a}, // stacked tags
+			SrcIP: netip.MustParseAddr("192.0.2.5"), DstIP: netip.MustParseAddr("203.0.113.2"),
+			Proto: ProtoUDP, SrcPort: 53, DstPort: 33333, TTL: 64, Payload: bytes.Repeat([]byte{0xAB}, 40),
+		},
+		"v6 udp": {
+			SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"),
+			Proto: ProtoUDP, SrcPort: 123, DstPort: 40000, TTL: 64, Payload: bytes.Repeat([]byte{0xCD}, 100),
+		},
+		"v4 icmp": {
+			SrcIP: netip.MustParseAddr("198.51.100.9"), DstIP: netip.MustParseAddr("203.0.113.3"),
+			Proto: ProtoICMP, ICMPType: 8, ICMPCode: 0, TTL: 64, Payload: bytes.Repeat([]byte{0x11}, 56),
+		},
+		"v6 icmp6": {
+			SrcIP: netip.MustParseAddr("2001:db8::9"), DstIP: netip.MustParseAddr("2001:db8::a"),
+			Proto: ProtoICMPv6, ICMPType: 128, ICMPCode: 0, TTL: 64, Payload: bytes.Repeat([]byte{0x22}, 8),
+		},
+		"v4 first fragment": {
+			SrcIP: netip.MustParseAddr("198.51.100.2"), DstIP: netip.MustParseAddr("203.0.113.4"),
+			Proto: ProtoUDP, SrcPort: 6000, DstPort: 53413, TTL: 64,
+			IPID: 0x4321, MoreFragments: true, Payload: bytes.Repeat([]byte{0x33}, 1480),
+		},
+		"v4 continuation fragment": {
+			SrcIP: netip.MustParseAddr("198.51.100.2"), DstIP: netip.MustParseAddr("203.0.113.4"),
+			Proto: ProtoUDP, TTL: 64, IPID: 0x4321, FragOffset: 185, Payload: bytes.Repeat([]byte{0x44}, 800),
+		},
+	}
+	for name, f := range frames {
+		t.Run(name, func(t *testing.T) {
+			pkt := mustBuild(t, f)
+			got, err := Parse(pkt)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if !equalFrame(f, got) {
+				t.Errorf("round trip mismatch\n have %+v\n want %+v", got, f)
+			}
+		})
+	}
+}
+
+// TestPcapRoundTrip verifies a generated set survives WritePcap/ReadPcap
+// losslessly and that WritePcap is byte-stable for identical input.
+func TestPcapRoundTrip(t *testing.T) {
+	frames := Generate(MixedVector, GenConfig{
+		Victim:  netip.MustParseAddr("203.0.113.50"),
+		Sources: []netip.Addr{netip.MustParseAddr("198.51.100.10"), netip.MustParseAddr("198.51.100.11")},
+		Count:   12,
+	})
+
+	var buf1, buf2 bytes.Buffer
+	if err := WritePcap(&buf1, frames); err != nil {
+		t.Fatalf("WritePcap() error = %v", err)
+	}
+	if err := WritePcap(&buf2, frames); err != nil {
+		t.Fatalf("WritePcap() (second) error = %v", err)
+	}
+	if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
+		t.Error("WritePcap is not byte-stable across identical input")
+	}
+	if buf1.Len() <= globalHdrLen {
+		t.Fatalf("pcap unexpectedly small: %d bytes", buf1.Len())
+	}
+
+	got, err := ReadPcap(bytes.NewReader(buf1.Bytes()))
+	if err != nil {
+		t.Fatalf("ReadPcap() error = %v", err)
+	}
+	if len(got) != len(frames) {
+		t.Fatalf("read %d frames, want %d", len(got), len(frames))
+	}
+	for i := range frames {
+		if !equalFrame(frames[i], got[i]) {
+			t.Errorf("frame %d round-trip mismatch\n have %+v\n want %+v", i, got[i], frames[i])
+		}
+	}
+}
+
+// TestGeneratePatterns builds every pattern for both address families and
+// confirms each frame is well-formed, parses cleanly and carries the
+// vector-defining protocol/ports.
+func TestGeneratePatterns(t *testing.T) {
+	all := []Pattern{
+		UDPFlood, SYNFlood, ACKFlood, DNSAmplification, NTPMonlist, CLDAPAmplification,
+		MemcachedAmplification, SSDPAmplification, ChargenAmplification, ICMPFlood,
+		FragmentFlood, MixedVector,
+	}
+	victims := map[string]netip.Addr{
+		"v4": netip.MustParseAddr("203.0.113.50"),
+		"v6": netip.MustParseAddr("2001:db8:1::50"),
+	}
+	for fam, victim := range victims {
+		for _, p := range all {
+			t.Run(fam+"/"+patternName(p), func(t *testing.T) {
+				frames := Generate(p, GenConfig{Victim: victim, Count: 8})
+				if len(frames) != 8 {
+					t.Fatalf("generated %d frames, want 8", len(frames))
+				}
+				for i, f := range frames {
+					pkt, err := f.Build()
+					if err != nil {
+						t.Fatalf("frame %d Build() error = %v", i, err)
+					}
+					back, err := Parse(pkt)
+					if err != nil {
+						t.Fatalf("frame %d Parse() error = %v", i, err)
+					}
+					if back.DstIP != victim {
+						t.Errorf("frame %d dst = %v, want victim %v", i, back.DstIP, victim)
+					}
+					// Reflection patterns must carry the abused service source port.
+					if port := p.reflectorPort(); port != 0 && back.SrcPort != port {
+						t.Errorf("frame %d src port = %d, want reflector %d", i, back.SrcPort, port)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestReflectionSourcePorts pins the characteristic reflector ports.
+func TestReflectionSourcePorts(t *testing.T) {
+	want := map[Pattern]uint16{
+		DNSAmplification: 53, NTPMonlist: 123, CLDAPAmplification: 389,
+		MemcachedAmplification: 11211, SSDPAmplification: 1900, ChargenAmplification: 19,
+	}
+	for p, port := range want {
+		if got := p.reflectorPort(); got != port {
+			t.Errorf("%s reflector port = %d, want %d", patternName(p), got, port)
+		}
+	}
+}
+
+// TestGenerateSizeControl checks that GenConfig.Size sets the on-wire length.
+func TestGenerateSizeControl(t *testing.T) {
+	frames := Generate(UDPFlood, GenConfig{
+		Victim: netip.MustParseAddr("203.0.113.50"), Count: 3, Size: 200,
+	})
+	for i, f := range frames {
+		pkt := mustBuild(t, f)
+		if len(pkt) != 200 {
+			t.Errorf("frame %d on-wire size = %d, want 200", i, len(pkt))
+		}
+	}
+}
+
+// TestBuildErrors checks the rejected cases.
+func TestBuildErrors(t *testing.T) {
+	cases := map[string]Frame{
+		"family mismatch": {SrcIP: netip.MustParseAddr("192.0.2.1"), DstIP: netip.MustParseAddr("2001:db8::1"), Proto: ProtoUDP},
+		"invalid addr":    {Proto: ProtoUDP},
+		"bad proto":       {SrcIP: netip.MustParseAddr("192.0.2.1"), DstIP: netip.MustParseAddr("192.0.2.2"), Proto: 99},
+		"v6 fragment":     {SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"), Proto: ProtoUDP, MoreFragments: true},
+	}
+	for name, f := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := f.Build(); err == nil {
+				t.Errorf("Build() error = nil, want an error")
+			}
+		})
+	}
+}
+
+func patternName(p Pattern) string {
+	switch p {
+	case UDPFlood:
+		return "UDPFlood"
+	case SYNFlood:
+		return "SYNFlood"
+	case ACKFlood:
+		return "ACKFlood"
+	case DNSAmplification:
+		return "DNSAmplification"
+	case NTPMonlist:
+		return "NTPMonlist"
+	case CLDAPAmplification:
+		return "CLDAPAmplification"
+	case MemcachedAmplification:
+		return "MemcachedAmplification"
+	case SSDPAmplification:
+		return "SSDPAmplification"
+	case ChargenAmplification:
+		return "ChargenAmplification"
+	case ICMPFlood:
+		return "ICMPFlood"
+	case FragmentFlood:
+		return "FragmentFlood"
+	case MixedVector:
+		return "MixedVector"
+	default:
+		return "unknown"
+	}
+}
