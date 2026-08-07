@@ -76,7 +76,13 @@ type Config struct {
 	BGP        BGP         `yaml:"bgp"`
 	// Scrubbing is the default traffic-diversion target (scrubbing center
 	// next-hops + divert community), used by groups whose ladder diverts.
-	Scrubbing   Scrubbing   `yaml:"scrubbing"`
+	Scrubbing Scrubbing `yaml:"scrubbing"`
+	// Dataplane enables the in-kernel XDP filter, letting this instance drop
+	// attack traffic on its own interfaces instead of only announcing routes.
+	// Absent (nil) disables it entirely and the binary behaves exactly as it
+	// does without the feature. Required when any ladder uses the dataplane
+	// action or method.
+	Dataplane   *Dataplane  `yaml:"dataplane"`
 	Notify      Notify      `yaml:"notify"`
 	API         API         `yaml:"api"`
 	UpdateCheck UpdateCheck `yaml:"update_check"`
@@ -110,6 +116,10 @@ type Config struct {
 	// GeoIPCfg is the resolved GeoIP/ASN configuration. It is comparable so
 	// reload can detect database-path changes that require a restart.
 	GeoIPCfg GeoIPSettings `yaml:"-"`
+	// DataplaneCfg is the resolved XDP data-plane configuration. It is
+	// comparable so reload can detect the changes that require a restart
+	// (attachment and map sizing); the policy itself hot-reloads.
+	DataplaneCfg DataplaneSettings `yaml:"-"`
 	// groupRoutes maps prefixes to Groups indexes, longest prefix first.
 	groupRoutes []groupRoute
 }
@@ -329,6 +339,13 @@ const (
 	// (the scrubbing.next_hop + divert community) so traffic is cleaned and
 	// reinjected rather than dropped. Shares the RTBH host-route NLRI.
 	MitigateDivert MitigationMethod = "divert"
+	// MitigateDataplane installs the attack's match rules into the local
+	// in-kernel XDP data plane, dropping (or rate-limiting) the attack on this
+	// box instead of asking a BGP peer to do it. The most surgical method and
+	// the only one that needs no router cooperation — but it can only act on
+	// traffic that actually reaches this machine's NIC, so it does not help
+	// once the uplink itself is saturated. Requires the dataplane block.
+	MitigateDataplane MitigationMethod = "dataplane"
 )
 
 // FlowSpecAction is the action attached to generated FlowSpec rules.
@@ -349,6 +366,11 @@ type EscalationAction string
 const (
 	// EscalateNone alerts only — no route is announced at this stage.
 	EscalateNone EscalationAction = "none"
+	// EscalateDataplane installs the attack's match rules into the local XDP
+	// data plane at this stage. The most surgical rung: nothing is announced,
+	// nothing leaves this box, and only traffic arriving on this machine's NIC
+	// is affected — so it sits just above alert-only.
+	EscalateDataplane EscalationAction = "dataplane"
 	// EscalateFlowSpec announces FlowSpec rules at this stage.
 	EscalateFlowSpec EscalationAction = "flowspec"
 	// EscalateDivert announces the victim /32-/128 toward a scrubbing center
@@ -717,10 +739,247 @@ type Scrubbing struct {
 	Community   string   `yaml:"community"`
 	Communities []string `yaml:"communities"`
 	LocalPref   uint32   `yaml:"local_pref"`
+	// Nodes lists managed scrubbing nodes (boxes running `kapkan scrub`), each
+	// with its own next-hop. The scalar next_hop above stays valid and is the
+	// one-node degenerate case; nodes and next_hop may both be set, in which
+	// case next_hop is the fallback target for groups no node claims.
+	Nodes []ScrubNode `yaml:"nodes"`
+	// NodeSelection picks the node for a new ban: affinity (default — the
+	// first node whose hostgroups claim the victim's group), least_loaded, or
+	// ecmp (all nodes share a next-hop and the router balances). The chosen
+	// node is frozen on the ban for its lifetime.
+	NodeSelection string `yaml:"node_selection"`
+	// OnAllNodesLost is what to do when no managed node is reachable:
+	// withdraw (default — stop attracting traffic), blackhole, or flowspec.
+	// While at least one node survives, the victim is re-announced toward it
+	// rather than withdrawn.
+	OnAllNodesLost string `yaml:"on_all_nodes_lost"`
+	// StaleAfterSeconds is how long a node may go without polling before it
+	// counts as lost (default 15).
+	StaleAfterSeconds int `yaml:"stale_after_seconds"`
 
 	// Parsed forms, populated by validate().
 	CommunityValues []uint32 `yaml:"-"`
 	CommunityStr    string   `yaml:"-"`
+}
+
+// Scrubbing node selection modes.
+const (
+	// NodeSelectAffinity routes a victim to the first node whose hostgroups
+	// claim it (the default; keeps traffic on the site it arrived at).
+	NodeSelectAffinity = "affinity"
+	// NodeSelectLeastLoaded picks the eligible node with the most headroom
+	// against its capacity_mbps.
+	NodeSelectLeastLoaded = "least_loaded"
+	// NodeSelectECMP announces one shared next-hop and lets the router
+	// balance. Every node then needs every rule, and per-source rate limits
+	// fragment across nodes (each sees only its share of a source's traffic).
+	NodeSelectECMP = "ecmp"
+)
+
+// Actions taken when no managed scrubbing node is reachable.
+const (
+	// NodesLostWithdraw stops attracting the victim's traffic (fail-open).
+	NodesLostWithdraw = "withdraw"
+	// NodesLostBlackhole falls back to an RTBH announcement.
+	NodesLostBlackhole = "blackhole"
+	// NodesLostFlowSpec falls back to FlowSpec rules.
+	NodesLostFlowSpec = "flowspec"
+)
+
+// ScrubNode is one managed scrubbing node: a box running `kapkan scrub` that
+// receives diverted traffic, drops the attack in its XDP data plane, and
+// reinjects what is left. Kapkan announces the victim toward the node's
+// next-hop; the node pulls its rules back over the API.
+type ScrubNode struct {
+	// Name identifies the node and must match the name its agent presents.
+	Name string `yaml:"name"`
+	// NextHop is the node's IPv4 BGP next-hop (required).
+	NextHop string `yaml:"next_hop"`
+	// NextHop6 is the node's IPv6 next-hop, required to divert IPv6 victims.
+	NextHop6 string `yaml:"next_hop6"`
+	// CapacityMbps is the node's scrubbing capacity, used by the least_loaded
+	// selection mode and surfaced in the console. 0 means unknown.
+	CapacityMbps uint64 `yaml:"capacity_mbps"`
+	// Hostgroups restricts which groups this node serves under affinity
+	// selection. Empty means the node accepts any group.
+	Hostgroups []string `yaml:"hostgroups"`
+}
+
+// Dataplane configures the in-kernel XDP filter. Everything here is policy the
+// operator writes; the rules that actually mitigate an attack are synthesized
+// by the detector and installed by the mitigator, exactly as they are for
+// FlowSpec. The data plane executes decisions made elsewhere: it never
+// classifies traffic, and its default verdict is always PASS.
+type Dataplane struct {
+	// Enabled defaults to true when the block is present.
+	Enabled *bool `yaml:"enabled"`
+	// Interfaces are the NICs to attach the XDP program to. At least one is
+	// required. Changing them requires a restart.
+	Interfaces []string `yaml:"interfaces"`
+	// XDPMode is auto (default — try native, fall back to generic), native
+	// (fail if the driver has no native XDP), or generic (the slower skb
+	// path, useful on virtio and for testing). Restart required.
+	XDPMode string `yaml:"xdp_mode"`
+	// PinPath is the bpffs directory holding the pinned program and maps, so
+	// policy survives a restart of this process. Restart required.
+	PinPath string `yaml:"pin_path"`
+	// OnExit is what happens on a clean shutdown: keep (default — the pinned
+	// program keeps enforcing static policy while dynamic rules age out on
+	// their in-kernel expiry) or detach (remove the program entirely).
+	OnExit string `yaml:"on_exit"`
+	// DropMalformed drops frames that cannot be parsed instead of passing and
+	// counting them. Default false: this is a mitigation executor, not a
+	// firewall, so anything unrecognized is forwarded.
+	DropMalformed bool `yaml:"drop_malformed"`
+	// Allowlist holds SOURCE prefixes that always pass, checked before every
+	// other rule. Note this is a different axis from protected_whitelist,
+	// which names DESTINATIONS that are never banned; both are enforced in
+	// the kernel.
+	Allowlist []string `yaml:"allowlist"`
+	// RateLimitProfiles are named pps/mbps ceilings referenced by static
+	// rules. Profiles live and die with the config: one that nothing
+	// references is removed on reload.
+	RateLimitProfiles []RateLimitProfile `yaml:"ratelimit_profiles"`
+	// StaticRules are always-on operator rules, evaluated after the
+	// allowlists and before any rule the detector installs.
+	StaticRules []StaticRule `yaml:"static_rules"`
+	// Limits size the BPF maps. Changing them requires a restart.
+	Limits DataplaneLimits `yaml:"limits"`
+}
+
+// RateLimitProfile is a named traffic ceiling. At least one of pps/mbps must
+// be set; when both are, whichever is reached first admits no further packets.
+type RateLimitProfile struct {
+	Name string `yaml:"name"`
+	PPS  uint64 `yaml:"pps"`
+	Mbps uint64 `yaml:"mbps"`
+}
+
+// StaticRule is one always-on data-plane rule. An empty match field means
+// "any", so a rule with an empty match matches every packet — which is only
+// ever sensible with a ratelimit action.
+type StaticRule struct {
+	// Name identifies the rule in counters, logs and the console. Required
+	// and unique: unlike xFW's implicit aliases, two rules can never silently
+	// address the same entry.
+	Name  string      `yaml:"name"`
+	Match StaticMatch `yaml:"match"`
+	// Action is pass, drop or ratelimit. ratelimit requires profile.
+	Action string `yaml:"action"`
+	// Profile names a ratelimit_profiles entry; only valid with the
+	// ratelimit action.
+	Profile string `yaml:"profile"`
+}
+
+// StaticMatch is the match criteria of a static rule. Fields are ANDed, and an
+// unset field matches anything.
+type StaticMatch struct {
+	// Src is a source address or CIDR.
+	Src string `yaml:"src"`
+	// Proto is tcp, udp, icmp or icmp6.
+	Proto string `yaml:"proto"`
+	// SrcPort and DstPort match a single port each (0 = any).
+	SrcPort uint16 `yaml:"src_port"`
+	DstPort uint16 `yaml:"dst_port"`
+}
+
+// DataplaneLimits sizes the BPF maps. They are allocated once at attach, so a
+// change requires a restart.
+type DataplaneLimits struct {
+	// MaxDynamicRules caps the rules the mitigator may install (default 4096).
+	// Each ban contributes up to 8, so this must exceed
+	// ban.max_active_bans * 8 or installs will start failing mid-attack.
+	MaxDynamicRules int `yaml:"max_dynamic_rules"`
+	// MaxStaticRules caps operator rules (default 256).
+	MaxStaticRules int `yaml:"max_static_rules"`
+	// MaxRatelimitSources sizes the per-source token-bucket LRU (default
+	// 1048576). Each entry costs kernel memory charged to this unit's cgroup.
+	MaxRatelimitSources int `yaml:"max_ratelimit_sources"`
+}
+
+// XDP attach modes.
+const (
+	// XDPModeAuto tries native and falls back to generic.
+	XDPModeAuto = "auto"
+	// XDPModeNative requires driver-level XDP.
+	XDPModeNative = "native"
+	// XDPModeGeneric forces the slower skb path.
+	XDPModeGeneric = "generic"
+)
+
+// Data-plane shutdown behaviours.
+const (
+	// OnExitKeep leaves the pinned program attached.
+	OnExitKeep = "keep"
+	// OnExitDetach removes the program on a clean shutdown.
+	OnExitDetach = "detach"
+)
+
+// Static-rule actions.
+const (
+	// StaticActionPass admits matching traffic unconditionally.
+	StaticActionPass = "pass"
+	// StaticActionDrop discards matching traffic.
+	StaticActionDrop = "drop"
+	// StaticActionRateLimit caps matching traffic at a named profile.
+	StaticActionRateLimit = "ratelimit"
+)
+
+// Data-plane defaults, applied by validateDataplane.
+const (
+	defaultPinPath             = "/sys/fs/bpf/kapkan"
+	defaultMaxDynamicRules     = 4096
+	defaultMaxStaticRules      = 256
+	defaultMaxRatelimitSources = 1 << 20
+	defaultStaleAfterSeconds   = 15
+)
+
+// maxDataplaneRulesPerBan mirrors the mitigator's per-attack rule cap: an
+// attack yields at most this many match rules, so the dynamic map must hold
+// ban.max_active_bans times this many entries to never fail an install.
+const maxDataplaneRulesPerBan = 8
+
+// ifaceNameRe matches a Linux interface name: IFNAMSIZ allows 15 characters,
+// and the kernel rejects '/' and whitespace. Validated by pattern only — this
+// package compiles to wasm, where the interface list cannot be enumerated.
+var ifaceNameRe = regexp.MustCompile(`^[A-Za-z0-9._@:-]{1,15}$`)
+
+// parsePrefixOrAddr accepts either a CIDR or a bare address (treated as a
+// host route) and returns the masked prefix. Data-plane policy lists accept
+// both spellings because operators write single addresses far more often than
+// /32s.
+func parsePrefixOrAddr(s string) (netip.Prefix, error) {
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("invalid CIDR %q: %w", s, err)
+		}
+		return p.Masked(), nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("invalid IP or CIDR %q: %w", s, err)
+	}
+	return netip.PrefixFrom(a, a.BitLen()), nil
+}
+
+// DataplaneSettings is the resolved data-plane configuration. It is comparable
+// so Store.Reload can reject the changes that cannot be applied to a running,
+// attached program: the interface set, the attach mode, the pin path and the
+// map sizes. Static policy (allowlist, rules, profiles) is deliberately absent
+// — it hot-reloads through a shadow-map generation flip.
+type DataplaneSettings struct {
+	Enabled bool
+	// Interfaces is the joined interface list; a slice would not be
+	// comparable, and this struct is compared with == on reload.
+	Interfaces          string
+	XDPMode             string
+	PinPath             string
+	OnExit              string
+	MaxDynamicRules     int
+	MaxStaticRules      int
+	MaxRatelimitSources int
 }
 
 // Neighbor is one BGP peer.
@@ -1018,6 +1277,11 @@ func (c *Config) validate() error {
 	if err := c.validateScrubbing(); err != nil {
 		return err
 	}
+	// The data plane validates before hostgroups so a group whose ladder uses
+	// the dataplane action can be checked against a resolved block.
+	if err := c.validateDataplane(); err != nil {
+		return err
+	}
 
 	if err := c.validateHostgroups(); err != nil {
 		return err
@@ -1148,7 +1412,12 @@ func (c *Config) validateHostgroups() error {
 		return fmt.Errorf("scrubbing: %w", err)
 	}
 	if usesDivert(globalStages) {
-		if err := validateDivertTarget(GlobalGroup, globalScrub, c.hasV6Networks()); err != nil {
+		if err := validateDivertTarget(GlobalGroup, globalScrub, &c.Scrubbing, c.hasV6Networks()); err != nil {
+			return err
+		}
+	}
+	if usesDataplane(globalStages) {
+		if err := c.requireDataplane(GlobalGroup); err != nil {
 			return err
 		}
 	}
@@ -1335,7 +1604,12 @@ func (c *Config) validateHostgroups() error {
 		}
 
 		if usesDivert(stages) {
-			if err := validateDivertTarget(hg.Name, groupScrub, groupHasV6); err != nil {
+			if err := validateDivertTarget(hg.Name, groupScrub, &c.Scrubbing, groupHasV6); err != nil {
+				return err
+			}
+		}
+		if usesDataplane(stages) {
+			if err := c.requireDataplane(hg.Name); err != nil {
 				return err
 			}
 		}
@@ -1480,8 +1754,11 @@ func resolveMitigation(methodStr string, flow *FlowSpec, defMethod MitigationMet
 	method := defMethod
 	if methodStr != "" {
 		method = MitigationMethod(methodStr)
-		if method != MitigateBlackhole && method != MitigateFlowSpec && method != MitigateDivert {
-			return "", "", 0, fmt.Errorf("method must be %q, %q or %q, got %q", MitigateBlackhole, MitigateFlowSpec, MitigateDivert, methodStr)
+		switch method {
+		case MitigateBlackhole, MitigateFlowSpec, MitigateDivert, MitigateDataplane:
+		default:
+			return "", "", 0, fmt.Errorf("method must be %q, %q, %q or %q, got %q",
+				MitigateBlackhole, MitigateFlowSpec, MitigateDivert, MitigateDataplane, methodStr)
 		}
 	}
 	if method != MitigateFlowSpec {
@@ -1553,6 +1830,8 @@ func methodAction(m MitigationMethod) EscalationAction {
 		return EscalateFlowSpec
 	case MitigateDivert:
 		return EscalateDivert
+	case MitigateDataplane:
+		return EscalateDataplane
 	default:
 		return EscalateBlackhole
 	}
@@ -1575,9 +1854,9 @@ func resolveEscalation(steps []EscalationStep, method MitigationMethod) ([]Escal
 	for i, s := range steps {
 		act := EscalationAction(s.Action)
 		switch act {
-		case EscalateNone, EscalateFlowSpec, EscalateDivert, EscalateBlackhole:
+		case EscalateNone, EscalateDataplane, EscalateFlowSpec, EscalateDivert, EscalateBlackhole:
 		default:
-			return nil, fmt.Errorf("escalation[%d].action must be none|flowspec|divert|blackhole, got %q", i, s.Action)
+			return nil, fmt.Errorf("escalation[%d].action must be none|dataplane|flowspec|divert|blackhole, got %q", i, s.Action)
 		}
 		if i == 0 && s.AfterSeconds != 0 {
 			return nil, fmt.Errorf("escalation[0].after_seconds must be 0 (the initial stage)")
@@ -1603,15 +1882,19 @@ func resolveEscalation(steps []EscalationStep, method MitigationMethod) ([]Escal
 }
 
 // escalationSeverity ranks ladder actions so a ladder can be validated as
-// non-decreasing: none < flowspec < divert < blackhole. Divert (scrub) keeps
-// the victim reachable, so it sits below the all-dropping blackhole.
+// non-decreasing: none < dataplane < flowspec < divert < blackhole. Dataplane
+// drops locally and announces nothing, so it is the most surgical response and
+// sits just above alert-only; divert (scrub) keeps the victim reachable, so it
+// sits below the all-dropping blackhole.
 func escalationSeverity(a EscalationAction) int {
 	switch a {
 	case EscalateBlackhole:
-		return 3
+		return 4
 	case EscalateDivert:
-		return 2
+		return 3
 	case EscalateFlowSpec:
+		return 2
+	case EscalateDataplane:
 		return 1
 	default: // EscalateNone
 		return 0
@@ -1632,6 +1915,16 @@ func usesFlowSpec(stages []EscalationStage) bool {
 func usesDivert(stages []EscalationStage) bool {
 	for _, s := range stages {
 		if s.Action == EscalateDivert {
+			return true
+		}
+	}
+	return false
+}
+
+// usesDataplane reports whether any stage drops in the local XDP data plane.
+func usesDataplane(stages []EscalationStage) bool {
+	for _, s := range stages {
+		if s.Action == EscalateDataplane {
 			return true
 		}
 	}
@@ -1900,6 +2193,258 @@ func (c *Config) validateScrubbing() error {
 		}
 		s.CommunityValues, s.CommunityStr = []uint32{v}, s.Community
 	}
+
+	// Managed scrubbing nodes. The node list is validated here so its shape is
+	// frozen from the first release that ships it; selection and failover are
+	// consumed by the mitigator later. The scalar next_hop above remains the
+	// one-node degenerate case, which is the migration path for anyone already
+	// diverting to a next-hop we do not manage.
+	seen := make(map[string]struct{}, len(s.Nodes))
+	for i, n := range s.Nodes {
+		if !groupNameRe.MatchString(n.Name) {
+			return fmt.Errorf("scrubbing.nodes[%d].name %q must match %s", i, n.Name, groupNameRe)
+		}
+		if _, dup := seen[n.Name]; dup {
+			return fmt.Errorf("scrubbing.nodes[%d]: duplicate node name %q", i, n.Name)
+		}
+		seen[n.Name] = struct{}{}
+		a, err := netip.ParseAddr(n.NextHop)
+		if err != nil || !a.Is4() {
+			return fmt.Errorf("scrubbing.nodes[%q].next_hop must be a valid IPv4 address, got %q", n.Name, n.NextHop)
+		}
+		if n.NextHop6 != "" {
+			a6, err := netip.ParseAddr(n.NextHop6)
+			if err != nil || !a6.Is6() || a6.Is4In6() {
+				return fmt.Errorf("scrubbing.nodes[%q].next_hop6 must be a valid IPv6 address, got %q", n.Name, n.NextHop6)
+			}
+		}
+	}
+
+	switch s.NodeSelection {
+	case "":
+		s.NodeSelection = NodeSelectAffinity
+	case NodeSelectAffinity, NodeSelectLeastLoaded, NodeSelectECMP:
+	default:
+		return fmt.Errorf("scrubbing.node_selection must be %q, %q or %q, got %q",
+			NodeSelectAffinity, NodeSelectLeastLoaded, NodeSelectECMP, s.NodeSelection)
+	}
+	switch s.OnAllNodesLost {
+	case "":
+		s.OnAllNodesLost = NodesLostWithdraw
+	case NodesLostWithdraw, NodesLostBlackhole, NodesLostFlowSpec:
+	default:
+		return fmt.Errorf("scrubbing.on_all_nodes_lost must be %q, %q or %q, got %q",
+			NodesLostWithdraw, NodesLostBlackhole, NodesLostFlowSpec, s.OnAllNodesLost)
+	}
+	if s.StaleAfterSeconds == 0 {
+		s.StaleAfterSeconds = defaultStaleAfterSeconds
+	}
+	if s.StaleAfterSeconds < 1 {
+		return fmt.Errorf("scrubbing.stale_after_seconds must be > 0, got %d", s.StaleAfterSeconds)
+	}
+	if len(s.Nodes) == 0 && (s.NodeSelection != NodeSelectAffinity || s.OnAllNodesLost != NodesLostWithdraw) {
+		return fmt.Errorf("scrubbing: node_selection and on_all_nodes_lost require at least one scrubbing.nodes entry")
+	}
+	return nil
+}
+
+// hasNodeTarget reports whether the scrubbing block offers a usable managed
+// node for the given family, i.e. whether diverting can land somewhere even
+// when the scalar next-hop is unset.
+func (s *Scrubbing) hasNodeTarget(v6 bool) bool {
+	for _, n := range s.Nodes {
+		if v6 {
+			if n.NextHop6 != "" {
+				return true
+			}
+			continue
+		}
+		if n.NextHop != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// validateDataplane resolves the dataplane block into DataplaneCfg, applying
+// defaults and checking everything that can be checked without touching the
+// machine. It deliberately performs no filesystem or netlink lookups: this
+// package compiles to wasm for the kapkan.io config builder, so interface
+// names and the pin path are checked syntactically only. Whether the NIC
+// exists and whether the kernel will load the program are answered at attach
+// time, by a clean startup error.
+func (c *Config) validateDataplane() error {
+	d := c.Dataplane
+	if d == nil {
+		c.DataplaneCfg = DataplaneSettings{}
+		return nil
+	}
+	if d.Enabled != nil && !*d.Enabled {
+		// Present but switched off: zero the resolved form so a cosmetic edit
+		// to a disabled block never demands a restart.
+		c.DataplaneCfg = DataplaneSettings{}
+		return nil
+	}
+
+	if len(d.Interfaces) == 0 {
+		return fmt.Errorf("dataplane.interfaces: name at least one interface to attach to")
+	}
+	seenIface := make(map[string]struct{}, len(d.Interfaces))
+	for i, name := range d.Interfaces {
+		if !ifaceNameRe.MatchString(name) {
+			return fmt.Errorf("dataplane.interfaces[%d]: %q is not a valid interface name", i, name)
+		}
+		if _, dup := seenIface[name]; dup {
+			return fmt.Errorf("dataplane.interfaces[%d]: %q is listed twice", i, name)
+		}
+		seenIface[name] = struct{}{}
+	}
+
+	switch d.XDPMode {
+	case "":
+		d.XDPMode = XDPModeAuto
+	case XDPModeAuto, XDPModeNative, XDPModeGeneric:
+	default:
+		return fmt.Errorf("dataplane.xdp_mode must be %q, %q or %q, got %q",
+			XDPModeAuto, XDPModeNative, XDPModeGeneric, d.XDPMode)
+	}
+
+	switch d.OnExit {
+	case "":
+		d.OnExit = OnExitKeep
+	case OnExitKeep, OnExitDetach:
+	default:
+		return fmt.Errorf("dataplane.on_exit must be %q or %q, got %q", OnExitKeep, OnExitDetach, d.OnExit)
+	}
+
+	if d.PinPath == "" {
+		d.PinPath = defaultPinPath
+	} else if !strings.HasPrefix(d.PinPath, "/") {
+		return fmt.Errorf("dataplane.pin_path must be an absolute path, got %q", d.PinPath)
+	}
+
+	for i, s := range d.Allowlist {
+		if _, err := parsePrefixOrAddr(s); err != nil {
+			return fmt.Errorf("dataplane.allowlist[%d]: %w", i, err)
+		}
+	}
+
+	profiles := make(map[string]struct{}, len(d.RateLimitProfiles))
+	for i, p := range d.RateLimitProfiles {
+		if !groupNameRe.MatchString(p.Name) {
+			return fmt.Errorf("dataplane.ratelimit_profiles[%d].name %q must match %s", i, p.Name, groupNameRe)
+		}
+		if _, dup := profiles[p.Name]; dup {
+			return fmt.Errorf("dataplane.ratelimit_profiles[%d]: duplicate profile name %q", i, p.Name)
+		}
+		if p.PPS == 0 && p.Mbps == 0 {
+			return fmt.Errorf("dataplane.ratelimit_profiles[%q]: set pps, mbps or both", p.Name)
+		}
+		profiles[p.Name] = struct{}{}
+	}
+
+	referenced := make(map[string]struct{}, len(profiles))
+	seenRule := make(map[string]struct{}, len(d.StaticRules))
+	for i, r := range d.StaticRules {
+		if !groupNameRe.MatchString(r.Name) {
+			return fmt.Errorf("dataplane.static_rules[%d].name %q must match %s", i, r.Name, groupNameRe)
+		}
+		if _, dup := seenRule[r.Name]; dup {
+			return fmt.Errorf("dataplane.static_rules[%d]: duplicate rule name %q", i, r.Name)
+		}
+		seenRule[r.Name] = struct{}{}
+
+		if r.Match.Src != "" {
+			if _, err := parsePrefixOrAddr(r.Match.Src); err != nil {
+				return fmt.Errorf("dataplane.static_rules[%q].match.src: %w", r.Name, err)
+			}
+		}
+		switch r.Match.Proto {
+		case "", "tcp", "udp", "icmp", "icmp6":
+		default:
+			return fmt.Errorf("dataplane.static_rules[%q].match.proto must be tcp|udp|icmp|icmp6, got %q", r.Name, r.Match.Proto)
+		}
+		if r.Match.Proto == "icmp" || r.Match.Proto == "icmp6" {
+			if r.Match.SrcPort != 0 || r.Match.DstPort != 0 {
+				return fmt.Errorf("dataplane.static_rules[%q]: ports are meaningless for %s", r.Name, r.Match.Proto)
+			}
+		}
+
+		switch r.Action {
+		case StaticActionPass, StaticActionDrop:
+			if r.Profile != "" {
+				return fmt.Errorf("dataplane.static_rules[%q]: profile is only valid with the %q action", r.Name, StaticActionRateLimit)
+			}
+		case StaticActionRateLimit:
+			if r.Profile == "" {
+				return fmt.Errorf("dataplane.static_rules[%q]: the %q action requires profile", r.Name, StaticActionRateLimit)
+			}
+			if _, ok := profiles[r.Profile]; !ok {
+				return fmt.Errorf("dataplane.static_rules[%q]: profile %q is not declared in dataplane.ratelimit_profiles", r.Name, r.Profile)
+			}
+			referenced[r.Profile] = struct{}{}
+		case "":
+			return fmt.Errorf("dataplane.static_rules[%q]: action is required (%s|%s|%s)", r.Name, StaticActionPass, StaticActionDrop, StaticActionRateLimit)
+		default:
+			return fmt.Errorf("dataplane.static_rules[%q].action must be %s|%s|%s, got %q", r.Name, StaticActionPass, StaticActionDrop, StaticActionRateLimit, r.Action)
+		}
+	}
+
+	if d.Limits.MaxDynamicRules == 0 {
+		d.Limits.MaxDynamicRules = defaultMaxDynamicRules
+	}
+	if d.Limits.MaxStaticRules == 0 {
+		d.Limits.MaxStaticRules = defaultMaxStaticRules
+	}
+	if d.Limits.MaxRatelimitSources == 0 {
+		d.Limits.MaxRatelimitSources = defaultMaxRatelimitSources
+	}
+	if d.Limits.MaxDynamicRules < 1 {
+		return fmt.Errorf("dataplane.limits.max_dynamic_rules must be > 0, got %d", d.Limits.MaxDynamicRules)
+	}
+	if d.Limits.MaxStaticRules < 1 {
+		return fmt.Errorf("dataplane.limits.max_static_rules must be > 0, got %d", d.Limits.MaxStaticRules)
+	}
+	if d.Limits.MaxRatelimitSources < 1 {
+		return fmt.Errorf("dataplane.limits.max_ratelimit_sources must be > 0, got %d", d.Limits.MaxRatelimitSources)
+	}
+	if n := len(d.StaticRules); n > d.Limits.MaxStaticRules {
+		return fmt.Errorf("dataplane: %d static_rules exceed limits.max_static_rules (%d)", n, d.Limits.MaxStaticRules)
+	}
+	// Every ban may install up to maxRulesPerAttack entries. Sizing the map
+	// below that ceiling means installs start failing mid-attack and quietly
+	// falling back to blackhole, so refuse the configuration up front.
+	if need := c.Ban.MaxActiveBans * maxDataplaneRulesPerBan; c.Ban.MaxActiveBans > 0 && need > d.Limits.MaxDynamicRules {
+		return fmt.Errorf("dataplane.limits.max_dynamic_rules (%d) is below ban.max_active_bans * %d (%d): installs would fail mid-attack",
+			d.Limits.MaxDynamicRules, maxDataplaneRulesPerBan, need)
+	}
+
+	c.DataplaneCfg = DataplaneSettings{
+		Enabled:             true,
+		Interfaces:          strings.Join(d.Interfaces, ","),
+		XDPMode:             d.XDPMode,
+		PinPath:             d.PinPath,
+		OnExit:              d.OnExit,
+		MaxDynamicRules:     d.Limits.MaxDynamicRules,
+		MaxStaticRules:      d.Limits.MaxStaticRules,
+		MaxRatelimitSources: d.Limits.MaxRatelimitSources,
+	}
+	return nil
+}
+
+// DataplaneEnabled reports whether the in-kernel filter is configured and on.
+func (c *Config) DataplaneEnabled() bool { return c.DataplaneCfg.Enabled }
+
+// requireDataplane rejects a ladder that drops in the kernel while the
+// dataplane block is missing or switched off — the mitigator would have
+// nowhere to install its rules and would silently fall back on every attack.
+func (c *Config) requireDataplane(group string) error {
+	switch {
+	case c.Dataplane == nil:
+		return fmt.Errorf("group %q: the %q action requires a dataplane block", group, EscalateDataplane)
+	case !c.DataplaneCfg.Enabled:
+		return fmt.Errorf("group %q: the %q action requires dataplane.enabled: true", group, EscalateDataplane)
+	}
 	return nil
 }
 
@@ -2053,16 +2598,17 @@ func (c *Config) hasV6Networks() bool {
 	return false
 }
 
-// validateDivertTarget checks that a group whose ladder diverts has a usable
-// scrubbing next-hop: an IPv4 next-hop always, plus an IPv6 next-hop when the
-// group protects IPv6 space (there is no safe discard-style fallback for
-// diversion — traffic must reach a real scrubber).
-func validateDivertTarget(group string, scrub resolvedBGP, hasV6 bool) error {
-	if scrub.nextHop == "" {
-		return fmt.Errorf("group %q: divert requires scrubbing.next_hop (the scrubbing center's IPv4 next-hop)", group)
+// validateDivertTarget checks that a group whose ladder diverts has somewhere
+// to divert to: an IPv4 target always, plus an IPv6 target when the group
+// protects IPv6 space (there is no safe discard-style fallback for diversion —
+// traffic must reach a real scrubber). A target is either the scalar
+// scrubbing.next_hop or a managed scrubbing.nodes entry.
+func validateDivertTarget(group string, scrub resolvedBGP, nodes *Scrubbing, hasV6 bool) error {
+	if scrub.nextHop == "" && !nodes.hasNodeTarget(false) {
+		return fmt.Errorf("group %q: divert requires scrubbing.next_hop or a scrubbing.nodes entry with next_hop (the scrubbing center's IPv4 next-hop)", group)
 	}
-	if hasV6 && scrub.nextHop6 == "" {
-		return fmt.Errorf("group %q: divert requires scrubbing.next_hop6 because the group protects IPv6 space", group)
+	if hasV6 && scrub.nextHop6 == "" && !nodes.hasNodeTarget(true) {
+		return fmt.Errorf("group %q: divert requires scrubbing.next_hop6 or a scrubbing.nodes entry with next_hop6 because the group protects IPv6 space", group)
 	}
 	return nil
 }
@@ -2331,6 +2877,12 @@ func (s *Store) Reload() (*Config, error) {
 	}
 	if next.GeoIPCfg != prev.GeoIPCfg {
 		return nil, fmt.Errorf("reload: geoip settings cannot change at runtime (restart required)")
+	}
+	// Static policy (allowlist, static rules, profiles) hot-reloads through a
+	// shadow-map flip; attachment and map sizing cannot change under a loaded
+	// program, and DataplaneSettings holds exactly those fields.
+	if next.DataplaneCfg != prev.DataplaneCfg {
+		return nil, fmt.Errorf("reload: dataplane attachment settings (interfaces, xdp_mode, pin_path, limits) cannot change at runtime (restart required)")
 	}
 	s.cur.Store(next)
 	return next, nil

@@ -196,6 +196,74 @@ thresholds: # per destination host, after sampling correction
 #   next_hop6: "100::100"     # required when IPv6 space is protected
 #   community: "65000:200"    # optional divert community
 #   local_pref: 200           # often raised so the divert route wins selection
+#
+#   # Managed scrubbing nodes: boxes running `kapkan scrub` that receive the
+#   # diverted traffic, drop the attack in their XDP data plane and reinject
+#   # what is left. The scalar next_hop above stays valid and is simply the
+#   # one-node case. A node is chosen when the ban is created and frozen for
+#   # its lifetime, so a victim's traffic never hops between nodes mid-attack;
+#   # if that node stops polling the victim is RE-ANNOUNCED toward a surviving
+#   # one, and on_all_nodes_lost applies only when none are left.
+#   nodes:
+#     - name: scrub-fra1
+#       next_hop: "192.0.2.100"
+#       next_hop6: "100::100"
+#       capacity_mbps: 40000
+#       hostgroups: [game-servers]   # affinity: which groups this node serves
+#     - name: scrub-ams1
+#       next_hop: "192.0.2.200"
+#       capacity_mbps: 10000
+#   node_selection: affinity        # affinity | least_loaded | ecmp
+#   on_all_nodes_lost: withdraw     # withdraw | blackhole | flowspec
+#   stale_after_seconds: 15         # no poll for this long => node is lost
+
+# In-kernel data plane (XDP/eBPF). Lets THIS instance drop attack traffic on
+# its own interfaces instead of only announcing routes — the surgical rung
+# below flowspec, and the only one that needs no router cooperation. It can
+# act only on traffic that actually reaches this machine's NIC, so it does not
+# help once the uplink itself is saturated; that is what the ladder above it
+# is for. Absent (the default) the feature does not exist and the binary
+# behaves exactly as it does today.
+#
+# Requires Linux 5.15+ with BTF, and the capabilities the shipped systemd unit
+# grants. The default verdict is always PASS: anything not matched by a rule
+# is forwarded. dry_run gates rule installation exactly as it gates BGP.
+#
+# dataplane:
+#   interfaces: [eth0]        # NICs to attach to (restart required)
+#   xdp_mode: auto            # auto (native, else generic) | native | generic
+#   pin_path: /sys/fs/bpf/kapkan   # policy survives a restart of this process
+#   on_exit: keep             # keep the program attached on shutdown, or detach
+#   drop_malformed: false     # unparseable frames pass and are counted
+#
+#   # SOURCE prefixes that always pass, checked before every other rule. This
+#   # is a different axis from protected_whitelist, which names DESTINATIONS
+#   # that are never banned; both are enforced in the kernel.
+#   allowlist:
+#     - "198.51.100.7/32"     # monitoring
+#     - "192.0.2.0/24"        # management network
+#
+#   # Named ceilings referenced by static rules. A profile nothing references
+#   # is removed on reload.
+#   ratelimit_profiles:
+#     - {name: icmp_cap, mbps: 10}
+#     - {name: dns_reply, pps: 50000}
+#
+#   # Always-on operator rules, evaluated after the allowlists and before any
+#   # rule the detector installs. Names are required and unique.
+#   static_rules:
+#     - name: drop_chargen
+#       match: {proto: udp, src_port: 19}
+#       action: drop
+#     - name: cap_icmp
+#       match: {proto: icmp}
+#       action: ratelimit
+#       profile: icmp_cap
+#
+#   limits:
+#     max_dynamic_rules: 4096      # must exceed ban.max_active_bans * 8
+#     max_static_rules: 256
+#     max_ratelimit_sources: 1048576   # per-source token buckets (kernel memory)
 
 ban:
   ttl_seconds: 600 # every ban auto-withdraws after this (no permanent bans)

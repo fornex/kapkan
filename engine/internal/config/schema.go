@@ -30,15 +30,23 @@ import (
 // hostgroup mirrors the global blocks. Values reference the typed constants so
 // a constant's string value cannot drift away from the schema unnoticed.
 var enumValues = map[string][]string{
-	"mitigation":             {string(MitigateBlackhole), string(MitigateFlowSpec), string(MitigateDivert)},
+	"mitigation":             {string(MitigateBlackhole), string(MitigateFlowSpec), string(MitigateDivert), string(MitigateDataplane)},
 	"ban.fallback":           {"none", string(MitigateBlackhole)},
 	"carpet.mitigation":      {string(MitigateFlowSpec), string(MitigateBlackhole)},
 	"flowspec.action":        {string(FlowSpecDiscard), string(FlowSpecRateLimit)},
-	"escalation.action":      {string(EscalateNone), string(EscalateFlowSpec), string(EscalateDivert), string(EscalateBlackhole)},
+	"escalation.action":      {string(EscalateNone), string(EscalateDataplane), string(EscalateFlowSpec), string(EscalateDivert), string(EscalateBlackhole)},
 	"hostgroups.calculation": {string(CalcPerHost), string(CalcTotal)},
 	"api.tokens.role":        {string(RoleViewer), string(RoleOperator)},
 	"notify.exec.format":     {ExecFormatKapkan, ExecFormatFastNetMon},
 	"update_check.channel":   {"stable", "prerelease"},
+
+	"scrubbing.node_selection":    {NodeSelectAffinity, NodeSelectLeastLoaded, NodeSelectECMP},
+	"scrubbing.on_all_nodes_lost": {NodesLostWithdraw, NodesLostBlackhole, NodesLostFlowSpec},
+
+	"dataplane.xdp_mode":                 {XDPModeAuto, XDPModeNative, XDPModeGeneric},
+	"dataplane.on_exit":                  {OnExitKeep, OnExitDetach},
+	"dataplane.static_rules.action":      {StaticActionPass, StaticActionDrop, StaticActionRateLimit},
+	"dataplane.static_rules.match.proto": {"tcp", "udp", "icmp", "icmp6"},
 }
 
 // numericBounds maps a yaml path to its inclusive {minimum,maximum} as enforced
@@ -93,6 +101,13 @@ var numericBounds = map[string]map[string]float64{
 	"carpet.aggregation_prefix_v6":  {"minimum": 16, "maximum": 128},
 	"carpet.min_hosts":              {"minimum": 2},
 	"carpet.max_active_prefix_bans": {"minimum": 1},
+
+	// 0 selects the built-in default for each of these, so the floor is 0 and
+	// only a negative is rejected (same shape as ban.max_bans_per_window).
+	"scrubbing.stale_after_seconds":          {"minimum": 0},
+	"dataplane.limits.max_dynamic_rules":     {"minimum": 0},
+	"dataplane.limits.max_static_rules":      {"minimum": 0},
+	"dataplane.limits.max_ratelimit_sources": {"minimum": 0},
 }
 
 // stringPatterns maps a yaml path to a regex the value must match. Beyond these
@@ -106,6 +121,11 @@ var stringPatterns = map[string]string{
 	"tenant":                      groupNameRe.String(),
 	"hostgroups.name":             groupNameRe.String(),
 	"storage.clickhouse.database": dbNameRe.String(),
+
+	"scrubbing.nodes.name":              groupNameRe.String(),
+	"dataplane.interfaces":              ifaceNameRe.String(),
+	"dataplane.ratelimit_profiles.name": groupNameRe.String(),
+	"dataplane.static_rules.name":       groupNameRe.String(),
 }
 
 // GenerateSchema returns the canonical JSON Schema for the configuration file.
