@@ -309,10 +309,11 @@ struct kapkan_counter {
  *
  *   TERMINAL — exactly one is bumped on every packet, naming the branch that
  *       decided it. These partition the traffic: their sum IS the packet
- *       count. Everything below except the five observation counters.
+ *       count. Everything below except the four observation counters.
  *
  *   OBSERVATION — bumped on the way past, and therefore CO-OCCURRING with a
- *       terminal counter for the same packet. There are five:
+ *       terminal counter for the same packet. There are four (Stat.IsObservation
+ *       in contract.go is the authority, and a test pins the two together):
  *         PASS_FRAG_NOPORTS   saw a non-first fragment (which is then
  *                             evaluated normally, and may well be dropped by
  *                             a rule — the name predates the rule engine and
@@ -322,7 +323,9 @@ struct kapkan_counter {
  *         DRYRUN_WOULD_DROP   a drop was rewritten to a pass
  *         ERR_POLICY_MISSING  a victim resolved to a policy block that is not
  *                             there; the packet fell through
- *         ERR_CFG_MISSING     is terminal, not observational (it returns)
+ *       and one near-miss worth naming because it looks like it belongs here:
+ *         ERR_CFG_MISSING     is TERMINAL, not observational — it returns
+ *                             XDP_PASS immediately rather than falling through
  *
  * Adding up every index to cross-check against an interface counter therefore
  * over-counts by the number of observations. The Go side documents the same

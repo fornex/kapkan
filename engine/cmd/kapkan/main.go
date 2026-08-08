@@ -23,29 +23,33 @@ import (
 )
 
 func main() {
-	var (
-		configPath  = flag.String("config", "configs/dev.yaml", "path to YAML config file")
-		logFormat   = flag.String("log-format", "json", "log format: json or text")
-		logLevel    = flag.String("log-level", "info", "log level: debug, info, warn, error")
-		dumpSchema  = flag.Bool("dump-schema", false, "print the config JSON schema to stdout and exit")
-		checkConfig = flag.String("check-config", "", "validate the config file at this path and exit (0 = valid, 1 = invalid)")
-		showVersion = flag.Bool("version", false, "print the version and exit")
-		checkUpdate = flag.Bool("check-update", false, "check for a newer release and exit (0 = up to date, 10 = update available, 1 = error)")
-		pidFile     = flag.String("pid-file", "/run/kapkan/kapkan.pid", "path to the pid file (written on start; read by -s)")
-		signalCmd   = flag.String("s", "", "send a signal to the running kapkan and exit: "+signalNames)
-	)
-	flag.Parse()
+	// The flags are declared and parsed in cli.go, unchanged in name, default
+	// and behaviour — flag.ExitOnError is what flag.CommandLine has always used,
+	// so a bad flag still prints usage and exits 2.
+	f, err := parseFlags(os.Args[0], os.Args[1:], flag.ExitOnError)
+	if err != nil {
+		os.Exit(exitUsage) // unreachable under ExitOnError; kept so the error is not ignored
+	}
+
+	// POSITIONAL DISPATCH, and note where it sits: after flag.Parse, never
+	// before. flag stops at the first non-flag argument, so a flags-only
+	// invocation — which is every invocation kapkan has ever accepted — leaves
+	// no arguments here and falls straight through to the code below, byte for
+	// byte as it always did. See the header of cli.go.
+	if len(f.args()) > 0 {
+		os.Exit(runSubcommand(f, os.Stdout, os.Stderr))
+	}
 
 	// Utility subcommands exit before the daemon starts; they never open
 	// listeners or send announcements.
-	if *showVersion {
+	if f.showVersion {
 		fmt.Println("kapkan", buildinfo.String())
 		return
 	}
-	if *checkUpdate {
-		os.Exit(checkForUpdate(*configPath))
+	if f.checkUpdate {
+		os.Exit(checkForUpdate(f.configPath))
 	}
-	if *dumpSchema {
+	if f.dumpSchema {
 		b, err := config.GenerateSchema()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "dump-schema:", err)
@@ -57,21 +61,21 @@ func main() {
 		}
 		return
 	}
-	if *checkConfig != "" {
-		os.Exit(checkConfigFile(*checkConfig))
+	if f.checkConfig != "" {
+		os.Exit(checkConfigFile(f.checkConfig))
 	}
 	// `kapkan -s reload|stop|quit` signals a running daemon (via its pid file)
 	// and exits — it never starts a daemon of its own.
-	if *signalCmd != "" {
-		if err := runSignalCommand(*signalCmd, *pidFile); err != nil {
+	if f.signalCmd != "" {
+		if err := runSignalCommand(f.signalCmd, f.pidFile); err != nil {
 			fmt.Fprintln(os.Stderr, "kapkan -s:", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	log := logging.New(*logFormat, *logLevel)
-	if err := run(*configPath, *pidFile, log); err != nil {
+	log := logging.New(f.logFormat, f.logLevel)
+	if err := run(f.configPath, f.pidFile, log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}

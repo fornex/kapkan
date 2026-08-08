@@ -248,11 +248,11 @@ func checkBPFFS(pinPath string) error {
 	}
 	if magic != bpfFSMagic {
 		return fmt.Errorf("%w: %s is on filesystem type %#x, not bpffs (%#x). "+
-			"Mount it with `mount -t bpf bpffs /sys/fs/bpf` (systemd normally does this), "+
-			"and if the unit sets ProtectKernelTunables=yes, remove it — systemd mounts "+
-			"/sys/fs/bpf read-only under that option, so no pin can be created. "+
-			"See engine/deploy/dataplane-operations.md §1",
-			ErrPinPathUnsafe, at, uint64(magic), uint64(bpfFSMagic))
+			"Mount one with `mount -t bpf bpffs %s` (systemd normally does this for "+
+			"/sys/fs/bpf), and if the unit sets ProtectKernelTunables=yes, remove it — "+
+			"systemd mounts /sys/fs/bpf read-only under that option, so no pin can be "+
+			"created. See engine/deploy/dataplane-operations.md §1",
+			ErrPinPathUnsafe, at, uint64(magic), uint64(bpfFSMagic), at)
 	}
 	return nil
 }
