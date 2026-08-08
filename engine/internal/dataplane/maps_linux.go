@@ -10,9 +10,9 @@ package dataplane
 // place to fix when F6 moves.
 //
 // THE STRUCT DEFINITIONS ARE NOT HERE. They are the bpf2go-generated types in
-// kapkanxdp_bpfel.go, derived from the object's BTF, aliased below under
-// readable names. A hand-written mirror is the classic way for userspace and
-// kernel to drift silently and start dropping traffic nobody named; with the
+// kapkanxdp_bpfel.go, derived from the object's BTF and aliased under readable
+// names in bindings.go. A hand-written mirror is the classic way for userspace
+// and kernel to drift silently and start dropping traffic nobody named; with the
 // generated types a field added in C is a Go compile error on the next
 // `make dataplane-sync`.
 //
@@ -30,41 +30,6 @@ import (
 
 	"github.com/cilium/ebpf"
 )
-
-// Aliases for the bpf2go-generated types. The generated names carry the
-// object's stem twice (kapkanXDPKapkanRule) and are unexported; these are the
-// names the rest of the package uses. They are ALIASES, not definitions, so
-// they cannot drift from the BTF-derived originals.
-type (
-	// Objects is the loaded program plus its whole map set.
-	Objects = kapkanXDPObjects
-	// Maps is the loaded map set on its own.
-	Maps = kapkanXDPMaps
-	// Rule is one encoded match rule: struct kapkan_rule.
-	Rule = kapkanXDPKapkanRule
-	// PolicyBlock is one victim's whole rule set: struct kapkan_policy_block.
-	PolicyBlock = kapkanXDPKapkanPolicyBlock
-	// Profile is a rate-limit ceiling with its precomputed reciprocals.
-	Profile = kapkanXDPKapkanProfile
-	// Bucket is one token bucket: struct kapkan_bucket.
-	Bucket = kapkanXDPKapkanBucket
-	// Config is kapkan_cfg[0]: struct kapkan_config.
-	Config = kapkanXDPKapkanConfig
-	// Counter is one {pkts, bytes} pair.
-	Counter = kapkanXDPKapkanCounter
-	// LPMKeyV4 and LPMKeyV6 key the prefix tries.
-	LPMKeyV4 = kapkanXDPKapkanLpmKeyV4
-	// LPMKeyV6 keys the IPv6 prefix tries.
-	LPMKeyV6 = kapkanXDPKapkanLpmKeyV6
-	// RLKeyV4 and RLKeyV6 key the token-bucket LRUs.
-	RLKeyV4 = kapkanXDPKapkanRlKeyV4
-	// RLKeyV6 keys the IPv6 token-bucket LRU.
-	RLKeyV6 = kapkanXDPKapkanRlKeyV6
-)
-
-// MapSet returns the loaded maps, so a caller holding Objects can pass them to
-// the helpers below without naming the generated embedded field.
-func (o *Objects) MapSet() *Maps { return &o.kapkanXDPMaps }
 
 /* ========================================================================= */
 /* Rules                                                                      */
@@ -495,12 +460,29 @@ func StaticStride(m *Maps) uint32 { return m.KapkanStatics.MaxEntries() / Genera
 
 // PutPolicy writes one victim's whole rule set into a generation's half.
 //
-// Write the INACTIVE generation only. The block is a single 520-byte map value
+// WHICH GENERATION depends on which caller you are, and the two answers differ:
+//
+//   - Static policy reload builds the INACTIVE half and publishes it with
+//     Activate. It rewrites everything at once, so an all-or-nothing flip is
+//     both possible and correct.
+//
+//   - A dynamic rule installer writes the ACTIVE half, inside Manager.WithMaps,
+//     which hands it the live generation under the same lock that serialises
+//     Reload. That is not a compromise: a ban must take effect now, and a rule
+//     parked in the inactive half would not be enforcing until something else
+//     happened to flip. WithMaps also closes the window where a reload's
+//     mirrorPolicyBlocks has already copied the blocks across but not yet
+//     flipped — a rule written to the active half in that window would be
+//     published into a half nobody copied it to and would simply vanish.
+//
+// The torn read is real either way — the block is a single 520-byte map value
 // and bpf_map_update_elem copies it without excluding a concurrent reader, so a
-// packet racing this write could see the new n_rules against the old rules[] —
-// which, in the active half, would mean an old rule firing on the strength of a
-// new count. Building in the inactive half and publishing with Activate makes
-// that race structurally impossible rather than unlikely.
+// packet can see the new n_rules against a partially written rules[]. It is
+// bounded to something harmless because slots past n_rules are left zeroed, so
+// KAPKAN_RF_VALID is clear in every one of them: a torn read UNDER-matches and
+// never over-matches. The worst case is one victim's own rule set enforcing a
+// packet or two late, which is fail-open and exactly what the charter asks for.
+// It could never produce a drop the operator did not configure.
 func PutPolicy(m *Maps, gen, policyID uint32, rules []Rule) error {
 	if len(rules) > RulesPerPolicy {
 		return fmt.Errorf("dataplane: policy %d has %d rules, the block holds %d "+

@@ -45,6 +45,10 @@
     zap:          F + '<path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>',          /* flowspec */
     divert:       P + '<path d="M4 7h6l4 10h6"/><path d="M18 4l3 3-3 3"/><path d="M4 17h4"/></svg>', /* reroute */
     slash:        P + '<circle cx="12" cy="12" r="9"/><path d="M6 6l12 12"/></svg>',  /* blackhole */
+    /* dataplane: a NIC/silicon die with pins. Deliberately unlike zap (flowspec)
+       and divert, which both mean "a router elsewhere does the work" — this one
+       means the drop happens on this box, in the kernel, before the stack. */
+    chip:         P + '<rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/></svg>',
     clock:        P + '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>',
     globe:        P + '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>',
     search:       P + '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',

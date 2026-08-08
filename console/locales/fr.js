@@ -37,6 +37,9 @@
       "mode.live": "Réel",
       "mode.dryrun.full": "Simulation — l'atténuation est simulée",
       "dryrun.banner": "Mode simulation — les routes et blocages ci-dessous sont simulés. Aucune annonce BGP n'est envoyée.",
+      "dryrun.dp.simulating": "Le plan de données XDP est en SIMULATION alors que le reste de kapkan est réel — le noyau transforme chaque rejet en passage, donc les paquets que vous attendez rejetés sont transmis. L'indicateur du noyau diverge du dry_run configuré, ce qui signifie généralement qu'un rechargement n'a pas été appliqué. Consultez le journal et redémarrez kapkan pour resynchroniser.",
+      "dryrun.dp.enforcing": "Le plan de données XDP REJETTE RÉELLEMENT alors que le reste de kapkan est en simulation — des paquets sont vraiment rejetés dans le noyau sur cette machine, même si les routes et blocages ci-dessous ne sont que simulés.",
+      "dryrun.dp.also": "Le plan de données dans le noyau simule aussi.",
 
       /* counters / topbar */
       "counter.attacks": "Attaques",
@@ -253,9 +256,9 @@
     enums: {
       direction: { incoming: "Entrant", outgoing: "Sortant" },
       scope: { host: "Hôte", group: "Groupe" },
-      method: { blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Redirection vers scrubber" },
+      method: { dataplane: "Rejet dans le noyau (XDP)", blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Redirection vers scrubber" },
       banState: { active: "Actif", withdrawn: "Retiré", rejected: "Rejeté" },
-      action: { none: "Alerte seule", flowspec: "FlowSpec : rejet / limite", divert: "Redirection vers nettoyage", blackhole: "Blackhole (RTBH)" },
+      action: { dataplane: "Rejet dans le noyau (XDP)", none: "Alerte seule", flowspec: "FlowSpec : rejet / limite", divert: "Redirection vers nettoyage", blackhole: "Blackhole (RTBH)" },
       calc: { per_host: "Par hôte", total: "Total du groupe" },
       attackType: {
         ntp_amplification: "Amplification NTP",
@@ -280,7 +283,7 @@
     },
 
     enumsShort: {
-      action: { none: "Alerte", flowspec: "FlowSpec", divert: "Redirection", blackhole: "Blackhole" }
+      action: { dataplane: "XDP", none: "Alerte", flowspec: "FlowSpec", divert: "Redirection", blackhole: "Blackhole" }
     }
   };
 })(window);

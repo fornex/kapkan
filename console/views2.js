@@ -207,7 +207,7 @@
         onclick: toggle, onkeydown: function (e) { hgKey(e, toggle); } }, [
         h("td", { class: "target-cell" }, h("span", { class: "row", style: { gap: "8px" } }, [w.icon(expanded ? "chevron-down" : "chevron-right"), h("span", { class: "mono", text: g.name })])),
         h("td", {}, K.badge("badge--muted", I.label("calc", g.calc))),
-        h("td", {}, K.badge(g.mitigation === "blackhole" ? "badge--active" : g.mitigation === "divert" ? "badge--elev" : "badge--accent", I.label("method", g.mitigation))),
+        h("td", {}, K.methodPill(g.mitigation)),
         h("td", {}, K.badge(g.ban_enabled ? "badge--calm" : "badge--muted", g.ban_enabled ? I.t("common.enabled") : I.t("common.disabled"))),
         h("td", { class: "mono", text: g.baseline ? "×" + g.baseline.factor : "—" })
       ]));

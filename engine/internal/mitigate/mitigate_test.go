@@ -1927,3 +1927,37 @@ func TestCarpetBlastRadiusAddressUnitsV6(t *testing.T) {
 		t.Errorf("blast_radius_fraction metric delta = %v, want 1", after-before)
 	}
 }
+
+// TestSupportsDataplaneMatchesStageView binds the SupportsDataplane flag to the
+// behaviour it advertises.
+//
+// The flag exists so that app.checkDataplaneLadder's refusal disappears on its
+// own when the backend lands. That only works if the flag cannot be flipped
+// ahead of the backend — and a boolean is easy to flip while unblocking
+// something else. If it ever says true while stageView still falls through to
+// the alert-only default, a rung the operator wrote as a drop becomes an alert
+// again, silently, which is the exact bug the refusal was added to prevent.
+//
+// So: assert the two agree in whichever direction the flag currently points.
+func TestSupportsDataplaneMatchesStageView(t *testing.T) {
+	m := &Mitigator{}
+	b := &Ban{}
+	got := m.stageView(b, config.EscalationStage{Action: config.EscalateDataplane})
+
+	if SupportsDataplane() {
+		if got.method == "" {
+			t.Fatal("SupportsDataplane() is true but stageView still maps the dataplane rung to " +
+				"the empty (alert-only) method: a configured drop would be announced as an alert. " +
+				"Add the EscalateDataplane case to stageView before flipping the flag.")
+		}
+		if got.method != config.MitigateDataplane {
+			t.Errorf("stageView(dataplane) = method %q, want %q", got.method, config.MitigateDataplane)
+		}
+		return
+	}
+	if got.method != "" {
+		t.Errorf("SupportsDataplane() is false but stageView already returns method %q; "+
+			"flip the flag to true in the same change, or app's startup refusal will keep "+
+			"rejecting configs this build can in fact execute", got.method)
+	}
+}

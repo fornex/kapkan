@@ -55,15 +55,33 @@
 /*
  * Default map sizings, matching config.DataplaneLimits defaults.
  *
- * These are the values baked into the ELF, and TODAY THEY ARE WHAT YOU GET:
- * there is no loader yet, so dataplane.limits is accepted by validate() and
- * then ignored. The loader (S3) must rewrite MaxEntries from DataplaneSettings
- * before creating the maps, otherwise an operator who lowers
- * max_ratelimit_sources to fit a small box still pays for the full 1M-entry
- * LRUs — which dominate the map footprint.
+ * THESE ARE DEFAULTS, NOT SIZES. The loader in internal/dataplane REWRITES
+ * max_entries from the resolved dataplane.limits on the CollectionSpec before
+ * the maps are created (see limits.go: Limits.MapSizing and applySizing), so
+ * what an operator gets is what they configured and these values are only what
+ * they get when they configure nothing. That matters most for
+ * KAPKAN_MAX_RL_SOURCES: the two LRU hashes it sizes are 94% of a measured
+ * 234.9 MiB, charged to the unit's memory cgroup in one step at load, so an
+ * operator lowering it to fit a small box has to actually get a smaller map.
  *
- * The values below agree with the Go defaults by hand. TestContractMatchesC
- * should grow a check for them when the loader lands.
+ * Three of them are the same number in three files — here, dataplane's
+ * DefaultMax* in contract.go, and config's defaultMax* — and both edges are
+ * gated: TestContractMatchesC reads this header, TestDefaultLimitsMatchConfig
+ * reads config.go.
+ *
+ * KAPKAN_MAX_STATIC_RULES is the count of rules AS THE OPERATOR WRITES THEM.
+ * kapkan_statics is created larger than KAPKAN_GENERATIONS x this: a config rule
+ * that names no source prefix has no address family, and since the datapath
+ * tests KAPKAN_RF_IPV6 against the packet unconditionally, such a rule is
+ * compiled to one kernel rule per family (dataplane.StaticExpansion).
+ *
+ * KAPKAN_MAX_RULE_STATS is a default the loader always replaces, with the real
+ * bound on live rule ids (max_dynamic_rules + the expanded static count).
+ *
+ * KAPKAN_MAX_PREFIXES is deliberately NOT rewritten: an LPM_TRIE allocates
+ * nothing up front and grows per insert (measured: 0 bytes at max_entries
+ * 65536), so it is a ceiling rather than a reservation and there is nothing to
+ * save by lowering it.
  */
 #define KAPKAN_MAX_DYNAMIC_RULES	4096 /* config default */
 #define KAPKAN_MAX_POLICIES		(KAPKAN_MAX_DYNAMIC_RULES / KAPKAN_RULES_PER_POLICY)

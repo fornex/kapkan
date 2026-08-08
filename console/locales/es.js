@@ -37,6 +37,9 @@
       "mode.live": "Real",
       "mode.dryrun.full": "Simulación — la mitigación está simulada",
       "dryrun.banner": "Modo simulación — las rutas y bloqueos de abajo están simulados. No se envían anuncios BGP.",
+      "dryrun.dp.simulating": "El plano de datos XDP está SIMULANDO mientras el resto de kapkan está en real — el kernel convierte cada descarte en un paso, por lo que los paquetes que espera descartar se están reenviando. La marca del kernel difiere del dry_run configurado, lo que normalmente indica que una recarga no se aplicó. Revise el registro y reinicie kapkan para resincronizar.",
+      "dryrun.dp.enforcing": "El plano de datos XDP ESTÁ DESCARTANDO DE VERDAD mientras el resto de kapkan está en simulación — en esta máquina se descartan paquetes realmente en el kernel, aunque las rutas y bloqueos de abajo solo estén simulados.",
+      "dryrun.dp.also": "El plano de datos en el kernel también está simulando.",
 
       /* counters / topbar */
       "counter.attacks": "Ataques",
@@ -253,9 +256,9 @@
     enums: {
       direction: { incoming: "Entrante", outgoing: "Saliente" },
       scope: { host: "Host", group: "Grupo" },
-      method: { blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Desvío al scrubber" },
+      method: { dataplane: "Descarte en el kernel (XDP)", blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Desvío al scrubber" },
       banState: { active: "Activo", withdrawn: "Retirado", rejected: "Rechazado" },
-      action: { none: "Solo alerta", flowspec: "FlowSpec: descarte / límite", divert: "Desvío a depuración", blackhole: "Blackhole (RTBH)" },
+      action: { dataplane: "Descarte en el kernel (XDP)", none: "Solo alerta", flowspec: "FlowSpec: descarte / límite", divert: "Desvío a depuración", blackhole: "Blackhole (RTBH)" },
       calc: { per_host: "Por host", total: "Total del grupo" },
       attackType: {
         ntp_amplification: "Amplificación NTP",
@@ -280,7 +283,7 @@
     },
 
     enumsShort: {
-      action: { none: "Alerta", flowspec: "FlowSpec", divert: "Desvío", blackhole: "Blackhole" }
+      action: { dataplane: "XDP", none: "Alerta", flowspec: "FlowSpec", divert: "Desvío", blackhole: "Blackhole" }
     }
   };
 })(window);

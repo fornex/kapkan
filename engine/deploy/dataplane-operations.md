@@ -202,6 +202,28 @@ What an operator needs to take from that table:
   **128 B** (v6, 40-byte key). Halving `max_ratelimit_sources` halves ~232 MiB
   of the 235.
 
+  **This is now a knob that works.** The loader rewrites `max_entries` on the
+  object before the maps are created; until it existed, `dataplane.limits` was
+  validated and then discarded, so lowering the limit changed nothing.
+  **Measured** on the same kernel, one process each:
+
+  | limits | `kapkan_rl_src4/6` entries | total footprint |
+  |---|---:|---:|
+  | defaults | 1,048,576 | 245,352,272 B (**234.0 MiB**) |
+  | `max_dynamic_rules: 256`, `max_static_rules: 32`, `max_ratelimit_sources: 65536` | 65,536 | 15,372,624 B (**14.7 MiB**) |
+
+  The other two limits barely move the total (`kapkan_policies` and
+  `kapkan_statics` are half a megabyte between them at the defaults) — they
+  exist to bound how many rules can be installed, not to save memory. Only
+  `max_ratelimit_sources` is worth tuning for a small box.
+
+  Two derived sizes are worth knowing because neither is spelled in the config:
+  `kapkan_rule_stats` is created at `max_dynamic_rules + 2 x max_static_rules`
+  rather than its compiled-in 8192, and `kapkan_statics` is created at twice
+  `max_static_rules` per generation — a static rule with no `match.src` has no
+  address family, and the datapath is family-strict, so such a rule compiles to
+  one kernel rule per family.
+
 - **The LPM tries cost nothing up front** and grow per insert, so an allowlist
   of 20 prefixes costs about what 20 prefixes should. Their `max_entries` of
   65,536 is a ceiling, not a reservation.
@@ -336,6 +358,14 @@ creates no user namespaces.
 | `avc: denied ... tclass=bpf` | SELinux; see section 3 |
 | pin creation fails, `/sys/fs/bpf` read-only | `ProtectKernelTunables=yes` |
 | unit OOM-killed at startup | `MemoryMax=` below the ~235 MiB of maps; see section 2 |
+| `pin path is not safe to use: ... is on filesystem type 0x…, not bpffs` | `pin_path` is an ordinary directory: bpffs is not mounted, or the unit made `/sys/fs/bpf` read-only |
+| `pin path is not safe to use: ... is mode 0777` / `owned by uid N` | the pin directory is writable by, or owned by, somebody else. A local user who can write it can pre-create a program kapkan would ADOPT, so this is a refusal to start. `chown` it to the kapkan user and `chmod 0700` |
+| `kernel too old: running X, the XDP data plane needs 5.15 or newer` | below the supported floor; set `dataplane.enabled: false` and use a flowspec/blackhole ladder |
+| `another XDP program already owns this interface's hook` | something else is attached (Cilium, a leftover `ip link set xdp`). `ip -details link show <if>` or `bpftool net` |
+| `this driver has no native XDP support` | `xdp_mode: native` on a device without driver XDP. `auto` falls back to the generic path and records that it did; `native` fails on purpose, because it costs ~10x less CPU per packet and silently giving up that difference is not a favour |
+| startup log: `REJECTED the existing pinned data plane and rebuilt it` | this binary's BPF object, map layout or `dataplane.limits` differ from the pinned ones, so they could not be adopted. Expected after an upgrade that changes `bpf/`; the cost is that dynamic rules from the previous process are gone and active attacks are re-mitigated on their next detection interval |
+| `/healthz` says `dataplane: DEGRADED (n/m interfaces attached)` | at least one configured interface has no live XDP attachment. Alert on `kapkan_dataplane_degraded`; the status code stays 200 because a restart cannot conjure a missing NIC |
+| startup refused: `escalation ladder uses "dataplane", which this build cannot execute` | this release has no mitigator backend for in-kernel drops yet. The rung would be announced as an alert-only stage, so kapkan refuses rather than run a configuration whose drop is not a drop. Use `flowspec`/`blackhole`/`none`; `static_rules` and `allowlist` are unaffected |
 
 ---
 

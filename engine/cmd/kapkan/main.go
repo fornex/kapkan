@@ -205,11 +205,16 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				if _, err := store.Reload(); err != nil {
+				cfg, err := store.Reload()
+				if err != nil {
 					log.Error("config reload failed; keeping previous config", "err", err)
-				} else {
-					log.Info("config reloaded")
+					continue
 				}
+				// State that lives outside this process — the data plane's
+				// kernel maps — has to be written, not observed. The API's
+				// reload route calls the same hook.
+				application.ApplyReload(cfg)
+				log.Info("config reloaded")
 			}
 		}
 	}()

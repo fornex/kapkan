@@ -857,6 +857,30 @@ func routeFamilyOf(method config.MitigationMethod) int {
 	}
 }
 
+// SupportsDataplane reports whether this build can actually EXECUTE a
+// config.EscalateDataplane ladder rung.
+//
+// It is false, and stageView immediately below is why: there is no case for
+// EscalateDataplane, so such a rung falls to the default and yields the empty
+// method — which announceMethodLocked logs as "escalation: alert-only stage (no
+// route announced)". The operator configured an in-kernel drop and got an alert,
+// with nothing in the ban, the API or the metrics to say the drop did not happen.
+//
+// Adding the case is deliberately NOT a one-liner here. A non-empty method with
+// no branch of its own in announceMethodLocked falls through to the
+// blackhole/divert host-route path, so the naive fix would announce a BLACKHOLE
+// for the rung an operator picked precisely because it is the gentlest on the
+// ladder (escalationSeverity: dataplane=1, flowspec=2, divert=3, blackhole=4).
+// The rung needs a real backend — install the attack's rules into the data
+// plane's maps, and withdraw them again — and that is a separate change.
+//
+// Until it lands, internal/app REFUSES TO START when a resolved ladder uses this
+// action; app.checkDataplaneLadder documents why refusing beats warning. Flip
+// this to true in the same change that adds the stageView case, the
+// announceMethodLocked branch and the withdrawMethodLocked branch, and the
+// refusal disappears without anyone having to remember it.
+func SupportsDataplane() bool { return false }
+
 // stageView maps a ladder stage to its method, route string, and frozen BGP
 // attribute set. EscalateNone maps to the empty method (alert only).
 func (m *Mitigator) stageView(b *Ban, stage config.EscalationStage) stageView {

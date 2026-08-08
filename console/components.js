@@ -184,15 +184,56 @@
     return el;
   }
 
-  /* ---------- ESCALATION LADDER (hero) ---------- */
-  var ACTION_TONE = { none: 1, flowspec: 2, divert: 3, blackhole: 4 };
-  var ACTION_ICON = { none: "bell", flowspec: "zap", divert: "divert", blackhole: "slash" };
+  /* ---------- ACTION / METHOD PRESENTATION ----------
+     Lookups, deliberately, and never a chain of ternaries.
+
+     Every one of these used to be written `x === "blackhole" ? a : x === "divert"
+     ? b : c`, which is a two-way test with a catch-all. That shape does not fail
+     when a new method appears — it silently renders the new thing as whatever sat
+     in the final else. When `dataplane` landed server-side, an in-kernel drop
+     would have been drawn with FlowSpec's lightning bolt in FlowSpec's colour: an
+     operator reading the dashboard would have been told, wrongly and
+     confidently, that a router upstream was filtering.
+
+     A lookup plus an explicit unknown fallback fails VISIBLY instead: a kapkan
+     newer than this console renders a muted badge with a neutral icon and the
+     raw method name (I.label already falls back to the key), which reads as
+     "this console does not know what that is" rather than as a wrong answer.
+
+     The tone numbers are colour SLOTS, not severities — the ladder's ordering is
+     the array's, not the tone's. Slot 5 is the data plane's own colour: it must
+     not be slot 1 (green), because green means alert-only and the data plane
+     really does drop; and it must not share flowspec's amber, because "this box's
+     NIC" and "a router upstream" fail in completely different ways. */
+  var ACTION_TONE = { none: 1, dataplane: 5, flowspec: 2, divert: 3, blackhole: 4 };
+  var ACTION_ICON = { none: "bell", dataplane: "chip", flowspec: "zap", divert: "divert", blackhole: "slash" };
+
+  /* Badge tone per mitigation METHOD (what a ban actually did), as opposed to
+     per configured ACTION above. Same list, different vocabulary in the API. */
+  var METHOD_BADGE = {
+    dataplane: "badge--dp",
+    flowspec:  "badge--accent",
+    divert:    "badge--elev",
+    blackhole: "badge--active"
+  };
+  var METHOD_ICON = { dataplane: "chip", flowspec: "zap", divert: "divert", blackhole: "slash" };
+
+  /* The fallbacks are the point of this file's existence; see above. */
+  function methodBadge(method) { return METHOD_BADGE[method] || "badge--muted"; }
+  function methodIcon(method) { return METHOD_ICON[method] || "shield"; }
+  function actionIcon(action) { return ACTION_ICON[action] || "shield"; }
+
+  /* methodPill is the one renderer every table and detail row should use, so a
+     sixth method needs exactly two lines added above and nothing hunted down. */
+  function methodPill(method) {
+    return badge(methodBadge(method), I.label("method", method), methodIcon(method));
+  }
 
   function ladder(escalation, currentStep, opts) {
     opts = opts || {};
     var compact = opts.compact, config = opts.config, startedMs = opts.startedMs, live = opts.live;
     var rungs = escalation.map(function (stage, i) {
-      var action = stage.action, tone = ACTION_TONE[action];
+      var action = stage.action, tone = ACTION_TONE[action] || 0;
       var state = config ? "config" : (i < currentStep ? "is-done" : i === currentStep ? "is-current" : "is-future");
       var nameFull = I.label("action", action), nameShort = I.labelShort("action", action);
 
@@ -228,7 +269,7 @@
 
       var node = (state === "is-done")
         ? h("span", { class: "rung__node" }, w.icon("check-sm"))
-        : h("span", { class: "rung__node" }, w.icon(ACTION_ICON[action]));
+        : h("span", { class: "rung__node" }, w.icon(actionIcon(action)));
 
       return h("div", { class: "rung " + (state === "config" ? "" : state), dataset: { tone: tone }, attrs: { title: nameFull } }, [
         h("div", { class: "rung__head" }, [node, h("span", { class: "rung__name", text: compact ? nameShort : nameFull })]),
@@ -289,7 +330,7 @@
   function routeDisplay(obj, dry) {
     var rows = [];
     var method = obj.method;
-    rows.push(routeRow(I.t("col.method"), h("span", { class: "badge " + (method === "blackhole" ? "badge--active" : method === "divert" ? "badge--elev" : "badge--accent") }, [w.icon(method === "blackhole" ? "slash" : method === "divert" ? "divert" : "zap"), h("span", { text: I.label("method", method) })])));
+    rows.push(routeRow(I.t("col.method"), methodPill(method)));
     if (obj.flowspec && obj.flowspec.length) {
       obj.flowspec.forEach(function (r, i) {
         rows.push(routeRow(i === 0 ? I.t("ac.flowspec") : "", h("span", { class: "route__rule" }, [
@@ -408,6 +449,7 @@
     routeDisplay: routeDisplay, shareGroup: shareGroup, timeline: timeline,
     rejection: rejection, toast: toast, confirm: confirm, closeConfirm: closeConfirm,
     empty: empty, skeletonRows: skeletonRows,
-    ACTION_ICON: ACTION_ICON
+    ACTION_ICON: ACTION_ICON, methodPill: methodPill,
+    methodBadge: methodBadge, methodIcon: methodIcon, actionIcon: actionIcon
   };
 })(window);

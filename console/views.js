@@ -181,7 +181,7 @@
         h("td", {}, K.badge("badge--active", I.label("attackType", a.classification.type), "flame")),
         h("td", { class: "num" }, [h("b", { class: "mono", style: { color: sev }, text: mult != null ? I.abbr(mult) + "×" : "—" }), h("div", { class: "td-muted mono", text: a.metric })]),
         h("td", {}, rung ? K.badge("badge--muted", I.label("action", rung)) : h("span", { class: "td-muted", text: "—" })),
-        h("td", {}, a.method ? K.badge(a.method === "blackhole" ? "badge--active" : a.method === "divert" ? "badge--elev" : "badge--accent", I.label("method", a.method)) : h("span", { class: "td-muted", text: I.t("ac.alertonly") })),
+        h("td", {}, a.method ? K.methodPill(a.method) : h("span", { class: "td-muted", text: I.t("ac.alertonly") })),
         actsCell
       ]));
       if (expanded) rows.push(h("tr", { class: "attack-detail-row" }, h("td", { attrs: { colspan: "7" } }, h("div", { class: "attack-card__body" }, attackBody(a, ctx)))));
@@ -225,7 +225,7 @@
     ]);
 
     var children = [banner];
-    if (ctx.dryRun) children.push(dryRunBanner());
+    children.push(dryRunBanner(ctx));   /* null when there is nothing to warn about */
     children.push(trafficStrip(ctx));
     children.push(h("div", { class: "mt-6" }, statsGrid(ctx)));
 
@@ -238,8 +238,55 @@
     K.mount(root, children);
   }
 
-  function dryRunBanner() {
-    return h("div", { class: "banner banner--dry" }, [w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("dryrun.banner") })]);
+  /* ---------- DRY-RUN BANNERS ----------
+     Returns null when there is nothing to say, so callers render it
+     UNCONDITIONALLY. That matters: the loudest case here fires precisely when
+     the global dry_run is FALSE, and the old `ctx.dryRun ? dryRunBanner() : null`
+     guard would have skipped exactly the warning that needed shouting.
+
+     The divergence being guarded is real and silent. dataplane dry_run lives in a
+     kernel map, and an ADOPTED pin set carries the previous process's flag — so an
+     operator can set dry_run: false, restart, watch every badge in this console
+     flip to LIVE, and still have a datapath rewriting every drop into a pass.
+     Nothing else on the page would contradict it. Hence a separate, louder banner
+     rather than a nuance inside the existing one.
+
+     Direction matters too, and the two directions are not symmetrical:
+
+       dataplane simulating while the rest is live  -> DANGEROUS. The operator
+         believes packets are being dropped and they are not. Loud, and shown to
+         every role: a viewer looking at a drop that is not dropping should not be
+         the last to know.
+
+       dataplane enforcing while the rest simulates -> SURPRISING. Real packets
+         are being dropped by a box the operator put in dry-run. Also loud, but
+         only renderable for an admin, because "a data plane exists" is only
+         knowable from the admin-only block — telling a viewer their data plane is
+         enforcing when there may not be one at all would be a fabrication. */
+  function dryRunBanner(ctx) {
+    var globalDry = !!ctx.dryRun;
+    var dpDry = !!ctx.status.dataplane_dry_run;
+    var dpBlock = ctx.status.dataplane;                       /* admin-only */
+    /* dpDry implies a data plane exists; the block is the only other evidence. */
+    var dpKnownEnabled = dpDry || !!(dpBlock && dpBlock.enabled);
+
+    if (dpDry && !globalDry) return banner(true, "dryrun.dp.simulating");
+    if (globalDry && dpDry) return banner(false, "dryrun.banner", "dryrun.dp.also");
+    if (globalDry && dpKnownEnabled) return banner(true, "dryrun.dp.enforcing");
+    if (globalDry) return banner(false, "dryrun.banner");
+    return null;
+
+    /* loud adds the pulsing treatment and role="alert" so a screen reader
+       announces it; both variants are class-only, never an inline style
+       attribute, because the dashboard runs under style-src 'self'. */
+    function banner(loud, key, extraKey) {
+      var kids = [w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t(key) })];
+      if (extraKey) kids.push(h("span", { class: "banner__more", text: I.t(extraKey) }));
+      return h("div", {
+        class: "banner " + (loud ? "banner--dry-loud" : "banner--dry"),
+        attrs: loud ? { role: "alert" } : null
+      }, kids);
+    }
   }
 
   function recentMini(ctx) {
@@ -349,7 +396,7 @@
       return h("tr", {}, [
         h("td", { class: "target-cell" }, [h("span", { text: b.target }), h("span", { class: "td-muted", text: b.prefix })]),
         h("td", { class: "mono td-muted", text: b.route }),
-        h("td", {}, K.badge(b.method === "blackhole" ? "badge--active" : b.method === "divert" ? "badge--elev" : "badge--accent", I.label("method", b.method))),
+        h("td", {}, K.methodPill(b.method)),
         h("td", {}, K.badge("badge--calm", I.label("banState", b.state))),
         h("td", {}, b.dry_run ? K.badge("badge--dry", I.t("mode.dryrun"), "shield-alert") : K.badge("badge--calm", I.t("mode.live"))),
         h("td", { class: "mono", dataset: { cdText: b.expires_at || "" }, text: expires }),
@@ -373,7 +420,7 @@
       return h("tr", {}, [
         h("td", { class: "target-cell" }, [h("span", { text: b.target }), h("span", { class: "td-muted", text: b.prefix })]),
         h("td", { class: "mono td-muted", text: b.route }),
-        h("td", {}, K.badge(b.method === "blackhole" ? "badge--muted" : "badge--muted", I.label("method", b.method))),
+        h("td", {}, K.badge("badge--muted", I.label("method", b.method), K.methodIcon(b.method))),
         h("td", {}, K.badge(rejected ? "badge--elev" : "badge--muted", I.label("banState", b.state))),
         h("td", {}, K.badge(b.manual ? "badge--accent" : "badge--muted", b.manual ? I.t("bn.manualtag") : I.t("bn.autotag"))),
         h("td", { class: "td-muted", text: rejected ? rejectReason(b.reason) : (b.withdrawn_at ? I.rel(new Date(b.withdrawn_at)) : "") })
@@ -391,7 +438,7 @@
 
     K.mount(root, [
       viewHead(I.t("nav.bans"), null),
-      ctx.dryRun ? dryRunBanner() : null,
+      dryRunBanner(ctx),
       manualForm,
       h("div", { class: "mt-4" }, activeBlock),
       h("div", { class: "mt-6" }, histBlock)

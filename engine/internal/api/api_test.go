@@ -193,6 +193,164 @@ func TestHealthzReflectsReadiness(t *testing.T) {
 	}
 }
 
+// fakeDataplane implements DataplaneReporter without touching internal/dataplane.
+//
+// The fake is the point, not a shortcut. This package must not import
+// internal/dataplane (see dataplane.go for the argument), and a test that reached
+// for the real Health type to build a fixture would quietly reintroduce exactly
+// the dependency the design removes — in the one file nobody checks the imports
+// of. Building the fixture out of api's own types also proves the interface is
+// satisfiable by something other than the Manager, which is what makes it an
+// interface rather than a type alias.
+type fakeDataplane struct {
+	summary string
+	status  DataplaneStatus
+}
+
+func (f *fakeDataplane) DataplaneSummary() string         { return f.summary }
+func (f *fakeDataplane) DataplaneStatus() DataplaneStatus { return f.status }
+
+// TestHealthzReportsDataplaneState: a degraded data plane is REPORTED in the
+// body and does not change the status code.
+//
+// The status code is a liveness answer, and a NIC that is down is not something a
+// restart fixes — flipping to 503 would turn one unattached interface into a
+// supervisor restart loop, which would take the interfaces that ARE filtering
+// down with it. The body is the human surface and kapkan_dataplane_degraded is
+// the alerting one.
+func TestHealthzReportsDataplaneState(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+	s.SetReady()
+	h := s.Handler()
+
+	// No data plane configured: the body is unchanged from before the feature.
+	if got := do(t, h, http.MethodGet, "/healthz", "").Body.String(); got != "ok\n" {
+		t.Errorf("healthz body without a data plane = %q, want %q", got, "ok\n")
+	}
+
+	s.SetDataplane(&fakeDataplane{
+		summary: "dataplane: DEGRADED (1/2 interfaces attached); unattached[eth1]: no XDP attachment on eth1",
+	})
+	rec := do(t, h, http.MethodGet, "/healthz", "")
+	if rec.Code != http.StatusOK {
+		t.Errorf("healthz with a degraded data plane = %d, want 200 (a restart cannot "+
+			"conjure a missing NIC; flapping readiness would be worse than the outage)", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"ok", "DEGRADED", "1/2 interfaces attached", "unattached[eth1]"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("healthz body %q is missing %q", body, want)
+		}
+	}
+	t.Logf("healthz body:\n%s", body)
+
+	// Healthy again: still 200, and the body says so.
+	s.SetDataplane(&fakeDataplane{summary: "dataplane: ok (1/1 interfaces attached)"})
+	body = do(t, h, http.MethodGet, "/healthz", "").Body.String()
+	if !strings.Contains(body, "dataplane: ok (1/1 interfaces attached)") {
+		t.Errorf("healthz body %q does not report a healthy data plane", body)
+	}
+}
+
+// TestStatusDataplaneVisibility is the disclosure gate.
+//
+// The `dataplane` object carries interface names — topology, and none of a scoped
+// tenant's business — so it lives inside the unscoped() gate next to scrubbing.
+// The flat dataplane_dry_run scalar does NOT: the console has to render a
+// per-subsystem DRY RUN state for a viewer, and a viewer who is looking at a drop
+// that is not actually dropping should not be the last person to find out. One
+// boolean about this box's own enforcement posture discloses no topology.
+//
+// Both halves are asserted for both roles, in both directions. Testing only that
+// the admin sees the block would pass just as well if the gate were missing.
+func TestStatusDataplaneVisibility(t *testing.T) {
+	t.Setenv("K_ADMIN", "admin-secret")
+	t.Setenv("K_A", "a-secret")
+	t.Setenv("K_B", "b-secret")
+	s := testServer(t, storeFromYAML(t, tenantAPIYAML()))
+	s.SetDataplane(&fakeDataplane{status: DataplaneStatus{
+		Enabled: true, DryRun: true, Degraded: true, Mode: "mixed",
+		Attached: 1, Configured: 2, StaticRules: 7, Generation: 3,
+		Interfaces: []DataplaneInterface{
+			{Name: "eth0", Index: 3, Mode: "native", Attached: true},
+			{Name: "eth1", Attached: false, Attempts: 4, LastError: "no such device"},
+		},
+	}})
+	h := s.Handler()
+
+	for _, tc := range []struct {
+		name, token string
+		wantBlock   bool
+	}{
+		{"unscoped admin", "admin-secret", true},
+		{"scoped viewer", "a-secret", false},
+		{"scoped operator", "b-secret", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+			r.Header.Set("Authorization", "Bearer "+tc.token)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, r)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("status body: %v", err)
+			}
+			// The scalar is visible to every role, always present.
+			dry, ok := got["dataplane_dry_run"]
+			if !ok {
+				t.Error("dataplane_dry_run is absent — the console renders it unconditionally")
+			}
+			if dry != true {
+				t.Errorf("dataplane_dry_run = %v, want true", dry)
+			}
+			block, hasBlock := got["dataplane"]
+			if hasBlock != tc.wantBlock {
+				t.Fatalf("dataplane block present = %v, want %v", hasBlock, tc.wantBlock)
+			}
+			if !tc.wantBlock {
+				// And prove the leak is really absent, not merely renamed: no
+				// interface name may appear anywhere in the scoped response.
+				if bytes.Contains(rec.Body.Bytes(), []byte("eth0")) ||
+					bytes.Contains(rec.Body.Bytes(), []byte("eth1")) {
+					t.Errorf("a scoped token's status names an interface:\n%s", rec.Body)
+				}
+				return
+			}
+			b, _ := json.MarshalIndent(block, "", "  ")
+			t.Logf("admin dataplane block:\n%s", b)
+			obj := block.(map[string]any)
+			for _, k := range []string{"enabled", "dry_run", "degraded", "adopted", "mode",
+				"attached", "configured", "interfaces", "static_rules", "dynamic_rules",
+				"generation", "map_schema_version", "map_bytes"} {
+				if _, ok := obj[k]; !ok {
+					t.Errorf("dataplane block is missing the frozen field %q", k)
+				}
+			}
+		})
+	}
+}
+
+// TestStatusDataplaneAbsentWithoutAManager: with no data plane wired, the block
+// is absent and the scalar is false — never absent. The console must not have to
+// distinguish "no data plane" from "an older kapkan".
+func TestStatusDataplaneAbsentWithoutAManager(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, apiYAML))
+	rec := do(t, s.Handler(), http.MethodGet, "/api/v1/status", "")
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("status body: %v", err)
+	}
+	if _, ok := got["dataplane"]; ok {
+		t.Error("dataplane block present with no data plane configured")
+	}
+	if got["dataplane_dry_run"] != false {
+		t.Errorf("dataplane_dry_run = %v, want false", got["dataplane_dry_run"])
+	}
+}
+
 func TestAttacksEndpoint(t *testing.T) {
 	s := testServer(t, storeFromYAML(t, apiYAML))
 	target := netip.MustParseAddr("203.0.113.50")

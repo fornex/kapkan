@@ -19,7 +19,8 @@
   /* ---- cache the synchronous getters read ---- */
   var cache = {
     status: { dry_run: false, uptime_seconds: 0, active_attacks: 0, active_bans: 0,
-      hostgroups: [], networks: [], thresholds: null, role: "viewer" },
+      hostgroups: [], networks: [], thresholds: null, role: "viewer",
+      dataplane_dry_run: false, dataplane: null },
     attacks: { active: [], recent: [] },
     hosts: [],
     bansActive: [],
@@ -243,7 +244,14 @@
         latest_url: status.latest_url || "",
         bgp: status.bgp || null,
         scrubbing: status.scrubbing || null,
-        notify: status.notify || null
+        notify: status.notify || null,
+        /* XDP data plane. The scalar is sent to EVERY role and defaults to
+           false, so the dry-run banner logic never has to distinguish "no data
+           plane" from "an older kapkan that does not send the field". The
+           `dataplane` object is admin-only (it names interfaces) and is null for
+           a scoped token — anything rendering it must handle that. */
+        dataplane_dry_run: !!status.dataplane_dry_run,
+        dataplane: status.dataplane || null
       };
       cache.attacks = {
         active: (attacks.active || []).map(function (a) { return mapAttack(a, groups, bansRaw); }),

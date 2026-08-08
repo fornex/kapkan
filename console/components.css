@@ -154,6 +154,11 @@
 .rung[data-tone="2"]{ --tone: var(--rung-2); }
 .rung[data-tone="3"]{ --tone: var(--rung-3); }
 .rung[data-tone="4"]{ --tone: var(--rung-4); }
+.rung[data-tone="5"]{ --tone: var(--rung-5); }   /* dataplane (in-kernel) */
+/* tone 0 = an action this console does not know (a newer kapkan). Neutral
+   rather than absent: an undefined --tone would render color-mix() as
+   transparent and the rung would vanish from the ladder entirely. */
+.rung[data-tone="0"]{ --tone: var(--muted); }
 
 .ladder__legend { display:flex; align-items:center; gap: var(--s-3); margin-top: var(--s-2); font-size: var(--t-xs); color: var(--faint); flex-wrap: wrap; }
 
@@ -366,6 +371,27 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
 .banner--error { background: var(--active-soft); border-color: var(--active-line); color: #ffd2d2; }
 .banner--info { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-2); }
 .banner--dry { background: repeating-linear-gradient(135deg, #ffb4540f 0 9px, #ffb45405 9px 18px); border: 1px dashed var(--elev-line); color: var(--elev); }
+/* banner--dry-loud: the DIVERGENCE treatment, for when the data plane's dry-run
+   state disagrees with the global one. It has to out-shout the ordinary dry-run
+   banner because the failure it describes is invisible everywhere else on the
+   page — every other badge reads LIVE while the kernel rewrites drops to passes.
+   Solid red-amber fill, a left rule, and a slow pulse; class-driven only, since
+   style-src 'self' forbids an inline style attribute. */
+.banner--dry-loud {
+  background: repeating-linear-gradient(135deg, #ff5c5c26 0 9px, #ffb4541a 9px 18px);
+  border: 1px solid var(--active-line); border-left: 4px solid var(--active);
+  color: #ffd2d2; font-weight: 600;
+  animation: banner-loud 2.4s var(--ease, ease-in-out) infinite;
+}
+.banner--dry-loud .ico { color: var(--active); }
+.banner--dry-loud .banner__txt b { color: #fff; }
+.banner__more { color: var(--muted); font-weight: 400; margin-left: var(--s-2); }
+@keyframes banner-loud {
+  0%, 100% { box-shadow: 0 0 0 0 #ff5c5c00; }
+  50%      { box-shadow: 0 0 0 3px #ff5c5c26; }
+}
+/* Respect a reduced-motion preference: keep the shout, drop the movement. */
+@media (prefers-reduced-motion: reduce) { .banner--dry-loud { animation: none; } }
 .banner__txt { flex: 1; } .banner__txt b { color: #fff; }
 
 /* rejection state callout */

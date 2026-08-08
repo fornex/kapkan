@@ -5,6 +5,7 @@ package metrics
 
 import (
 	"runtime"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -214,3 +215,269 @@ var (
 		Help:      "Storage rows, by table and result (written|dropped|error).",
 	}, []string{"table", "result"})
 )
+
+// Data-plane (XDP) metrics.
+//
+// The lifecycle ones exist because of an asymmetry: every other component in
+// kapkan fails in a way an operator eventually notices, while an XDP program
+// that is not attached looks exactly like one that is — the daemon is up, the
+// API answers, bans are recorded — and the only visible difference is that the
+// packets the operator asked to drop are not dropped. So "is it attached" is a
+// first-class metric and not an inference from a log line at boot.
+var (
+	// DataplaneXDPMode is 1 for the mode actually in force on an interface and 0
+	// for the other, so a mode change (auto falling back from native to generic
+	// across a restart) does not leave a stale series claiming both. When an
+	// interface is not attached at all, BOTH series read 0 — which is the
+	// difference between "filtering on the generic path" and "not filtering".
+	DataplaneXDPMode = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "xdp_mode",
+		Help:      "1 when the XDP program is attached to this interface in this mode (native|generic), else 0.",
+	}, []string{"interface", "mode"})
+
+	// DataplaneDegraded is the single number to alert on: any configured
+	// interface not filtering.
+	DataplaneDegraded = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "degraded",
+		Help:      "1 when at least one configured interface has no live XDP attachment.",
+	})
+
+	// DataplaneAttachErrorsTotal counts failed attach attempts, including the
+	// watcher's retries. A rising counter with degraded=1 is a NIC that will not
+	// take the program; a rising counter with degraded=0 is a flapping link that
+	// is being recovered.
+	DataplaneAttachErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "attach_errors_total",
+		Help:      "Failed XDP attach attempts, by interface.",
+	}, []string{"interface"})
+
+	// DataplaneReattachTotal counts successful re-attachments after a loss,
+	// which is the metric that makes an intermittent NIC visible: the box looks
+	// healthy at every scrape and this counter says it was not.
+	DataplaneReattachTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "reattach_total",
+		Help:      "Times the XDP program was re-attached to an interface after losing the attachment.",
+	}, []string{"interface"})
+
+	// DataplaneMapEntries and DataplaneMapBytes report what dataplane.limits
+	// actually bought. They are the feedback loop for sizing MemoryMax= on the
+	// unit: the maps are charged to the unit's memory cgroup in one step at
+	// load, so an operator lowering max_ratelimit_sources needs to see the
+	// result rather than infer it.
+	DataplaneMapEntries = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "map_entries",
+		Help:      "max_entries of each BPF map as created, after dataplane.limits were applied.",
+	}, []string{"map"})
+
+	// DataplaneMapBytes is the kernel's own footprint estimate per map.
+	DataplaneMapBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "map_bytes",
+		Help:      "Kernel footprint estimate per BPF map, in bytes (the memlock field of map fdinfo).",
+	}, []string{"map"})
+
+	// DataplanePinsRebuilt is 1 when this process found an existing pinned
+	// program and REJECTED it, so the pins were torn down and rebuilt. That
+	// discards every dynamic rule the previous process had installed, which is
+	// the one piece of data-plane state a restart cannot otherwise lose.
+	DataplanePinsRebuilt = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "pins_rebuilt",
+		Help:      "1 when an existing pinned program was rejected and rebuilt at startup (dynamic rules were lost).",
+	})
+
+	// DataplanePacketsTotal counts packets the datapath reached a TERMINAL
+	// verdict on, by verdict name (pass_default, drop_static, drop_rl, ...).
+	//
+	// Only terminal verdicts appear here, and that is load-bearing. kapkan_stats
+	// also carries OBSERVATION counters (dryrun_would_drop, pass_rule_expired,
+	// pass_frag_noports, err_policy_missing) which are bumped ALONGSIDE a
+	// terminal counter for the same packet — see dataplane.Stat.IsObservation.
+	// Exporting them under the same metric name would make the obvious query,
+	// sum(rate(kapkan_dataplane_packets_total[1m])), silently over-count every
+	// packet that tripped one. With observations split out into
+	// DataplaneObservationsTotal, that sum is exactly "packets through the
+	// datapath" and the ratio of drop_* to it is exactly the drop rate.
+	//
+	// NOTE for whoever reads a graph across a restart: this counter starts at
+	// zero with the process, while the kernel maps it is fed from do NOT (an
+	// adopted pin set carries the previous process's totals). The scraper seeds
+	// its baseline from the first read, so what is published is what THIS process
+	// observed. That keeps rate() correct at startup instead of producing a spike
+	// the width of the previous process's whole lifetime. The absolute kernel
+	// totals are on /api/v1/status for anyone who needs them.
+	DataplanePacketsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "packets_total",
+		Help:      "Packets by terminal XDP verdict (see also observations_total, which double-counts by design).",
+	}, []string{"verdict"})
+
+	// DataplaneBytesTotal is DataplanePacketsTotal's byte accumulator. A pps
+	// graph alone cannot tell a 64-byte SYN flood from a 1500-byte amplification
+	// reflection, and the two call for different responses.
+	DataplaneBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "bytes_total",
+		Help:      "Bytes by terminal XDP verdict.",
+	}, []string{"verdict"})
+
+	// DataplaneObservationsTotal counts the annotations that accompany a terminal
+	// verdict rather than replacing it. Kept out of packets_total so that summing
+	// packets_total is honest; see the comment there.
+	//
+	// dryrun_would_drop is the one an operator watches during a dry run: it is
+	// the number of packets that WOULD have been dropped, and it is the whole
+	// argument for turning dry_run off.
+	DataplaneObservationsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "observations_total",
+		Help:      "Datapath observations that co-occur with a terminal verdict (dryrun_would_drop, pass_rule_expired, ...).",
+	}, []string{"kind"})
+
+	// DataplaneRules is the number of rules the kernel is enforcing, split by
+	// mode exactly as mitigate.FlowSpecRules is — so "how much is real and how
+	// much is simulated" is the same question with the same answer shape whether
+	// the enforcement point is an upstream router or this box's NIC.
+	//
+	// dry_run here is the DATAPATH's flag read back from kapkan_cfg, not the
+	// global config's: an adopted pin set can be running the previous process's
+	// flag, and a rule count filed under the wrong mode would state the opposite
+	// of the truth about whether traffic is being dropped.
+	DataplaneRules = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "rules",
+		Help:      "Rules currently installed in the kernel, by mode (real|dry_run).",
+	}, []string{"mode"})
+
+	// DataplanePolicyGeneration is the live half of the double buffer. It is not
+	// interesting in itself; its RATE is. kapkan_statics and kapkan_policies flip
+	// together, so a generation climbing once per second means something is
+	// republishing static policy in a loop, and every flip walks the policy map.
+	DataplanePolicyGeneration = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "policy_generation",
+		Help:      "The generation of the double-buffered policy currently live in the kernel.",
+	})
+
+	// DataplanePolicyApplySeconds times one build-and-publish of static policy:
+	// encode, write the inactive generation, mirror the dynamic policy blocks,
+	// flip. It bounds how long a config reload holds the Manager lock, and that
+	// lock also serialises rule installs — so this histogram is the answer to
+	// "could a reload have delayed mitigating an attack?".
+	DataplanePolicyApplySeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "policy_apply_seconds",
+		Help:      "Time to build and publish one generation of static policy (holds the lock that serialises rule installs).",
+		Buckets:   prometheus.ExponentialBuckets(1e-4, 4, 10),
+	})
+)
+
+// SetDataplaneAttached records the attachment state of one interface, writing
+// both modes so the series never claims two at once.
+//
+// Writing the zero for the mode NOT in force matters more than it looks: under
+// xdp_mode: auto an interface can come back on the generic path after a flap,
+// and a bare Set on the new mode would leave the old series reading 1 forever —
+// a dashboard would show one NIC attached twice, in two modes, one of which is a
+// lie.
+func SetDataplaneAttached(iface, mode string, attached bool) {
+	for _, m := range []string{"native", "generic"} {
+		v := 0.0
+		if attached && m == mode {
+			v = 1
+		}
+		DataplaneXDPMode.WithLabelValues(iface, m).Set(v)
+	}
+}
+
+// SetDataplaneRules files the installed-rule count under the mode the DATAPATH
+// is actually in, zeroing the other, mirroring mitigate's updateGaugeLocked.
+func SetDataplaneRules(rules int, dryRun bool) {
+	real, dry := float64(rules), 0.0
+	if dryRun {
+		real, dry = 0, float64(rules)
+	}
+	DataplaneRules.WithLabelValues("real").Set(real)
+	DataplaneRules.WithLabelValues("dry_run").Set(dry)
+}
+
+// dpCounters tracks the last absolute value seen for each kernel counter so the
+// scraper can turn absolute reads into the deltas a Prometheus counter needs.
+//
+// A Prometheus counter can only be incremented, and the kernel's per-CPU arrays
+// can only be read absolutely, so something has to hold the previous value.
+// Doing it here rather than in the scraper keeps it next to the collectors it
+// feeds, and keeps the scraper a pure function of one Stats() call.
+var dpCounters = struct {
+	mu   sync.Mutex
+	last map[string]uint64
+}{last: map[string]uint64{}}
+
+// AddDataplaneVerdict publishes one terminal verdict's ABSOLUTE kernel counters,
+// converting them to Prometheus counter deltas.
+//
+// First sight of a key seeds the baseline and publishes nothing: see the note on
+// DataplanePacketsTotal for why an adopted pin set must not dump the previous
+// process's lifetime totals into a fresh counter as one spike.
+//
+// A value that went DOWN can only mean the counters were reset under us (pins
+// rebuilt, a map recreated). Add() would panic on a negative delta, so this
+// re-seeds and publishes nothing rather than taking the process down over a
+// metric.
+func AddDataplaneVerdict(verdict string, packets, bytes uint64) {
+	if d := dpAdvance("pkt/"+verdict, packets); d > 0 {
+		DataplanePacketsTotal.WithLabelValues(verdict).Add(d)
+	}
+	if d := dpAdvance("byt/"+verdict, bytes); d > 0 {
+		DataplaneBytesTotal.WithLabelValues(verdict).Add(d)
+	}
+}
+
+// AddDataplaneObservation is AddDataplaneVerdict for the co-occurring
+// observation counters, which are deliberately a different metric family.
+func AddDataplaneObservation(kind string, packets uint64) {
+	if d := dpAdvance("obs/"+kind, packets); d > 0 {
+		DataplaneObservationsTotal.WithLabelValues(kind).Add(d)
+	}
+}
+
+// dpAdvance returns the delta to add for an absolute reading, seeding on first
+// sight and on any decrease.
+func dpAdvance(key string, absolute uint64) float64 {
+	dpCounters.mu.Lock()
+	defer dpCounters.mu.Unlock()
+	prev, seen := dpCounters.last[key]
+	dpCounters.last[key] = absolute
+	if !seen || absolute < prev {
+		return 0
+	}
+	return float64(absolute - prev)
+}
+
+// ResetDataplaneCounterBaseline forgets every counter baseline, so the next
+// publish re-seeds instead of emitting a delta. Called when the map set is
+// replaced (pins rebuilt) — the counters restart at zero there and the stale
+// baseline would swallow real traffic until the kernel counter climbed past it.
+func ResetDataplaneCounterBaseline() {
+	dpCounters.mu.Lock()
+	defer dpCounters.mu.Unlock()
+	dpCounters.last = map[string]uint64{}
+}

@@ -34,6 +34,9 @@
       "mode.live": "Aktiv",
       "mode.dryrun.full": "Testlauf — Abwehr wird nur simuliert",
       "dryrun.banner": "Testlauf-Modus — die unten gezeigten Routen und Sperren werden simuliert. Es werden keine BGP-Ankündigungen gesendet.",
+      "dryrun.dp.simulating": "Die XDP-Datenebene SIMULIERT, während der restliche kapkan aktiv ist — der Kernel wandelt jedes Verwerfen in ein Durchlassen um, sodass Pakete, die verworfen werden sollten, weitergeleitet werden. Das Flag im Kernel weicht vom konfigurierten dry_run ab; meist bedeutet das, dass ein Neuladen der Konfiguration nicht angewendet wurde. Prüfen Sie das Protokoll und starten Sie kapkan neu.",
+      "dryrun.dp.enforcing": "Die XDP-Datenebene VERWIRFT WIRKLICH, während der restliche kapkan im Testlauf ist — auf diesem Host werden Pakete tatsächlich im Kernel verworfen, obwohl die Routen und Sperren unten nur simuliert werden.",
+      "dryrun.dp.also": "Die Datenebene im Kernel simuliert ebenfalls.",
 
       "counter.attacks": "Angriffe",
       "counter.bans": "Sperren",
@@ -238,9 +241,9 @@
     enums: {
       direction: { incoming: "Eingehend", outgoing: "Ausgehend" },
       scope: { host: "Host", group: "Gruppe" },
-      method: { blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Umleitung zum Scrubber" },
+      method: { dataplane: "Verwerfen im Kernel (XDP)", blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Umleitung zum Scrubber" },
       banState: { active: "Aktiv", withdrawn: "Zurückgezogen", rejected: "Abgelehnt" },
-      action: { none: "Nur Warnung", flowspec: "FlowSpec verwerfen / drosseln", divert: "Umleitung zum Scrubbing", blackhole: "Blackhole (RTBH)" },
+      action: { dataplane: "Verwerfen im Kernel (XDP)", none: "Nur Warnung", flowspec: "FlowSpec verwerfen / drosseln", divert: "Umleitung zum Scrubbing", blackhole: "Blackhole (RTBH)" },
       calc: { per_host: "Pro Host", total: "Gruppensumme" },
       attackType: {
         ntp_amplification: "NTP-Amplifikation",
@@ -264,7 +267,7 @@
       }
     },
     enumsShort: {
-      action: { none: "Warnung", flowspec: "FlowSpec", divert: "Umleitung", blackhole: "Blackhole" }
+      action: { dataplane: "XDP", none: "Warnung", flowspec: "FlowSpec", divert: "Umleitung", blackhole: "Blackhole" }
     }
   };
 })(window);

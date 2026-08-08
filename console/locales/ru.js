@@ -34,6 +34,9 @@
       "mode.live": "Боевой",
       "mode.dryrun.full": "Тест-режим — подавление только моделируется",
       "dryrun.banner": "Тест-режим — маршруты и блокировки ниже моделируются. Анонсы BGP не отправляются.",
+      "dryrun.dp.simulating": "Подсистема XDP работает В ТЕСТ-РЕЖИМЕ, а остальной kapkan — в боевом: ядро превращает каждый отброс в пропуск, и пакеты, которые должны отбрасываться, пересылаются дальше. Флаг в ядре расходится с настроенным dry_run — обычно это значит, что перезагрузка настроек не применилась. Проверьте журнал и перезапустите kapkan для синхронизации.",
+      "dryrun.dp.enforcing": "Подсистема XDP РЕАЛЬНО ОТБРАСЫВАЕТ пакеты в ядре на этом узле, хотя остальной kapkan работает в тест-режиме и маршруты с блокировками ниже только моделируются.",
+      "dryrun.dp.also": "Подсистема XDP в ядре тоже моделирует.",
 
       "counter.attacks": "Атаки",
       "counter.bans": "Блокир.",
@@ -238,9 +241,9 @@
     enums: {
       direction: { incoming: "Входящая", outgoing: "Исходящая" },
       scope: { host: "Хост", group: "Группа" },
-      method: { blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Перенаправление в центр очистки" },
+      method: { dataplane: "Отброс в ядре (XDP)", blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Перенаправление в центр очистки" },
       banState: { active: "Активна", withdrawn: "Отозвана", rejected: "Отклонена" },
-      action: { none: "Только оповещение", flowspec: "FlowSpec сброс / ограничение", divert: "Перенаправление на очистку", blackhole: "Blackhole (RTBH)" },
+      action: { dataplane: "Отброс в ядре (XDP)", none: "Только оповещение", flowspec: "FlowSpec сброс / ограничение", divert: "Перенаправление на очистку", blackhole: "Blackhole (RTBH)" },
       calc: { per_host: "На хост", total: "Сумма группы" },
       attackType: {
         ntp_amplification: "NTP-усиление",
@@ -264,7 +267,7 @@
       }
     },
     enumsShort: {
-      action: { none: "Оповещ.", flowspec: "FlowSpec", divert: "Перенапр.", blackhole: "Blackhole" }
+      action: { dataplane: "XDP", none: "Оповещ.", flowspec: "FlowSpec", divert: "Перенапр.", blackhole: "Blackhole" }
     }
   };
 })(window);

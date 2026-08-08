@@ -30,6 +30,47 @@ const RulesPerPolicy = 8
 // lossless policy swap.
 const Generations = 2
 
+// Default and fixed map sizings.
+//
+// The three Default* values are what the ELF is compiled with AND what
+// config's defaultMax* constants resolve to when the operator names no limits.
+// They agree by hand in three places (this file, kapkan_maps.h, config.go), so
+// TestContractMatchesC and TestDefaultLimitsMatchConfig gate all three.
+//
+// The Manager REWRITES the first three (and defaultMaxRuleStats, which is
+// derived from them) on the CollectionSpec before the maps are created, so an
+// operator who lowers dataplane.limits.max_ratelimit_sources actually gets a
+// smaller LRU rather than paying for the compiled-in 1M entries. See
+// Limits.MapSizing.
+const (
+	// DefaultMaxDynamicRules mirrors config.defaultMaxDynamicRules.
+	DefaultMaxDynamicRules = 4096
+	// DefaultMaxStaticRules mirrors config.defaultMaxStaticRules.
+	DefaultMaxStaticRules = 256
+	// DefaultMaxRatelimitSources mirrors config.defaultMaxRatelimitSources.
+	// This one dominates the map footprint: two LRU hashes of this many
+	// entries are 94% of the measured 234.9 MiB (see
+	// deploy/dataplane-operations.md §2).
+	DefaultMaxRatelimitSources = 1 << 20
+
+	// MaxProfiles is the hard ceiling on rate-limit profile ids, not
+	// operator-settable: the map is 16 KiB at full size, so there is nothing
+	// to save by shrinking it and a limit would only add a way to fail.
+	MaxProfiles = 256
+	// MaxPrefixes is the ceiling on entries in each LPM trie. Also not
+	// operator-settable, and deliberately not rewritten: an LPM_TRIE
+	// allocates nothing up front and grows per insert (measured: 0 bytes at
+	// max_entries 65536), so max_entries here is a ceiling, not a
+	// reservation.
+	MaxPrefixes = 65536
+
+	// defaultMaxRuleStats is the compiled-in size of kapkan_rule_stats. The
+	// loader replaces it with MaxDynamicRules+MaxStaticRules, which is the
+	// real bound on live rule ids, so it is a baked default and not a
+	// contract value.
+	defaultMaxRuleStats = 8192
+)
+
 // Map names. These are contract: the pinned bpffs paths are derived from them,
 // so renaming one orphans an operator's pins across an upgrade.
 const (

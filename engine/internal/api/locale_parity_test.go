@@ -156,11 +156,14 @@ func TestLocaleParityRegistered(t *testing.T) {
 //
 //	cd console/locales
 //	awk '/^    strings: \{/{f=1;next} /^    \},?$/{f=0} f' en.js |
-//	    grep -oE '"[^"]+"[[:space:]]*:' | sort -u | wc -l    # → 240 strings
+//	    grep -oE '"[^"]+"[[:space:]]*:' | sort -u | wc -l    # → 243 strings
 //
-// and by counting the enum members by hand (direction 2, scope 2, method 3,
-// banState 3, action 4, calc 2, attackType 12, metric 13 = 41 across 8 groups).
+// and by counting the enum members by hand (direction 2, scope 2, method 4,
+// banState 3, action 5, calc 2, attackType 12, metric 13 = 43 across 8 groups).
 // Bump these when the catalog legitimately grows.
+//
+// The data plane added: 3 strings (dryrun.dp.{simulating,enforcing,also}), one
+// member to enums.method, one to enums.action, and one to enumsShort.action.
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -171,11 +174,11 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		{"units", 0, 4},
 		{"plurals", 1, 5},
 		{"plurals", 0, 10}, // 5 keys × {one, other}
-		{"strings", 0, 240},
+		{"strings", 0, 243},
 		{"enums", 1, 8},
-		{"enums", 0, 41},
+		{"enums", 0, 43},
 		{"enumsShort", 1, 1},
-		{"enumsShort", 0, 4},
+		{"enumsShort", 0, 5},
 	} {
 		obj := en.fields[tc.object]
 		if obj == nil {

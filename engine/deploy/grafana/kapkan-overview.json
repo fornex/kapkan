@@ -1040,7 +1040,427 @@
           },
           "expr": "sum by (from, to) (rate(kapkan_mitigate_fallback_total[$__rate_interval]))",
           "refId": "A",
-          "legendFormat": "{{from}} → {{to}}"
+          "legendFormat": "{{from}} \u2192 {{to}}"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "row",
+      "title": "Data plane",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
+      "panels": []
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Packets / sec by XDP verdict",
+      "description": "Terminal XDP verdicts (kapkan_dataplane_packets_total). Stacked, so the total height is packets through the datapath: observation counters such as dryrun_would_drop are a SEPARATE metric (kapkan_dataplane_observations_total) precisely so this sum does not double-count them.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (verdict) (rate(kapkan_dataplane_packets_total[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{verdict}}"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Data-plane rules by mode",
+      "description": "Rules installed in the kernel, real vs dry_run (kapkan_dataplane_rules). dry_run is read back from the datapath, not from the config file \u2014 an adopted pin set can be running the previous process's flag.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "kapkan_dataplane_rules",
+          "refId": "A",
+          "legendFormat": "{{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "XDP attachment by interface and mode",
+      "description": "1 = the program is attached to this interface in this mode (kapkan_dataplane_xdp_mode). BOTH series read 0 for an interface that is not filtering at all, which is the distinction between 'on the generic path' and 'not protected'. mode=generic costs roughly 10x the per-packet CPU of native.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 63
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "kapkan_dataplane_xdp_mode",
+          "refId": "A",
+          "legendFormat": "{{interface}} / {{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Attach errors / sec by interface",
+      "description": "Failed XDP attach attempts including watcher retries (kapkan_dataplane_attach_errors_total). Rising WITH kapkan_dataplane_degraded = a NIC that will not take the program; rising WITHOUT it = a flapping link that is being recovered, which no single scrape would ever show.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 63
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (interface) (rate(kapkan_dataplane_attach_errors_total[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{interface}}"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Policy generation",
+      "description": "The live half of the double-buffered policy (kapkan_dataplane_policy_generation). The VALUE is uninteresting; the SLOPE is the alert. Each flip walks the policy map under the lock that also serialises rule installs, so a generation climbing every second means something is republishing static policy in a loop.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 63
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "kapkan_dataplane_policy_generation",
+          "refId": "A",
+          "legendFormat": "generation"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Policy apply time (quantiles)",
+      "description": "Time to build and publish one generation of static policy (kapkan_dataplane_policy_apply_seconds). This span holds the Manager lock, and that lock is what a rule install waits on \u2014 so this panel answers 'could a config reload have delayed mitigating an attack?'.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 70
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(kapkan_dataplane_policy_apply_seconds_bucket[$__rate_interval])))",
+          "refId": "A",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kapkan_dataplane_policy_apply_seconds_bucket[$__rate_interval])))",
+          "refId": "B",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(kapkan_dataplane_policy_apply_seconds_bucket[$__rate_interval])))",
+          "refId": "C",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "BPF map entries (as created)",
+      "description": "max_entries of each map after dataplane.limits were applied (kapkan_dataplane_map_entries). This is the feedback loop for sizing: the maps are charged to the unit's memory cgroup in one step at load, so an operator who lowers max_ratelimit_sources should SEE the result here rather than infer it. Pair with kapkan_dataplane_map_bytes for the footprint.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 70
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "topk(8, kapkan_dataplane_map_entries)",
+          "refId": "A",
+          "legendFormat": "{{map}}"
         }
       ]
     },
@@ -1053,7 +1473,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 78
       },
       "panels": []
     },
@@ -1070,7 +1490,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 55
+        "y": 79
       },
       "fieldConfig": {
         "defaults": {
@@ -1125,7 +1545,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 55
+        "y": 79
       },
       "fieldConfig": {
         "defaults": {
@@ -1185,8 +1605,8 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "Kapkan — Overview",
+  "title": "Kapkan \u2014 Overview",
   "uid": "kapkan-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

@@ -22,17 +22,29 @@ func readFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-// cDefine extracts the integer value of a simple `#define NAME <int>`.
+// cDefine extracts the integer value of a `#define NAME <int>` or of the shift
+// form the header uses for the large map sizes (`#define X (1 << 20)`).
+//
+// The shift form is accepted rather than normalised away in the C, because
+// "1 << 20" is how an operator reads a million-entry LRU and "1048576" is not.
 func cDefine(t *testing.T, src, name string) int {
 	t.Helper()
-	re := regexp.MustCompile(`(?m)^#define\s+` + regexp.QuoteMeta(name) + `\s+(\d+)\b`)
+	re := regexp.MustCompile(`(?m)^#define\s+` + regexp.QuoteMeta(name) +
+		`\s+\(?(\d+)(?:\s*<<\s*(\d+))?\)?\s*(?:/\*|$)`)
 	m := re.FindStringSubmatch(src)
 	if m == nil {
-		t.Fatalf("#define %s not found in %s", name, mapsHeaderPath)
+		t.Fatalf("#define %s not found (or not in a form this test can read) in %s", name, mapsHeaderPath)
 	}
 	v, err := strconv.Atoi(m[1])
 	if err != nil {
 		t.Fatalf("#define %s: %v", name, err)
+	}
+	if m[2] != "" {
+		sh, err := strconv.Atoi(m[2])
+		if err != nil {
+			t.Fatalf("#define %s: %v", name, err)
+		}
+		v <<= sh
 	}
 	return v
 }
@@ -54,6 +66,26 @@ func TestContractMatchesC(t *testing.T) {
 		{"KAPKAN_MAP_SCHEMA_VERSION", MapSchemaVersion},
 		{"KAPKAN_RULES_PER_POLICY", RulesPerPolicy},
 		{"KAPKAN_GENERATIONS", Generations},
+
+		// The map sizings. These matter more now than they did when the header
+		// was written: the loader REWRITES max_entries from dataplane.limits
+		// before the maps are created, so these values are what an operator gets
+		// when they name no limits — and they have to be the same number in
+		// three files (this one, the header, and config's defaultMax*, which
+		// TestDefaultLimitsMatchConfig checks).
+		//
+		// The two that are not operator-settable are here for a different
+		// reason: MaxProfiles bounds the profile ids userspace may assign, and
+		// MaxPrefixes bounds every prefix list. Exceeding either is not an error
+		// the datapath can report — a rule pointing at a profile that was never
+		// written caps nothing and admits — so they are checked at compile time
+		// in compilePolicy against these constants.
+		{"KAPKAN_MAX_DYNAMIC_RULES", DefaultMaxDynamicRules},
+		{"KAPKAN_MAX_STATIC_RULES", DefaultMaxStaticRules},
+		{"KAPKAN_MAX_RL_SOURCES", DefaultMaxRatelimitSources},
+		{"KAPKAN_MAX_PROFILES", MaxProfiles},
+		{"KAPKAN_MAX_PREFIXES", MaxPrefixes},
+		{"KAPKAN_MAX_RULE_STATS", defaultMaxRuleStats},
 	} {
 		if got := cDefine(t, src, tc.cName); got != tc.goVal {
 			t.Errorf("%s = %d in C, %d in Go", tc.cName, got, tc.goVal)

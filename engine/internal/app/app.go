@@ -16,6 +16,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/api"
 	"github.com/kapkan-io/kapkan/internal/buildinfo"
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/engine"
 	"github.com/kapkan-io/kapkan/internal/geoip"
 	"github.com/kapkan-io/kapkan/internal/ingest"
@@ -37,7 +38,15 @@ type App struct {
 	Storage  storage.Writer
 	GeoIP    *geoip.DB
 	Update   *update.Checker // nil when update_check is disabled
+	// Dataplane is the in-kernel XDP filter, nil when dataplane.enabled is
+	// false or absent. Non-nil means the program is attached and static policy
+	// is being enforced; Health().Degraded says whether every configured
+	// interface is actually filtering.
+	Dataplane *dataplane.Manager
 
+	// dpReport adapts Dataplane to the API's contract and owns the metrics
+	// scrape. nil exactly when Dataplane is nil.
+	dpReport    *dataplaneReporter
 	log         *slog.Logger
 	cancel      context.CancelFunc
 	storeCancel context.CancelFunc
@@ -49,6 +58,26 @@ type App struct {
 // sockets or start goroutines; call Start for that.
 func New(store *config.Store, log *slog.Logger) (*App, error) {
 	a := &App{Store: store, log: log, apiErr: make(chan error, 1)}
+	cfg := store.Get()
+
+	// Before anything is built: refuse a ladder whose in-kernel drop this build
+	// cannot deliver. It has to come first because the whole point is that the
+	// daemon must not reach a serving state in that configuration — see
+	// checkDataplaneLadder for why this is a refusal and not a warning.
+	if err := checkDataplaneLadder(cfg); err != nil {
+		return nil, err
+	}
+
+	// The XDP data plane, when configured. Started before the mitigator and the
+	// ingest path so that static policy is already in the kernel by the time the
+	// first packet is counted — an operator's static drop that only starts
+	// working a second after the daemon does is a second of an attack getting
+	// through.
+	dp, err := startDataplane(cfg, log)
+	if err != nil {
+		return nil, fmt.Errorf("init dataplane: %w", err)
+	}
+	a.Dataplane = dp
 
 	// GeoIP/ASN enrichment is optional. Config validation already rejected a
 	// missing path or a directory at load time; a remaining open failure here
@@ -56,7 +85,7 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	// logged and the detector runs without attribution rather than refusing to
 	// start over a non-critical data file.
 	engineOpts := []engine.Option{engine.WithLogger(log)}
-	if gc := store.Get().GeoIPCfg; gc.Enabled {
+	if gc := cfg.GeoIPCfg; gc.Enabled {
 		db, err := geoip.Open(gc.ASNPath, gc.CountryPath)
 		if err != nil {
 			log.Warn("geoip disabled: could not open database", "err", err)
@@ -86,6 +115,15 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	a.API.SetQuerier(storage.NewQuerier(store.Get().StorageCfg, log))
 	a.Storage = storage.NewWriter(store.Get().StorageCfg, log)
 	a.API.SetAuditWriter(a.Storage) // operator-attributed audit trail (no-op when storage off)
+	// /healthz reports the data plane's degraded state in its body, /api/v1/status
+	// renders it in full for an admin, and /metrics is fed from the same reading —
+	// see dataplaneReporter. An API or SIGHUP reload has to be pushed into the
+	// kernel maps rather than picked up on the next tick, hence the reload hook.
+	if a.Dataplane != nil {
+		a.dpReport = newDataplaneReporter(a.Dataplane, log)
+		a.API.SetDataplane(a.dpReport)
+	}
+	a.API.SetReloadHook(a.ApplyReload)
 
 	// Always expose the running version as a zero-egress info metric.
 	metrics.RecordBuildInfo(buildinfo.Version(), buildinfo.Commit())
@@ -155,6 +193,15 @@ func (a *App) Start(ctx context.Context) error {
 	go func() { defer a.wg.Done(); a.consumeOngoing(runCtx) }()
 	go func() { defer a.wg.Done(); a.persistTraffic(runCtx) }()
 
+	// The data-plane metrics scrape, on the same 1 Hz tick as the engine loop and
+	// the mitigator sweep. Joined through wg so it cannot still be reading kernel
+	// maps when Stop closes them — a Stats() racing Close would read from a closed
+	// fd, and unlike a dropped sample that is a real error surfacing at shutdown.
+	if a.dpReport != nil {
+		a.wg.Add(1)
+		go func() { defer a.wg.Done(); a.dpReport.scrape(runCtx) }()
+	}
+
 	// Update check (opt-in): detached, never on the startup path, stops on ctx.
 	// No shutdown drain — it holds no state that must be flushed.
 	if a.Update != nil {
@@ -183,6 +230,10 @@ func (a *App) Stop() {
 	}
 	a.wg.Wait() // engine, consumeEvents and persistTraffic have stopped producing
 	a.Mitigate.Stop()
+	// After the mitigator: nothing installs rules any more, so honouring
+	// dataplane.on_exit here cannot race a rule install. "" means the configured
+	// behaviour (keep by default, so static policy survives the process).
+	a.closeDataplane("")
 	if a.storeCancel != nil {
 		a.storeCancel() // now trigger the storage drain+flush
 	}
@@ -209,12 +260,30 @@ func (a *App) StopForRestart() {
 	}
 	a.wg.Wait()
 	a.Mitigate.SignalRestart(context.Background())
+	// An upgrade restart KEEPS the program attached whatever on_exit says, for
+	// the same reason SignalRestart asks peers to retain routes: the gap is
+	// measured in seconds and detaching would forward every packet the operator
+	// asked to drop for the whole of it. The next process re-adopts the pins.
+	a.closeDataplane(config.OnExitKeep)
 	if a.storeCancel != nil {
 		a.storeCancel()
 	}
 	a.Storage.Stop()
 	if a.GeoIP != nil {
 		_ = a.GeoIP.Close()
+	}
+}
+
+// closeDataplane shuts the data plane down with the given on_exit behaviour
+// ("" for the configured one), logging rather than propagating a failure: by the
+// time this runs the process is going away and there is nobody left to handle an
+// error.
+func (a *App) closeDataplane(onExit string) {
+	if a.Dataplane == nil {
+		return
+	}
+	if err := a.Dataplane.Close(onExit); err != nil {
+		a.log.Error("shutting down the XDP data plane", "err", err)
 	}
 }
 
