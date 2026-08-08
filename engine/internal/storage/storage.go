@@ -82,10 +82,20 @@ type AttackRow struct {
 	Mbps       float64 `json:"mbps"`
 	FlowsPS    float64 `json:"flows_per_sec"`
 	BanState   string  `json:"ban_state"`
-	DryRun     uint8   `json:"dry_run"`
-	TopSources string  `json:"top_sources"` // comma-joined for quick reading
-	TopASNs    string  `json:"top_asns"`    // pipe-joined "AS<n> <org>" (orgs may contain commas); empty when geoip off
-	Reason     string  `json:"reason"`      // compact JSON of the detection Reason (why it fired); empty on attack_ended
+	// Method is the mitigation method applied to this attack — "blackhole",
+	// "flowspec", "divert", "dataplane", or "" for an alert-only stage.
+	//
+	// The column is LowCardinality(String) and NOT an Enum, which matters: an
+	// Enum would have to list every method, and a release adding one (this one
+	// added `dataplane`) would start failing every insert against a table created
+	// by the previous release — silently dropping the attack history for exactly
+	// the deployments running the newest mitigation. LowCardinality is a storage
+	// encoding, not a constraint; unknown values cost nothing and insert fine.
+	Method     string `json:"method"`
+	DryRun     uint8  `json:"dry_run"`
+	TopSources string `json:"top_sources"` // comma-joined for quick reading
+	TopASNs    string `json:"top_asns"`    // pipe-joined "AS<n> <org>" (orgs may contain commas); empty when geoip off
+	Reason     string `json:"reason"`      // compact JSON of the detection Reason (why it fired); empty on attack_ended
 }
 
 // AuditRow is one operator-attributed mutation persisted to the audit_events
@@ -335,7 +345,8 @@ func (c *ClickHouse) ensureSchema(ctx context.Context) error {
 			"target String, `group` String, direction LowCardinality(String), "+
 			"attack_type LowCardinality(String), metric LowCardinality(String), "+
 			"rate Float64, threshold Float64, pps Float64, mbps Float64, flows_per_sec Float64, "+
-			"ban_state LowCardinality(String), dry_run UInt8, top_sources String, top_asns String, reason String"+
+			"ban_state LowCardinality(String), method LowCardinality(String), dry_run UInt8, "+
+			"top_sources String, top_asns String, reason String"+
 			") ENGINE = MergeTree() ORDER BY (event_time, target) "+
 			"TTL event_time + INTERVAL %d DAY", c.cfg.Database, tableAttacks, c.cfg.TTLDays),
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s.%s ("+
@@ -362,7 +373,7 @@ func (c *ClickHouse) ensureSchema(ctx context.Context) error {
 	// fresh installs already have the column, so a failure here — e.g. a writer
 	// credential without ALTER rights — must not fail schema init or block the
 	// (unrelated) traffic table above.
-	for _, col := range []string{"top_asns String", "reason String"} {
+	for _, col := range []string{"top_asns String", "reason String", "method LowCardinality(String)"} {
 		alter := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s", c.cfg.Database, tableAttacks, col)
 		if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(alter)); err != nil {
 			c.log.Warn("clickhouse: attack_events column upgrade skipped (fresh installs already have it)", "column", col, "err", err)

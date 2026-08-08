@@ -116,8 +116,11 @@
   }
 
   /* ---------- atoms ---------- */
-  function badge(cls, label, iconName) {
-    return h("span", { class: "badge " + cls }, [iconName ? w.icon(iconName) : null, h("span", { text: label })]);
+  /* title is optional; when given it becomes the hover tooltip (a real attribute,
+     so it survives reconcile()'s attribute sync). */
+  function badge(cls, label, iconName, title) {
+    return h("span", { class: "badge " + cls, attrs: title ? { title: title } : null },
+      [iconName ? w.icon(iconName) : null, h("span", { text: label })]);
   }
   function dirBadge(dir) {
     var out = dir === "outgoing";
@@ -349,6 +352,83 @@
     return h("div", { class: "route" + (dry ? " is-dry" : "") }, rows);
   }
 
+  /* ---------- measured in-kernel drops ----------
+     `dp` is the ban/attack's `dataplane` object, or null when the mitigation
+     has no rules in this box's XDP maps (every blackhole, flowspec, divert,
+     alert-only and dry-run ban). Null renders as an em dash, NOT as "0": a ban
+     with no rules dropped nothing here, and a "0" in a Dropped column reads as
+     "the rules are installed and catching nothing", which is a bug report. */
+  /* Binary byte sizes. Separate from I.abbr (which is decimal k/M/G for packet
+     and flow counts) because these are memory and traffic volumes, where 1 MiB
+     is 1048576 and rendering it as "1.0M B" reads as a typo. Unit symbols are
+     the SI/IEC ones and are the same in every locale, like Mb/s next door. */
+  function bytesFmt(n) {
+    n = n || 0;
+    var units = ["B", "KiB", "MiB", "GiB", "TiB"], i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? I.num(n) : I._nf1.format(n)) + " " + units[i];
+  }
+
+  function dropCell(dp) {
+    if (!dp) return h("span", { class: "td-muted", text: "—" });
+    var kids = [
+      h("span", { class: "mono", text: I.abbr(dp.packets || 0) }),
+      h("span", { class: "td-muted drop__b", text: bytesFmt(dp.bytes) })
+    ];
+    if (dp.stale) kids.push(staleTag(dp));
+    return h("span", { class: "drop" }, kids);
+  }
+
+  /* The staleness marker. It exists because the alternative — showing zeros
+     when the counters cannot be read — would say the datapath had stopped
+     dropping, which is the one wrong answer an operator would act on. The
+     numbers next to it are the last successful reading. */
+  function staleTag(dp) {
+    var when = dp.measured_at ? new Date(dp.measured_at) : null;
+    var title = when && !isNaN(when.getTime()) && when.getTime() > 0
+      ? I.t("dp.stale.title", { t: I.rel(when) })
+      : I.t("dp.stale.never");
+    return badge("badge--elev drop__stale", I.t("dp.stale"), "clock", title);
+  }
+
+  /* The "installed in kernel" panel: each announced rule beside what it caught.
+     The join is BY INDEX — rule i of `flowspec` is counter i of
+     `dataplane.rules` — because that is the only thing that pairs them; the
+     counters carry no match of their own. The counter array may be SHORTER than
+     the rule list (an entry already reaped), so a missing tail renders as
+     "not measured" rather than as zero. */
+  function kernelRules(obj) {
+    var dp = obj.dataplane, rules = obj.flowspec || [];
+    var counters = (dp && dp.rules) || [];
+    var rows = rules.map(function (r, i) {
+      var c = i < counters.length ? counters[i] : null;
+      return h("div", { class: "kr__row" }, [
+        h("span", { class: "kr__rule route__rule" }, [
+          h("span", { text: r.match + " → " }),
+          h("span", { class: r.action === "discard" ? "op-discard" : "op-rate", text: r.action })
+        ]),
+        c
+          ? h("span", { class: "kr__n mono", text: I.abbr(c.packets || 0) + " · " + bytesFmt(c.bytes) })
+          : h("span", { class: "kr__n td-muted", text: I.t("dp.notmeasured") })
+      ]);
+    });
+    var foot = [];
+    if (dp) {
+      foot.push(h("span", { class: "kr__total" }, [
+        h("span", { class: "td-muted", text: I.t("dp.total") + " " }),
+        h("span", { class: "mono", text: I.num(dp.packets || 0) + " · " + bytesFmt(dp.bytes) })
+      ]));
+      foot.push(dp.stale
+        ? staleTag(dp)
+        : h("span", { class: "td-muted kr__when", text: dp.measured_at ? I.rel(new Date(dp.measured_at)) : "" }));
+    } else {
+      /* Rules are announced but nothing has been measured. Said out loud
+         because the honest reading is "no reading yet", not "no drops". */
+      foot.push(h("span", { class: "td-muted", text: I.t("dp.pending") }));
+    }
+    return h("div", { class: "kr" }, [h("div", { class: "kr__rows" }, rows), h("div", { class: "kr__foot" }, foot)]);
+  }
+
   /* ---------- share bars (sample) ---------- */
   function shareGroup(title, list, opts) {
     opts = opts || {};
@@ -447,6 +527,7 @@
     sparkline: sparkline, areaChart: areaChart,
     ladder: ladder, gauge: gauge, confidence: confidence, baselineBar: baselineBar,
     routeDisplay: routeDisplay, shareGroup: shareGroup, timeline: timeline,
+    dropCell: dropCell, kernelRules: kernelRules, bytesFmt: bytesFmt,
     rejection: rejection, toast: toast, confirm: confirm, closeConfirm: closeConfirm,
     empty: empty, skeletonRows: skeletonRows,
     ACTION_ICON: ACTION_ICON, methodPill: methodPill,

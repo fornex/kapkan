@@ -44,6 +44,13 @@ archives:
       - README.md
       - src: engine/deploy/kapkan.service
         dst: deploy/kapkan.service
+      # The XDP data plane's systemd drop-in. Shipped but NOT installed: it
+      # relaxes the unit's hardening and is only needed where dataplane.enabled
+      # is true (see deploy/dataplane-operations.md §1).
+      - src: engine/deploy/kapkan-dataplane.conf
+        dst: deploy/kapkan-dataplane.conf
+      - src: engine/deploy/dataplane-operations.md
+        dst: deploy/dataplane-operations.md
       - src: engine/deploy/config.example.yaml
         dst: deploy/config.example.yaml
       - src: engine/deploy/update.sh
@@ -78,6 +85,18 @@ nfpms:
     contents:
       - src: engine/deploy/kapkan.service
         dst: /usr/lib/systemd/system/kapkan.service
+        file_info: { mode: 0644 }
+      # The data-plane drop-in goes to /usr/share, NOT to
+      # /etc/systemd/system/kapkan.service.d/, on purpose: installing it would
+      # hand CAP_BPF/CAP_PERFMON and a writable /sys/fs/bpf to every box that
+      # merely installed the package. An operator copies it into place on the
+      # hosts where they turn dataplane.enabled on, and the daemon refuses to
+      # start on a host where they turned it on and did not.
+      - src: engine/deploy/kapkan-dataplane.conf
+        dst: /usr/share/kapkan/kapkan-dataplane.conf
+        file_info: { mode: 0644 }
+      - src: engine/deploy/dataplane-operations.md
+        dst: /usr/share/doc/kapkan/dataplane-operations.md
         file_info: { mode: 0644 }
       # Reference config (replaced on upgrade). postinstall seeds
       # /etc/kapkan/config.yaml from this on first install only.

@@ -75,6 +75,7 @@
       "col.threshold": "Seuil", "col.topsources": "Sources principales", "col.ban": "Blocage",
       "col.peak": "Débit max", "col.started": "Début", "col.ended": "Fin",
       "col.duration": "Durée", "col.route": "Route", "col.method": "Méthode",
+      "col.dropped": "Rejeté (noyau)",
       "col.state": "État", "col.mode": "Mode", "col.expires": "Expire",
       "col.type2": "Origine", "col.reason": "Raison", "col.host": "Hôte",
       "col.group": "Groupe", "col.baseline": "Référence", "col.calc": "Calcul",
@@ -250,6 +251,31 @@
       "se.reload.title": "Recharger la configuration",
       "se.reload.desc": "Relit le fichier de configuration sans redémarrer le moteur.",
       "se.adminonly": "Champs réservés aux administrateurs",
+      /* rejets mesurés dans le noyau (le plan de données XDP) */
+      "dp.stale": "obsolète",
+      "dp.stale.title": "Les compteurs n'ont pas pu être lus ; voici les dernières valeurs, mesurées {t}.",
+      "dp.stale.never": "Aucun compteur n'a encore été lu dans ce processus ; ces valeurs viennent d'avant le redémarrage.",
+      "dp.notmeasured": "non mesuré",
+      "dp.total": "Total rejeté",
+      "dp.pending": "Pas encore de relevé — les compteurs sont lus toutes les quelques secondes.",
+      "ac.inkernel": "Installé dans le noyau",
+
+      /* paramètres : plan de données XDP */
+      "se.dp": "Plan de données XDP",
+      "se.dp.state": "État",
+      "se.dp.ok": "Filtre",
+      "se.dp.degraded": "Dégradé",
+      "se.dp.adopted": "Repris après redémarrage",
+      "se.dp.attached": "Interfaces attachées",
+      "se.dp.interfaces": "Interfaces",
+      "se.dp.rules": "Règles (statiques + mitigation)",
+      "se.dp.generation": "Génération de politique",
+      "se.dp.maps": "Mémoire des maps BPF",
+      "se.dp.verdicts": "Verdicts de paquets",
+      "se.dp.off": "Le plan de données noyau est désactivé",
+      "se.dp.off.sub": "La mitigation n'est qu'annoncée aux pairs BGP. Activez dataplane dans la configuration du moteur pour rejeter le trafic d'attaque sur cette machine.",
+      "se.dp.readerr": "Les compteurs n'ont pas pu être lus au dernier relevé : {t}",
+
       "se.readonly": "La configuration est gérée dans le fichier de configuration du moteur ; cette console l'affiche en lecture seule."
     },
 

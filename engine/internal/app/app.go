@@ -46,7 +46,10 @@ type App struct {
 
 	// dpReport adapts Dataplane to the API's contract and owns the metrics
 	// scrape. nil exactly when Dataplane is nil.
-	dpReport    *dataplaneReporter
+	dpReport *dataplaneReporter
+	// dpCounters measures each active data-plane ban's in-kernel drop counters
+	// and publishes them onto the ban records. nil exactly when Dataplane is nil.
+	dpCounters  *banCounterScraper
 	log         *slog.Logger
 	cancel      context.CancelFunc
 	storeCancel context.CancelFunc
@@ -59,14 +62,6 @@ type App struct {
 func New(store *config.Store, log *slog.Logger) (*App, error) {
 	a := &App{Store: store, log: log, apiErr: make(chan error, 1)}
 	cfg := store.Get()
-
-	// Before anything is built: refuse a ladder whose in-kernel drop this build
-	// cannot deliver. It has to come first because the whole point is that the
-	// daemon must not reach a serving state in that configuration — see
-	// checkDataplaneLadder for why this is a refusal and not a warning.
-	if err := checkDataplaneLadder(cfg); err != nil {
-		return nil, err
-	}
 
 	// The XDP data plane, when configured. Started before the mitigator and the
 	// ingest path so that static policy is already in the kernel by the time the
@@ -97,7 +92,36 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	}
 	a.Engine = engine.New(store, engineOpts...)
 
-	mit, err := mitigate.New(store, log)
+	// The mitigator, holding the data plane as its backend for `action:
+	// dataplane` rungs.
+	//
+	// ORDER IS LOAD-BEARING IN BOTH DIRECTIONS. Construction: the Manager must
+	// already be open here, because Mitigate.Start rehydrates persisted bans and
+	// re-announces them, and a dataplane ban's re-announce INSTALLS RULES — with
+	// no backend it would fail and degrade a surgical filter to a blackhole on
+	// every restart. Teardown: Stop closes the data plane only after
+	// Mitigate.Stop, so nothing is installing into maps that are being closed.
+	//
+	// dataplane.NewInstaller exists on every platform (the non-Linux one refuses
+	// loudly), which is why this line needs no build tag and the darwin developer
+	// loop compiles the same wiring that ships. A nil Manager yields no option at
+	// all, so a deployment with the data plane off gets a mitigator whose dp
+	// backend is nil — and installDataplaneLocked then FAILS such a rung rather
+	// than silently treating it as alert-only.
+	// ONE Installer, shared between the mitigator (which writes rules) and the
+	// counter scraper (which reads their counters). Not two: the policy-id
+	// bindings ARE the Installer's state, and a second instance would have an
+	// empty map — every Counters() call would report "nothing installed here" for
+	// victims the first one had just installed.
+	var (
+		dpInstaller *dataplane.Installer
+		mopts       []mitigate.Option
+	)
+	if a.Dataplane != nil {
+		dpInstaller = dataplane.NewInstaller(a.Dataplane, log)
+		mopts = append(mopts, mitigate.WithDataplane(dpInstaller))
+	}
+	mit, err := mitigate.New(store, log, mopts...)
 	if err != nil {
 		return nil, fmt.Errorf("init mitigation: %w", err)
 	}
@@ -122,6 +146,7 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	if a.Dataplane != nil {
 		a.dpReport = newDataplaneReporter(a.Dataplane, log)
 		a.API.SetDataplane(a.dpReport)
+		a.dpCounters = newBanCounterScraper(dpInstaller, mit, log, a.dpReport)
 	}
 	a.API.SetReloadHook(a.ApplyReload)
 
@@ -201,6 +226,15 @@ func (a *App) Start(ctx context.Context) error {
 		a.wg.Add(1)
 		go func() { defer a.wg.Done(); a.dpReport.scrape(runCtx) }()
 	}
+	// The per-ban drop counters, on their own slower cadence. Joined through wg
+	// for the same reason: it reads the same kernel maps, and a read racing
+	// Close() would hit a closed fd. It starts AFTER Mitigate.Start above, so
+	// rehydrated bans already carry their persisted lifetime totals and the first
+	// scrape continues those counts instead of seeding from zero.
+	if a.dpCounters != nil {
+		a.wg.Add(1)
+		go func() { defer a.wg.Done(); a.dpCounters.run(runCtx) }()
+	}
 
 	// Update check (opt-in): detached, never on the startup path, stops on ctx.
 	// No shutdown drain — it holds no state that must be flushed.
@@ -229,6 +263,7 @@ func (a *App) Stop() {
 		a.cancel()
 	}
 	a.wg.Wait() // engine, consumeEvents and persistTraffic have stopped producing
+	a.finalBanCounterScrape()
 	a.Mitigate.Stop()
 	// After the mitigator: nothing installs rules any more, so honouring
 	// dataplane.on_exit here cannot race a rule install. "" means the configured
@@ -259,6 +294,7 @@ func (a *App) StopForRestart() {
 		a.cancel()
 	}
 	a.wg.Wait()
+	a.finalBanCounterScrape()
 	a.Mitigate.SignalRestart(context.Background())
 	// An upgrade restart KEEPS the program attached whatever on_exit says, for
 	// the same reason SignalRestart asks peers to retain routes: the gap is
@@ -272,6 +308,22 @@ func (a *App) StopForRestart() {
 	if a.GeoIP != nil {
 		_ = a.GeoIP.Close()
 	}
+}
+
+// finalBanCounterScrape takes one last measurement before the mitigator drains
+// its state file.
+//
+// Without it, up to one scrape interval of drops is lost from every ban's
+// persisted lifetime total on every restart — and a restart is exactly when the
+// number matters, because it is the only moment the count has to survive
+// somewhere other than a kernel map. It runs between wg.Wait (the scrape
+// goroutine has stopped, so nothing races it) and Mitigate.Stop (whose
+// drainPersist writes the result), with the maps still open.
+func (a *App) finalBanCounterScrape() {
+	if a.dpCounters == nil {
+		return
+	}
+	a.dpCounters.tick()
 }
 
 // closeDataplane shuts the data plane down with the given on_exit behaviour
@@ -369,6 +421,10 @@ func attackRow(ev engine.Event, ban *mitigate.Ban) storage.AttackRow {
 	}
 	if ban != nil {
 		r.BanState = string(ban.State)
+		// The method as APPLIED, which for an escalating ban is the rung it was
+		// on when the event fired — including "dataplane". A report asking "which
+		// attacks did we drop in the kernel" has no other way to tell.
+		r.Method = string(ban.Method)
 		if ban.DryRun {
 			r.DryRun = 1
 		}

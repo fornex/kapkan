@@ -69,6 +69,7 @@
       "col.threshold": "Schwellenwert", "col.topsources": "Top-Quellen", "col.ban": "Sperre",
       "col.peak": "Spitzenrate", "col.started": "Begonnen", "col.ended": "Beendet",
       "col.duration": "Dauer", "col.route": "Route", "col.method": "Methode",
+      "col.dropped": "Verworfen (Kernel)",
       "col.state": "Status", "col.mode": "Modus", "col.expires": "Läuft ab",
       "col.type2": "Herkunft", "col.reason": "Grund", "col.host": "Host",
       "col.group": "Gruppe", "col.baseline": "Grundlinie", "col.calc": "Berechnung",
@@ -235,6 +236,31 @@
       "se.reload.title": "Konfiguration neu laden",
       "se.reload.desc": "Die Konfigurationsdatei neu einlesen, ohne die Engine neu zu starten.",
       "se.adminonly": "Nur-Admin-Felder",
+      /* gemessene Verwerfungen im Kernel (die XDP-Datenebene) */
+      "dp.stale": "veraltet",
+      "dp.stale.title": "Die Zähler konnten nicht gelesen werden; dies sind die letzten Werte, gemessen {t}.",
+      "dp.stale.never": "In diesem Prozess wurden noch keine Zähler gelesen; diese Werte stammen von vor dem Neustart.",
+      "dp.notmeasured": "nicht gemessen",
+      "dp.total": "Insgesamt verworfen",
+      "dp.pending": "Noch keine Messung — die Zähler werden alle paar Sekunden abgefragt.",
+      "ac.inkernel": "Im Kernel installiert",
+
+      /* Einstellungen: XDP-Datenebene */
+      "se.dp": "XDP-Datenebene",
+      "se.dp.state": "Zustand",
+      "se.dp.ok": "Filtert",
+      "se.dp.degraded": "Beeinträchtigt",
+      "se.dp.adopted": "Über Neustart übernommen",
+      "se.dp.attached": "Angebundene Schnittstellen",
+      "se.dp.interfaces": "Schnittstellen",
+      "se.dp.rules": "Regeln (statisch + Mitigation)",
+      "se.dp.generation": "Policy-Generation",
+      "se.dp.maps": "BPF-Map-Speicher",
+      "se.dp.verdicts": "Paket-Entscheidungen",
+      "se.dp.off": "Die Datenebene im Kernel ist aus",
+      "se.dp.off.sub": "Mitigation wird nur an BGP-Nachbarn angekündigt. Aktivieren Sie dataplane in der Engine-Konfiguration, um Angriffsverkehr auf diesem Host zu verwerfen.",
+      "se.dp.readerr": "Die Zähler konnten beim letzten Abruf nicht gelesen werden: {t}",
+
       "se.readonly": "Die Konfiguration wird in der Engine-Konfigurationsdatei verwaltet; diese Konsole zeigt sie schreibgeschützt an."
     },
 

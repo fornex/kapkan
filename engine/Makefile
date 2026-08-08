@@ -81,13 +81,25 @@ dataplane-sync:
 # loads. Needs Docker (Desktop is fine) and runs privileged because loading an
 # XDP program and BPF_PROG_TEST_RUN both want CAP_BPF/CAP_SYS_ADMIN. The repo
 # root is mounted so the C/Go drift tests can read bpf/include/kapkan_maps.h.
-dataplane-test:
+#
+# TWO packages, not one. internal/app is here because it owns the last hop —
+# turning kapkan_rule_stats into the number on /api/v1/bans — and that hop is
+# unreachable on the macOS loop: on a host with no kernel its Linux-only test
+# does not even compile in. Everything else in internal/app still runs under
+# `make test`; this adds the part that needs a datapath. Depends on console-sync
+# because internal/app imports internal/api, which go:embeds the console.
+dataplane-test: console-sync
 	GOOS=linux GOARCH=$(BPF_TEST_ARCH) CGO_ENABLED=0 \
 		go test -c -o .dataplane.test ./internal/dataplane/
+	GOOS=linux GOARCH=$(BPF_TEST_ARCH) CGO_ENABLED=0 \
+		go test -c -o .app.test ./internal/app/
 	docker run --rm --privileged \
 		-v "$(CURDIR)/..:/w" -w /w/engine/internal/dataplane \
 		$(BPF_TEST_IMAGE) /w/engine/.dataplane.test -test.v
-	rm -f .dataplane.test
+	docker run --rm --privileged \
+		-v "$(CURDIR)/..:/w" -w /w/engine/internal/app \
+		$(BPF_TEST_IMAGE) /w/engine/.app.test -test.v -test.run 'MeasuredDropsReachTheAPI'
+	rm -f .dataplane.test .app.test
 
 # Capacity numbers for the data plane, via the kernel's own PROG_TEST_RUN
 # repeat loop. Same container as dataplane-test. The absolute figures depend on
@@ -103,5 +115,5 @@ dataplane-bench:
 	rm -f .dataplane.test
 
 clean:
-	rm -f $(BINARY) .dataplane.test
+	rm -f $(BINARY) .dataplane.test .app.test
 	rm -rf internal/api/static

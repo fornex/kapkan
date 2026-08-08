@@ -189,6 +189,9 @@
       metric: a.metric, rate: a.rate, threshold: a.threshold, rates: a.rates || {},
       active: !!a.active, ban_state: a.ban_state, method: a.method, route: a.route,
       flowspec: a.flowspec ? mapFlowspec(a.flowspec) : null,
+      /* measured in-kernel drops; null for every attack with no XDP rules.
+         Passed through verbatim — the engine already shaped it. */
+      dataplane: a.dataplane || null,
       dry_run: !!a.dry_run, started_at: a.started_at, ended_at: a.ended_at,
       sample: mapSample(a.sample),
       classification: a.classification || { type: "mixed", confidence: 0 },
@@ -204,6 +207,9 @@
       out.method = d.ban.method || out.method;
       out.route = d.ban.route || out.route;
       if (d.ban.flowspec) out.flowspec = mapFlowspec(d.ban.flowspec);
+      /* The ban's counters move every scrape; the attack record's were taken
+         when it was detected. Prefer the live ones for a live attack. */
+      if (d.ban.dataplane) out.dataplane = d.ban.dataplane;
       out.next_hop = d.ban.next_hop;
       out.community = d.ban.community;
       out.local_pref = d.ban.local_pref;

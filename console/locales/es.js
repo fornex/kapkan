@@ -75,6 +75,7 @@
       "col.threshold": "Umbral", "col.topsources": "Fuentes principales", "col.ban": "Bloqueo",
       "col.peak": "Tasa máx.", "col.started": "Inicio", "col.ended": "Fin",
       "col.duration": "Duración", "col.route": "Ruta", "col.method": "Método",
+      "col.dropped": "Descartado (núcleo)",
       "col.state": "Estado", "col.mode": "Modo", "col.expires": "Expira",
       "col.type2": "Origen", "col.reason": "Motivo", "col.host": "Host",
       "col.group": "Grupo", "col.baseline": "Referencia", "col.calc": "Cálculo",
@@ -250,6 +251,31 @@
       "se.reload.title": "Recargar configuración",
       "se.reload.desc": "Vuelve a leer el archivo de configuración sin reiniciar el motor.",
       "se.adminonly": "Campos solo para administradores",
+      /* descartes medidos en el núcleo (el plano de datos XDP) */
+      "dp.stale": "obsoleto",
+      "dp.stale.title": "No se pudieron leer los contadores; estos son los últimos valores, medidos {t}.",
+      "dp.stale.never": "Aún no se han leído contadores en este proceso; estos valores vienen de antes del reinicio.",
+      "dp.notmeasured": "sin medir",
+      "dp.total": "Total descartado",
+      "dp.pending": "Aún sin lectura — los contadores se consultan cada pocos segundos.",
+      "ac.inkernel": "Instalado en el núcleo",
+
+      /* ajustes: plano de datos XDP */
+      "se.dp": "Plano de datos XDP",
+      "se.dp.state": "Estado",
+      "se.dp.ok": "Filtrando",
+      "se.dp.degraded": "Degradado",
+      "se.dp.adopted": "Adoptado tras el reinicio",
+      "se.dp.interfaces": "Interfaces",
+      "se.dp.attached": "Interfaces conectadas",
+      "se.dp.rules": "Reglas (estáticas + mitigación)",
+      "se.dp.generation": "Generación de política",
+      "se.dp.maps": "Memoria de mapas BPF",
+      "se.dp.verdicts": "Veredictos de paquetes",
+      "se.dp.off": "El plano de datos del núcleo está desactivado",
+      "se.dp.off.sub": "La mitigación solo se anuncia a los pares BGP. Active dataplane en la configuración del motor para descartar el tráfico de ataque en esta máquina.",
+      "se.dp.readerr": "No se pudieron leer los contadores en el último sondeo: {t}",
+
       "se.readonly": "La configuración se gestiona en el archivo de configuración del motor; esta consola la muestra en solo lectura."
     },
 

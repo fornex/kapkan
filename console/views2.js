@@ -54,6 +54,12 @@
         ? section("ac.mitigation", "shield", K.routeDisplay(a, a.dry_run))
         : section("ac.mitigation", "bell", h("div", { class: "route" }, h("div", { class: "route__line" }, h("span", { class: "route__v", text: a.scope === "group" ? I.t("ac.groupnote") : I.t("ac.alertonly") })))),
 
+      // "Installed in kernel": each announced rule beside what the datapath
+      // measured for it. Only for a data-plane mitigation — for a flowspec ban
+      // the rules were handed to an upstream peer and this box counts nothing,
+      // so a panel of dashes would imply a measurement that does not exist.
+      a.method === "dataplane" ? section("ac.inkernel", "chip", K.kernelRules(a)) : null,
+
       sample ? section("ac.sample", "target", h("div", {}, [
         h("div", { class: "shares" }, [
           K.shareGroup(I.t(isOut ? "ac.topdest" : "ac.topsources"), sample.top_sources, { src: true }),
@@ -389,6 +395,8 @@
       bgpBody
     ]);
 
+    var dpCard = dataplaneCard(s);
+
     var reloadCard = h("div", { class: "card" }, [
       h("div", { class: "card__head" }, [h("div", { class: "card__title" }, [w.icon("refresh"), h("span", { text: I.t("se.reload.title") })]), ctx.role === "operator" ? K.badge("badge--accent", I.t("op.only"), "lock") : null]),
       h("div", { class: "card__body row between wrap" }, [
@@ -404,8 +412,86 @@
       h("div", { class: "banner banner--info" }, [w.icon("lock"), h("span", { class: "banner__txt", text: I.t("se.readonly") })]),
       h("div", { class: "cols-2" }, [statusCard, netCard]),
       h("div", { class: "cols-2 mt-4" }, [thrCard, bgpCard]),
+      h("div", { class: "mt-4" }, dpCard),
       h("div", { class: "mt-4" }, reloadCard)
     ]);
+  }
+
+  /* The XDP data plane card.
+     THREE STATES, and conflating any two of them would mislead:
+       - the block is admin-only (it names interfaces, which is topology), so a
+         scoped token gets `dataplane: null` and is told that, not that the data
+         plane is off;
+       - `enabled: false` means this box does no in-kernel filtering at all;
+       - enabled but DEGRADED means the program is loaded and at least one
+         configured NIC is not filtering — traffic on it is not being inspected,
+         which looks identical to "protected" unless it is said out loud.
+     The dry_run row reads back what the DATAPATH is doing (kapkan_cfg), not what
+     the config asked for: the two can disagree across an adoption, and that
+     disagreement is the reason the field is reported separately. */
+  function dataplaneCard(s) {
+    var dp = s.dataplane;
+    var head = h("div", { class: "card__head" }, [
+      h("div", { class: "card__title" }, [w.icon("chip"), h("span", { text: I.t("se.dp") })]),
+      K.badge("badge--muted", I.t("se.adminonly"), "lock")
+    ]);
+    if (!dp) {
+      return h("div", { class: "card" }, [head,
+        h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("se.adminonly") }))]);
+    }
+    if (!dp.enabled) {
+      return h("div", { class: "card" }, [head,
+        h("div", { class: "card__body" }, K.empty("chip", I.t("se.dp.off"), I.t("se.dp.off.sub")))]);
+    }
+
+    var state = dp.degraded
+      ? K.badge("badge--active", I.t("se.dp.degraded"), "shield-alert")
+      : K.badge("badge--calm", I.t("se.dp.ok"), "shield-check");
+    var rows = [
+      [h("dt", { text: I.t("se.dp.state") }), h("dd", { class: "row wrap", style: { gap: "6px" } }, [
+        state,
+        K.badge(dp.dry_run ? "badge--dry" : "badge--calm",
+          dp.dry_run ? I.t("mode.dryrun") : I.t("mode.live"),
+          dp.dry_run ? "shield-alert" : "shield-check"),
+        dp.adopted ? K.badge("badge--muted", I.t("se.dp.adopted"), "history") : null
+      ])],
+      [h("dt", { text: I.t("se.dp.attached") }),
+        h("dd", { class: "mono", text: I.num(dp.attached || 0) + " / " + I.num(dp.configured || 0) +
+          (dp.mode ? "  " + dp.mode : "") })],
+      [h("dt", { text: I.t("se.dp.interfaces") }), h("dd", { class: "row wrap", style: { gap: "6px" } },
+        (dp.interfaces || []).length
+          ? dp.interfaces.map(function (i) {
+              return K.badge(i.attached ? "badge--calm" : "badge--elev",
+                i.interface + (i.mode ? " · " + i.mode : ""),
+                i.attached ? "shield-check" : "shield-alert",
+                i.attached ? "" : (i.last_error || ""));
+            })
+          : h("span", { class: "td-muted", text: I.t("common.none") }))],
+      [h("dt", { text: I.t("se.dp.rules") }),
+        h("dd", { class: "mono", text: I.num(dp.static_rules || 0) + " + " + I.num(dp.dynamic_rules || 0) })],
+      [h("dt", { text: I.t("se.dp.generation") }), h("dd", { class: "mono", text: String(dp.generation || 0) })],
+      [h("dt", { text: I.t("se.dp.maps") }), h("dd", { class: "mono", text: K.bytesFmt(dp.map_bytes) })]
+    ];
+    var body = [h("dl", { class: "kv" }, [].concat.apply([], rows))];
+
+    // Verdict counters, biggest first, zeros dropped: a table of twenty-one
+    // names of which two are non-zero buries the two.
+    var vs = dp.verdicts || {};
+    var names = Object.keys(vs).filter(function (k) { return (vs[k].packets || 0) > 0; })
+      .sort(function (a, b) { return (vs[b].packets || 0) - (vs[a].packets || 0); });
+    if (names.length) {
+      body.push(h("div", { class: "section-label mt-4" }, [w.icon("activity"), h("span", { text: I.t("se.dp.verdicts") })]));
+      body.push(h("div", { class: "row wrap", style: { gap: "6px" } }, names.map(function (k) {
+        return K.badge("badge--muted", k + " · " + I.abbr(vs[k].packets || 0));
+      })));
+    }
+    if (dp.error) {
+      body.push(h("p", { class: "td-muted mt-4", text: I.t("se.dp.readerr", { t: dp.error }) }));
+    }
+    (dp.conditions || []).forEach(function (c) {
+      body.push(h("p", { class: "td-muted", text: c.message }));
+    });
+    return h("div", { class: "card" }, [head, h("div", { class: "card__body" }, body)]);
   }
 
   V.hostgroups = hostgroups;

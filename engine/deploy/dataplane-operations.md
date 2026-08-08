@@ -105,41 +105,66 @@ fallback path.
 
 ### systemd unit
 
-```ini
-[Service]
-# The three, and only the three. CapabilityBoundingSet caps what the process
-# could ever regain; AmbientCapabilities is what it actually starts with, so
-# this works with User= set to a non-root account.
-User=kapkan
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
-NoNewPrivileges=yes
+**The shipped `kapkan.service` does NOT grant any of this, and a drop-in next to
+it does: `deploy/kapkan-dataplane.conf`.**
 
-# bpf(2) is in systemd's @privileged group and NOT in @system-service, so the
-# usual hardening line silently blocks every BPF syscall. Add it back by name.
-SystemCallFilter=@system-service bpf
-
-# Pre-5.11 kernels charge map memory against RLIMIT_MEMLOCK. Harmless on 5.11+.
-LimitMEMLOCK=infinity
-
-# See section 2 — the maps are charged to this unit's memory cgroup at load.
-MemoryAccounting=yes
-# MemoryMax=<at least map footprint + heap + headroom; see the table below>
-
-# Do NOT set these:
-#   ProtectKernelTunables=yes   -> mounts /sys AND /sys/fs/bpf read-only
-#   PrivateNetwork=yes          -> private sysfs and no host interfaces
-ProtectSystem=strict
-ReadWritePaths=/sys/fs/bpf
+```
+install -D -m 0644 kapkan-dataplane.conf \
+    /etc/systemd/system/kapkan.service.d/10-dataplane.conf
+systemctl daemon-reload && systemctl restart kapkan
 ```
 
-Three of those lines are load-bearing and each was checked rather than assumed:
+Why a drop-in rather than an edit to the unit everyone gets: every line in it
+relaxes the shipped hardening, and a kapkan that mitigates through BGP alone —
+blackhole, flowspec, divert — touches no BPF, no bpffs and no netlink. Handing
+`CAP_BPF` and `CAP_PERFMON` to those hosts buys nothing and widens what a
+compromised daemon can do. The privileges are opt-in by the same switch the
+feature is: one config flag, one drop-in, installed together.
 
-- **`SystemCallFilter`** — **measured** on systemd 255 (Ubuntu 24.04):
+A host with `dataplane.enabled: true` and no drop-in **fails at startup** and
+says why (see the triage table). That is deliberate — an operator who configured
+in-kernel drops must not get a daemon that came up without them.
+
+The drop-in, in full:
+
+```ini
+[Service]
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+ProtectKernelTunables=false
+ReadWritePaths=/sys/fs/bpf
+RestrictAddressFamilies=AF_NETLINK
+MemoryAccounting=yes
+LimitMEMLOCK=infinity
+# MemoryMax=<map footprint + heap + headroom; see section 2>
+```
+
+**Measured, end to end, on systemd 255 (Ubuntu 24.04, kernel 6.12.76-linuxkit),
+installing the shipped unit exactly as an operator would.** Each relaxation was
+then removed on its own to check it was actually load-bearing:
+
+| unit | result |
+|---|---|
+| shipped `kapkan.service`, no drop-in | **fails**: `missing capability: CAP_BPF … Effective capabilities are 0x0000000000000000` |
+| drop-in minus `ProtectKernelTunables=false` | **fails**: `create pin directory /sys/fs/bpf/kapkan: read-only file system` |
+| drop-in minus `RestrictAddressFamilies=AF_NETLINK` | **fails**: `could not attach to any of the configured interfaces ([lo]): interface "lo" does not exist` |
+| the full drop-in | **works**: `data plane attached interface=lo mode=generic`, `/healthz` → `dataplane: ok (1/1 interfaces attached)`, as uid 997 with `CapEff: 000000c000001000` |
+
+That third row is the one worth remembering, because the error lies. Resolving
+an interface name to an ifindex is an `AF_NETLINK` socket, and a blocked socket
+comes back through `net.InterfaceByName` as "no such interface" — so a unit
+missing one line reports a NIC that is plainly there as absent. Nothing in the
+message points at systemd.
+
+The rest, checked rather than assumed:
+
+- **`SystemCallFilter`** — **measured** on systemd 255:
   `systemd-analyze syscall-filter @system-service | grep -w bpf` returns
   nothing; `bpf` appears only in `@privileged` (and `@known`). A unit hardened
   with the recommended `SystemCallFilter=@system-service` and nothing else gets
-  EPERM — or rather ENOSYS/SIGSYS — on the very first `bpf(2)`.
+  EPERM — or rather ENOSYS/SIGSYS — on the very first `bpf(2)`. The shipped unit
+  sets **no** syscall filter, so the drop-in does not need to fix one; if you add
+  one of your own it must read `SystemCallFilter=@system-service bpf`.
 
 - **`ProtectKernelTunables=yes`** — **cited**, systemd v255
   `src/core/namespace.c`:
@@ -155,10 +180,17 @@ Three of those lines are load-bearing and each was checked rather than assumed:
   cannot create pins under `dataplane.pin_path` (default
   `/sys/fs/bpf/kapkan`) — which means no `on_exit: keep`, no policy surviving a
   restart, and a failure at startup rather than at the moment it matters.
+  `ReadWritePaths=` does not rescue it: the path is mounted read-only by the
+  same protection, so the option itself has to go. **Measured** above.
 
 - **`ProtectSystem=strict`** is fine on its own: it leaves `/dev`, `/proc` and
   `/sys` writable and defers those to the `Protect*` options above (**cited**:
   systemd.exec(5)). `ReadWritePaths=/sys/fs/bpf` is belt and braces.
+
+- **`on_exit: keep` survives `systemctl restart` under this unit.** **Measured**:
+  the second process logged `data plane adopted the existing attachment on lo`
+  and `re-installed static policy over the adopted data plane`, so the gap
+  between the two processes forwards nothing.
 
 ---
 
@@ -347,16 +379,70 @@ creates no user namespaces.
 
 ---
 
-## 5. Quick triage
+## 5. Measured drops on a ban
+
+Every ban whose method is `dataplane` carries what the kernel actually counted
+for its rules. It is a nested `dataplane` object on the ban, and it reaches
+`/api/v1/bans`, `/api/v1/attacks` and the console's bans table and attack
+drawer. A ban with no rules in this box's maps — every blackhole, flowspec,
+divert, alert-only and dry-run ban — **omits the object entirely**, so those
+payloads are byte-for-byte what they were before this existed.
+
+```json
+"dataplane": {
+  "packets": 400,
+  "bytes": 192800,
+  "rules": [ { "id": 0, "packets": 400, "bytes": 192800 } ],
+  "policy_id": 0,
+  "measured_at": "2026-08-08T19:32:47Z",
+  "stale": false
+}
+```
+
+Four things about it that are not obvious from the shape:
+
+- **`packets`/`bytes` are the ban's LIFETIME totals, not the raw counter.** The
+  kernel's counters restart in normal operation — a re-install recreates the
+  `kapkan_rule_stats` entries at zero, and a restart that could not adopt the
+  pins starts with empty maps. kapkan accumulates deltas across those events, so
+  the number only ever goes up for the life of the ban. It is also persisted in
+  `ban.state_file`, which is what carries it across a restart.
+
+- **`rules` joins to the ban's `flowspec` array BY INDEX.** `rules[i]` is what
+  `flowspec[i]` caught. The counters carry no match of their own precisely so
+  the two cannot drift into disagreeing about which rule a number belongs to.
+  The array may be **shorter** than `flowspec` (a counter already reaped); a
+  missing entry means *unknown*, not zero.
+
+- **`stale: true` means the last reading is old, not that traffic stopped.**
+  Counters are scraped every 5 seconds; past three intervals the last good
+  values are kept and flagged. They are deliberately not replaced with zeros —
+  a datapath whose counters cannot be read has not stopped dropping packets, and
+  zero is the one answer an operator would act on and be wrong.
+
+- **`policy_id` is never persisted.** It is an allocation against a map set that
+  may have been resized or rebuilt while the process was down; after a restart it
+  is absent until the first scrape re-derives it.
+
+The same numbers are on `/metrics` as `kapkan_dataplane_packets_total` by
+verdict, and `/api/v1/status`'s `dataplane.dynamic_rules` is the count of
+mitigator rules whose counters could actually be read — measured, not tallied
+from intent.
+
+---
+
+## 6. Quick triage
 
 | symptom | cause |
 |---|---|
 | `map create: operation not permitted` | no `CAP_BPF` |
+| `missing capability: CAP_BPF … Effective capabilities are 0x0` under systemd | the data-plane drop-in is not installed. `install -D -m 0644 kapkan-dataplane.conf /etc/systemd/system/kapkan.service.d/10-dataplane.conf`, then `systemctl daemon-reload && systemctl restart kapkan` |
+| `interface "eth0" does not exist` for a NIC that plainly does | the unit's `RestrictAddressFamilies=` has no `AF_NETLINK`. Resolving a name to an ifindex is a netlink socket, and a blocked one surfaces as "no such interface". Install the drop-in |
 | `load program: operation not permitted` | no `CAP_NET_ADMIN` (XDP is a net-admin program type) |
 | verifier log ending `pointer -= pointer prohibited` | no `CAP_PERFMON` — **not** a kapkan bug |
 | SIGSYS / ENOSYS on the first `bpf(2)` | `SystemCallFilter=` without `bpf` |
 | `avc: denied ... tclass=bpf` | SELinux; see section 3 |
-| pin creation fails, `/sys/fs/bpf` read-only | `ProtectKernelTunables=yes` |
+| `create pin directory /sys/fs/bpf/kapkan: read-only file system` | `ProtectKernelTunables=yes` is still in force; the drop-in sets it to `false` and `ReadWritePaths=` cannot substitute for that |
 | unit OOM-killed at startup | `MemoryMax=` below the ~235 MiB of maps; see section 2 |
 | `pin path is not safe to use: ... is on filesystem type 0x…, not bpffs` | `pin_path` is an ordinary directory: bpffs is not mounted, or the unit made `/sys/fs/bpf` read-only |
 | `pin path is not safe to use: ... is mode 0777` / `owned by uid N` | the pin directory is writable by, or owned by, somebody else. A local user who can write it can pre-create a program kapkan would ADOPT, so this is a refusal to start. `chown` it to the kapkan user and `chmod 0700` |
@@ -365,7 +451,8 @@ creates no user namespaces.
 | `this driver has no native XDP support` | `xdp_mode: native` on a device without driver XDP. `auto` falls back to the generic path and records that it did; `native` fails on purpose, because it costs ~10x less CPU per packet and silently giving up that difference is not a favour |
 | startup log: `REJECTED the existing pinned data plane and rebuilt it` | this binary's BPF object, map layout or `dataplane.limits` differ from the pinned ones, so they could not be adopted. Expected after an upgrade that changes `bpf/`; the cost is that dynamic rules from the previous process are gone and active attacks are re-mitigated on their next detection interval |
 | `/healthz` says `dataplane: DEGRADED (n/m interfaces attached)` | at least one configured interface has no live XDP attachment. Alert on `kapkan_dataplane_degraded`; the status code stays 200 because a restart cannot conjure a missing NIC |
-| startup refused: `escalation ladder uses "dataplane", which this build cannot execute` | this release has no mitigator backend for in-kernel drops yet. The rung would be announced as an alert-only stage, so kapkan refuses rather than run a configuration whose drop is not a drop. Use `flowspec`/`blackhole`/`none`; `static_rules` and `allowlist` are unaffected |
+| a `dataplane` ban shows `fell_back_from: dataplane` and a blackhole route | the install failed and the ban degraded to its configured fallback, which is louder and safer than going unmitigated. The reason is in the log next to it — usually `ErrNoPolicySlots` (raise `dataplane.limits.max_dynamic_rules`) or `ErrNoProfileSlots` (more than 64 distinct live rate-limit rates) |
+| a ban's `dataplane.stale` is true in `/api/v1/bans` | the per-rule counters could not be read for more than three scrape intervals. The numbers shown are the last good ones, NOT zeros — the rules are still installed and still dropping; it is the *reading* that failed. Check the log for `reading in-kernel drop counters failed` |
 
 ---
 

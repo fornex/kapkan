@@ -397,6 +397,9 @@
         h("td", { class: "target-cell" }, [h("span", { text: b.target }), h("span", { class: "td-muted", text: b.prefix })]),
         h("td", { class: "mono td-muted", text: b.route }),
         h("td", {}, K.methodPill(b.method)),
+        // What the kernel MEASURED for this ban, not what it was asked to do.
+        // Empty for every mitigation with no rules in this box's XDP maps.
+        h("td", { class: "num" }, K.dropCell(b.dataplane)),
         h("td", {}, K.badge("badge--calm", I.label("banState", b.state))),
         h("td", {}, b.dry_run ? K.badge("badge--dry", I.t("mode.dryrun"), "shield-alert") : K.badge("badge--calm", I.t("mode.live"))),
         h("td", { class: "mono", dataset: { cdText: b.expires_at || "" }, text: expires }),
@@ -409,7 +412,7 @@
       h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("ban"), h("span", { text: I.t("bn.active") }), data.active.length ? K.badge("badge--active", String(data.active.length)) : null])),
       data.active.length
         ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
-            h("thead", {}, h("tr", {}, [th("col.target"), th("col.route"), th("col.method"), th("col.state"), th("col.mode"), th("col.expires"), th("col.type2"), h("th", {})])),
+            h("thead", {}, h("tr", {}, [th("col.target"), th("col.route"), th("col.method"), thNum("col.dropped"), th("col.state"), th("col.mode"), th("col.expires"), th("col.type2"), h("th", {})])),
             h("tbody", {}, activeRows)
           ]))
         : h("div", { class: "card__body" }, K.empty("shield-check", I.t("bn.empty.title"), I.t("bn.empty.sub")))
@@ -421,6 +424,10 @@
         h("td", { class: "target-cell" }, [h("span", { text: b.target }), h("span", { class: "td-muted", text: b.prefix })]),
         h("td", { class: "mono td-muted", text: b.route }),
         h("td", {}, K.badge("badge--muted", I.label("method", b.method), K.methodIcon(b.method))),
+        // The FINAL tally. Kept on a withdrawn ban on purpose: the kernel
+        // counters were reaped with the rules, so this record is the only
+        // remaining answer to "how much did that mitigation actually catch".
+        h("td", { class: "num" }, K.dropCell(b.dataplane)),
         h("td", {}, K.badge(rejected ? "badge--elev" : "badge--muted", I.label("banState", b.state))),
         h("td", {}, K.badge(b.manual ? "badge--accent" : "badge--muted", b.manual ? I.t("bn.manualtag") : I.t("bn.autotag"))),
         h("td", { class: "td-muted", text: rejected ? rejectReason(b.reason) : (b.withdrawn_at ? I.rel(new Date(b.withdrawn_at)) : "") })
@@ -430,7 +437,7 @@
       h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("history"), h("span", { text: I.t("bn.history") })])),
       data.history.length
         ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
-            h("thead", {}, h("tr", {}, [th("col.target"), th("col.route"), th("col.method"), th("col.state"), th("col.type2"), th("col.reason")])),
+            h("thead", {}, h("tr", {}, [th("col.target"), th("col.route"), th("col.method"), thNum("col.dropped"), th("col.state"), th("col.type2"), th("col.reason")])),
             h("tbody", {}, histRows)
           ]))
         : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("bn.history.empty") }))

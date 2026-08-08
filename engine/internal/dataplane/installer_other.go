@@ -37,3 +37,17 @@ func (i *Installer) Install(netip.Prefix, DynamicRules) error { return ErrUnsupp
 
 // Withdraw always fails with ErrUnsupported.
 func (i *Installer) Withdraw(netip.Prefix) error { return ErrUnsupported }
+
+// Counters reports that nothing is installed, rather than failing.
+//
+// It is the one method here that does NOT refuse loudly, and the asymmetry is
+// the point. Install and Withdraw are asked to change enforcement, so a silent
+// success would be a lie about whether an operator's drop is happening. This is
+// asked "how much did your rules catch", and the truthful answer on a host with
+// no data plane is "there are no rules of mine here" — which is exactly what
+// ok=false means to every caller. Returning an error instead would make the
+// scrape loop log a failure once per interval, forever, on a machine where
+// nothing is wrong.
+func (i *Installer) Counters(netip.Prefix) (VictimCounters, bool, error) {
+	return VictimCounters{}, false, nil
+}

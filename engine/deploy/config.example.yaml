@@ -225,9 +225,21 @@ thresholds: # per destination host, after sampling correction
 # is for. Absent (the default) the feature does not exist and the binary
 # behaves exactly as it does today.
 #
-# Requires Linux 5.15+ with BTF, and the capabilities the shipped systemd unit
-# grants. The default verdict is always PASS: anything not matched by a rule
-# is forwarded. dry_run gates rule installation exactly as it gates BGP.
+# Requires Linux 5.15+ with BTF, and privileges the shipped systemd unit does
+# NOT grant: CAP_BPF, CAP_NET_ADMIN, CAP_PERFMON, a writable /sys/fs/bpf and
+# AF_NETLINK. Turning this on without them makes kapkan REFUSE TO START (with a
+# message naming the cause) rather than run without the drops you configured.
+# Install the drop-in that ships beside the unit on the same hosts:
+#
+#   install -D -m 0644 kapkan-dataplane.conf \
+#       /etc/systemd/system/kapkan.service.d/10-dataplane.conf
+#   systemctl daemon-reload && systemctl restart kapkan
+#
+# (packages put it at /usr/share/kapkan/kapkan-dataplane.conf). The reasoning
+# and the measurements are in deploy/dataplane-operations.md §1.
+#
+# The default verdict is always PASS: anything not matched by a rule is
+# forwarded. dry_run gates rule installation exactly as it gates BGP.
 #
 # dataplane:
 #   interfaces: [eth0]        # NICs to attach to (restart required)

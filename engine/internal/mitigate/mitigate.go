@@ -75,6 +75,20 @@ type Ban struct {
 	FellBackFrom   config.MitigationMethod `json:"fell_back_from,omitempty"`
 	FellBackReason string                  `json:"fell_back_reason,omitempty"`
 
+	// Dataplane is what the KERNEL measured for this ban's installed rules:
+	// packets and bytes the datapath actually dropped or rate-limited, read back
+	// from kapkan_rule_stats. Nil for every ban that has no rules in this box's
+	// maps — which is every blackhole, divert, flowspec, alert-only and dry-run
+	// ban — so their JSON is byte-identical to what it was before this field
+	// existed (TestBlackholeBanJSONIsUnchanged pins that).
+	//
+	// It is a POINTER TO A NESTED OBJECT and not a pair of flat fields because
+	// the numbers are only meaningful together with the freshness that produced
+	// them: "0 drops" and "0 drops, last measured 40 seconds ago" are different
+	// claims, and flattening them invites a console to render the first when it
+	// has the second. Nothing writes it except SetDataplaneCounters.
+	Dataplane *BanDataplane `json:"dataplane,omitempty"`
+
 	// dirMask tracks which attack directions hold this ban (one mitigation
 	// covers both). An incoming and an outgoing attack on the same host
 	// share the ban; it is withdrawn only when the last direction ends.
@@ -88,6 +102,12 @@ type Ban struct {
 	// NextHop/Community/LocalPref mirror the CURRENTLY-applied rung's set.
 	bhAttrs  blackholeAttrs
 	divAttrs blackholeAttrs
+	// dpInstalledAt is when the kernel rules for this ban were last written,
+	// and exists only to throttle renewals (see renewDataplaneLocked). It is
+	// NOT persisted: a rehydrated ban re-installs from scratch, which sets a
+	// fresh deadline anyway, and a remembered timestamp would be a claim about
+	// kernel state that a restart cannot verify.
+	dpInstalledAt time.Time
 }
 
 // dirBit maps an event direction to its mask bit. Events without a
@@ -467,6 +487,66 @@ func (m *Mitigator) OnAttackOngoing(ev engine.Event) {
 	if now.Sub(m.lastOngoingPersist) >= cfg.Ban.TTL()/2 {
 		m.lastOngoingPersist = now
 		m.markDirty()
+	}
+
+	// Refreshing ExpiresAt is enough for every BGP method — an announcement sits
+	// on the peer until we withdraw it — but NOT for the data plane, whose rules
+	// carry their own boot-clock deadline in the kernel. That deadline is the
+	// fail-safe that makes a crashed userspace harmless; it also means a rule
+	// installed once stops applying at its original TTL no matter how many times
+	// this function moves the Go-side ExpiresAt.
+	//
+	// The result, before this call existed, was the worst failure this feature
+	// can produce: an attack outlasting ban.ttl_seconds (600 by default — so any
+	// flood over ten minutes, which is the normal case rather than the edge one)
+	// silently stopped being dropped, while /api/v1/bans, the console and the
+	// metrics all went on reporting an active ban. Re-installing renews the
+	// deadline the kernel actually reads.
+	//
+	// Throttled on the same TTL/2 cadence as the persist above and for the same
+	// reason: a heartbeat arrives every second, and rewriting a policy block per
+	// second per victim for the duration of an attack is pure churn. TTL/2 keeps
+	// the in-kernel deadline at least half a TTL ahead, which is the same margin
+	// the state file gets.
+	m.renewDataplaneLocked(now, cfg)
+}
+
+// renewDataplaneLocked re-installs the kernel rules of every active data-plane
+// ban whose in-kernel deadline is closer than half a TTL.
+//
+// It walks the ban table rather than only the refreshed ban because the two are
+// not the same set: a multi-vector attack refreshes one target while another
+// stays banned on its own heartbeat, and a ban whose heartbeats stop is supposed
+// to lapse — which it still does, because this only renews bans the sweep has
+// not yet expired.
+//
+// A failure here is logged and left alone rather than escalated. The ban is
+// already active and already installed; the next heartbeat retries, and if the
+// attack ends first the rule ages out on its own, which is the correct outcome.
+// Falling back to blackhole because one renewal failed would take a customer
+// offline over a transient map write.
+func (m *Mitigator) renewDataplaneLocked(now time.Time, cfg *config.Config) {
+	if m.dp == nil {
+		return
+	}
+	ttl := cfg.Ban.TTL()
+	if ttl <= 0 {
+		return
+	}
+	for _, b := range m.bans {
+		if b.State != BanActive || b.Method != config.MitigateDataplane || b.DryRun {
+			continue
+		}
+		if now.Sub(b.dpInstalledAt) < ttl/2 {
+			continue
+		}
+		if err := m.installDataplaneLocked(b, b.Route); err != nil {
+			m.log.Error("renewing the in-kernel deadline failed; the rules keep their previous "+
+				"deadline and will stop applying when it passes. The next heartbeat retries",
+				"target", b.Target.String(), "err", err)
+			continue
+		}
+		b.dpInstalledAt = now
 	}
 }
 
@@ -956,9 +1036,16 @@ func routeFamilyOf(method config.MitigationMethod) int {
 //     actually removes the map entries.
 //
 // TestSupportsDataplaneMatchesStageView binds the flag to the first of those in
-// BOTH directions, so it cannot be flipped ahead of the backend. With it true,
-// app.checkDataplaneLadder's startup refusal returns nil on its own and the
-// action becomes configurable.
+// BOTH directions, so it cannot be flipped ahead of the backend.
+//
+// IT NO LONGER HAS A PRODUCTION CALLER, and is kept anyway. Its original one was
+// app.checkDataplaneLadder, a startup refusal for a ladder this build could not
+// execute; that function was written as a function of this flag precisely so it
+// would retire itself, and it has been deleted. What remains is the invariant:
+// the test above fails if stageView ever stops returning a real method for the
+// action, which is the regression that would silently turn every configured
+// in-kernel drop back into an alert-only stage. That tripwire is worth one
+// exported line.
 //
 // What it does NOT claim: that a data plane is attached on this host. That is a
 // runtime question (dataplane.enabled, a Linux kernel, a NIC that takes the
@@ -1209,6 +1296,7 @@ func (m *Mitigator) installDataplaneLocked(b *Ban, route string) error {
 			"route", route, "err", err)
 		return err
 	}
+	b.dpInstalledAt = m.now()
 	m.log.Warn("installed data-plane rules", "route", route, "target", b.Target.String(),
 		"rules", len(set.Specs), "ttl", ttl.Round(time.Second).String())
 	return nil

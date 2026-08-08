@@ -1,26 +1,29 @@
 package app
 
-// Wiring the XDP data plane into the daemon, and the one refusal that keeps a
-// half-finished feature from lying to an operator.
+// Wiring the XDP data plane into the daemon: starting it, hot-reloading its
+// static policy, and reporting what it is doing to /metrics, /healthz and
+// /api/v1/status.
 //
-// Two separate things live here and they are easy to confuse:
+// A THIRD THING USED TO LIVE HERE and is worth recording, because its absence is
+// now load-bearing: a startup REFUSAL for a ladder containing `action:
+// dataplane` that the mitigator had no backend for. Such a rung resolved to the
+// empty method and was announced as an alert-only stage — the ban recorded, the
+// notification sent, the metrics moved, and the traffic forwarded. The refusal
+// was written as a function of mitigate.SupportsDataplane() precisely so that
+// the change adding the backend would retire it without anyone having to
+// remember it existed. That change has landed, SupportsDataplane() is true, and
+// the guard has been deleted rather than left as dead code that reads like an
+// active safety net. What replaced it is stronger than a startup check: the rung
+// now installs, and an install that fails degrades to the configured fallback
+// with FellBackFrom set, so the failure is visible per ban instead of per boot.
 //
-//  1. STARTING THE DATA PLANE, when dataplane.enabled is true. Static policy
-//     (allowlist, protected list, static rules, rate-limit profiles) is installed
-//     and enforced in the kernel from this moment, and it hot-reloads.
-//
-//  2. REFUSING TO START when a resolved escalation ladder contains
-//     `action: dataplane` and this build cannot execute that rung. That is a
-//     different question from whether the data plane is up: the program can be
-//     attached and enforcing every static rule the operator wrote, and a ladder
-//     rung that says "drop this attack in the kernel" would still do nothing.
+// The tripwire that keeps the silent alert-only bug from coming back is
+// mitigate.TestSupportsDataplaneMatchesStageView, which fails if stageView stops
+// returning a real method for the action.
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"sort"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -28,92 +31,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/metrics"
-	"github.com/kapkan-io/kapkan/internal/mitigate"
 )
-
-// checkDataplaneLadder refuses to start when a resolved ladder uses
-// `action: dataplane` and the mitigator has no backend for it.
-//
-// WHY A REFUSAL AND NOT A WARNING. The failure this prevents is silent by
-// construction: mitigate.stageView has no case for the action, so the rung
-// resolves to the empty method and is announced as "alert-only stage (no route
-// announced)". Nothing about the running system distinguishes it from a ladder
-// the operator deliberately configured as alert-only — the ban is recorded, the
-// notification fires, the metrics move — while the traffic the operator asked to
-// drop in the kernel is forwarded.
-//
-// Four options were on the table:
-//
-//   - Warn and continue. The warning is emitted at startup; the consequence
-//     arrives during an attack, hours or weeks later, and nobody correlates the
-//     two. It would also be inconsistent with the layer directly above:
-//     config.requireDataplane already REFUSES a ladder that names this action
-//     while the dataplane block is missing or disabled, for exactly the same
-//     reason ("the mitigator would have nowhere to install its rules and would
-//     silently fall back on every attack"). Warning here would mean the same
-//     mistake is fatal one layer up and cosmetic one layer down.
-//
-//   - Make the rung fail at announce time. applyStageLocked would then reject
-//     the ban, and the victim would get NO mitigation at all — strictly worse
-//     than alert-only at the moment it matters.
-//
-//   - Fall back to blackhole, the way flowspec and divert do. Wrong direction on
-//     the ladder: dataplane is the MILDEST rung (escalationSeverity: dataplane=1,
-//     flowspec=2, divert=3, blackhole=4), so this would blackhole a customer the
-//     operator wanted surgically filtered. Worse than either of the above.
-//
-//   - Refuse at startup. The operator finds out at a moment of their choosing,
-//     the supervisor reports it, and the message names the one line to change.
-//     This one.
-//
-// The check is a function of mitigate.SupportsDataplane, so the change that adds
-// the stageView case and the backend removes this refusal without anyone having
-// to remember it exists.
-func checkDataplaneLadder(cfg *config.Config) error {
-	if mitigate.SupportsDataplane() {
-		return nil
-	}
-	groups := groupsUsingDataplane(cfg)
-	if len(groups) == 0 {
-		return nil
-	}
-	// One line, no trailing punctuation: this is returned as an error and ends
-	// up in a slog field, where embedded newlines render as literal \n and make
-	// the most important message the daemon can print harder to read, not
-	// easier. (staticcheck ST1005 says the same thing.)
-	return fmt.Errorf(
-		"escalation ladder uses %q, which this build cannot execute: the mitigator has no "+
-			"data-plane backend yet, so such a rung would be announced as an ALERT-ONLY stage — "+
-			"the attack would be recorded and notified but the traffic would NOT be dropped; "+
-			"affected group(s): %s; change those rungs to %q, %q or %q "+
-			"(dataplane.static_rules and dataplane.allowlist are unaffected and keep working)",
-		config.EscalateDataplane, strings.Join(groups, ", "),
-		config.EscalateNone, config.EscalateFlowSpec, config.EscalateBlackhole)
-}
-
-// groupsUsingDataplane lists the resolved groups whose ladder contains the
-// dataplane action.
-//
-// It reads Config.Groups, the RESOLVED ladders, rather than the YAML: a group
-// that inherits the global escalation has no escalation block of its own, and
-// reading the YAML would miss exactly the case where an operator set the action
-// once at the top and it applies everywhere.
-func groupsUsingDataplane(cfg *config.Config) []string {
-	seen := map[string]bool{}
-	for _, g := range cfg.Groups {
-		for _, s := range g.Escalation {
-			if s.Action == config.EscalateDataplane {
-				seen[g.Name] = true
-			}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for n := range seen {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
-}
 
 // startDataplane builds and attaches the data plane, or returns nil when it is
 // not configured.
@@ -214,6 +132,11 @@ type dataplaneReporter struct {
 	snap atomic.Pointer[dataplane.Snapshot]
 	// lastErr is the most recent Stats() failure, "" once one succeeds again.
 	lastErr atomic.Pointer[string]
+	// dynRules is the mitigator-installed rule count, published by the ban
+	// counter scraper on ITS cadence (5s) rather than this one (1s). Kept as an
+	// atomic here, instead of read from the scraper on demand, so a request
+	// goroutine never touches the scraper's unsynchronised state.
+	dynRules atomic.Int64
 }
 
 // newDataplaneReporter builds the reporter and takes the first reading, so
@@ -265,10 +188,12 @@ func (r *dataplaneReporter) publish(snap dataplane.Snapshot) {
 		metrics.DataplaneMapBytes.WithLabelValues(mp.Name).Set(float64(mp.Bytes))
 	}
 	// rules{mode} counts what the kernel is enforcing, filed under what the
-	// DATAPATH is doing with it. Today that is the static rules only; the
-	// mitigator's dynamic rules join the same gauge when the data-plane backend
-	// lands, which is why the metric is a total by mode and not named for statics.
-	metrics.SetDataplaneRules(int(snap.StaticCount), r.m.EffectiveDryRun())
+	// DATAPATH is doing with it — which is why the metric is a total by mode and
+	// not named for statics. The mitigator's dynamic rules now join it, measured
+	// by the ban counter scraper on its own cadence, so the gauge answers "how
+	// many rules is this box actually running" rather than "how many did the
+	// operator write".
+	metrics.SetDataplaneRules(int(snap.StaticCount)+int(r.dynRules.Load()), r.m.EffectiveDryRun())
 }
 
 // scrape runs refresh on kapkan's existing 1 Hz cadence — the same tick the
@@ -311,13 +236,17 @@ func (r *dataplaneReporter) DataplaneSummary() string {
 func (r *dataplaneReporter) DataplaneStatus() api.DataplaneStatus {
 	h := r.m.Health()
 	out := api.DataplaneStatus{
-		Enabled:      h.Enabled,
-		DryRun:       r.m.EffectiveDryRun(),
-		Degraded:     h.Degraded,
-		Adopted:      h.Adopted,
-		DynamicRules: 0, // no data-plane mitigation backend yet; see
-		// checkDataplaneLadder. Reported as an explicit zero so a console
-		// written now does not have to special-case the field appearing later.
+		Enabled:  h.Enabled,
+		DryRun:   r.m.EffectiveDryRun(),
+		Degraded: h.Degraded,
+		Adopted:  h.Adopted,
+		// The mitigator's rules, as MEASURED by the ban counter scraper — the
+		// count of kapkan_rule_stats entries it could actually read, not the
+		// number of rules something meant to install. A rule that failed to
+		// install, or whose in-kernel deadline lapsed while userspace was wedged,
+		// is not counted here, which is the point of measuring rather than
+		// tallying intent.
+		DynamicRules: int(r.dynRules.Load()),
 	}
 	modes := map[string]bool{}
 	for _, i := range h.Interfaces {

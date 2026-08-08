@@ -156,7 +156,7 @@ func TestLocaleParityRegistered(t *testing.T) {
 //
 //	cd console/locales
 //	awk '/^    strings: \{/{f=1;next} /^    \},?$/{f=0} f' en.js |
-//	    grep -oE '"[^"]+"[[:space:]]*:' | sort -u | wc -l    # → 243 strings
+//	    grep -oE '"[^"]+"[[:space:]]*:' | sort -u | wc -l    # → 265 strings
 //
 // and by counting the enum members by hand (direction 2, scope 2, method 4,
 // banState 3, action 5, calc 2, attackType 12, metric 13 = 43 across 8 groups).
@@ -164,6 +164,11 @@ func TestLocaleParityRegistered(t *testing.T) {
 //
 // The data plane added: 3 strings (dryrun.dp.{simulating,enforcing,also}), one
 // member to enums.method, one to enums.action, and one to enumsShort.action.
+//
+// Measured in-kernel drops added 22 more strings, all of them new keys and none
+// of them renamed: col.dropped, the seven dp.*/ac.inkernel keys the bans table
+// and the drawer panel render, and the fourteen se.dp.* keys of the Settings
+// card (243 + 22 = 265).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -174,7 +179,7 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		{"units", 0, 4},
 		{"plurals", 1, 5},
 		{"plurals", 0, 10}, // 5 keys × {one, other}
-		{"strings", 0, 243},
+		{"strings", 0, 265},
 		{"enums", 1, 8},
 		{"enums", 0, 43},
 		{"enumsShort", 1, 1},

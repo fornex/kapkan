@@ -619,3 +619,68 @@ func endedEvent(target string) engine.Event {
 	ev.Kind = engine.AttackEnded
 	return ev
 }
+
+// TestSustainedAttackRenewsTheKernelDeadline covers the failure a sustained
+// flood produces, which is the normal case rather than an edge one.
+//
+// Refreshing Ban.ExpiresAt is enough for BGP — an announcement sits on the peer
+// until withdrawn — but a data-plane rule carries its OWN boot-clock deadline in
+// the kernel. Without a re-install, an attack outlasting ban.ttl_seconds stopped
+// being dropped at the original deadline while the API, console and metrics all
+// still reported an active ban whose expires_in never counted down. With the
+// shipped default of 600s that is every flood over ten minutes.
+//
+// The renewal is throttled to TTL/2, so this also pins that heartbeats do not
+// rewrite the policy block every second for the duration of an attack.
+func TestSustainedAttackRenewsTheKernelDeadline(t *testing.T) {
+	clk := &mockClock{t: time.Now()}
+	dp := &dpRecorder{}
+	m, _ := newDataplaneMitigator(t, dpYAML(""), dp, clk)
+
+	m.OnAttackStarted(startedEvent("203.0.113.5"))
+	if dp.installCount() != 1 {
+		t.Fatalf("installs = %d, want 1", dp.installCount())
+	}
+	ttl := m.store.Get().Ban.TTL()
+
+	// Heartbeats well inside TTL/2 must NOT reinstall: the deadline is still far
+	// enough ahead, and per-second churn on a policy block is pure cost.
+	for i := 0; i < 5; i++ {
+		clk.Advance(time.Second)
+		m.OnAttackOngoing(ongoingEvent("203.0.113.5"))
+	}
+	if got := dp.installCount(); got != 1 {
+		t.Errorf("installs after 5s of heartbeats = %d, want 1: renewal is throttled to TTL/2", got)
+	}
+
+	// Past TTL/2 the deadline is renewed, and the rules the kernel now holds
+	// must expire later than the ones it held before.
+	first := dp.lastInstall(t)
+	clk.Advance(ttl/2 + time.Second)
+	m.OnAttackOngoing(ongoingEvent("203.0.113.5"))
+	if got := dp.installCount(); got != 2 {
+		t.Fatalf("installs after TTL/2 of heartbeats = %d, want 2: a sustained attack must renew "+
+			"the in-kernel deadline, or it silently stops being dropped while the ban reads active", got)
+	}
+	second := dp.lastInstall(t)
+	if len(first.rules.Specs) == 0 || len(second.rules.Specs) == 0 {
+		t.Fatal("both installs must carry rules")
+	}
+	// The boot-clock deadline itself is computed by the installer, where the
+	// boot clock is readable; what travels here is the WINDOW. The renewal is
+	// only worth anything if that window is a full TTL rather than the stale
+	// remainder of the original one — a shrinking window would move the kernel
+	// deadline forward by less each time and still strand the ban eventually.
+	if second.rules.TTL < ttl-time.Minute {
+		t.Errorf("renewed window = %s, want ~%s: the re-install must give the kernel a fresh full "+
+			"TTL, not what was left of the old one", second.rules.TTL, ttl)
+	}
+
+	// A ban that stops being refreshed still lapses: renewal must not make a
+	// ban immortal.
+	clk.Advance(ttl + time.Second)
+	m.sweepExpired()
+	if dp.withdrawCount() != 1 {
+		t.Errorf("withdraws after the heartbeats stopped = %d, want 1", dp.withdrawCount())
+	}
+}

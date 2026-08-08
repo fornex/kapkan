@@ -76,6 +76,7 @@
       "col.threshold": "Threshold", "col.topsources": "Top sources", "col.ban": "Ban",
       "col.peak": "Peak rate", "col.started": "Started", "col.ended": "Ended",
       "col.duration": "Duration", "col.route": "Route", "col.method": "Method",
+      "col.dropped": "Dropped (kernel)",
       "col.state": "State", "col.mode": "Mode", "col.expires": "Expires",
       "col.type2": "Origin", "col.reason": "Reason", "col.host": "Host",
       "col.group": "Group", "col.baseline": "Baseline", "col.calc": "Calc",
@@ -251,6 +252,31 @@
       "se.reload.title": "Reload configuration",
       "se.reload.desc": "Re-read the config file without restarting the engine.",
       "se.adminonly": "Admin-only fields",
+      /* measured in-kernel drops (the XDP data plane) */
+      "dp.stale": "stale",
+      "dp.stale.title": "Counters could not be read; these are the last values, measured {t}.",
+      "dp.stale.never": "Counters have not been read yet in this process; these values were carried across a restart.",
+      "dp.notmeasured": "not measured",
+      "dp.total": "Total dropped",
+      "dp.pending": "No reading yet — the counters are scraped every few seconds.",
+      "ac.inkernel": "Installed in kernel",
+
+      /* settings: XDP data plane */
+      "se.dp": "XDP data plane",
+      "se.dp.state": "State",
+      "se.dp.ok": "Filtering",
+      "se.dp.degraded": "Degraded",
+      "se.dp.adopted": "Adopted across restart",
+      "se.dp.attached": "Interfaces attached",
+      "se.dp.interfaces": "Interfaces",
+      "se.dp.rules": "Rules (static + mitigation)",
+      "se.dp.generation": "Policy generation",
+      "se.dp.maps": "BPF map memory",
+      "se.dp.verdicts": "Packet verdicts",
+      "se.dp.off": "The in-kernel data plane is off",
+      "se.dp.off.sub": "Mitigation is announced to BGP peers only. Enable dataplane in the engine config to drop attack traffic on this box.",
+      "se.dp.readerr": "The counters could not be read on the last poll: {t}",
+
       "se.readonly": "Configuration is managed in the engine config file; this console shows it read-only."
     },
 

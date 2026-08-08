@@ -50,10 +50,18 @@ type Attack struct {
 	Method    config.MitigationMethod `json:"method,omitempty"`
 	Route     string                  `json:"route,omitempty"`
 	// FlowSpec holds the generated FlowSpec rules when the method is flowspec.
-	FlowSpec  []mitigate.FlowSpecRule `json:"flowspec,omitempty"`
-	DryRun    bool                    `json:"dry_run"`
-	StartedAt time.Time               `json:"started_at"`
-	EndedAt   time.Time               `json:"ended_at,omitempty"`
+	FlowSpec []mitigate.FlowSpecRule `json:"flowspec,omitempty"`
+	// Dataplane is what the kernel measured for this attack's in-kernel rules;
+	// nil for every attack that has none, so a blackhole attack's JSON is
+	// unchanged. For a LIVE attack it is refreshed from the current ban on every
+	// request (see handleAttacks) rather than frozen at detection, because at
+	// detection the rules had not caught anything yet — the count would be a
+	// permanent zero. For an ended one it is the final tally, snapshotted when
+	// the attack moved to the recent ring.
+	Dataplane *mitigate.BanDataplane `json:"dataplane,omitempty"`
+	DryRun    bool                   `json:"dry_run"`
+	StartedAt time.Time              `json:"started_at"`
+	EndedAt   time.Time              `json:"ended_at,omitempty"`
 	// Sample is the flow sample captured when the attack was detected.
 	Sample *engine.AttackSample `json:"sample,omitempty"`
 	// Classification is the attack vector inferred at detection time.
@@ -219,6 +227,11 @@ func (s *Server) RecordAttackEnded(ev engine.Event, ban *mitigate.Ban) {
 	a.Rates = ev.Rates
 	if ban != nil {
 		a.BanState = ban.State
+		// The final measured tally, kept on the record because the ban's rules
+		// are gone from the kernel by now and this is the last place the number
+		// exists. Nothing refreshes it afterwards — an ended attack's drop count
+		// must not keep moving.
+		a.Dataplane = ban.Dataplane
 	}
 	delete(s.active, key)
 	s.recent = append(s.recent, *a)
@@ -586,6 +599,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAttacks(w http.ResponseWriter, r *http.Request) {
 	c := callerFrom(r)
 	cfg := s.store.Get()
+	// Measured in-kernel drops for the LIVE bans, indexed once per request. The
+	// attack record is a snapshot taken at detection, when the rules had caught
+	// nothing yet; the moving number lives on the ban, and joining here is what
+	// makes "installed in kernel" a live panel rather than a permanent zero.
+	// Ended attacks keep their own frozen tally and are not touched.
+	live := map[netip.Addr]*mitigate.BanDataplane{}
+	for _, b := range s.mit.ActiveBans() {
+		if b.Dataplane != nil {
+			live[b.Target] = b.Dataplane
+		}
+	}
 	stamp := func(a Attack) Attack {
 		if a.Scope == engine.ScopeGroup {
 			a.Tenant = groupTenant(cfg, a.Group)
@@ -598,7 +622,9 @@ func (s *Server) handleAttacks(w http.ResponseWriter, r *http.Request) {
 	active := make([]Attack, 0, len(s.active))
 	for _, a := range s.active {
 		if visibleAttack(c, cfg, *a) {
-			active = append(active, stamp(*a))
+			at := stamp(*a)
+			at.Dataplane = live[at.Target]
+			active = append(active, at)
 		}
 	}
 	// Copy recent newest-first.

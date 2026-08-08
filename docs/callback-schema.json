@@ -57,12 +57,12 @@
     },
     "method": {
       "type": "string",
-      "enum": ["blackhole", "flowspec", "divert"],
-      "description": "Mitigation method that produced the ban."
+      "enum": ["blackhole", "flowspec", "divert", "dataplane"],
+      "description": "Mitigation method that produced the ban. \"dataplane\" means the rules were installed in this box's own XDP data plane and are dropping packets locally — nothing was announced to a BGP peer. New values may be added in a future release WITHOUT a schema_version bump (this one added \"dataplane\"), so treat an unrecognised method as \"some mitigation was applied\" rather than rejecting the payload."
     },
     "route": {
       "type": "string",
-      "description": "The (dry-run: would-be) announcement: a blackhole route, a 'flowspec: ...' summary of the generated rules, or a divert announcement."
+      "description": "The (dry-run: would-be) announcement: a blackhole route, a 'flowspec: ...' summary of the rules asked of an upstream peer, a 'dataplane: ...' summary of the rules installed in this box's own kernel, or a divert announcement. The prefix says which — \"these rules, in this kernel\" is a different claim from \"these rules, asked of an upstream\"."
     },
     "dry_run": { "type": "boolean" },
     "at": { "type": "string", "format": "date-time" },
