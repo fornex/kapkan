@@ -2,320 +2,37 @@
 
 package dataplane
 
-// The Go half of the data plane's map interface: encode ordinary Go values
-// into the layouts frozen in bpf/include/kapkan_maps.h, and write them into a
-// loaded map set. Everything that ever writes to a kapkan_* map goes through
-// this file — the manager, the FlowSpec-to-BPF encoder and every test — so
-// there is exactly one place where a struct field is filled in and exactly one
-// place to fix when F6 moves.
+// The WRITING half of the data plane's map interface: putting the encoded
+// layouts from encode.go into a loaded map set. Everything that ever writes to
+// a kapkan_* map goes through this file — the manager, the mitigator's rule
+// installer and every test — so there is exactly one place to fix when a map's
+// update rules change.
 //
-// THE STRUCT DEFINITIONS ARE NOT HERE. They are the bpf2go-generated types in
-// kapkanxdp_bpfel.go, derived from the object's BTF and aliased under readable
-// names in bindings.go. A hand-written mirror is the classic way for userspace
-// and kernel to drift silently and start dropping traffic nobody named; with the
-// generated types a field added in C is a Go compile error on the next
-// `make dataplane-sync`.
+// THE STRUCT DEFINITIONS ARE NOT HERE, AND NOT IN encode.go EITHER. They are
+// the bpf2go-generated types in kapkanxdp_bpfel.go, derived from the object's
+// BTF and aliased under readable names in bindings.go. A hand-written mirror is
+// the classic way for userspace and kernel to drift silently and start dropping
+// traffic nobody named; with the generated types a field added in C is a Go
+// compile error on the next `make dataplane-sync`.
 //
 // Linux-only because writing a map needs the bpf(2) syscall. The pure encoders
-// (RuleSpec.Encode, ProfileSpec.Encode) would build anywhere, but splitting
-// them into a second file would put half the contract in each and invite
-// exactly the drift this file exists to prevent.
+// live in encode.go, which is untagged so that the mitigator's
+// FlowSpecRule-to-RuleSpec compiler — the code that decides which packets get
+// dropped — is unit-testable on a macOS development host; see the note at the
+// top of that file.
 
 import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math"
 	"net/netip"
 
 	"github.com/cilium/ebpf"
 )
 
 /* ========================================================================= */
-/* Rules                                                                      */
-/* ========================================================================= */
-
-// RuleSpec is one match rule in ordinary Go values, field-for-field the same
-// predicate as mitigate.FlowSpecRule (which is frozen and cannot be edited, so
-// this is the shape the encoder maps onto rather than the type itself — the
-// data plane must not depend on the mitigation package).
-//
-// WHY POINTERS FOR proto/ports AND NOT "0 MEANS ANY". Zero is a legal value for
-// several of these: protocol 0 is IPv6 hop-by-hop and TCP flags 0 is a NULL
-// scan, which is precisely a thing an operator wants to match. The kernel
-// spells "any" with an explicit KAPKAN_RF_*_ANY bit for the same reason, and
-// this type keeps the distinction rather than losing it on the way in.
-// FlowSpecRule's own "0 = any" convention is a property of the FlowSpec wire
-// format; converting from it is the caller's job and is where that convention
-// belongs.
-type RuleSpec struct {
-	// ID is the stable rule id, the key of kapkan_rule_stats.
-	ID uint32
-	// Action is pass, drop or ratelimit.
-	Action Action
-	// Profile indexes kapkan_profiles; only meaningful for ActionRateLimit.
-	Profile uint32
-	// ExpiresAt is a boot-clock deadline in nanoseconds, comparable with
-	// bpf_ktime_get_boot_ns. 0 means "never expires" and is reserved for
-	// static rules, which come from the config file and cannot be stranded by
-	// a manager crash. AN EXPIRED RULE IS TREATED AS ABSENT: that is the
-	// fail-safe that degrades a crashed userspace to a wire instead of leaving
-	// a customer blackholed.
-	ExpiresAt uint64
-
-	// Src and Dst are the match prefixes. An invalid (zero) Prefix means
-	// "any". Host bits are masked off; the datapath masks too, so this only
-	// keeps the map contents readable.
-	Src netip.Prefix
-	Dst netip.Prefix
-
-	// Proto, SrcPort and DstPort are nil for "any".
-	Proto   *uint8
-	SrcPort *uint16
-	DstPort *uint16
-
-	// TCPFlags and TCPFlagsMask together express the flag test:
-	// (observed & TCPFlagsMask) == TCPFlags. A zero mask disables the test
-	// entirely. Use MatchTCPFlags for RFC 8955 bitmask semantics.
-	TCPFlags     uint8
-	TCPFlagsMask uint8
-
-	// Fragment restricts the rule to fragmented packets. Clear means the rule
-	// is indifferent and matches fragments and whole datagrams alike, which
-	// mirrors FlowSpec, where an absent type-12 component means "any".
-	Fragment bool
-
-	// IPv6 selects the address family. It is only consulted when neither Src
-	// nor Dst is set; otherwise it must agree with them, and Encode rejects a
-	// disagreement rather than guessing.
-	IPv6 bool
-}
-
-// MatchTCPFlags sets RFC 8955 bitmask semantics: "every bit in v is set in the
-// packet". This is why FlowSpecRule documents that a SYN rule also catches
-// SYN-ACK — 0x12 & 0x02 == 0x02 — and it is what flowSpecNLRI emits, so a rule
-// handed to a FlowSpec peer and the same rule handed to this data plane select
-// the same packets.
-func (s RuleSpec) MatchTCPFlags(v uint8) RuleSpec {
-	s.TCPFlags, s.TCPFlagsMask = v, v
-	return s
-}
-
-// MatchTCPFlagsExact sets an exact flag-byte match, which FlowSpec's bitmask
-// operator alone cannot express. The obvious use is a NULL scan (v = 0), where
-// bitmask semantics would match every packet.
-func (s RuleSpec) MatchTCPFlagsExact(v uint8) RuleSpec {
-	s.TCPFlags, s.TCPFlagsMask = v, 0xFF
-	return s
-}
-
-// Encode renders the spec as the kernel's struct kapkan_rule.
-//
-// It rejects, rather than silently narrowing, four encoder bugs that would
-// otherwise show up as a rule that never fires (or, worse, one that fires on
-// traffic nobody named):
-//
-//   - an unknown action;
-//   - Src and Dst in different address families, or either disagreeing with
-//     IPv6;
-//   - an IPv4-mapped IPv6 prefix (::ffff:a.b.c.d), because the datapath
-//     deliberately does NOT normalise those — see the long note at the top of
-//     kapkan_xdp.c. Callers must Unmap() and pick a family on purpose;
-//   - flag bits set outside the flag mask, which can never match.
-func (s RuleSpec) Encode() (Rule, error) {
-	switch s.Action {
-	case ActionPass, ActionDrop, ActionRateLimit:
-	default:
-		return Rule{}, fmt.Errorf("dataplane: rule %d: unknown action %d", s.ID, s.Action)
-	}
-	if s.TCPFlags&^s.TCPFlagsMask != 0 {
-		return Rule{}, fmt.Errorf(
-			"dataplane: rule %d: tcp flags %#02x has bits outside mask %#02x, so it can never match",
-			s.ID, s.TCPFlags, s.TCPFlagsMask)
-	}
-
-	// Family resolution. -1 until a prefix pins it down.
-	fam := -1
-	for _, p := range []struct {
-		name string
-		pfx  netip.Prefix
-	}{{"src", s.Src}, {"dst", s.Dst}} {
-		if !p.pfx.IsValid() {
-			continue
-		}
-		if p.pfx.Addr().Is4In6() {
-			return Rule{}, fmt.Errorf(
-				"dataplane: rule %d: %s prefix %s is IPv4-mapped IPv6; the datapath never "+
-					"normalises families, so Unmap() it and choose one on purpose", s.ID, p.name, p.pfx)
-		}
-		f := 0
-		if p.pfx.Addr().Is6() {
-			f = 1
-		}
-		if fam >= 0 && fam != f {
-			return Rule{}, fmt.Errorf("dataplane: rule %d: src %s and dst %s are different address families",
-				s.ID, s.Src, s.Dst)
-		}
-		fam = f
-	}
-	v6 := s.IPv6
-	if fam >= 0 {
-		if (fam == 1) != s.IPv6 {
-			return Rule{}, fmt.Errorf(
-				"dataplane: rule %d: IPv6=%v disagrees with the prefixes (src %s, dst %s)",
-				s.ID, s.IPv6, s.Src, s.Dst)
-		}
-		v6 = fam == 1
-	}
-
-	// Start from "matches every packet of its family" and clear an ANY bit for
-	// each field the spec actually names.
-	r := Rule{
-		ExpiresAtNs:  s.ExpiresAt,
-		RuleId:       s.ID,
-		Profile:      s.Profile,
-		Action:       uint8(s.Action),
-		TcpFlags:     s.TCPFlags,
-		TcpFlagsMask: s.TCPFlagsMask,
-		Flags: RuleValid | RuleSrcAny | RuleDstAny |
-			RuleProtoAny | RuleSportAny | RuleDportAny,
-	}
-	if v6 {
-		r.Flags |= RuleIPv6
-	}
-	if s.Fragment {
-		r.Flags |= RuleFragment
-	}
-	if s.Src.IsValid() {
-		copyPrefix(r.Src[:], s.Src)
-		r.SrcPrefixlen = uint8(s.Src.Bits())
-		r.Flags &^= RuleSrcAny
-	}
-	if s.Dst.IsValid() {
-		copyPrefix(r.Dst[:], s.Dst)
-		r.DstPrefixlen = uint8(s.Dst.Bits())
-		r.Flags &^= RuleDstAny
-	}
-	if s.Proto != nil {
-		r.Proto = *s.Proto
-		r.Flags &^= RuleProtoAny
-	}
-	if s.SrcPort != nil {
-		r.Sport = *s.SrcPort
-		r.Flags &^= RuleSportAny
-	}
-	if s.DstPort != nil {
-		r.Dport = *s.DstPort
-		r.Flags &^= RuleDportAny
-	}
-	return r, nil
-}
-
-// EncodeRules encodes a whole rule set, naming the offending index on failure.
-func EncodeRules(specs ...RuleSpec) ([]Rule, error) {
-	out := make([]Rule, len(specs))
-	for i, s := range specs {
-		r, err := s.Encode()
-		if err != nil {
-			return nil, fmt.Errorf("rule %d of %d: %w", i, len(specs), err)
-		}
-		out[i] = r
-	}
-	return out, nil
-}
-
-// copyPrefix writes a prefix's address into the rule's left-aligned 16-byte
-// slot, network order, IPv4 in bytes [0..3]. Host bits are masked off.
-func copyPrefix(dst []byte, p netip.Prefix) {
-	a := p.Masked().Addr()
-	if a.Is4() {
-		b := a.As4()
-		copy(dst, b[:])
-		return
-	}
-	b := a.As16()
-	copy(dst, b[:])
-}
-
-/* ========================================================================= */
 /* Rate-limit profiles                                                        */
 /* ========================================================================= */
-
-const nsPerSecond = 1_000_000_000
-
-// ProfileSpec is a rate-limit ceiling in the units an operator writes.
-//
-// Interning a rate into a profile is what keeps DIVISION out of the datapath:
-// the kernel refills a bucket with (elapsed_ns * tokens_per_ns) in Q32 fixed
-// point, and tokens_per_ns is computed here, once, per profile.
-type ProfileSpec struct {
-	// PPS is the packet ceiling in packets/s. 0 disables the packet ceiling.
-	PPS uint64
-	// BurstPackets is the bucket depth in packets. 0 derives one second of
-	// PPS (and at least 1 — a zero depth with a non-zero rate would deny every
-	// packet until the first refill, which is a default-deny by accident).
-	BurstPackets uint64
-	// BytesPerSecond is the byte ceiling. 0 disables it. Use
-	// ProfileFromConfig to convert config.RateLimitProfile.Mbps.
-	BytesPerSecond uint64
-	// BurstBytes is the bucket depth in bytes; 0 derives one second of
-	// BytesPerSecond.
-	BurstBytes uint64
-}
-
-// ProfileFromConfig converts a config.RateLimitProfile's pps/mbps pair, where
-// mbps is megabits per second and the kernel counts bytes.
-func ProfileFromConfig(pps, mbps uint64) ProfileSpec {
-	return ProfileSpec{PPS: pps, BytesPerSecond: mbps * 1_000_000 / 8}
-}
-
-// Encode renders the spec as struct kapkan_profile, precomputing both
-// spellings of the rate: ns_per_* for userspace display and sanity checks, and
-// the Q32 reciprocals the datapath actually multiplies by.
-//
-// SATURATION, stated plainly because it is invisible otherwise: the Q32
-// reciprocal is clamped to 2^32-1 in the kernel so that
-// delta(<=2^32) * q(<2^32) cannot wrap a u64. That caps the refill at one
-// token per nanosecond, i.e. 1e9 packets/s or 1e9 bytes/s (8 Gbit/s). These
-// are PER-SOURCE ceilings — the bucket is keyed {victim, source, profile} — so
-// a per-attacker cap anywhere near 8 Gbit/s is not a ceiling anyone means, but
-// a caller that asks for more gets 8 Gbit/s and no error.
-func (s ProfileSpec) Encode() Profile {
-	p := Profile{
-		RatePps:      s.PPS,
-		BurstPps:     s.BurstPackets,
-		RateBps:      s.BytesPerSecond,
-		BurstBps:     s.BurstBytes,
-		PktPerNsQ32:  q32PerNs(s.PPS),
-		BytePerNsQ32: q32PerNs(s.BytesPerSecond),
-	}
-	if s.PPS > 0 {
-		p.NsPerPkt = nsPerSecond / s.PPS
-		if p.BurstPps == 0 {
-			p.BurstPps = max(s.PPS, 1)
-		}
-	}
-	if s.BytesPerSecond > 0 {
-		p.NsPerByte = nsPerSecond / s.BytesPerSecond
-		if p.BurstBps == 0 {
-			p.BurstBps = max(s.BytesPerSecond, 1)
-		}
-	}
-	return p
-}
-
-// q32PerNs is tokens-per-nanosecond in Q32 fixed point: (rate << 32) / 1e9.
-// The input is clamped to 2^32-1 first so the shift cannot overflow; the
-// kernel clamps the result again for the same reason.
-func q32PerNs(ratePerSecond uint64) uint64 {
-	if ratePerSecond == 0 {
-		return 0
-	}
-	if ratePerSecond > math.MaxUint32 {
-		ratePerSecond = math.MaxUint32
-	}
-	return (ratePerSecond << 32) / nsPerSecond
-}
 
 // PutProfile writes kapkan_profiles[id].
 func PutProfile(m *Maps, id uint32, s ProfileSpec) error {
@@ -693,6 +410,25 @@ func EnsureRuleStats(m *Maps, ids ...uint32) error {
 	for _, id := range ids {
 		if err := m.KapkanRuleStats.Put(uint64(id), zero); err != nil {
 			return fmt.Errorf("dataplane: create rule_stats[%d]: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// DeleteRuleStats removes the kapkan_rule_stats entries for the given rule ids.
+// An absent entry is not an error, for the same reason DeleteVictim tolerates
+// one: the caller reconciles toward a desired state and must be safe to run
+// twice.
+//
+// This is the other half of the contract limits.go states: kapkan_rule_stats is
+// a PREALLOCATED PERCPU_HASH sized MaxDynamicRules + StaticStride, so an
+// installer that creates entries and never reaps them fills the map and starts
+// failing installs — during an attack, which is the only time it installs
+// anything.
+func DeleteRuleStats(m *Maps, ids ...uint32) error {
+	for _, id := range ids {
+		if err := m.KapkanRuleStats.Delete(uint64(id)); err != nil && !isMissing(err) {
+			return fmt.Errorf("dataplane: delete rule_stats[%d]: %w", id, err)
 		}
 	}
 	return nil

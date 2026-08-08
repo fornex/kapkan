@@ -51,6 +51,18 @@ var (
 
 	// ErrClosed is returned by every method after Close.
 	ErrClosed = errors.New("dataplane: manager is closed")
+
+	// ErrNoPolicySlots is returned by Installer.Install when every policy id is
+	// in use. It is separate from a plain error so a caller can tell "the data
+	// plane is full" from "the data plane is broken": the first means the
+	// operator's own dataplane.limits are the binding constraint, the second
+	// means something is wrong with the kernel side. The mitigator degrades to
+	// its configured fallback either way.
+	ErrNoPolicySlots = errors.New("dataplane: no free policy slots")
+
+	// ErrNoProfileSlots is returned when the dynamic rate-limit profile band
+	// (DynamicProfileBase..MaxProfiles) is exhausted.
+	ErrNoProfileSlots = errors.New("dataplane: no free rate-limit profile slots")
 )
 
 // ConditionKind names a degraded state. Stable strings: they are a Prometheus

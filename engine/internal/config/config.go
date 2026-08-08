@@ -1397,7 +1397,15 @@ func (c *Config) validateHostgroups() error {
 	}
 	// A FlowSpec stage needs an action policy even if the single `mitigation`
 	// method is blackhole (e.g. escalation: none → flowspec).
-	if usesFlowSpec(globalStages) && globalAction == "" {
+	//
+	// SO DOES A DATAPLANE STAGE, and for the same reason: the generated rules
+	// are one IR with two backends, and the action rides on the rule, not on the
+	// backend. A ladder that only ever drops in the kernel would otherwise leave
+	// this empty and the mitigator would compile a rule with no action —
+	// refused, so every ban of that group would fall back to a blackhole. The
+	// gentlest rung on the ladder degrading to the harshest, for a field nobody
+	// wrote, is exactly the silent failure this action was gated on.
+	if (usesFlowSpec(globalStages) || usesDataplane(globalStages)) && globalAction == "" {
 		if globalAction, globalRate, err = resolveFlowSpecPolicy(c.FlowSpec, nil); err != nil {
 			return fmt.Errorf("flowspec: %w", err)
 		}
@@ -1557,7 +1565,9 @@ func (c *Config) validateHostgroups() error {
 				}
 			}
 		}
-		if usesFlowSpec(stages) && action == "" {
+		// Same for a dataplane stage as for a flowspec one: one rule IR, two
+		// backends, and the action lives on the rule. See the global case above.
+		if (usesFlowSpec(stages) || usesDataplane(stages)) && action == "" {
 			if action, rate, err = resolveFlowSpecPolicy(hg.FlowSpec, c.FlowSpec); err != nil {
 				return fmt.Errorf("hostgroups[%q]: flowspec: %w", hg.Name, err)
 			}

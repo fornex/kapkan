@@ -57,6 +57,31 @@ const (
 	// operator-settable: the map is 16 KiB at full size, so there is nothing
 	// to save by shrinking it and a limit would only add a way to fail.
 	MaxProfiles = 256
+
+	// DynamicProfileBase splits kapkan_profiles into a config half [0, base)
+	// and a mitigator half [base, MaxProfiles).
+	//
+	// WHY A STATIC PARTITION AND NOT A SHARED FREE LIST. The two allocators run
+	// at different times and neither can see the other's future. compilePolicy
+	// assigns config ids by NAME, keeping an id a name already had and filling
+	// the lowest free slots for new names, so that a reload does not silently
+	// reassign every rate. A reload that adds a profile would therefore hand
+	// out the lowest free id — which, in a shared space, is a slot the
+	// mitigator interned a live ban's rate into ten seconds earlier. PutProfile
+	// would overwrite it in place and that ban's rate-limit rules would
+	// silently start enforcing the OPERATOR's number. No error, no log line,
+	// just a different rate than either party asked for. Reserving a band makes
+	// that unrepresentable rather than merely unlikely.
+	//
+	// The split is 192/64. Config profiles are named ceilings an operator
+	// writes by hand, and 192 is far past what anyone maintains; dynamic ones
+	// are interned per DISTINCT RATE, not per ban, and a deployment has as many
+	// distinct rates as it has groups with a rate_limit flowspec action —
+	// typically one. compilePolicy refuses a config that exceeds 192 with a
+	// message naming this reservation, and the Installer fails an install (and
+	// therefore falls back to blackhole) rather than reusing a slot when the
+	// dynamic band is full.
+	DynamicProfileBase = 192
 	// MaxPrefixes is the ceiling on entries in each LPM trie. Also not
 	// operator-settable, and deliberately not rewritten: an LPM_TRIE
 	// allocates nothing up front and grows per insert (measured: 0 bytes at

@@ -40,14 +40,6 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// StaticRuleIDBase is the first rule id given to a config static rule.
-//
-// The top half of the u32 id space belongs to static (operator) rules and the
-// bottom half to dynamic (mitigator) ones, so the two can never collide in
-// kapkan_rule_stats — where a collision would not be an error, just two rules
-// silently sharing one counter.
-const StaticRuleIDBase uint32 = 1 << 31
-
 // compiled is a StaticPolicy turned into the exact bytes and ids the kernel
 // wants.
 type compiled struct {
@@ -97,10 +89,15 @@ func compilePolicy(pol StaticPolicy, sizing MapSizing, prev map[string]uint32) (
 		for taken[next] {
 			next++
 		}
-		if next >= MaxProfiles {
+		// DynamicProfileBase, not MaxProfiles: the top of the array is reserved
+		// for the rates the mitigator interns while an attack is running. See
+		// that constant for why the partition has to be static.
+		if next >= DynamicProfileBase {
 			return compiled{}, fmt.Errorf(
-				"dataplane: %d ratelimit_profiles need more than the %d profile slots the data plane has",
-				len(pol.Profiles), MaxProfiles)
+				"dataplane: %d ratelimit_profiles need more than the %d profile slots the config half "+
+					"of the data plane has (ids %d..%d are reserved for the rates the mitigator interns "+
+					"for rate_limit bans)",
+				len(pol.Profiles), DynamicProfileBase, DynamicProfileBase, MaxProfiles-1)
 		}
 		c.profileOf[p.Name] = next
 		taken[next] = true
