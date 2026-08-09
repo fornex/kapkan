@@ -11,8 +11,13 @@ package dataplane
 //
 //	cd engine
 //	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o /tmp/dp.test ./internal/dataplane/
-//	docker run --rm --privileged -v "$PWD/..:/w" -w /w/engine/internal/dataplane \
+//	docker run --rm --privileged -e KAPKAN_DATAPLANE=require \
+//	    -v "$PWD/..:/w" -w /w/engine/internal/dataplane \
 //	    alpine:3.20 /tmp/dp.test -test.v
+//
+// KAPKAN_DATAPLANE=require is not decoration: without it, a container that has
+// quietly stopped being privileged runs this file as a few dozen skips and
+// exits 0. See kernelgate_linux_test.go.
 //
 // (see engine/bpf/README.md for the full recipe, including the mount that lets
 // the drift tests read the C header).
@@ -64,6 +69,11 @@ func verdictName(v uint32) string {
 func loadObjects(t *testing.T) *kapkanXDPObjects {
 	t.Helper()
 
+	// The gate first, so a host with no right to call bpf(2) declines here with
+	// one clear message instead of at whichever syscall happens to be next.
+	// See kernelgate_linux_test.go.
+	requireBPF(t)
+
 	if err := rlimit.RemoveMemlock(); err != nil {
 		skipIfUnprivileged(t, err)
 		t.Fatalf("RemoveMemlock: %v", err)
@@ -88,10 +98,16 @@ func loadObjects(t *testing.T) *kapkanXDPObjects {
 // skipIfUnprivileged skips the test when the kernel refused for lack of
 // CAP_BPF/CAP_SYS_ADMIN. Deliberately narrow: only EPERM, never EACCES (which
 // is what a verifier rejection looks like).
+//
+// Still reachable after requireBPF has passed, and that is not redundant: the
+// gate proves this process may CREATE MAPS (CAP_BPF), while loading an XDP
+// program additionally needs CAP_NET_ADMIN and CAP_PERFMON. A process holding
+// the first and not the others lands here. It exits through skipOrFail so that
+// case cannot silently deflate the `require` runs either.
 func skipIfUnprivileged(t *testing.T, err error) {
 	t.Helper()
 	if errors.Is(err, syscall.EPERM) {
-		t.Skipf("need CAP_BPF/CAP_SYS_ADMIN to load an XDP program (%v); "+
+		skipOrFail(t, "need CAP_BPF/CAP_NET_ADMIN/CAP_PERFMON to load an XDP program (%v); "+
 			"run `make dataplane-test` for the privileged-container loop", err)
 	}
 }

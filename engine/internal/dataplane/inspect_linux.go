@@ -408,7 +408,7 @@ func permissionError(path string, err error) error {
 		"     bpf_link unless the fd is opened O_RDWR. So even a reader who can see every map\n"+
 		"     cannot see the attachments unless it is the owning uid.\n"+
 		"NEITHER CAP_NET_ADMIN NOR CAP_PERFMON is needed here — those are for loading and attaching\n"+
-		"the program, not for reading its maps. See engine/deploy/dataplane-operations.md.",
+		"the program, not for reading its maps. See engine/deploy/dataplane-operations.md",
 		path, err)
 }
 

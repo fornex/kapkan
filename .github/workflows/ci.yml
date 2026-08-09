@@ -55,6 +55,24 @@ jobs:
           version: latest
           working-directory: engine
 
+      # ADDITIVE second pass, GOOS=darwin. The step above is unchanged and still
+      # decides the job for Linux; this one only adds build configurations it
+      # cannot see.
+      #
+      # golangci-lint type-checks ONE GOOS per run. This job runs on ubuntu, so
+      # `//go:build !linux` files — manager_stub.go, inspect_other.go,
+      # installer_other.go, smoke_other_test.go — have never been linted by CI at
+      # all, while the developer's macOS `make lint` never saw the Linux-only
+      # ones. Between the two, part of the tree was unlinted everywhere; three
+      # findings in internal/dataplane's Linux-only files are what surfaced it.
+      # `make lint` now runs both directions locally (LINT_GOOS in the Makefile);
+      # this keeps CI honest about the same thing.
+      #
+      # The action above installed the binary, so it is on PATH here.
+      - name: Lint the non-Linux build configuration (GOOS=darwin)
+        working-directory: engine
+        run: GOOS=darwin golangci-lint run
+
   bpf:
     name: XDP data plane
     # Pinned, not ubuntu-latest. This job makes claims about the machine it runs
@@ -183,6 +201,18 @@ jobs:
         working-directory: engine/internal/dataplane
         run: |
           set -euo pipefail
+          # A bpffs THIS USER CAN WRITE TO, for the same reason the block-rate
+          # step below mounts one: the runner's stock /sys/fs/bpf is a bpffs
+          # already (systemd mounts it) but it is root-owned mode 0700, and this
+          # job deliberately holds three capabilities, none of them
+          # CAP_DAC_OVERRIDE. Every pin directory therefore failed with EACCES —
+          # "statfs /sys/fs/bpf/kapkan-test-...: permission denied" — which reads
+          # like a data-plane bug and is a filesystem permission. Rather than
+          # weaken the capability set, mount a second bpffs and hand it over.
+          # KAPKAN_BPFFS is the only knob the suite exposes for it.
+          sudo mkdir -p /run/kapkan-dpfs
+          sudo mount -t bpf bpffs /run/kapkan-dpfs
+          sudo chown "$(id -u):$(id -g)" /run/kapkan-dpfs
           go test -c -o dataplane.test .
           drop=(sudo setpriv
                 --reuid="$(id -u)" --regid="$(id -g)" --clear-groups
@@ -193,7 +223,14 @@ jobs:
           # afternoon. Expect CapEff=000000c000001000 — bits 39 (CAP_BPF),
           # 38 (CAP_PERFMON) and 12 (CAP_NET_ADMIN), and nothing else.
           "${drop[@]}" sh -c 'id; grep -E "^Cap(Eff|Bnd|Amb)" /proc/self/status'
-          "${drop[@]}" ./dataplane.test -test.v -test.count=1
+          # KAPKAN_DATAPLANE=require turns this suite's environment skips into
+          # failures. This job IS the enforcement point; without the knob, a
+          # runner image that stopped providing bpffs or a capability set trimmed
+          # one bit too far would silently downgrade ~125 kernel assertions to
+          # ~125 skips and keep the badge green. The suite also refuses to report
+          # success if implausibly few tests reached the kernel.
+          "${drop[@]}" env KAPKAN_BPFFS=/run/kapkan-dpfs KAPKAN_DATAPLANE=require \
+            ./dataplane.test -test.v -test.count=1
           rm -f dataplane.test
 
       # THE PCAP BLOCK-RATE SUITE — the gate on every public pps/Gbps/percentage

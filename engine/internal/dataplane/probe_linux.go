@@ -170,7 +170,7 @@ func checkCapabilities() error {
 				"    AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON\n"+
 				"    CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON\n"+
 				"    SystemCallFilter=@system-service bpf\n"+
-				"See engine/deploy/dataplane-operations.md §1. Effective capabilities are %#016x.",
+				"See engine/deploy/dataplane-operations.md §1. Effective capabilities are %#016x",
 				ErrMissingCapability, c.name, c.symptom, caps)
 		}
 	}
@@ -205,13 +205,17 @@ func checkFeatures() error {
 
 // statfsType returns the filesystem magic of the deepest existing ancestor of
 // path, along with the ancestor it actually looked at.
+//
+// Statfs_t.Type is already int64 on every architecture this package builds for
+// (limits.go's 2^31 map-entry ceiling does not fit in a 32-bit int, so 386 and
+// arm do not compile at all), hence no conversion here.
 func statfsType(path string) (magic int64, at string, err error) {
 	at = path
 	for {
 		var st syscall.Statfs_t
 		err := syscall.Statfs(at, &st)
 		if err == nil {
-			return int64(st.Type), at, nil
+			return st.Type, at, nil
 		}
 		if !errors.Is(err, syscall.ENOENT) {
 			return 0, at, fmt.Errorf("statfs %s: %w", at, err)

@@ -38,8 +38,10 @@ package dataplane_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
+	"syscall"
 	"testing"
 	"time"
 
@@ -139,9 +141,19 @@ func TestCarpetBombDropsAPrefixInTheKernel(t *testing.T) {
 	}
 	opts.Log = log
 	opts.WatchInterval = -1
+	dataplane.RequireBPF(t)
 	mgr, err := dataplane.Open(opts)
 	if err != nil {
-		t.Skipf("cannot bring up the data plane here (%v); run `make dataplane-test`", err)
+		// Narrow, not blanket. The gate above already established that bpf(2)
+		// works here; the one remaining environment failure is a process that
+		// may create maps but not load an XDP program (CAP_BPF without
+		// CAP_NET_ADMIN/CAP_PERFMON). Anything else is a bug in the data plane
+		// and must stay red — the previous unconditional Skipf turned exactly
+		// that into a green run.
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, dataplane.ErrMissingCapability) {
+			dataplane.SkipOrFail(t, "cannot bring up the data plane here (%v); run `make dataplane-test`", err)
+		}
+		t.Fatalf("dataplane.Open: %v", err)
 	}
 	defer func() { _ = mgr.Close(config.OnExitDetach) }()
 	t.Logf("data plane: %s", mgr.Health().Summary())

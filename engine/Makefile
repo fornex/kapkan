@@ -48,8 +48,27 @@ build: console-sync
 test: console-sync
 	go test -race -count=1 $(PKG)
 
+# GOOS values `make lint` type-checks. BOTH, always, on whichever host you are.
+#
+# golangci-lint type-checks ONE build configuration per run, so a `//go:build
+# linux` file simply does not exist to a run on macOS — and a `//go:build
+# !linux` file does not exist to a run on Linux. Neither host lints the whole
+# tree, and until now neither did CI: the lint job runs on ubuntu, so
+# manager_stub.go, inspect_other.go and installer_other.go had never been linted
+# anywhere, and the ~5,000 lines of Linux-only data-plane test code had never
+# been linted on the machine that writes them.
+#
+# That gap is how three findings (two ST1005, one unconvert) in
+# internal/dataplane's Linux-only files got past `make lint` on the development
+# host and were first reported by CI. Linting both directions costs a second
+# type-check pass and removes the whole class.
+LINT_GOOS ?= linux darwin
+
 lint: console-sync
-	golangci-lint run
+	@for goos in $(LINT_GOOS); do \
+		echo "==> golangci-lint (GOOS=$$goos)"; \
+		GOOS=$$goos golangci-lint run || exit 1; \
+	done
 
 bench: console-sync
 	go test -run '^$$' -bench . -benchmem ./internal/engine/...
@@ -83,6 +102,14 @@ dataplane-sync:
 # XDP program and BPF_PROG_TEST_RUN both want CAP_BPF/CAP_SYS_ADMIN. The repo
 # root is mounted so the C/Go drift tests can read bpf/include/kapkan_maps.h.
 #
+# KAPKAN_DATAPLANE=require is what stops the skipping from following the tests
+# in here. Every environment skip in internal/dataplane goes through one
+# skipOrFail (see kernelgate_linux_test.go); under `require` it fails instead,
+# and the suite additionally refuses to report success when implausibly few
+# tests reached the kernel. Without it, a container that quietly stopped being
+# privileged would turn this target into a fast, green no-op. Same knob and same
+# reasoning as KAPKAN_BLOCKRATE=require below.
+#
 # TWO packages, not one. internal/app is here because it owns the last hop —
 # turning kapkan_rule_stats into the number on /api/v1/bans — and that hop is
 # unreachable on the macOS loop: on a host with no kernel its Linux-only test
@@ -95,9 +122,11 @@ dataplane-test: console-sync
 	GOOS=linux GOARCH=$(BPF_TEST_ARCH) CGO_ENABLED=0 \
 		go test -c -o .app.test ./internal/app/
 	docker run --rm --privileged \
+		-e KAPKAN_DATAPLANE=require \
 		-v "$(CURDIR)/..:/w" -w /w/engine/internal/dataplane \
 		$(BPF_TEST_IMAGE) /w/engine/.dataplane.test -test.v
 	docker run --rm --privileged \
+		-e KAPKAN_DATAPLANE=require \
 		-v "$(CURDIR)/..:/w" -w /w/engine/internal/app \
 		$(BPF_TEST_IMAGE) /w/engine/.app.test -test.v -test.run 'MeasuredDropsReachTheAPI'
 	rm -f .dataplane.test .app.test

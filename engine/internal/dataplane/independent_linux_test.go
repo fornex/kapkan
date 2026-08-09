@@ -35,20 +35,46 @@ import (
 /* -------------------------------------------------------------------------- */
 
 // ivBpffs mounts a bpffs of my own at /run/ivbpf and returns it.
+//
+// Mounting one of my own is the point — these tests share no fixture with the
+// rest of the suite — so that is still what is tried first. What I cannot do is
+// insist on it: mount(2) needs CAP_SYS_ADMIN, and the CI job that runs this
+// binary deliberately holds CAP_BPF, CAP_NET_ADMIN and CAP_PERFMON and nothing
+// else, where even the mkdir under /run fails. So KAPKAN_BPFFS, if the
+// environment offers one, gets me a subdirectory of somebody else's mount —
+// still my own pin directories, still my own assertions — and if there is
+// neither, this is an environment that cannot run these tests and it says so
+// through the shared gate rather than by failing.
 func ivBpffs(t *testing.T) string {
 	t.Helper()
+	requireBPF(t)
+
 	const root = "/run/ivbpf"
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", root, err)
+	if err := os.MkdirAll(root, 0o755); err == nil {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(root, &st); err == nil && uint32(st.Type) == 0xcafe4a11 {
+			return root
+		}
+		if err := syscall.Mount("bpffs", root, "bpf", 0, ""); err == nil {
+			return root
+		}
 	}
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(root, &st); err == nil && uint32(st.Type) == 0xcafe4a11 {
-		return root
+
+	if shared := os.Getenv("KAPKAN_BPFFS"); shared != "" {
+		mine := filepath.Join(shared, "iv")
+		if err := os.MkdirAll(mine, 0o700); err != nil {
+			skipOrFail(t, "cannot mount a bpffs at %s and cannot make one under KAPKAN_BPFFS=%s: %v",
+				root, shared, err)
+		}
+		if err := usableBpffs(mine); err != nil {
+			skipOrFail(t, "cannot mount a bpffs at %s and KAPKAN_BPFFS=%s is unusable: %v",
+				root, shared, err)
+		}
+		return mine
 	}
-	if err := syscall.Mount("bpffs", root, "bpf", 0, ""); err != nil {
-		t.Skipf("cannot mount bpffs at %s: %v", root, err)
-	}
-	return root
+
+	skipOrFail(t, "cannot mount a bpffs at %s and KAPKAN_BPFFS is unset; run `make dataplane-test`", root)
+	return ""
 }
 
 // ivPinDir makes a fresh, correctly-owned pin dir under a bpffs.

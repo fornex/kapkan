@@ -19,10 +19,12 @@ package dataplane_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -123,9 +125,19 @@ func TestEndToEndDetectionDropsAPacketInTheKernel(t *testing.T) {
 	}
 	opts.Log = log
 	opts.WatchInterval = -1
+	dataplane.RequireBPF(t)
 	mgr, err := dataplane.Open(opts)
 	if err != nil {
-		t.Skipf("cannot bring up the data plane here (%v); run `make dataplane-test`", err)
+		// Narrow, not blanket. The gate above already established that bpf(2)
+		// works here; the one remaining environment failure is a process that
+		// may create maps but not load an XDP program (CAP_BPF without
+		// CAP_NET_ADMIN/CAP_PERFMON). Anything else is a bug in the data plane
+		// and must stay red — the previous unconditional Skipf turned exactly
+		// that into a green run.
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, dataplane.ErrMissingCapability) {
+			dataplane.SkipOrFail(t, "cannot bring up the data plane here (%v); run `make dataplane-test`", err)
+		}
+		t.Fatalf("dataplane.Open: %v", err)
 	}
 	defer func() { _ = mgr.Close(config.OnExitDetach) }()
 	t.Logf("data plane: %s", mgr.Health().Summary())
@@ -330,10 +342,11 @@ func logCounters(t *testing.T, mgr *dataplane.Manager) {
 // run at all.
 func e2ePinDir(t *testing.T) string {
 	t.Helper()
-	const root = "/sys/fs/bpf"
-	if _, err := os.Stat(root); err != nil {
-		t.Skipf("no %s (%v); run `make dataplane-test`", root, err)
-	}
+	// Through the package's shared gate rather than assuming /sys/fs/bpf: it
+	// checks that the mount is one this process can create pins in, honours
+	// KAPKAN_BPFFS for the CI job that cannot write the stock one, and turns
+	// its skip into a failure under KAPKAN_DATAPLANE=require.
+	root := dataplane.BpffsRoot(t)
 	dir := filepath.Join(root, "kapkan-e2e-"+t.Name())
 	_ = os.RemoveAll(dir)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })

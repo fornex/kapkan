@@ -174,6 +174,18 @@ it in a privileged container (Docker Desktop's VM kernel is 6.12 and ships
 the checks that need no kernel — the C↔Go drift gate and the map set in the
 committed ELF.
 
+On **Linux without the privilege** — CI's ordinary test job, or any contributor
+running `make test` as a normal user — the kernel-side files do compile, and
+they skip through one shared gate rather than failing: see
+`engine/internal/dataplane/kernelgate_linux_test.go` for what it probes and,
+more importantly, for what it deliberately does *not* gate. Two environment
+variables go with it:
+
+| Variable | Effect |
+|---|---|
+| `KAPKAN_DATAPLANE=require` | Turns every environment skip in `internal/dataplane` (and `internal/app`'s data-plane test) into a **failure**, and makes the suite refuse to report success if implausibly few tests reached the kernel. Set by `make dataplane-test`, by the CI `XDP data plane` job and by the kernel-matrix guest — the three paths that exist to run these tests for real. |
+| `KAPKAN_BPFFS` | Where the suite may create pins. Needed wherever `/sys/fs/bpf` is a bpffs the test user cannot write to, which is the case on a GitHub runner: it is root-owned mode 0700 and the job holds `CAP_BPF`/`CAP_NET_ADMIN`/`CAP_PERFMON` and no `CAP_DAC_OVERRIDE`. Same variable the pcap block-rate suite uses. |
+
 `dataplane-matrix` is the one that tests the **documented floor** rather than
 whatever kernel the host happens to run: it boots each kernel under QEMU on a
 purpose-built initramfs and runs the whole suite there. See

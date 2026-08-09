@@ -64,15 +64,36 @@ var bpffsOnce struct {
 	err  error
 }
 
-// bpffsRoot returns a mounted bpffs, mounting one at /sys/fs/bpf if needed.
+// bpffsRoot returns a bpffs this process can create pins in, mounting one at
+// /sys/fs/bpf if it has to.
 //
 // Not unmounted afterwards: the mount is process-wide state shared by every test
 // in the binary, and in the container it goes away with the container.
+//
+// KAPKAN_BPFFS names a mount to use instead, and exists for the CI job that runs
+// this suite with three capabilities and no more. There, /sys/fs/bpf IS a bpffs
+// — systemd mounts it — but it is root-owned mode 0700 and the job holds no
+// CAP_DAC_OVERRIDE, so every pin directory failed with EACCES. Mounting a second
+// bpffs and handing it to the test user is the same remedy the pcap block-rate
+// suite already uses, and it is the same environment variable, deliberately:
+// one knob for "where may this binary put its pins".
+//
+// The usableBpffs check is a real mkdir rather than a statfs magic comparison
+// for exactly that reason — "it is a bpffs" and "I may write to it" are
+// different questions and only the second one predicts what happens next.
 func bpffsRoot(t *testing.T) string {
 	t.Helper()
 	bpffsOnce.Do(func() {
+		if root := os.Getenv("KAPKAN_BPFFS"); root != "" {
+			if err := usableBpffs(root); err != nil {
+				bpffsOnce.err = fmt.Errorf("KAPKAN_BPFFS=%s: %w", root, err)
+				return
+			}
+			bpffsOnce.root = root
+			return
+		}
 		const root = "/sys/fs/bpf"
-		if magic, _, err := statfsType(root); err == nil && magic == bpfFSMagic {
+		if err := usableBpffs(root); err == nil {
 			bpffsOnce.root = root
 			return
 		}
@@ -84,10 +105,15 @@ func bpffsRoot(t *testing.T) string {
 			bpffsOnce.err = fmt.Errorf("mount bpffs at %s: %w", root, err)
 			return
 		}
+		if err := usableBpffs(root); err != nil {
+			bpffsOnce.err = err
+			return
+		}
 		bpffsOnce.root = root
 	})
 	if bpffsOnce.err != nil {
-		t.Skipf("no bpffs available (%v); run `make dataplane-test` for the privileged-container loop",
+		skipOrFail(t, "no writable bpffs available (%v); run `make dataplane-test` for the "+
+			"privileged-container loop, or set KAPKAN_BPFFS to a bpffs this user owns",
 			bpffsOnce.err)
 	}
 	return bpffsOnce.root
@@ -141,8 +167,17 @@ func cleanupPinDir(dir string) {
 
 // testOptions is a Manager configuration with the watcher DISABLED, so every
 // test drives reconciliation by hand with Reconcile() instead of sleeping.
+//
+// The privilege gate lives here as well as in mustOpen because several tests
+// call Open directly — they are testing a REFUSAL, so they must not go through
+// a helper that turns a failed Open into a skip. Every one of them still builds
+// its Options here, and Open's own capability check runs before the refusal
+// they are asserting on, so without this they failed with "missing capability:
+// CAP_BPF, want ErrPinPathUnsafe". Gating the constructor catches them all
+// without weakening a single assertion.
 func testOptions(t *testing.T, dir string, ifaces ...string) Options {
 	t.Helper()
+	requireBPF(t)
 	return Options{
 		Interfaces:    ifaces,
 		XDPMode:       config.XDPModeAuto,
@@ -182,10 +217,11 @@ func testOptions(t *testing.T, dir string, ifaces ...string) Options {
 // so managers are always closed before their pin directory is removed.
 func mustOpen(t *testing.T, opts Options) *Manager {
 	t.Helper()
+	requireBPF(t)
 	m, err := Open(opts)
 	if err != nil {
 		if errors.Is(err, syscall.EPERM) || errors.Is(err, ErrMissingCapability) {
-			t.Skipf("need CAP_BPF/CAP_NET_ADMIN/CAP_PERFMON (%v); run `make dataplane-test`", err)
+			skipOrFail(t, "need CAP_BPF/CAP_NET_ADMIN/CAP_PERFMON (%v); run `make dataplane-test`", err)
 		}
 		t.Fatalf("Open: %v", err)
 	}
@@ -219,7 +255,7 @@ func hasIP(t *testing.T) string {
 	t.Helper()
 	p, err := exec.LookPath("ip")
 	if err != nil {
-		t.Skipf("no `ip` command to create a veth (%v)", err)
+		skipOrFail(t, "no `ip` command to create a veth (%v)", err)
 	}
 	return p
 }
@@ -231,7 +267,7 @@ func makeVeth(t *testing.T, name string) string {
 	peer := name + "p"
 	_ = exec.Command(ip, "link", "del", name).Run()
 	if out, err := exec.Command(ip, "link", "add", name, "type", "veth", "peer", "name", peer).CombinedOutput(); err != nil {
-		t.Skipf("cannot create veth %s (%v): %s", name, err, out)
+		skipOrFail(t, "cannot create veth %s (%v): %s", name, err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command(ip, "link", "del", name).Run() })
 	if out, err := exec.Command(ip, "link", "set", name, "up").CombinedOutput(); err != nil {

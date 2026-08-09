@@ -23,6 +23,15 @@
 /bin/busybox --install -s /bin 2>/dev/null
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
+# This guest exists for one purpose: run the data-plane suite as root on a real
+# kernel of a known version. There is therefore no environment in which it is
+# acceptable for those tests to skip — a "5.15 is fine" that skipped every
+# kernel assertion is the single most misleading thing this harness could
+# report. `require` turns internal/dataplane's environment skips into failures
+# and makes the suite refuse to report success if implausibly few tests reached
+# the kernel. See engine/internal/dataplane/kernelgate_linux_test.go.
+export KAPKAN_DATAPLANE=require
+
 mount -t proc     proc     /proc
 mount -t sysfs    sysfs    /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null

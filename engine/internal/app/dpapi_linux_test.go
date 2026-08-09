@@ -123,7 +123,7 @@ func TestMeasuredDropsReachTheAPI(t *testing.T) {
 	opts.WatchInterval = -1
 	mgr, err := dataplane.Open(opts)
 	if err != nil {
-		t.Skipf("cannot bring up the data plane here (%v); run `make dataplane-test`", err)
+		skipOrFail(t, "cannot bring up the data plane here (%v); run `make dataplane-test`", err)
 	}
 	defer func() { _ = mgr.Close(config.OnExitDetach) }()
 	t.Logf("data plane: %s", mgr.Health().Summary())
@@ -308,20 +308,26 @@ const bpfFSMagic = 0xcafe4a11
 // operator remembers an extra shell command is a test that stops being run.
 //
 // It skips (never fails) when there is no kernel to do this on, so `make test`
-// on the macOS developer box stays green.
+// on the macOS developer box stays green — but through skipOrFail, so the one
+// path whose whole job is to run this (`make dataplane-test`, which sets
+// KAPKAN_DATAPLANE=require) cannot be reduced to a silent skip by a container
+// that stopped being privileged.
 func dpAPIPinDir(t *testing.T) string {
 	t.Helper()
 	if err := rlimit.RemoveMemlock(); err != nil {
-		t.Skipf("cannot raise RLIMIT_MEMLOCK (%v); run `make dataplane-test`", err)
+		skipOrFail(t, "cannot raise RLIMIT_MEMLOCK (%v); run `make dataplane-test`", err)
 	}
-	const base = "/sys/fs/bpf"
+	base := os.Getenv("KAPKAN_BPFFS")
+	if base == "" {
+		base = "/sys/fs/bpf"
+	}
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(base, &st); err != nil || uint64(st.Type) != bpfFSMagic {
 		if err := os.MkdirAll(base, 0o755); err != nil {
-			t.Skipf("no bpffs and cannot create %s (%v); run `make dataplane-test`", base, err)
+			skipOrFail(t, "no bpffs and cannot create %s (%v); run `make dataplane-test`", base, err)
 		}
 		if err := syscall.Mount("bpffs", base, "bpf", 0, ""); err != nil {
-			t.Skipf("no bpffs at %s and mounting one failed (%v); run `make dataplane-test`", base, err)
+			skipOrFail(t, "no bpffs at %s and mounting one failed (%v); run `make dataplane-test`", base, err)
 		}
 	}
 	dir := filepath.Join(base, "kapkan-dpapi-"+t.Name())
@@ -399,4 +405,22 @@ func dpAPIFirstActive(t *testing.T, body string) string {
 	_ = json.Unmarshal(doc.Active[0], &pretty)
 	out, _ := json.MarshalIndent(pretty, "", "  ")
 	return string(out)
+}
+
+// skipOrFail skips on a host that cannot run the kernel half — the macOS
+// development loop, an unprivileged CI runner — unless KAPKAN_DATAPLANE is set
+// to "require", in which case it FAILS.
+//
+// This test is only ever run by `make dataplane-test`, which sets that variable.
+// The whole value of the test is that it exercises the last hop on a real
+// kernel; a run that skipped it would report success having checked nothing, and
+// nobody reads the skip lines of a target that exits 0. Same knob as
+// internal/dataplane's gate, same reasoning as KAPKAN_BLOCKRATE=require on the
+// pcap suite.
+func skipOrFail(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("KAPKAN_DATAPLANE") == "require" {
+		t.Fatalf("KAPKAN_DATAPLANE=require: "+format, args...)
+	}
+	t.Skipf(format, args...)
 }
