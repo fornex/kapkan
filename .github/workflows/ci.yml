@@ -229,8 +229,16 @@ jobs:
           # one bit too far would silently downgrade ~125 kernel assertions to
           # ~125 skips and keep the badge green. The suite also refuses to report
           # success if implausibly few tests reached the kernel.
+          # The drift gate is deliberately excluded: it has its own step above,
+          # which runs as the normal runner user with a usable HOME. Here the
+          # process has been setpriv'd to a bare capability set and still carries
+          # root's HOME, so the `go` that bpf2go shells out to cannot create its
+          # module cache and the gate fails on the environment rather than on
+          # drift. Running it twice bought nothing; running it once, in the step
+          # built for it, is the enforcement.
           "${drop[@]}" env KAPKAN_BPFFS=/run/kapkan-dpfs KAPKAN_DATAPLANE=require \
-            ./dataplane.test -test.v -test.count=1
+            ./dataplane.test -test.v -test.count=1 \
+            -test.skip '^TestGeneratedArtifactsMatchSource$' 
           rm -f dataplane.test
 
       # THE PCAP BLOCK-RATE SUITE — the gate on every public pps/Gbps/percentage
@@ -328,7 +336,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kernel-matrix-${{ matrix.kernel }}
-          path: engine/.kernel-matrix/*/logs/
+          # Match FILES, not the directory. The previous pattern ended at the
+          # logs/ directory and uploaded nothing ("No files were found"), which
+          # cost exactly what this step exists to preserve: on the first red
+          # matrix run the guest log — the only place the failing test is named —
+          # did not survive the job. Warn rather than error, because a harness
+          # that dies before booting legitimately produces no log.
+          path: engine/.kernel-matrix/*/logs/*.log
           if-no-files-found: warn
 
   govulncheck:
