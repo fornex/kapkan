@@ -25,6 +25,9 @@ import (
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/engine"
+	"github.com/kapkan-io/kapkan/internal/metrics"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 /* ------------------------------------------------------------ the recorder */
@@ -619,6 +622,101 @@ func TestDataplaneRouteFamilyIsItsOwn(t *testing.T) {
 			t.Errorf("dataplane shares a route family with %q; escalating between them would skip "+
 				"the withdraw and strand one of the two mitigations", other)
 		}
+	}
+}
+
+/* ---------------------------------------------------------------- gauges */
+
+// dpGauges reads the four numbers the data-plane rung is responsible for.
+func dpGauges(t *testing.T) (announced, dpBans, dpRules, fsRules float64) {
+	t.Helper()
+	return testutil.ToFloat64(metrics.AnnouncedRoutes.WithLabelValues("real")),
+		testutil.ToFloat64(metrics.MitigateDataplaneBans.WithLabelValues("real")),
+		testutil.ToFloat64(metrics.MitigateDataplaneRules.WithLabelValues("real")),
+		testutil.ToFloat64(metrics.FlowSpecRules.WithLabelValues("real"))
+}
+
+// TestDataplaneBanIsNotAnAnnouncedRoute is the gauge-honesty property: a rung
+// that talks to no peer must not move a gauge named for the RIB. Before the
+// split, every dataplane ban incremented announced_routes, so an operator
+// watching "are my upstreams filtering?" saw a number that included mitigations
+// no upstream had ever been told about.
+func TestDataplaneBanIsNotAnAnnouncedRoute(t *testing.T) {
+	dp := &dpRecorder{}
+	m, rec := newDataplaneMitigator(t, dpYAML(""), dp, nil)
+
+	m.OnAttackStarted(startedEvent("203.0.113.5"))
+
+	announced, dpBans, dpRules, fsRules := dpGauges(t)
+	if announced != 0 {
+		t.Errorf("announced_routes{real} = %v, want 0: the dataplane rung announces nothing "+
+			"(BGP saw %v)", announced, rec.eventLog())
+	}
+	if fsRules != 0 {
+		t.Errorf("flowspec_rules{real} = %v, want 0: this ban is not on the flowspec rung", fsRules)
+	}
+	if dpBans != 1 {
+		t.Errorf("dataplane_bans{real} = %v, want 1", dpBans)
+	}
+	// Tie the gauge to what actually reached the backend, so the two cannot
+	// drift if dataplaneRules ever stops being 1:1 with the ban's rule list.
+	if want := float64(len(dp.lastInstall(t).rules.Specs)); dpRules != want {
+		t.Errorf("dataplane_rules{real} = %v, want %v (the specs actually installed)", dpRules, want)
+	}
+	if dpRules < 1 {
+		t.Error("a dataplane ban installed rules but the gauge reports none")
+	}
+}
+
+// TestDataplaneGaugesClearOnWithdraw: the rules are gone from the kernel when
+// the attack ends, so the gauge must say so. A gauge that only ever climbs is
+// worse than no gauge — it would make a quiet network look like a saturated
+// max_dynamic_rules budget.
+func TestDataplaneGaugesClearOnWithdraw(t *testing.T) {
+	dp := &dpRecorder{}
+	m, _ := newDataplaneMitigator(t, dpYAML(""), dp, nil)
+
+	m.OnAttackStarted(startedEvent("203.0.113.5"))
+	if _, dpBans, _, _ := dpGauges(t); dpBans != 1 {
+		t.Fatalf("dataplane_bans{real} = %v after ban, want 1", dpBans)
+	}
+
+	m.OnAttackEnded(endedEvent("203.0.113.5"))
+
+	_, dpBans, dpRules, _ := dpGauges(t)
+	if dpBans != 0 {
+		t.Errorf("dataplane_bans{real} = %v after withdraw, want 0", dpBans)
+	}
+	if dpRules != 0 {
+		t.Errorf("dataplane_rules{real} = %v after withdraw, want 0", dpRules)
+	}
+}
+
+// TestDryRunDataplaneBanCountsAsDryRun: a dry-run ban installs nothing (see
+// TestDryRunInstallsNothing), but it is still a ban the operator wants to see —
+// filed under dry_run, and never under real, which is the whole point of
+// running dry.
+func TestDryRunDataplaneBanCountsAsDryRun(t *testing.T) {
+	dp := &dpRecorder{}
+	yaml := strings.Replace(dpYAML(""), "dry_run: false\n", "dry_run: true\n", 1)
+	m, _ := newDataplaneMitigator(t, yaml, dp, nil)
+
+	b := m.OnAttackStarted(startedEvent("203.0.113.5"))
+	if b.State != BanActive {
+		t.Fatalf("ban state = %s (%s), want active", b.State, b.Reason)
+	}
+
+	if got := testutil.ToFloat64(metrics.MitigateDataplaneBans.WithLabelValues("dry_run")); got != 1 {
+		t.Errorf("dataplane_bans{dry_run} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(metrics.MitigateDataplaneBans.WithLabelValues("real")); got != 0 {
+		t.Errorf("dataplane_bans{real} = %v, want 0: nothing was installed", got)
+	}
+	if got := testutil.ToFloat64(metrics.MitigateDataplaneRules.WithLabelValues("dry_run")); got < 1 {
+		t.Errorf("dataplane_rules{dry_run} = %v, want the rules it WOULD have installed", got)
+	}
+	if got := testutil.ToFloat64(metrics.AnnouncedRoutes.WithLabelValues("dry_run")); got != 0 {
+		t.Errorf("announced_routes{dry_run} = %v, want 0: still not an announcement", got)
 	}
 }
 

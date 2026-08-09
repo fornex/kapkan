@@ -202,6 +202,14 @@ func (r *dataplaneReporter) publish(snap dataplane.Snapshot) {
 	// by the ban counter scraper on its own cadence, so the gauge answers "how
 	// many rules is this box actually running" rather than "how many did the
 	// operator write".
+	//
+	// kapkan_mitigate_dataplane_rules answers a DIFFERENT question with a number
+	// that should normally match this one's dynamic half: what the mitigator
+	// believes it installed, attributed to the bans that own it, filed under each
+	// ban's frozen dry-run flag rather than the datapath's. Two independent paths
+	// to the same quantity is the point — a lasting gap between them is a real
+	// fault (a withdraw that failed, or rules the kernel expired underneath a ban
+	// that still considers itself active) that one summed number would hide.
 	metrics.SetDataplaneRules(int(snap.StaticCount)+int(r.dynRules.Load()), r.m.EffectiveDryRun())
 }
 
