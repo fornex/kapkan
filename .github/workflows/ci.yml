@@ -343,6 +343,10 @@ jobs:
           # did not survive the job. Warn rather than error, because a harness
           # that dies before booting legitimately produces no log.
           path: engine/.kernel-matrix/*/logs/*.log
+          # .kernel-matrix is a DOT directory and upload-artifact stopped
+          # matching hidden paths by default in v4.4, so both earlier attempts
+          # uploaded nothing and the first red matrix run lost its evidence.
+          include-hidden-files: true
           if-no-files-found: warn
 
   govulncheck:

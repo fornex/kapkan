@@ -222,4 +222,25 @@ for v in $KERNELS; do
 	printf '%-8s %-12s %-5s %-10s %-9s %s\n' \
 		"$v" "${rel:-?}" "${btf:-?}" "${proc:-n/a}" "${pass:-0}p/${fail:-0}f" "$verdict"
 done
+
+# Name the failures on stdout, not only in the log file.
+#
+# The boot log is the only place a failing test is identified, and twice now it
+# did not survive the job: the artifact step matched a directory rather than
+# files, and then it skipped the whole tree because .kernel-matrix is hidden.
+# Both are fixed, but an artifact is a second copy that can go missing again,
+# while the job's own output cannot. So the verdict table is followed by the
+# evidence: a red matrix should be diagnosable from the CI page alone.
+if [ "$rc" -ne 0 ]; then
+	for v in $KERNELS; do
+		log=$WORK/logs/$v.log
+		[ -f "$log" ] || continue
+		grep -q '^--- FAIL' "$log" || continue
+		echo
+		echo "===== $v: failing tests ====="
+		# The FAIL line plus the assertions above it, which is where the
+		# reason lives; capped so one pathological test cannot bury the rest.
+		grep -B 25 '^--- FAIL' "$log" | tail -80
+	done
+fi
 exit $rc
