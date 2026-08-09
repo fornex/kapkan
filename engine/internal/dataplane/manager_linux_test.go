@@ -1685,7 +1685,12 @@ func TestCapabilityProbeAgreesWithReality(t *testing.T) {
 	case loadErr != nil && probeErr == nil && errors.Is(loadErr, syscall.EPERM):
 		t.Errorf("the capability check accepted a process that cannot load the program: %v", loadErr)
 	case loadErr != nil:
-		t.Skipf("cannot load the program here (%v); capability check said: %v", loadErr, probeErr)
+		// Through skipOrFail, not a plain Skipf. This is the test that stops the
+		// gate marking its own homework, so on an enforcement run — the CI bpf
+		// job, make dataplane-test, the kernel matrix — it has to be a failure
+		// rather than a quiet skip. Otherwise a job whose program loading broke
+		// would lose the one check that would have noticed the gate was lying.
+		skipOrFail(t, "cannot load the program here (%v); capability check said: %v", loadErr, probeErr)
 	}
 	t.Logf("program loads, verifier processed %d insns; capability check agrees", verified)
 }
