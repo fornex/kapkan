@@ -903,7 +903,7 @@ type StaticMatch struct {
 // change requires a restart.
 type DataplaneLimits struct {
 	// MaxDynamicRules caps the rules the mitigator may install (default 4096).
-	// Each ban contributes up to 8, so this must exceed
+	// Each ban contributes up to 8, so this must be at least
 	// ban.max_active_bans * 8 or installs will start failing mid-attack.
 	MaxDynamicRules int `yaml:"max_dynamic_rules"`
 	// MaxStaticRules caps operator rules (default 256).
