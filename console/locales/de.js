@@ -260,7 +260,7 @@
       "se.dp.off": "Die Datenebene im Kernel ist aus",
       "se.dp.off.sub": "Mitigation wird nur an BGP-Nachbarn angekündigt. Aktivieren Sie dataplane in der Engine-Konfiguration, um Angriffsverkehr auf diesem Host zu verwerfen.",
       "se.dp.readerr": "Die Zähler konnten beim letzten Abruf nicht gelesen werden: {t}",
-      "dp.bypass.banner": "FILTER UMGANGEN: {n} Pakete wurden weitergeleitet, ohne dass auch nur eine Regel geprüft wurde. Sie trugen mehr IPv6-Erweiterungsheader, als die Data Plane auswertet (8) — der Parser gab vor dem Regeldurchlauf auf.",
+      "dp.bypass.banner": "FILTER UMGANGEN: {n} Pakete wurden weitergeleitet, ohne dass auch nur eine Regel geprüft wurde. Sie trugen mehr IPv6-Erweiterungsheader, als die Datenebene auswertet (8) — der Parser gab vor dem Regeldurchlauf auf.",
       "dp.bypass.act": "Mögliche Umgehung.",
       "dp.bypass.card": "FILTER UMGANGEN: {n} Pakete haben den Regeldurchlauf vollständig übersprungen — mehr als 8 IPv6-Erweiterungsheader. Sie werden bewusst weitergeleitet und nie verworfen, deshalb ist dieser Zähler das Einzige, was sie meldet.",
       "dp.bypass.tip": "Weitergeleitet, ohne dass eine Regel geprüft wurde — mögliche Filterumgehung.",
