@@ -1197,9 +1197,23 @@ func TestReloadFlipsGenerationsWithoutLoss(t *testing.T) {
 	// Several reloads, each publishing a different rule set that still drops the
 	// probe packet. Doing it repeatedly, with the driver running throughout, is
 	// what makes the window a flip opens likely to be hit if there is one.
+	// Keep flipping until the driver has demonstrably raced them, rather than
+	// for a fixed number of iterations.
+	//
+	// The window in which a flip can be observed IS the reload work, so it
+	// shrinks on a fast machine by exactly the factor that speeds the driver up.
+	// A fixed 8 flips plus an absolute "at least 100 runs" guard therefore
+	// calibrates itself to whatever host it was written on: measured 73 runs on
+	// a KVM-backed CI runner against >100 under TCG locally, which made the
+	// matrix red on a different kernel each run for reasons that had nothing to
+	// do with the kernel. Looping until both conditions hold keeps the guard's
+	// intent — proof that the driver really overlapped the swaps — without
+	// asserting anything about how fast the machine is.
+	const minFlips, minRuns = 8, 100
 	next := opts
 	publishedGens := map[uint32]int{}
-	for i := 0; i < 8; i++ {
+	deadline := time.Now().Add(30 * time.Second)
+	for i := 0; ; i++ {
 		next.Policy.Statics = []StaticRule{
 			dropChargen(),
 			{Name: fmt.Sprintf("filler-%d", i), Action: ActionDrop,
@@ -1213,6 +1227,14 @@ func TestReloadFlipsGenerationsWithoutLoss(t *testing.T) {
 			t.Errorf("reload %d installed %d kernel rules, want 4", i, rep.StaticRules)
 		}
 		publishedGens[rep.Generation]++
+		if i+1 >= minFlips && runs.Load() >= minRuns {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after %d flips the concurrent driver had only managed %d runs (want %d); "+
+				"it is not keeping up, which means this test is no longer proving the swap is "+
+				"lossless under load", i+1, runs.Load(), minRuns)
+		}
 		time.Sleep(time.Millisecond)
 	}
 	close(stop)
@@ -1221,7 +1243,7 @@ func TestReloadFlipsGenerationsWithoutLoss(t *testing.T) {
 	if e := runErr.Load(); e != nil {
 		t.Fatalf("the concurrent driver stopped after %d runs: %v", runs.Load(), *e)
 	}
-	if runs.Load() < 100 {
+	if runs.Load() < minRuns {
 		t.Fatalf("the concurrent driver only managed %d runs; too few to have overlapped the flips",
 			runs.Load())
 	}
