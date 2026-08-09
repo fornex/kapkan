@@ -1103,7 +1103,7 @@
       "id": 33,
       "type": "timeseries",
       "title": "Data-plane rules by mode (mitigator)",
-      "description": "Rules the mitigator believes it installed, attributed to the bans that own them, real vs dry_run (kapkan_mitigate_dataplane_rules). One ban carries several rules, so this exceeds the ban count \u2014 watch it against dataplane.limits.max_dynamic_rules. Filed under each ban's frozen dry-run flag, whereas 'Rules in kernel by mode' uses the datapath's; the two are independent paths to the same quantity and are meant to be compared, not summed.",
+      "description": "Rules the mitigator believes it installed, attributed to the bans that own them, real vs dry_run (kapkan_mitigate_dataplane_rules). A ban contributes 1 rule for a cleanly classified single-vector attack and up to 8 for a mixed or unclassified one. Watch it against dataplane.limits.max_dynamic_rules. In real mode it should track the dynamic half of 'Rules in kernel by mode' \u2014 compare them, never sum them. In dry_run mode the two diverge by design: nothing is installed, so this reports intent while the measured gauge stays at zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1230,7 +1230,7 @@
       "id": 26,
       "type": "timeseries",
       "title": "Rules in kernel by mode (measured total)",
-      "description": "All rules the kernel is actually running \u2014 config statics plus the mitigator's dynamic rules \u2014 real vs dry_run (kapkan_dataplane_rules). dry_run is read back from the datapath, not from the config file: an adopted pin set can be running the previous process's flag. Compare its dynamic half against 'Data-plane rules by mode (mitigator)': those two should track each other, and a lasting gap means a withdraw failed or the kernel expired rules under a still-active ban.",
+      "description": "All rules the kernel is actually running \u2014 config statics plus the mitigator's dynamic rules \u2014 real vs dry_run (kapkan_dataplane_rules). dry_run is read back from the datapath, not from the config file: an adopted pin set can be running the previous process's flag. In real mode its dynamic half should track 'Data-plane rules by mode (mitigator)', and a lasting gap there means a withdraw failed or the kernel expired rules under a still-active ban. Under dry_run nothing is installed, so the dynamic half is zero by design.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"

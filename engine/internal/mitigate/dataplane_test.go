@@ -480,6 +480,72 @@ func TestInstallFailureFallsBackToBlackhole(t *testing.T) {
 	if rec.announced["203.0.113.5/32"] != 1 {
 		t.Errorf("blackhole announces = %d, want 1", rec.announced["203.0.113.5/32"])
 	}
+
+	// The gauges must follow the rung the ban ENDED UP on, not the one it tried.
+	// A ban that fell back to blackhole is a real announced route, and counting
+	// it as a data-plane ban would report kernel filtering that does not exist —
+	// on the exact box where the install just failed.
+	announced, dpBans, dpRules, _ := dpGauges(t)
+	if announced != 1 {
+		t.Errorf("announced_routes{real} = %v, want 1: the fallback announced a blackhole route", announced)
+	}
+	if dpBans != 0 {
+		t.Errorf("dataplane_bans{real} = %v, want 0: the install failed, nothing is in the kernel", dpBans)
+	}
+	if dpRules != 0 {
+		t.Errorf("dataplane_rules{real} = %v, want 0: the install failed, nothing is in the kernel", dpRules)
+	}
+}
+
+// TestEscalationMovesTheBanBetweenGauges: a ban climbing off the dataplane rung
+// onto a peer rung must MOVE, never appear in both. The gauges are recomputed
+// from scratch on every update, so the risk is not a stale value but a count()
+// that stops being mutually exclusive — invisible until someone adds the two
+// together and gets more mitigations than there are bans.
+//
+// The ladder runs dataplane -> blackhole because that is the only legal
+// direction: config.escalationSeverity ranks dataplane as the WEAKEST enforcing
+// rung, so a ladder may climb out of it but never into it from a peer rung.
+func TestEscalationMovesTheBanBetweenGauges(t *testing.T) {
+	clk := &mockClock{t: time.Now()}
+	dp := &dpRecorder{}
+	yaml := "dry_run: false\n" + baseYAML() + `
+dataplane:
+  enabled: true
+  interfaces: ["eth0"]
+escalation:
+  - {after_seconds: 0, action: dataplane}
+  - {after_seconds: 5, action: blackhole}
+`
+	m, _ := newDataplaneMitigator(t, yaml, dp, clk)
+
+	m.OnAttackStarted(startedEvent("203.0.113.7"))
+	announced, dpBans, dpRules, _ := dpGauges(t)
+	if dpBans != 1 || dpRules < 1 {
+		t.Fatalf("on the dataplane rung: dataplane_bans=%v rules=%v, want 1 and >=1", dpBans, dpRules)
+	}
+	if announced != 0 {
+		t.Fatalf("announced_routes{real} = %v on the dataplane rung, want 0", announced)
+	}
+
+	clk.Advance(6 * time.Second)
+	m.sweepExpired() // escalate onto the blackhole rung
+
+	if b := m.ActiveBans(); len(b) != 1 || b[0].Method != config.MitigateBlackhole {
+		t.Fatalf("escalation did not reach the blackhole rung: %+v", m.ActiveBans())
+	}
+	announced, dpBans, dpRules, _ = dpGauges(t)
+	if announced != 1 {
+		t.Errorf("announced_routes{real} = %v after escalating to blackhole, want 1", announced)
+	}
+	if dpBans != 0 {
+		t.Errorf("dataplane_bans{real} = %v after escalating away, want 0: the ban is on a peer rung "+
+			"now and counting it in both places would double-count the mitigation", dpBans)
+	}
+	if dpRules != 0 {
+		t.Errorf("dataplane_rules{real} = %v after escalating away, want 0: the rules were withdrawn "+
+			"from the kernel", dpRules)
+	}
 }
 
 // TestNoBackendFallsBackRatherThanAlerting is the failure the whole feature was

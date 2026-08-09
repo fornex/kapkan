@@ -183,13 +183,19 @@ var (
 	// dataplane.limits.max_dynamic_rules the way flowspec_rules is watched
 	// against an upstream's route limit.
 	//
-	// This is the MITIGATOR's account of what it installed, keyed by the ban that
+	// This is the MITIGATOR's account of what it INTENDED, keyed by the ban that
 	// owns it and filed under that ban's frozen dry-run flag. DataplaneRules is
 	// the MEASURED total actually in the kernel maps (statics included), filed
-	// under the datapath's own flag. This gauge should equal that one's dynamic
-	// half; a sustained divergence is worth alerting on, because it means a
-	// withdraw failed or the kernel expired rules out from under a ban that still
-	// believes it is mitigating.
+	// under the datapath's own flag.
+	//
+	// The two agree only under mode="real". Under dry-run they diverge BY
+	// DESIGN and permanently: announceMethodLocked returns before the installer,
+	// so nothing enters the maps, and app/dpcounters skips dry-run bans outright
+	// — so this gauge reports the rules that WOULD have been installed while
+	// DataplaneRules' dynamic half stays flat at zero. Only the real bucket is
+	// worth alerting on; a real-mode divergence means a withdraw failed or the
+	// kernel expired rules out from under a ban that still believes it is
+	// mitigating.
 	MitigateDataplaneRules = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "kapkan",
 		Subsystem: "mitigate",
