@@ -166,7 +166,86 @@ type Inspection struct {
 	// generic-mode attachment, dry-run, a link pin whose netdevice is gone.
 	// Each is one sentence naming the consequence.
 	Warnings []string `json:"warnings,omitempty"`
+
+	// Bypass is the alarm: traffic that went past the filter without any rule
+	// being evaluated. Empty on a healthy box, and empty is the overwhelmingly
+	// common case, which is exactly why a non-empty one is worth its own field
+	// instead of a row in a twenty-one-line counter table.
+	//
+	// It is a separate field from Warnings because the two say different things
+	// to whoever is reading. A warning is "this box is misconfigured"; this is
+	// "somebody may be routing around your filter". A monitoring script can key
+	// on `.filter_bypass | length > 0` without parsing prose.
+	Bypass []BypassSignal `json:"filter_bypass,omitempty"`
 }
+
+// BypassSignal is one parse-limit bypass with a non-zero counter: packets the
+// datapath PASSED without consulting a single rule. See Stat.BypassReason for
+// why this is a security signal and not a parser statistic.
+type BypassSignal struct {
+	// Reason is the stable class name, matching the Prometheus label value on
+	// kapkan_dataplane_filter_bypass_packets_total.
+	Reason string `json:"reason"`
+	// Stat is the underlying counter's name in the terminal block, so a reader
+	// can find the same number there and see that it is not double-counted.
+	Stat  string `json:"stat"`
+	Pkts  uint64 `json:"pkts"`
+	Bytes uint64 `json:"bytes"`
+	// Message is the operator-facing sentence: what happened, and what to do.
+	Message string `json:"message"`
+}
+
+// bypassSignals extracts the alarm-grade counters from a decoded LiveState.
+//
+// It reads l.Terminal, which is already zero-suppressed, so a zero counter
+// produces no signal and a healthy box produces an empty slice — nil, not [],
+// because `omitempty` on the field is the whole point: the key's ABSENCE is the
+// all-clear, and a consumer checking `.filter_bypass` gets null rather than an
+// empty array it has to distinguish from a missing one.
+func bypassSignals(l *LiveState) []BypassSignal {
+	if l == nil {
+		return nil
+	}
+	var out []BypassSignal
+	for _, c := range l.Terminal {
+		if c.Pkts == 0 && c.Bytes == 0 {
+			continue
+		}
+		reason, ok := Stat(c.Index).BypassReason()
+		if !ok {
+			continue
+		}
+		out = append(out, BypassSignal{
+			Reason:  reason,
+			Stat:    c.Name,
+			Pkts:    c.Pkts,
+			Bytes:   c.Bytes,
+			Message: bypassMessage(reason),
+		})
+	}
+	return out
+}
+
+// bypassMessage is the one home for the sentence an operator reads, so the CLI
+// report, the JSON document and anything else quoting it cannot drift apart.
+func bypassMessage(reason string) string {
+	switch reason {
+	case "ipv6_exthdr_cap":
+		return fmt.Sprintf("These packets carried %d or more IPv6 extension headers, which is the "+
+			"datapath's parse limit, so the parser gave up BEFORE the rule scan and the packets were "+
+			"forwarded with no rule evaluated at all — allow-lists, drop rules and rate limits alike. "+
+			"They are passed rather than dropped on purpose: a parse budget must not become a "+
+			"default-deny. Nothing legitimate chains %d extension headers, so treat any movement here "+
+			"as a possible attempt to evade this filter. Identify the source, and either filter the "+
+			"chain upstream (a router ACL on IPv6 extension-header count) or alert and investigate.",
+			MaxIPv6ExtHdrs, MaxIPv6ExtHdrs)
+	}
+	return "These packets were forwarded without any rule being evaluated."
+}
+
+// HasBypass reports whether the filter was bypassed at all. It is the one-bit
+// question a first line answers.
+func (i Inspection) HasBypass() bool { return len(i.Bypass) > 0 }
 
 // PinnedProgram is the identity of the program in the pin directory.
 type PinnedProgram struct {

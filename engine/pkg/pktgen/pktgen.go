@@ -50,6 +50,39 @@ const (
 	tpid8021ad = 0x88a8
 )
 
+// IPv6 extension-header types Build emits and Parse walks. They are exactly
+// the TLV-shaped headers the datapath's own walk skips (see the
+// KAPKAN_MAX_EXT_HDRS loop in bpf/kapkan_xdp.c), so a frame built here
+// exercises that walk rather than some shape it would reject outright.
+const (
+	ExtHopByHop = 0   // IPPROTO_HOPOPTS
+	ExtRouting  = 43  // IPPROTO_ROUTING
+	ExtDstOpts  = 60  // IPPROTO_DSTOPTS
+	ExtMobility = 135 // IPPROTO_MH
+)
+
+// ExtHdr is one IPv6 extension header in a Frame's chain.
+//
+// Type is the header's own protocol number, which is what the PRECEDING
+// header's next-header field carries; Build chains those for you, so a caller
+// only names the types in wire order.
+//
+// Data is the header body AFTER the two leading bytes (next-header and
+// hdr-ext-len), both of which Build fills in. An extension header is measured
+// in 8-octet units not counting the first 8, so the total length is 8*(n+1)
+// and len(Data) must be 8*(n+1)-2: 6, 14, 22, ... Build rejects anything else
+// rather than emitting a header whose length field disagrees with its size,
+// which is the one bug that would make this generator useless for testing a
+// parser.
+type ExtHdr struct {
+	Type uint8
+	Data []byte
+}
+
+// extHdrLenOK reports whether n is a legal ExtHdr.Data length: the header is
+// 8*(units+1) bytes and Data is everything after the first 2.
+func extHdrLenOK(n int) bool { return n >= 6 && (n+2)%8 == 0 && (n+2)/8-1 <= 255 }
+
 // Frame describes a single L2 frame to synthesise. Zero values are sensible
 // defaults: an all-zero MAC is emitted verbatim and TTL 0 is rewritten to 64.
 //
@@ -58,9 +91,9 @@ const (
 // fragment extension header) is not supported and Build rejects it.
 //
 // The following fields survive a Build -> WritePcap -> ReadPcap round trip
-// unchanged: SrcMAC, DstMAC, VLANs, SrcIP, DstIP, IPv4Options, Proto, SrcPort,
-// DstPort, TCPFlags, ICMPType, ICMPCode, IPID, DontFragment, MoreFragments,
-// FragOffset, TTL (once defaulted) and Payload.
+// unchanged: SrcMAC, DstMAC, VLANs, SrcIP, DstIP, IPv4Options, ExtHdrs, Proto,
+// SrcPort, DstPort, TCPFlags, ICMPType, ICMPCode, IPID, DontFragment,
+// MoreFragments, FragOffset, TTL (once defaulted) and Payload.
 type Frame struct {
 	SrcMAC, DstMAC [6]byte
 	// VLANs is an optional 802.1Q tag stack, outermost first. Each entry is a
@@ -68,6 +101,17 @@ type Frame struct {
 	VLANs []uint16
 
 	SrcIP, DstIP netip.Addr
+
+	// ExtHdrs is an optional IPv6 extension-header chain, outermost first,
+	// inserted between the fixed 40-byte header and the L4 header. Build sets
+	// every next-header field, so the IPv6 header points at ExtHdrs[0], each
+	// entry points at the next, and the last points at Proto. IPv6 only; a
+	// chain on an IPv4 frame is rejected.
+	//
+	// This exists for the same reason IPv4Options does: it moves the L4 header
+	// off its usual offset, which is where an extension-header-walking bug
+	// lives and where no other frame shape can find it.
+	ExtHdrs []ExtHdr
 
 	// IPv4Options are the bytes between the fixed 20-byte IPv4 header and the
 	// L4 header, already padded by the caller to a 4-byte boundary (IHL counts
@@ -128,6 +172,17 @@ func (f Frame) Build() ([]byte, error) {
 			return nil, fmt.Errorf("pktgen: IPv4Options length %d exceeds the 40 bytes IHL allows", n)
 		}
 	}
+	if len(f.ExtHdrs) > 0 && !isV6 {
+		return nil, fmt.Errorf("pktgen: ExtHdrs set on an IPv4 frame")
+	}
+	for i, e := range f.ExtHdrs {
+		if !extHdrLenOK(len(e.Data)) {
+			return nil, fmt.Errorf(
+				"pktgen: ExtHdrs[%d] (type %d) has %d data bytes; an extension header is 8*(n+1) "+
+					"bytes and Data excludes the first 2, so the length must be one of 6, 14, 22 and so on",
+				i, e.Type, len(e.Data))
+		}
+	}
 
 	ttl := f.TTL
 	if ttl == 0 {
@@ -147,7 +202,12 @@ func (f Frame) Build() ([]byte, error) {
 		l4 = f.Payload
 	}
 
-	out := make([]byte, 0, 14+4*len(f.VLANs)+40+len(l4))
+	// The extension chain, if any, sits between the IPv6 header and l4 and
+	// counts toward the IPv6 payload length (but never toward the L4
+	// checksum's pseudo-header, which measures the upper-layer payload only).
+	ext := f.buildExtChain()
+
+	out := make([]byte, 0, 14+4*len(f.VLANs)+40+len(ext)+len(l4))
 
 	// Ethernet header.
 	out = append(out, f.DstMAC[:]...)
@@ -158,13 +218,43 @@ func (f Frame) Build() ([]byte, error) {
 	}
 	if isV6 {
 		out = appendU16(out, etherTypeIPv6)
-		out = f.appendIPv6(out, src, dst, ttl, l4)
+		out = f.appendIPv6(out, src, dst, ttl, len(ext)+len(l4))
+		out = append(out, ext...)
 	} else {
 		out = appendU16(out, etherTypeIPv4)
 		out = f.appendIPv4(out, src, dst, ttl, l4)
 	}
 	out = append(out, l4...)
 	return out, nil
+}
+
+// buildExtChain serialises the extension-header chain, wiring each header's
+// next-header field to the one that follows and the last to f.Proto. Build has
+// already validated every length.
+func (f Frame) buildExtChain() []byte {
+	if len(f.ExtHdrs) == 0 {
+		return nil
+	}
+	var out []byte
+	for i, e := range f.ExtHdrs {
+		next := f.Proto
+		if i+1 < len(f.ExtHdrs) {
+			next = f.ExtHdrs[i+1].Type
+		}
+		// hdr_ext_len counts 8-octet units NOT including the first 8.
+		out = append(out, next, byte((len(e.Data)+2)/8-1))
+		out = append(out, e.Data...)
+	}
+	return out
+}
+
+// firstHeader is the protocol number the IPv6 header's next-header field must
+// carry: the first extension header when there is a chain, else the L4 proto.
+func (f Frame) firstHeader() uint8 {
+	if len(f.ExtHdrs) > 0 {
+		return f.ExtHdrs[0].Type
+	}
+	return f.Proto
 }
 
 // appendIPv4 appends the IPv4 header — 20 bytes plus any IPv4Options — with a
@@ -194,11 +284,12 @@ func (f Frame) appendIPv4(out []byte, src, dst netip.Addr, ttl uint8, l4 []byte)
 	return out
 }
 
-// appendIPv6 appends a 40-byte IPv6 header. payloadLen is len(l4).
-func (f Frame) appendIPv6(out []byte, src, dst netip.Addr, ttl uint8, l4 []byte) []byte {
+// appendIPv6 appends a 40-byte IPv6 header. payloadLen covers the extension
+// chain plus the L4 bytes, which is what the IPv6 payload-length field means.
+func (f Frame) appendIPv6(out []byte, src, dst netip.Addr, ttl uint8, payloadLen int) []byte {
 	out = append(out, 0x60, 0x00, 0x00, 0x00) // version 6, TC 0, flow label 0
-	out = appendU16(out, uint16(len(l4)))
-	out = append(out, f.Proto, ttl)
+	out = appendU16(out, uint16(payloadLen))
+	out = append(out, f.firstHeader(), ttl)
 	s16, d16 := src.As16(), dst.As16()
 	out = append(out, s16[:]...)
 	out = append(out, d16[:]...)
@@ -377,7 +468,35 @@ func parseIPv6(f Frame, b []byte) (Frame, error) {
 	if plen == 0 || end > len(b) {
 		end = len(b)
 	}
-	return parseL4(f, b[40:end], true)
+	payload := b[40:end]
+
+	// Walk the TLV-shaped extension headers, exactly the set the datapath
+	// walks. Anything else (every L4 protocol, ESP, IPPROTO_NONE) ends the
+	// chain and is left in f.Proto for parseL4.
+	for isExtHdrType(f.Proto) {
+		if len(payload) < 8 {
+			return f, fmt.Errorf("pktgen: truncated IPv6 extension header (type %d)", f.Proto)
+		}
+		n := (int(payload[1]) + 1) * 8
+		if len(payload) < n {
+			return f, fmt.Errorf(
+				"pktgen: IPv6 extension header (type %d) claims %d bytes, %d present", f.Proto, n, len(payload))
+		}
+		f.ExtHdrs = append(f.ExtHdrs, ExtHdr{Type: f.Proto, Data: clone(payload[2:n])})
+		f.Proto = payload[0]
+		payload = payload[n:]
+	}
+	return parseL4(f, payload, true)
+}
+
+// isExtHdrType reports whether p names one of the TLV-shaped IPv6 extension
+// headers Build emits and the datapath walks.
+func isExtHdrType(p uint8) bool {
+	switch p {
+	case ExtHopByHop, ExtRouting, ExtDstOpts, ExtMobility:
+		return true
+	}
+	return false
 }
 
 func parseL4(f Frame, b []byte, isV6 bool) (Frame, error) {

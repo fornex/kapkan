@@ -456,16 +456,31 @@ type Carpet struct {
 	MaxActivePrefixBans int `yaml:"max_active_prefix_bans"`
 }
 
+// CarpetMethods returns every mitigation method a carpet-bomb detection may
+// select, in documentation order.
+//
+// It is the SINGLE source of truth for three things that must never disagree:
+// the validator (validateCarpet), the resolver (Carpet.Method) and the config
+// schema enum (schema.go). When those were three hand-written lists, widening
+// one of them was enough to make a method parse, resolve to "" and then be
+// mitigated by something else entirely — which for a carpet ban means a whole
+// /24 blackholed because the operator asked for a surgical kernel drop.
+//
+// Divert is deliberately absent: a carpet ban covers a whole aggregation
+// prefix, and diverting a /24 into a scrubbing centre is a routing decision an
+// operator makes deliberately, not one a detector should make automatically.
+func CarpetMethods() []MitigationMethod {
+	return []MitigationMethod{MitigateFlowSpec, MitigateBlackhole, MitigateDataplane}
+}
+
 // Method resolves carpet.mitigation to a MitigationMethod ("" = alert-only).
 func (c Carpet) Method() MitigationMethod {
-	switch c.Mitigation {
-	case string(MitigateFlowSpec):
-		return MitigateFlowSpec
-	case string(MitigateBlackhole):
-		return MitigateBlackhole
-	default:
-		return ""
+	for _, m := range CarpetMethods() {
+		if c.Mitigation == string(m) {
+			return m
+		}
 	}
+	return ""
 }
 
 // CalcMethod selects how a hostgroup's thresholds are applied.
@@ -1698,10 +1713,21 @@ func (c *Config) validateCarpet() error {
 	if cp.Thresholds.Zero() {
 		return fmt.Errorf("carpet.thresholds: set at least one aggregate threshold")
 	}
-	switch cp.Mitigation {
-	case "", string(MitigateFlowSpec), string(MitigateBlackhole):
-	default:
-		return fmt.Errorf("carpet.mitigation must be empty, %q or %q, got %q", MitigateFlowSpec, MitigateBlackhole, cp.Mitigation)
+	if cp.Mitigation != "" && cp.Method() == "" {
+		return fmt.Errorf("carpet.mitigation must be empty or one of %s, got %q",
+			quotedMethods(CarpetMethods()), cp.Mitigation)
+	}
+	// CROSS-FIELD: dropping a carpet bomb in this box's kernel needs a kernel to
+	// drop it in. Without this the mitigator would accept the method, fail every
+	// install and fall back to blackholing the whole aggregation prefix — the
+	// widest possible outcome, reached by the most surgical request.
+	if cp.Method() == MitigateDataplane {
+		switch {
+		case c.Dataplane == nil:
+			return fmt.Errorf("carpet.mitigation %q requires a dataplane block", MitigateDataplane)
+		case !c.DataplaneCfg.Enabled:
+			return fmt.Errorf("carpet.mitigation %q requires dataplane.enabled: true", MitigateDataplane)
+		}
 	}
 	if cp.MaxActivePrefixBans == 0 {
 		cp.MaxActivePrefixBans = 10
@@ -1710,6 +1736,23 @@ func (c *Config) validateCarpet() error {
 		return fmt.Errorf("carpet.max_active_prefix_bans must be >= 1, got %d", cp.MaxActivePrefixBans)
 	}
 	return nil
+}
+
+// quotedMethods renders a method set for an error message ("flowspec",
+// "blackhole" or "dataplane"), so the message can never fall behind the set it
+// describes.
+func quotedMethods(ms []MitigationMethod) string {
+	parts := make([]string, len(ms))
+	for i, m := range ms {
+		parts[i] = strconv.Quote(string(m))
+	}
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	}
+	return strings.Join(parts[:len(parts)-1], ", ") + " or " + parts[len(parts)-1]
 }
 
 // resolveBaseline validates one baseline block and applies defaults. A nil
@@ -1833,18 +1876,48 @@ func resolveFlowSpecPolicy(flow, defFlow *FlowSpec) (FlowSpecAction, float64, er
 // maxEscalationStages bounds a mitigation ladder.
 const maxEscalationStages = 5
 
-// methodAction maps a single mitigation method to its ladder action.
-func methodAction(m MitigationMethod) EscalationAction {
+// AllMitigationMethods returns every mitigation method, so a table test can
+// prove Action() maps each one to the mechanism that actually enforces it
+// rather than silently to the default.
+func AllMitigationMethods() []MitigationMethod {
+	return []MitigationMethod{MitigateBlackhole, MitigateFlowSpec, MitigateDivert, MitigateDataplane}
+}
+
+// Action maps a mitigation method to the ladder action that ENFORCES it. This
+// is the ONE mapping: the synthesized single-rung ladders (global, per-group
+// and carpet) all resolve through it, so a method cannot be accepted by a
+// validator in one place and then enforced by a different mechanism in another.
+//
+// It is written as a total switch with no catch-all on purpose. The catch-all
+// it replaced returned blackhole for anything it did not recognise, which meant
+// a method added to the type — or simply forgotten in one branch of a two-way
+// `if` — quietly became "blackhole the target". On the carpet path that is a
+// whole /24 (or /48) null-routed when the operator asked for a surgical drop.
+// An unknown method now returns EscalateNone (alert only): the failure mode of
+// a lost method must be "did nothing and said so", never "took more offline
+// than anyone asked for".
+func (m MitigationMethod) Action() EscalationAction {
 	switch m {
+	case MitigateBlackhole:
+		return EscalateBlackhole
 	case MitigateFlowSpec:
 		return EscalateFlowSpec
 	case MitigateDivert:
 		return EscalateDivert
 	case MitigateDataplane:
 		return EscalateDataplane
-	default:
+	}
+	return EscalateNone
+}
+
+// methodAction maps a single mitigation method to its ladder action. An empty
+// method (no explicit configuration anywhere) keeps the historical default of
+// blackhole; every named method resolves through MitigationMethod.Action.
+func methodAction(m MitigationMethod) EscalationAction {
+	if m == "" {
 		return EscalateBlackhole
 	}
+	return m.Action()
 }
 
 // resolveEscalation resolves a mitigation ladder. An empty steps slice

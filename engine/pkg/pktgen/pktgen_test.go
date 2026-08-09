@@ -239,6 +239,73 @@ func TestIPv4OptionsHeader(t *testing.T) {
 	}
 }
 
+// TestIPv6ExtensionHeaders pins the three things an extension chain can get
+// wrong and that nothing else in this package would catch: the next-header
+// chaining, the hdr_ext_len encoding (8-octet units, not counting the first
+// 8), and the fact that the chain counts toward the IPv6 payload length but
+// NOT toward the L4 checksum's pseudo-header — which measures the upper-layer
+// payload only, so an implementation that folded the chain in would produce a
+// checksum every receiver rejects.
+func TestIPv6ExtensionHeaders(t *testing.T) {
+	src := netip.MustParseAddr("2001:db8:beef::7")
+	dst := netip.MustParseAddr("2001:db8::99")
+	f := Frame{
+		SrcIP: src, DstIP: dst, TTL: 64,
+		Proto: ProtoUDP, SrcPort: 53, DstPort: 40000,
+		ExtHdrs: []ExtHdr{
+			{Type: ExtHopByHop, Data: bytes.Repeat([]byte{0x01}, 6)}, // 8 bytes total
+			{Type: ExtDstOpts, Data: bytes.Repeat([]byte{0x01}, 14)}, // 16 bytes total
+			{Type: ExtRouting, Data: bytes.Repeat([]byte{0x00}, 22)}, // 24 bytes total
+		},
+		Payload: make([]byte, 100),
+	}
+	pkt := mustBuild(t, f)
+	ip := pkt[14:]
+
+	if got := ip[6]; got != ExtHopByHop {
+		t.Errorf("IPv6 next-header = %d, want %d (the first extension header)", got, ExtHopByHop)
+	}
+	const chainLen = 8 + 16 + 24
+	if got, want := int(binary.BigEndian.Uint16(ip[4:])), chainLen+8+100; got != want {
+		t.Errorf("IPv6 payload length = %d, want %d (chain + UDP header + payload)", got, want)
+	}
+	// Walk the chain by hand: types in order, then UDP.
+	off := 40
+	for i, want := range []uint8{ExtDstOpts, ExtRouting, ProtoUDP} {
+		n := (int(ip[off+1]) + 1) * 8
+		if got := ip[off]; got != want {
+			t.Fatalf("extension header %d chains to %d, want %d", i, got, want)
+		}
+		off += n
+	}
+	if off != 40+chainLen {
+		t.Fatalf("chain ended at offset %d, want %d", off, 40+chainLen)
+	}
+	if got := l4Checksum(src, dst, ProtoUDP, ip[off:]); got != 0 {
+		t.Errorf("UDP checksum over the pseudo-header = %#04x, want 0 — the extension "+
+			"chain must not be part of the upper-layer length", got)
+	}
+
+	// And the whole thing survives a round trip.
+	got, err := Parse(pkt)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(got.ExtHdrs) != len(f.ExtHdrs) {
+		t.Fatalf("parsed %d extension headers, want %d", len(got.ExtHdrs), len(f.ExtHdrs))
+	}
+	for i := range f.ExtHdrs {
+		if got.ExtHdrs[i].Type != f.ExtHdrs[i].Type ||
+			!bytes.Equal(got.ExtHdrs[i].Data, f.ExtHdrs[i].Data) {
+			t.Errorf("extension header %d = %+v, want %+v", i, got.ExtHdrs[i], f.ExtHdrs[i])
+		}
+	}
+	if got.Proto != ProtoUDP || got.SrcPort != 53 || got.DstPort != 40000 {
+		t.Errorf("L4 after the chain = proto %d %d->%d, want udp 53->40000",
+			got.Proto, got.SrcPort, got.DstPort)
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -374,6 +441,18 @@ func TestBuildErrors(t *testing.T) {
 		"options on v6": {
 			SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"),
 			Proto: ProtoUDP, IPv4Options: []byte{0x01, 0x01, 0x01, 0x00},
+		},
+		"ext headers on v4": {
+			SrcIP: netip.MustParseAddr("192.0.2.1"), DstIP: netip.MustParseAddr("192.0.2.2"),
+			Proto: ProtoUDP, ExtHdrs: []ExtHdr{{Type: ExtDstOpts, Data: make([]byte, 6)}},
+		},
+		"ext header misaligned": {
+			SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"),
+			Proto: ProtoUDP, ExtHdrs: []ExtHdr{{Type: ExtDstOpts, Data: make([]byte, 8)}},
+		},
+		"ext header too short": {
+			SrcIP: netip.MustParseAddr("2001:db8::1"), DstIP: netip.MustParseAddr("2001:db8::2"),
+			Proto: ProtoUDP, ExtHdrs: []ExtHdr{{Type: ExtDstOpts, Data: nil}},
 		},
 	}
 	for name, f := range cases {

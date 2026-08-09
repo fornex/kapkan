@@ -8,6 +8,11 @@ import "net/netip"
 type AttackPattern int
 
 // Supported attack patterns.
+//
+// The set mirrors the vectors internal/engine's classifier can actually name
+// (see classify.go): every reflected service port it knows, plus the
+// volumetric floods it separates by protocol class. Nothing here is a shape
+// the detector has no opinion about.
 const (
 	// UDPFlood is a generic high-pps UDP flood to a victim port.
 	UDPFlood AttackPattern = iota
@@ -19,6 +24,23 @@ const (
 	DNSAmplification
 	// CLDAPAmplification reflects off UDP/389 with large responses.
 	CLDAPAmplification
+	// MemcachedAmplification reflects off UDP/11211 with large responses.
+	MemcachedAmplification
+	// SSDPAmplification reflects off UDP/1900 with large responses.
+	SSDPAmplification
+	// ChargenAmplification reflects off UDP/19 with large responses.
+	ChargenAmplification
+	// ACKFlood is a TCP ACK flood: TCP-dominant but with the pure-SYN share
+	// near zero, which is what separates it from SYNFlood at the classifier.
+	ACKFlood
+	// ICMPFlood is an ICMP (or ICMPv6, chosen from the victim's family) echo
+	// flood.
+	ICMPFlood
+	// FragmentFlood is a flood of non-first IP fragments. Flow telemetry can
+	// only see non-first fragments (a first fragment reports offset 0 and is
+	// indistinguishable from a whole datagram), so every record carries
+	// Fragment — which is exactly the undercount internal/flow documents.
+	FragmentFlood
 )
 
 // PatternParams shapes a generated attack toward a single victim.
@@ -46,6 +68,12 @@ func (p AttackPattern) reflectorPort() uint16 {
 		return 53
 	case CLDAPAmplification:
 		return 389
+	case MemcachedAmplification:
+		return 11211
+	case SSDPAmplification:
+		return 1900
+	case ChargenAmplification:
+		return 19
 	default:
 		return 0
 	}
@@ -66,6 +94,7 @@ func (pp PatternParams) Build() []Record {
 	proto := uint8(ProtoUDP)
 	var flags uint8
 	var srcPort, dstPort uint16
+	var fragment bool
 	switch pp.Pattern {
 	case SYNFlood:
 		proto = ProtoTCP
@@ -74,7 +103,32 @@ func (pp PatternParams) Build() []Record {
 		if bytesPer == 0 {
 			bytesPer = 60
 		}
-	case NTPAmplification, DNSAmplification, CLDAPAmplification:
+	case ACKFlood:
+		proto = ProtoTCP
+		flags = TCPAck
+		dstPort = 80
+		if bytesPer == 0 {
+			bytesPer = 60
+		}
+	case ICMPFlood:
+		// ICMP has no ports; the family follows the victim so the engine's
+		// ICMP class (which counts protocols 1 and 58 alike) is fed the
+		// protocol number that would really be on the wire.
+		proto = ProtoICMP
+		if pp.Victim.Is6() && !pp.Victim.Is4In6() {
+			proto = ProtoICMPv6
+		}
+		if bytesPer == 0 {
+			bytesPer = 98 // classic ping
+		}
+	case FragmentFlood:
+		fragment = true
+		dstPort = 53413
+		if bytesPer == 0 {
+			bytesPer = 1400
+		}
+	case NTPAmplification, DNSAmplification, CLDAPAmplification,
+		MemcachedAmplification, SSDPAmplification, ChargenAmplification:
 		srcPort = pp.Pattern.reflectorPort()
 		dstPort = 40000
 		if bytesPer == 0 {
@@ -90,7 +144,7 @@ func (pp PatternParams) Build() []Record {
 	recs := make([]Record, pp.Records)
 	for i := range recs {
 		sp := srcPort
-		if sp == 0 {
+		if sp == 0 && proto != ProtoICMP && proto != ProtoICMPv6 {
 			sp = uint16(1024 + (i % 60000)) // ephemeral source for floods
 		}
 		recs[i] = Record{
@@ -100,6 +154,7 @@ func (pp PatternParams) Build() []Record {
 			DstPort:  dstPort,
 			Proto:    proto,
 			TCPFlags: flags,
+			Fragment: fragment,
 			Bytes:    bytesPer,
 			Packets:  pktsPer,
 		}

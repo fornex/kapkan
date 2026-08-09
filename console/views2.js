@@ -474,6 +474,22 @@
     ];
     var body = [h("dl", { class: "kv" }, [].concat.apply([], rows))];
 
+    /* The filter-bypass alarm, ABOVE the counters it is derived from. The
+       overview already carries a page-level banner for this; repeating it here
+       is deliberate rather than redundant, because this card is where an
+       operator lands when they go looking at the data plane, and the counter it
+       comes from is three lines below. Seeing the raw pass_exthdr_cap number
+       without the sentence that says "no rule was evaluated" is exactly the
+       misreading this whole treatment exists to prevent. */
+    var bypassPkts = (dp.verdicts && dp.verdicts["pass_exthdr_cap"] &&
+      dp.verdicts["pass_exthdr_cap"].packets) || 0;
+    if (bypassPkts) {
+      body.push(h("div", { class: "banner banner--dry-loud mt-4", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"),
+        h("span", { class: "banner__txt", text: I.t("dp.bypass.card", { n: I.abbr(bypassPkts) }) })
+      ]));
+    }
+
     // Verdict counters, biggest first, zeros dropped: a table of twenty-one
     // names of which two are non-zero buries the two.
     var vs = dp.verdicts || {};
@@ -482,7 +498,15 @@
     if (names.length) {
       body.push(h("div", { class: "section-label mt-4" }, [w.icon("activity"), h("span", { text: I.t("se.dp.verdicts") })]));
       body.push(h("div", { class: "row wrap", style: { gap: "6px" } }, names.map(function (k) {
-        return K.badge("badge--muted", k + " · " + I.abbr(vs[k].packets || 0));
+        /* pass_exthdr_cap is not a parser statistic like its neighbours: it
+           counts packets that skipped the rule scan entirely. Colouring it like
+           the other twenty would be the console agreeing that it is one of
+           them. */
+        var bypass = k === "pass_exthdr_cap";
+        return K.badge(bypass ? "badge--active" : "badge--muted",
+          k + " · " + I.abbr(vs[k].packets || 0),
+          bypass ? "shield-alert" : "",
+          bypass ? I.t("dp.bypass.tip") : "");
       })));
     }
     if (dp.error) {

@@ -110,9 +110,15 @@ thresholds: # per destination host, after sampling correction
 #   thresholds:                # AGGREGATE volume over the prefix
 #     pps: 2000000
 #     mbps: 20000
-#   mitigation: flowspec       # empty (default) = alert-only; flowspec drops the
-#                              # vector to the whole prefix; blackhole RTBHs it.
-#                              # EITHER refuses a prefix containing a whitelisted addr.
+#   mitigation: flowspec       # empty (default) = alert-only; flowspec asks the
+#                              # upstream to drop the vector to the whole prefix;
+#                              # dataplane installs that same vector rule in THIS
+#                              # box's kernel (needs a dataplane block, enabled);
+#                              # blackhole RTBHs the whole prefix.
+#                              # EVERY method refuses a prefix containing a
+#                              # whitelisted address — one kernel/FlowSpec rule
+#                              # here covers 256 addresses (a /24), so the
+#                              # whitelist guarantee has no per-method exception.
 #   max_active_prefix_bans: 10 # cap on simultaneous carpet bans (separate from host bans)
 
 # Attack samples: recent flows are buffered continuously so detections carry

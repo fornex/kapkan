@@ -20,6 +20,8 @@ package dataplane
 import (
 	"encoding/binary"
 	"errors"
+	"regexp"
+	"strconv"
 	"syscall"
 	"testing"
 
@@ -518,6 +520,27 @@ func TestDropMalformed(t *testing.T) {
 // erodes.
 const verifierComplexityBudget = 1_000_000
 
+// processedInsnsRe pulls the instruction count out of the verifier's own log.
+//
+// This is the PORTABLE source for that number, and the reason it exists rather
+// than reading bpf_prog_info alone: `verified_insns` was added to
+// bpf_prog_info in 5.16 (aba64c7da983), which is ABOVE kapkan's 5.15 floor. On
+// 5.15 the field reads back as zero and Info().VerifiedInstructions() reports
+// "not available", so a test that insisted on it failed on the exact kernel
+// the project promises to support. The verifier's trailing summary line —
+// "processed N insns (limit 1000000) max_states_per_insn ..." — is emitted at
+// log_level>=1 on every kernel in the matrix, 5.15 included.
+var processedInsnsRe = regexp.MustCompile(`processed (\d+) insns`)
+
+// logTail returns the last n bytes of s, for putting a verifier log into a
+// failure message without printing all of it.
+func logTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "..." + s[len(s)-n:]
+}
+
 // TestProgramSize reports the three numbers that matter and fails only if the
 // verifier is already close to its limit.
 func TestProgramSize(t *testing.T) {
@@ -529,13 +552,33 @@ func TestProgramSize(t *testing.T) {
 	slots := insns.Size() / 8 // raw 8-byte slots; a 64-bit imm load takes two
 
 	objs := loadObjects(t)
+
+	// loadObjects asks for LogLevelInstruction, so the program carries the
+	// verifier's log even though the load succeeded.
+	log := objs.KapkanXdpFilter.VerifierLog
+	m := processedInsnsRe.FindStringSubmatch(log)
+	if m == nil {
+		t.Fatalf("verifier log has no 'processed N insns' line; "+
+			"cannot measure complexity. Log tail:\n%s", logTail(log, 512))
+	}
+	processed, err := strconv.ParseUint(m[1], 10, 64)
+	if err != nil {
+		t.Fatalf("parsing %q from the verifier log: %v", m[1], err)
+	}
+
+	// Cross-check against bpf_prog_info where the kernel offers it. Kept as a
+	// consistency check rather than the primary source: see processedInsnsRe.
 	info, err := objs.KapkanXdpFilter.Info()
 	if err != nil {
 		t.Fatalf("program Info: %v", err)
 	}
-	processed, ok := info.VerifiedInstructions()
-	if !ok {
-		t.Fatalf("kernel did not report verified_insns")
+	if reported, ok := info.VerifiedInstructions(); !ok {
+		t.Logf("bpf_prog_info.verified_insns is unavailable on this kernel "+
+			"(added in 5.16, below it is zero); using the verifier log's %d",
+			processed)
+	} else if uint64(reported) != processed {
+		t.Errorf("bpf_prog_info says %d verified insns, the verifier log says %d",
+			reported, processed)
 	}
 
 	t.Logf("kapkan_xdp_filter: %d instructions (%d raw slots) in the ELF; "+

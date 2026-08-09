@@ -145,3 +145,71 @@ func TestSetDataplaneAttachedZeroesTheOtherMode(t *testing.T) {
 		}
 	}
 }
+
+// TestFilterBypassPublishesAZeroSeries is the "is this alert even wired up?"
+// test.
+//
+// kapkan_dataplane_filter_bypass_packets_total is an alarm whose healthy value
+// is zero and whose alert threshold is any value above it. A CounterVec only
+// creates a child series when a label combination is first used, so a
+// bypass-free box would publish NO series at all — and an operator checking
+// their alert would see "No data", which is indistinguishable from a broken
+// scrape, a typo'd metric name, or a build that never had the feature.
+//
+// So the reason label is materialised on every publish, even at zero. This test
+// is what keeps a future refactor from moving the WithLabelValues call back
+// inside the `if delta > 0` guard, which would look like a harmless tidy-up and
+// would silently un-wire the alarm.
+func TestFilterBypassPublishesAZeroSeries(t *testing.T) {
+	ResetDataplaneCounterBaseline()
+	DataplaneFilterBypassPacketsTotal.Reset()
+	DataplaneFilterBypassBytesTotal.Reset()
+
+	// A healthy data plane: the kernel counter is zero and stays zero.
+	AddDataplaneFilterBypass("ipv6_exthdr_cap", 0, 0)
+	AddDataplaneFilterBypass("ipv6_exthdr_cap", 0, 0)
+	if got := testutil.CollectAndCount(DataplaneFilterBypassPacketsTotal); got != 1 {
+		t.Errorf("series count = %d, want 1 — a bypass-free box must publish an explicit zero, "+
+			"or an operator cannot tell a quiet alarm from an absent one", got)
+	}
+	if got := testutil.ToFloat64(DataplaneFilterBypassPacketsTotal.WithLabelValues("ipv6_exthdr_cap")); got != 0 {
+		t.Errorf("packets = %v, want 0", got)
+	}
+
+	// Now traffic starts skipping the rule scan. The first read seeded the
+	// baseline above, so this publishes the real delta rather than an absolute.
+	AddDataplaneFilterBypass("ipv6_exthdr_cap", 41207, 5686566)
+	if got := testutil.ToFloat64(DataplaneFilterBypassPacketsTotal.WithLabelValues("ipv6_exthdr_cap")); got != 41207 {
+		t.Errorf("packets = %v, want 41207", got)
+	}
+	if got := testutil.ToFloat64(DataplaneFilterBypassBytesTotal.WithLabelValues("ipv6_exthdr_cap")); got != 5686566 {
+		t.Errorf("bytes = %v, want 5686566", got)
+	}
+}
+
+// TestFilterBypassKeepsItsOwnBaseline: the same kernel counter feeds both
+// packets_total{verdict="pass_exthdr_cap"} and the bypass alarm, and each
+// conversion from absolute to delta needs its OWN remembered previous value.
+// Sharing one would leave whichever family published second seeing a zero delta
+// forever — a permanently silent alarm, with a healthy-looking verdict counter
+// climbing beside it.
+func TestFilterBypassKeepsItsOwnBaseline(t *testing.T) {
+	ResetDataplaneCounterBaseline()
+	DataplanePacketsTotal.Reset()
+	DataplaneFilterBypassPacketsTotal.Reset()
+
+	// Two ticks of the scraper, both families fed from the same absolute read.
+	AddDataplaneVerdict("pass_exthdr_cap", 100, 6400)
+	AddDataplaneFilterBypass("ipv6_exthdr_cap", 100, 6400)
+	AddDataplaneVerdict("pass_exthdr_cap", 250, 16000)
+	AddDataplaneFilterBypass("ipv6_exthdr_cap", 250, 16000)
+
+	verdict := testutil.ToFloat64(DataplanePacketsTotal.WithLabelValues("pass_exthdr_cap"))
+	bypass := testutil.ToFloat64(DataplaneFilterBypassPacketsTotal.WithLabelValues("ipv6_exthdr_cap"))
+	if verdict != 150 {
+		t.Errorf("packets_total{pass_exthdr_cap} = %v, want 150", verdict)
+	}
+	if bypass != 150 {
+		t.Errorf("filter_bypass = %v, want 150 — the two families must not share a baseline", bypass)
+	}
+}

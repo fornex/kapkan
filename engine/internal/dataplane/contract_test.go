@@ -11,6 +11,9 @@ import (
 const (
 	mapsHeaderPath = "../../bpf/include/kapkan_maps.h"
 	configPath     = "../../internal/config/config.go"
+	// xdpSourcePath holds the parser limits, which are program constants rather
+	// than map layout and so live in the .c rather than the header.
+	xdpSourcePath = "../../bpf/kapkan_xdp.c"
 )
 
 func readFile(t *testing.T, path string) string {
@@ -90,6 +93,75 @@ func TestContractMatchesC(t *testing.T) {
 		if got := cDefine(t, src, tc.cName); got != tc.goVal {
 			t.Errorf("%s = %d in C, %d in Go", tc.cName, got, tc.goVal)
 		}
+	}
+}
+
+// TestExtHdrCapMatchesC pins MaxIPv6ExtHdrs against KAPKAN_MAX_EXT_HDRS.
+//
+// This is the HOST-side half of the extension-header cap gate, and it exists
+// because the other half cannot run here. TestIPv6ExtHdrCapBoundary measures the
+// real threshold against the compiled object, which needs a privileged Linux
+// container; this one is a grep, so it runs in `make test` on every developer's
+// laptop and in CI on hosts that have no bpf(2) at all.
+//
+// What drifting costs is unusual for a constant. Below the cap, traffic is
+// filtered; at or above it, the datapath forwards the packet WITHOUT EVALUATING
+// A SINGLE RULE. So this number is not a tuning parameter — it is the published
+// width of a hole in the filter, quoted verbatim to operators in
+// engine/deploy/dataplane-operations.md §6, in the console's banner text and in
+// the CLI report. A C-side change that this mirror did not follow would leave
+// every one of those places confidently stating the wrong threshold.
+func TestExtHdrCapMatchesC(t *testing.T) {
+	src := readFile(t, xdpSourcePath)
+	re := regexp.MustCompile(`(?m)^#define\s+KAPKAN_MAX_EXT_HDRS\s+(\d+)\s*(?:/\*|$)`)
+	m := re.FindStringSubmatch(src)
+	if m == nil {
+		t.Fatalf("#define KAPKAN_MAX_EXT_HDRS not found (or not in a form this test can read) in %s",
+			xdpSourcePath)
+	}
+	got, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("#define KAPKAN_MAX_EXT_HDRS: %v", err)
+	}
+	if got != MaxIPv6ExtHdrs {
+		t.Errorf("KAPKAN_MAX_EXT_HDRS = %d in C, MaxIPv6ExtHdrs = %d in Go. This is the number of "+
+			"IPv6 extension headers a packet needs to carry to skip the rule scan entirely; the "+
+			"operations guide, the console banner and `kapkan dataplane status` all quote the Go "+
+			"value, so a mismatch means they are misreporting where the filter stops working.",
+			got, MaxIPv6ExtHdrs)
+	}
+}
+
+// TestExtHdrCapIsTheOnlyBypassReason pins the classification that every alarm
+// hangs off: the metric label, the console banner and the CLI block are all
+// driven by Stat.BypassReason, so a counter silently gaining or losing that
+// status changes what operators are told without changing any datapath code.
+//
+// StatPassVLANDepth is asserted NOT to be one on purpose. It is the other
+// parse-limit pass, and it looks like the same thing, but QinQ is ordinary
+// traffic on a carrier trunk — wiring an alarm to it would produce a permanent
+// alert on healthy boxes, and a permanent alert is an ignored one.
+func TestExtHdrCapIsTheOnlyBypassReason(t *testing.T) {
+	got := map[Stat]string{}
+	for s := Stat(0); s < StatMax; s++ {
+		if reason, ok := s.BypassReason(); ok {
+			got[s] = reason
+		}
+	}
+	want := map[Stat]string{StatPassExtHdrCap: "ipv6_exthdr_cap"}
+	if len(got) != len(want) {
+		t.Fatalf("bypass reasons = %v, want %v", got, want)
+	}
+	for s, reason := range want {
+		if got[s] != reason {
+			t.Errorf("%s.BypassReason() = %q, want %q — this string is a Prometheus label value on "+
+				"kapkan_dataplane_filter_bypass_packets_total and an operator's alert rule may name it",
+				s, got[s], reason)
+		}
+	}
+	if _, ok := StatPassVLANDepth.BypassReason(); ok {
+		t.Error("pass_vlan_depth is now a bypass reason: it fires on ordinary QinQ traffic, so the " +
+			"filter-bypass alarm would be permanently on and therefore permanently ignored")
 	}
 }
 

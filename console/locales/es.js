@@ -275,6 +275,10 @@
       "se.dp.off": "El plano de datos del núcleo está desactivado",
       "se.dp.off.sub": "La mitigación solo se anuncia a los pares BGP. Active dataplane en la configuración del motor para descartar el tráfico de ataque en esta máquina.",
       "se.dp.readerr": "No se pudieron leer los contadores en el último sondeo: {t}",
+      "dp.bypass.banner": "FILTRO ELUDIDO: se dejaron pasar {n} paquetes sin evaluar ni una sola regla. Llevaban más cabeceras de extensión IPv6 de las que analiza el plano de datos (8), así que el análisis se detuvo antes del recorrido de reglas.",
+      "dp.bypass.act": "Posible evasión.",
+      "dp.bypass.card": "FILTRO ELUDIDO: {n} paquetes se saltaron por completo el recorrido de reglas — más de 8 cabeceras de extensión IPv6. Se dejan pasar y nunca se descartan, por diseño, así que este contador es lo único que los reporta.",
+      "dp.bypass.tip": "Pasaron sin que se evaluara ninguna regla — posible evasión del filtro.",
 
       "se.readonly": "La configuración se gestiona en el archivo de configuración del motor; esta consola la muestra en solo lectura."
     },

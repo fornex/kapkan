@@ -196,6 +196,104 @@ jobs:
           "${drop[@]}" ./dataplane.test -test.v -test.count=1
           rm -f dataplane.test
 
+      # THE PCAP BLOCK-RATE SUITE — the gate on every public pps/Gbps/percentage
+      # figure kapkan's documentation is allowed to state. Eighteen fixtures,
+      # each driven from synthetic telemetry through the REAL detector,
+      # classifier, FlowSpec IR, kernel encoder and installer, then replayed
+      # from committed pcaps through BPF_PROG_TEST_RUN.
+      #
+      # It is a separate step from the data-plane tests above because it lives
+      # in a different package (internal/mitigate — the only one that can see
+      # the whole chain without an import cycle) and because it needs a bpffs
+      # THIS USER CAN WRITE TO. The stock /sys/fs/bpf is root-owned, and this
+      # job deliberately runs with three capabilities and no more; rather than
+      # weaken that, mount a second bpffs and hand it over. KAPKAN_BPFFS is the
+      # only knob the suite exposes for it.
+      #
+      # -test.timeout is generous because detection runs through the engine's
+      # real one-second evaluation loop. The window is wall clock and cannot be
+      # faked from outside the package, and stubbing the detector out of its own
+      # regression suite would defeat the point of the suite.
+      - name: pcap block-rate suite (CAP_BPF + CAP_NET_ADMIN + CAP_PERFMON, non-root)
+        working-directory: engine/internal/mitigate
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /run/kapkan-bpffs
+          sudo mount -t bpf bpffs /run/kapkan-bpffs
+          sudo chown "$(id -u):$(id -g)" /run/kapkan-bpffs
+          go test -c -o blockrate.test .
+          drop=(sudo setpriv
+                --reuid="$(id -u)" --regid="$(id -g)" --clear-groups
+                --inh-caps=+bpf,+net_admin,+perfmon
+                --ambient-caps=+bpf,+net_admin,+perfmon)
+          # KAPKAN_BLOCKRATE=require turns this suite's environment skips into
+          # failures. Without it a runner image that stopped providing bpffs, or
+          # a capability set trimmed one bit too far, would silently downgrade
+          # the gate on every published performance figure to a green no-op.
+          "${drop[@]}" env KAPKAN_BPFFS=/run/kapkan-bpffs KAPKAN_BLOCKRATE=require \
+            ./blockrate.test -test.v -test.count=1 -test.timeout 10m \
+            -test.run 'TestPcapBlockRateSuite'
+          rm -f blockrate.test
+
+  # THE KERNEL FLOOR. The `bpf` job above proves the program loads on whatever
+  # kernel the runner image happens to ship (6.x today). This one proves the
+  # floor the product DOCUMENTS — deploy/dataplane-operations.md,
+  # config.example.yaml and manager_stub.go all promise Linux 5.15.
+  #
+  # That promise used to be reasoned rather than tested: pointer arguments to
+  # global BPF functions landed in v5.13 (e5069b9c23b3), and that construct is
+  # the one that took the verifier from 97.9% of its complexity budget to 7.5%.
+  # If a 5.15 verifier had rejected it, the program would need restructuring and
+  # the support matrix would be wrong — so the claim is worth a job.
+  #
+  # It is not merely a load check: the whole internal/dataplane suite runs on
+  # each kernel, because per-CPU maps, LRU eviction, the boot-clock helpers and
+  # BTF availability all vary across these versions. The first thing it caught
+  # was a test reading bpf_prog_info.verified_insns, a field added in 5.16 —
+  # i.e. a failure on the exact kernel the docs promise.
+  kernel-matrix:
+    name: kernel floor (${{ matrix.kernel }})
+    runs-on: ubuntu-24.04
+    strategy:
+      # Every kernel reports independently. "5.15 broke, 6.6 is fine" is the
+      # single most useful thing this job can say, and fail-fast would hide it.
+      fail-fast: false
+      matrix:
+        kernel: ["5.15", "6.1", "6.6", "6.12"]
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache: true
+          cache-dependency-path: engine/go.sum
+
+      # Logged, not asserted. GitHub's Linux runners expose /dev/kvm, which is
+      # the difference between a two-minute job and a thirty-minute one; the
+      # harness falls back to QEMU TCG when it is missing, so losing it makes
+      # this job slow rather than red. If that ever happens, this line is how
+      # you find out in one look.
+      - name: Virtualisation available?
+        run: ls -l /dev/kvm || echo "no /dev/kvm, guests will run under TCG"
+
+      - name: Boot Linux ${{ matrix.kernel }} and run the data-plane suite
+        run: KERNELS=${{ matrix.kernel }} ./hack/kernel-matrix/run.sh
+
+      # The verifier log is the whole product of a failure here: it names the
+      # instruction and the register state the older kernel refused. Keep it
+      # even on success — the processed-instruction count per kernel is the
+      # headroom number, and watching it move across releases is the point.
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-matrix-${{ matrix.kernel }}
+          path: engine/.kernel-matrix/*/logs/
+          if-no-files-found: warn
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest

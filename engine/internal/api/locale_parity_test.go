@@ -169,6 +169,10 @@ func TestLocaleParityRegistered(t *testing.T) {
 // of them renamed: col.dropped, the seven dp.*/ac.inkernel keys the bans table
 // and the drawer panel render, and the fourteen se.dp.* keys of the Settings
 // card (243 + 22 = 265).
+//
+// The filter-bypass alarm added 4: dp.bypass.{banner,act,card,tip}, the text of
+// the "packets were passed with no rule evaluated" warning on Overview and on
+// the data-plane card (265 + 4 = 269).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -178,8 +182,8 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 	}{
 		{"units", 0, 4},
 		{"plurals", 1, 5},
-		{"plurals", 0, 10}, // 5 keys × {one, other}
-		{"strings", 0, 265},
+		{"plurals", 0, 10},  // 5 keys × {one, other}
+		{"strings", 0, 269}, // +4: dp.bypass.{banner,act,card,tip}
 		{"enums", 1, 8},
 		{"enums", 0, 43},
 		{"enumsShort", 1, 1},

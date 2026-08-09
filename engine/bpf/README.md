@@ -165,13 +165,19 @@ They run with:
 ```
 cd engine && make dataplane-test    # correctness
 cd engine && make dataplane-bench   # capacity
+cd engine && make dataplane-matrix  # the same suite on 5.15 / 6.1 / 6.6 / 6.12
 ```
 
-On macOS that cross-compiles the test binary for `linux/arm64` and runs it in a
-privileged container (Docker Desktop's VM kernel is 6.12 and ships
+On macOS the first two cross-compile the test binary for `linux/arm64` and run
+it in a privileged container (Docker Desktop's VM kernel is 6.12 and ships
 `/sys/kernel/btf/vmlinux`). `make test` on macOS skips those cases and runs only
 the checks that need no kernel — the C↔Go drift gate and the map set in the
 committed ELF.
+
+`dataplane-matrix` is the one that tests the **documented floor** rather than
+whatever kernel the host happens to run: it boots each kernel under QEMU on a
+purpose-built initramfs and runs the whole suite there. See
+`engine/hack/kernel-matrix/README.md`.
 
 ## Verifier-risk register
 
@@ -220,12 +226,52 @@ Two lessons worth keeping:
 - **`global`, not `static`, is the lever.** A static subprogram is verified
   along every path that reaches it; a global one is verified *exactly once*,
   standalone. Only that breaks the multiplication. Pointer arguments to global
-  functions landed in 5.13 (`e5069b9c23b3`), below the 5.15 floor.
+  functions landed in 5.13 (`e5069b9c23b3`), below the 5.15 floor — and this
+  is no longer only a citation: see the kernel matrix below, where a real
+  5.15 verifier accepts the program.
 - **Branchless is not automatically cheaper.** Removing the matcher's early
   exits *raised* the count on its own (70.3% → 82.2%), because every call then
   runs the full body and carries more live state into the loop. It only paid
   off once the function was global and verified once — then the single-path
   body is exactly what you want. Measure, do not assume.
+
+### Kernel matrix — the floor, measured
+
+`make dataplane-matrix` boots each kernel under QEMU and runs the whole
+`internal/dataplane` suite on it. Kernels come from `quay.io/lvh-images`
+(Cilium's BPF CI images); the harness is `engine/hack/kernel-matrix`.
+
+| Kernel | Guest release | Loads | Verifier processed | % of 1M budget | Suite |
+|---|---|---|---|---|---|
+| 5.15 (the floor) | 5.15.213 | yes | 75,216 | 7.5% | pass |
+| 6.1 | 6.1.180 | yes | 75,216 | 7.5% | pass |
+| 6.6 | 6.6.147 | yes | 74,633 | 7.5% | pass |
+| 6.12 | 6.12.100 | yes | 118,003 | 11.8% | pass |
+
+Program tag is `c71769b19e70b058` on every row. The instruction counts and the
+tag are identical on **arm64 and amd64 guests** of the same kernels — expected,
+since the committed object is arch-neutral bytecode, but now checked rather
+than assumed. The `Suite` column is the amd64 run; CI runs amd64, and
+`MATRIX_ARCH=arm64 ./run.sh` runs the same thing on arm64 guests.
+
+Two things this settles:
+
+- **The 5.15 floor is real, not inferred.** The global-function shape that the
+  budget depends on is accepted by a 5.15 verifier.
+- **Older is cheaper here, not riskier.** The intuition that an older verifier
+  would be closer to the limit is backwards for this program: 5.15 through 6.6
+  process ~75k, and 6.12 processes ~118k. The headroom to watch is on the
+  *newest* kernel, which is where `TestProgramSize`'s tripwire already runs.
+
+One portability trap the matrix found, worth knowing before writing any test
+that reads program metadata: `bpf_prog_info.verified_insns` was added in
+**5.16** (`aba64c7da983`). On 5.15 it reads back as zero, so
+`ProgramInfo.VerifiedInstructions()` reports "unavailable" and anything that
+insists on it fails on the exact kernel the project supports. The portable
+source for that number is the verifier's own trailing
+`processed N insns (limit 1000000)` line, which every kernel in the matrix
+emits; `TestProgramSize` parses that and treats `bpf_prog_info` as a
+cross-check.
 
 ### Runtime cost
 

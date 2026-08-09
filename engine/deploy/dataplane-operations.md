@@ -6,7 +6,9 @@
 > `https://kapkan.io/docs/deployment` when the feature ships.
 
 Operational notes for `dataplane.*`: what privileges the kapkan process needs,
-how much memory the BPF maps cost, and what SELinux and AppArmor do to it.
+how much memory the BPF maps cost, what SELinux and AppArmor do to it, and the
+one traffic shape that gets past every rule (section 6 — read it before you go
+live).
 
 Everything marked **measured** was run for this document on kernel
 `6.12.76-linuxkit` (aarch64, 14 CPUs, the Docker Desktop VM) against the
@@ -86,6 +88,19 @@ split out of `CAP_SYS_ADMIN` in 5.8, below the project's 5.15 floor, and all
 three gates above are byte-identical between the v5.15 and v6.8 trees. On a
 kernel older than 5.8 there is no split and the process needs `CAP_SYS_ADMIN`,
 but that is below the supported floor anyway.
+
+**The floor itself is tested, not asserted.** `make dataplane-matrix` (and the
+`kernel floor` CI job) boots 5.15, 6.1, 6.6 and 6.12 under QEMU and runs the
+whole data-plane suite on each. The program loads on all four with the same
+program tag, and the verifier processes 75,216 instructions on 5.15 against a
+1,000,000 limit — 7.5%. See `engine/bpf/README.md` for the table and
+`engine/hack/kernel-matrix/README.md` for the harness.
+
+One consequence to expect on a 5.15 host: the startup line
+`data plane pre-flight passed ... verified_insns=0` and the
+`verified_instructions` field of `kapkan dataplane status` are **zero because
+the kernel does not report the number**, not because nothing was verified.
+`bpf_prog_info.verified_insns` was added in 5.16.
 
 **Attach works under the same three.** **Measured**: with only
 `CAP_BPF,CAP_NET_ADMIN,CAP_PERFMON` as ambient capabilities on a non-root uid,
@@ -431,7 +446,137 @@ from intent.
 
 ---
 
-## 6. Quick triage
+## 6. IPv6 extension headers: the one way traffic bypasses every rule
+
+**A packet carrying 8 or more IPv6 extension headers is forwarded without a
+single rule being evaluated.** Not "the rules ran and none matched" — the rules
+never run. Your allow-list, your static drops, the mitigator's rules and every
+rate limit are skipped together. It costs an attacker 64 bytes of padding.
+
+This is the datapath's only blind spot, it is deliberate, and it is not going to
+be closed by dropping the packet. What follows is how it works, how to see it,
+and what to do when you do.
+
+### The mechanism
+
+`kapkan_parse()` walks the IPv6 header chain in a bounded loop:
+`KAPKAN_MAX_EXT_HDRS` iterations, unrolled, with the `data_end` bound re-checked
+inside the body. The bound is what makes the program verify — an unbounded walk
+is rejected outright on 5.15, and the loop's cost multiplies into every rule-scan
+path the verifier explores downstream.
+
+Falling off the end of that loop is the cap. The parser returns
+`KAPKAN_PARSE_EXTHDR_CAP`, the program counts `pass_exthdr_cap` and returns
+`XDP_PASS` **immediately** — before the victim lookup, before the allow-list,
+before the rule scan. Nothing downstream of the parser sees the packet at all.
+
+### The threshold, measured
+
+**Measured** on `6.12.76-linuxkit` against the committed `kapkanxdp_bpfel.o`,
+by `TestIPv6ExtHdrCapBoundary` (`engine/internal/dataplane/exthdrcap_linux_test.go`).
+The test installs two static drop rules for the victim — one matching on
+protocol and port, one matching the destination address alone — and sweeps the
+header count:
+
+| extension headers | verdict | counter | rules consulted |
+|---|---|---|---|
+| 0 – 7 | `XDP_DROP` | `drop_static` | yes, normally |
+| 8 and above | `XDP_PASS` | `pass_exthdr_cap` | **none** |
+
+The destination-only rule is what makes the second row mean something: it matches
+*any* IPv6 packet to that address, and it does not fire.
+
+Eight minimum-length headers is **64 bytes** — less than the IPv6 header they
+follow, and cheaper than the TCP header they hide. Header *type* does not matter:
+hop-by-hop options, destination options, routing and mobility headers all count
+toward the same cap, and `TestIPv6ExtHdrCapCostsSixtyFourBytes` pins the
+hop-by-hop case specifically because it is the cheapest chain to build.
+
+The boundary is asserted from **both** sides on purpose. A future change that
+lowered the cap to 4 for a verifier-budget win would still pass any test that
+only checked "a long chain is passed", while quietly quadrupling the window.
+
+### Why it is passed and not dropped
+
+Because the charter's default verdict is PASS, and a parse limit must never
+become a default-deny.
+
+The same header chain can arrive from a legitimate host. Dropping on "my parser
+gave up" would mean a packet shape nobody rejected is blackholed by an
+implementation budget — and the failure would be silent, permanent, and
+attributable to nothing an operator configured. A filter that fails open and says
+so is recoverable. One that fails closed on a parser detail is not.
+
+So the packet goes through, and **being seen is the entire mitigation.**
+
+### How you find out
+
+Three places, all fed by the same kernel counter:
+
+- **Prometheus.** `kapkan_dataplane_filter_bypass_packets_total{reason="ipv6_exthdr_cap"}`
+  (and `..._bytes_total`). The series is published even at zero, so you can tell a
+  quiet alarm from an alarm that was never wired up. The threshold is zero:
+
+  ```yaml
+  - alert: KapkanFilterBypassed
+    expr: sum(rate(kapkan_dataplane_filter_bypass_packets_total[5m])) > 0
+    for: 2m
+    labels: { severity: critical }
+    annotations:
+      summary: "Packets are passing Kapkan's data plane with no rule evaluated"
+  ```
+
+  This duplicates `kapkan_dataplane_packets_total{verdict="pass_exthdr_cap"}` on
+  purpose — an alert rule should name the thing it means, not a parser statistic.
+  It is a second view of one series, not extra traffic. Do not add the two.
+
+- **`kapkan dataplane status`.** A block directly under the verdict line, above
+  the pin path, and a marker on the counter row itself. Absent entirely when the
+  counter is zero, so its presence *is* the signal. `-json` carries the same thing
+  as `.filter_bypass[]` — `jq -e '.filter_bypass | length > 0'` is the check.
+
+- **The console.** An alert-role banner at the top of Overview, a second one on
+  the XDP data plane card in Settings, and the `pass_exthdr_cap` verdict badge
+  coloured as an alarm rather than as one statistic among twenty. Admin-only, like
+  the rest of the data-plane block.
+
+### What to do when the counter moves
+
+**Any** movement is worth looking at. No legitimate traffic chains eight
+extension headers — not tunnels, not IPsec, not Mobile IPv6. A non-zero value is
+either somebody probing your parser or an attack already routing around your
+filter, and the two look identical until you check the source.
+
+1. **Confirm the scale.** Compare `filter_bypass_packets_total` against
+   `kapkan_dataplane_packets_total`. A few packets an hour is reconnaissance; a
+   sustained rate is the attack that reconnaissance was for. The bytes counter
+   separates the two faster than the packet counter does.
+2. **Find the source.** The datapath does not record it — the packet never
+   reached the victim lookup. Use flow telemetry (your sFlow/NetFlow exporters, or
+   `tcpdump 'ip6[6] == 0 or ip6[6] == 60'` on the ingress interface) to identify
+   the sources and destinations.
+3. **Filter it upstream.** This is the real remedy. An edge router ACL that drops
+   or rate-limits IPv6 packets by extension-header count enforces at a place with
+   a full parser, and it costs nothing on normal traffic. On most platforms the
+   knob is an IPv6 extension-header / hop-by-hop filter in the ingress ACL.
+4. **If you cannot filter upstream, alert and investigate.** Keep the Prometheus
+   alert on. Do not raise `KAPKAN_MAX_EXT_HDRS` hoping to parse further: the cap
+   exists because the verifier budget is finite, raising it moves the window
+   rather than closing it, and the same attacker adds one more header.
+
+### What will not help
+
+- **Turning on `drop_malformed`.** It does not apply. These packets are not
+  malformed — they parse correctly for as far as the parser goes, and
+  `drop_malformed` governs `pass_malformed`/`drop_malformed`, a different counter
+  and a different branch.
+- **Adding a rule.** There is no rule that catches this, because rule evaluation
+  is exactly what is being skipped. A destination-only catch-all does not fire;
+  that is measured above.
+
+---
+
+## 7. Quick triage
 
 | symptom | cause |
 |---|---|
@@ -452,6 +597,7 @@ from intent.
 | startup log: `REJECTED the existing pinned data plane and rebuilt it` | this binary's BPF object, map layout or `dataplane.limits` differ from the pinned ones, so they could not be adopted. Expected after an upgrade that changes `bpf/`; the cost is that dynamic rules from the previous process are gone and active attacks are re-mitigated on their next detection interval |
 | `/healthz` says `dataplane: DEGRADED (n/m interfaces attached)` | at least one configured interface has no live XDP attachment. Alert on `kapkan_dataplane_degraded`; the status code stays 200 because a restart cannot conjure a missing NIC |
 | a `dataplane` ban shows `fell_back_from: dataplane` and a blackhole route | the install failed and the ban degraded to its configured fallback, which is louder and safer than going unmitigated. The reason is in the log next to it — usually `ErrNoPolicySlots` (raise `dataplane.limits.max_dynamic_rules`) or `ErrNoProfileSlots` (more than 64 distinct live rate-limit rates) |
+| `pass_exthdr_cap` is non-zero, or `kapkan dataplane status` prints a FILTER BYPASSED block | packets carrying 8+ IPv6 extension headers are being forwarded with **no rule evaluated**. Not a parser statistic — treat it as possible evasion. See section 6 |
 | a ban's `dataplane.stale` is true in `/api/v1/bans` | the per-rule counters could not be read for more than three scrape intervals. The numbers shown are the last good ones, NOT zeros — the rules are still installed and still dropping; it is the *reading* that failed. Check the log for `reading in-kernel drop counters failed` |
 
 ---

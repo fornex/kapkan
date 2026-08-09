@@ -29,10 +29,14 @@ import (
 // the GLOBAL path; a leading "hostgroups." is stripped on lookup because a
 // hostgroup mirrors the global blocks. Values reference the typed constants so
 // a constant's string value cannot drift away from the schema unnoticed.
+//
+// carpet.mitigation goes one step further and reads the SAME list the validator
+// and Carpet.Method use, so the schema (and therefore the config builder) cannot
+// offer a method the engine would reject, or omit one it accepts.
 var enumValues = map[string][]string{
 	"mitigation":             {string(MitigateBlackhole), string(MitigateFlowSpec), string(MitigateDivert), string(MitigateDataplane)},
 	"ban.fallback":           {"none", string(MitigateBlackhole)},
-	"carpet.mitigation":      {string(MitigateFlowSpec), string(MitigateBlackhole)},
+	"carpet.mitigation":      methodStrings(CarpetMethods()),
 	"flowspec.action":        {string(FlowSpecDiscard), string(FlowSpecRateLimit)},
 	"escalation.action":      {string(EscalateNone), string(EscalateDataplane), string(EscalateFlowSpec), string(EscalateDivert), string(EscalateBlackhole)},
 	"hostgroups.calculation": {string(CalcPerHost), string(CalcTotal)},
@@ -277,4 +281,13 @@ func lookupPattern(path string) (string, bool) {
 		return envNameRe.String(), true
 	}
 	return "", false
+}
+
+// methodStrings renders a method set as the schema's plain string enum.
+func methodStrings(ms []MitigationMethod) []string {
+	out := make([]string, len(ms))
+	for i, m := range ms {
+		out[i] = string(m)
+	}
+	return out
 }

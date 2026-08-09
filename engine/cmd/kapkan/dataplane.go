@@ -209,6 +209,14 @@ func renderStatus(dst io.Writer, doc statusDoc) {
 	w.printf("kapkan data plane: %s\n", headline(ins))
 	w.printf("%s\n", indentWrap(ins.Reason, "  ", 96))
 
+	// ABOVE everything else, including the pin path, and above the counter table
+	// this number also appears in. A filter bypass is the one thing in this
+	// report that says the operator's rules did not run at all, and it is
+	// small — a few thousand packets is a working evasion — so it loses every
+	// contest for attention against a drop counter in the millions. It gets the
+	// second-most-read position on the page, right under the verdict.
+	renderBypass(w, ins)
+
 	w.line("")
 	w.printf("  pin path   %s\n", ins.PinPath)
 	if ins.PinPathSource != "" {
@@ -311,6 +319,29 @@ func headline(ins dataplane.Inspection) string {
 	return s
 }
 
+// renderBypass prints the filter-bypass alarm, and prints nothing at all when
+// there is none — which is the normal case, so its presence in the output is
+// itself the signal.
+//
+// It is deliberately the loudest thing in the report. The failure mode being
+// designed against is an operator reading "ENFORCING", seeing healthy drop
+// counters, and never noticing the four-digit counter that means some fraction
+// of the attack walked straight past every rule.
+func renderBypass(w lineWriter, ins dataplane.Inspection) {
+	if !ins.HasBypass() {
+		return
+	}
+	w.line("")
+	w.line("  " + strings.Repeat("=", 94))
+	for _, b := range ins.Bypass {
+		w.printf("  !! FILTER BYPASSED — %s packets (%s) were PASSED WITHOUT ANY RULE BEING EVALUATED\n",
+			comma(b.Pkts), humanBytes(b.Bytes))
+		w.printf("     %s\n", strings.ToUpper(b.Reason))
+		w.printf("%s\n", hangWrap("     ", "     ", b.Message, 96))
+	}
+	w.line("  " + strings.Repeat("=", 94))
+}
+
 func renderAttachments(w lineWriter, ins dataplane.Inspection) {
 	if len(ins.Attachments) == 0 {
 		return
@@ -372,7 +403,15 @@ func renderCounters(w lineWriter, ins dataplane.Inspection) {
 		w.line("  (all zero — no packet has reached the program yet)")
 	}
 	for _, c := range l.Terminal {
-		w.printf("  %-22s %14s pkts  %12s\n", c.Name, comma(c.Pkts), humanBytes(c.Bytes))
+		// A bypass row is flagged where it is READ, not only in the banner
+		// above: an operator who scrolled to the counters and is comparing them
+		// against an interface counter must not have to remember which of the
+		// twenty-one names means "no rule ran".
+		mark := ""
+		if _, ok := dataplane.Stat(c.Index).BypassReason(); ok {
+			mark = "   << FILTER BYPASSED, see the top of this report"
+		}
+		w.printf("  %-22s %14s pkts  %12s%s\n", c.Name, comma(c.Pkts), humanBytes(c.Bytes), mark)
 	}
 	if len(l.Terminal) > 0 {
 		w.printf("  %s\n", strings.Repeat("-", 60))

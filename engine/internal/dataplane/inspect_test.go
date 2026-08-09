@@ -8,6 +8,7 @@ package dataplane
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -212,5 +213,67 @@ func TestInspectStatesAreDistinct(t *testing.T) {
 		if s != StateEnforcing && s.Enforcing() {
 			t.Errorf("%s.Enforcing() = true", s)
 		}
+	}
+}
+
+// TestBypassSignalsOnlyFireOnARealBypass is the false-positive/false-negative
+// gate on the loudest thing this report can say.
+//
+// A FILTER BYPASSED banner on a healthy box teaches an operator to ignore it,
+// and no banner on a box being evaded is the failure the whole feature exists to
+// prevent. Both directions are cheap to get wrong here, because the signal is
+// derived from a zero-suppressed list of counters that already dropped the
+// distinction between "zero" and "absent".
+func TestBypassSignalsOnlyFireOnARealBypass(t *testing.T) {
+	// A busy, entirely healthy data plane: millions of packets, several branches
+	// exercised, nothing bypassed. pass_vlan_depth is included deliberately — it
+	// is the other parse-limit pass and the nearest thing to a false positive.
+	var c [StatMax]Counter
+	c[StatPassDefault] = Counter{Pkts: 2044318, Bytes: 133000000}
+	c[StatDropStatic] = Counter{Pkts: 2962591, Bytes: 251964000}
+	c[StatPassVLANDepth] = Counter{Pkts: 88123, Bytes: 5640000}
+	c[StatDryRunWouldDrop] = Counter{Pkts: 4, Bytes: 256}
+
+	terminal, observation, total := splitCounters(c)
+	healthy := &LiveState{Terminal: terminal, Observation: observation, TerminalTotal: total}
+	if got := bypassSignals(healthy); len(got) != 0 {
+		t.Errorf("bypassSignals on a healthy data plane = %+v, want none — a banner that fires "+
+			"without a bypass trains operators to ignore the one that matters", got)
+	}
+	if (Inspection{Live: healthy, Bypass: bypassSignals(healthy)}).HasBypass() {
+		t.Error("HasBypass() is true with no bypass counter set")
+	}
+
+	// Now the cap fires. Small, as it is in practice — the counter does not have
+	// to be big to mean the filter was turned off for those packets.
+	c[StatPassExtHdrCap] = Counter{Pkts: 41207, Bytes: 5686566}
+	terminal, observation, total = splitCounters(c)
+	live := &LiveState{Terminal: terminal, Observation: observation, TerminalTotal: total}
+
+	got := bypassSignals(live)
+	if len(got) != 1 {
+		t.Fatalf("bypassSignals = %+v, want exactly one signal", got)
+	}
+	if got[0].Reason != "ipv6_exthdr_cap" || got[0].Stat != "pass_exthdr_cap" {
+		t.Errorf("signal = %+v, want reason ipv6_exthdr_cap / stat pass_exthdr_cap", got[0])
+	}
+	if got[0].Pkts != 41207 || got[0].Bytes != 5686566 {
+		t.Errorf("signal counters = %d pkts / %d bytes, want 41207/5686566", got[0].Pkts, got[0].Bytes)
+	}
+	// The message must name the threshold, because the operator's next action —
+	// writing an upstream ACL — needs the number, and the CLI and JSON both quote
+	// this one string.
+	if !strings.Contains(got[0].Message, strconv.Itoa(MaxIPv6ExtHdrs)) {
+		t.Errorf("message does not state the %d-header threshold: %q", MaxIPv6ExtHdrs, got[0].Message)
+	}
+	if !(Inspection{Live: live, Bypass: got}).HasBypass() {
+		t.Error("HasBypass() is false with a non-zero bypass counter")
+	}
+
+	// nil Live (schema skew, or maps that could not be decoded) must not panic
+	// and must not claim an all-clear it has no evidence for — it returns no
+	// signal, and the report says the contents were unreadable elsewhere.
+	if got := bypassSignals(nil); got != nil {
+		t.Errorf("bypassSignals(nil) = %+v, want nil", got)
 	}
 }

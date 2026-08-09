@@ -313,6 +313,12 @@ func InspectPins(dir string) (Inspection, error) {
 		return ins, err
 	}
 	ins.Live = live
+	// The filter-bypass alarm is derived here rather than left for the caller to
+	// spot in the counter table: a reader scanning twenty-one counters for the
+	// one that means "your rules were never consulted" will not find it, and the
+	// counter is small in an attack precisely because it does not have to be big
+	// to work.
+	ins.Bypass = bypassSignals(live)
 	if live.DryRun {
 		ins.Warnings = append(ins.Warnings, "DRY-RUN is set in kapkan_cfg: the datapath is rewriting "+
 			"every drop verdict into a pass, so nothing is actually being dropped. This is what the "+

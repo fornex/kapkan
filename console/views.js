@@ -226,6 +226,7 @@
 
     var children = [banner];
     children.push(dryRunBanner(ctx));   /* null when there is nothing to warn about */
+    children.push(filterBypassBanner(ctx)); /* likewise; above the traffic strip on purpose */
     children.push(trafficStrip(ctx));
     children.push(h("div", { class: "mt-6" }, statsGrid(ctx)));
 
@@ -287,6 +288,42 @@
         attrs: loud ? { role: "alert" } : null
       }, kids);
     }
+  }
+
+  /* ---------- FILTER-BYPASS BANNER ----------
+     The one signal on this dashboard that means the operator's rules did not
+     run. The data plane walks a bounded number of IPv6 extension headers; a
+     packet carrying more hits the cap and is FORWARDED without any rule being
+     evaluated — allow-list, drop rule and rate limit alike. The verdict is PASS
+     by charter (a parse budget must never become a default-deny), so being SEEN
+     is the entire mitigation.
+
+     Why a page-level banner and not just a counter in the data-plane card:
+     nothing legitimate chains eight extension headers, so any non-zero value is
+     worth a human's attention — but as one row among twenty-one parser
+     statistics it reads as noise, and it stays SMALL in a real attack. A few
+     thousand packets that skipped the filter will never win an attention
+     contest against a drop counter in the millions, so it is not made to
+     compete: it gets its own alert-role banner at the top of the page.
+
+     Returns null when there is nothing to say, so callers render it
+     unconditionally — the same contract as dryRunBanner.
+
+     ADMIN-ONLY by construction, not by an explicit role check: the verdict
+     counters ride in `status.dataplane`, which the API omits for a scoped
+     token. A viewer therefore sees nothing here rather than a claim this
+     console cannot substantiate. */
+  function filterBypassBanner(ctx) {
+    var dp = ctx.status.dataplane;
+    if (!dp || !dp.enabled || !dp.verdicts) return null;
+    var c = dp.verdicts["pass_exthdr_cap"];
+    var pkts = (c && c.packets) || 0;
+    if (!pkts) return null;
+    return h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+      w.icon("shield-alert"),
+      h("span", { class: "banner__txt", text: I.t("dp.bypass.banner", { n: I.abbr(pkts) }) }),
+      h("span", { class: "banner__more", text: I.t("dp.bypass.act") })
+    ]);
   }
 
   function recentMini(ctx) {
@@ -586,6 +623,7 @@
   w.Views = {
     overview: overview, attacks: attacks, bans: bans, hosts: hosts,
     attackCard: attackCard, statsGrid: statsGrid, trafficStrip: trafficStrip,
-    viewHead: viewHead, th: th, thNum: thNum, dryRunBanner: dryRunBanner
+    viewHead: viewHead, th: th, thNum: thNum, dryRunBanner: dryRunBanner,
+    filterBypassBanner: filterBypassBanner
   };
 })(window);

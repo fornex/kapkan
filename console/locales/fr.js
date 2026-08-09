@@ -275,6 +275,10 @@
       "se.dp.off": "Le plan de données noyau est désactivé",
       "se.dp.off.sub": "La mitigation n'est qu'annoncée aux pairs BGP. Activez dataplane dans la configuration du moteur pour rejeter le trafic d'attaque sur cette machine.",
       "se.dp.readerr": "Les compteurs n'ont pas pu être lus au dernier relevé : {t}",
+      "dp.bypass.banner": "FILTRE CONTOURNÉ : {n} paquets ont été laissés passer sans qu'aucune règle ne soit évaluée. Ils portaient plus d'en-têtes d'extension IPv6 que le plan de données n'en analyse (8) : l'analyse s'est arrêtée avant le parcours des règles.",
+      "dp.bypass.act": "Contournement possible.",
+      "dp.bypass.card": "FILTRE CONTOURNÉ : {n} paquets ont sauté tout le parcours des règles — plus de 8 en-têtes d'extension IPv6. Ils sont laissés passer et jamais rejetés, à dessein ; ce compteur est donc la seule chose qui les signale.",
+      "dp.bypass.tip": "Laissés passer sans qu'aucune règle soit évaluée — contournement du filtre possible.",
 
       "se.readonly": "La configuration est gérée dans le fichier de configuration du moteur ; cette console l'affiche en lecture seule."
     },

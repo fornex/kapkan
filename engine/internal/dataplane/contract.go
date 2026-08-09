@@ -23,6 +23,18 @@ const MapSchemaVersion = 1
 // and the datapath needs a single map lookup to evaluate it.
 const RulesPerPolicy = 8
 
+// MaxIPv6ExtHdrs is how many IPv6 extension headers the datapath's parser walks
+// before it gives up. It mirrors KAPKAN_MAX_EXT_HDRS in bpf/kapkan_xdp.c.
+//
+// It is a SECURITY-RELEVANT number, not a tuning knob, and that is why it is
+// restated on this side of the boundary instead of being left in C where only
+// the verifier ever reads it. A packet carrying this many extension headers is
+// passed on WITHOUT ANY RULE BEING EVALUATED — see BypassReason — so this
+// constant is the exact width of the datapath's blind spot, and
+// TestIPv6ExtHdrCapBoundary pins it against the compiled object in both
+// directions so it cannot move without somebody noticing.
+const MaxIPv6ExtHdrs = 8
+
 // Generations is the double-buffer depth of kapkan_policies and
 // kapkan_statics. Userspace fills the inactive half, then flips
 // kapkan_cfg[0].generation so a packet sees either the whole old rule set or
@@ -249,4 +261,32 @@ func (s Stat) String() string {
 		return "unknown"
 	}
 	return statNames[s]
+}
+
+// BypassReason reports whether s counts a FILTER BYPASS — a packet the datapath
+// forwarded without evaluating a single rule, because it hit a parse limit
+// before the rule scan ever started — and names the class if so.
+//
+// This is the one distinction in the counter block that is a security signal
+// rather than a statistic. Every other pass_* counter means "the rules were
+// consulted and none of them said drop". These mean "the rules were never
+// consulted at all", which is the shape of an evasion attempt: an attacker who
+// can construct a packet the parser gives up on has, for that packet, turned
+// the filter off. The verdict is still PASS and deliberately so — the charter
+// forbids a parse limit becoming a default-deny, because the same packet shape
+// arriving from a legitimate host must not be blackholed by a parser's
+// budget — so VISIBILITY is the entire mitigation, and it has to be loud.
+//
+// Only the IPv6 extension-header cap qualifies today. StatPassVLANDepth is the
+// other parse-limit pass and is deliberately NOT here: QinQ is ordinary traffic
+// on a carrier trunk, so that counter is non-zero on healthy boxes and an alarm
+// wired to it would be noise. Nothing legitimate chains eight IPv6 extension
+// headers, so any movement on this one is worth a human's attention.
+//
+// The returned string is a stable Prometheus label value; do not rename it.
+func (s Stat) BypassReason() (string, bool) {
+	if s == StatPassExtHdrCap {
+		return "ipv6_exthdr_cap", true
+	}
+	return "", false
 }

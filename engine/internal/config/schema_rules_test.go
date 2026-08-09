@@ -52,6 +52,26 @@ func TestParseAcceptsValidBase(t *testing.T) {
 	}
 }
 
+// TestParseAcceptsCarpetDataplane is the positive half of the two carpet
+// dataplane rejections below: with the block present and enabled, the method
+// parses AND resolves to the in-kernel mechanism. Without this, a validator
+// that rejected the method outright would still pass the rejection cases.
+func TestParseAcceptsCarpetDataplane(t *testing.T) {
+	yaml := validBase + "\ndataplane:\n  enabled: true\n  interfaces: [\"eth0\"]\n" +
+		"\ncarpet:\n  thresholds: {pps: 100000}\n  mitigation: dataplane\n"
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("carpet.mitigation: dataplane with an enabled data plane should parse, got: %v", err)
+	}
+	if got := cfg.Carpet.Method(); got != MitigateDataplane {
+		t.Fatalf("carpet method = %q, want %q", got, MitigateDataplane)
+	}
+	if got := cfg.Carpet.Method().Action(); got != EscalateDataplane {
+		t.Fatalf("carpet ladder action = %q, want %q — the operator asked for a surgical in-kernel "+
+			"drop of one vector and would have got a null route for the whole prefix", got, EscalateDataplane)
+	}
+}
+
 func TestParseRejectsCrossFieldViolations(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -199,6 +219,29 @@ api: {listen: "127.0.0.1:8080"}
 			name:    "carpet with an invalid mitigation method",
 			yaml:    validBase + "\ncarpet:\n  thresholds: {pps: 100000}\n  mitigation: bogus\n",
 			wantErr: "carpet.mitigation",
+		},
+		{
+			// divert is a valid method everywhere ELSE. A carpet ban covers a
+			// whole aggregation prefix, and diverting a /24 into a scrubbing
+			// centre is a routing decision an operator makes deliberately, not
+			// one a detector makes for them.
+			name:    "carpet cannot select divert",
+			yaml:    validBase + "\ncarpet:\n  thresholds: {pps: 100000}\n  mitigation: divert\n",
+			wantErr: "carpet.mitigation must be empty or one of",
+		},
+		{
+			// Accepting the method with no kernel to install into would mean
+			// every carpet install fails and falls back to blackholing the whole
+			// prefix — the widest outcome reached from the most surgical request.
+			name:    "carpet dataplane without a dataplane block",
+			yaml:    validBase + "\ncarpet:\n  thresholds: {pps: 100000}\n  mitigation: dataplane\n",
+			wantErr: "carpet.mitigation \"dataplane\" requires a dataplane block",
+		},
+		{
+			name: "carpet dataplane with the data plane switched off",
+			yaml: validBase + "\ndataplane:\n  enabled: false\n  interfaces: [\"eth0\"]\n" +
+				"\ncarpet:\n  thresholds: {pps: 100000}\n  mitigation: dataplane\n",
+			wantErr: "carpet.mitigation \"dataplane\" requires dataplane.enabled: true",
 		},
 		{
 			name: "duplicate boundary exporter",

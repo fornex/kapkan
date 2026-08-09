@@ -85,6 +85,15 @@ func (d *dpRecorder) lastInstall(t *testing.T) dpInstall {
 	return d.installs[len(d.installs)-1]
 }
 
+// allInstalls returns every recorded install in order, for tests that care
+// about WHICH victims were re-installed rather than how many times.
+func (d *dpRecorder) allInstalls(t *testing.T) []dpInstall {
+	t.Helper()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]dpInstall(nil), d.installs...)
+}
+
 func (d *dpRecorder) log() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()

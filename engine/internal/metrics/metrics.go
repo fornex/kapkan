@@ -349,6 +349,51 @@ var (
 		Help:      "Datapath observations that co-occur with a terminal verdict (dryrun_would_drop, pass_rule_expired, ...).",
 	}, []string{"kind"})
 
+	// DataplaneFilterBypassPacketsTotal is an ALARM, and the only counter in this
+	// file that is meant to page somebody.
+	//
+	// It counts packets the datapath forwarded WITHOUT EVALUATING A SINGLE RULE,
+	// because they hit a parser limit before the rule scan started. Every other
+	// pass_* verdict means "the rules ran and none said drop"; this one means the
+	// rules never ran. An attacker who can build such a packet has, for that
+	// packet, switched the filter off — allow-lists, drop rules and rate limits
+	// alike.
+	//
+	// reason="ipv6_exthdr_cap" is the one class today: eight or more IPv6
+	// extension headers, which is dataplane.MaxIPv6ExtHdrs. See
+	// dataplane.Stat.BypassReason for why that class and not the other parse
+	// limit, and engine/deploy/dataplane-operations.md for what to do about it.
+	//
+	// The packet is PASSED, not dropped, by charter — a parse budget must never
+	// become a default-deny — so this metric is the entire mitigation, and the
+	// alert threshold is zero:
+	//
+	//	sum(rate(kapkan_dataplane_filter_bypass_packets_total[5m])) > 0
+	//
+	// It DUPLICATES a series already published as
+	// kapkan_dataplane_packets_total{verdict="pass_exthdr_cap"}. That is
+	// deliberate and it is not a double count of traffic: packets_total still
+	// partitions the traffic exactly once, and this is a second, named view of
+	// one of its members, lifted out so an alert rule can name the thing it
+	// means instead of a parser statistic. Never add the two together.
+	DataplaneFilterBypassPacketsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "filter_bypass_packets_total",
+		Help:      "ALARM: packets PASSED without any rule being evaluated, because they hit a datapath parse limit (possible filter evasion). Alert on any non-zero rate.",
+	}, []string{"reason"})
+
+	// DataplaneFilterBypassBytesTotal is the byte accumulator for the above. It
+	// separates a probe from a flood: a handful of crafted packets an hour is
+	// somebody measuring your parser, and a sustained bitrate is the attack that
+	// measurement was for.
+	DataplaneFilterBypassBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "filter_bypass_bytes_total",
+		Help:      "Bytes PASSED without any rule being evaluated, by bypass reason.",
+	}, []string{"reason"})
+
 	// DataplaneRules is the number of rules the kernel is enforcing, split by
 	// mode exactly as mitigate.FlowSpecRules is — so "how much is real and how
 	// much is simulated" is the same question with the same answer shape whether
@@ -456,6 +501,30 @@ func AddDataplaneVerdict(verdict string, packets, bytes uint64) {
 func AddDataplaneObservation(kind string, packets uint64) {
 	if d := dpAdvance("obs/"+kind, packets); d > 0 {
 		DataplaneObservationsTotal.WithLabelValues(kind).Add(d)
+	}
+}
+
+// AddDataplaneFilterBypass publishes the absolute kernel counters for one
+// filter-bypass class, converting them to Prometheus counter deltas.
+//
+// It uses its own dpAdvance keys rather than sharing the verdict's, because the
+// same kernel counter feeds both this metric and packets_total and each needs
+// its own baseline; sharing one would make whichever published second see a zero
+// delta forever.
+// Unlike the verdict counters, both series are MATERIALISED on every call even
+// when nothing has moved, so a data plane that has never been bypassed publishes
+// an explicit zero rather than no series at all. That distinction is the whole
+// difference between a dashboard panel that says "0" and one that says "No
+// data" — and between an alert an operator trusts and one they cannot tell is
+// wired up.
+func AddDataplaneFilterBypass(reason string, packets, bytes uint64) {
+	pkts := DataplaneFilterBypassPacketsTotal.WithLabelValues(reason)
+	byts := DataplaneFilterBypassBytesTotal.WithLabelValues(reason)
+	if d := dpAdvance("byp.pkt/"+reason, packets); d > 0 {
+		pkts.Add(d)
+	}
+	if d := dpAdvance("byp.byt/"+reason, bytes); d > 0 {
+		byts.Add(d)
 	}
 }
 

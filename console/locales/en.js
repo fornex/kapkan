@@ -276,6 +276,10 @@
       "se.dp.off": "The in-kernel data plane is off",
       "se.dp.off.sub": "Mitigation is announced to BGP peers only. Enable dataplane in the engine config to drop attack traffic on this box.",
       "se.dp.readerr": "The counters could not be read on the last poll: {t}",
+      "dp.bypass.banner": "FILTER BYPASSED: {n} packets were passed with no rule evaluated at all. They carried more IPv6 extension headers than the data plane parses (8), so the parser gave up before the rule scan.",
+      "dp.bypass.act": "Treat it as possible evasion.",
+      "dp.bypass.card": "FILTER BYPASSED: {n} packets skipped the rule scan entirely — more than 8 IPv6 extension headers. They are passed and never dropped by design, so this counter is the only thing that reports them.",
+      "dp.bypass.tip": "Passed without any rule being evaluated — possible filter evasion.",
 
       "se.readonly": "Configuration is managed in the engine config file; this console shows it read-only."
     },

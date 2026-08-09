@@ -31,7 +31,8 @@ BPF_TEST_IMAGE ?= alpine:3.20
 BPF_BENCH_N ?= 300000
 
 .PHONY: build test lint bench run-dev clean console-sync schema \
-	dataplane-sync dataplane-test dataplane-bench
+	dataplane-sync dataplane-test dataplane-bench dataplane-matrix \
+	blockrate blockrate-fixtures
 
 # The operator console lives in the repository's top-level console/ folder; the Go
 # binary go:embeds internal/api/static. Copy console/ there before any compile
@@ -100,6 +101,46 @@ dataplane-test: console-sync
 		-v "$(CURDIR)/..:/w" -w /w/engine/internal/app \
 		$(BPF_TEST_IMAGE) /w/engine/.app.test -test.v -test.run 'MeasuredDropsReachTheAPI'
 	rm -f .dataplane.test .app.test
+	$(MAKE) blockrate
+
+# The pcap block-rate suite: the gate on every public pps/Gbps/percentage
+# figure. It is a THIRD package (internal/mitigate) because it is the only one
+# that can see the whole chain — detector, classifier, FlowSpec IR, kernel
+# encoder, installer — without an import cycle. Same container, same kernel.
+#
+# -timeout is raised because detection is driven through the engine's REAL
+# one-second evaluation loop: the window cannot be faked from outside the
+# package, so a few seconds of wall clock is the price of not stubbing the
+# detector out of its own regression suite.
+blockrate: console-sync
+	GOOS=linux GOARCH=$(BPF_TEST_ARCH) CGO_ENABLED=0 \
+		go test -c -o .blockrate.test ./internal/mitigate/
+	docker run --rm --privileged \
+		-v "$(CURDIR)/..:/w" -w /w/engine/internal/mitigate \
+		-e KAPKAN_BLOCKRATE=require \
+		$(BPF_TEST_IMAGE) /w/engine/.blockrate.test \
+		-test.v -test.timeout 10m -test.run 'TestPcapBlockRateSuite'
+	rm -f .blockrate.test
+
+# Boot 5.15, 6.1, 6.6 and 6.12 under QEMU and run the data-plane suite on each.
+#
+# `dataplane-test` above proves the program loads on WHATEVER kernel the host
+# happens to run — 6.12 on Docker Desktop, whatever the CI runner ships. This
+# target is the one that proves the DOCUMENTED FLOOR: the 5.15 in
+# deploy/dataplane-operations.md, config.example.yaml and manager_stub.go's
+# error string. See hack/kernel-matrix/README.md for how it works and why the
+# macOS loop is slow (no /dev/kvm, so the guests run under TCG).
+#
+# Not a prerequisite of anything: it pulls ~50MB of guest kernel per version
+# and takes tens of minutes without KVM. CI runs it per-kernel in parallel.
+dataplane-matrix:
+	./hack/kernel-matrix/run.sh
+
+# Regenerate the committed pcap fixtures from the catalog. Like the BPF object,
+# they are the artifact of record: committed, reviewed, and byte-compared by
+# TestCommittedFixturesMatchTheCatalog on every run, on every host.
+blockrate-fixtures:
+	go run ./internal/blockrate/cmd/mkfixtures internal/blockrate/testdata
 
 # Capacity numbers for the data plane, via the kernel's own PROG_TEST_RUN
 # repeat loop. Same container as dataplane-test. The absolute figures depend on
@@ -115,5 +156,5 @@ dataplane-bench:
 	rm -f .dataplane.test
 
 clean:
-	rm -f $(BINARY) .dataplane.test .app.test
+	rm -f $(BINARY) .dataplane.test .app.test .blockrate.test
 	rm -rf internal/api/static

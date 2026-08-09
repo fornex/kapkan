@@ -181,6 +181,15 @@ func (r *dataplaneReporter) publish(snap dataplane.Snapshot) {
 			continue
 		}
 		metrics.AddDataplaneVerdict(s.String(), c.Pkts, c.Bytes)
+		// A verdict that is also a FILTER BYPASS — the rules were never
+		// consulted, not consulted and satisfied — is republished under its own
+		// alarm-grade metric. Unconditionally, including at zero, so the series
+		// exists on a healthy box and an alert on it is visibly wired up rather
+		// than merely never firing. It is a second view of a counter already in
+		// packets_total, not extra traffic; see the metric's own comment.
+		if reason, ok := s.BypassReason(); ok {
+			metrics.AddDataplaneFilterBypass(reason, c.Pkts, c.Bytes)
+		}
 	}
 	metrics.DataplanePolicyGeneration.Set(float64(snap.Generation))
 	for _, mp := range snap.Maps {

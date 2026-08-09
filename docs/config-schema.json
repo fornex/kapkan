@@ -233,7 +233,8 @@
         "mitigation": {
           "enum": [
             "flowspec",
-            "blackhole"
+            "blackhole",
+            "dataplane"
           ],
           "type": "string"
         },

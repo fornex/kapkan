@@ -57,6 +57,9 @@ func TestSchemaEnumsPresent(t *testing.T) {
 	for _, segs := range [][]string{
 		{"mitigation"},
 		{"ban", "fallback"},
+		// Generated from CarpetMethods() rather than a literal, so it is the one
+		// enum that could degrade to free text through a code change alone.
+		{"carpet", "mitigation"},
 		{"flowspec", "action"},
 		{"escalation", "action"},
 		{"hostgroups", "calculation"},

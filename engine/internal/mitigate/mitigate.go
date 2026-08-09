@@ -514,11 +514,17 @@ func (m *Mitigator) OnAttackOngoing(ev engine.Event) {
 // renewDataplaneLocked re-installs the kernel rules of every active data-plane
 // ban whose in-kernel deadline is closer than half a TTL.
 //
-// It walks the ban table rather than only the refreshed ban because the two are
+// It walks the ban tableS rather than only the refreshed ban because the two are
 // not the same set: a multi-vector attack refreshes one target while another
 // stays banned on its own heartbeat, and a ban whose heartbeats stop is supposed
 // to lapse — which it still does, because this only renews bans the sweep has
 // not yet expired.
+//
+// BOTH tables. Carpet (prefix) bans install exactly the same kernel rules with
+// exactly the same boot-clock deadline, so leaving them out of the walk would
+// reintroduce the bug this function exists to fix — an attack outlasting
+// ban.ttl_seconds silently stops being dropped while the API still reports an
+// active ban — for the widest rules the product installs.
 //
 // A failure here is logged and left alone rather than escalated. The ban is
 // already active and already installed; the next heartbeat retries, and if the
@@ -533,20 +539,42 @@ func (m *Mitigator) renewDataplaneLocked(now time.Time, cfg *config.Config) {
 	if ttl <= 0 {
 		return
 	}
-	for _, b := range m.bans {
+	renew := func(b *Ban) {
 		if b.State != BanActive || b.Method != config.MitigateDataplane || b.DryRun {
-			continue
+			return
 		}
 		if now.Sub(b.dpInstalledAt) < ttl/2 {
-			continue
+			return
 		}
 		if err := m.installDataplaneLocked(b, b.Route); err != nil {
 			m.log.Error("renewing the in-kernel deadline failed; the rules keep their previous "+
 				"deadline and will stop applying when it passes. The next heartbeat retries",
-				"target", b.Target.String(), "err", err)
-			continue
+				"target", b.Target.String(), "prefix", b.Prefix.String(), "err", err)
+			return
 		}
 		b.dpInstalledAt = now
+	}
+	for _, b := range m.bans {
+		if cfg.IsWhitelisted(b.Target) {
+			continue
+		}
+		renew(b)
+	}
+	for _, b := range m.prefixBans {
+		// The whitelist is absolute, and a reload can add a protected member
+		// into an already-banned prefix. banPrefix refuses such a prefix at
+		// creation and the sweep withdraws it on its next tick, so this is not
+		// a hole — the protected host is also immune through the kernel's own
+		// precedence-2 map. But renewal walks EVERY ban while OnAttackOngoing
+		// only re-checks the prefix whose heartbeat arrived, so without this a
+		// neighbouring prefix's heartbeat would push a fresh deadline onto a
+		// rule the whitelist has already disqualified. Extending the life of a
+		// rule we are about to withdraw is not something to leave implicit in a
+		// safety guarantee this product states without qualification.
+		if cfg.PrefixContainsWhitelisted(b.Prefix) {
+			continue
+		}
+		renew(b)
 	}
 }
 
@@ -800,10 +828,17 @@ func (m *Mitigator) banPrefix(p netip.Prefix, opts banOpts) *Ban {
 	}
 
 	g := &cfg.Groups[0] // global group: source of the blackhole BGP attributes
-	action := config.EscalateBlackhole
-	if method == config.MitigateFlowSpec {
-		action = config.EscalateFlowSpec
-	}
+	// The method -> action mapping is config's, not a local two-way branch.
+	//
+	// It used to be one: `action := EscalateBlackhole; if method == flowspec {
+	// action = EscalateFlowSpec }`. That is fine for exactly two methods and
+	// catastrophic for three — a third method reached the `else` and was
+	// BLACKHOLED. On this path the target is an aggregation prefix, so the
+	// silent wrong method takes 256 addresses (v4) or 2^80 (v6) offline in
+	// answer to a request for a surgical drop. TestCarpetMethodActionMapping
+	// walks config.CarpetMethods() and fails if any method ever maps to the
+	// wrong mechanism again.
+	stages := []config.EscalationStage{{AfterSeconds: 0, Action: method.Action()}}
 	b := &Ban{
 		Target:     p.Addr(),
 		Prefix:     p,
@@ -814,14 +849,21 @@ func (m *Mitigator) banPrefix(p netip.Prefix, opts banOpts) *Ban {
 		DryRun:     cfg.DryRun,
 		StartedAt:  now,
 		ExpiresAt:  now.Add(cfg.Ban.TTL()),
-		Escalation: []config.EscalationStage{{AfterSeconds: 0, Action: action}},
+		Escalation: stages,
 	}
-	// Freeze blackhole attributes when the method is blackhole OR a flowspec
-	// fallback may degrade to it (the prefix is already whitelist-free).
+	// Freeze blackhole attributes when the rung IS a blackhole, or when a
+	// surgical rung (flowspec / dataplane) may degrade to one (the prefix is
+	// already whitelist-free). Reads b.Escalation, so it must follow it.
 	freezeUnicastAttrs(b, g, p.Addr(), cfg)
-	if method == config.MitigateFlowSpec {
-		// Vector-anchored on the whole prefix: drops only the attack vector to
-		// the /24, sparing non-vector traffic. The prefix is whitelist-free.
+	// The generated rules are the IR for BOTH surgical rungs, exactly as on the
+	// host path in ban(): bgp.go encodes them as FlowSpec NLRI and dpencode.go
+	// compiles them into kernel rules. Gating this on the same ladder predicates
+	// the host path uses — rather than on a second, separately-maintained
+	// comparison against `method` — is what keeps "the validator accepted it"
+	// and "the enforcement mechanism got its input" from ever disagreeing.
+	// Vector-anchored on the whole prefix: drops only the attack vector to the
+	// /24, sparing non-vector traffic to its other hosts.
+	if ladderUsesFlowSpec(stages) || ladderUsesDataplane(stages) {
 		b.FlowSpec = generateCarpetRules(p, opts.classification, opts.sample, config.FlowSpecDiscard, 0)
 	}
 
