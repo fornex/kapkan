@@ -857,3 +857,116 @@ func TestSustainedAttackRenewsTheKernelDeadline(t *testing.T) {
 		t.Errorf("withdraws after the heartbeats stopped = %d, want 1", dp.withdrawCount())
 	}
 }
+
+// TestDryRunRenewalInstallsNothing is the dry-run gate on the RENEWAL path.
+//
+// TestDryRunInstallsNothing covers the install and the withdraw, and
+// TestDryRunGateIsAboveTheDataplaneBranch pins the gate's position inside
+// announceMethodLocked — but renewal does not go through announceMethodLocked.
+// It reads the ban's own frozen DryRun flag and that check is the only thing
+// standing between a dry run and a real map write, because a dry-run ban never
+// set dpInstalledAt, so the TTL/2 throttle is wide open on every heartbeat.
+// Reading the ban rather than the live config is also what makes a reload that
+// turns dry-run off mid-ban unable to "renew" rules that were never installed.
+func TestDryRunRenewalInstallsNothing(t *testing.T) {
+	clk := &mockClock{t: time.Now()}
+	dp := &dpRecorder{}
+	yaml := strings.Replace(dpYAML(""), "dry_run: false\n", "dry_run: true\n", 1)
+	m, _ := newDataplaneMitigator(t, yaml, dp, clk)
+
+	b := m.OnAttackStarted(startedEvent("203.0.113.5"))
+	if b.Method != config.MitigateDataplane || !b.DryRun {
+		t.Fatalf("ban = method %q dry_run %v, want a dry-run dataplane ban", b.Method, b.DryRun)
+	}
+	// Two full TTLs of heartbeats: four renewal windows, every one of which a
+	// live ban would have re-installed in.
+	ttl := m.store.Get().Ban.TTL()
+	for i := 0; i < 8; i++ {
+		clk.Advance(ttl / 4)
+		m.OnAttackOngoing(ongoingEvent("203.0.113.5"))
+	}
+
+	if n := dp.installCount(); n != 0 {
+		t.Fatalf("DRY-RUN INSTALLED %d rule sets into the kernel through the renewal path", n)
+	}
+	if ev := dp.log(); len(ev) != 0 {
+		t.Fatalf("DRY-RUN touched the data plane: %v", ev)
+	}
+}
+
+// TestRenewalFailureKeepsTheBanAndRetries pins what a FAILED renewal does, which
+// is a different answer from a failed first install and deliberately so.
+//
+// A first install that fails means the victim has nothing, so the ban degrades to
+// a blackhole (TestInstallFailureFallsBackToBlackhole). A renewal that fails
+// means the victim still has live rules, good for about another half TTL, so
+// escalating would take a customer's traffic offline over one transient map
+// write. The ban therefore stays exactly where it is — and because dpInstalledAt
+// is only advanced on success, the NEXT heartbeat retries instead of waiting a
+// further TTL/2 and spending most of the margin that made leaving it alone safe.
+func TestRenewalFailureKeepsTheBanAndRetries(t *testing.T) {
+	clk := &mockClock{t: time.Now()}
+	dp := &dpRecorder{}
+	m, _ := newDataplaneMitigator(t, dpYAML(""), dp, clk)
+
+	m.OnAttackStarted(startedEvent("203.0.113.5"))
+	if dp.installCount() != 1 {
+		t.Fatalf("installs = %d, want 1", dp.installCount())
+	}
+	ttl := m.store.Get().Ban.TTL()
+
+	// Past the throttle, with the backend refusing.
+	dp.failWith = dataplane.ErrNoPolicySlots
+	clk.Advance(ttl/2 + time.Second)
+	m.OnAttackOngoing(ongoingEvent("203.0.113.5"))
+	if n := dp.installCount(); n != 1 {
+		t.Fatalf("successful installs = %d, want 1: the failed renewal was recorded as one", n)
+	}
+	b := dpBanOf(t, m, "203.0.113.5")
+	if b.State != BanActive || b.Method != config.MitigateDataplane {
+		t.Errorf("after a failed renewal the ban is %s/%q, want active on %q: the rules it already "+
+			"has are live for another half TTL, so one failed map write must not move the victim "+
+			"onto a blackhole", b.State, b.Method, config.MitigateDataplane)
+	}
+	if dp.withdrawCount() != 0 {
+		t.Errorf("a failed renewal withdrew %d times; that would leave the victim with nothing at "+
+			"all, mid-attack", dp.withdrawCount())
+	}
+
+	// The very next heartbeat retries, and this time the backend is healthy.
+	dp.failWith = nil
+	clk.Advance(time.Second)
+	m.OnAttackOngoing(ongoingEvent("203.0.113.5"))
+	if n := dp.installCount(); n != 2 {
+		t.Fatalf("installs = %d after the backend recovered, want 2: a failed renewal must not "+
+			"start the throttle clock, or a transient error costs half a TTL of margin", n)
+	}
+	if got := dp.lastInstall(t).rules.TTL; got < ttl-time.Minute {
+		t.Errorf("retried window = %s, want a fresh full ~%s", got, ttl)
+	}
+
+	// And the successful retry DOES re-arm the throttle: the rest of the attack
+	// must not rewrite the victim's policy block once per heartbeat.
+	for i := 0; i < 5; i++ {
+		clk.Advance(time.Second)
+		m.OnAttackOngoing(ongoingEvent("203.0.113.5"))
+	}
+	if n := dp.installCount(); n != 2 {
+		t.Errorf("installs = %d after 5 more heartbeats, want 2: a successful renewal must reset "+
+			"the TTL/2 throttle", n)
+	}
+}
+
+// dpBanOf returns the live ban for target. Snapshot() is ordered by start time,
+// which is not an index a test should depend on.
+func dpBanOf(t *testing.T, m *Mitigator, target string) Ban {
+	t.Helper()
+	want := netip.MustParseAddr(target)
+	for _, b := range m.Snapshot() {
+		if b.Target == want {
+			return b
+		}
+	}
+	t.Fatalf("no ban for %s", target)
+	return Ban{}
+}
