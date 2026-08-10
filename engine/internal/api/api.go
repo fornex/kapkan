@@ -635,10 +635,44 @@ func (s *Server) handleAttacks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Unlock()
+	// Outside s.mu: this reads engine state, and no invariant needs the two held
+	// together. Ended attacks are not touched — RecordAttackEnded already gave
+	// them the engine's final measurement.
+	for i := range active {
+		s.refreshRates(&active[i])
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"active": active,
 		"recent": recent,
 	})
+}
+
+// refreshRates replaces a LIVE attack's measurement with the engine's current
+// one, for the same reason handleAttacks joins the live Dataplane: the record
+// was stamped at detection, and detection fires on the FIRST sliding window that
+// crossed the threshold — necessarily the window holding the least data. That
+// makes the frozen rate an underestimate of a sustained attack by up to the
+// window length (5x at the default window, more when the exporter's first
+// datagram landed mid-second), and nothing ever rewrote it: the engine's
+// AttackOngoing heartbeats go to mitigation, not here. So an attack that ran for
+// minutes reported its first, weakest second forever.
+//
+// Metric and Threshold stay frozen on purpose. They name what tripped, and the
+// engine judges the attack's end against the thresholds captured at its start,
+// so re-deriving either here would make the pair disagree with the decision
+// actually being taken. rate is re-read for the frozen metric, which keeps
+// rate-vs-threshold a live comparison of the quantity that fired.
+//
+// An attack whose scope the engine no longer tracks (an evicted host, a group a
+// reload removed) keeps its snapshot: stale is better than a zero that reads as
+// "the attack stopped".
+func (s *Server) refreshRates(a *Attack) {
+	r, ok := s.eng.LiveRates(a.Scope, a.Target, a.Group, a.Direction)
+	if !ok {
+		return
+	}
+	a.Rates = r
+	a.Rate = r.For(a.Metric)
 }
 
 func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {

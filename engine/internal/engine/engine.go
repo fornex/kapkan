@@ -199,6 +199,16 @@ type Engine struct {
 	// only for prefixes currently in (or ending) a carpet attack.
 	carpets map[netip.Prefix]*carpetState
 
+	// liveGroups / liveCarpets republish, once per tick, the measurements
+	// evalTick computed for the two scopes whose state it owns without a lock,
+	// so readers on other goroutines (the API's attack view, via LiveRates) can
+	// see a current rate without touching that state. Replaced wholesale under
+	// liveMu, which keeps the write short and readers copy-free. Host rates need
+	// no such copy: the shard lock already makes them readable anywhere.
+	liveMu      sync.RWMutex
+	liveGroups  map[string][2]Rates
+	liveCarpets map[netip.Addr]Rates // keyed by the aggregation prefix's network address
+
 	// geo optionally attributes sample sources to ASN/country. nil disables
 	// enrichment; the resolver is read-only and safe for concurrent use.
 	geo geoip.Resolver
@@ -674,8 +684,73 @@ func (e *Engine) evalTick(now time.Time) {
 		e.closeAllCarpets(now)
 	}
 
+	e.publishLiveRates()
+
 	metrics.ActiveAttacks.Set(float64(active))
 	metrics.TrackedHosts.Set(float64(tracked))
+}
+
+// publishLiveRates republishes this tick's group and carpet measurements for
+// readers outside the Run goroutine. A prefix that carried no traffic this tick
+// keeps its last nonzero measurement, exactly as e.carpets does — its attack is
+// in the hysteresis tail and evalCarpets has not recorded a new number for it.
+func (e *Engine) publishLiveRates() {
+	groups := make(map[string][2]Rates, len(e.groups))
+	for name, gs := range e.groups {
+		groups[name] = gs.lastRates
+	}
+	carpets := make(map[netip.Addr]Rates, len(e.carpets))
+	for prefix, cs := range e.carpets {
+		carpets[prefix.Addr()] = cs.lastRates
+	}
+	e.liveMu.Lock()
+	e.liveGroups, e.liveCarpets = groups, carpets
+	e.liveMu.Unlock()
+}
+
+// LiveRates returns the engine's CURRENT measurement for one attack's scope, so
+// a consumer holding a record stamped at detection can replace the frozen
+// numbers on it. Detection necessarily fires on the first sliding window that
+// crosses a threshold — the window with the least data in it — so a
+// detection-time rate understates a sustained attack by up to the window length
+// and never converges on its own (see windowedRates).
+//
+// target identifies a host (ScopeHost) or an aggregation prefix's network
+// address (ScopePrefix); group names a total hostgroup (ScopeGroup). ok is false
+// when the scope is no longer tracked — an evicted host, a group or prefix a
+// reload removed — in which case the caller should keep what it has rather than
+// report a zero. A tracked scope with no traffic in the window reports zero
+// rates with ok true: for an attack still active that is the truth, its
+// hysteresis tail.
+func (e *Engine) LiveRates(scope Scope, target netip.Addr, group string, dir Direction) (Rates, bool) {
+	switch scope {
+	case ScopeGroup:
+		e.liveMu.RLock()
+		defer e.liveMu.RUnlock()
+		r, ok := e.liveGroups[group]
+		if !ok {
+			return Rates{}, false
+		}
+		return r[dirIndex(dir)], true
+	case ScopePrefix:
+		e.liveMu.RLock()
+		defer e.liveMu.RUnlock()
+		r, ok := e.liveCarpets[target]
+		return r, ok // carpet detection is incoming-only
+	default:
+		sh := e.shardFor(target)
+		sh.mu.Lock()
+		defer sh.mu.Unlock()
+		hs := sh.hosts[target]
+		if hs == nil {
+			return Rates{}, false
+		}
+		in, out, _ := e.windowedRates(hs, e.now().Unix())
+		if dir == DirOutgoing {
+			return out, true
+		}
+		return in, true
+	}
 }
 
 // evalGroups runs the per-direction attack lifecycle for every
@@ -1084,6 +1159,11 @@ func evaluate(r Rates, th config.Thresholds) (Metric, float64, float64, bool) {
 	}
 	return "", 0, 0, false
 }
+
+// For returns the component of r that metric m measures — how a consumer
+// re-derives an attack's headline rate after replacing its measurement with a
+// fresher one. An unknown metric falls back to total pps.
+func (r Rates) For(m Metric) float64 { return rateFor(r, m) }
 
 // rateFor returns the component of r selected by m.
 func rateFor(r Rates, m Metric) float64 {
