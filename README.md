@@ -465,7 +465,8 @@ Prometheus metrics under the `kapkan_` namespace, including: `ingest_flows_total
 protocol), `ingest_packets_total` (by exporter/protocol), `ingest_decode_errors_total`,
 `engine_active_attacks`, `engine_attacks_total`, `engine_process_latency_seconds`,
 `engine_tracked_hosts`, `mitigate_announced_routes` (by `real`/`dry_run` mode),
-`mitigate_flowspec_rules` (by mode), `mitigate_bans_rejected_total`,
+`mitigate_flowspec_rules` (by mode), `mitigate_dataplane_bans` and
+`mitigate_dataplane_rules` (by mode, for the local XDP rung), `mitigate_bans_rejected_total`,
 `notify_notifications_total` (by channel/result), and `storage_rows_total` (by table and
 `written`/`dropped`/`error`).
 

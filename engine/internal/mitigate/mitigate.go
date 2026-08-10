@@ -1584,17 +1584,41 @@ func famLabel(a netip.Addr) string {
 	return "ipv4"
 }
 
-// updateGaugeLocked recomputes the announced-route and FlowSpec-rule gauges.
+// updateGaugeLocked recomputes the announced-route, FlowSpec-rule and
+// data-plane gauges.
+//
 // Each ban is counted into its OWN mode bucket (real|dry_run) using the DryRun
 // frozen on it at creation — never a caller-supplied mode — so a config reload
 // that flips dry_run cannot misfile a live ban, and a mix of real and dry-run
 // bans (possible across such a reload) is reported correctly. Both buckets are
 // always set so a flip leaves no stale value behind.
+//
+// A ban is counted against exactly ONE enforcement point, chosen by the rung it
+// is currently on. The `dataplane` rung installs into this box's NIC and asks no
+// peer for anything, so it must not land in announced_routes: that gauge's name
+// is a claim about the RIB, and an operator reading it during an incident is
+// asking "what have my upstreams been told?". Its own pair of gauges answers the
+// local question instead.
 func (m *Mitigator) updateGaugeLocked() {
 	var realBans, realFS, dryBans, dryFS int
+	var realDPBans, realDPRules, dryDPBans, dryDPRules int
 	count := func(b *Ban) {
 		if b.State != BanActive || b.Method == "" {
-			// Withdrawn/rejected bans and alert-only rungs announce no route.
+			// Withdrawn/rejected bans and alert-only rungs enforce nothing.
+			return
+		}
+		if b.Method == config.MitigateDataplane {
+			// Enforced locally in the kernel; nothing is announced to any peer.
+			// installDataplaneLocked compiles b.FlowSpec 1:1 into rule specs
+			// (dataplaneRules never expands or collapses a rule), so the ban's
+			// own rule list IS the count that reached the policy block.
+			if b.DryRun {
+				dryDPBans++
+				dryDPRules += len(b.FlowSpec)
+			} else {
+				realDPBans++
+				realDPRules += len(b.FlowSpec)
+			}
 			return
 		}
 		// Count rules only for bans CURRENTLY on FlowSpec; a ban that merely
@@ -1623,6 +1647,12 @@ func (m *Mitigator) updateGaugeLocked() {
 	// footprint so operators can alert before an upstream's rule limit.
 	metrics.FlowSpecRules.WithLabelValues("real").Set(float64(realFS))
 	metrics.FlowSpecRules.WithLabelValues("dry_run").Set(float64(dryFS))
+	// Same shape one layer down: bans on the local XDP rung, and the rules they
+	// put in the kernel to watch against dataplane.limits.max_dynamic_rules.
+	metrics.MitigateDataplaneBans.WithLabelValues("real").Set(float64(realDPBans))
+	metrics.MitigateDataplaneBans.WithLabelValues("dry_run").Set(float64(dryDPBans))
+	metrics.MitigateDataplaneRules.WithLabelValues("real").Set(float64(realDPRules))
+	metrics.MitigateDataplaneRules.WithLabelValues("dry_run").Set(float64(dryDPRules))
 }
 
 // ActiveBans returns the currently active bans, sorted by target.

@@ -201,7 +201,7 @@
       "id": 4,
       "type": "stat",
       "title": "Announced routes (real)",
-      "description": "Blackhole routes actually announced (mode=real).",
+      "description": "Blackhole routes actually announced (mode=real). Peer-enforced rungs only (blackhole/divert/flowspec) \u2014 bans on the local dataplane rung are in kapkan_mitigate_dataplane_bans.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -828,7 +828,7 @@
       "id": 17,
       "type": "timeseries",
       "title": "Announced routes by mode",
-      "description": "Blackhole routes announced, real vs dry_run (kapkan_mitigate_announced_routes).",
+      "description": "Blackhole routes announced, real vs dry_run (kapkan_mitigate_announced_routes). Counts only rungs that ask a peer to enforce something; the local dataplane rung announces nothing and is graphed separately.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1045,6 +1045,116 @@
       ]
     },
     {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Data-plane bans by mode",
+      "description": "Bans enforced by this host's own XDP data plane rather than by an upstream, real vs dry_run (kapkan_mitigate_dataplane_bans). These announce nothing to any peer and keep filtering through a BGP outage, which is why they are absent from announced routes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 54
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "kapkan_mitigate_dataplane_bans",
+          "refId": "A",
+          "legendFormat": "{{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Data-plane rules by mode (mitigator)",
+      "description": "Rules the mitigator believes it installed, attributed to the bans that own them, real vs dry_run (kapkan_mitigate_dataplane_rules). A ban contributes 1 rule for a cleanly classified single-vector attack and up to 8 for a mixed or unclassified one. Watch it against dataplane.limits.max_dynamic_rules. In real mode it should track the dynamic half of 'Rules in kernel by mode' \u2014 compare them, never sum them. In dry_run mode the two diverge by design: nothing is installed, so this reports intent while the measured gauge stays at zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 54
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "axisPlacement": "auto"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "kapkan_mitigate_dataplane_rules",
+          "refId": "A",
+          "legendFormat": "{{mode}}"
+        }
+      ]
+    },
+    {
       "id": 24,
       "type": "row",
       "title": "Data plane",
@@ -1053,7 +1163,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 62
       },
       "panels": []
     },
@@ -1070,7 +1180,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 55
+        "y": 63
       },
       "fieldConfig": {
         "defaults": {
@@ -1119,8 +1229,8 @@
     {
       "id": 26,
       "type": "timeseries",
-      "title": "Data-plane rules by mode",
-      "description": "Rules installed in the kernel, real vs dry_run (kapkan_dataplane_rules). dry_run is read back from the datapath, not from the config file \u2014 an adopted pin set can be running the previous process's flag.",
+      "title": "Rules in kernel by mode (measured total)",
+      "description": "All rules the kernel is actually running \u2014 config statics plus the mitigator's dynamic rules \u2014 real vs dry_run (kapkan_dataplane_rules). dry_run is read back from the datapath, not from the config file: an adopted pin set can be running the previous process's flag. In real mode its dynamic half should track 'Data-plane rules by mode (mitigator)', and a lasting gap there means a withdraw failed or the kernel expired rules under a still-active ban. Under dry_run nothing is installed, so the dynamic half is zero by design.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1129,7 +1239,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 55
+        "y": 63
       },
       "fieldConfig": {
         "defaults": {
@@ -1184,7 +1294,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 63
+        "y": 71
       },
       "fieldConfig": {
         "defaults": {
@@ -1239,7 +1349,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 63
+        "y": 71
       },
       "fieldConfig": {
         "defaults": {
@@ -1294,7 +1404,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 63
+        "y": 71
       },
       "fieldConfig": {
         "defaults": {
@@ -1349,7 +1459,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 70
+        "y": 78
       },
       "fieldConfig": {
         "defaults": {
@@ -1422,7 +1532,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 70
+        "y": 78
       },
       "fieldConfig": {
         "defaults": {
@@ -1473,7 +1583,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 78
+        "y": 86
       },
       "panels": []
     },
@@ -1490,7 +1600,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 79
+        "y": 87
       },
       "fieldConfig": {
         "defaults": {
@@ -1545,7 +1655,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 79
+        "y": 87
       },
       "fieldConfig": {
         "defaults": {

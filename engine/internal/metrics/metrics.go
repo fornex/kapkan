@@ -113,6 +113,12 @@ var (
 var (
 	// AnnouncedRoutes is the number of currently announced (or, in dry-run,
 	// virtually announced) blackhole routes.
+	//
+	// It counts only the rungs that ask a PEER to enforce something — blackhole,
+	// divert, flowspec. A `dataplane` rung enforces on this box's own NIC and
+	// announces nothing to anybody, so counting it here would inflate a gauge
+	// whose name is a claim about the RIB; those bans are in
+	// MitigateDataplaneBans.
 	AnnouncedRoutes = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "kapkan",
 		Subsystem: "mitigate",
@@ -151,6 +157,50 @@ var (
 		Subsystem: "mitigate",
 		Name:      "flowspec_rules",
 		Help:      "FlowSpec rules currently announced, by mode (real|dry_run).",
+	}, []string{"mode"})
+
+	// MitigateDataplaneBans is AnnouncedRoutes' counterpart for the `dataplane` rung:
+	// bans currently enforced by THIS box's XDP data plane rather than by an
+	// upstream. Split out rather than folded into AnnouncedRoutes because the
+	// operational question differs — an announced route can be rejected or
+	// filtered by the peer and is only as good as the session, while these are
+	// enforced locally and survive a BGP outage entirely.
+	//
+	// mode is the BAN's frozen dry-run flag, matching AnnouncedRoutes. Note that
+	// a dry-run ban never reaches the installer at all (announceMethodLocked
+	// returns before it), so mode="dry_run" here means "would have installed",
+	// exactly as it means "would have announced" on the other gauges.
+	MitigateDataplaneBans = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "mitigate",
+		Name:      "dataplane_bans",
+		Help:      "Bans currently enforced by the local XDP data plane, by mode (real|dry_run).",
+	}, []string{"mode"})
+
+	// MitigateDataplaneRules is FlowSpecRules' counterpart for the `dataplane`
+	// rung: the rules those bans installed into the kernel. One ban carries
+	// several rules, so this exceeds MitigateDataplaneBans — watch it against
+	// dataplane.limits.max_dynamic_rules the way flowspec_rules is watched
+	// against an upstream's route limit.
+	//
+	// This is the MITIGATOR's account of what it INTENDED, keyed by the ban that
+	// owns it and filed under that ban's frozen dry-run flag. DataplaneRules is
+	// the MEASURED total actually in the kernel maps (statics included), filed
+	// under the datapath's own flag.
+	//
+	// The two agree only under mode="real". Under dry-run they diverge BY
+	// DESIGN and permanently: announceMethodLocked returns before the installer,
+	// so nothing enters the maps, and app/dpcounters skips dry-run bans outright
+	// — so this gauge reports the rules that WOULD have been installed while
+	// DataplaneRules' dynamic half stays flat at zero. Only the real bucket is
+	// worth alerting on; a real-mode divergence means a withdraw failed or the
+	// kernel expired rules out from under a ban that still believes it is
+	// mitigating.
+	MitigateDataplaneRules = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "mitigate",
+		Name:      "dataplane_rules",
+		Help:      "Rules installed in the local XDP data plane by active bans, by mode (real|dry_run).",
 	}, []string{"mode"})
 
 	// NotificationsTotal counts notification deliveries by channel and result.
@@ -403,11 +453,23 @@ var (
 	// global config's: an adopted pin set can be running the previous process's
 	// flag, and a rule count filed under the wrong mode would state the opposite
 	// of the truth about whether traffic is being dropped.
+	//
+	// This is the TOTAL — config statics plus the mitigator's dynamic rules —
+	// and it is measured, not intended: the static half is read back from
+	// kapkan_cfg and the dynamic half comes from the ban counter scraper's walk
+	// of the kernel maps. It answers "how many rules is this box actually
+	// running", which is the question that matters against the map sizing.
+	//
+	// MitigateDataplaneRules answers the neighbouring question — what the
+	// MITIGATOR believes it installed, attributed to the bans that own it — and
+	// its value should track this gauge's dynamic half. They are deliberately two
+	// gauges and not one: a lasting divergence is a real fault, and a single
+	// summed number is exactly where such a fault would hide.
 	DataplaneRules = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "kapkan",
 		Subsystem: "dataplane",
 		Name:      "rules",
-		Help:      "Rules currently installed in the kernel, by mode (real|dry_run).",
+		Help:      "Rules currently installed in the kernel (static + mitigator dynamic, as measured), by mode (real|dry_run).",
 	}, []string{"mode"})
 
 	// DataplanePolicyGeneration is the live half of the double buffer. It is not
