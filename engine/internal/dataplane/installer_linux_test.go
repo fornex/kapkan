@@ -179,6 +179,123 @@ func TestInKernelDeadlinePassesOnItsOwn(t *testing.T) {
 	}
 }
 
+// TestReinstallAdvancesTheInKernelDeadline is the KERNEL half of the renewal
+// mitigate.renewDataplaneLocked performs, and the half that sat uncovered: the
+// mitigator's own tests prove it calls Install again with a fresh full TTL, but
+// they prove it against a mock backend, and the test above proves only the
+// opposite direction (a rule past its deadline goes inert). What sits between
+// the two is the claim the whole renewal rests on — that a re-install MOVES the
+// deadline the kernel is enforcing, in place, without spending a second slot per
+// half TTL.
+//
+// The boot clock is driven by the test, so the arithmetic is exact rather than
+// "later than before" by however long the two calls took.
+func TestReinstallAdvancesTheInKernelDeadline(t *testing.T) {
+	const ttl = 600 * time.Second
+	m := mustOpen(t, testOptions(t, pinDir(t), "lo"))
+	inst := newInstaller(t, m)
+
+	bootNs := uint64(time.Hour) // an hour after boot
+	inst.bootNs = func() uint64 { return bootNs }
+
+	if err := inst.Install(instVictim, ntpRules(instVictim, ttl)); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	policyID := policyIDOf(t, inst, instVictim)
+	first := blockOf(t, m, policyID).Rules[0].ExpiresAtNs
+	if want := bootNs + uint64(ttl); first != want {
+		t.Fatalf("deadline = %d, want %d (boot clock + ttl)", first, want)
+	}
+
+	// Half a TTL in, the mitigator renews: same victim, same rules, a fresh full
+	// TTL rather than the ban's remaining time.
+	bootNs += uint64(ttl / 2)
+	if err := inst.Install(instVictim, ntpRules(instVictim, ttl)); err != nil {
+		t.Fatalf("re-Install: %v", err)
+	}
+
+	if got := policyIDOf(t, inst, instVictim); got != policyID {
+		t.Errorf("the renewal moved the victim from policy %d to %d; it is supposed to replace "+
+			"that victim's block in place, not spend a second slot per half TTL", policyID, got)
+	}
+	second := blockOf(t, m, policyID).Rules[0].ExpiresAtNs
+	if want := bootNs + uint64(ttl); second != want {
+		t.Errorf("renewed deadline = %d, want %d: a renewal that hands the kernel anything less "+
+			"than a full fresh window moves the deadline by less each time and strands the ban "+
+			"anyway", second, want)
+	}
+	if second <= first {
+		t.Errorf("renewed deadline %d is not past the original %d: the rules would still lapse "+
+			"mid-attack while the ban record read active", second, first)
+	}
+	if ents, err := victimEntries(m.Maps()); err != nil {
+		t.Fatalf("victimEntries: %v", err)
+	} else if len(ents) != 1 {
+		t.Errorf("kapkan_victims holds %d entries after a renewal, want 1", len(ents))
+	}
+}
+
+// TestReinstallRevivesARuleThatPassedItsDeadline is the same property from the
+// DATAPATH's side, which is the only place it can be proved: the deadline the
+// kernel enforces is the RE-INSTALLED one, in both directions.
+//
+// The middle step installs a deadline in the distant past — the state a ban
+// reaches when its rules were installed one TTL ago and never renewed — and the
+// last one brings it back with a real TTL, which is a renewal with the clock
+// compressed. Without the last step passing, an attack outlasting
+// ban.ttl_seconds stops being dropped while the API still reports it active,
+// which is the failure renewal exists to prevent.
+func TestReinstallRevivesARuleThatPassedItsDeadline(t *testing.T) {
+	m := mustOpen(t, testOptions(t, pinDir(t), "lo"))
+	inst := newInstaller(t, m)
+	realBootNs := inst.bootNs
+
+	if err := inst.Install(instVictim, ntpRules(instVictim, time.Hour)); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	ruleID := DynamicRuleID(policyIDOf(t, inst, instVictim), 0)
+	if got := runMgr(t, m, ntpReflection()); got != xdpDrop {
+		t.Fatalf("verdict %d, want DROP while the rule is live", got)
+	}
+
+	// The un-renewed state: a deadline 1ns after boot is in the past for any
+	// kernel that has been up longer than that.
+	inst.bootNs = func() uint64 { return 1 }
+	if err := inst.Install(instVictim, ntpRules(instVictim, time.Nanosecond)); err != nil {
+		t.Fatalf("re-Install (stale deadline): %v", err)
+	}
+	expired := statOf(t, m, StatPassRuleExpired)
+	if got := runMgr(t, m, ntpReflection()); got != xdpPass {
+		t.Fatalf("verdict %d on a rule past its deadline, want PASS", got)
+	}
+	if after := statOf(t, m, StatPassRuleExpired); after != expired+1 {
+		t.Errorf("pass_rule_expired %d -> %d, want +1", expired, after)
+	}
+
+	// The renewal: the same rules, a fresh TTL off the real boot clock.
+	inst.bootNs = realBootNs
+	before := statOf(t, m, StatDropDynDst)
+	if err := inst.Install(instVictim, ntpRules(instVictim, time.Hour)); err != nil {
+		t.Fatalf("re-Install (renewed deadline): %v", err)
+	}
+	if got := runMgr(t, m, ntpReflection()); got != xdpDrop {
+		t.Fatalf("verdict %d after the renewal, want DROP: the kernel is still enforcing the old "+
+			"deadline, so renewing the ban's TTL does not keep the drops alive", got)
+	}
+	if after := statOf(t, m, StatDropDynDst); after != before+1 {
+		t.Errorf("drop_dyn_dst %d -> %d, want +1: it dropped for some other reason than the "+
+			"renewed rule", before, after)
+	}
+	// The counter the datapath needs still exists after the re-install. Its
+	// VALUE is deliberately not asserted: EnsureRuleStats recreates the entry at
+	// zero on every install, and app.banCounterScraper accumulates deltas
+	// precisely because these raw counters restart.
+	if _, ok, err := ReadRuleStats(m.Maps(), ruleID); err != nil || !ok {
+		t.Errorf("rule_stats[%d] missing after a renewal (ok=%v err=%v): the rule's drops would "+
+			"stop being accounted", ruleID, ok, err)
+	}
+}
+
 // TestZeroTTLIsRefused: a zero deadline means "never expires" in the kernel and
 // is reserved for static rules, which cannot be stranded by a crash.
 func TestZeroTTLIsRefused(t *testing.T) {
