@@ -43,19 +43,24 @@ const maxRecordsPerDatagram = 30
 
 // actor is one host in the scene.
 //
-// Sizing is given as records per tick, MEASURED rather than derived. The
-// obvious formula — effective pps = records × packets × samplingRate / interval
-// — does not predict what the console shows: measured against configs/dev.yaml,
-// the reported rate came out about 5× below it, and raising the reported
-// sampling rate fivefold roughly halved the reported pps instead of raising it.
-// Until that is explained (see the `-v` numbers in the header comment), treat
-// these counts as calibration constants: change one, re-run with -v, and read
-// /api/v1/attacks to see where it actually landed.
+// Sizing is given as records per tick, and the obvious formula does predict it:
+// effective pps = records × packets × samplingRate / interval, which is what
+// /api/v1/hosts and /api/v1/attacks now report for every actor below.
+//
+// An earlier version of this comment recorded the formula as unreliable — the
+// reported rate came out about 5× below it, and raising the reported sampling
+// rate fivefold appeared to halve the reported pps. Neither was a sampling
+// problem. /api/v1/attacks used to serve the measurement frozen at the instant
+// of detection, which is the first sliding window to cross a threshold and so
+// the one holding a single second of a five-second average: a fifth of the truth
+// for the whole life of an attack, or a tenth when the first datagram landed
+// mid-second, which is the apparent halving. It now serves the engine's live
+// measurement, and the formula, /api/v1/hosts and the console all agree.
 type actor struct {
 	victim  string
 	pattern flowgen.AttackPattern
-	// recordsPerTick is the calibration knob. The comment beside each entry
-	// records what it measured, so a later change can be compared against it.
+	// recordsPerTick sets this actor's offered rate through the formula above.
+	// The scene comment records what each one produces.
 	recordsPerTick int
 	// packetsPerRecord and bytesPerPacket separate a bandwidth attack from a
 	// packet-rate one: an amplification vector is large packets, a SYN flood is
@@ -105,11 +110,20 @@ func (a actor) due(tick uint64) bool {
 //
 // Measured at -sampling-rate 1000 -interval 500ms, ~20s in:
 //
-//	203.0.113.45  pps 520k vs 20k = 26×  (UDP flood, 5.8 Gbps)
-//	203.0.113.10  pps 240k vs 20k = 12×  (SYN flood, 115 Mbps — packets, not bits)
-//	203.0.113.77  pps 320k vs 80k =  4×  (DNS reflection, 3.8 Gbps)
+//	203.0.113.45  pps 2.6M vs 20k = 130×  (UDP flood, 29 Gbps)
+//	203.0.113.10  pps 1.2M vs 20k =  60×  (SYN flood, 576 Mbps — packets, not bits)
+//	203.0.113.77  pps 1.6M vs 80k =  20×  (DNS reflection, 19 Gbps)
 //
 // and exactly three active attacks: the quiet hosts stay under every threshold.
+//
+// These are five times the figures this comment carried when the scene was first
+// calibrated, and the scene itself did not change: the old ones were read off the
+// frozen /api/v1/attacks. Two consequences, neither of them a code change. The
+// console screenshots were taken against the old figures
+// and now understate what the console shows, so they want a recapture.
+// And whether a 29 Gbps single-host flood is the scene the
+// screenshots should show is now a calibration question worth asking, since the
+// answer was previously hidden behind a fifth.
 var scene = []actor{
 	// A bandwidth-heavy UDP flood inside the tight hostgroup: the loudest row.
 	{victim: "203.0.113.45", pattern: flowgen.UDPFlood, recordsPerTick: 325, packetsPerRecord: 4, bytesPerPacket: 1400, srcBase: "198.51.100.0"},
