@@ -19,7 +19,8 @@
   /* ---- cache the synchronous getters read ---- */
   var cache = {
     status: { dry_run: false, uptime_seconds: 0, active_attacks: 0, active_bans: 0,
-      hostgroups: [], networks: [], thresholds: null, role: "viewer" },
+      hostgroups: [], networks: [], thresholds: null, role: "viewer",
+      dataplane_dry_run: false, dataplane: null },
     attacks: { active: [], recent: [] },
     hosts: [],
     bansActive: [],
@@ -188,6 +189,9 @@
       metric: a.metric, rate: a.rate, threshold: a.threshold, rates: a.rates || {},
       active: !!a.active, ban_state: a.ban_state, method: a.method, route: a.route,
       flowspec: a.flowspec ? mapFlowspec(a.flowspec) : null,
+      /* measured in-kernel drops; null for every attack with no XDP rules.
+         Passed through verbatim — the engine already shaped it. */
+      dataplane: a.dataplane || null,
       dry_run: !!a.dry_run, started_at: a.started_at, ended_at: a.ended_at,
       sample: mapSample(a.sample),
       classification: a.classification || { type: "mixed", confidence: 0 },
@@ -203,6 +207,9 @@
       out.method = d.ban.method || out.method;
       out.route = d.ban.route || out.route;
       if (d.ban.flowspec) out.flowspec = mapFlowspec(d.ban.flowspec);
+      /* The ban's counters move every scrape; the attack record's were taken
+         when it was detected. Prefer the live ones for a live attack. */
+      if (d.ban.dataplane) out.dataplane = d.ban.dataplane;
       out.next_hop = d.ban.next_hop;
       out.community = d.ban.community;
       out.local_pref = d.ban.local_pref;
@@ -243,7 +250,14 @@
         latest_url: status.latest_url || "",
         bgp: status.bgp || null,
         scrubbing: status.scrubbing || null,
-        notify: status.notify || null
+        notify: status.notify || null,
+        /* XDP data plane. The scalar is sent to EVERY role and defaults to
+           false, so the dry-run banner logic never has to distinguish "no data
+           plane" from "an older kapkan that does not send the field". The
+           `dataplane` object is admin-only (it names interfaces) and is null for
+           a scoped token — anything rendering it must handle that. */
+        dataplane_dry_run: !!status.dataplane_dry_run,
+        dataplane: status.dataplane || null
       };
       cache.attacks = {
         active: (attacks.active || []).map(function (a) { return mapAttack(a, groups, bansRaw); }),

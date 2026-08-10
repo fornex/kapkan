@@ -154,6 +154,11 @@
 .rung[data-tone="2"]{ --tone: var(--rung-2); }
 .rung[data-tone="3"]{ --tone: var(--rung-3); }
 .rung[data-tone="4"]{ --tone: var(--rung-4); }
+.rung[data-tone="5"]{ --tone: var(--rung-5); }   /* dataplane (in-kernel) */
+/* tone 0 = an action this console does not know (a newer kapkan). Neutral
+   rather than absent: an undefined --tone would render color-mix() as
+   transparent and the rung would vanish from the ladder entirely. */
+.rung[data-tone="0"]{ --tone: var(--muted); }
 
 .ladder__legend { display:flex; align-items:center; gap: var(--s-3); margin-top: var(--s-2); font-size: var(--t-xs); color: var(--faint); flex-wrap: wrap; }
 
@@ -209,6 +214,33 @@
 .route__v { color: var(--text-strong); word-break: break-all; }
 .route__v .op-discard { color: var(--active); } .route__v .op-rate { color: var(--elev); }
 .route__rule { color: var(--accent-2); }
+
+/* measured in-kernel drops — the bans table cell */
+.drop { display: inline-flex; align-items: baseline; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.drop__b { font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
+.drop__stale { text-transform: none; letter-spacing: 0; }
+
+/* "installed in kernel" — each announced rule beside what it caught. Two
+   columns so the numbers line up whatever the rule text does; the rule column
+   is allowed to wrap and the counter column never is. */
+.kr {
+  background: var(--inset); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: var(--s-4); font-size: var(--t-base);
+}
+.kr__row {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px var(--s-4);
+  align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--border);
+}
+.kr__row:last-child { border-bottom: 0; }
+.kr__rule { font-family: var(--mono); word-break: break-all; }
+.kr__n { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-strong); }
+.kr__foot {
+  display: flex; gap: var(--s-3); align-items: center; flex-wrap: wrap;
+  margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px solid var(--elev-line);
+  font-size: var(--t-sm);
+}
+.kr__total { font-variant-numeric: tabular-nums; }
+.kr__when { font-size: var(--t-xs); }
 
 /* sample shares (top sources / ports / protos) — each group boxed to match the
    metric/mitigation boxes above and align column-for-column with them. */
@@ -270,11 +302,21 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
   background: var(--inset); border: 1px solid var(--border); color: var(--text);
   border-radius: var(--r-sm); padding: 7px 10px; font-size: var(--t-md); font-family: inherit;
 }
+/* The dropdown chevron is drawn with GRADIENTS, not an inline SVG.
+   A `url("data:image/svg+xml,…")` here was blocked by the dashboard's own CSP
+   (`img-src 'self'` — a data: URI is not 'self'), so every filter select on
+   Attacks and Hosts rendered with no arrow and logged a violation on each page
+   load. Two linear gradients draw the same chevron out of a theme colour and
+   cost nothing at request time. */
 .select {
   appearance: none; -webkit-appearance: none; -moz-appearance: none;
   padding-right: 30px; cursor: pointer;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.75 4.75 6 8 9.25 4.75' fill='none' stroke='%238b97a5' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: right 11px center;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-size: 6px 6px, 6px 6px;
+  background-position: right 15px top 52%, right 11px top 52%;
+  background-repeat: no-repeat, no-repeat;
 }
 .input.mono { font-family: var(--mono); }
 .select:focus-visible, .input:focus-visible { border-color: var(--accent); }
@@ -366,6 +408,27 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
 .banner--error { background: var(--active-soft); border-color: var(--active-line); color: #ffd2d2; }
 .banner--info { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-2); }
 .banner--dry { background: repeating-linear-gradient(135deg, #ffb4540f 0 9px, #ffb45405 9px 18px); border: 1px dashed var(--elev-line); color: var(--elev); }
+/* banner--dry-loud: the DIVERGENCE treatment, for when the data plane's dry-run
+   state disagrees with the global one. It has to out-shout the ordinary dry-run
+   banner because the failure it describes is invisible everywhere else on the
+   page — every other badge reads LIVE while the kernel rewrites drops to passes.
+   Solid red-amber fill, a left rule, and a slow pulse; class-driven only, since
+   style-src 'self' forbids an inline style attribute. */
+.banner--dry-loud {
+  background: repeating-linear-gradient(135deg, #ff5c5c26 0 9px, #ffb4541a 9px 18px);
+  border: 1px solid var(--active-line); border-left: 4px solid var(--active);
+  color: #ffd2d2; font-weight: 600;
+  animation: banner-loud 2.4s var(--ease, ease-in-out) infinite;
+}
+.banner--dry-loud .ico { color: var(--active); }
+.banner--dry-loud .banner__txt b { color: #fff; }
+.banner__more { color: var(--muted); font-weight: 400; margin-left: var(--s-2); }
+@keyframes banner-loud {
+  0%, 100% { box-shadow: 0 0 0 0 #ff5c5c00; }
+  50%      { box-shadow: 0 0 0 3px #ff5c5c26; }
+}
+/* Respect a reduced-motion preference: keep the shout, drop the movement. */
+@media (prefers-reduced-motion: reduce) { .banner--dry-loud { animation: none; } }
 .banner__txt { flex: 1; } .banner__txt b { color: #fff; }
 
 /* rejection state callout */

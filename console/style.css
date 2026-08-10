@@ -41,11 +41,21 @@
   --active-soft: #ff5c5c1c;
   --active-line: #ff5c5c4d;
 
-  /* --- Escalation ramp (amber → red across 4 rungs) --- */
+  /* --- Escalation ramp (amber → red across the ladder) ---
+     These are colour SLOTS keyed by data-tone, not a severity scale: the ladder
+     is ordered by the config array, not by this number. Slot 5 is the in-kernel
+     data plane and is deliberately OFF the amber→red ramp — it is the mildest
+     real drop, it happens on this box rather than at an upstream router, and it
+     must not be slot 1 (green), which the console uses to mean alert-only /
+     nothing dropped. */
   --rung-1: #3fcf6b;   /* alert (calm)        */
   --rung-2: #ffb454;   /* flowspec (amber)    */
   --rung-3: #ff8a3d;   /* divert (orange)     */
   --rung-4: #ff5c5c;   /* blackhole (red)     */
+  --rung-5: #46c7e8;   /* dataplane (in-kernel XDP drop, cyan) */
+  --dp:      #46c7e8;
+  --dp-soft: #46c7e81c;
+  --dp-line: #46c7e84d;
 
   /* --- Chart inks --- */
   --chart-in:  #4ea1ff;
@@ -315,6 +325,9 @@ button { font-family: inherit; }
 .badge--active { background: var(--active-soft);  color: var(--active); border-color: var(--active-line); }
 .badge--muted  { background: #ffffff0d; color: var(--muted); border-color: var(--border); }
 .badge--accent { background: var(--accent-soft); color: var(--accent-2); border-color: var(--accent-line); }
+/* dataplane: an in-kernel XDP drop on this box. Its own tone, because reusing
+   flowspec's amber would tell an operator a router upstream is filtering. */
+.badge--dp     { background: var(--dp-soft); color: var(--dp); border-color: var(--dp-line); }
 
 /* dry-run treatment — calm but unmissable: dashed amber */
 .badge--dry {

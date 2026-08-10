@@ -13,3 +13,6 @@ files.zip
 engine/internal/api/static/
 # engine binary (built into engine/ by make build)
 /engine/kapkan
+# kernel-matrix scratch: cached guest kernels (~12MB each), the generated
+# initramfs payload and the per-kernel boot logs. See engine/hack/kernel-matrix.
+engine/.kernel-matrix/

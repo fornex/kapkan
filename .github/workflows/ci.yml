@@ -55,6 +55,300 @@ jobs:
           version: latest
           working-directory: engine
 
+      # ADDITIVE second pass, GOOS=darwin. The step above is unchanged and still
+      # decides the job for Linux; this one only adds build configurations it
+      # cannot see.
+      #
+      # golangci-lint type-checks ONE GOOS per run. This job runs on ubuntu, so
+      # `//go:build !linux` files — manager_stub.go, inspect_other.go,
+      # installer_other.go, smoke_other_test.go — have never been linted by CI at
+      # all, while the developer's macOS `make lint` never saw the Linux-only
+      # ones. Between the two, part of the tree was unlinted everywhere; three
+      # findings in internal/dataplane's Linux-only files are what surfaced it.
+      # `make lint` now runs both directions locally (LINT_GOOS in the Makefile);
+      # this keeps CI honest about the same thing.
+      #
+      # The action above installed the binary, so it is on PATH here.
+      - name: Lint the non-Linux build configuration (GOOS=darwin)
+        working-directory: engine
+        run: GOOS=darwin golangci-lint run
+
+  bpf:
+    name: XDP data plane
+    # Pinned, not ubuntu-latest. This job makes claims about the machine it runs
+    # on — that the kernel exposes BTF, that BPF_PROG_TEST_RUN works with three
+    # capabilities and no more, that apt.llvm.org publishes for this codename —
+    # so a silent runner-image rotation should be a deliberate bump here, not a
+    # surprise on an unrelated PR.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache: true
+          cache-dependency-path: engine/go.sum
+
+      # The drift gate below compares BYTES, so the compiler is part of the
+      # contract: a different LLVM major reorders instructions and renumbers BTF
+      # for reasons that have nothing to do with kapkan_xdp.c. 21 is what
+      # engine/bpf/README.md documents and what dataplane.pinnedClangMajor
+      # pins. The runner image ships clang 16/17/18 only, hence apt.llvm.org.
+      #
+      # Verified byte-identical across hosts at this major: Homebrew clang
+      # 21.1.8 (darwin/x86_64) and this repo's clang 21.1.8 (linux/aarch64)
+      # produce the same object, because bpf2go compiles with -fno-ident,
+      # -fdebug-prefix-map and -fdebug-compilation-dir.
+      - name: Install clang 21 (pinned toolchain)
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg]" \
+               "http://apt.llvm.org/${VERSION_CODENAME}/" \
+               "llvm-toolchain-${VERSION_CODENAME}-21 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-21 llvm-21
+          clang-21 --version
+
+      # Licensing gate. Every Kapkan-authored C/H file must say what it is under,
+      # and the vendored libbpf headers must still be the bytes we recorded.
+      - name: Lint SPDX identifiers and vendored-header provenance
+        run: |
+          set -euo pipefail
+          fail=0
+
+          # libbpf generates bpf_helper_defs.h from the kernel's bpf.h and ships
+          # it with no SPDX tag of its own. It is the single allowed exception;
+          # its licence is recorded in bpf/README.md and its bytes are checked
+          # immediately below, so the exception costs no coverage.
+          allow=bpf/include/bpf_helper_defs.h
+          while IFS= read -r f; do
+            if [ "$f" = "$allow" ]; then continue; fi
+            if ! grep -q 'SPDX-License-Identifier:' "$f"; then
+              echo "::error file=engine/$f::missing SPDX-License-Identifier"
+              fail=1
+            fi
+          done < <(find bpf -type f \( -name '*.c' -o -name '*.h' \) | sort)
+
+          if [ ! -f "$allow" ]; then
+            echo "::error::SPDX allowlist names $allow, which no longer exists — drop the exception"
+            fail=1
+          fi
+
+          # Checksums come out of the provenance table in bpf/README.md rather
+          # than being repeated here, so there is one place to update when a
+          # header is re-vendored and no way for the two to disagree.
+          sums=$(awk -F'|' '/`include\/bpf_.*\.h`/ {
+                   gsub(/[ `]/, "", $2); gsub(/[ `]/, "", $4); print $4 "  " $2 }' bpf/README.md)
+          if [ "$(printf '%s\n' "$sums" | grep -c .)" -ne 3 ]; then
+            echo "::error::expected 3 vendored headers in the bpf/README.md provenance table, got:"
+            printf '%s\n' "$sums"
+            fail=1
+          else
+            printf '%s\n' "$sums" | (cd bpf && sha256sum -c -) || fail=1
+          fi
+
+          exit $fail
+
+      # The committed .o is what an operator's kernel actually runs, so it — not
+      # the C — is the artifact of record, exactly as docs/config-schema.json is
+      # for the config (TestSchemaMatchesGenerated). Regenerate and byte-compare;
+      # a C change that never made it into the object is a shipping bug.
+      #
+      # The test self-skips without a toolchain so it is a no-op for contributors
+      # on macOS-without-Homebrew-LLVM and inside the container `make
+      # dataplane-test` uses. KAPKAN_BPF_DRIFT=require turns those skips into
+      # failures, which is what makes this job the enforcement point.
+      - name: Drift gate (regenerate the BPF object, byte-compare)
+        env:
+          KAPKAN_BPF_DRIFT: require
+        run: |
+          go test -count=1 -v \
+            -run 'TestGeneratedArtifactsMatchSource|TestGenerateDirectiveMatches' \
+            ./internal/dataplane/
+
+      # Logged, not asserted. When the kernel tests below start failing after a
+      # runner-image bump, these three lines say whether the kernel moved,
+      # whether BTF went away, or whether the sysctl was tightened.
+      - name: Kernel prerequisites
+        run: |
+          uname -r
+          ls -l /sys/kernel/btf/vmlinux
+          cat /proc/sys/kernel/unprivileged_bpf_disabled
+
+      # Least privilege, established by experiment rather than assumed — and
+      # each of the three is load-bearing (measured on 6.12, cap sets varied one
+      # at a time):
+      #   no caps                -> map create EPERM
+      #   CAP_BPF                -> maps create, prog load EPERM
+      #   CAP_BPF+CAP_PERFMON    -> prog load EPERM (XDP needs CAP_NET_ADMIN)
+      #   CAP_BPF+CAP_NET_ADMIN  -> verifier REJECTS: "R7 pointer -= pointer
+      #                             prohibited". The parser computes
+      #                             data_end - data, and pointer arithmetic
+      #                             between two pointers is gated on
+      #                             allow_ptr_leaks == perfmon_capable().
+      #   all three              -> passes, as a non-root uid
+      # BPF_PROG_TEST_RUN itself needs nothing beyond those. Running the job
+      # under plain `sudo` would hide a future dependency on CAP_SYS_ADMIN;
+      # this way CI keeps engine/docs/dataplane-operations.md honest.
+      - name: Data-plane tests (CAP_BPF + CAP_NET_ADMIN + CAP_PERFMON, non-root)
+        working-directory: engine/internal/dataplane
+        run: |
+          set -euo pipefail
+          # A bpffs THIS USER CAN WRITE TO, for the same reason the block-rate
+          # step below mounts one: the runner's stock /sys/fs/bpf is a bpffs
+          # already (systemd mounts it) but it is root-owned mode 0700, and this
+          # job deliberately holds three capabilities, none of them
+          # CAP_DAC_OVERRIDE. Every pin directory therefore failed with EACCES —
+          # "statfs /sys/fs/bpf/kapkan-test-...: permission denied" — which reads
+          # like a data-plane bug and is a filesystem permission. Rather than
+          # weaken the capability set, mount a second bpffs and hand it over.
+          # KAPKAN_BPFFS is the only knob the suite exposes for it.
+          sudo mkdir -p /run/kapkan-dpfs
+          sudo mount -t bpf bpffs /run/kapkan-dpfs
+          sudo chown "$(id -u):$(id -g)" /run/kapkan-dpfs
+          go test -c -o dataplane.test .
+          drop=(sudo setpriv
+                --reuid="$(id -u)" --regid="$(id -g)" --clear-groups
+                --inh-caps=+bpf,+net_admin,+perfmon
+                --ambient-caps=+bpf,+net_admin,+perfmon)
+          # Print the capability sets first: if the run below ever fails, this
+          # line is the difference between a one-minute diagnosis and an
+          # afternoon. Expect CapEff=000000c000001000 — bits 39 (CAP_BPF),
+          # 38 (CAP_PERFMON) and 12 (CAP_NET_ADMIN), and nothing else.
+          "${drop[@]}" sh -c 'id; grep -E "^Cap(Eff|Bnd|Amb)" /proc/self/status'
+          # KAPKAN_DATAPLANE=require turns this suite's environment skips into
+          # failures. This job IS the enforcement point; without the knob, a
+          # runner image that stopped providing bpffs or a capability set trimmed
+          # one bit too far would silently downgrade ~125 kernel assertions to
+          # ~125 skips and keep the badge green. The suite also refuses to report
+          # success if implausibly few tests reached the kernel.
+          # The drift gate is deliberately excluded: it has its own step above,
+          # which runs as the normal runner user with a usable HOME. Here the
+          # process has been setpriv'd to a bare capability set and still carries
+          # root's HOME, so the `go` that bpf2go shells out to cannot create its
+          # module cache and the gate fails on the environment rather than on
+          # drift. Running it twice bought nothing; running it once, in the step
+          # built for it, is the enforcement.
+          "${drop[@]}" env KAPKAN_BPFFS=/run/kapkan-dpfs KAPKAN_DATAPLANE=require \
+            ./dataplane.test -test.v -test.count=1 \
+            -test.skip '^TestGeneratedArtifactsMatchSource$' 
+          rm -f dataplane.test
+
+      # THE PCAP BLOCK-RATE SUITE — the gate on every public pps/Gbps/percentage
+      # figure kapkan's documentation is allowed to state. Eighteen fixtures,
+      # each driven from synthetic telemetry through the REAL detector,
+      # classifier, FlowSpec IR, kernel encoder and installer, then replayed
+      # from committed pcaps through BPF_PROG_TEST_RUN.
+      #
+      # It is a separate step from the data-plane tests above because it lives
+      # in a different package (internal/mitigate — the only one that can see
+      # the whole chain without an import cycle) and because it needs a bpffs
+      # THIS USER CAN WRITE TO. The stock /sys/fs/bpf is root-owned, and this
+      # job deliberately runs with three capabilities and no more; rather than
+      # weaken that, mount a second bpffs and hand it over. KAPKAN_BPFFS is the
+      # only knob the suite exposes for it.
+      #
+      # -test.timeout is generous because detection runs through the engine's
+      # real one-second evaluation loop. The window is wall clock and cannot be
+      # faked from outside the package, and stubbing the detector out of its own
+      # regression suite would defeat the point of the suite.
+      - name: pcap block-rate suite (CAP_BPF + CAP_NET_ADMIN + CAP_PERFMON, non-root)
+        working-directory: engine/internal/mitigate
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /run/kapkan-bpffs
+          sudo mount -t bpf bpffs /run/kapkan-bpffs
+          sudo chown "$(id -u):$(id -g)" /run/kapkan-bpffs
+          go test -c -o blockrate.test .
+          drop=(sudo setpriv
+                --reuid="$(id -u)" --regid="$(id -g)" --clear-groups
+                --inh-caps=+bpf,+net_admin,+perfmon
+                --ambient-caps=+bpf,+net_admin,+perfmon)
+          # KAPKAN_BLOCKRATE=require turns this suite's environment skips into
+          # failures. Without it a runner image that stopped providing bpffs, or
+          # a capability set trimmed one bit too far, would silently downgrade
+          # the gate on every published performance figure to a green no-op.
+          "${drop[@]}" env KAPKAN_BPFFS=/run/kapkan-bpffs KAPKAN_BLOCKRATE=require \
+            ./blockrate.test -test.v -test.count=1 -test.timeout 10m \
+            -test.run 'TestPcapBlockRateSuite'
+          rm -f blockrate.test
+
+  # THE KERNEL FLOOR. The `bpf` job above proves the program loads on whatever
+  # kernel the runner image happens to ship (6.x today). This one proves the
+  # floor the product DOCUMENTS — deploy/dataplane-operations.md,
+  # config.example.yaml and manager_stub.go all promise Linux 5.15.
+  #
+  # That promise used to be reasoned rather than tested: pointer arguments to
+  # global BPF functions landed in v5.13 (e5069b9c23b3), and that construct is
+  # the one that took the verifier from 97.9% of its complexity budget to 7.5%.
+  # If a 5.15 verifier had rejected it, the program would need restructuring and
+  # the support matrix would be wrong — so the claim is worth a job.
+  #
+  # It is not merely a load check: the whole internal/dataplane suite runs on
+  # each kernel, because per-CPU maps, LRU eviction, the boot-clock helpers and
+  # BTF availability all vary across these versions. The first thing it caught
+  # was a test reading bpf_prog_info.verified_insns, a field added in 5.16 —
+  # i.e. a failure on the exact kernel the docs promise.
+  kernel-matrix:
+    name: kernel floor (${{ matrix.kernel }})
+    runs-on: ubuntu-24.04
+    strategy:
+      # Every kernel reports independently. "5.15 broke, 6.6 is fine" is the
+      # single most useful thing this job can say, and fail-fast would hide it.
+      fail-fast: false
+      matrix:
+        kernel: ["5.15", "6.1", "6.6", "6.12"]
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache: true
+          cache-dependency-path: engine/go.sum
+
+      # Logged, not asserted. GitHub's Linux runners expose /dev/kvm, which is
+      # the difference between a two-minute job and a thirty-minute one; the
+      # harness falls back to QEMU TCG when it is missing, so losing it makes
+      # this job slow rather than red. If that ever happens, this line is how
+      # you find out in one look.
+      - name: Virtualisation available?
+        run: ls -l /dev/kvm || echo "no /dev/kvm, guests will run under TCG"
+
+      - name: Boot Linux ${{ matrix.kernel }} and run the data-plane suite
+        run: KERNELS=${{ matrix.kernel }} ./hack/kernel-matrix/run.sh
+
+      # The verifier log is the whole product of a failure here: it names the
+      # instruction and the register state the older kernel refused. Keep it
+      # even on success — the processed-instruction count per kernel is the
+      # headroom number, and watching it move across releases is the point.
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-matrix-${{ matrix.kernel }}
+          # Match FILES, not the directory. The previous pattern ended at the
+          # logs/ directory and uploaded nothing ("No files were found"), which
+          # cost exactly what this step exists to preserve: on the first red
+          # matrix run the guest log — the only place the failing test is named —
+          # did not survive the job. Warn rather than error, because a harness
+          # that dies before booting legitimately produces no log.
+          path: engine/.kernel-matrix/*/logs/*.log
+          # .kernel-matrix is a DOT directory and upload-artifact stopped
+          # matching hidden paths by default in v4.4, so both earlier attempts
+          # uploaded nothing and the first red matrix run lost its evidence.
+          include-hidden-files: true
+          if-no-files-found: warn
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest

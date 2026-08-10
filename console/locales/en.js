@@ -38,6 +38,9 @@
       "mode.live": "Live",
       "mode.dryrun.full": "Dry-run — mitigation is simulated",
       "dryrun.banner": "Dry-run mode — routes and bans below are simulated. No BGP announcements are sent.",
+      "dryrun.dp.simulating": "The XDP data plane is SIMULATING while the rest of kapkan is live — the kernel is rewriting every drop into a pass, so packets you expect to be dropped are being forwarded. The datapath's flag disagrees with the configured dry_run, which normally means a reload failed to apply it. Check the log and restart kapkan to resynchronise.",
+      "dryrun.dp.enforcing": "The XDP data plane is ENFORCING while the rest of kapkan is in dry-run — packets are really being dropped in the kernel on this box, even though the routes and bans below are only simulated.",
+      "dryrun.dp.also": "The in-kernel data plane is simulating too.",
 
       /* counters / topbar */
       "counter.attacks": "Attacks",
@@ -73,6 +76,7 @@
       "col.threshold": "Threshold", "col.topsources": "Top sources", "col.ban": "Ban",
       "col.peak": "Peak rate", "col.started": "Started", "col.ended": "Ended",
       "col.duration": "Duration", "col.route": "Route", "col.method": "Method",
+      "col.dropped": "Dropped (kernel)",
       "col.state": "State", "col.mode": "Mode", "col.expires": "Expires",
       "col.type2": "Origin", "col.reason": "Reason", "col.host": "Host",
       "col.group": "Group", "col.baseline": "Baseline", "col.calc": "Calc",
@@ -248,15 +252,44 @@
       "se.reload.title": "Reload configuration",
       "se.reload.desc": "Re-read the config file without restarting the engine.",
       "se.adminonly": "Admin-only fields",
+      /* measured in-kernel drops (the XDP data plane) */
+      "dp.stale": "stale",
+      "dp.stale.title": "Counters could not be read; these are the last values, measured {t}.",
+      "dp.stale.never": "Counters have not been read yet in this process; these values were carried across a restart.",
+      "dp.notmeasured": "not measured",
+      "dp.total": "Total dropped",
+      "dp.pending": "No reading yet — the counters are scraped every few seconds.",
+      "ac.inkernel": "Installed in kernel",
+
+      /* settings: XDP data plane */
+      "se.dp": "XDP data plane",
+      "se.dp.state": "State",
+      "se.dp.ok": "Filtering",
+      "se.dp.degraded": "Degraded",
+      "se.dp.adopted": "Adopted across restart",
+      "se.dp.attached": "Interfaces attached",
+      "se.dp.interfaces": "Interfaces",
+      "se.dp.rules": "Rules (static + mitigation)",
+      "se.dp.generation": "Policy generation",
+      "se.dp.maps": "BPF map memory",
+      "se.dp.verdicts": "Packet verdicts",
+      "se.dp.off": "The in-kernel data plane is off",
+      "se.dp.off.sub": "Mitigation is announced to BGP peers only. Enable dataplane in the engine config to drop attack traffic on this box.",
+      "se.dp.readerr": "The counters could not be read on the last poll: {t}",
+      "dp.bypass.banner": "FILTER BYPASSED: {n} packets were passed with no rule evaluated at all. They carried more IPv6 extension headers than the data plane parses (8), so the parser gave up before the rule scan.",
+      "dp.bypass.act": "Treat it as possible evasion.",
+      "dp.bypass.card": "FILTER BYPASSED: {n} packets skipped the rule scan entirely — more than 8 IPv6 extension headers. They are passed and never dropped by design, so this counter is the only thing that reports them.",
+      "dp.bypass.tip": "Passed without any rule being evaluated — possible filter evasion.",
+
       "se.readonly": "Configuration is managed in the engine config file; this console shows it read-only."
     },
 
     enums: {
       direction: { incoming: "Incoming", outgoing: "Outgoing" },
       scope: { host: "Host", group: "Group" },
-      method: { blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Divert to scrubber" },
+      method: { dataplane: "In-kernel drop (XDP)", blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Divert to scrubber" },
       banState: { active: "Active", withdrawn: "Withdrawn", rejected: "Rejected" },
-      action: { none: "Alert only", flowspec: "FlowSpec drop / rate-limit", divert: "Divert to scrubbing", blackhole: "Blackhole (RTBH)" },
+      action: { dataplane: "In-kernel drop (XDP)", none: "Alert only", flowspec: "FlowSpec drop / rate-limit", divert: "Divert to scrubbing", blackhole: "Blackhole (RTBH)" },
       calc: { per_host: "Per host", total: "Group total" },
       attackType: {
         ntp_amplification: "NTP amplification",
@@ -282,7 +315,7 @@
 
     /* short label variants for tight widths (escalation ladder rungs) */
     enumsShort: {
-      action: { none: "Alert", flowspec: "FlowSpec", divert: "Divert", blackhole: "Blackhole" }
+      action: { dataplane: "XDP", none: "Alert", flowspec: "FlowSpec", divert: "Divert", blackhole: "Blackhole" }
     }
   };
 })(window);

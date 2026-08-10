@@ -21,6 +21,7 @@ type decoded struct {
 	bytes        uint64
 	packets      uint64
 	samplingRate uint64
+	fragOffset   uint32
 }
 
 // collector implements producer wrapping to capture decoded messages.
@@ -50,6 +51,7 @@ func (c *collector) Produce(msg interface{}, args *producer.ProduceArgs) ([]prod
 			bytes:        pm.Bytes,
 			packets:      pm.Packets,
 			samplingRate: pm.SamplingRate,
+			fragOffset:   pm.FragmentOffset,
 		})
 	}
 	return set, err
@@ -215,6 +217,53 @@ func TestNetFlowV9NoSamplingRate(t *testing.T) {
 	}
 }
 
+// TestFragmentFloodDecodes proves Record.Fragment is not a generator-only
+// fiction: both wire builders encode it where a real exporter would (a v9
+// fragmentOffset element, an sFlow IPv4 fragment-offset field), so the
+// decoder reports a non-zero offset — which is exactly what internal/ingest
+// turns into flow.Flow.Fragment and what the engine's frag_pps counter is
+// built from.
+func TestFragmentFloodDecodes(t *testing.T) {
+	victim := netip.MustParseAddr("203.0.113.50")
+	agent := netip.MustParseAddr("198.51.100.1")
+	recs := PatternParams{Pattern: FragmentFlood, Victim: victim, Records: 6}.Build()
+	for _, r := range recs {
+		if !r.Fragment {
+			t.Fatal("FragmentFlood built a record with Fragment unset")
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		sflow   bool
+	}{
+		{"sflow", BuildSFlowV5(recs, SFlowOptions{SamplingRate: 100}), true},
+		{"netflow9", BuildNetFlowV9(recs, NetFlowV9Options{SourceID: 1, SamplingRate: 100}), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := decode(t, tc.payload, tc.sflow, agent)
+			if len(got) != len(recs) {
+				t.Fatalf("decoded %d flows, want %d", len(got), len(recs))
+			}
+			for _, d := range got {
+				if d.fragOffset == 0 {
+					t.Errorf("fragmentOffset = 0, want non-zero (the record is a non-first fragment)")
+				}
+			}
+		})
+	}
+
+	// And an unfragmented set must still decode with offset 0 — the element is
+	// only added to the template when something in the set needs it.
+	plain := PatternParams{Pattern: UDPFlood, Victim: victim, Records: 3}.Build()
+	for _, d := range decode(t, BuildNetFlowV9(plain, NetFlowV9Options{SourceID: 1}), false, agent) {
+		if d.fragOffset != 0 {
+			t.Errorf("fragmentOffset = %d on an unfragmented record, want 0", d.fragOffset)
+		}
+	}
+}
+
 func TestPatternsDecode(t *testing.T) {
 	victim := netip.MustParseAddr("203.0.113.50")
 	tests := []struct {
@@ -229,6 +278,11 @@ func TestPatternsDecode(t *testing.T) {
 		{"ntp amp", NTPAmplification, ProtoUDP, 0, func(p uint16) bool { return p == 123 }},
 		{"dns amp", DNSAmplification, ProtoUDP, 0, func(p uint16) bool { return p == 53 }},
 		{"cldap amp", CLDAPAmplification, ProtoUDP, 0, func(p uint16) bool { return p == 389 }},
+		{"memcached amp", MemcachedAmplification, ProtoUDP, 0, func(p uint16) bool { return p == 11211 }},
+		{"ssdp amp", SSDPAmplification, ProtoUDP, 0, func(p uint16) bool { return p == 1900 }},
+		{"chargen amp", ChargenAmplification, ProtoUDP, 0, func(p uint16) bool { return p == 19 }},
+		{"ack flood", ACKFlood, ProtoTCP, TCPAck, func(uint16) bool { return true }},
+		{"icmp flood", ICMPFlood, ProtoICMP, 0, func(p uint16) bool { return p == 0 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

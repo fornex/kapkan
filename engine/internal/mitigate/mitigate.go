@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/engine"
 	"github.com/kapkan-io/kapkan/internal/metrics"
 
@@ -74,6 +75,20 @@ type Ban struct {
 	FellBackFrom   config.MitigationMethod `json:"fell_back_from,omitempty"`
 	FellBackReason string                  `json:"fell_back_reason,omitempty"`
 
+	// Dataplane is what the KERNEL measured for this ban's installed rules:
+	// packets and bytes the datapath actually dropped or rate-limited, read back
+	// from kapkan_rule_stats. Nil for every ban that has no rules in this box's
+	// maps — which is every blackhole, divert, flowspec, alert-only and dry-run
+	// ban — so their JSON is byte-identical to what it was before this field
+	// existed (TestBlackholeBanJSONIsUnchanged pins that).
+	//
+	// It is a POINTER TO A NESTED OBJECT and not a pair of flat fields because
+	// the numbers are only meaningful together with the freshness that produced
+	// them: "0 drops" and "0 drops, last measured 40 seconds ago" are different
+	// claims, and flattening them invites a console to render the first when it
+	// has the second. Nothing writes it except SetDataplaneCounters.
+	Dataplane *BanDataplane `json:"dataplane,omitempty"`
+
 	// dirMask tracks which attack directions hold this ban (one mitigation
 	// covers both). An incoming and an outgoing attack on the same host
 	// share the ban; it is withdrawn only when the last direction ends.
@@ -87,6 +102,12 @@ type Ban struct {
 	// NextHop/Community/LocalPref mirror the CURRENTLY-applied rung's set.
 	bhAttrs  blackholeAttrs
 	divAttrs blackholeAttrs
+	// dpInstalledAt is when the kernel rules for this ban were last written,
+	// and exists only to throttle renewals (see renewDataplaneLocked). It is
+	// NOT persisted: a rehydrated ban re-installs from scratch, which sets a
+	// fresh deadline anyway, and a remembered timestamp would be a claim about
+	// kernel state that a restart cannot verify.
+	dpInstalledAt time.Time
 }
 
 // dirBit maps an event direction to its mask bit. Events without a
@@ -119,12 +140,40 @@ type announcer interface {
 	WithdrawFlowSpec(ctx context.Context, rule FlowSpecRule) error
 }
 
+// dataplaneBackend installs and removes a ban's rules in the LOCAL in-kernel
+// XDP data plane. *dataplane.Installer is the implementation; a test double is
+// the other one.
+//
+// IT IS A SECOND FIELD ON THE MITIGATOR AND NOT TWO MORE METHODS ON announcer.
+// The two are different things that happen to sit at the same seam: announcer
+// asks a BGP peer to enforce something, this enforces it here. Widening
+// announcer would also have made every one of its six test doubles implement a
+// data plane they have nothing to do with, so a mistake in the ladder wiring
+// would show up as a compile error in six unrelated tests instead of a failure
+// in the one that tests the ladder.
+//
+// The victim prefix is the key on BOTH calls: it is what kapkan_victims is
+// keyed by, so a withdraw needs nothing the ban did not already carry, and a
+// process that restarted mid-ban can withdraw rules it never installed.
+type dataplaneBackend interface {
+	// Install replaces everything installed for victim with these rules,
+	// all-or-nothing. An error means nothing is installed, and the caller
+	// falls back.
+	Install(victim netip.Prefix, rules dataplane.DynamicRules) error
+	// Withdraw removes them. A victim with nothing installed is not an error.
+	Withdraw(victim netip.Prefix) error
+}
+
 // Mitigator owns the ban table and the BGP speaker.
 type Mitigator struct {
 	store   *config.Store
 	log     *slog.Logger
 	bgp     announcer
 	speaker *bgpSpeaker // nil when an external announcer was injected
+	// dp is the local data-plane backend, nil when this instance has none.
+	// A dataplane rung with no backend is an install failure, not a silent
+	// alert — see installDataplaneLocked.
+	dp dataplaneBackend
 
 	mu   sync.Mutex
 	bans map[netip.Addr]*Ban
@@ -176,6 +225,21 @@ func WithClock(now func() time.Time) Option {
 // (tests).
 func withAnnouncer(a announcer) Option {
 	return func(m *Mitigator) { m.bgp = a }
+}
+
+// WithDataplane gives the mitigator a local XDP data plane to install ladder
+// rungs whose action is `dataplane` into. Pass dataplane.NewInstaller(mgr, log).
+//
+// Without it, such a rung fails its install and degrades to the configured
+// fallback. That is deliberate: the alternative — treating a missing backend as
+// "nothing to do" — is the exact silent alert-only bug that
+// app.checkDataplaneLadder was written to refuse at startup.
+func WithDataplane(b dataplaneBackend) Option {
+	return func(m *Mitigator) {
+		if b != nil {
+			m.dp = b
+		}
+	}
 }
 
 // New constructs a Mitigator and its BGP speaker (unless an announcer was
@@ -424,6 +488,94 @@ func (m *Mitigator) OnAttackOngoing(ev engine.Event) {
 		m.lastOngoingPersist = now
 		m.markDirty()
 	}
+
+	// Refreshing ExpiresAt is enough for every BGP method — an announcement sits
+	// on the peer until we withdraw it — but NOT for the data plane, whose rules
+	// carry their own boot-clock deadline in the kernel. That deadline is the
+	// fail-safe that makes a crashed userspace harmless; it also means a rule
+	// installed once stops applying at its original TTL no matter how many times
+	// this function moves the Go-side ExpiresAt.
+	//
+	// The result, before this call existed, was the worst failure this feature
+	// can produce: an attack outlasting ban.ttl_seconds (600 by default — so any
+	// flood over ten minutes, which is the normal case rather than the edge one)
+	// silently stopped being dropped, while /api/v1/bans, the console and the
+	// metrics all went on reporting an active ban. Re-installing renews the
+	// deadline the kernel actually reads.
+	//
+	// Throttled on the same TTL/2 cadence as the persist above and for the same
+	// reason: a heartbeat arrives every second, and rewriting a policy block per
+	// second per victim for the duration of an attack is pure churn. TTL/2 keeps
+	// the in-kernel deadline at least half a TTL ahead, which is the same margin
+	// the state file gets.
+	m.renewDataplaneLocked(now, cfg)
+}
+
+// renewDataplaneLocked re-installs the kernel rules of every active data-plane
+// ban whose in-kernel deadline is closer than half a TTL.
+//
+// It walks the ban tableS rather than only the refreshed ban because the two are
+// not the same set: a multi-vector attack refreshes one target while another
+// stays banned on its own heartbeat, and a ban whose heartbeats stop is supposed
+// to lapse — which it still does, because this only renews bans the sweep has
+// not yet expired.
+//
+// BOTH tables. Carpet (prefix) bans install exactly the same kernel rules with
+// exactly the same boot-clock deadline, so leaving them out of the walk would
+// reintroduce the bug this function exists to fix — an attack outlasting
+// ban.ttl_seconds silently stops being dropped while the API still reports an
+// active ban — for the widest rules the product installs.
+//
+// A failure here is logged and left alone rather than escalated. The ban is
+// already active and already installed; the next heartbeat retries, and if the
+// attack ends first the rule ages out on its own, which is the correct outcome.
+// Falling back to blackhole because one renewal failed would take a customer
+// offline over a transient map write.
+func (m *Mitigator) renewDataplaneLocked(now time.Time, cfg *config.Config) {
+	if m.dp == nil {
+		return
+	}
+	ttl := cfg.Ban.TTL()
+	if ttl <= 0 {
+		return
+	}
+	renew := func(b *Ban) {
+		if b.State != BanActive || b.Method != config.MitigateDataplane || b.DryRun {
+			return
+		}
+		if now.Sub(b.dpInstalledAt) < ttl/2 {
+			return
+		}
+		if err := m.installDataplaneLocked(b, b.Route); err != nil {
+			m.log.Error("renewing the in-kernel deadline failed; the rules keep their previous "+
+				"deadline and will stop applying when it passes. The next heartbeat retries",
+				"target", b.Target.String(), "prefix", b.Prefix.String(), "err", err)
+			return
+		}
+		b.dpInstalledAt = now
+	}
+	for _, b := range m.bans {
+		if cfg.IsWhitelisted(b.Target) {
+			continue
+		}
+		renew(b)
+	}
+	for _, b := range m.prefixBans {
+		// The whitelist is absolute, and a reload can add a protected member
+		// into an already-banned prefix. banPrefix refuses such a prefix at
+		// creation and the sweep withdraws it on its next tick, so this is not
+		// a hole — the protected host is also immune through the kernel's own
+		// precedence-2 map. But renewal walks EVERY ban while OnAttackOngoing
+		// only re-checks the prefix whose heartbeat arrived, so without this a
+		// neighbouring prefix's heartbeat would push a fresh deadline onto a
+		// rule the whitelist has already disqualified. Extending the life of a
+		// rule we are about to withdraw is not something to leave implicit in a
+		// safety guarantee this product states without qualification.
+		if cfg.PrefixContainsWhitelisted(b.Prefix) {
+			continue
+		}
+		renew(b)
+	}
 }
 
 // ManualBan bans target by operator request, respecting the whitelist and the
@@ -562,7 +714,14 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	// cannot change a live ban's route, and so a rehydrated ban matches) and the
 	// generated FlowSpec rules if any rung is flowspec.
 	freezeUnicastAttrs(b, group, target, cfg)
-	if ladderUsesFlowSpec(group.Escalation) {
+	// The generated rules are the IR for BOTH surgical rungs — bgp.go encodes
+	// them as FlowSpec NLRI, dpencode.go compiles them into kernel rules — so a
+	// ladder that only ever drops in the data plane needs them generated here
+	// exactly as a flowspec ladder does. They are generated ONCE, at ban time,
+	// from the attack sample: the sample is gone by the time an escalation runs,
+	// and a rung that re-derived them would filter a different vector than the
+	// ban record says it does.
+	if ladderUsesFlowSpec(group.Escalation) || ladderUsesDataplane(group.Escalation) {
 		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample,
 			group.FlowSpecAction, group.FlowSpecRateBps, group.FlowSpecSourceAnchored, group.FlowSpecMinConcentration)
 	}
@@ -669,10 +828,17 @@ func (m *Mitigator) banPrefix(p netip.Prefix, opts banOpts) *Ban {
 	}
 
 	g := &cfg.Groups[0] // global group: source of the blackhole BGP attributes
-	action := config.EscalateBlackhole
-	if method == config.MitigateFlowSpec {
-		action = config.EscalateFlowSpec
-	}
+	// The method -> action mapping is config's, not a local two-way branch.
+	//
+	// It used to be one: `action := EscalateBlackhole; if method == flowspec {
+	// action = EscalateFlowSpec }`. That is fine for exactly two methods and
+	// catastrophic for three — a third method reached the `else` and was
+	// BLACKHOLED. On this path the target is an aggregation prefix, so the
+	// silent wrong method takes 256 addresses (v4) or 2^80 (v6) offline in
+	// answer to a request for a surgical drop. TestCarpetMethodActionMapping
+	// walks config.CarpetMethods() and fails if any method ever maps to the
+	// wrong mechanism again.
+	stages := []config.EscalationStage{{AfterSeconds: 0, Action: method.Action()}}
 	b := &Ban{
 		Target:     p.Addr(),
 		Prefix:     p,
@@ -683,14 +849,21 @@ func (m *Mitigator) banPrefix(p netip.Prefix, opts banOpts) *Ban {
 		DryRun:     cfg.DryRun,
 		StartedAt:  now,
 		ExpiresAt:  now.Add(cfg.Ban.TTL()),
-		Escalation: []config.EscalationStage{{AfterSeconds: 0, Action: action}},
+		Escalation: stages,
 	}
-	// Freeze blackhole attributes when the method is blackhole OR a flowspec
-	// fallback may degrade to it (the prefix is already whitelist-free).
+	// Freeze blackhole attributes when the rung IS a blackhole, or when a
+	// surgical rung (flowspec / dataplane) may degrade to one (the prefix is
+	// already whitelist-free). Reads b.Escalation, so it must follow it.
 	freezeUnicastAttrs(b, g, p.Addr(), cfg)
-	if method == config.MitigateFlowSpec {
-		// Vector-anchored on the whole prefix: drops only the attack vector to
-		// the /24, sparing non-vector traffic. The prefix is whitelist-free.
+	// The generated rules are the IR for BOTH surgical rungs, exactly as on the
+	// host path in ban(): bgp.go encodes them as FlowSpec NLRI and dpencode.go
+	// compiles them into kernel rules. Gating this on the same ladder predicates
+	// the host path uses — rather than on a second, separately-maintained
+	// comparison against `method` — is what keeps "the validator accepted it"
+	// and "the enforcement mechanism got its input" from ever disagreeing.
+	// Vector-anchored on the whole prefix: drops only the attack vector to the
+	// /24, sparing non-vector traffic to its other hosts.
+	if ladderUsesFlowSpec(stages) || ladderUsesDataplane(stages) {
 		b.FlowSpec = generateCarpetRules(p, opts.classification, opts.sample, config.FlowSpecDiscard, 0)
 	}
 
@@ -760,6 +933,19 @@ func ladderUsesFlowSpec(stages []config.EscalationStage) bool {
 	return false
 }
 
+// ladderUsesDataplane reports whether any rung drops in the local XDP data
+// plane. Its callers are the two places that must treat a dataplane-only ladder
+// exactly like a flowspec one: generating the rule IR at ban time, and freezing
+// the blackhole attributes a fallback would need.
+func ladderUsesDataplane(stages []config.EscalationStage) bool {
+	for _, s := range stages {
+		if s.Action == config.EscalateDataplane {
+			return true
+		}
+	}
+	return false
+}
+
 // ladderUsesBlackhole reports whether any rung announces an RTBH route.
 func ladderUsesBlackhole(stages []config.EscalationStage) bool {
 	for _, s := range stages {
@@ -820,8 +1006,14 @@ func groupDivertAttrs(g *config.Group, target netip.Addr) blackholeAttrs {
 // time from the attack sample, restored verbatim on rehydration).
 func freezeUnicastAttrs(b *Ban, group *config.Group, target netip.Addr, cfg *config.Config) {
 	fallbackToBlackhole := cfg.Ban.FallbackMethod() != ""
-	if ladderUsesBlackhole(b.Escalation) ||
-		(fallbackToBlackhole && (ladderUsesFlowSpec(b.Escalation) || ladderUsesDivert(b.Escalation))) {
+	// The dataplane rung is in the fallback set (see fallbackFor), so its
+	// blackhole attributes must be frozen here too. Leave it out and a failed
+	// install falls back to a host route with an EMPTY next-hop — an announce
+	// the peer rejects, turning a recoverable install failure into a victim with
+	// no mitigation at all.
+	surgical := ladderUsesFlowSpec(b.Escalation) || ladderUsesDivert(b.Escalation) ||
+		ladderUsesDataplane(b.Escalation)
+	if ladderUsesBlackhole(b.Escalation) || (fallbackToBlackhole && surgical) {
 		b.bhAttrs = groupBlackholeAttrs(group, target)
 	}
 	if ladderUsesDivert(b.Escalation) {
@@ -844,6 +1036,15 @@ const (
 	rfNone = iota
 	rfFlowSpec
 	rfUnicast // blackhole and divert share the host-route /32-/128 NLRI
+	// rfDataplane is not an NLRI at all: nothing is announced, the rules live
+	// in this box's BPF maps. It still needs a family of its own, and the
+	// reason is escalateLocked, which withdraws the old rung ONLY when the
+	// family differs from the applied one. Sharing rfFlowSpec — the tempting
+	// choice, since both carry the same generated rules — would mean a
+	// dataplane -> flowspec escalation never calls withdrawMethodLocked, and
+	// the map entries would stay installed for the life of the ban while the
+	// operator's ban record says the mitigation moved upstream.
+	rfDataplane
 )
 
 func routeFamilyOf(method config.MitigationMethod) int {
@@ -852,15 +1053,59 @@ func routeFamilyOf(method config.MitigationMethod) int {
 		return rfFlowSpec
 	case config.MitigateBlackhole, config.MitigateDivert:
 		return rfUnicast
+	case config.MitigateDataplane:
+		return rfDataplane
 	default:
 		return rfNone
 	}
 }
 
+// SupportsDataplane reports whether this build can actually EXECUTE a
+// config.EscalateDataplane ladder rung.
+//
+// It is TRUE as of the change that added the four pieces it advertises, and
+// they are worth naming because the flag is otherwise just a boolean somebody
+// could flip:
+//
+//   - stageView has a case for EscalateDataplane, so the rung yields
+//     MitigateDataplane rather than falling to the empty (alert-only) method;
+//   - announceMethodLocked has a branch of its own AFTER the dry-run return, so
+//     the rung installs rules instead of falling through to the host-route path
+//     and blackholing a customer the operator wanted surgically filtered;
+//   - withdrawMethodLocked has the matching branch, honouring the ban's frozen
+//     DryRun;
+//   - routeFamilyOf gives it rfDataplane, so an escalation off this rung
+//     actually removes the map entries.
+//
+// TestSupportsDataplaneMatchesStageView binds the flag to the first of those in
+// BOTH directions, so it cannot be flipped ahead of the backend.
+//
+// IT NO LONGER HAS A PRODUCTION CALLER, and is kept anyway. Its original one was
+// app.checkDataplaneLadder, a startup refusal for a ladder this build could not
+// execute; that function was written as a function of this flag precisely so it
+// would retire itself, and it has been deleted. What remains is the invariant:
+// the test above fails if stageView ever stops returning a real method for the
+// action, which is the regression that would silently turn every configured
+// in-kernel drop back into an alert-only stage. That tripwire is worth one
+// exported line.
+//
+// What it does NOT claim: that a data plane is attached on this host. That is a
+// runtime question (dataplane.enabled, a Linux kernel, a NIC that takes the
+// program) and config.requireDataplane already refuses a ladder that names this
+// action without a dataplane block. This flag is only about whether the
+// mitigator has the code path.
+func SupportsDataplane() bool { return true }
+
 // stageView maps a ladder stage to its method, route string, and frozen BGP
 // attribute set. EscalateNone maps to the empty method (alert only).
 func (m *Mitigator) stageView(b *Ban, stage config.EscalationStage) stageView {
 	switch stage.Action {
+	case config.EscalateDataplane:
+		// No attribute set: nothing is announced to anyone. The "route" is the
+		// rule set, rendered the same way the flowspec rung renders it because
+		// it IS the same generated rules — one backend away from being sent to
+		// a peer instead of a BPF map.
+		return stageView{method: config.MitigateDataplane, route: dataplaneSummary(b.FlowSpec)}
 	case config.EscalateFlowSpec:
 		return stageView{method: config.MitigateFlowSpec, route: flowSpecSummary(b.FlowSpec)}
 	case config.EscalateBlackhole:
@@ -943,15 +1188,26 @@ func (m *Mitigator) announceStageLocked(b *Ban, v stageView, cfg *config.Config)
 }
 
 // fallbackFor returns the method to try when primary's announce is rejected, or
-// "" when no fallback applies. Only the surgical methods (flowspec, divert)
-// degrade; blackhole and alert-only have no fallback. ban.fallback="none"
+// "" when no fallback applies. Only the surgical methods (dataplane, flowspec,
+// divert) degrade; blackhole and alert-only have no fallback. ban.fallback="none"
 // disables it entirely.
+//
+// DATAPLANE IS IN THE SET for the same reason flowspec is: an install that
+// fails leaves the victim with NO mitigation, and the failures are the same
+// shape — a capacity limit the operator set (a full policy map, a full profile
+// band) or a backend that is not there. Degrading to a blackhole is a big jump
+// on the severity ladder (dataplane=1, blackhole=4) and it is recorded as one:
+// the ban carries FellBackFrom, the fallback metric moves and the log line names
+// both methods. The alternative is a customer under attack with nothing
+// installed, which is what app.checkDataplaneLadder called "strictly worse than
+// alert-only at the moment it matters".
 func fallbackFor(primary config.MitigationMethod, cfg *config.Config) config.MitigationMethod {
 	fb := cfg.Ban.FallbackMethod()
 	if fb == "" {
 		return ""
 	}
-	if primary == config.MitigateFlowSpec || primary == config.MitigateDivert {
+	switch primary {
+	case config.MitigateDataplane, config.MitigateFlowSpec, config.MitigateDivert:
 		return fb
 	}
 	return ""
@@ -971,11 +1227,25 @@ func (m *Mitigator) blackholeStageView(b *Ban) stageView {
 // flowSpecSummary renders a one-line summary of a rule set for the Route
 // field, logs and notifications.
 func flowSpecSummary(rules []FlowSpecRule) string {
+	return "flowspec: " + ruleSummary(rules)
+}
+
+// dataplaneSummary is the same summary for a rung enforced in this box's
+// kernel. The prefix differs from flowSpecSummary's on purpose: the Route field
+// is what an operator reads in the API, the console and a notification, and
+// "these rules, in this kernel" is a materially different claim from "these
+// rules, asked of an upstream" — the first only touches traffic that reaches
+// this NIC.
+func dataplaneSummary(rules []FlowSpecRule) string {
+	return "dataplane: " + ruleSummary(rules)
+}
+
+func ruleSummary(rules []FlowSpecRule) string {
 	parts := make([]string, 0, len(rules))
 	for _, r := range rules {
 		parts = append(parts, r.String())
 	}
-	return "flowspec: " + strings.Join(parts, "; ")
+	return strings.Join(parts, "; ")
 }
 
 // announceMethodLocked installs the given mitigation method for a ban,
@@ -997,6 +1267,9 @@ func (m *Mitigator) announceMethodLocked(b *Ban, method config.MitigationMethod,
 			"method", string(method), "route", route, "target", b.Target.String(),
 			"metric", string(b.Metric), "manual", b.Manual)
 		return nil
+	}
+	if method == config.MitigateDataplane {
+		return m.installDataplaneLocked(b, route)
 	}
 	if method == config.MitigateFlowSpec {
 		for i, r := range b.FlowSpec {
@@ -1025,6 +1298,49 @@ func (m *Mitigator) announceMethodLocked(b *Ban, method config.MitigationMethod,
 		return err
 	}
 	m.log.Warn("announced host route", "method", string(method), "route", route, "target", b.Target.String())
+	return nil
+}
+
+// installDataplaneLocked is the dataplane rung's announce: compile the ban's
+// generated rules and put them in this box's BPF maps. The caller holds m.mu,
+// and has already returned for dry-run — nothing below may reach a map.
+//
+// THE TTL IS THE BAN'S OWN, converted to a duration here and to a boot-clock
+// deadline inside the installer. Every installed rule therefore carries the same
+// deadline the sweeper enforces, and the kernel treats a rule past its deadline
+// as ABSENT. That is the fail-safe for a dead userspace: kill -9 this process
+// and the victim's rules lapse on their own instead of filtering a customer
+// forever. It is also why a non-positive TTL is refused rather than encoded as
+// 0, which the kernel reads as "never expires".
+func (m *Mitigator) installDataplaneLocked(b *Ban, route string) error {
+	if m.dp == nil {
+		// No backend: FAIL, so the ban falls back to blackhole and the operator
+		// gets a mitigation plus an error. Returning nil here would record an
+		// enforcing dataplane rung that installed nothing, which is the silent
+		// failure the whole feature was gated on.
+		err := fmt.Errorf("no data-plane backend is wired into this mitigator " +
+			"(dataplane.enabled is false, or the data plane failed to attach)")
+		m.log.Error("data-plane rung cannot be applied", "target", b.Target.String(), "err", err)
+		return err
+	}
+	ttl := b.ExpiresAt.Sub(m.now())
+	if ttl <= 0 {
+		return fmt.Errorf("ban expires in %s; refusing to install rules that are already stale", ttl)
+	}
+	set, err := dataplaneRules(b.FlowSpec, ttl)
+	if err != nil {
+		m.log.Error("compiling data-plane rules failed", "target", b.Target.String(),
+			"route", route, "err", err)
+		return err
+	}
+	if err := m.dp.Install(b.Prefix, set); err != nil {
+		m.log.Error("installing data-plane rules failed", "target", b.Target.String(),
+			"route", route, "err", err)
+		return err
+	}
+	b.dpInstalledAt = m.now()
+	m.log.Warn("installed data-plane rules", "route", route, "target", b.Target.String(),
+		"rules", len(set.Specs), "ttl", ttl.Round(time.Second).String())
 	return nil
 }
 
@@ -1057,8 +1373,30 @@ func (m *Mitigator) withdrawMethodLocked(b *Ban, method config.MitigationMethod,
 	case method == "":
 		// Alert-only rung: nothing was announced.
 	case b.DryRun:
+		// The BAN's frozen flag, not cfg's: a config reload that turned dry-run
+		// ON between the install and the withdraw must still remove the rules
+		// this ban really put in the kernel, and one that turned it OFF must not
+		// try to remove rules that were never installed.
 		m.log.Warn("DRY-RUN: would withdraw mitigation (not sent)",
 			"method", string(method), "route", route, "reason", reason)
+	case method == config.MitigateDataplane:
+		if m.dp == nil {
+			// Nothing could have been installed without a backend, so there is
+			// nothing to remove. Said out loud because the alternative reading —
+			// "rules are stranded in the kernel" — would be alarming and wrong.
+			m.log.Info("no data-plane backend; nothing to withdraw", "route", route, "reason", reason)
+			break
+		}
+		if err := m.dp.Withdraw(b.Prefix); err != nil {
+			// Logged and not propagated, exactly as the FlowSpec case: a stuck
+			// "active" would misreport state and block re-bans. The rules also
+			// carry their own in-kernel deadline, so a failed withdraw lapses
+			// rather than lasting forever.
+			m.log.Error("data-plane withdraw failed; the rules will lapse at their in-kernel deadline",
+				"target", b.Target.String(), "route", route, "err", err)
+		} else {
+			m.log.Info("removed data-plane rules", "route", route, "reason", reason)
+		}
 	case method == config.MitigateFlowSpec:
 		// Withdraw every rule; log but proceed on error (a stuck "active"
 		// would misreport state and block re-bans).

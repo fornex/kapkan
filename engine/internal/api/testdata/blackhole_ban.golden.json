@@ -1,0 +1,25 @@
+{
+  "target": "203.0.113.66",
+  "prefix": "203.0.113.66/32",
+  "metric": "pps",
+  "rate": 200000,
+  "threshold": 1000,
+  "next_hop": "192.0.2.1",
+  "community": "65000:666",
+  "local_pref": 100,
+  "route": "203.0.113.66/32 next-hop 192.0.2.1 community 65000:666",
+  "state": "active",
+  "dry_run": false,
+  "manual": false,
+  "started_at": "2026-08-08T12:00:00Z",
+  "expires_at": "2026-08-08T12:10:00Z",
+  "withdrawn_at": "0001-01-01T00:00:00Z",
+  "method": "blackhole",
+  "escalation": [
+    {
+      "after_seconds": 0,
+      "action": "blackhole"
+    }
+  ],
+  "escalation_step": 0
+}

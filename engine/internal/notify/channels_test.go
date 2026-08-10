@@ -450,6 +450,34 @@ func TestPayloadMatchesPublishedSchema(t *testing.T) {
 	gotCounter := gotSample["top_sources"].([]any)[0].(map[string]any)
 	keysMatch(t, "counters", gotCounter, schemaNode(t, schema, "$defs", "counters", "items", "properties"))
 
+	// The method enum must cover every mitigation method the config can resolve.
+	//
+	// This gate was added the day `dataplane` shipped, because the drift it
+	// catches is silent in exactly the wrong direction: the schema listed three
+	// methods, the mitigator started emitting a fourth, and every consumer
+	// validating against the published schema would have rejected the
+	// notification for the newest and most consequential kind of mitigation. The
+	// keysMatch checks above cannot see this — the KEY was always there; only its
+	// value set moved.
+	methodEnum := schemaNode(t, schema, "properties", "method")["enum"].([]any)
+	documentedMethods := map[string]bool{}
+	for _, v := range methodEnum {
+		documentedMethods[v.(string)] = true
+	}
+	for _, m := range []config.MitigationMethod{
+		config.MitigateBlackhole, config.MitigateFlowSpec,
+		config.MitigateDivert, config.MitigateDataplane,
+	} {
+		if !documentedMethods[string(m)] {
+			t.Errorf("mitigation method %q reaches Payload.Method but is missing from the "+
+				"schema enum; a consumer validating against docs/callback-schema.json would "+
+				"reject that notification", m)
+		}
+	}
+	if len(documentedMethods) != 4 {
+		t.Errorf("schema method enum has %d entries, config defines 4 methods", len(documentedMethods))
+	}
+
 	// The metric enum must equal the engine's full metric set.
 	enumRaw := schemaNode(t, schema, "properties", "metric")["enum"].([]any)
 	documented := map[string]bool{}
@@ -846,4 +874,65 @@ func TestExecFastNetMonInvocation(t *testing.T) {
 	if !strings.Contains(s, "DRY-RUN") {
 		t.Errorf("dry-run report should note DRY-RUN:\n%s", s)
 	}
+}
+
+// TestDataplaneMethodReachesEveryChannel: the mitigator's newest method is a
+// plain string all the way down, and nothing between the ban and an operator's
+// phone special-cases the three older ones.
+//
+// The failure this guards against is not a crash — it is a chat message that
+// says "Ban: active" for an in-kernel drop and gives the operator no way to tell
+// it apart from a blackhole. The route string is what carries that distinction,
+// and its "dataplane: " prefix is deliberately different from "flowspec: ":
+// rules running in THIS kernel and rules asked of an upstream peer are different
+// claims about who is dropping the packets.
+func TestDataplaneMethodReachesEveryChannel(t *testing.T) {
+	ev := sampleEvent()
+	ev.Scope = engine.ScopeHost
+	n := New(storeFrom(t, yamlWith("")), discardLogger())
+	ban := &mitigate.Ban{
+		State:  mitigate.BanActive,
+		Method: config.MitigateDataplane,
+		Route:  "dataplane: dst 203.0.113.66/32 udp src-port 123 -> discard",
+	}
+	p := n.buildPayload("attack_started", ev, ban)
+
+	if p.Method != string(config.MitigateDataplane) {
+		t.Fatalf("Payload.Method = %q, want %q", p.Method, config.MitigateDataplane)
+	}
+	// The JSON a webhook/exec consumer actually receives.
+	body, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["method"] != "dataplane" {
+		t.Errorf(`marshaled method = %v, want "dataplane"`, got["method"])
+	}
+	t.Logf("webhook payload method=%v route=%v", got["method"], got["route"])
+
+	// Every rendered channel must name the in-kernel rules rather than dropping
+	// the route on the floor.
+	for name, text := range map[string]string{
+		"telegram": formatTelegram(p),
+		"slack":    formatSlack(p),
+		"email":    string(emailMessage(config.Email{From: "a@b.test", To: []string{"c@d.test"}}, p)),
+	} {
+		if !strings.Contains(text, "dataplane: dst 203.0.113.66/32") {
+			t.Errorf("%s message does not carry the data-plane route:\n%s", name, text)
+		}
+		t.Logf("%s: %s", name, firstLineContaining(text, "dataplane:"))
+	}
+}
+
+func firstLineContaining(s, sub string) string {
+	for _, ln := range strings.Split(s, "\n") {
+		if strings.Contains(ln, sub) {
+			return strings.TrimSpace(ln)
+		}
+	}
+	return ""
 }

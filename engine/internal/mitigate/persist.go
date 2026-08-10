@@ -50,6 +50,27 @@ type banSnapshot struct {
 	EscalationStep int                      `json:"escalation_step"`
 	FellBackFrom   config.MitigationMethod  `json:"fell_back_from,omitempty"`
 	FellBackReason string                   `json:"fell_back_reason,omitempty"`
+
+	// The data-plane measurement, persisted as the LIFETIME TOTALS ONLY and not
+	// as the BanDataplane object.
+	//
+	// What must survive a restart is the running count, because nothing else
+	// can reconstruct it: kapkan_rule_stats is zeroed by the next install, and a
+	// restart that could not adopt the pins has no counters at all. What must
+	// NOT survive is everything describing the kernel's current state —
+	// policy_id, measured_at, stale. Those are claims about map contents that no
+	// one has verified since the process died, and rehydrating them would put a
+	// timestamp on the API that says a measurement happened when none did. They
+	// come back on the first scrape, one interval later.
+	//
+	// Every field is omitempty and the document version is UNCHANGED: load()
+	// hard-fails on a version mismatch, so bumping it would discard every live
+	// ban on upgrade — the exact mitigation gap the state file exists to close.
+	// An old kapkan reading a new file ignores these keys; a new kapkan reading
+	// an old file reads zeros, which is the correct starting total.
+	DataplanePackets uint64             `json:"dataplane_packets,omitempty"`
+	DataplaneBytes   uint64             `json:"dataplane_bytes,omitempty"`
+	DataplaneRules   []BanDataplaneRule `json:"dataplane_rules,omitempty"`
 }
 
 // persistState is the on-disk document.
@@ -61,6 +82,16 @@ type persistState struct {
 }
 
 func toSnapshot(b *Ban) banSnapshot {
+	s := snapshotCore(b)
+	if b.Dataplane != nil {
+		s.DataplanePackets = b.Dataplane.Packets
+		s.DataplaneBytes = b.Dataplane.Bytes
+		s.DataplaneRules = b.Dataplane.Rules
+	}
+	return s
+}
+
+func snapshotCore(b *Ban) banSnapshot {
 	return banSnapshot{
 		Target:         b.Target,
 		Prefix:         b.Prefix,
@@ -360,6 +391,25 @@ func (m *Mitigator) rehydratePrefixLocked(s banSnapshot, cfg *config.Config, now
 // direction holds; the engine's re-detection re-establishes real holds via
 // ban(), and the restored TTL remains the backstop.
 func banFromSnapshot(s banSnapshot, prefix netip.Prefix) *Ban {
+	b := banCoreFromSnapshot(s, prefix)
+	// Restore the lifetime totals so the next scrape CONTINUES the count instead
+	// of restarting it, and mark them stale immediately: nothing has been read
+	// from a kernel map yet in this process, and a zero MeasuredAt would be
+	// rendered as "measured at the epoch". The first successful scrape clears
+	// the flag one interval later; a ban whose rules could not be reinstalled
+	// keeps the last number the previous process saw, correctly flagged.
+	if s.DataplanePackets != 0 || s.DataplaneBytes != 0 || len(s.DataplaneRules) != 0 {
+		b.Dataplane = &BanDataplane{
+			Packets: s.DataplanePackets,
+			Bytes:   s.DataplaneBytes,
+			Rules:   s.DataplaneRules,
+			Stale:   true,
+		}
+	}
+	return b
+}
+
+func banCoreFromSnapshot(s banSnapshot, prefix netip.Prefix) *Ban {
 	return &Ban{
 		Target:         s.Target,
 		Prefix:         prefix,

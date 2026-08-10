@@ -34,6 +34,9 @@
       "mode.live": "Aktiv",
       "mode.dryrun.full": "Testlauf — Abwehr wird nur simuliert",
       "dryrun.banner": "Testlauf-Modus — die unten gezeigten Routen und Sperren werden simuliert. Es werden keine BGP-Ankündigungen gesendet.",
+      "dryrun.dp.simulating": "Die XDP-Datenebene SIMULIERT, während der restliche kapkan aktiv ist — der Kernel wandelt jedes Verwerfen in ein Durchlassen um, sodass Pakete, die verworfen werden sollten, weitergeleitet werden. Das Flag im Kernel weicht vom konfigurierten dry_run ab; meist bedeutet das, dass ein Neuladen der Konfiguration nicht angewendet wurde. Prüfen Sie das Protokoll und starten Sie kapkan neu.",
+      "dryrun.dp.enforcing": "Die XDP-Datenebene VERWIRFT WIRKLICH, während der restliche kapkan im Testlauf ist — auf diesem Host werden Pakete tatsächlich im Kernel verworfen, obwohl die Routen und Sperren unten nur simuliert werden.",
+      "dryrun.dp.also": "Die Datenebene im Kernel simuliert ebenfalls.",
 
       "counter.attacks": "Angriffe",
       "counter.bans": "Sperren",
@@ -66,6 +69,7 @@
       "col.threshold": "Schwellenwert", "col.topsources": "Top-Quellen", "col.ban": "Sperre",
       "col.peak": "Spitzenrate", "col.started": "Begonnen", "col.ended": "Beendet",
       "col.duration": "Dauer", "col.route": "Route", "col.method": "Methode",
+      "col.dropped": "Verworfen (Kernel)",
       "col.state": "Status", "col.mode": "Modus", "col.expires": "Läuft ab",
       "col.type2": "Herkunft", "col.reason": "Grund", "col.host": "Host",
       "col.group": "Gruppe", "col.baseline": "Grundlinie", "col.calc": "Berechnung",
@@ -232,15 +236,44 @@
       "se.reload.title": "Konfiguration neu laden",
       "se.reload.desc": "Die Konfigurationsdatei neu einlesen, ohne die Engine neu zu starten.",
       "se.adminonly": "Nur-Admin-Felder",
+      /* gemessene Verwerfungen im Kernel (die XDP-Datenebene) */
+      "dp.stale": "veraltet",
+      "dp.stale.title": "Die Zähler konnten nicht gelesen werden; dies sind die letzten Werte, gemessen {t}.",
+      "dp.stale.never": "In diesem Prozess wurden noch keine Zähler gelesen; diese Werte stammen von vor dem Neustart.",
+      "dp.notmeasured": "nicht gemessen",
+      "dp.total": "Insgesamt verworfen",
+      "dp.pending": "Noch keine Messung — die Zähler werden alle paar Sekunden abgefragt.",
+      "ac.inkernel": "Im Kernel installiert",
+
+      /* Einstellungen: XDP-Datenebene */
+      "se.dp": "XDP-Datenebene",
+      "se.dp.state": "Zustand",
+      "se.dp.ok": "Filtert",
+      "se.dp.degraded": "Beeinträchtigt",
+      "se.dp.adopted": "Über Neustart übernommen",
+      "se.dp.attached": "Angebundene Schnittstellen",
+      "se.dp.interfaces": "Schnittstellen",
+      "se.dp.rules": "Regeln (statisch + Mitigation)",
+      "se.dp.generation": "Policy-Generation",
+      "se.dp.maps": "BPF-Map-Speicher",
+      "se.dp.verdicts": "Paket-Entscheidungen",
+      "se.dp.off": "Die Datenebene im Kernel ist aus",
+      "se.dp.off.sub": "Mitigation wird nur an BGP-Nachbarn angekündigt. Aktivieren Sie dataplane in der Engine-Konfiguration, um Angriffsverkehr auf diesem Host zu verwerfen.",
+      "se.dp.readerr": "Die Zähler konnten beim letzten Abruf nicht gelesen werden: {t}",
+      "dp.bypass.banner": "FILTER UMGANGEN: {n} Pakete wurden weitergeleitet, ohne dass auch nur eine Regel geprüft wurde. Sie trugen mehr IPv6-Erweiterungsheader, als die Datenebene auswertet (8) — der Parser gab vor dem Regeldurchlauf auf.",
+      "dp.bypass.act": "Mögliche Umgehung.",
+      "dp.bypass.card": "FILTER UMGANGEN: {n} Pakete haben den Regeldurchlauf vollständig übersprungen — mehr als 8 IPv6-Erweiterungsheader. Sie werden bewusst weitergeleitet und nie verworfen, deshalb ist dieser Zähler das Einzige, was sie meldet.",
+      "dp.bypass.tip": "Weitergeleitet, ohne dass eine Regel geprüft wurde — mögliche Filterumgehung.",
+
       "se.readonly": "Die Konfiguration wird in der Engine-Konfigurationsdatei verwaltet; diese Konsole zeigt sie schreibgeschützt an."
     },
 
     enums: {
       direction: { incoming: "Eingehend", outgoing: "Ausgehend" },
       scope: { host: "Host", group: "Gruppe" },
-      method: { blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Umleitung zum Scrubber" },
+      method: { dataplane: "Verwerfen im Kernel (XDP)", blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Umleitung zum Scrubber" },
       banState: { active: "Aktiv", withdrawn: "Zurückgezogen", rejected: "Abgelehnt" },
-      action: { none: "Nur Warnung", flowspec: "FlowSpec verwerfen / drosseln", divert: "Umleitung zum Scrubbing", blackhole: "Blackhole (RTBH)" },
+      action: { dataplane: "Verwerfen im Kernel (XDP)", none: "Nur Warnung", flowspec: "FlowSpec verwerfen / drosseln", divert: "Umleitung zum Scrubbing", blackhole: "Blackhole (RTBH)" },
       calc: { per_host: "Pro Host", total: "Gruppensumme" },
       attackType: {
         ntp_amplification: "NTP-Amplifikation",
@@ -264,7 +297,7 @@
       }
     },
     enumsShort: {
-      action: { none: "Warnung", flowspec: "FlowSpec", divert: "Umleitung", blackhole: "Blackhole" }
+      action: { dataplane: "XDP", none: "Warnung", flowspec: "FlowSpec", divert: "Umleitung", blackhole: "Blackhole" }
     }
   };
 })(window);

@@ -50,10 +50,18 @@ type Attack struct {
 	Method    config.MitigationMethod `json:"method,omitempty"`
 	Route     string                  `json:"route,omitempty"`
 	// FlowSpec holds the generated FlowSpec rules when the method is flowspec.
-	FlowSpec  []mitigate.FlowSpecRule `json:"flowspec,omitempty"`
-	DryRun    bool                    `json:"dry_run"`
-	StartedAt time.Time               `json:"started_at"`
-	EndedAt   time.Time               `json:"ended_at,omitempty"`
+	FlowSpec []mitigate.FlowSpecRule `json:"flowspec,omitempty"`
+	// Dataplane is what the kernel measured for this attack's in-kernel rules;
+	// nil for every attack that has none, so a blackhole attack's JSON is
+	// unchanged. For a LIVE attack it is refreshed from the current ban on every
+	// request (see handleAttacks) rather than frozen at detection, because at
+	// detection the rules had not caught anything yet — the count would be a
+	// permanent zero. For an ended one it is the final tally, snapshotted when
+	// the attack moved to the recent ring.
+	Dataplane *mitigate.BanDataplane `json:"dataplane,omitempty"`
+	DryRun    bool                   `json:"dry_run"`
+	StartedAt time.Time              `json:"started_at"`
+	EndedAt   time.Time              `json:"ended_at,omitempty"`
 	// Sample is the flow sample captured when the attack was detected.
 	Sample *engine.AttackSample `json:"sample,omitempty"`
 	// Classification is the attack vector inferred at detection time.
@@ -86,6 +94,14 @@ type Server struct {
 	updchk  *update.Checker // optional update-availability source; nil = disabled
 	start   time.Time
 	ready   atomic.Bool // flipped true once the daemon is fully started (drives /healthz)
+	// dp, when set, reports the XDP data plane's state for /healthz and
+	// /api/v1/status. atomic.Pointer so it can be installed after New without a
+	// lock, and read on request goroutines without one.
+	dp atomic.Pointer[DataplaneReporter]
+	// reloadHook, when set, is called after a successful config reload with the
+	// new configuration, for the components that cannot re-read the store on
+	// their next tick (today: the data plane's kernel maps).
+	reloadHook atomic.Pointer[func(*config.Config)]
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -211,6 +227,11 @@ func (s *Server) RecordAttackEnded(ev engine.Event, ban *mitigate.Ban) {
 	a.Rates = ev.Rates
 	if ban != nil {
 		a.BanState = ban.State
+		// The final measured tally, kept on the record because the ban's rules
+		// are gone from the kernel by now and this is the last place the number
+		// exists. Nothing refreshes it afterwards — an ended attack's drop count
+		// must not keep moving.
+		a.Dataplane = ban.Dataplane
 	}
 	delete(s.active, key)
 	s.recent = append(s.recent, *a)
@@ -255,14 +276,38 @@ func (s *Server) Handler() http.Handler {
 // SetReady marks the daemon fully started; /healthz returns 200 thereafter.
 func (s *Server) SetReady() { s.ready.Store(true) }
 
+// SetDataplane installs the reporter for the XDP data plane's state, which
+// /healthz summarises in its body and /api/v1/status renders in full. Leave it
+// unset when there is no data plane; every consumer handles a nil reporter.
+func (s *Server) SetDataplane(r DataplaneReporter) { s.dp.Store(&r) }
+
+// SetReloadHook installs a callback run after a successful config reload, so
+// state that lives outside this process (the data plane's kernel maps) can be
+// updated. Called synchronously from the reload handler.
+func (s *Server) SetReloadHook(f func(*config.Config)) { s.reloadHook.Store(&f) }
+
+// handleHealthz is a LIVENESS probe, and stays 200 even when the data plane is
+// degraded.
+//
+// That is a deliberate line. A supervisor and the update script both use this
+// endpoint to decide whether a restart succeeded, and a NIC that is down or
+// missing is not something a restart fixes — flipping to 503 would turn one
+// unattached interface into a restart loop, and a restart loop would take the
+// interfaces that ARE filtering down with it. The degraded state is reported in
+// the body for a human and in kapkan_dataplane_degraded for an alert, which are
+// the two consumers that can act on it.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if !s.ready.Load() {
 		http.Error(w, "starting", http.StatusServiceUnavailable)
 		return
 	}
+	body := "ok\n"
+	if r := s.dp.Load(); r != nil {
+		body += (*r).DataplaneSummary() + "\n"
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok\n"))
+	_, _ = w.Write([]byte(body))
 }
 
 // requireRole enforces the configured API tokens and the route's minimum role.
@@ -472,6 +517,29 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// version is build info (not sensitive); shown in Settings to all roles.
 		"version": buildVersion(),
 	}
+	// The data plane, in two pieces with two different audiences.
+	//
+	// dataplane_dry_run is a flat scalar EVERY role sees, sitting next to the
+	// global dry_run. The console renders a per-subsystem DRY RUN state from it,
+	// and it has to be visible to a viewer for a blunt reason: a viewer looking at
+	// a drop that is not happening should not be the last to know. It cannot leak
+	// anything — it is one boolean about this box's own enforcement posture, with
+	// no interface name, no prefix and no victim in it.
+	//
+	// Always present, defaulting to false, so the console can render without an
+	// existence check — the same contract update_available follows below. Note
+	// that false is correct for "no data plane": nothing is being simulated
+	// because nothing is being filtered, and the `dataplane` block (or its
+	// absence) is where "is there one at all" is answered.
+	dpDryRun := false
+	var dpStatus *DataplaneStatus
+	if r := s.dp.Load(); r != nil {
+		st := (*r).DataplaneStatus()
+		dpDryRun = st.Enabled && st.DryRun
+		dpStatus = &st
+	}
+	resp["dataplane_dry_run"] = dpDryRun
+
 	// Update availability (only meaningful when the opt-in check is enabled).
 	// Defaults to "no update" so the console can render unconditionally.
 	if s.updchk != nil {
@@ -509,6 +577,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp["scrubbing"] = map[string]any{
 			"next_hop": cfg.Scrubbing.NextHop, "next_hop6": cfg.Scrubbing.NextHop6, "community": scrubCommunity,
 		}
+		// The full data-plane block sits here, inside the unscoped gate next to
+		// scrubbing, because Interfaces is topology: the NIC names and how many
+		// links this box filters on. A scoped tenant gets dataplane_dry_run above
+		// and nothing else.
+		if dpStatus != nil {
+			resp["dataplane"] = dpStatus
+		}
 		// Notify exposes only WHICH channels are enabled, never tokens/URLs.
 		resp["notify"] = map[string]any{
 			"telegram": cfg.Notify.Telegram.ChatID != "" || cfg.Notify.Telegram.TokenEnv != "",
@@ -524,6 +599,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAttacks(w http.ResponseWriter, r *http.Request) {
 	c := callerFrom(r)
 	cfg := s.store.Get()
+	// Measured in-kernel drops for the LIVE bans, indexed once per request. The
+	// attack record is a snapshot taken at detection, when the rules had caught
+	// nothing yet; the moving number lives on the ban, and joining here is what
+	// makes "installed in kernel" a live panel rather than a permanent zero.
+	// Ended attacks keep their own frozen tally and are not touched.
+	live := map[netip.Addr]*mitigate.BanDataplane{}
+	for _, b := range s.mit.ActiveBans() {
+		if b.Dataplane != nil {
+			live[b.Target] = b.Dataplane
+		}
+	}
 	stamp := func(a Attack) Attack {
 		if a.Scope == engine.ScopeGroup {
 			a.Tenant = groupTenant(cfg, a.Group)
@@ -536,7 +622,9 @@ func (s *Server) handleAttacks(w http.ResponseWriter, r *http.Request) {
 	active := make([]Attack, 0, len(s.active))
 	for _, a := range s.active {
 		if visibleAttack(c, cfg, *a) {
-			active = append(active, stamp(*a))
+			at := stamp(*a)
+			at.Dataplane = live[at.Target]
+			active = append(active, at)
 		}
 	}
 	// Copy recent newest-first.
@@ -808,6 +896,12 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeAudit(auditRow(c, "config_reload", "ok", "", "global", "", "", false))
+	// Push the new config into whatever cannot observe the store on its own.
+	// Synchronous, so the response is not sent before the kernel maps have been
+	// updated (or the failure logged).
+	if f := s.reloadHook.Load(); f != nil {
+		(*f)(cfg)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"reloaded":   true,
 		"dry_run":    cfg.DryRun,

@@ -27,13 +27,22 @@ const (
 	ieIPv6Src          = 27
 	ieIPv6Dst          = 28
 	ieSamplingInterval = 34 // honored only in an options-data record
+	ieFragmentOffset   = 88 // NFV9_FIELD_FRAGMENT_OFFSET
 )
 
 // IP protocol numbers used by the generated records.
 const (
-	ProtoTCP = 6
-	ProtoUDP = 17
+	ProtoICMP   = 1
+	ProtoTCP    = 6
+	ProtoUDP    = 17
+	ProtoICMPv6 = 58
 )
+
+// fragOffsetNonFirst is the fragment offset (in 8-byte units) stamped on a
+// record marked Fragment. Any non-zero value means "not the first fragment",
+// which is precisely what the ingestion layer turns into flow.Flow.Fragment;
+// 185 is the offset of the second fragment of a 1500-byte MTU datagram.
+const fragOffsetNonFirst = 185
 
 // TCP flag bits.
 const (
@@ -66,8 +75,30 @@ type Record struct {
 	DstPort  uint16
 	Proto    uint8
 	TCPFlags uint8
+	// Fragment marks the flow as carrying NON-FIRST IP fragments. Both
+	// builders encode it for real — NetFlow v9 adds a fragmentOffset element
+	// to the template, sFlow stamps the offset into the synthetic IPv4 header
+	// — so a decoded record comes back with the fragment bit set rather than
+	// the field being a generator-only fiction.
+	//
+	// IPv4 only: the sFlow builder has no fragment extension header to put it
+	// in, so an IPv6 record silently carries no fragment marking on that wire.
+	Fragment bool
 	Bytes    uint32
 	Packets  uint32
+}
+
+// anyFragment reports whether any record in the set is marked as a fragment,
+// which decides whether the template carries the fragmentOffset element at
+// all. Adding it unconditionally would change every existing caller's
+// template for a field almost none of them set.
+func anyFragment(recs []Record) bool {
+	for _, r := range recs {
+		if r.Fragment {
+			return true
+		}
+	}
+	return false
 }
 
 // NetFlowV9Options configures a NetFlow v9 datagram.
@@ -93,17 +124,18 @@ func BuildNetFlowV9(recs []Record, opts NetFlowV9Options) []byte {
 		return nil
 	}
 	isV6 := recs[0].DstAddr.Is6() && !recs[0].DstAddr.Is4In6()
+	frag := anyFragment(recs)
 
 	const dataTemplateID = 256
 	const optTemplateID = 258
 
 	var flowsets [][]byte
-	flowsets = append(flowsets, buildDataTemplate(dataTemplateID, isV6))
+	flowsets = append(flowsets, buildDataTemplate(dataTemplateID, isV6, frag))
 	if opts.SamplingRate > 0 {
 		flowsets = append(flowsets, buildOptionsTemplate(optTemplateID))
 		flowsets = append(flowsets, buildOptionsData(optTemplateID, opts.SamplingRate))
 	}
-	flowsets = append(flowsets, buildDataFlowSet(dataTemplateID, recs, isV6))
+	flowsets = append(flowsets, buildDataFlowSet(dataTemplateID, recs, isV6, frag))
 
 	pkt := &bytes.Buffer{}
 	beU16(pkt, 9)                     // Version
@@ -120,12 +152,12 @@ func BuildNetFlowV9(recs []Record, opts NetFlowV9Options) []byte {
 
 // dataTemplateFields returns the field specifiers for the data template,
 // choosing IPv4 or IPv6 address elements.
-func dataTemplateFields(isV6 bool) [][2]uint16 {
+func dataTemplateFields(isV6, frag bool) [][2]uint16 {
 	srcIE, dstIE, addrLen := uint16(ieIPv4Src), uint16(ieIPv4Dst), uint16(4)
 	if isV6 {
 		srcIE, dstIE, addrLen = ieIPv6Src, ieIPv6Dst, 16
 	}
-	return [][2]uint16{
+	fields := [][2]uint16{
 		{srcIE, addrLen},
 		{dstIE, addrLen},
 		{ieL4SrcPort, 2},
@@ -135,10 +167,14 @@ func dataTemplateFields(isV6 bool) [][2]uint16 {
 		{ieInBytes, 4},
 		{ieInPkts, 4},
 	}
+	if frag {
+		fields = append(fields, [2]uint16{ieFragmentOffset, 2})
+	}
+	return fields
 }
 
-func buildDataTemplate(templateID uint16, isV6 bool) []byte {
-	fields := dataTemplateFields(isV6)
+func buildDataTemplate(templateID uint16, isV6, frag bool) []byte {
+	fields := dataTemplateFields(isV6, frag)
 	body := &bytes.Buffer{}
 	beU16(body, templateID)
 	beU16(body, uint16(len(fields)))
@@ -149,7 +185,7 @@ func buildDataTemplate(templateID uint16, isV6 bool) []byte {
 	return wrapFlowSet(0, body.Bytes())
 }
 
-func buildDataFlowSet(templateID uint16, recs []Record, isV6 bool) []byte {
+func buildDataFlowSet(templateID uint16, recs []Record, isV6, frag bool) []byte {
 	body := &bytes.Buffer{}
 	for _, r := range recs {
 		if isV6 {
@@ -169,6 +205,15 @@ func buildDataFlowSet(templateID uint16, recs []Record, isV6 bool) []byte {
 		body.WriteByte(r.TCPFlags)
 		beU32(body, r.Bytes)
 		beU32(body, r.Packets)
+		if frag {
+			// Every record must carry the element the template declares, so a
+			// non-fragment record in a fragment-bearing set encodes offset 0.
+			var off uint16
+			if r.Fragment {
+				off = fragOffsetNonFirst
+			}
+			beU16(body, off)
+		}
 	}
 	return wrapFlowSet(templateID, body.Bytes())
 }
@@ -331,8 +376,15 @@ func buildRawHeader(r Record) []byte {
 		h.WriteByte(0x45) // version + IHL
 		h.WriteByte(0x00) // DSCP/ECN
 		beU16(h, uint16(20+len(l4)))
-		beU16(h, 0)     // id
-		beU16(h, 0)     // flags + frag
+		beU16(h, 0) // id
+		// Flags + fragment offset. goflow2's packet parser reads the low 13
+		// bits here and reports them as FragmentOffset, which is what the
+		// ingestion layer turns into flow.Flow.Fragment.
+		var fragField uint16
+		if r.Fragment {
+			fragField = fragOffsetNonFirst
+		}
+		beU16(h, fragField)
 		h.WriteByte(64) // TTL (offset 8)
 		h.WriteByte(r.Proto)
 		beU16(h, 0) // checksum (parser ignores)
@@ -348,6 +400,19 @@ func buildRawHeader(r Record) []byte {
 func buildL4(r Record) []byte {
 	l4 := &bytes.Buffer{}
 	switch r.Proto {
+	case ProtoICMP, ProtoICMPv6:
+		// Echo request: type, code, checksum, id, sequence. ICMP has no ports,
+		// so framing it as UDP (the old default branch) would have handed the
+		// decoder two bytes of type/code as a source port.
+		typ := byte(8) // ICMPv4 echo request
+		if r.Proto == ProtoICMPv6 {
+			typ = 128 // ICMPv6 echo request
+		}
+		l4.WriteByte(typ)
+		l4.WriteByte(0) // code
+		beU16(l4, 0)    // checksum (parser ignores)
+		beU16(l4, 1)    // identifier
+		beU16(l4, 1)    // sequence
 	case ProtoTCP:
 		beU16(l4, r.SrcPort)
 		beU16(l4, r.DstPort)

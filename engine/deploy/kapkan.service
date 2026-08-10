@@ -40,6 +40,22 @@ StateDirectoryMode=0700
 # Hardening. kapkan needs no special privileges in dry-run or when peering
 # from a high local port; if you bind BGP to port 179, add the capability:
 #   AmbientCapabilities=CAP_NET_BIND_SERVICE
+#
+# THE XDP DATA PLANE NEEDS MORE THAN THIS UNIT GRANTS, and deliberately so.
+# `dataplane.enabled: true` requires CAP_BPF/CAP_NET_ADMIN/CAP_PERFMON, a
+# writable /sys/fs/bpf (which ProtectKernelTunables below mounts read-only) and
+# AF_NETLINK (which RestrictAddressFamilies below omits). Rather than grant all
+# of that to every deployment — most mitigate through BGP alone and touch no
+# BPF — the relaxations ship as an opt-in drop-in next to this file:
+#
+#   install -D -m 0644 kapkan-dataplane.conf \
+#       /etc/systemd/system/kapkan.service.d/10-dataplane.conf
+#
+# Install it on the same hosts where you turn dataplane.enabled on. Without it
+# those hosts FAIL AT STARTUP with a message naming the cause, which is the
+# intended behaviour: an operator who configured in-kernel drops must not get a
+# daemon that silently came up without them. See kapkan-dataplane.conf and
+# dataplane-operations.md §1 for what each line does and what it costs.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

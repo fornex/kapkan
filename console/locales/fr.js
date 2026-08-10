@@ -37,6 +37,9 @@
       "mode.live": "Réel",
       "mode.dryrun.full": "Simulation — l'atténuation est simulée",
       "dryrun.banner": "Mode simulation — les routes et blocages ci-dessous sont simulés. Aucune annonce BGP n'est envoyée.",
+      "dryrun.dp.simulating": "Le plan de données XDP est en SIMULATION alors que le reste de kapkan est réel — le noyau transforme chaque rejet en passage, donc les paquets que vous attendez rejetés sont transmis. L'indicateur du noyau diverge du dry_run configuré, ce qui signifie généralement qu'un rechargement n'a pas été appliqué. Consultez le journal et redémarrez kapkan pour resynchroniser.",
+      "dryrun.dp.enforcing": "Le plan de données XDP REJETTE RÉELLEMENT alors que le reste de kapkan est en simulation — des paquets sont vraiment rejetés dans le noyau sur cette machine, même si les routes et blocages ci-dessous ne sont que simulés.",
+      "dryrun.dp.also": "Le plan de données dans le noyau simule aussi.",
 
       /* counters / topbar */
       "counter.attacks": "Attaques",
@@ -72,6 +75,7 @@
       "col.threshold": "Seuil", "col.topsources": "Sources principales", "col.ban": "Blocage",
       "col.peak": "Débit max", "col.started": "Début", "col.ended": "Fin",
       "col.duration": "Durée", "col.route": "Route", "col.method": "Méthode",
+      "col.dropped": "Rejeté (noyau)",
       "col.state": "État", "col.mode": "Mode", "col.expires": "Expire",
       "col.type2": "Origine", "col.reason": "Raison", "col.host": "Hôte",
       "col.group": "Groupe", "col.baseline": "Référence", "col.calc": "Calcul",
@@ -247,15 +251,44 @@
       "se.reload.title": "Recharger la configuration",
       "se.reload.desc": "Relit le fichier de configuration sans redémarrer le moteur.",
       "se.adminonly": "Champs réservés aux administrateurs",
+      /* rejets mesurés dans le noyau (le plan de données XDP) */
+      "dp.stale": "obsolète",
+      "dp.stale.title": "Les compteurs n'ont pas pu être lus ; voici les dernières valeurs, mesurées {t}.",
+      "dp.stale.never": "Aucun compteur n'a encore été lu dans ce processus ; ces valeurs viennent d'avant le redémarrage.",
+      "dp.notmeasured": "non mesuré",
+      "dp.total": "Total rejeté",
+      "dp.pending": "Pas encore de relevé — les compteurs sont lus toutes les quelques secondes.",
+      "ac.inkernel": "Installé dans le noyau",
+
+      /* paramètres : plan de données XDP */
+      "se.dp": "Plan de données XDP",
+      "se.dp.state": "État",
+      "se.dp.ok": "Filtre",
+      "se.dp.degraded": "Dégradé",
+      "se.dp.adopted": "Repris après redémarrage",
+      "se.dp.attached": "Interfaces attachées",
+      "se.dp.interfaces": "Interfaces",
+      "se.dp.rules": "Règles (statiques + mitigation)",
+      "se.dp.generation": "Génération de politique",
+      "se.dp.maps": "Mémoire des maps BPF",
+      "se.dp.verdicts": "Verdicts de paquets",
+      "se.dp.off": "Le plan de données noyau est désactivé",
+      "se.dp.off.sub": "La mitigation n'est qu'annoncée aux pairs BGP. Activez dataplane dans la configuration du moteur pour rejeter le trafic d'attaque sur cette machine.",
+      "se.dp.readerr": "Les compteurs n'ont pas pu être lus au dernier relevé : {t}",
+      "dp.bypass.banner": "FILTRE CONTOURNÉ : {n} paquets ont été laissés passer sans qu'aucune règle ne soit évaluée. Ils portaient plus d'en-têtes d'extension IPv6 que le plan de données n'en analyse (8) : l'analyse s'est arrêtée avant le parcours des règles.",
+      "dp.bypass.act": "Contournement possible.",
+      "dp.bypass.card": "FILTRE CONTOURNÉ : {n} paquets ont sauté tout le parcours des règles — plus de 8 en-têtes d'extension IPv6. Ils sont laissés passer et jamais rejetés, à dessein ; ce compteur est donc la seule chose qui les signale.",
+      "dp.bypass.tip": "Laissés passer sans qu'aucune règle soit évaluée — contournement du filtre possible.",
+
       "se.readonly": "La configuration est gérée dans le fichier de configuration du moteur ; cette console l'affiche en lecture seule."
     },
 
     enums: {
       direction: { incoming: "Entrant", outgoing: "Sortant" },
       scope: { host: "Hôte", group: "Groupe" },
-      method: { blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Redirection vers scrubber" },
+      method: { dataplane: "Rejet dans le noyau (XDP)", blackhole: "Blackhole (RTBH)", flowspec: "FlowSpec", divert: "Redirection vers scrubber" },
       banState: { active: "Actif", withdrawn: "Retiré", rejected: "Rejeté" },
-      action: { none: "Alerte seule", flowspec: "FlowSpec : rejet / limite", divert: "Redirection vers nettoyage", blackhole: "Blackhole (RTBH)" },
+      action: { dataplane: "Rejet dans le noyau (XDP)", none: "Alerte seule", flowspec: "FlowSpec : rejet / limite", divert: "Redirection vers nettoyage", blackhole: "Blackhole (RTBH)" },
       calc: { per_host: "Par hôte", total: "Total du groupe" },
       attackType: {
         ntp_amplification: "Amplification NTP",
@@ -280,7 +313,7 @@
     },
 
     enumsShort: {
-      action: { none: "Alerte", flowspec: "FlowSpec", divert: "Redirection", blackhole: "Blackhole" }
+      action: { dataplane: "XDP", none: "Alerte", flowspec: "FlowSpec", divert: "Redirection", blackhole: "Blackhole" }
     }
   };
 })(window);

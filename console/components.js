@@ -116,8 +116,11 @@
   }
 
   /* ---------- atoms ---------- */
-  function badge(cls, label, iconName) {
-    return h("span", { class: "badge " + cls }, [iconName ? w.icon(iconName) : null, h("span", { text: label })]);
+  /* title is optional; when given it becomes the hover tooltip (a real attribute,
+     so it survives reconcile()'s attribute sync). */
+  function badge(cls, label, iconName, title) {
+    return h("span", { class: "badge " + cls, attrs: title ? { title: title } : null },
+      [iconName ? w.icon(iconName) : null, h("span", { text: label })]);
   }
   function dirBadge(dir) {
     var out = dir === "outgoing";
@@ -184,15 +187,56 @@
     return el;
   }
 
-  /* ---------- ESCALATION LADDER (hero) ---------- */
-  var ACTION_TONE = { none: 1, flowspec: 2, divert: 3, blackhole: 4 };
-  var ACTION_ICON = { none: "bell", flowspec: "zap", divert: "divert", blackhole: "slash" };
+  /* ---------- ACTION / METHOD PRESENTATION ----------
+     Lookups, deliberately, and never a chain of ternaries.
+
+     Every one of these used to be written `x === "blackhole" ? a : x === "divert"
+     ? b : c`, which is a two-way test with a catch-all. That shape does not fail
+     when a new method appears — it silently renders the new thing as whatever sat
+     in the final else. When `dataplane` landed server-side, an in-kernel drop
+     would have been drawn with FlowSpec's lightning bolt in FlowSpec's colour: an
+     operator reading the dashboard would have been told, wrongly and
+     confidently, that a router upstream was filtering.
+
+     A lookup plus an explicit unknown fallback fails VISIBLY instead: a kapkan
+     newer than this console renders a muted badge with a neutral icon and the
+     raw method name (I.label already falls back to the key), which reads as
+     "this console does not know what that is" rather than as a wrong answer.
+
+     The tone numbers are colour SLOTS, not severities — the ladder's ordering is
+     the array's, not the tone's. Slot 5 is the data plane's own colour: it must
+     not be slot 1 (green), because green means alert-only and the data plane
+     really does drop; and it must not share flowspec's amber, because "this box's
+     NIC" and "a router upstream" fail in completely different ways. */
+  var ACTION_TONE = { none: 1, dataplane: 5, flowspec: 2, divert: 3, blackhole: 4 };
+  var ACTION_ICON = { none: "bell", dataplane: "chip", flowspec: "zap", divert: "divert", blackhole: "slash" };
+
+  /* Badge tone per mitigation METHOD (what a ban actually did), as opposed to
+     per configured ACTION above. Same list, different vocabulary in the API. */
+  var METHOD_BADGE = {
+    dataplane: "badge--dp",
+    flowspec:  "badge--accent",
+    divert:    "badge--elev",
+    blackhole: "badge--active"
+  };
+  var METHOD_ICON = { dataplane: "chip", flowspec: "zap", divert: "divert", blackhole: "slash" };
+
+  /* The fallbacks are the point of this file's existence; see above. */
+  function methodBadge(method) { return METHOD_BADGE[method] || "badge--muted"; }
+  function methodIcon(method) { return METHOD_ICON[method] || "shield"; }
+  function actionIcon(action) { return ACTION_ICON[action] || "shield"; }
+
+  /* methodPill is the one renderer every table and detail row should use, so a
+     sixth method needs exactly two lines added above and nothing hunted down. */
+  function methodPill(method) {
+    return badge(methodBadge(method), I.label("method", method), methodIcon(method));
+  }
 
   function ladder(escalation, currentStep, opts) {
     opts = opts || {};
     var compact = opts.compact, config = opts.config, startedMs = opts.startedMs, live = opts.live;
     var rungs = escalation.map(function (stage, i) {
-      var action = stage.action, tone = ACTION_TONE[action];
+      var action = stage.action, tone = ACTION_TONE[action] || 0;
       var state = config ? "config" : (i < currentStep ? "is-done" : i === currentStep ? "is-current" : "is-future");
       var nameFull = I.label("action", action), nameShort = I.labelShort("action", action);
 
@@ -228,7 +272,7 @@
 
       var node = (state === "is-done")
         ? h("span", { class: "rung__node" }, w.icon("check-sm"))
-        : h("span", { class: "rung__node" }, w.icon(ACTION_ICON[action]));
+        : h("span", { class: "rung__node" }, w.icon(actionIcon(action)));
 
       return h("div", { class: "rung " + (state === "config" ? "" : state), dataset: { tone: tone }, attrs: { title: nameFull } }, [
         h("div", { class: "rung__head" }, [node, h("span", { class: "rung__name", text: compact ? nameShort : nameFull })]),
@@ -289,7 +333,7 @@
   function routeDisplay(obj, dry) {
     var rows = [];
     var method = obj.method;
-    rows.push(routeRow(I.t("col.method"), h("span", { class: "badge " + (method === "blackhole" ? "badge--active" : method === "divert" ? "badge--elev" : "badge--accent") }, [w.icon(method === "blackhole" ? "slash" : method === "divert" ? "divert" : "zap"), h("span", { text: I.label("method", method) })])));
+    rows.push(routeRow(I.t("col.method"), methodPill(method)));
     if (obj.flowspec && obj.flowspec.length) {
       obj.flowspec.forEach(function (r, i) {
         rows.push(routeRow(i === 0 ? I.t("ac.flowspec") : "", h("span", { class: "route__rule" }, [
@@ -306,6 +350,83 @@
     /* the dry-run cue is the dashed amber border + a badge in the section header
        (rendered by the caller), so the box itself carries no inline tag. */
     return h("div", { class: "route" + (dry ? " is-dry" : "") }, rows);
+  }
+
+  /* ---------- measured in-kernel drops ----------
+     `dp` is the ban/attack's `dataplane` object, or null when the mitigation
+     has no rules in this box's XDP maps (every blackhole, flowspec, divert,
+     alert-only and dry-run ban). Null renders as an em dash, NOT as "0": a ban
+     with no rules dropped nothing here, and a "0" in a Dropped column reads as
+     "the rules are installed and catching nothing", which is a bug report. */
+  /* Binary byte sizes. Separate from I.abbr (which is decimal k/M/G for packet
+     and flow counts) because these are memory and traffic volumes, where 1 MiB
+     is 1048576 and rendering it as "1.0M B" reads as a typo. Unit symbols are
+     the SI/IEC ones and are the same in every locale, like Mb/s next door. */
+  function bytesFmt(n) {
+    n = n || 0;
+    var units = ["B", "KiB", "MiB", "GiB", "TiB"], i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? I.num(n) : I._nf1.format(n)) + " " + units[i];
+  }
+
+  function dropCell(dp) {
+    if (!dp) return h("span", { class: "td-muted", text: "—" });
+    var kids = [
+      h("span", { class: "mono", text: I.abbr(dp.packets || 0) }),
+      h("span", { class: "td-muted drop__b", text: bytesFmt(dp.bytes) })
+    ];
+    if (dp.stale) kids.push(staleTag(dp));
+    return h("span", { class: "drop" }, kids);
+  }
+
+  /* The staleness marker. It exists because the alternative — showing zeros
+     when the counters cannot be read — would say the datapath had stopped
+     dropping, which is the one wrong answer an operator would act on. The
+     numbers next to it are the last successful reading. */
+  function staleTag(dp) {
+    var when = dp.measured_at ? new Date(dp.measured_at) : null;
+    var title = when && !isNaN(when.getTime()) && when.getTime() > 0
+      ? I.t("dp.stale.title", { t: I.rel(when) })
+      : I.t("dp.stale.never");
+    return badge("badge--elev drop__stale", I.t("dp.stale"), "clock", title);
+  }
+
+  /* The "installed in kernel" panel: each announced rule beside what it caught.
+     The join is BY INDEX — rule i of `flowspec` is counter i of
+     `dataplane.rules` — because that is the only thing that pairs them; the
+     counters carry no match of their own. The counter array may be SHORTER than
+     the rule list (an entry already reaped), so a missing tail renders as
+     "not measured" rather than as zero. */
+  function kernelRules(obj) {
+    var dp = obj.dataplane, rules = obj.flowspec || [];
+    var counters = (dp && dp.rules) || [];
+    var rows = rules.map(function (r, i) {
+      var c = i < counters.length ? counters[i] : null;
+      return h("div", { class: "kr__row" }, [
+        h("span", { class: "kr__rule route__rule" }, [
+          h("span", { text: r.match + " → " }),
+          h("span", { class: r.action === "discard" ? "op-discard" : "op-rate", text: r.action })
+        ]),
+        c
+          ? h("span", { class: "kr__n mono", text: I.abbr(c.packets || 0) + " · " + bytesFmt(c.bytes) })
+          : h("span", { class: "kr__n td-muted", text: I.t("dp.notmeasured") })
+      ]);
+    });
+    var foot = [];
+    if (dp) {
+      foot.push(h("span", { class: "kr__total" }, [
+        h("span", { class: "td-muted", text: I.t("dp.total") + " " }),
+        h("span", { class: "mono", text: I.num(dp.packets || 0) + " · " + bytesFmt(dp.bytes) })
+      ]));
+      foot.push(dp.stale
+        ? staleTag(dp)
+        : h("span", { class: "td-muted kr__when", text: dp.measured_at ? I.rel(new Date(dp.measured_at)) : "" }));
+    } else {
+      /* Rules are announced but nothing has been measured. Said out loud
+         because the honest reading is "no reading yet", not "no drops". */
+      foot.push(h("span", { class: "td-muted", text: I.t("dp.pending") }));
+    }
+    return h("div", { class: "kr" }, [h("div", { class: "kr__rows" }, rows), h("div", { class: "kr__foot" }, foot)]);
   }
 
   /* ---------- share bars (sample) ---------- */
@@ -406,8 +527,10 @@
     sparkline: sparkline, areaChart: areaChart,
     ladder: ladder, gauge: gauge, confidence: confidence, baselineBar: baselineBar,
     routeDisplay: routeDisplay, shareGroup: shareGroup, timeline: timeline,
+    dropCell: dropCell, kernelRules: kernelRules, bytesFmt: bytesFmt,
     rejection: rejection, toast: toast, confirm: confirm, closeConfirm: closeConfirm,
     empty: empty, skeletonRows: skeletonRows,
-    ACTION_ICON: ACTION_ICON
+    ACTION_ICON: ACTION_ICON, methodPill: methodPill,
+    methodBadge: methodBadge, methodIcon: methodIcon, actionIcon: actionIcon
   };
 })(window);
