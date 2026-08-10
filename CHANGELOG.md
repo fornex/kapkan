@@ -19,6 +19,94 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-10
+
+Kapkan can now drop attack packets itself, in the Linux kernel, instead of only
+announcing BGP routes for someone else's router to act on. The feature is
+opt-in: without a `dataplane:` block the binary behaves exactly as before, and
+no existing deployment changes behaviour on upgrade.
+
+### Config changes
+
+- **Added** `dataplane:` — the whole optional block: `enabled`, `interfaces`,
+  `xdp_mode` (`auto` | `native` | `generic`), `pin_path`, `on_exit`
+  (`keep` | `detach`), `drop_malformed`, `allowlist`, `ratelimit_profiles[]`,
+  `static_rules[]` and `limits`. Absent means the data plane does not exist.
+- **Added** `dataplane` as a value for `mitigation`, for `escalation[].action`
+  and for `carpet.mitigation`. Ladder severity is now
+  `none < dataplane < flowspec < divert < blackhole`, so a `dataplane` rung may
+  follow an alert-only rung but never `flowspec`, `divert` or `blackhole`.
+- **Added** `scrubbing.nodes[]` (`name`, `next_hop`, `next_hop6`,
+  `capacity_mbps`, `hostgroups`), `scrubbing.node_selection` and
+  `scrubbing.on_all_nodes_lost`. The scalar `scrubbing.next_hop` stays valid and
+  is the one-node form; nothing to migrate. Multi-node is schema-only in this
+  release — the node role itself is not shipped yet.
+- **Tightened** a `dataplane` rung, or `carpet.mitigation: dataplane`, is
+  rejected at startup unless a `dataplane` block exists with `enabled: true`.
+  A configured drop that silently is not a drop is the failure this prevents.
+- **Tightened** `dataplane.limits.max_dynamic_rules` must be at least
+  `ban.max_active_bans * 8`. The defaults sit exactly on that boundary at 512
+  active bans.
+
+### Security
+
+- Go 1.26.5 (was 1.26.4) — `crypto/tls`, Encrypted Client Hello privacy leak
+  (GO-2026-5856).
+- gRPC 1.82.1 (was 1.79.3, pulled in by gobgp) — xDS RBAC authorization engine
+  and HTTP/2 server transport (GO-2026-6061).
+
+### Added
+
+- **In-kernel mitigation.** A detection installs XDP rules directly into kernel
+  maps: the same rules that would have been announced as FlowSpec, compiled to a
+  second encoder instead of BGP NLRI. Requires Linux 5.15+ with BTF, `CAP_BPF`
+  and `CAP_NET_ADMIN`, and a writable bpffs. Nothing needs a compiler on the box.
+- **Per-source rate limiting**, which BGP FlowSpec structurally cannot express:
+  each attacking source gets its own token bucket, so a limit of *N* holds every
+  individual source to *N* rather than letting attackers and legitimate clients
+  compete for one aggregate ceiling.
+- **Rules expire inside the kernel.** Every generated rule carries its own
+  deadline and the program treats an expired rule as absent, so a killed or hung
+  Kapkan cannot leave a victim's legitimate traffic dropped. Sustained attacks
+  renew the deadline while they last.
+- **Safety is inherited, not reimplemented.** The backend sits below the existing
+  announcer seam, so dry-run (still the default), the absolute
+  `protected_whitelist`, TTLs, hysteresis, blast-radius caps, fallback to
+  blackhole and ban rehydration across restarts all apply unchanged. The
+  whitelist is enforced in the kernel too, on both the source and destination
+  axes, so a protected host inside a carpet-banned prefix keeps receiving traffic.
+- **`kapkan dataplane status`** — a strictly read-only inspector that works with
+  the daemon stopped, which is when an operator needs it. Reports attached
+  interfaces, attach mode, rule counts, map pressure and per-verdict counters.
+  `kapkan` gained subcommand dispatch; every existing flag invocation is
+  unchanged.
+- **Measured, not asserted.** Eighteen attack captures run end to end on every
+  change: 100% of attack traffic dropped on seventeen of them, 98.5% on the
+  per-source rate-limit capture, zero legitimate frames dropped and zero
+  allowlisted frames dropped in all eighteen. The full suite also runs on real
+  5.15, 6.1, 6.6 and 6.12 kernels in CI.
+- **A documented limitation, surfaced rather than buried.** An IPv6 packet
+  carrying more than eight extension headers is forwarded **without any rule
+  being evaluated** — the parser's budget is bounded, and a parse limit that
+  dropped packets would be a default-deny hiding inside a parser. No legitimate
+  traffic chains eight, so it is counted as
+  `kapkan_dataplane_filter_bypass_packets_total{reason="ipv6_exthdr_cap"}` and
+  called out in the console and the CLI. Alert on it.
+- New documentation page **In-kernel data plane**, in all five languages, plus a
+  `kapkan-dataplane.conf` systemd drop-in in the packages. The packaged unit
+  deliberately does not grant `CAP_BPF` by default — install the drop-in on the
+  boxes that run a data plane.
+- Prometheus: `kapkan_dataplane_*` — attach mode, per-verdict packets and bytes,
+  map entries and bytes, policy generation, attach errors, apply latency and the
+  filter-bypass counters. Per-ban measured drops are on `/api/v1/bans` rather
+  than `/metrics`, which is unauthenticated.
+
+### Fixed
+
+- `dataplane.limits` was documented as requiring `max_dynamic_rules` to *exceed*
+  `ban.max_active_bans * 8` in the config builder and the example config,
+  while validation accepts equality. All copies now say "at least".
+
 ## [1.3.1] - 2026-06-28
 
 ### Fixed
