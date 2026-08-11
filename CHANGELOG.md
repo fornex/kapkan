@@ -19,6 +19,47 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-11
+
+A metrics and reporting release: the in-kernel mitigation rung gets gauges of its
+own, and two numbers that were quietly wrong — one gauge, one API field — now say
+what they claim to. No config change; nothing needs editing on upgrade.
+
+### Added
+
+- **Two gauges for the in-kernel rung**, which the announced-route metric could
+  not represent. `kapkan_mitigate_dataplane_bans{mode}` counts bans on the local
+  XDP rung and `kapkan_mitigate_dataplane_rules{mode}` the rules they installed,
+  both labelled by the ban's frozen dry-run flag. They stay separate from the
+  datapath's own `kapkan_dataplane_rules` deliberately: one is what the mitigator
+  intended, the other what the kernel actually holds, and a divergence between
+  them under `mode="real"` is a fault worth seeing rather than summing away.
+  Under dry-run the intent gauge counts while the measured one stays at zero —
+  permanently and benignly, since a dry-run ban never reaches the installer.
+
+### Fixed
+
+- **`/api/v1/attacks` reported the weakest second of an attack's life.** The
+  record carried the measurement frozen at the instant of detection, and
+  detection fires on the first sliding window to cross a threshold — necessarily
+  the window holding the least data. A sustained attack therefore reported a
+  fifth of its real rate, or a tenth when the exporter's first datagram landed
+  mid-second, for its entire duration, and contradicted `/api/v1/hosts` about the
+  same host at the same moment. Active attacks now carry the engine's live
+  measurement; `metric` and `threshold` stay frozen at detection, because the
+  engine judges an attack's end against the thresholds captured at its start.
+  Mitigation is unaffected — the ban decision always ran on the live windowed
+  rates and never read the frozen number — but anyone who tuned thresholds from
+  the attack view, the console's attack panel or a Telegram/webhook payload was
+  reading a figure roughly 5x too low.
+- **`kapkan_mitigate_announced_routes` counted bans that announce nothing.**
+  Every ban with a non-empty method was counted, including the `dataplane` rung,
+  which installs into this box's own NIC and asks no peer for anything — so it
+  inflated a gauge whose name is a claim about the RIB. It now counts only the
+  rungs that ask a peer to enforce something: blackhole, divert and flowspec.
+  Dashboards and alerts built on this gauge will see it drop by the number of
+  data-plane bans, which is the correction, not a regression.
+
 ## [1.4.0] - 2026-08-10
 
 Kapkan can now drop attack packets itself, in the Linux kernel, instead of only
