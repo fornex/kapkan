@@ -62,6 +62,15 @@ func dirName(d int) Direction {
 	return DirIncoming
 }
 
+// dirIndex maps a public direction name back to its internal index. Anything
+// other than outgoing indexes incoming, so a zero-value Direction is incoming.
+func dirIndex(d Direction) int {
+	if d == DirOutgoing {
+		return dirOut
+	}
+	return dirIn
+}
+
 // Rates is one sampling-corrected per-second measurement for a single
 // destination host (one direction), averaged over the engine's sliding
 // window. Per-protocol components omit zeros in JSON.
