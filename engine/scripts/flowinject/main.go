@@ -110,28 +110,37 @@ func (a actor) due(tick uint64) bool {
 //
 // Measured at -sampling-rate 1000 -interval 500ms, ~20s in:
 //
-//	203.0.113.45  pps 2.6M vs 20k = 130×  (UDP flood, 29 Gbps)
-//	203.0.113.10  pps 1.2M vs 20k =  60×  (SYN flood, 576 Mbps — packets, not bits)
-//	203.0.113.77  pps 1.6M vs 80k =  20×  (DNS reflection, 19 Gbps)
+//	203.0.113.45  pps 520k vs 20k = 26×  (UDP flood, 5.8 Gbps)
+//	203.0.113.10  pps 240k vs 20k = 12×  (SYN flood, 115 Mbps — packets, not bits)
+//	203.0.113.77  320k, 4–5×           (DNS reflection, 3.8 Gbps)
+//
+// 203.0.113.77 crosses two of its thresholds — the global pps 80000 and udp_pps
+// 60000 — so which one the row names varies between runs: whichever tripped first
+// in the window that opened the detection. It reads 4× as pps or 5.3× as udp_pps.
 //
 // and exactly three active attacks: the quiet hosts stay under every threshold.
 //
-// These are five times the figures this comment carried when the scene was first
-// calibrated, and the scene itself did not change: the old ones were read off the
-// frozen /api/v1/attacks. Two consequences, neither of them a code change. The
-// console screenshots were taken against the old figures
-// and now understate what the console shows, so they want a recapture.
-// And whether a 29 Gbps single-host flood is the scene the
-// screenshots should show is now a calibration question worth asking, since the
-// answer was previously hidden behind a fifth.
+// The record counts were divided by five once /api/v1/attacks stopped serving the
+// rate frozen at detection. The scene had always offered five times this, but the
+// figures it was originally calibrated against were read off the frozen endpoint,
+// so the numbers above are what the console had been showing all along and what
+// the scene was in fact chosen to look like. Restoring them is deliberate: the
+// unreduced scene put a 29 Gbps flood against a single /32 and 130× threshold on
+// a public page, and 130× over threshold does not read as a capable
+// detector — it reads as a threshold set 130× too low. What the screenshot is
+// there to show is three vectors classified apart, each with its own method and
+// escalation rung; the magnitude adds nothing to that.
+//
+// Retuning: pps = recordsPerTick × packetsPerRecord × samplingRate / interval,
+// which now matches what /api/v1/attacks, /api/v1/hosts and the console report.
 var scene = []actor{
 	// A bandwidth-heavy UDP flood inside the tight hostgroup: the loudest row.
-	{victim: "203.0.113.45", pattern: flowgen.UDPFlood, recordsPerTick: 325, packetsPerRecord: 4, bytesPerPacket: 1400, srcBase: "198.51.100.0"},
+	{victim: "203.0.113.45", pattern: flowgen.UDPFlood, recordsPerTick: 65, packetsPerRecord: 4, bytesPerPacket: 1400, srcBase: "198.51.100.0"},
 	// A SYN flood on the same hostgroup: high pps, negligible bandwidth, and a
 	// different classification, so the Attacks view is not three of a kind.
-	{victim: "203.0.113.10", pattern: flowgen.SYNFlood, recordsPerTick: 150, packetsPerRecord: 4, bytesPerPacket: 60, srcBase: "203.0.200.0"},
+	{victim: "203.0.113.10", pattern: flowgen.SYNFlood, recordsPerTick: 30, packetsPerRecord: 4, bytesPerPacket: 60, srcBase: "203.0.200.0"},
 	// A DNS reflection against a host on the default /24 policy.
-	{victim: "203.0.113.77", pattern: flowgen.DNSAmplification, recordsPerTick: 200, packetsPerRecord: 4, bytesPerPacket: 1500, srcBase: "192.0.2.0"},
+	{victim: "203.0.113.77", pattern: flowgen.DNSAmplification, recordsPerTick: 40, packetsPerRecord: 4, bytesPerPacket: 1500, srcBase: "192.0.2.0"},
 
 	// Quiet neighbours, so the Hosts view has healthy rows to contrast against
 	// instead of reading as a wall of fire. One record every eighth tick puts
