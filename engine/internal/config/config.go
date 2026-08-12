@@ -1148,6 +1148,13 @@ const (
 	RoleViewer Role = "viewer"
 	// RoleOperator may read and mutate (manual ban/unban, config reload).
 	RoleOperator Role = "operator"
+	// RoleAgent is a scrub node's credential: it may pull the dataplane rules
+	// document and (in a later milestone) report its own state — NOTHING else.
+	// It sits OFF the privilege ladder, deliberately below viewer: an agent
+	// token lives on a remote, often less-guarded box, and it must not become
+	// a read-everything key if that box is compromised. Its routes are granted
+	// by explicit membership (api.requireAnyRole), never by rank.
+	RoleAgent Role = "agent"
 )
 
 // Rank orders roles so a check is "presented rank >= required rank".
@@ -1157,6 +1164,11 @@ func (r Role) Rank() int {
 		return 2
 	case RoleViewer:
 		return 1
+	case RoleAgent:
+		// Explicitly rank 0: the monotonic ladder cannot express "agent but
+		// not viewer", so rank grants an agent nothing and requireAnyRole is
+		// the only way it reaches a route.
+		return 0
 	default:
 		return 0
 	}
@@ -2564,8 +2576,16 @@ func (c *Config) validateAPITokens() error {
 				return fmt.Errorf("api.tokens[%q]: token_env %q is not a valid environment variable name", tk.Name, tk.TokenEnv)
 			}
 			role := Role(tk.Role)
-			if role != RoleViewer && role != RoleOperator {
-				return fmt.Errorf("api.tokens[%q]: role must be %q or %q, got %q", tk.Name, RoleViewer, RoleOperator, tk.Role)
+			if role != RoleViewer && role != RoleOperator && role != RoleAgent {
+				return fmt.Errorf("api.tokens[%q]: role must be %q, %q or %q, got %q", tk.Name, RoleViewer, RoleOperator, RoleAgent, tk.Role)
+			}
+			// An agent token is refused a tenant OUTRIGHT rather than ignored
+			// with one: the rules document it reads is unscoped (it spans every
+			// tenant), so a tenant here would promise a scoping that nothing
+			// enforces. When per-node scoping lands (the fleet milestone), it
+			// will be by hostgroup, and this rule can be relaxed deliberately.
+			if role == RoleAgent && tk.Tenant != "" {
+				return fmt.Errorf("api.tokens[%q]: an agent token cannot be tenant-scoped (the rules feed is deployment-wide)", tk.Name)
 			}
 			if tk.Tenant != "" && !tenants[tk.Tenant] {
 				return fmt.Errorf("api.tokens[%q]: tenant %q is not used by any hostgroup", tk.Name, tk.Tenant)

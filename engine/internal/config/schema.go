@@ -40,7 +40,7 @@ var enumValues = map[string][]string{
 	"flowspec.action":        {string(FlowSpecDiscard), string(FlowSpecRateLimit)},
 	"escalation.action":      {string(EscalateNone), string(EscalateDataplane), string(EscalateFlowSpec), string(EscalateDivert), string(EscalateBlackhole)},
 	"hostgroups.calculation": {string(CalcPerHost), string(CalcTotal)},
-	"api.tokens.role":        {string(RoleViewer), string(RoleOperator)},
+	"api.tokens.role":        {string(RoleViewer), string(RoleOperator), string(RoleAgent)},
 	"notify.exec.format":     {ExecFormatKapkan, ExecFormatFastNetMon},
 	"update_check.channel":   {"stable", "prerelease"},
 

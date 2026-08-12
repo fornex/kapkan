@@ -115,6 +115,11 @@ type Server struct {
 	// the hold budget, a field only so tests can shorten a 25-second wait.
 	holds     *holdGate
 	rulesHold time.Duration
+	// apiPatterns records every /api/v1 route pattern Handler() registers, so
+	// TestRoleMatrix can fail when a route lacks an authorization-matrix row.
+	// Written only inside Handler(), which runs once at startup (tests included)
+	// — not for concurrent use.
+	apiPatterns []string
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -264,11 +269,19 @@ func (s *Server) RecordAttackEnded(ev engine.Event, ban *mitigate.Ban) {
 // the data it loads is, via the guarded API) are served without a token.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// Every /api/v1 registration goes through handle(), which records the
+	// pattern into apiPatterns so TestRoleMatrix can ENFORCE that its table
+	// covers every guarded route — a route added here without a matrix row is
+	// a test failure, not a comment-discipline hope.
+	handle := func(pattern string, h http.Handler) {
+		s.apiPatterns = append(s.apiPatterns, pattern)
+		mux.Handle(pattern, h)
+	}
 	read := func(pattern string, h http.HandlerFunc) {
-		mux.Handle(pattern, s.requireRole(config.RoleViewer, h))
+		handle(pattern, s.requireRole(config.RoleViewer, h))
 	}
 	write := func(pattern string, h http.HandlerFunc) {
-		mux.Handle(pattern, s.requireRole(config.RoleOperator, h))
+		handle(pattern, s.requireRole(config.RoleOperator, h))
 	}
 	read("GET /api/v1/status", s.handleStatus)
 	read("GET /api/v1/attacks", s.handleAttacks)
@@ -279,12 +292,13 @@ func (s *Server) Handler() http.Handler {
 	write("POST /api/v1/ban", s.handleBan)
 	write("POST /api/v1/unban", s.handleUnban)
 	write("POST /api/v1/config/reload", s.handleReload)
-	// The scrub-node channel (rules.go). Operator-gated for now — the agent
-	// role (rank 0, explicit-membership routes) is the next milestone task, and
-	// this route moves to requireAnyRole(agent, operator) with it. It is a read
-	// that the viewer role deliberately does NOT get: the document lists every
-	// diverted victim across every tenant (see handleDataplaneRules).
-	mux.Handle("GET /api/v1/dataplane/rules", s.requireRole(config.RoleOperator, s.handleDataplaneRules))
+	// The scrub-node channel (rules.go), granted by explicit membership: agent
+	// (the role that exists FOR this route) and operator (so a human can curl
+	// what the agent sees). It is a read that the viewer role deliberately does
+	// NOT get: the document lists every diverted victim across every tenant
+	// (see handleDataplaneRules), and viewer reads are tenant-scopable.
+	handle("GET /api/v1/dataplane/rules",
+		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleDataplaneRules))
 	mux.Handle("GET /metrics", promhttp.Handler())
 	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater
 	// or supervisor can confirm the daemon is fully up after a restart. 503 until
@@ -332,67 +346,45 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
-// requireRole enforces the configured API tokens and the route's minimum role.
-// When no tokens are configured the API is open (safe only on a trusted
-// listener such as the default 127.0.0.1 bind). Otherwise the presented bearer
-// token is matched (constant-time) against every configured token's current env
-// value — an empty value never matches, so the API fails closed — and the
-// highest matching role is taken: no match is 401, a role below the route's
-// requirement is 403. Tokens and roles are read per request, so a reload takes
-// effect without a restart.
-//
-// For mutating methods an application/json content type is also required: a
-// cross-site request cannot set that header without a CORS preflight (never
-// granted), so token-in-header plus JSON closes CSRF.
+// requireRole enforces the configured API tokens and the route's minimum role:
+// a role below the route's requirement is 403. This is the ladder check every
+// human-facing route uses; RoleAgent has rank 0, so it clears no ladder and can
+// only enter through requireAnyRole below.
 func (s *Server) requireRole(required config.Role, next http.HandlerFunc) http.Handler {
+	return s.guard(func(r config.Role) bool { return r.Rank() >= required.Rank() }, next)
+}
+
+// requireAnyRole grants a route by EXPLICIT MEMBERSHIP instead of rank. It
+// exists for the agent: the monotonic ladder cannot express "agent but not
+// viewer" — an agent token lives on a remote scrub box and must not read
+// attacks, bans or audit if that box is compromised — so its two routes name
+// their allowed roles outright. Operator stays listed so a human can curl the
+// same endpoints an agent uses.
+func (s *Server) requireAnyRole(allowed []config.Role, next http.HandlerFunc) http.Handler {
+	return s.guard(func(r config.Role) bool {
+		for _, a := range allowed {
+			if r == a {
+				return true
+			}
+		}
+		return false
+	}, next)
+}
+
+// guard is the shared authentication + authorization wrapper: authenticate the
+// bearer, apply the route's permit predicate, enforce the JSON content type on
+// mutating methods (a cross-site request cannot set that header without a CORS
+// preflight, never granted — token-in-header plus JSON closes CSRF), and stamp
+// the caller into the request context.
+func (s *Server) guard(permit func(config.Role) bool, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tokens := s.store.Get().API.TokenSpecs
-		// No tokens configured: open API (trusted-listener mode), caller is an
-		// unscoped admin — identical to pre-RBAC behavior.
-		cl := caller{role: config.RoleOperator, tenant: ""}
-		if len(tokens) > 0 {
-			// Require the exact "Bearer " scheme; a raw header value must not
-			// authenticate. Compare against every token without an early exit,
-			// taking the highest matching role and its tenant scope.
-			got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			var match config.TokenSpec
-			matched := false
-			ambiguous := false
-			if ok {
-				for _, tk := range tokens {
-					want := os.Getenv(tk.Env)
-					if want == "" {
-						continue // env unset/empty → never matches (fail closed)
-					}
-					if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-						continue
-					}
-					switch {
-					case !matched:
-						match, matched = tk, true
-					case tk.Role != match.Role || tk.Tenant != match.Tenant:
-						// The same bearer matches tokens of DIFFERENT role or
-						// tenant (a reused secret): which principal is this?
-						// Fail closed rather than pick one — a reuse must never
-						// silently widen access. Checked against ALL matches, so
-						// a higher-rank token cannot clear the ambiguity.
-						ambiguous = true
-					}
-				}
-			}
-			if !matched || ambiguous {
-				if ambiguous {
-					s.log.Error("ambiguous API token: one secret matches tokens of differing role/tenant; refusing")
-				}
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
-				return
-			}
-			if match.Role.Rank() < required.Rank() {
-				writeError(w, http.StatusForbidden, "this token's role may not perform this action")
-				return
-			}
-			cl = caller{role: match.Role, tenant: match.Tenant, token: match.Name}
+		cl, ok := s.authenticate(w, r)
+		if !ok {
+			return // authenticate already wrote the 401
+		}
+		if !permit(cl.role) {
+			writeError(w, http.StatusForbidden, "this token's role may not perform this action")
+			return
 		}
 		if r.Method == http.MethodPost {
 			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
@@ -404,10 +396,64 @@ func (s *Server) requireRole(required config.Role, next http.HandlerFunc) http.H
 	})
 }
 
+// authenticate resolves the request's caller from the configured API tokens.
+// When no tokens are configured the API is open (safe only on a trusted
+// listener such as the default 127.0.0.1 bind) and the caller is an unscoped
+// operator — identical to pre-RBAC behavior. Otherwise the presented bearer
+// token is matched (constant-time) against every configured token's current env
+// value — an empty value never matches, so the API fails closed — and no match
+// is a 401, written here. Tokens and roles are read per request, so a reload
+// takes effect without a restart.
+func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (caller, bool) {
+	tokens := s.store.Get().API.TokenSpecs
+	if len(tokens) == 0 {
+		return caller{role: config.RoleOperator, tenant: ""}, true
+	}
+	// Require the exact "Bearer " scheme; a raw header value must not
+	// authenticate. Compare against every token without an early exit,
+	// taking the matching token's role and tenant scope.
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	var match config.TokenSpec
+	matched := false
+	ambiguous := false
+	if ok {
+		for _, tk := range tokens {
+			want := os.Getenv(tk.Env)
+			if want == "" {
+				continue // env unset/empty → never matches (fail closed)
+			}
+			if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+				continue
+			}
+			switch {
+			case !matched:
+				match, matched = tk, true
+			case tk.Role != match.Role || tk.Tenant != match.Tenant:
+				// The same bearer matches tokens of DIFFERENT role or
+				// tenant (a reused secret): which principal is this?
+				// Fail closed rather than pick one — a reuse must never
+				// silently widen access. Checked against ALL matches, so
+				// a higher-rank token cannot clear the ambiguity.
+				ambiguous = true
+			}
+		}
+	}
+	if !matched || ambiguous {
+		if ambiguous {
+			s.log.Error("ambiguous API token: one secret matches tokens of differing role/tenant; refusing")
+		}
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+		return caller{}, false
+	}
+	return caller{role: match.Role, tenant: match.Tenant, token: match.Name}, true
+}
+
 // caller is the authenticated principal for a request: its role and its tenant
-// scope ("" = unscoped admin / all tenants). It is derived once in requireRole
-// and carried in the request context, so every handler shares one source of
-// truth for who is asking.
+// scope ("" = unscoped admin / all tenants). It is derived once in guard (the
+// wrapper behind both requireRole and requireAnyRole) and carried in the
+// request context, so every handler shares one source of truth for who is
+// asking.
 type caller struct {
 	role   config.Role
 	tenant string
@@ -421,9 +467,9 @@ func (c caller) unscoped() bool { return c.tenant == "" }
 
 type callerKey struct{}
 
-// callerFrom returns the caller established by requireRole. Every /api/v1 route
-// passes through requireRole, so this is always populated; the zero value (an
-// unscoped admin) is only a defensive fallback.
+// callerFrom returns the caller established by guard. Every /api/v1 route
+// passes through guard (via requireRole or requireAnyRole), so this is always
+// populated; the zero value (an unscoped admin) is only a defensive fallback.
 func callerFrom(r *http.Request) caller {
 	c, _ := r.Context().Value(callerKey{}).(caller)
 	return c

@@ -19,6 +19,18 @@ security-relevant.
 
 ## [Unreleased]
 
+### Config changes
+
+- **Added** `agent` as a value for `api.tokens[].role` — a scrub node's
+  credential. It sits *off* the privilege ladder, below `viewer`: an agent
+  token may read `GET /api/v1/dataplane/rules` (and, in an upcoming release,
+  report its node's state) and nothing else — not attacks, not bans, not audit.
+  The token lives on a remote scrub box, and a compromise there must not become
+  a read-everything key. An agent token cannot be tenant-scoped: the rules feed
+  is deployment-wide (per-node scoping arrives with the fleet milestone), and
+  validation rejects the combination rather than promising a scoping nothing
+  enforces.
+
 ### Added
 
 - **`GET /api/v1/dataplane/rules` — the scrub-node channel.** A versioned,
@@ -29,10 +41,10 @@ security-relevant.
   `kapkan scrub` role follows rule changes with sub-second latency over plain
   HTTP polling. Holds are capped — 4 per token, 8 overall, `429` beyond — and a
   graceful shutdown releases every held poll immediately instead of stalling
-  behind it. The endpoint is restricted to unscoped operator tokens: the
+  behind it. The endpoint is restricted to unscoped tokens — the dedicated
+  `agent` role (see Config changes above) or an unscoped operator — because the
   document deliberately spans all tenants (per-node scoping is the fleet
-  milestone), and until the dedicated `agent` role lands, only an unscoped
-  operator may read it. Reverse proxies in front of the API need read timeouts
+  milestone). Reverse proxies in front of the API need read timeouts
   above 30 s (the long-poll hold) — nginx `proxy_read_timeout 60s` or higher.
 
 ## [1.5.0] - 2026-08-11
