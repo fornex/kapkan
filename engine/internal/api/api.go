@@ -103,6 +103,19 @@ type Server struct {
 	// their next tick (today: the data plane's kernel maps).
 	reloadHook atomic.Pointer[func(*config.Config)]
 
+	// quit is closed when the HTTP server begins shutting down (via
+	// RegisterOnShutdown), releasing every held /api/v1/dataplane/rules
+	// long-poll immediately — a graceful Shutdown waits for in-flight handlers,
+	// and a parked 25-second hold must not be what it waits for. quitOnce
+	// guards the close: net/http runs the shutdown hooks once per Shutdown
+	// CALL, and a second call must not panic on a closed channel.
+	quit     chan struct{}
+	quitOnce sync.Once
+	// holds caps concurrent rule-poll holds (per token and total); rulesHold is
+	// the hold budget, a field only so tests can shorten a 25-second wait.
+	holds     *holdGate
+	rulesHold time.Duration
+
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
 	recent []Attack           // ring of the most recent ended attacks (newest last)
@@ -111,12 +124,15 @@ type Server struct {
 // New creates the API server.
 func New(store *config.Store, eng *engine.Engine, mit *mitigate.Mitigator, log *slog.Logger) *Server {
 	return &Server{
-		store:  store,
-		eng:    eng,
-		mit:    mit,
-		log:    log.With("component", "api"),
-		start:  time.Now(),
-		active: make(map[string]*Attack),
+		store:     store,
+		eng:       eng,
+		mit:       mit,
+		log:       log.With("component", "api"),
+		start:     time.Now(),
+		active:    make(map[string]*Attack),
+		quit:      make(chan struct{}),
+		holds:     newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
+		rulesHold: rulesHoldMax,
 	}
 }
 
@@ -263,6 +279,12 @@ func (s *Server) Handler() http.Handler {
 	write("POST /api/v1/ban", s.handleBan)
 	write("POST /api/v1/unban", s.handleUnban)
 	write("POST /api/v1/config/reload", s.handleReload)
+	// The scrub-node channel (rules.go). Operator-gated for now — the agent
+	// role (rank 0, explicit-membership routes) is the next milestone task, and
+	// this route moves to requireAnyRole(agent, operator) with it. It is a read
+	// that the viewer role deliberately does NOT get: the document lists every
+	// diverted victim across every tenant (see handleDataplaneRules).
+	mux.Handle("GET /api/v1/dataplane/rules", s.requireRole(config.RoleOperator, s.handleDataplaneRules))
 	mux.Handle("GET /metrics", promhttp.Handler())
 	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater
 	// or supervisor can confirm the daemon is fully up after a restart. 503 until
@@ -439,14 +461,34 @@ func visibleAttack(c caller, cfg *config.Config, a Attack) bool {
 	return visibleAddr(c, cfg, a.Target)
 }
 
+// httpServer builds the http.Server ListenAndServe runs, factored out so the
+// shutdown test can drive the REAL server (hooks and all) on its own listener.
+func (s *Server) httpServer() *http.Server {
+	srv := &http.Server{
+		Addr:    s.store.Get().API.Listen,
+		Handler: s.Handler(),
+		// ReadHeaderTimeout is the slow-loris guard and is safe: it only times
+		// the request HEAD, never a response being (deliberately) withheld.
+		ReadHeaderTimeout: 5 * time.Second,
+		// NO WriteTimeout AND NO IdleTimeout, and this is load-bearing:
+		// /api/v1/dataplane/rules holds a response for up to rulesHoldMax while
+		// an agent waits for a rule change, and either timeout would sever that
+		// hold — silently, in production, as agents that mysteriously reconnect
+		// every request. Adding one here breaks the agent channel.
+	}
+	// Wake every held long-poll the moment Shutdown begins: Shutdown waits for
+	// in-flight handlers, and a parked hold must release on quit, not sit out
+	// its deadline into the shutdown timeout.
+	srv.RegisterOnShutdown(func() {
+		s.quitOnce.Do(func() { close(s.quit) })
+	})
+	return srv
+}
+
 // ListenAndServe runs the HTTP server until ctx is cancelled, then shuts it
 // down gracefully.
 func (s *Server) ListenAndServe(ctx context.Context) error {
-	srv := &http.Server{
-		Addr:              s.store.Get().API.Listen,
-		Handler:           s.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	srv := s.httpServer()
 	errc := make(chan error, 1)
 	go func() {
 		s.log.Info("api listening", "addr", srv.Addr)
