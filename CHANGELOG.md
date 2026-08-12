@@ -33,6 +33,22 @@ security-relevant.
 
 ### Added
 
+- **`POST /api/v1/dataplane/nodes/{name}/report` — a scrub node's self-report.**
+  Version, XDP mode, node-side dry-run, load and drop totals, stored in memory
+  for the console's upcoming Nodes view. Reports are **advisory by contract**:
+  every field is what the node *claims*, and none of it feeds a decision — above
+  all, a report is never a liveness signal, so a compromised agent token cannot
+  keep a dead node "up" and attracting diverted traffic by posting reports.
+  Liveness is the rules poll and only the rules poll: an agent identifies
+  itself with `?node=<name>` on `GET /api/v1/dataplane/rules`, and the brain
+  tracks who is asking (a node mid-hold counts as present). An unknown name is
+  refused (404) so a typo'd `controller.name` fails loudly instead of polling
+  into the void, and naming a node at all requires a real API token (403 in
+  token-less open mode) — presence must not be forgeable by an unauthenticated
+  request. Reports for nodes
+  absent from `scrubbing.nodes[]` are refused (404), bodies over 64 KiB
+  likewise (413); the route takes the same `agent`-or-unscoped-`operator`
+  credentials as the rules feed.
 - **`GET /api/v1/dataplane/rules` — the scrub-node channel.** A versioned,
   deterministic document of every active diverted victim (prefix, narrowing
   rules, mirrored TTL, dry-run flag), served with a content-hash `ETag`. A

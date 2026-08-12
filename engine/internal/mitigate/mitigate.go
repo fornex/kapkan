@@ -209,6 +209,12 @@ type Mitigator struct {
 	// by RulesChanged. Lazily created; nil until someone listens. Guarded by mu.
 	rulesCh chan struct{}
 
+	// nodes tracks scrub-node poll presence (see nodes.go). Its OWN mutex, not
+	// mu: polls are recorded on every agent request, and the hot request path
+	// must not contend with ban mutations.
+	nodesMu sync.Mutex
+	nodes   map[string]*nodePresence
+
 	now    func() time.Time
 	ctx    context.Context
 	cancel context.CancelFunc

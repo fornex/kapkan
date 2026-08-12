@@ -770,7 +770,12 @@ type Scrubbing struct {
 	// rather than withdrawn.
 	OnAllNodesLost string `yaml:"on_all_nodes_lost"`
 	// StaleAfterSeconds is how long a node may go without polling before it
-	// counts as lost (default 15).
+	// counts as lost (default 15). The real detection bound for a SILENT death
+	// (power loss, partition — nothing sends a FIN) is this PLUS the rules
+	// long-poll hold the node may be parked in (documented ≤30 s): the open
+	// hold keeps the node present until its server-side deadline passes. Size
+	// this against blackhole tolerance with that sum in mind, not this number
+	// alone.
 	StaleAfterSeconds int `yaml:"stale_after_seconds"`
 
 	// Parsed forms, populated by validate().

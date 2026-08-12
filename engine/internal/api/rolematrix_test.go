@@ -54,33 +54,43 @@ func TestRoleMatrix(t *testing.T) {
 
 	routes := []struct {
 		method, path, body string
+		// pattern is the registered mux pattern when it differs from
+		// method+path (wildcards, query strings are stripped automatically).
+		pattern string
 		// allowed[identity name] — absent means denied.
 		allowed map[string]bool
 	}{
-		{"GET", "/api/v1/status", "", map[string]bool{"viewer": true, "operator": true}},
-		{"GET", "/api/v1/attacks", "", map[string]bool{"viewer": true, "operator": true}},
-		{"GET", "/api/v1/hosts", "", map[string]bool{"viewer": true, "operator": true}},
-		{"GET", "/api/v1/bans", "", map[string]bool{"viewer": true, "operator": true}},
-		{"GET", "/api/v1/traffic?key=203.0.113.10", "", map[string]bool{"viewer": true, "operator": true}},
-		{"GET", "/api/v1/audit", "", map[string]bool{"viewer": true, "operator": true}},
-		{"POST", "/api/v1/ban", `{"ip":"203.0.113.10"}`, map[string]bool{"operator": true}},
-		{"POST", "/api/v1/unban", `{"ip":"203.0.113.10"}`, map[string]bool{"operator": true}},
-		{"POST", "/api/v1/config/reload", `{}`, map[string]bool{"operator": true}},
-		// The scrub-node channel: the agent's ONLY route, plus operator so a
-		// human can curl what the agent sees. Viewer is denied on purpose —
-		// the document spans every tenant while viewer reads are scopable.
-		{"GET", "/api/v1/dataplane/rules", "", map[string]bool{"operator": true, "agent": true}},
+		{"GET", "/api/v1/status", "", "", map[string]bool{"viewer": true, "operator": true}},
+		{"GET", "/api/v1/attacks", "", "", map[string]bool{"viewer": true, "operator": true}},
+		{"GET", "/api/v1/hosts", "", "", map[string]bool{"viewer": true, "operator": true}},
+		{"GET", "/api/v1/bans", "", "", map[string]bool{"viewer": true, "operator": true}},
+		{"GET", "/api/v1/traffic?key=203.0.113.10", "", "", map[string]bool{"viewer": true, "operator": true}},
+		{"GET", "/api/v1/audit", "", "", map[string]bool{"viewer": true, "operator": true}},
+		{"POST", "/api/v1/ban", `{"ip":"203.0.113.10"}`, "", map[string]bool{"operator": true}},
+		{"POST", "/api/v1/unban", `{"ip":"203.0.113.10"}`, "", map[string]bool{"operator": true}},
+		{"POST", "/api/v1/config/reload", `{}`, "", map[string]bool{"operator": true}},
+		// The scrub-node channel: the agent's routes, plus operator so a human
+		// can curl what the agent sees/sends. Viewer is denied on purpose —
+		// the rules document spans every tenant while viewer reads are
+		// scopable, and a report is a write.
+		{"GET", "/api/v1/dataplane/rules", "", "", map[string]bool{"operator": true, "agent": true}},
+		{"POST", "/api/v1/dataplane/nodes/n1/report", `{}`, "POST /api/v1/dataplane/nodes/{name}/report",
+			map[string]bool{"operator": true, "agent": true}},
 	}
 
 	// The two route sets must be IDENTICAL: every registered /api/v1 pattern
 	// has a matrix row, and every row names a registered pattern.
 	inMatrix := map[string]bool{}
 	for _, rt := range routes {
-		p := rt.path
-		if i := strings.Index(p, "?"); i >= 0 {
-			p = p[:i]
+		pat := rt.pattern
+		if pat == "" {
+			p := rt.path
+			if i := strings.Index(p, "?"); i >= 0 {
+				p = p[:i]
+			}
+			pat = rt.method + " " + p
 		}
-		inMatrix[rt.method+" "+p] = true
+		inMatrix[pat] = true
 	}
 	registered := map[string]bool{}
 	for _, pat := range s.apiPatterns {
