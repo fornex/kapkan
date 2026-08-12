@@ -183,11 +183,16 @@ func (m *Mitigator) snapshotLocked() persistState {
 	return st
 }
 
-// markDirty signals the persist loop that ban state changed. Non-blocking and a
-// no-op when persistence is disabled, so it is safe to call from any ban
-// mutation under m.mu. Writes coalesce: a full pending signal means a write is
-// already queued, which will capture the latest state.
+// markDirty signals both consumers of "the ban table changed": the persist
+// loop (below) and the long-poll waiters behind RulesChanged (a scrub node
+// holding GET /api/v1/dataplane/rules). One signal point on purpose — anything
+// worth writing to the state file is exactly what a scrub node must hear about,
+// and a future mutation that calls markDirty gets both behaviors for free.
+// Non-blocking; every caller is a ban mutation already holding m.mu (which
+// notifyRulesLocked requires). Persist writes coalesce: a full pending signal
+// means a write is already queued, which will capture the latest state.
 func (m *Mitigator) markDirty() {
+	m.notifyRulesLocked()
 	if m.persist == nil {
 		return
 	}

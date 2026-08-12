@@ -204,6 +204,11 @@ type Mitigator struct {
 	dirty       chan struct{}
 	persistDone chan struct{}
 
+	// rulesCh broadcasts ban-table changes to /api/v1/dataplane/rules long-polls
+	// (see ruleschannel.go): closed and replaced by notifyRulesLocked, handed out
+	// by RulesChanged. Lazily created; nil until someone listens. Guarded by mu.
+	rulesCh chan struct{}
+
 	now    func() time.Time
 	ctx    context.Context
 	cancel context.CancelFunc

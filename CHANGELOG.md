@@ -19,6 +19,22 @@ security-relevant.
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /api/v1/dataplane/rules` — the scrub-node channel.** A versioned,
+  deterministic document of every active diverted victim (prefix, narrowing
+  rules, mirrored TTL, dry-run flag), served with a content-hash `ETag`. A
+  request whose `If-None-Match` names the current document is held until the ban
+  table changes (or up to 30 s, then `304`), so a box running the upcoming
+  `kapkan scrub` role follows rule changes with sub-second latency over plain
+  HTTP polling. Holds are capped — 4 per token, 8 overall, `429` beyond — and a
+  graceful shutdown releases every held poll immediately instead of stalling
+  behind it. The endpoint is restricted to unscoped operator tokens: the
+  document deliberately spans all tenants (per-node scoping is the fleet
+  milestone), and until the dedicated `agent` role lands, only an unscoped
+  operator may read it. Reverse proxies in front of the API need read timeouts
+  above 30 s (the long-poll hold) — nginx `proxy_read_timeout 60s` or higher.
+
 ## [1.5.0] - 2026-08-11
 
 A metrics and reporting release: the in-kernel mitigation rung gets gauges of its
