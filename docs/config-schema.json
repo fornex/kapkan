@@ -27,7 +27,8 @@
               "role": {
                 "enum": [
                   "viewer",
-                  "operator"
+                  "operator",
+                  "agent"
                 ],
                 "type": "string"
               },

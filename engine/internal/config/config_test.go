@@ -1258,12 +1258,26 @@ func TestAPITokensResolution(t *testing.T) {
 		t.Errorf("token specs = %+v", s)
 	}
 
+	// The agent role (a scrub node's credential) is accepted and sits off the
+	// privilege ladder: rank 0, below viewer.
+	cfg, err = Parse([]byte(withAPI("  tokens:\n    - {name: node1, token_env: K_NODE, role: agent}\n")))
+	if err != nil {
+		t.Fatalf("Parse() agent token error = %v", err)
+	}
+	if s := cfg.API.TokenSpecs; len(s) != 1 || s[0].Role != RoleAgent {
+		t.Errorf("agent token specs = %+v", s)
+	}
+	if RoleAgent.Rank() != 0 || RoleAgent.Rank() >= RoleViewer.Rank() {
+		t.Errorf("RoleAgent.Rank() = %d, must be 0 (off the ladder, below viewer)", RoleAgent.Rank())
+	}
+
 	bad := []struct{ name, block, wantErr string }{
 		{"both token_env and tokens", "  token_env: \"K\"\n  tokens:\n    - {name: a, token_env: K2, role: viewer}\n", "not both"},
 		{"bad role", "  tokens:\n    - {name: a, token_env: K, role: admin}\n", "role must be"},
 		{"duplicate name", "  tokens:\n    - {name: a, token_env: K1, role: viewer}\n    - {name: a, token_env: K2, role: operator}\n", "duplicate name"},
 		{"empty name", "  tokens:\n    - {name: \"\", token_env: K, role: viewer}\n", "name is required"},
 		{"bad env name", "  tokens:\n    - {name: a, token_env: \"bad env!\", role: viewer}\n", "valid environment variable"},
+		{"agent with tenant", "  tokens:\n    - {name: a, token_env: K, role: agent, tenant: custA}\n", "cannot be tenant-scoped"},
 	}
 	for _, tt := range bad {
 		t.Run(tt.name, func(t *testing.T) {

@@ -102,6 +102,16 @@ api: {listen: "127.0.0.1:8080"}
 			wantErr: "de-escalates",
 		},
 		{
+			// An agent token is a scrub node's credential and its rules feed is
+			// deployment-wide; a tenant on it would promise a scoping nothing
+			// enforces (per-node scoping is the fleet milestone).
+			name: "tenant-scoped agent token",
+			yaml: strings.Replace(validBase, "api:\n  listen: \"127.0.0.1:8080\"\n",
+				"api:\n  listen: \"127.0.0.1:8080\"\n  tokens:\n    - {name: n1, token_env: K_N1, role: agent, tenant: custA}\n", 1) +
+				"\nhostgroups:\n  - {name: a-web, tenant: custA, networks: [\"203.0.113.0/26\"]}\n",
+			wantErr: "cannot be tenant-scoped",
+		},
+		{
 			// dataplane is the most surgical rung, so climbing from flowspec
 			// back down to it is a de-escalation like any other.
 			name:    "de-escalating from flowspec to dataplane",
