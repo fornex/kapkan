@@ -120,6 +120,9 @@ type Server struct {
 	// Written only inside Handler(), which runs once at startup (tests included)
 	// — not for concurrent use.
 	apiPatterns []string
+	// nodeReports holds each scrub node's last self-report (nodes.go). Advisory
+	// display data only; liveness lives in the mitigator.
+	nodeReports nodeReportStore
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -299,6 +302,9 @@ func (s *Server) Handler() http.Handler {
 	// (see handleDataplaneRules), and viewer reads are tenant-scopable.
 	handle("GET /api/v1/dataplane/rules",
 		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleDataplaneRules))
+	// The node self-report (nodes.go). Advisory by contract — never liveness.
+	handle("POST /api/v1/dataplane/nodes/{name}/report",
+		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleNodeReport))
 	mux.Handle("GET /metrics", promhttp.Handler())
 	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater
 	// or supervisor can confirm the daemon is fully up after a restart. 503 until

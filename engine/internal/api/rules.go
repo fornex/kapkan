@@ -154,9 +154,40 @@ func (s *Server) handleDataplaneRules(w http.ResponseWriter, r *http.Request) {
 	// per-hostgroup scoping is the M5 fleet milestone). So only unscoped tokens
 	// may read it; a tenant-scoped operator would otherwise learn every other
 	// tenant's victims from one GET. Same rule, same reason as handleReload.
-	if c := callerFrom(r); !c.unscoped() {
+	c := callerFrom(r)
+	if !c.unscoped() {
 		writeError(w, http.StatusForbidden, "dataplane rules are restricted to unscoped tokens")
 		return
+	}
+	// ?node=<name> is the agent's identity, and THIS REQUEST is the node's
+	// liveness signal — the one and only one (a self-report never is; see
+	// nodes.go). The name must be a configured scrubbing node: a typo in the
+	// agent's controller.name must fail loudly here, not leave a node that
+	// polls diligently while the brain counts it dead and re-announces its
+	// victims elsewhere. Optional, so an operator's bare curl still works.
+	if node := r.URL.Query().Get("node"); node != "" {
+		// A sighting requires a REAL credential. This is the API's one
+		// side-effectful GET, which the POST-only CSRF gate (see guard) does
+		// not cover: in token-less open mode, any browser on the operator's
+		// machine could otherwise forge presence for a dead node with a
+		// cross-origin <img> pointed at the localhost listener. Refused
+		// loudly rather than silently unrecorded, so a node polling an
+		// open-mode brain reads as a setup error, not as mysteriously dead.
+		if c.token == "" {
+			writeError(w, http.StatusForbidden, "node identity requires an API token (configure api.tokens)")
+			return
+		}
+		if configuredNode(s.store.Get(), node) == nil {
+			writeError(w, http.StatusNotFound, "unknown scrubbing node")
+			return
+		}
+		// Token↔node binding is deliberately NOT enforced yet: any agent (or
+		// unscoped operator) token may assert any configured node's presence.
+		// The fleet milestone's per-node token binding must cover BOTH
+		// surfaces — this poll identity and the report path — not reports
+		// alone; whoever implements it, start here.
+		s.mit.NodePollStarted(node)
+		defer s.mit.NodePollEnded(node)
 	}
 	body, etag, err := s.ruleSnapshot()
 	if err != nil {
