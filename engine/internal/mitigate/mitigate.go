@@ -39,22 +39,30 @@ const (
 // Ban records one blackhole decision and its lifecycle. It is the unit shared
 // with the API and notifications.
 type Ban struct {
-	Target      netip.Addr    `json:"target"`
-	Prefix      netip.Prefix  `json:"prefix"`
-	Metric      engine.Metric `json:"metric,omitempty"`
-	Rate        float64       `json:"rate,omitempty"`
-	Threshold   float64       `json:"threshold,omitempty"`
-	NextHop     string        `json:"next_hop"`
-	Community   string        `json:"community"`
-	LocalPref   uint32        `json:"local_pref,omitempty"`
-	Route       string        `json:"route"`
-	State       BanState      `json:"state"`
-	DryRun      bool          `json:"dry_run"`
-	Manual      bool          `json:"manual"`
-	StartedAt   time.Time     `json:"started_at"`
-	ExpiresAt   time.Time     `json:"expires_at"`
-	WithdrawnAt time.Time     `json:"withdrawn_at,omitempty"`
-	Reason      string        `json:"reason,omitempty"`
+	Target    netip.Addr    `json:"target"`
+	Prefix    netip.Prefix  `json:"prefix"`
+	Metric    engine.Metric `json:"metric,omitempty"`
+	Rate      float64       `json:"rate,omitempty"`
+	Threshold float64       `json:"threshold,omitempty"`
+	NextHop   string        `json:"next_hop"`
+	Community string        `json:"community"`
+	LocalPref uint32        `json:"local_pref,omitempty"`
+	Route     string        `json:"route"`
+	// Node is the managed scrubbing node this ban's divert rung announces
+	// toward, FROZEN at ban time exactly like the BGP attribute sets below —
+	// a victim's traffic must not hop between nodes because a reload reordered
+	// a list. It changes only when the node is lost and the loss sweep
+	// re-announces toward a survivor (nodeselect.go). Empty when the ladder
+	// does not divert, or diverts to the unmanaged scalar scrubbing.next_hop —
+	// so every pre-nodes ban's JSON is byte-identical to what it was.
+	Node        string    `json:"node,omitempty"`
+	State       BanState  `json:"state"`
+	DryRun      bool      `json:"dry_run"`
+	Manual      bool      `json:"manual"`
+	StartedAt   time.Time `json:"started_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	WithdrawnAt time.Time `json:"withdrawn_at,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
 
 	// Method is the mitigation method currently applied to this ban; it
 	// changes as the escalation ladder advances ("" while at an alert-only
@@ -287,6 +295,12 @@ func New(store *config.Store, log *slog.Logger, opts ...Option) (*Mitigator, err
 // gated on dry_run.
 func (m *Mitigator) Start(ctx context.Context) error {
 	m.ctx, m.cancel = context.WithCancel(ctx)
+	// Selection modes beyond affinity are the fleet milestone; say so once at
+	// startup rather than silently doing something else per ban.
+	if s := m.store.Get().Scrubbing; len(s.Nodes) > 0 && s.NodeSelection != config.NodeSelectAffinity {
+		m.log.Warn("scrubbing.node_selection mode is not implemented yet; using affinity",
+			"configured", s.NodeSelection)
+	}
 	if m.speaker != nil {
 		if err := m.speaker.start(m.ctx); err != nil {
 			return fmt.Errorf("start bgp speaker: %w", err)
@@ -724,7 +738,7 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	// ladder uses: the blackhole/divert attribute sets (frozen so a config reload
 	// cannot change a live ban's route, and so a rehydrated ban matches) and the
 	// generated FlowSpec rules if any rung is flowspec.
-	freezeUnicastAttrs(b, group, target, cfg)
+	m.freezeUnicastAttrs(b, group, target, cfg)
 	// The generated rules are the IR for BOTH surgical rungs — bgp.go encodes
 	// them as FlowSpec NLRI, dpencode.go compiles them into kernel rules — so a
 	// ladder that only ever drops in the data plane needs them generated here
@@ -732,7 +746,13 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	// from the attack sample: the sample is gone by the time an escalation runs,
 	// and a rung that re-derived them would filter a different vector than the
 	// ban record says it does.
-	if ladderUsesFlowSpec(group.Escalation) || ladderUsesDataplane(group.Escalation) {
+	//
+	// A divert ladder needs them too when on_all_nodes_lost is flowspec: the
+	// fallback fires long after the sample is gone, and executing it with an
+	// empty rule set would announce nothing — a victim silently undefended at
+	// the exact moment every scrub node is down.
+	if ladderUsesFlowSpec(group.Escalation) || ladderUsesDataplane(group.Escalation) ||
+		(ladderUsesDivert(group.Escalation) && cfg.Scrubbing.OnAllNodesLost == config.NodesLostFlowSpec) {
 		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample,
 			group.FlowSpecAction, group.FlowSpecRateBps, group.FlowSpecSourceAnchored, group.FlowSpecMinConcentration)
 	}
@@ -865,7 +885,7 @@ func (m *Mitigator) banPrefix(p netip.Prefix, opts banOpts) *Ban {
 	// Freeze blackhole attributes when the rung IS a blackhole, or when a
 	// surgical rung (flowspec / dataplane) may degrade to one (the prefix is
 	// already whitelist-free). Reads b.Escalation, so it must follow it.
-	freezeUnicastAttrs(b, g, p.Addr(), cfg)
+	m.freezeUnicastAttrs(b, g, p.Addr(), cfg)
 	// The generated rules are the IR for BOTH surgical rungs, exactly as on the
 	// host path in ban(): bgp.go encodes them as FlowSpec NLRI and dpencode.go
 	// compiles them into kernel rules. Gating this on the same ladder predicates
@@ -1015,7 +1035,13 @@ func groupDivertAttrs(g *config.Group, target netip.Addr) blackholeAttrs {
 // re-announces and escalates with exactly the attributes a freshly-created one
 // would. FlowSpec rules are handled separately by the caller (generated at ban
 // time from the attack sample, restored verbatim on rehydration).
-func freezeUnicastAttrs(b *Ban, group *config.Group, target netip.Addr, cfg *config.Config) {
+//
+// A Mitigator method (not a free function) because the divert rung's next-hop
+// may come from a MANAGED scrubbing node, and picking one prefers nodes that
+// are actually polling — liveness the mitigator owns. b.Node going in is the
+// rehydration preference (keep the persisted choice when still valid); b.Node
+// coming out is the frozen choice, "" for the unmanaged scalar path.
+func (m *Mitigator) freezeUnicastAttrs(b *Ban, group *config.Group, target netip.Addr, cfg *config.Config) {
 	fallbackToBlackhole := cfg.Ban.FallbackMethod() != ""
 	// The dataplane rung is in the fallback set (see fallbackFor), so its
 	// blackhole attributes must be frozen here too. Leave it out and a failed
@@ -1024,11 +1050,26 @@ func freezeUnicastAttrs(b *Ban, group *config.Group, target netip.Addr, cfg *con
 	// no mitigation at all.
 	surgical := ladderUsesFlowSpec(b.Escalation) || ladderUsesDivert(b.Escalation) ||
 		ladderUsesDataplane(b.Escalation)
-	if ladderUsesBlackhole(b.Escalation) || (fallbackToBlackhole && surgical) {
+	// on_all_nodes_lost=blackhole degrades a divert ban through
+	// blackholeStageView long after ban time, so its attribute set must be
+	// frozen NOW even when no rung and no fallback policy would otherwise need
+	// it (ban.fallback can be "none") — the same reasoning that generates
+	// flowspec rules at ban time for the policy's flowspec flavor. Without
+	// this, the degradation announces an EMPTY next-hop, the peer rejects it
+	// every tick, and the dead node keeps attracting the victim's traffic.
+	nodesLostBlackhole := ladderUsesDivert(b.Escalation) &&
+		cfg.Scrubbing.OnAllNodesLost == config.NodesLostBlackhole
+	if ladderUsesBlackhole(b.Escalation) || (fallbackToBlackhole && surgical) || nodesLostBlackhole {
 		b.bhAttrs = groupBlackholeAttrs(group, target)
 	}
 	if ladderUsesDivert(b.Escalation) {
-		b.divAttrs = groupDivertAttrs(group, target)
+		if n := m.selectScrubNode(cfg, group, target, b.Node, false); n != nil {
+			b.Node = n.Name
+			b.divAttrs = nodeDivertAttrs(n, group, target)
+		} else {
+			b.Node = ""
+			b.divAttrs = groupDivertAttrs(group, target)
+		}
 	}
 }
 
@@ -1122,7 +1163,11 @@ func (m *Mitigator) stageView(b *Ban, stage config.EscalationStage) stageView {
 	case config.EscalateBlackhole:
 		return stageView{method: config.MitigateBlackhole, route: unicastRoute("blackhole", b.Prefix, b.bhAttrs), attrs: b.bhAttrs}
 	case config.EscalateDivert:
-		return stageView{method: config.MitigateDivert, route: unicastRoute("divert", b.Prefix, b.divAttrs), attrs: b.divAttrs}
+		route := unicastRoute("divert", b.Prefix, b.divAttrs)
+		if b.Node != "" {
+			route += " node " + b.Node
+		}
+		return stageView{method: config.MitigateDivert, route: route, attrs: b.divAttrs}
 	default: // EscalateNone
 		return stageView{route: "alert only"}
 	}
@@ -1575,6 +1620,10 @@ func (m *Mitigator) sweepExpired() {
 		}
 		m.escalateLocked(b, now, cfg)
 	}
+	// Managed scrubbing nodes: move or degrade divert bans whose node stopped
+	// polling. After the lifecycle loops on purpose — a ban the TTL just
+	// withdrew must not be relocated in the same tick.
+	m.sweepNodesLocked(cfg)
 }
 
 func (m *Mitigator) activeCountLocked() int {
