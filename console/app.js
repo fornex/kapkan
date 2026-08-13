@@ -10,6 +10,9 @@
     { id: "attacks", icon: "alert", key: "nav.attacks", section: "monitor", count: "attacks" },
     { id: "bans", icon: "ban", key: "nav.bans", section: "monitor", count: "bans" },
     { id: "hosts", icon: "server", key: "nav.hosts", section: "monitor" },
+    /* shown only when /status reports nodes_total > 0 — most deployments have
+       no managed scrubbing nodes and must not carry a permanently-empty view */
+    { id: "nodes", icon: "divert", key: "nav.nodes", section: "monitor", whenNodes: true },
     { id: "hostgroups", icon: "layers", key: "nav.hostgroups", section: "config" },
     { id: "traffic", icon: "chart", key: "nav.traffic", section: "config" },
     { id: "settings", icon: "settings", key: "nav.settings", section: "config" }
@@ -27,6 +30,10 @@
     localeOpen: false,
     buf: { aggIn: [], aggOut: [], aggInPps: [], aggOutPps: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {}, hostMbps: {} },
     traffic: { key: null, available: false, points: [], loading: false, fetchedAt: 0 },
+    /* scrubbing nodes — fetched on demand with a freshness guard, NOT in the
+       3s poll: liveness moves at stale_after (15s) pace and the endpoint walks
+       the ban table, so refreshing it with the firehose buys nothing */
+    nodes: { loading: false, fetchedAt: 0, ok: false, forbidden: false, total: 0, staleAfter: 15, list: [] },
     last: { rung: -1 }
   };
 
@@ -87,6 +94,10 @@
       var btn = h("button", { class: "nav__item" + (state.view === item.id ? " is-active" : ""), dataset: { view: item.id },
         onclick: function () { actions.setView(item.id); } },
         [w.icon(item.icon, "ico"), h("span", { class: "nav__item__txt", text: I.t(item.key) }), countEl]);
+      /* node-gated items start hidden so a zero-node deployment never sees
+         them flash before the first /status answer; renderShellDynamic
+         reveals them (CSSOM, not a style attribute — CSP style-src 'self') */
+      if (item.whenNodes && state.view !== item.id) btn.style.display = "none";
       nav.appendChild(btn);
     });
 
@@ -168,6 +179,14 @@
       el.textContent = I.num(v);
       el.classList.toggle("is-hot", v > 0);
       el.style.display = v > 0 ? "" : "none";
+    });
+
+    /* node-gated nav items: hidden until /status reports managed nodes, but
+       never hidden out from under the operator who is LOOKING at the view */
+    NAV.forEach(function (item) {
+      if (!item.whenNodes) return;
+      var el = document.querySelector('.nav__item[data-view="' + item.id + '"]');
+      if (el) el.style.display = (ctx.status.nodes_total > 0 || state.view === item.id) ? "" : "none";
     });
 
     document.getElementById("lastUpdated").textContent = I.time(new Date());
@@ -287,6 +306,24 @@
         t.loading = false; t.key = key; t.fetchedAt = Date.now();
         t.available = r.available; t.points = r.points || [];
         if (state.view === "traffic") renderView();
+      });
+    },
+    /* nodes inventory — same on-demand + freshness-guard shape as loadTraffic.
+       10s: half a stale_after, so a lost node is never shown as up for longer
+       than the API itself would claim it. */
+    loadNodes: function () {
+      var n = state.nodes;
+      if (n.loading) return;
+      /* half a stale_after (the value the API itself reports), capped at 10s:
+         a lost node must never be shown as up longer than the API would say */
+      var fresh = Math.min(10000, (n.staleAfter || 15) * 500);
+      if (n.fetchedAt && Date.now() - n.fetchedAt < fresh) return;
+      n.loading = true;
+      API.getNodes().then(function (r) {
+        n.loading = false; n.fetchedAt = Date.now();
+        n.ok = r.ok; n.forbidden = !!r.forbidden;
+        n.total = r.total; n.staleAfter = r.staleAfter; n.list = r.nodes;
+        if (state.view === "nodes") renderView();
       });
     },
     openDrawer: openDrawer, closeDrawer: closeDrawer,

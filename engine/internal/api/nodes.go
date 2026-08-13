@@ -32,6 +32,95 @@ import (
 // cannot feed the decoder forever.
 const maxNodeReportBytes = 64 << 10
 
+// NodesDoc is the GET /api/v1/dataplane/nodes response: every configured
+// scrubbing node with what the brain KNOWS (config, poll liveness, how many
+// bans divert to it) joined with what the node CLAIMS (its last advisory
+// report, clearly separated under `report`).
+type NodesDoc struct {
+	// NodesTotal mirrors the scalar on /api/v1/status so a consumer holding
+	// this document never needs the other call to interpret it.
+	NodesTotal int `json:"nodes_total"`
+	// StaleAfterSeconds is the liveness contract the `alive` field was judged
+	// against, so a console can render "lost after Ns" without hardcoding it.
+	StaleAfterSeconds int          `json:"stale_after_seconds"`
+	Nodes             []NodeStatus `json:"nodes"`
+}
+
+// NodeStatus is one node in NodesDoc.
+type NodeStatus struct {
+	Name         string   `json:"name"`
+	NextHop      string   `json:"next_hop,omitempty"`
+	NextHop6     string   `json:"next_hop6,omitempty"`
+	CapacityMbps uint64   `json:"capacity_mbps,omitempty"`
+	Hostgroups   []string `json:"hostgroups,omitempty"`
+	// Alive is the brain's judgment from the rules poll — THE liveness truth,
+	// never influenced by reports. Holding means a poll is parked open right
+	// now (the healthy steady state).
+	Alive   bool `json:"alive"`
+	Holding bool `json:"holding"`
+	// LastSeen is the last completed poll, RFC3339; empty when the node has
+	// never polled this process (a string, not time.Time, because a zero
+	// time.Time survives omitempty and would render as year 1).
+	LastSeen string `json:"last_seen,omitempty"`
+	// ActiveBans counts the active divert bans currently frozen to this node.
+	ActiveBans int `json:"active_bans"`
+	// Report is the node's last self-report, VERBATIM and advisory (see the
+	// file comment); ReportedAt is when it arrived. Absent when it never did.
+	Report     *NodeReport `json:"report,omitempty"`
+	ReportedAt string      `json:"reported_at,omitempty"`
+}
+
+// handleDataplaneNodes serves the node inventory for the console's Nodes view.
+//
+// Unscoped tokens only, same reasoning as the status handler's dataplane
+// block: node names, next-hops and hostgroup claims are deployment topology,
+// not a scoped tenant's business (the fleet milestone replaces this refusal
+// with a per-tenant filtered view). The count alone — enough for the console
+// to show or hide node affordances — rides on /api/v1/status for every role.
+func (s *Server) handleDataplaneNodes(w http.ResponseWriter, r *http.Request) {
+	if c := callerFrom(r); !c.unscoped() {
+		writeError(w, http.StatusForbidden, "the node inventory is restricted to unscoped tokens")
+		return
+	}
+	cfg := s.store.Get()
+	staleAfter := time.Duration(cfg.Scrubbing.StaleAfterSeconds) * time.Second
+	bansByNode := map[string]int{}
+	for _, b := range s.mit.ActiveBans() {
+		if b.Node != "" && b.Method == config.MitigateDivert {
+			bansByNode[b.Node]++
+		}
+	}
+	doc := NodesDoc{
+		NodesTotal:        len(cfg.Scrubbing.Nodes),
+		StaleAfterSeconds: cfg.Scrubbing.StaleAfterSeconds,
+		Nodes:             []NodeStatus{},
+	}
+	for i := range cfg.Scrubbing.Nodes {
+		n := &cfg.Scrubbing.Nodes[i]
+		lastSeen, holding := s.mit.NodeSeen(n.Name)
+		ns := NodeStatus{
+			Name:         n.Name,
+			NextHop:      n.NextHop,
+			NextHop6:     n.NextHop6,
+			CapacityMbps: n.CapacityMbps,
+			Hostgroups:   n.Hostgroups,
+			Alive:        s.mit.NodeAlive(n.Name, staleAfter),
+			Holding:      holding,
+			ActiveBans:   bansByNode[n.Name],
+		}
+		if !lastSeen.IsZero() {
+			ns.LastSeen = lastSeen.UTC().Format(time.RFC3339)
+		}
+		if rep, at, ok := s.nodeReports.get(n.Name); ok {
+			r := rep
+			ns.Report = &r
+			ns.ReportedAt = at.UTC().Format(time.RFC3339)
+		}
+		doc.Nodes = append(doc.Nodes, ns)
+	}
+	writeJSON(w, http.StatusOK, doc)
+}
+
 // NodeReport is what a scrub node says about itself. THE JSON CONTRACT IS
 // FROZEN HERE (F7); the agent (`kapkan scrub`) and the console Nodes view are
 // written against these key names. Every field is a CLAIM (see the file

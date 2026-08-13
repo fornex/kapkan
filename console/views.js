@@ -427,6 +427,12 @@
   function bans(root, ctx) {
     var data = ctx.bans;
     var manualForm = ctx.role === "operator" ? banForm(ctx) : viewerNote();
+    /* the node column exists only when managed scrubbing nodes are configured
+       — the regression guard for everyone else: their tables stay unchanged */
+    var withNode = ctx.status.nodes_total > 0;
+    function nodeCell(b) {
+      return h("td", {}, b.node ? K.badge("badge--muted", b.node, "divert") : h("span", { class: "td-muted", text: "—" }));
+    }
 
     var activeRows = data.active.map(function (b) {
       var expires = b.expires_at ? I.t("bn.expiresin", { t: I.duration((new Date(b.expires_at) - Date.now()) / 1000) }) : I.t("bn.noexpire");
@@ -434,6 +440,7 @@
         h("td", { class: "target-cell" }, [h("span", { text: b.target }), h("span", { class: "td-muted", text: b.prefix })]),
         h("td", { class: "mono td-muted", text: b.route }),
         h("td", {}, K.methodPill(b.method)),
+        withNode ? nodeCell(b) : null,
         // What the kernel MEASURED for this ban, not what it was asked to do.
         // Empty for every mitigation with no rules in this box's XDP maps.
         h("td", { class: "num" }, K.dropCell(b.dataplane)),
@@ -449,7 +456,7 @@
       h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("ban"), h("span", { text: I.t("bn.active") }), data.active.length ? K.badge("badge--active", String(data.active.length)) : null])),
       data.active.length
         ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
-            h("thead", {}, h("tr", {}, [th("col.target"), th("col.route"), th("col.method"), thNum("col.dropped"), th("col.state"), th("col.mode"), th("col.expires"), th("col.type2"), h("th", {})])),
+            h("thead", {}, h("tr", {}, [th("col.target"), th("col.route"), th("col.method"), withNode ? th("col.node") : null, thNum("col.dropped"), th("col.state"), th("col.mode"), th("col.expires"), th("col.type2"), h("th", {})])),
             h("tbody", {}, activeRows)
           ]))
         : h("div", { class: "card__body" }, K.empty("shield-check", I.t("bn.empty.title"), I.t("bn.empty.sub")))
@@ -461,6 +468,7 @@
         h("td", { class: "target-cell" }, [h("span", { text: b.target }), h("span", { class: "td-muted", text: b.prefix })]),
         h("td", { class: "mono td-muted", text: b.route }),
         h("td", {}, K.badge("badge--muted", I.label("method", b.method), K.methodIcon(b.method))),
+        withNode ? nodeCell(b) : null,
         // The FINAL tally. Kept on a withdrawn ban on purpose: the kernel
         // counters were reaped with the rules, so this record is the only
         // remaining answer to "how much did that mitigation actually catch".
@@ -474,7 +482,7 @@
       h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("history"), h("span", { text: I.t("bn.history") })])),
       data.history.length
         ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
-            h("thead", {}, h("tr", {}, [th("col.target"), th("col.route"), th("col.method"), thNum("col.dropped"), th("col.state"), th("col.type2"), th("col.reason")])),
+            h("thead", {}, h("tr", {}, [th("col.target"), th("col.route"), th("col.method"), withNode ? th("col.node") : null, thNum("col.dropped"), th("col.state"), th("col.type2"), th("col.reason")])),
             h("tbody", {}, histRows)
           ]))
         : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("bn.history.empty") }))

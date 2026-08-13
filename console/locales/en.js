@@ -281,6 +281,31 @@
       "dp.bypass.card": "FILTER BYPASSED: {n} packets skipped the rule scan entirely — more than 8 IPv6 extension headers. They are passed and never dropped by design, so this counter is the only thing that reports them.",
       "dp.bypass.tip": "Passed without any rule being evaluated — possible filter evasion.",
 
+
+      /* scrubbing nodes (Nodes view + the node column in bans) */
+      "nav.nodes": "Scrubbing nodes",
+      "col.node": "Node",
+      "nd.sub": "Managed scrubbing nodes: boxes running kapkan scrub that receive diverted traffic and drop the attack in their kernel.",
+      "nd.list": "Nodes",
+      "nd.empty.title": "No managed scrubbing nodes",
+      "nd.empty.sub": "Add scrubbing.nodes[] to the engine config to divert victims toward boxes running kapkan scrub.",
+      "nd.adminonly": "The node inventory names next-hops and hostgroups (deployment topology), so it is visible to unscoped tokens only.",
+      "nd.loading": "Loading the node inventory…",
+      "nd.note": "A node is lost after {t}s without a rules poll; a mid-poll node counts as present.",
+      "nd.up": "Up",
+      "nd.polling": "Up · polling",
+      "nd.lost": "LOST",
+      "nd.never": "never seen",
+      "nd.load": "Load (reported)",
+      "nd.load.title": "Reported by the node itself; capacity {c}",
+      "nd.noreport": "no report",
+      "nd.error": "The node inventory could not be loaded — this is a fetch error, not an empty fleet. Retrying shortly.",
+      "nd.dropped": "Dropped (reported)",
+      "nd.mode": "Mode (reported)",
+      "nd.agent": "Agent (reported)",
+      "nd.lastseen": "Last poll",
+      "nd.anygroup": "any group",
+      "nd.reportnote": "Status and ban counts come from the brain (the rules poll is the only liveness signal). Load, drops, version and dry-run are the node's own reports — shown as claims, never used for decisions.",
       "se.readonly": "Configuration is managed in the engine config file; this console shows it read-only."
     },
 

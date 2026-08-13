@@ -305,6 +305,9 @@ func (s *Server) Handler() http.Handler {
 	// The node self-report (nodes.go). Advisory by contract — never liveness.
 	handle("POST /api/v1/dataplane/nodes/{name}/report",
 		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleNodeReport))
+	// The node inventory for the console's Nodes view (nodes.go): viewer rank,
+	// but unscoped tokens only — the handler explains why.
+	read("GET /api/v1/dataplane/nodes", s.handleDataplaneNodes)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater
 	// or supervisor can confirm the daemon is fully up after a restart. 503 until
@@ -633,6 +636,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		dpStatus = &st
 	}
 	resp["dataplane_dry_run"] = dpDryRun
+	// How many managed scrubbing nodes are configured — a COUNT for every
+	// role, always present, so the console can decide whether node affordances
+	// (the Nodes view, the node column in bans) exist at all without another
+	// request. The inventory itself (names, next-hops: topology) stays behind
+	// GET /api/v1/dataplane/nodes, unscoped tokens only.
+	resp["nodes_total"] = len(cfg.Scrubbing.Nodes)
 
 	// Update availability (only meaningful when the opt-in check is enabled).
 	// Defaults to "no update" so the console can render unconditionally.

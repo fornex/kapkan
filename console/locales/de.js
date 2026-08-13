@@ -265,6 +265,31 @@
       "dp.bypass.card": "FILTER UMGANGEN: {n} Pakete haben den Regeldurchlauf vollständig übersprungen — mehr als 8 IPv6-Erweiterungsheader. Sie werden bewusst weitergeleitet und nie verworfen, deshalb ist dieser Zähler das Einzige, was sie meldet.",
       "dp.bypass.tip": "Weitergeleitet, ohne dass eine Regel geprüft wurde — mögliche Filterumgehung.",
 
+
+      /* Scrubbing-Knoten (Nodes-Ansicht + Knoten-Spalte in Bans) */
+      "nav.nodes": "Scrubbing-Knoten",
+      "col.node": "Knoten",
+      "nd.sub": "Verwaltete Scrubbing-Knoten: Maschinen mit kapkan scrub, die umgeleiteten Verkehr empfangen und den Angriff in ihrem Kernel verwerfen.",
+      "nd.list": "Knoten",
+      "nd.empty.title": "Keine verwalteten Scrubbing-Knoten",
+      "nd.empty.sub": "Fügen Sie scrubbing.nodes[] zur Engine-Konfiguration hinzu, um Opfer zu Maschinen mit kapkan scrub umzuleiten.",
+      "nd.adminonly": "Das Knoten-Inventar nennt Next-Hops und Hostgruppen (Topologie) und ist daher nur für Tokens ohne Mandanten-Scope sichtbar.",
+      "nd.loading": "Knoten-Inventar wird geladen…",
+      "nd.note": "Ein Knoten gilt nach {t}s ohne Regel-Abfrage als verloren; ein Knoten mitten in einer Abfrage zählt als präsent.",
+      "nd.up": "Erreichbar",
+      "nd.polling": "Erreichbar · fragt ab",
+      "nd.lost": "VERLOREN",
+      "nd.never": "nie gesehen",
+      "nd.load": "Last (gemeldet)",
+      "nd.load.title": "Vom Knoten selbst gemeldet; Kapazität {c}",
+      "nd.noreport": "kein Bericht",
+      "nd.error": "Das Knoten-Inventar konnte nicht geladen werden — ein Abruffehler, keine leere Flotte. Neuer Versuch in Kürze.",
+      "nd.dropped": "Verworfen (gemeldet)",
+      "nd.mode": "Modus (gemeldet)",
+      "nd.agent": "Agent (gemeldet)",
+      "nd.lastseen": "Letzte Abfrage",
+      "nd.anygroup": "jede Gruppe",
+      "nd.reportnote": "Status und Sperren-Zahlen stammen von der Engine (die Regel-Abfrage ist das einzige Lebenszeichen). Last, Drops, Version und Dry-Run sind die eigenen Berichte des Knotens — als Angaben angezeigt, nie für Entscheidungen verwendet.",
       "se.readonly": "Die Konfiguration wird in der Engine-Konfigurationsdatei verwaltet; diese Konsole zeigt sie schreibgeschützt an."
     },
 

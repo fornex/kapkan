@@ -173,6 +173,10 @@ func TestLocaleParityRegistered(t *testing.T) {
 // The filter-bypass alarm added 4: dp.bypass.{banner,act,card,tip}, the text of
 // the "packets were passed with no rule evaluated" warning on Overview and on
 // the data-plane card (265 + 4 = 269).
+//
+// The scrubbing Nodes view added 23: nav.nodes, col.node, and the twenty-one
+// nd.* keys of the inventory table, its states, its provenance labels and its
+// error/empty notes (269 + 23 = 292).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -183,7 +187,7 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		{"units", 0, 4},
 		{"plurals", 1, 5},
 		{"plurals", 0, 10},  // 5 keys × {one, other}
-		{"strings", 0, 269}, // +4: dp.bypass.{banner,act,card,tip}
+		{"strings", 0, 292}, // +23: nav.nodes, col.node, nd.*
 		{"enums", 1, 8},
 		{"enums", 0, 43},
 		{"enumsShort", 1, 1},

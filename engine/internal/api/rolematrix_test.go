@@ -76,6 +76,9 @@ func TestRoleMatrix(t *testing.T) {
 		{"GET", "/api/v1/dataplane/rules", "", "", map[string]bool{"operator": true, "agent": true}},
 		{"POST", "/api/v1/dataplane/nodes/n1/report", `{}`, "POST /api/v1/dataplane/nodes/{name}/report",
 			map[string]bool{"operator": true, "agent": true}},
+		// The node inventory: viewer rank (the console's Nodes view), agent
+		// DENIED — an agent needs its rules, not the whole fleet topology.
+		{"GET", "/api/v1/dataplane/nodes", "", "", map[string]bool{"viewer": true, "operator": true}},
 	}
 
 	// The two route sets must be IDENTICAL: every registered /api/v1 pattern
