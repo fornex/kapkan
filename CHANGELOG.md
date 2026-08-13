@@ -21,6 +21,15 @@ security-relevant.
 
 ### Config changes
 
+- **Tightened** the divert-target check: a group whose ladder diverts must now
+  have the scalar `scrubbing.next_hop` **or a `scrubbing.nodes[]` entry that
+  actually serves that group** (matching its `hostgroups` restriction, per
+  address family). Previously a node restricted to *other* groups satisfied
+  the check, and victims outside those groups diverted to an empty next-hop —
+  an announce every peer rejects, silently degrading them to the blackhole
+  fallback instead of scrubbing them. Migration: either add the group to the
+  node's `hostgroups`, add an unrestricted node, or set the scalar
+  `next_hop`/`next_hop6` as the catch-all target.
 - **Added** `agent` as a value for `api.tokens[].role` — a scrub node's
   credential. It sits *off* the privilege ladder, below `viewer`: an agent
   token may read `GET /api/v1/dataplane/rules` (and, in an upcoming release,
@@ -33,6 +42,27 @@ security-relevant.
 
 ### Added
 
+- **Divert bans now pick a managed scrubbing node and survive its death.** When
+  `scrubbing.nodes[]` is configured, a divert ban chooses a node at ban time —
+  affinity order, preferring nodes that are actually polling — and **freezes**
+  the choice like its BGP attributes, so a victim's traffic never hops between
+  scrub sites because a reload reordered a list. The frozen choice appears on
+  the ban as `node` and survives a restart. When the node stops polling
+  (`stale_after_seconds`, default 15), the victim is **re-announced toward a
+  surviving node** — make-before-break on the same host route — and only when
+  no node survives does `on_all_nodes_lost` run: `withdraw` (default: stop
+  attracting traffic toward a dead box), `blackhole`, or `flowspec` (rules are
+  generated at ban time for this, while the attack sample still exists). A
+  node the brain has never seen — after a restart, or just added by reload —
+  gets one appearance window (`stale_after` plus a poll cycle) before it may
+  be judged lost, so a routine node rollout or a brain restart never fires the
+  last-resort policy against healthy configs; a node that *was* polling is
+  judged strictly by `stale_after`. A ban degraded by node loss comes back
+  from the state file on its degraded method, never on the divert rung (which
+  would re-attract traffic to the still-dead node). Bans on the unmanaged
+  scalar `next_hop` are never judged at all, and a target whitelisted mid-ban
+  is withdrawn rather than degraded. `node_selection` modes beyond `affinity`
+  are not implemented yet and log a warning at startup.
 - **`POST /api/v1/dataplane/nodes/{name}/report` — a scrub node's self-report.**
   Version, XDP mode, node-side dry-run, load and drop totals, stored in memory
   for the console's upcoming Nodes view. Reports are **advisory by contract**:

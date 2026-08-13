@@ -2348,19 +2348,31 @@ func (c *Config) validateScrubbing() error {
 	return nil
 }
 
-// hasNodeTarget reports whether the scrubbing block offers a usable managed
-// node for the given family, i.e. whether diverting can land somewhere even
-// when the scalar next-hop is unset.
-func (s *Scrubbing) hasNodeTarget(v6 bool) bool {
-	for _, n := range s.Nodes {
+// hasNodeTargetFor reports whether the scrubbing block offers a usable managed
+// node FOR THIS GROUP and family, i.e. whether diverting a victim of this
+// group can land somewhere even when the scalar next-hop is unset. Hostgroup-
+// aware on purpose: a node restricted to other groups is not a target for this
+// one, and validation that ignored the restriction blessed configs whose
+// unclaimed victims would divert to an empty next-hop — an announce the peer
+// rejects, silently degrading the victim to the fallback (blackhole) instead
+// of scrubbing it.
+func (s *Scrubbing) hasNodeTargetFor(group string, v6 bool) bool {
+	for i := range s.Nodes {
+		n := &s.Nodes[i]
 		if v6 {
-			if n.NextHop6 != "" {
-				return true
+			if n.NextHop6 == "" {
+				continue
 			}
+		} else if n.NextHop == "" {
 			continue
 		}
-		if n.NextHop != "" {
-			return true
+		if len(n.Hostgroups) == 0 {
+			return true // an unrestricted node serves every group
+		}
+		for _, g := range n.Hostgroups {
+			if g == group {
+				return true
+			}
 		}
 	}
 	return false
@@ -2710,13 +2722,14 @@ func (c *Config) hasV6Networks() bool {
 // to divert to: an IPv4 target always, plus an IPv6 target when the group
 // protects IPv6 space (there is no safe discard-style fallback for diversion —
 // traffic must reach a real scrubber). A target is either the scalar
-// scrubbing.next_hop or a managed scrubbing.nodes entry.
+// scrubbing.next_hop or a managed scrubbing.nodes entry THAT SERVES THIS GROUP
+// (a node restricted to other hostgroups does not count).
 func validateDivertTarget(group string, scrub resolvedBGP, nodes *Scrubbing, hasV6 bool) error {
-	if scrub.nextHop == "" && !nodes.hasNodeTarget(false) {
-		return fmt.Errorf("group %q: divert requires scrubbing.next_hop or a scrubbing.nodes entry with next_hop (the scrubbing center's IPv4 next-hop)", group)
+	if scrub.nextHop == "" && !nodes.hasNodeTargetFor(group, false) {
+		return fmt.Errorf("group %q: divert requires scrubbing.next_hop or a scrubbing.nodes entry with next_hop that serves this group (the scrubbing center's IPv4 next-hop)", group)
 	}
-	if hasV6 && scrub.nextHop6 == "" && !nodes.hasNodeTarget(true) {
-		return fmt.Errorf("group %q: divert requires scrubbing.next_hop6 or a scrubbing.nodes entry with next_hop6 because the group protects IPv6 space", group)
+	if hasV6 && scrub.nextHop6 == "" && !nodes.hasNodeTargetFor(group, true) {
+		return fmt.Errorf("group %q: divert requires scrubbing.next_hop6 or a scrubbing.nodes entry with next_hop6 that serves this group because the group protects IPv6 space", group)
 	}
 	return nil
 }

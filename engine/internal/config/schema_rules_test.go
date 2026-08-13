@@ -102,6 +102,25 @@ api: {listen: "127.0.0.1:8080"}
 			wantErr: "de-escalates",
 		},
 		{
+			// A node restricted to other hostgroups is not a divert target for
+			// this group: without this rule, unclaimed victims would divert to
+			// an empty next-hop — an announce the peer rejects, silently
+			// degrading them to the fallback instead of scrubbing them.
+			name: "divert target restricted to a foreign hostgroup",
+			yaml: validBase + `
+mitigation: divert
+scrubbing:
+  nodes:
+    - name: fra1
+      next_hop: "192.0.2.10"
+      hostgroups: [game]
+hostgroups:
+  - name: game
+    networks: ["203.0.113.0/26"]
+`,
+			wantErr: "that serves this group",
+		},
+		{
 			// An agent token is a scrub node's credential and its rules feed is
 			// deployment-wide; a tenant on it would promise a scoping nothing
 			// enforces (per-node scoping is the fleet milestone).

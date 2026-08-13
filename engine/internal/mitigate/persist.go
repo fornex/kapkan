@@ -50,6 +50,12 @@ type banSnapshot struct {
 	EscalationStep int                      `json:"escalation_step"`
 	FellBackFrom   config.MitigationMethod  `json:"fell_back_from,omitempty"`
 	FellBackReason string                   `json:"fell_back_reason,omitempty"`
+	// Node is the frozen scrubbing-node choice, persisted so a brain restart
+	// does not shuffle victims between nodes: rehydration KEEPS this node when
+	// it is still configured and eligible, and re-selects only when it is gone.
+	// omitempty, version unchanged — an old kapkan ignores it, and a pre-nodes
+	// file simply re-selects, which is what it would have done anyway.
+	Node string `json:"node,omitempty"`
 
 	// The data-plane measurement, persisted as the LIFETIME TOTALS ONLY and not
 	// as the BanDataplane object.
@@ -108,6 +114,7 @@ func snapshotCore(b *Ban) banSnapshot {
 		EscalationStep: b.EscalationStep,
 		FellBackFrom:   b.FellBackFrom,
 		FellBackReason: b.FellBackReason,
+		Node:           b.Node,
 	}
 }
 
@@ -336,7 +343,7 @@ func (m *Mitigator) rehydrateHostLocked(s banSnapshot, cfg *config.Config, now t
 	// the restart would either strand a real route (withdraws become no-ops) or
 	// record a real ban that announced nothing.
 	b.DryRun = cfg.DryRun
-	freezeUnicastAttrs(b, cfg.GroupFor(target), target, cfg)
+	m.freezeUnicastAttrs(b, cfg.GroupFor(target), target, cfg)
 	if !m.reannounceLocked(b, cfg) {
 		return false
 	}
@@ -376,7 +383,7 @@ func (m *Mitigator) rehydratePrefixLocked(s banSnapshot, cfg *config.Config, now
 		return false
 	}
 	b.DryRun = cfg.DryRun // reconcile with the live config (see rehydrateHostLocked)
-	freezeUnicastAttrs(b, &cfg.Groups[0], p.Addr(), cfg)
+	m.freezeUnicastAttrs(b, &cfg.Groups[0], p.Addr(), cfg)
 	if !m.reannounceLocked(b, cfg) {
 		return false
 	}
@@ -432,6 +439,9 @@ func banCoreFromSnapshot(s banSnapshot, prefix netip.Prefix) *Ban {
 		EscalationStep: s.EscalationStep,
 		FellBackFrom:   s.FellBackFrom,
 		FellBackReason: s.FellBackReason,
+		// The rehydration PREFERENCE: freezeUnicastAttrs keeps this node when
+		// still configured and eligible, re-selects otherwise.
+		Node: s.Node,
 	}
 }
 
@@ -439,14 +449,35 @@ func validEscalationStep(b *Ban) bool {
 	return len(b.Escalation) > 0 && b.EscalationStep >= 0 && b.EscalationStep < len(b.Escalation)
 }
 
-// reannounceLocked re-announces a rehydrated ban's CURRENT rung (the same route
+// reannounceLocked re-announces a rehydrated ban's CURRENT route (the same one
 // it had before the restart), reusing the normal announce path so dry-run, the
 // FlowSpec rule loop and route summaries all behave identically. It records the
-// applied rung on the ban. On failure the ban is not restored. No fallback is
+// applied stage on the ban. On failure the ban is not restored. No fallback is
 // attempted: the goal is to refresh the exact route the helper retained, not to
 // pick a different method. The caller holds m.mu.
 func (m *Mitigator) reannounceLocked(b *Ban, cfg *config.Config) bool {
 	v := m.stageView(b, b.Escalation[b.EscalationStep])
+	// The persisted METHOD wins when it disagrees with the rung: the ban FELL
+	// BACK before the restart (a peer rejection, or every scrubbing node was
+	// lost), and "the exact route the helper retained" is the fallback's.
+	// Resurrecting the rung instead would re-announce a divert toward a node
+	// that was dead when the process went down — attracting the victim's
+	// traffic into a black hole — or de-escalate a blackhole the peer is
+	// still holding, and it would do so successfully (the peer is fine; it is
+	// the scrub node that is not), so nothing downstream corrects it until
+	// the loss sweep re-judges the node a grace period later.
+	if b.Method != "" && b.Method != v.method {
+		switch b.Method {
+		case config.MitigateBlackhole:
+			v = m.blackholeStageView(b)
+		case config.MitigateFlowSpec:
+			v = stageView{method: config.MitigateFlowSpec, route: flowSpecSummary(b.FlowSpec)}
+		default:
+			// No other method can be recorded off-rung today (divert and
+			// dataplane are never fallback targets); keep the rung view
+			// rather than invent one.
+		}
+	}
 	if err := m.announceMethodLocked(b, v.method, v.route, v.attrs, cfg); err != nil {
 		m.log.Error("rehydrate re-announce failed; dropping ban",
 			"target", b.Target.String(), "method", string(v.method), "err", err)

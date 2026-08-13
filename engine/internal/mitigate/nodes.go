@@ -26,6 +26,12 @@ import "time"
 type nodePresence struct {
 	open     int
 	lastSeen time.Time
+	// graceUntil is set for a node that has NEVER polled, the first time the
+	// loss sweep needs to judge it: until it passes, "never seen" reads as
+	// "not appeared yet", not "dead" (see Mitigator.nodeLost). Anchored per
+	// node so one added by a config reload gets the same allowance a freshly
+	// restarted brain grants everyone.
+	graceUntil time.Time
 }
 
 // NodePollStarted records that node is holding a rules poll open. While at
