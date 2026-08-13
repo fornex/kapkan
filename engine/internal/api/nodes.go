@@ -142,7 +142,9 @@ type NodeReport struct {
 	// read this — selection trusts only what the brain measures.
 	LoadMbps float64 `json:"load_mbps,omitempty"`
 	LoadPPS  float64 `json:"load_pps,omitempty"`
-	// DroppedPackets / DroppedBytes are lifetime totals since agent start.
+	// DroppedPackets / DroppedBytes are the node datapath's lifetime totals —
+	// they live in the pinned kernel maps, so with on_exit: keep (the default)
+	// they SURVIVE an agent restart rather than resetting with the process.
 	DroppedPackets uint64 `json:"dropped_packets,omitempty"`
 	DroppedBytes   uint64 `json:"dropped_bytes,omitempty"`
 	// RulesETag is the ETag of the rules document the node is currently

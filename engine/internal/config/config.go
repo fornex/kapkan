@@ -2386,28 +2386,50 @@ func (s *Scrubbing) hasNodeTargetFor(group string, v6 bool) bool {
 // exists and whether the kernel will load the program are answered at attach
 // time, by a clean startup error.
 func (c *Config) validateDataplane() error {
-	d := c.Dataplane
+	set, err := validateDataplaneBlock(c.Dataplane)
+	if err != nil {
+		return err
+	}
+	if set.Enabled {
+		// Every ban may install up to maxRulesPerAttack entries. Sizing the map
+		// below that ceiling means installs start failing mid-attack and quietly
+		// falling back to blackhole, so refuse the configuration up front. This
+		// cross-field check lives HERE and not in validateDataplaneBlock because
+		// only the daemon role has ban caps — a scrub node's dynamic rules are
+		// bounded by the brain that feeds it.
+		if need := c.Ban.MaxActiveBans * maxDataplaneRulesPerBan; c.Ban.MaxActiveBans > 0 && need > c.Dataplane.Limits.MaxDynamicRules {
+			return fmt.Errorf("dataplane.limits.max_dynamic_rules (%d) is below ban.max_active_bans * %d (%d): installs would fail mid-attack",
+				c.Dataplane.Limits.MaxDynamicRules, maxDataplaneRulesPerBan, need)
+		}
+	}
+	c.DataplaneCfg = set
+	return nil
+}
+
+// validateDataplaneBlock validates and defaults one dataplane block, returning
+// its resolved comparable settings. A free function rather than a Config method
+// because TWO roles carry the block: the daemon's kapkan.yaml and the scrub
+// node's scrub.yaml — same keys, same defaults, same rejections, one validator.
+func validateDataplaneBlock(d *Dataplane) (DataplaneSettings, error) {
 	if d == nil {
-		c.DataplaneCfg = DataplaneSettings{}
-		return nil
+		return DataplaneSettings{}, nil
 	}
 	if d.Enabled != nil && !*d.Enabled {
 		// Present but switched off: zero the resolved form so a cosmetic edit
 		// to a disabled block never demands a restart.
-		c.DataplaneCfg = DataplaneSettings{}
-		return nil
+		return DataplaneSettings{}, nil
 	}
 
 	if len(d.Interfaces) == 0 {
-		return fmt.Errorf("dataplane.interfaces: name at least one interface to attach to")
+		return DataplaneSettings{}, fmt.Errorf("dataplane.interfaces: name at least one interface to attach to")
 	}
 	seenIface := make(map[string]struct{}, len(d.Interfaces))
 	for i, name := range d.Interfaces {
 		if !ifaceNameRe.MatchString(name) {
-			return fmt.Errorf("dataplane.interfaces[%d]: %q is not a valid interface name", i, name)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.interfaces[%d]: %q is not a valid interface name", i, name)
 		}
 		if _, dup := seenIface[name]; dup {
-			return fmt.Errorf("dataplane.interfaces[%d]: %q is listed twice", i, name)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.interfaces[%d]: %q is listed twice", i, name)
 		}
 		seenIface[name] = struct{}{}
 	}
@@ -2417,7 +2439,7 @@ func (c *Config) validateDataplane() error {
 		d.XDPMode = XDPModeAuto
 	case XDPModeAuto, XDPModeNative, XDPModeGeneric:
 	default:
-		return fmt.Errorf("dataplane.xdp_mode must be %q, %q or %q, got %q",
+		return DataplaneSettings{}, fmt.Errorf("dataplane.xdp_mode must be %q, %q or %q, got %q",
 			XDPModeAuto, XDPModeNative, XDPModeGeneric, d.XDPMode)
 	}
 
@@ -2426,31 +2448,31 @@ func (c *Config) validateDataplane() error {
 		d.OnExit = OnExitKeep
 	case OnExitKeep, OnExitDetach:
 	default:
-		return fmt.Errorf("dataplane.on_exit must be %q or %q, got %q", OnExitKeep, OnExitDetach, d.OnExit)
+		return DataplaneSettings{}, fmt.Errorf("dataplane.on_exit must be %q or %q, got %q", OnExitKeep, OnExitDetach, d.OnExit)
 	}
 
 	if d.PinPath == "" {
 		d.PinPath = defaultPinPath
 	} else if !strings.HasPrefix(d.PinPath, "/") {
-		return fmt.Errorf("dataplane.pin_path must be an absolute path, got %q", d.PinPath)
+		return DataplaneSettings{}, fmt.Errorf("dataplane.pin_path must be an absolute path, got %q", d.PinPath)
 	}
 
 	for i, s := range d.Allowlist {
 		if _, err := parsePrefixOrAddr(s); err != nil {
-			return fmt.Errorf("dataplane.allowlist[%d]: %w", i, err)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.allowlist[%d]: %w", i, err)
 		}
 	}
 
 	profiles := make(map[string]struct{}, len(d.RateLimitProfiles))
 	for i, p := range d.RateLimitProfiles {
 		if !groupNameRe.MatchString(p.Name) {
-			return fmt.Errorf("dataplane.ratelimit_profiles[%d].name %q must match %s", i, p.Name, groupNameRe)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.ratelimit_profiles[%d].name %q must match %s", i, p.Name, groupNameRe)
 		}
 		if _, dup := profiles[p.Name]; dup {
-			return fmt.Errorf("dataplane.ratelimit_profiles[%d]: duplicate profile name %q", i, p.Name)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.ratelimit_profiles[%d]: duplicate profile name %q", i, p.Name)
 		}
 		if p.PPS == 0 && p.Mbps == 0 {
-			return fmt.Errorf("dataplane.ratelimit_profiles[%q]: set pps, mbps or both", p.Name)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.ratelimit_profiles[%q]: set pps, mbps or both", p.Name)
 		}
 		profiles[p.Name] = struct{}{}
 	}
@@ -2459,46 +2481,46 @@ func (c *Config) validateDataplane() error {
 	seenRule := make(map[string]struct{}, len(d.StaticRules))
 	for i, r := range d.StaticRules {
 		if !groupNameRe.MatchString(r.Name) {
-			return fmt.Errorf("dataplane.static_rules[%d].name %q must match %s", i, r.Name, groupNameRe)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%d].name %q must match %s", i, r.Name, groupNameRe)
 		}
 		if _, dup := seenRule[r.Name]; dup {
-			return fmt.Errorf("dataplane.static_rules[%d]: duplicate rule name %q", i, r.Name)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%d]: duplicate rule name %q", i, r.Name)
 		}
 		seenRule[r.Name] = struct{}{}
 
 		if r.Match.Src != "" {
 			if _, err := parsePrefixOrAddr(r.Match.Src); err != nil {
-				return fmt.Errorf("dataplane.static_rules[%q].match.src: %w", r.Name, err)
+				return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%q].match.src: %w", r.Name, err)
 			}
 		}
 		switch r.Match.Proto {
 		case "", "tcp", "udp", "icmp", "icmp6":
 		default:
-			return fmt.Errorf("dataplane.static_rules[%q].match.proto must be tcp|udp|icmp|icmp6, got %q", r.Name, r.Match.Proto)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%q].match.proto must be tcp|udp|icmp|icmp6, got %q", r.Name, r.Match.Proto)
 		}
 		if r.Match.Proto == "icmp" || r.Match.Proto == "icmp6" {
 			if r.Match.SrcPort != 0 || r.Match.DstPort != 0 {
-				return fmt.Errorf("dataplane.static_rules[%q]: ports are meaningless for %s", r.Name, r.Match.Proto)
+				return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%q]: ports are meaningless for %s", r.Name, r.Match.Proto)
 			}
 		}
 
 		switch r.Action {
 		case StaticActionPass, StaticActionDrop:
 			if r.Profile != "" {
-				return fmt.Errorf("dataplane.static_rules[%q]: profile is only valid with the %q action", r.Name, StaticActionRateLimit)
+				return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%q]: profile is only valid with the %q action", r.Name, StaticActionRateLimit)
 			}
 		case StaticActionRateLimit:
 			if r.Profile == "" {
-				return fmt.Errorf("dataplane.static_rules[%q]: the %q action requires profile", r.Name, StaticActionRateLimit)
+				return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%q]: the %q action requires profile", r.Name, StaticActionRateLimit)
 			}
 			if _, ok := profiles[r.Profile]; !ok {
-				return fmt.Errorf("dataplane.static_rules[%q]: profile %q is not declared in dataplane.ratelimit_profiles", r.Name, r.Profile)
+				return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%q]: profile %q is not declared in dataplane.ratelimit_profiles", r.Name, r.Profile)
 			}
 			referenced[r.Profile] = struct{}{}
 		case "":
-			return fmt.Errorf("dataplane.static_rules[%q]: action is required (%s|%s|%s)", r.Name, StaticActionPass, StaticActionDrop, StaticActionRateLimit)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%q]: action is required (%s|%s|%s)", r.Name, StaticActionPass, StaticActionDrop, StaticActionRateLimit)
 		default:
-			return fmt.Errorf("dataplane.static_rules[%q].action must be %s|%s|%s, got %q", r.Name, StaticActionPass, StaticActionDrop, StaticActionRateLimit, r.Action)
+			return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%q].action must be %s|%s|%s, got %q", r.Name, StaticActionPass, StaticActionDrop, StaticActionRateLimit, r.Action)
 		}
 	}
 
@@ -2512,26 +2534,18 @@ func (c *Config) validateDataplane() error {
 		d.Limits.MaxRatelimitSources = defaultMaxRatelimitSources
 	}
 	if d.Limits.MaxDynamicRules < 1 {
-		return fmt.Errorf("dataplane.limits.max_dynamic_rules must be > 0, got %d", d.Limits.MaxDynamicRules)
+		return DataplaneSettings{}, fmt.Errorf("dataplane.limits.max_dynamic_rules must be > 0, got %d", d.Limits.MaxDynamicRules)
 	}
 	if d.Limits.MaxStaticRules < 1 {
-		return fmt.Errorf("dataplane.limits.max_static_rules must be > 0, got %d", d.Limits.MaxStaticRules)
+		return DataplaneSettings{}, fmt.Errorf("dataplane.limits.max_static_rules must be > 0, got %d", d.Limits.MaxStaticRules)
 	}
 	if d.Limits.MaxRatelimitSources < 1 {
-		return fmt.Errorf("dataplane.limits.max_ratelimit_sources must be > 0, got %d", d.Limits.MaxRatelimitSources)
+		return DataplaneSettings{}, fmt.Errorf("dataplane.limits.max_ratelimit_sources must be > 0, got %d", d.Limits.MaxRatelimitSources)
 	}
 	if n := len(d.StaticRules); n > d.Limits.MaxStaticRules {
-		return fmt.Errorf("dataplane: %d static_rules exceed limits.max_static_rules (%d)", n, d.Limits.MaxStaticRules)
+		return DataplaneSettings{}, fmt.Errorf("dataplane: %d static_rules exceed limits.max_static_rules (%d)", n, d.Limits.MaxStaticRules)
 	}
-	// Every ban may install up to maxRulesPerAttack entries. Sizing the map
-	// below that ceiling means installs start failing mid-attack and quietly
-	// falling back to blackhole, so refuse the configuration up front.
-	if need := c.Ban.MaxActiveBans * maxDataplaneRulesPerBan; c.Ban.MaxActiveBans > 0 && need > d.Limits.MaxDynamicRules {
-		return fmt.Errorf("dataplane.limits.max_dynamic_rules (%d) is below ban.max_active_bans * %d (%d): installs would fail mid-attack",
-			d.Limits.MaxDynamicRules, maxDataplaneRulesPerBan, need)
-	}
-
-	c.DataplaneCfg = DataplaneSettings{
+	return DataplaneSettings{
 		Enabled:             true,
 		Interfaces:          strings.Join(d.Interfaces, ","),
 		XDPMode:             d.XDPMode,
@@ -2540,8 +2554,7 @@ func (c *Config) validateDataplane() error {
 		MaxDynamicRules:     d.Limits.MaxDynamicRules,
 		MaxStaticRules:      d.Limits.MaxStaticRules,
 		MaxRatelimitSources: d.Limits.MaxRatelimitSources,
-	}
-	return nil
+	}, nil
 }
 
 // DataplaneEnabled reports whether the in-kernel filter is configured and on.

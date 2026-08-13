@@ -145,8 +145,26 @@ func OptionsFromConfig(cfg *config.Config) (Options, error) {
 	if cfg == nil || cfg.Dataplane == nil || !cfg.DataplaneCfg.Enabled {
 		return Options{}, fmt.Errorf("dataplane: not enabled in the configuration")
 	}
-	set := cfg.DataplaneCfg
-	pol, err := PolicyFromConfig(cfg)
+	return optionsFromBlock(cfg.Dataplane, cfg.DataplaneCfg, cfg.DryRun, cfg.WhitelistAddrs)
+}
+
+// OptionsFromScrub is OptionsFromConfig's twin for the scrub-node role, whose
+// scrub.yaml carries the same dataplane block validated by the same code. The
+// differences are exactly the role's: dry-run resolves from the role default
+// (TRUE when absent), and there is no protected_whitelist — the brain's
+// whitelist safety runs where bans are DECIDED, and a node is never handed a
+// rule for a whitelisted victim in the first place.
+func OptionsFromScrub(sc *config.ScrubConfig) (Options, error) {
+	if sc == nil || sc.Dataplane == nil || !sc.DataplaneCfg.Enabled {
+		return Options{}, fmt.Errorf("dataplane: not enabled in the scrub configuration")
+	}
+	return optionsFromBlock(sc.Dataplane, sc.DataplaneCfg, sc.DryRunResolved(), nil)
+}
+
+// optionsFromBlock converts one validated dataplane block + its resolved
+// settings, shared by both roles.
+func optionsFromBlock(d *config.Dataplane, set config.DataplaneSettings, dryRun bool, protected []netip.Addr) (Options, error) {
+	pol, err := policyFromBlock(d, protected)
 	if err != nil {
 		return Options{}, err
 	}
@@ -157,8 +175,8 @@ func OptionsFromConfig(cfg *config.Config) (Options, error) {
 		OnExit:     set.OnExit,
 		// DropMalformed is static policy that lives in kapkan_cfg rather than
 		// in a map, so it rides on Options and is re-stamped on reload.
-		DropMalformed: cfg.Dataplane.DropMalformed,
-		DryRun:        cfg.DryRun,
+		DropMalformed: d.DropMalformed,
+		DryRun:        dryRun,
 		Limits: Limits{
 			MaxDynamicRules:     set.MaxDynamicRules,
 			MaxStaticRules:      set.MaxStaticRules,
@@ -171,7 +189,10 @@ func OptionsFromConfig(cfg *config.Config) (Options, error) {
 // PolicyFromConfig extracts just the hot-reloadable half, which is what
 // Manager.Reload needs and what a config reload changes.
 func PolicyFromConfig(cfg *config.Config) (StaticPolicy, error) {
-	d := cfg.Dataplane
+	return policyFromBlock(cfg.Dataplane, cfg.WhitelistAddrs)
+}
+
+func policyFromBlock(d *config.Dataplane, protected []netip.Addr) (StaticPolicy, error) {
 	if d == nil {
 		return StaticPolicy{}, fmt.Errorf("dataplane: no dataplane block")
 	}
@@ -188,7 +209,7 @@ func PolicyFromConfig(cfg *config.Config) (StaticPolicy, error) {
 	// protected_whitelist is a list of bare addresses in config (it predates
 	// the data plane and is used for "never ban this host"), so each becomes a
 	// host route here.
-	for _, a := range cfg.WhitelistAddrs {
+	for _, a := range protected {
 		pol.Protected = append(pol.Protected, netip.PrefixFrom(a, a.BitLen()))
 	}
 
