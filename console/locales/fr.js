@@ -280,6 +280,31 @@
       "dp.bypass.card": "FILTRE CONTOURNÉ : {n} paquets ont sauté tout le parcours des règles — plus de 8 en-têtes d'extension IPv6. Ils sont laissés passer et jamais rejetés, à dessein ; ce compteur est donc la seule chose qui les signale.",
       "dp.bypass.tip": "Laissés passer sans qu'aucune règle soit évaluée — contournement du filtre possible.",
 
+
+      /* nœuds de scrubbing (vue Nodes + colonne nœud dans les bans) */
+      "nav.nodes": "Nœuds de scrubbing",
+      "col.node": "Nœud",
+      "nd.sub": "Nœuds de scrubbing gérés : machines exécutant kapkan scrub qui reçoivent le trafic dévié et rejettent l'attaque dans leur noyau.",
+      "nd.list": "Nœuds",
+      "nd.empty.title": "Aucun nœud de scrubbing géré",
+      "nd.empty.sub": "Ajoutez scrubbing.nodes[] à la configuration du moteur pour dévier les victimes vers des machines exécutant kapkan scrub.",
+      "nd.adminonly": "L'inventaire des nœuds expose les next-hops et les groupes d'hôtes (topologie) ; il n'est visible que pour les jetons sans périmètre client.",
+      "nd.loading": "Chargement de l'inventaire des nœuds…",
+      "nd.note": "Un nœud est perdu après {t}s sans interrogation des règles ; un nœud en pleine interrogation compte comme présent.",
+      "nd.up": "En ligne",
+      "nd.polling": "En ligne · interroge",
+      "nd.lost": "PERDU",
+      "nd.never": "jamais vu",
+      "nd.load": "Charge (déclarée)",
+      "nd.load.title": "Déclarée par le nœud lui-même ; capacité {c}",
+      "nd.noreport": "aucun rapport",
+      "nd.error": "L'inventaire des nœuds n'a pas pu être chargé — c'est une erreur de requête, pas une flotte vide. Nouvel essai sous peu.",
+      "nd.dropped": "Rejetés (déclaré)",
+      "nd.mode": "Mode (déclaré)",
+      "nd.agent": "Agent (déclaré)",
+      "nd.lastseen": "Dernière interrogation",
+      "nd.anygroup": "tout groupe",
+      "nd.reportnote": "L'état et le nombre de blocages viennent du moteur (l'interrogation des règles est le seul signal de vie). La charge, les rejets, la version et le dry-run sont les rapports du nœud lui-même — affichés comme des déclarations, jamais utilisés pour des décisions.",
       "se.readonly": "La configuration est gérée dans le fichier de configuration du moteur ; cette console l'affiche en lecture seule."
     },
 

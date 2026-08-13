@@ -104,6 +104,93 @@ hostgroups:
 	}
 }
 
+// TestNodesInventory: the Nodes-view document joins what the brain KNOWS
+// (config, poll liveness, divert-ban counts) with what the node CLAIMS (its
+// last report), and /status carries the count for every role.
+func TestNodesInventory(t *testing.T) {
+	s := testServer(t, storeFromYAML(t, nodesYAML))
+	h := s.Handler()
+
+	// The status scalar exists for everyone.
+	rec := do(t, h, http.MethodGet, "/api/v1/status", "")
+	var st map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &st)
+	if st["nodes_total"] != float64(1) {
+		t.Fatalf("status nodes_total = %v, want 1", st["nodes_total"])
+	}
+
+	// Inventory before any activity: configured, never seen, no report.
+	rec = do(t, h, http.MethodGet, "/api/v1/dataplane/nodes", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET nodes = %d, want 200", rec.Code)
+	}
+	var doc NodesDoc
+	_ = json.Unmarshal(rec.Body.Bytes(), &doc)
+	if doc.NodesTotal != 1 || len(doc.Nodes) != 1 || doc.StaleAfterSeconds != 15 {
+		t.Fatalf("doc = %+v, want one node and the default stale_after", doc)
+	}
+	n := doc.Nodes[0]
+	if n.Name != "fra1" || n.Alive || n.Holding || n.LastSeen != "" || n.Report != nil {
+		t.Fatalf("pristine node = %+v, want never-seen fra1 with no report", n)
+	}
+
+	// A poll, a report and a divert ban later, the document reflects all three
+	// — liveness from the poll, the claims under `report`, the ban count from
+	// the mitigator.
+	s.mit.NodePollStarted("fra1")
+	s.mit.NodePollEnded("fra1")
+	if rec := postReport(h, "fra1", `{"version":"1.5.0","load_mbps":250}`, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("report = %d", rec.Code)
+	}
+	if _, err := s.mit.ManualBan(mustAddr(t, "203.0.113.10")); err != nil {
+		t.Fatalf("ManualBan: %v", err)
+	}
+	rec = do(t, h, http.MethodGet, "/api/v1/dataplane/nodes", "")
+	doc = NodesDoc{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &doc)
+	n = doc.Nodes[0]
+	if !n.Alive || n.LastSeen == "" {
+		t.Errorf("after a poll: alive=%v last_seen=%q, want alive with a timestamp", n.Alive, n.LastSeen)
+	}
+	if n.Report == nil || n.Report.Version != "1.5.0" || n.Report.LoadMbps != 250 || n.ReportedAt == "" {
+		t.Errorf("report on the doc = %+v (%q), want the posted claims", n.Report, n.ReportedAt)
+	}
+	if n.ActiveBans != 1 {
+		t.Errorf("active_bans = %d, want the divert ban counted", n.ActiveBans)
+	}
+}
+
+// TestNodesInventoryScopedRefused: the inventory is topology; a tenant-scoped
+// token gets a 403, not a filtered lie (per-tenant filtering is the fleet
+// milestone).
+func TestNodesInventoryScopedRefused(t *testing.T) {
+	const yaml = apiYAML + `  tokens:
+    - name: v-scoped
+      token_env: TEST_NODES_V_SCOPED
+      role: viewer
+      tenant: acme
+mitigation: divert
+scrubbing:
+  next_hop: "192.0.2.9"
+  nodes:
+    - name: fra1
+      next_hop: "192.0.2.10"
+hostgroups:
+  - name: acme-web
+    networks: ["203.0.113.128/25"]
+    tenant: acme
+`
+	t.Setenv("TEST_NODES_V_SCOPED", "vs-secret")
+	s := testServer(t, storeFromYAML(t, yaml))
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/dataplane/nodes", nil)
+	r.Header.Set("Authorization", "Bearer vs-secret")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("scoped viewer inventory = %d, want 403", rec.Code)
+	}
+}
+
 // TestRulesPollOpenModeCannotClaimIdentity: naming a node requires a real
 // token. The ?node= sighting is the API's one side-effectful GET, outside the
 // POST-only CSRF gate — in token-less open mode a browser on the operator's

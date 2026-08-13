@@ -42,6 +42,17 @@ security-relevant.
 
 ### Added
 
+- **The console gained a Nodes view, and bans a node column.** A new
+  `GET /api/v1/dataplane/nodes` (viewer rank, unscoped tokens only — the
+  inventory names next-hops and hostgroups, which is topology) joins what the
+  brain knows about each managed scrubbing node — poll liveness, last poll,
+  how many divert bans are frozen to it — with the node's own advisory report
+  (load, drops, version, XDP mode, node-side dry-run), rendered as claims and
+  visually attributed as such. `/api/v1/status` gains a `nodes_total` count
+  for every role, which is what shows or hides the node affordances: a
+  deployment without `scrubbing.nodes[]` sees neither the view nor the extra
+  bans column, and its tables are byte-identical to before. Active and
+  historical bans now display the frozen `node`.
 - **Divert bans now pick a managed scrubbing node and survive its death.** When
   `scrubbing.nodes[]` is configured, a divert ban chooses a node at ban time —
   affinity order, preferring nodes that are actually polling — and **freezes**

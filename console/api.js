@@ -257,7 +257,11 @@
            `dataplane` object is admin-only (it names interfaces) and is null for
            a scoped token — anything rendering it must handle that. */
         dataplane_dry_run: !!status.dataplane_dry_run,
-        dataplane: status.dataplane || null
+        dataplane: status.dataplane || null,
+        /* managed scrubbing nodes, COUNT only, sent to every role: it gates
+           the Nodes nav item and the node column in bans. The inventory
+           itself is a separate, admin-only fetch (getNodes). */
+        nodes_total: status.nodes_total || 0
       };
       cache.attacks = {
         active: (attacks.active || []).map(function (a) { return mapAttack(a, groups, bansRaw); }),
@@ -283,6 +287,19 @@
     getNetworks: function () { return cache.networks; },
     /* historical traffic for one host (Traffic/Reports view). Resolves to
        {available:false} when the engine has no ClickHouse storage. */
+    /* scrubbing-node inventory (Nodes view). Fetched on demand — app.js holds
+       the freshness guard — never in the 3s refresh. A 403 (scoped token: the
+       inventory is topology) is reported as forbidden, not as an error. */
+    getNodes: function () {
+      return request("/api/v1/dataplane/nodes").then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, total: 0, staleAfter: 15, nodes: [] };
+        if (!res.ok) throw new Error("nodes -> " + res.status);
+        return res.json().then(function (r) {
+          return { ok: true, forbidden: false, total: r.nodes_total || 0,
+            staleAfter: r.stale_after_seconds || 15, nodes: r.nodes || [] };
+        });
+      }).catch(function () { return { ok: false, forbidden: false, total: 0, staleAfter: 15, nodes: [] }; });
+    },
     getTraffic: function (key, fromISO, toISO, step) {
       var qs = "key=" + encodeURIComponent(key);
       if (fromISO) qs += "&from=" + encodeURIComponent(fromISO);

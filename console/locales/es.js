@@ -280,6 +280,31 @@
       "dp.bypass.card": "FILTRO ELUDIDO: {n} paquetes se saltaron por completo el recorrido de reglas — más de 8 cabeceras de extensión IPv6. Se dejan pasar y nunca se descartan, por diseño, así que este contador es lo único que los reporta.",
       "dp.bypass.tip": "Pasaron sin que se evaluara ninguna regla — posible evasión del filtro.",
 
+
+      /* nodos de scrubbing (vista Nodes + columna de nodo en bans) */
+      "nav.nodes": "Nodos de scrubbing",
+      "col.node": "Nodo",
+      "nd.sub": "Nodos de scrubbing gestionados: máquinas con kapkan scrub que reciben el tráfico desviado y descartan el ataque en su kernel.",
+      "nd.list": "Nodos",
+      "nd.empty.title": "Sin nodos de scrubbing gestionados",
+      "nd.empty.sub": "Añade scrubbing.nodes[] a la configuración del motor para desviar víctimas hacia máquinas con kapkan scrub.",
+      "nd.adminonly": "El inventario de nodos expone next-hops y grupos de hosts (topología); solo es visible para tokens sin ámbito de cliente.",
+      "nd.loading": "Cargando el inventario de nodos…",
+      "nd.note": "Un nodo se da por perdido tras {t}s sin consultar reglas; un nodo en plena consulta cuenta como presente.",
+      "nd.up": "Activo",
+      "nd.polling": "Activo · consultando",
+      "nd.lost": "PERDIDO",
+      "nd.never": "nunca visto",
+      "nd.load": "Carga (declarada)",
+      "nd.load.title": "Declarada por el propio nodo; capacidad {c}",
+      "nd.noreport": "sin informe",
+      "nd.error": "No se pudo cargar el inventario de nodos: es un error de la petición, no una flota vacía. Se reintentará en breve.",
+      "nd.dropped": "Descartados (declarado)",
+      "nd.mode": "Modo (declarado)",
+      "nd.agent": "Agente (declarado)",
+      "nd.lastseen": "Última consulta",
+      "nd.anygroup": "cualquier grupo",
+      "nd.reportnote": "El estado y el número de bloqueos vienen del motor (la consulta de reglas es la única señal de vida). La carga, los descartes, la versión y el dry-run son los informes del propio nodo: se muestran como declaraciones y nunca se usan para decisiones.",
       "se.readonly": "La configuración se gestiona en el archivo de configuración del motor; esta consola la muestra en solo lectura."
     },
 

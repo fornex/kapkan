@@ -518,8 +518,103 @@
     return h("div", { class: "card" }, [head, h("div", { class: "card__body" }, body)]);
   }
 
+  /* ===== SCRUBBING NODES =====
+     One row per managed node. Two provenances on one row, deliberately kept
+     visually apart: liveness, ban count and config come from the BRAIN (the
+     rules poll is the only liveness signal); load, drops, version and the
+     node-side dry-run flag are the node's own CLAIMS from its advisory report
+     — trustworthy for display, never for decisions, and labeled as reported. */
+  function nodeStatusBadge(n) {
+    if (n.alive) return K.badge("badge--calm", I.t(n.holding ? "nd.polling" : "nd.up"), "shield-check");
+    if (n.last_seen) return K.badge("badge--active", I.t("nd.lost"), "shield-alert");
+    return K.badge("badge--muted", I.t("nd.never"), "clock");
+  }
+  /* load bar: reported Mbps against configured capacity. CSSOM width only —
+     this console runs under style-src 'self', so setAttribute("style") would
+     be silently discarded and every bar would render full. */
+  function nodeLoadCell(n) {
+    var rep = n.report;
+    if (!rep) return h("span", { class: "td-muted", text: I.t("nd.noreport") });
+    /* absent-but-reported is a ZERO claim, not an unknown: load_mbps rides the
+       report with omitempty, so a standby node's honest 0 arrives keyless —
+       same convention as the drops column's `|| 0` */
+    var load = rep.load_mbps || 0;
+    var txt = I.mbps(load);
+    if (!n.capacity_mbps) return h("span", { class: "mono", text: txt });
+    var frac = Math.max(0, Math.min(1, load / n.capacity_mbps));
+    var bar = h("i");
+    bar.style.width = Math.max(2, frac * 100) + "%";
+    return h("div", { class: "share", title: I.t("nd.load.title", { c: I.mbps(n.capacity_mbps) }) }, [
+      h("span", { class: "share__pct mono", text: txt }),
+      h("span", { class: "share__bar" + (frac >= 0.8 ? " is-dom" : "") }, bar)
+    ]);
+  }
+  function nodes(root, ctx) {
+    ctx.actions.loadNodes();
+    var st = ctx.state.nodes;
+    var children = [V.viewHead(I.t("nav.nodes"), I.t("nd.sub"))];
+
+    if (!ctx.status.nodes_total) {
+      children.push(h("div", { class: "card" }, K.empty("divert", I.t("nd.empty.title"), I.t("nd.empty.sub"), "muted")));
+    } else if (st.forbidden) {
+      children.push(h("div", { class: "banner banner--info" }, [w.icon("lock"), h("span", { class: "banner__txt", text: I.t("nd.adminonly") })]));
+    } else if (!st.fetchedAt) {
+      children.push(h("div", { class: "card" }, h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("nd.loading") }))));
+    } else if (!st.ok) {
+      /* a FAILED fetch is an error state, never an empty fleet: /status says
+         nodes exist, so a bare table claiming zero would be a false count at
+         exactly the moment (an incident) someone opens this view */
+      children.push(h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("nd.error") })]));
+    } else {
+      var rows = st.list.map(function (n) {
+        var rep = n.report;
+        return h("tr", {}, [
+          h("td", { class: "target-cell" }, [
+            h("div", { class: "mono", text: n.name }),
+            h("div", { class: "td-muted", text: n.next_hop + (n.next_hop6 ? " · " + n.next_hop6 : "") })
+          ]),
+          h("td", {}, nodeStatusBadge(n)),
+          h("td", {}, nodeLoadCell(n)),
+          h("td", { class: "num" }, rep
+            ? h("span", { class: "mono", text: I.abbr(rep.dropped_packets || 0) })
+            : h("span", { class: "td-muted", text: "—" })),
+          h("td", { class: "num mono", text: I.num(n.active_bans || 0) }),
+          /* dry_run rides the report with omitempty: absent-but-reported IS the
+             "not watch-only" claim, so a report without the key renders Live —
+             only a node with no report at all gets the unknown dash */
+          h("td", {}, rep
+            ? K.badge(rep.dry_run ? "badge--dry" : "badge--calm", rep.dry_run ? I.t("mode.dryrun") : I.t("mode.live"))
+            : h("span", { class: "td-muted", text: "—" })),
+          h("td", { class: "td-muted" }, rep ? [
+            h("div", { class: "mono", text: (rep.version || "—") + (rep.xdp_mode ? " · " + rep.xdp_mode : "") }),
+            n.reported_at ? h("div", { text: I.rel(new Date(n.reported_at)) }) : null
+          ] : h("span", { text: "—" })),
+          h("td", { class: "td-muted", text: n.last_seen ? I.rel(new Date(n.last_seen)) : I.t("nd.never") }),
+          h("td", {}, (n.hostgroups || []).length
+            ? h("span", { class: "row wrap", style: { gap: "4px" } }, n.hostgroups.map(function (g) { return K.badge("badge--muted", g); }))
+            : h("span", { class: "td-muted", text: I.t("nd.anygroup") }))
+        ]);
+      });
+      children.push(h("div", { class: "card" }, [
+        h("div", { class: "card__head" }, [
+          h("div", { class: "card__title" }, [w.icon("divert"), h("span", { text: I.t("nd.list") }), K.badge("badge--muted", String(st.total))]),
+          h("span", { class: "td-muted", text: I.t("nd.note", { t: st.staleAfter }) })
+        ]),
+        h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+          h("thead", {}, h("tr", {}, [V.th("col.node"), V.th("col.state"), V.th("nd.load"), V.thNum("nd.dropped"),
+            V.thNum("counter.bans"), V.th("nd.mode"), V.th("nd.agent"), V.th("nd.lastseen"), V.th("nav.hostgroups")])),
+          h("tbody", {}, rows)
+        ]))
+      ]));
+      children.push(h("div", { class: "banner banner--info mt-4" }, [w.icon("info"), h("span", { class: "banner__txt", text: I.t("nd.reportnote") })]));
+    }
+    K.mount(root, children);
+  }
+
   V.hostgroups = hostgroups;
   V.traffic = traffic;
   V.settings = settings;
   V.attackDetail = attackDetail;
+  V.nodes = nodes;
 })(window);
