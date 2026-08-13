@@ -38,6 +38,10 @@ func (i *Installer) Install(netip.Prefix, DynamicRules) error { return ErrUnsupp
 // Withdraw always fails with ErrUnsupported.
 func (i *Installer) Withdraw(netip.Prefix) error { return ErrUnsupported }
 
+// Victims reports that nothing is installed — truthful on a host with no data
+// plane, same asymmetry as Counters below.
+func (i *Installer) Victims() ([]netip.Prefix, error) { return nil, nil }
+
 // Counters reports that nothing is installed, rather than failing.
 //
 // It is the one method here that does NOT refuse loudly, and the asymmetry is

@@ -98,8 +98,9 @@ type RuleDocBan struct {
 	// holds the rules no longer than this even if the brain dies mid-attack.
 	ExpiresAt time.Time `json:"expires_at"`
 	// FlowSpec is the ban's rule set, the same IR the bans API exposes. May be
-	// empty (a divert-only ladder generates no narrowing rules today); the node
-	// then applies its configured diverted_default to the prefix.
+	// empty (a divert-only ladder generates no narrowing rules today); the
+	// node then has nothing to install for the prefix, and the datapath's
+	// charter default — PASS — applies to its diverted traffic.
 	FlowSpec []mitigate.FlowSpecRule `json:"flowspec,omitempty"`
 }
 

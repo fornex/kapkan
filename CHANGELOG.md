@@ -42,6 +42,22 @@ security-relevant.
 
 ### Added
 
+- **`kapkan scrub` — the scrub-node role, in the same binary.** A box that
+  receives diverted traffic now runs `kapkan scrub -config scrub.yaml`: no
+  detection, no BGP, no listeners — it long-polls the brain's rules document
+  (the poll doubles as its liveness signal), compiles each ban's rules through
+  the *same* encoder the brain's own in-kernel rung uses, and keeps the local
+  XDP data plane enforcing them. Every installed rule carries the ban's
+  mirrored TTL as its in-kernel deadline, so a dead brain leaves rules that
+  age out on their own and a dead agent leaves a datapath that keeps
+  enforcing until they do. The node never invents rules and never enforces a
+  `dry_run` entry while live; its own `dry_run` **defaults to true** (the
+  remote-role safety default — set `dry_run: false` explicitly to go live).
+  `scrub.yaml` carries the controller (URL, token env, node name) and the
+  same `dataplane:` block as `kapkan.yaml`, validated by the same code; the
+  agent posts its advisory self-report every `report_interval_seconds`
+  (default 10). A node stopped with the default `on_exit: keep` leaves the
+  pinned program filtering.
 - **The console gained a Nodes view, and bans a node column.** A new
   `GET /api/v1/dataplane/nodes` (viewer rank, unscoped tokens only — the
   inventory names next-hops and hostgroups, which is topology) joins what the

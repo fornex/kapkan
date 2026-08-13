@@ -72,6 +72,16 @@ import (
 	"github.com/kapkan-io/kapkan/internal/dataplane"
 )
 
+// CompileDataplaneRules is the exported face of dataplaneRules for the scrub
+// agent — the SECOND consumer of this compiler, and deliberately the same
+// code: a rule the brain would install locally and the rule a node installs
+// for the same ban must select the same packets, and a third copy in the agent
+// is exactly the drift this file's header warns about. TestEncodersAgree keeps
+// all consumers honest at once.
+func CompileDataplaneRules(rules []FlowSpecRule, ttl time.Duration) (dataplane.DynamicRules, error) {
+	return dataplaneRules(rules, ttl)
+}
+
 // dataplaneRules compiles a ban's FlowSpec IR into the rule set the data-plane
 // installer wants, with ttl becoming each rule's in-kernel deadline.
 //

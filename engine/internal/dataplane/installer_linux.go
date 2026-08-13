@@ -121,6 +121,33 @@ func NewInstaller(mgr *Manager, log *slog.Logger) *Installer {
 /* Install                                                                    */
 /* ========================================================================= */
 
+// Victims lists every victim this data plane currently holds dynamic rules
+// for, INCLUDING rule sets adopted from a previous process's pinned maps — it
+// triggers the same lazy adoption the first Install would. The scrub agent
+// calls it once, on its first reconcile, because process memory alone cannot
+// see adopted rules: a node restarted with on_exit: keep still enforces its
+// previous run's rule sets, and the agent must be able to withdraw the ones
+// the brain's document no longer lists (or never should have enforced — a
+// dry_run entry installed by a previous watch-only run).
+func (i *Installer) Victims() ([]netip.Prefix, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	var out []netip.Prefix
+	err := i.mgr.WithMaps(func(maps *Maps, gen uint32) error {
+		if err := i.adoptLocked(maps, gen); err != nil {
+			return err
+		}
+		for p := range i.policyOf {
+			out = append(out, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Install puts one victim's rule set into the kernel, replacing whatever this
 // victim had before.
 //

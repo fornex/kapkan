@@ -144,6 +144,8 @@ Usage:
 Commands:
   dataplane status    report the XDP data plane's state; read-only, works with the daemon
                       stopped. Run "kapkan dataplane status -h" for its own flags.
+  scrub               run the scrub-node role: pull the brain's rule table and enforce it
+                      in the local XDP data plane. Run "kapkan scrub -h" for its flags.
   help                print this message
 
 Flags:
@@ -178,6 +180,8 @@ func runSubcommand(f *cliFlags, out, errOut io.Writer) int {
 	switch name {
 	case "dataplane":
 		return runDataplaneCommand(args[1:], f, out, errOut)
+	case "scrub":
+		return runScrubCommand(args[1:], f, out, errOut)
 	case "help":
 		usage(out, f.fs)
 		return exitOK
