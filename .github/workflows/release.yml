@@ -12,8 +12,42 @@ permissions:
   attestations: write # SLSA build-provenance attestations
 
 jobs:
+  # Release-blocking kernel matrix: the tagged commit must load and pass the
+  # XDP data-plane suite on every supported kernel floor before anything is
+  # built or published. CI runs this on push to main, but a tag can point at a
+  # commit whose matrix was red (or never ran), so the gate is repeated here on
+  # the exact released SHA. Mirrors the `kernel floor` job in ci.yml.
+  kernel-matrix:
+    name: kernel floor (${{ matrix.kernel }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ["5.15", "6.1", "6.6", "6.12"]
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache: true
+          cache-dependency-path: engine/go.sum
+      - name: Virtualisation available?
+        run: ls -l /dev/kvm || echo "no /dev/kvm, guests will run under TCG"
+      - name: Boot Linux ${{ matrix.kernel }} and run the data-plane suite
+        run: KERNELS=${{ matrix.kernel }} ./hack/kernel-matrix/run.sh
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-matrix-${{ matrix.kernel }}
+          path: engine/.kernel-matrix/*/logs/*.log
+
   release:
     name: build, sign & publish
+    needs: [kernel-matrix] # do not publish unless every kernel floor passed
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

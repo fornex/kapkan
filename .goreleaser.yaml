@@ -42,6 +42,21 @@ archives:
     files:
       - LICENSE
       - README.md
+      # The BPF data plane's own licensing. The compiled XDP object is embedded
+      # in the binary and loaded into the kernel, so the archive must carry the
+      # dual BSD/GPL texts for Kapkan's own BPF sources AND the vendored libbpf
+      # headers' texts (taken under BSD-2-Clause). README.md documents the
+      # provenance. See engine/bpf/README.md.
+      - src: engine/bpf/LICENSE.BSD-2-Clause
+        dst: licenses/bpf/LICENSE.BSD-2-Clause
+      - src: engine/bpf/LICENSE.GPL-2.0
+        dst: licenses/bpf/LICENSE.GPL-2.0
+      - src: engine/bpf/include/LICENSE.LGPL-2.1
+        dst: licenses/bpf/include/LICENSE.LGPL-2.1
+      - src: engine/bpf/include/LICENSE.BSD-2-Clause
+        dst: licenses/bpf/include/LICENSE.BSD-2-Clause
+      - src: engine/bpf/README.md
+        dst: licenses/bpf/README.md
       - src: engine/deploy/kapkan.service
         dst: deploy/kapkan.service
       # The XDP data plane's systemd drop-in. Shipped but NOT installed: it
@@ -111,6 +126,24 @@ nfpms:
         file_info: { mode: 0644 }
       - src: LICENSE
         dst: /usr/share/doc/kapkan/LICENSE
+        file_info: { mode: 0644 }
+      # The embedded BPF object's licensing (see the archive files above and
+      # engine/bpf/README.md): the dual BSD/GPL texts for Kapkan's own BPF
+      # sources plus the vendored libbpf headers' texts.
+      - src: engine/bpf/LICENSE.BSD-2-Clause
+        dst: /usr/share/doc/kapkan/bpf/LICENSE.BSD-2-Clause
+        file_info: { mode: 0644 }
+      - src: engine/bpf/LICENSE.GPL-2.0
+        dst: /usr/share/doc/kapkan/bpf/LICENSE.GPL-2.0
+        file_info: { mode: 0644 }
+      - src: engine/bpf/include/LICENSE.LGPL-2.1
+        dst: /usr/share/doc/kapkan/bpf/include/LICENSE.LGPL-2.1
+        file_info: { mode: 0644 }
+      - src: engine/bpf/include/LICENSE.BSD-2-Clause
+        dst: /usr/share/doc/kapkan/bpf/include/LICENSE.BSD-2-Clause
+        file_info: { mode: 0644 }
+      - src: engine/bpf/README.md
+        dst: /usr/share/doc/kapkan/bpf/README.md
         file_info: { mode: 0644 }
     scripts:
       postinstall: engine/deploy/nfpm/postinstall.sh

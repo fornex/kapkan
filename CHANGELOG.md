@@ -122,6 +122,14 @@ security-relevant.
 
 ### Fixed
 
+- **Release artifacts now ship the BPF data plane's license texts.** The
+  compiled XDP object is embedded in the binary and loaded into the kernel, so
+  the dual BSD/GPL texts for Kapkan's own BPF sources and the vendored libbpf
+  headers' texts now travel with every release — under `licenses/bpf/` in the
+  tarballs and `/usr/share/doc/kapkan/bpf/` in the `.deb`/`.rpm`. The kernel
+  support matrix (5.15 / 6.1 / 6.6 / 6.12) is now **release-blocking**: a tag
+  does not publish unless the XDP suite loads and passes on every supported
+  kernel floor, checked on the exact released commit.
 - **A divert ban toward a managed scrubbing node now carries the attack's
   narrowing rules — before, a scrub node dropped nothing.** The scrub node
   pulls each diverted ban from `/api/v1/dataplane/rules` and enforces its
