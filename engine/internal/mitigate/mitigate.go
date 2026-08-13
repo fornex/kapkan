@@ -747,12 +747,23 @@ func (m *Mitigator) ban(target netip.Addr, opts banOpts) *Ban {
 	// and a rung that re-derived them would filter a different vector than the
 	// ban record says it does.
 	//
-	// A divert ladder needs them too when on_all_nodes_lost is flowspec: the
-	// fallback fires long after the sample is gone, and executing it with an
-	// empty rule set would announce nothing — a victim silently undefended at
-	// the exact moment every scrub node is down.
+	// A divert ladder needs them too, for two independent reasons:
+	//
+	//   - a MANAGED scrub node enforces them. The divert rung announces the
+	//     victim toward a kapkan_scrub box, which pulls this ban from the rules
+	//     document and installs its FlowSpec set in its own XDP data plane — so
+	//     a divert ban with no rules would divert the victim's whole traffic to
+	//     a node that then drops NOTHING (default PASS) and the attack reaches
+	//     the victim through the scrubber. An unmanaged scalar next-hop (a
+	//     third-party scrubber) needs nothing from us, hence the nodes check.
+	//   - on_all_nodes_lost: flowspec fires long after the sample is gone, and
+	//     executing it with an empty rule set would announce nothing — a victim
+	//     silently undefended at the exact moment every scrub node is down.
+	// config.DivertGeneratesRules is the SHARED predicate: config resolved the
+	// group's FlowSpecAction under exactly this condition, so generating rules
+	// under any other would produce a rule whose action config left empty.
 	if ladderUsesFlowSpec(group.Escalation) || ladderUsesDataplane(group.Escalation) ||
-		(ladderUsesDivert(group.Escalation) && cfg.Scrubbing.OnAllNodesLost == config.NodesLostFlowSpec) {
+		config.DivertGeneratesRules(group.Escalation, &cfg.Scrubbing) {
 		b.FlowSpec = generateRules(target, opts.direction, opts.classification, opts.sample,
 			group.FlowSpecAction, group.FlowSpecRateBps, group.FlowSpecSourceAnchored, group.FlowSpecMinConcentration)
 	}

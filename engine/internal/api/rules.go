@@ -97,10 +97,12 @@ type RuleDocBan struct {
 	// ExpiresAt is the ban's TTL, quantized (see ruleExpiryQuantum). The node
 	// holds the rules no longer than this even if the brain dies mid-attack.
 	ExpiresAt time.Time `json:"expires_at"`
-	// FlowSpec is the ban's rule set, the same IR the bans API exposes. May be
-	// empty (a divert-only ladder generates no narrowing rules today); the
-	// node then has nothing to install for the prefix, and the datapath's
-	// charter default — PASS — applies to its diverted traffic.
+	// FlowSpec is the ban's rule set, the same IR the bans API exposes. A ban
+	// diverting to a MANAGED node carries the narrowing rules the node
+	// enforces (config.DivertGeneratesRules); it is empty only for a divert
+	// that no node claims — an unmanaged scalar next-hop, a third-party
+	// scrubber deciding its own policy — in which case the node has nothing to
+	// install and the datapath's charter default (PASS) applies.
 	FlowSpec []mitigate.FlowSpecRule `json:"flowspec,omitempty"`
 }
 
