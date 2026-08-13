@@ -1437,7 +1437,14 @@ func (c *Config) validateHostgroups() error {
 	// refused, so every ban of that group would fall back to a blackhole. The
 	// gentlest rung on the ladder degrading to the harshest, for a field nobody
 	// wrote, is exactly the silent failure this action was gated on.
-	if (usesFlowSpec(globalStages) || usesDataplane(globalStages)) && globalAction == "" {
+	//
+	// AND SO DOES A DIVERT STAGE toward a managed scrub node — the THIRD backend
+	// for the same IR. The node pulls the ban and enforces its FlowSpec rules in
+	// its own XDP data plane, so a divert ban whose rules carry no action would
+	// leave the node unable to compile them and dropping nothing. The
+	// on_all_nodes_lost: flowspec fallback needs it for the same reason.
+	if (usesFlowSpec(globalStages) || usesDataplane(globalStages) ||
+		DivertGeneratesRules(globalStages, &c.Scrubbing)) && globalAction == "" {
 		if globalAction, globalRate, err = resolveFlowSpecPolicy(c.FlowSpec, nil); err != nil {
 			return fmt.Errorf("flowspec: %w", err)
 		}
@@ -1597,9 +1604,10 @@ func (c *Config) validateHostgroups() error {
 				}
 			}
 		}
-		// Same for a dataplane stage as for a flowspec one: one rule IR, two
-		// backends, and the action lives on the rule. See the global case above.
-		if (usesFlowSpec(stages) || usesDataplane(stages)) && action == "" {
+		// Same for a dataplane stage as for a flowspec one, and for a divert
+		// stage toward a managed scrub node: one rule IR, three backends, and the
+		// action lives on the rule. See the global case above.
+		if (usesFlowSpec(stages) || usesDataplane(stages) || DivertGeneratesRules(stages, &c.Scrubbing)) && action == "" {
 			if action, rate, err = resolveFlowSpecPolicy(hg.FlowSpec, c.FlowSpec); err != nil {
 				return fmt.Errorf("hostgroups[%q]: flowspec: %w", hg.Name, err)
 			}
@@ -2029,6 +2037,23 @@ func usesDataplane(stages []EscalationStage) bool {
 		}
 	}
 	return false
+}
+
+// DivertGeneratesRules reports whether a divert ladder will produce FlowSpec
+// rules that some backend must be able to compile — so the group needs a
+// resolved FlowSpec action AND mitigate.ban must generate the rules. Two cases:
+// the divert targets a MANAGED scrub node (which enforces the rules in its own
+// data plane), or on_all_nodes_lost is flowspec (which announces them when
+// every node is down). Exported and shared by BOTH sides on purpose: config
+// resolves the action exactly when mitigate generates the rules, and a single
+// predicate is the only way to keep them from drifting into a ban whose rules
+// carry an action the config never resolved. An unmanaged scalar next-hop needs
+// neither: a third-party scrubber decides its own policy.
+func DivertGeneratesRules(stages []EscalationStage, s *Scrubbing) bool {
+	if !usesDivert(stages) {
+		return false
+	}
+	return len(s.Nodes) > 0 || s.OnAllNodesLost == NodesLostFlowSpec
 }
 
 // validateStorage resolves the storage block into StorageCfg with defaults.

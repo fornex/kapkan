@@ -19,6 +19,24 @@ security-relevant.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A divert ban toward a managed scrubbing node now carries the attack's
+  narrowing rules — before, a scrub node dropped nothing.** The scrub node
+  pulls each diverted ban from `/api/v1/dataplane/rules` and enforces its
+  `flowspec` rule set in its own XDP data plane, but a divert-only ladder never
+  generated those rules (they were made only for `flowspec`/`dataplane` rungs),
+  so the node received an empty set, applied its charter default of PASS, and
+  passed the attack straight through to the victim it was diverting to protect.
+  Divert bans that target a managed node — or whose `on_all_nodes_lost` is
+  `flowspec` — now generate the rules, and the group's `flowspec.action`
+  resolves for them (a divert group previously left it empty, so even the
+  generated rules would not compile). Surfaced by the network-integration lab
+  (`engine/scripts/labnet/`), which runs the full attack → detect → divert →
+  scrub → drop loop on a real kernel. No config change; an unmanaged scalar
+  `scrubbing.next_hop` (a third-party scrubber) is unaffected — it decides its
+  own policy.
+
 ### Config changes
 
 - **Tightened** the divert-target check: a group whose ladder diverts must now

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/engine"
 )
 
 // nodesYAML: a divert deployment with two managed nodes — fra1 claims only the
@@ -39,6 +40,35 @@ hostgroups:
 func nodePoll(m *Mitigator, name string) {
 	m.NodePollStarted(name)
 	m.NodePollEnded(name)
+}
+
+// TestDivertBanToManagedNodeCarriesRules is the lab-surfaced invariant: a
+// divert ban aimed at a managed scrub node MUST carry the narrowing FlowSpec
+// rules, or the node — which pulls this ban and enforces its rules — would
+// receive an empty set, drop nothing (default PASS), and pass the attack
+// straight through to the victim it was diverting to protect.
+func TestDivertBanToManagedNodeCarriesRules(t *testing.T) {
+	clk := &mockClock{t: time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)}
+	m := newMitigator(t, nodesYAML(""), newRecorder(), clk)
+
+	// A UDP-flood attack on a game-group victim, diverted to fra1.
+	b := m.OnAttackStarted(engine.Event{
+		Scope: engine.ScopeHost, Target: netip.MustParseAddr("203.0.113.5"),
+		Metric: engine.MetricPPS, Rate: 500000, Threshold: 20000, BanEnabled: true,
+		Direction:      engine.DirIncoming,
+		Classification: &engine.Classification{Type: engine.AttackUDPFlood},
+		Sample:         &engine.AttackSample{TotalPackets: 1000},
+	})
+	if b == nil || b.Method != config.MitigateDivert || b.Node != "fra1" {
+		t.Fatalf("ban = %+v, want a divert ban on fra1", b)
+	}
+	if len(b.FlowSpec) == 0 {
+		t.Fatal("a divert ban to a managed node carries no FlowSpec rules — the node would drop nothing")
+	}
+	// The UDP classification narrowed it to proto 17.
+	if b.FlowSpec[0].Proto != 17 {
+		t.Errorf("rule proto = %d, want 17 (the classified UDP vector)", b.FlowSpec[0].Proto)
+	}
 }
 
 func TestDivertBanFreezesNode(t *testing.T) {
