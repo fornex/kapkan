@@ -21,6 +21,13 @@ security-relevant.
 
 ## [1.6.0] - 2026-08-14
 
+### Security
+
+- **Built with Go 1.26.6**, which fixes six reachable standard-library advisories
+  (`net/url`, `html/template`, `crypto/tls`, `net/http` ×2, `encoding/asn1`) —
+  GO-2026-5026, -5972, -6089, -6090, -6091, -6218. No code change; the toolchain
+  floor in `engine/go.mod` moves from 1.26.5 to 1.26.6.
+
 The scrub-node release: Kapkan can now run its own managed scrubbing nodes.
 A box running `kapkan scrub` receives diverted traffic, drops the attack in its
 own XDP data plane, and reinjects the rest — Kapkan diverts the victim toward it
