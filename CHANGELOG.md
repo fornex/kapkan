@@ -19,6 +19,17 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-14
+
+The scrub-node release: Kapkan can now run its own managed scrubbing nodes.
+A box running `kapkan scrub` receives diverted traffic, drops the attack in its
+own XDP data plane, and reinjects the rest — Kapkan diverts the victim toward it
+over BGP and tells it exactly what to drop. New: the `agent` token role, the
+scrub-node rule channel and node inventory API, the console Nodes view, frozen
+node selection with re-announce on node loss, and a lab-verified network
+integration guide. No breaking change; deployments without `scrubbing.nodes[]`
+are unaffected.
+
 ### Config changes
 
 - **Tightened** the divert-target check: a group whose ladder diverts must now
