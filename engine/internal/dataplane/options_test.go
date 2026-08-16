@@ -7,6 +7,7 @@ package dataplane
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -379,6 +380,229 @@ func TestNormalizeRejects(t *testing.T) {
 			}
 		})
 	}
+}
+
+/* ------------------------------------------- unreachable static rules */
+
+// TestShadowedByEarlierRule is the first-match-wins half of the reachability
+// analysis: a static rule below one whose match set contains it can never be
+// reached, and nothing else in the system will ever say so — the rule's counter
+// in `kapkan dataplane status` stays at zero, which is exactly what a correct
+// rule looks like on a quiet day.
+//
+// The NOT-shadowed cases carry as much weight as the shadowed ones. A partial
+// overlap between two rules is ordinary, correct policy and appears in configs
+// everywhere; an analysis that flagged it would be worse than no analysis.
+func TestShadowedByEarlierRule(t *testing.T) {
+	pfx := func(s string) netip.Prefix { return netip.MustParsePrefix(s) }
+
+	cases := []struct {
+		name string
+		// rules is the static list in config order.
+		rules []StaticRule
+		// dead is the rule that must be reported, or "" for "report nothing".
+		dead string
+		// by names the earlier rule(s) the report must blame.
+		by []string
+	}{
+		{
+			name: "an identical earlier rule",
+			rules: []StaticRule{
+				{Name: "cap-https", Action: ActionRateLimit, Profile: "https", Proto: ptr(protoTCP), DstPort: ptr(uint16(443))},
+				{Name: "cap-https-again", Action: ActionRateLimit, Profile: "tighter", Proto: ptr(protoTCP), DstPort: ptr(uint16(443))},
+			},
+			dead: "cap-https-again",
+			by:   []string{"cap-https"},
+		},
+		{
+			// The shape that motivated this: a broad cap on a port, then the
+			// narrower rule the operator actually cared about, written below it.
+			name: "a strictly broader earlier rule",
+			rules: []StaticRule{
+				{Name: "cap-https", Action: ActionRateLimit, Profile: "https", Proto: ptr(protoTCP), DstPort: ptr(uint16(443))},
+				{Name: "cap-partner-https", Action: ActionRateLimit, Profile: "partner",
+					Src: pfx("198.51.100.0/24"), Proto: ptr(protoTCP), DstPort: ptr(uint16(443))},
+			},
+			dead: "cap-partner-https",
+			by:   []string{"cap-https"},
+		},
+		{
+			// The same two rules the right way round, which is the whole point
+			// of first match wins and must stay silent.
+			name: "a narrower earlier rule shadows nothing",
+			rules: []StaticRule{
+				{Name: "cap-partner-https", Action: ActionRateLimit, Profile: "partner",
+					Src: pfx("198.51.100.0/24"), Proto: ptr(protoTCP), DstPort: ptr(uint16(443))},
+				{Name: "cap-https", Action: ActionRateLimit, Profile: "https", Proto: ptr(protoTCP), DstPort: ptr(uint16(443))},
+			},
+		},
+		{
+			name: "containment, not equality, decides the source prefix",
+			rules: []StaticRule{
+				{Name: "drop-net", Action: ActionDrop, Src: pfx("10.0.0.0/8")},
+				{Name: "drop-host", Action: ActionDrop, Src: pfx("10.1.2.3/32")},
+			},
+			dead: "drop-host",
+			by:   []string{"drop-net"},
+		},
+		{
+			// The datapath tests a rule's family bit unconditionally, so a v4
+			// rule cannot take a v6 rule's packets however broad it is.
+			name: "the two address families never shadow each other",
+			rules: []StaticRule{
+				{Name: "drop-v4", Action: ActionDrop, Src: pfx("0.0.0.0/0")},
+				{Name: "drop-v6", Action: ActionDrop, Src: pfx("2001:db8::/32")},
+			},
+		},
+		{
+			name: "icmp and icmp6 pin different families",
+			rules: []StaticRule{
+				{Name: "cap-icmp", Action: ActionRateLimit, Profile: "icmp", Proto: ptr(protoICMP)},
+				{Name: "cap-icmp6", Action: ActionRateLimit, Profile: "icmp", Proto: ptr(protoICMPv6)},
+			},
+		},
+		{
+			// A rule with no match.src compiles to one kernel rule per family,
+			// so it is only dead when BOTH families are taken — here by two
+			// different earlier rules.
+			name: "both families taken, one earlier rule each",
+			rules: []StaticRule{
+				{Name: "drop-all-v4", Action: ActionDrop, Src: pfx("0.0.0.0/0")},
+				{Name: "drop-all-v6", Action: ActionDrop, Src: pfx("::/0")},
+				{Name: "cap-udp", Action: ActionRateLimit, Profile: "udp", Proto: ptr(protoUDP)},
+			},
+			dead: "cap-udp",
+			by:   []string{"drop-all-v4", "drop-all-v6"},
+		},
+		{
+			// Only one family is covered, so the rule still fires on the other.
+			name: "one family covered is not dead",
+			rules: []StaticRule{
+				{Name: "drop-all-v4", Action: ActionDrop, Src: pfx("0.0.0.0/0")},
+				{Name: "cap-udp", Action: ActionRateLimit, Profile: "udp", Proto: ptr(protoUDP)},
+			},
+		},
+		{
+			// The dangerous one, and the reason this axis reports pass rules
+			// while the allowlist axis does not: the operator believes they have
+			// exempted their resolver, and its traffic is being dropped.
+			name: "an exemption written below the drop it is meant to escape",
+			rules: []StaticRule{
+				{Name: "drop-udp", Action: ActionDrop, Proto: ptr(protoUDP)},
+				{Name: "allow-resolver", Action: ActionPass,
+					Src: pfx("192.0.2.53/32"), Proto: ptr(protoUDP), DstPort: ptr(uint16(53))},
+			},
+			dead: "allow-resolver",
+			by:   []string{"drop-udp"},
+		},
+		{
+			// A partial overlap: the earlier rule constrains a field the later
+			// one leaves open, so traffic exists that only the later one takes.
+			name: "a partial overlap is ordinary policy",
+			rules: []StaticRule{
+				{Name: "drop-chargen", Action: ActionDrop, Proto: ptr(protoUDP), SrcPort: ptr(uint16(19))},
+				{Name: "cap-udp", Action: ActionRateLimit, Profile: "udp", Proto: ptr(protoUDP)},
+			},
+		},
+		{
+			// The example configuration shipped in deploy/config.example.yaml
+			// and quoted in the docs. It must stay silent, or every operator who
+			// copied it gets a warning on upgrade.
+			name: "the shipped example config",
+			rules: []StaticRule{
+				{Name: "drop_chargen", Action: ActionDrop, Proto: ptr(protoUDP), SrcPort: ptr(uint16(19))},
+				{Name: "cap_icmp", Action: ActionRateLimit, Profile: "icmp_cap", Proto: ptr(protoICMP)},
+			},
+		},
+		{
+			name: "an unset field is any, so a bare rule takes everything below it",
+			rules: []StaticRule{
+				{Name: "cap-everything", Action: ActionRateLimit, Profile: "global"},
+				{Name: "drop-chargen", Action: ActionDrop, Proto: ptr(protoUDP), SrcPort: ptr(uint16(19))},
+			},
+			dead: "drop-chargen",
+			by:   []string{"cap-everything"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ShadowedStatics(StaticPolicy{Statics: tc.rules})
+			if tc.dead == "" {
+				if len(got) != 0 {
+					t.Fatalf("reported %v, but every rule here can still fire", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("reported %v, want exactly one entry naming %q", got, tc.dead)
+			}
+			if !strings.HasPrefix(got[0], tc.dead+" ") {
+				t.Errorf("reported %q, want it to name the dead rule %q first", got[0], tc.dead)
+			}
+			for _, by := range tc.by {
+				if !strings.Contains(got[0], fmt.Sprintf("%q", by)) {
+					t.Errorf("reported %q, want it to blame %q", got[0], by)
+				}
+			}
+		})
+	}
+}
+
+// TestShadowedByAllowlist is the other axis, kept honest here rather than only
+// in the kernel test that covers it end to end: the allowlist is precedence 1
+// and stops evaluation, so it can kill a static rule outright — but a PASS rule
+// it covers is harmless, because both verdicts admit the packet.
+func TestShadowedByAllowlist(t *testing.T) {
+	pol := StaticPolicy{
+		Allow: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")},
+		Statics: []StaticRule{
+			{Name: "drop-that-host", Action: ActionDrop, Src: netip.MustParsePrefix("198.51.100.7/32")},
+			{Name: "allow-that-host", Action: ActionPass, Src: netip.MustParsePrefix("198.51.100.8/32")},
+			{Name: "drop-elsewhere", Action: ActionDrop, Src: netip.MustParsePrefix("203.0.113.0/24")},
+		},
+	}
+	got := ShadowedStatics(pol)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "drop-that-host ") {
+		t.Fatalf("reported %v, want only drop-that-host", got)
+	}
+	if !strings.Contains(got[0], "198.51.100.0/24") {
+		t.Errorf("reported %q, want it to name the allowlist entry that covers the rule", got[0])
+	}
+}
+
+// TestShadowedStaticsFromYAML runs the analysis on the real chain — YAML through
+// config.Parse and PolicyFromConfig — so a mistake in how a match is parsed
+// cannot hide behind hand-built rules.
+func TestShadowedStaticsFromYAML(t *testing.T) {
+	cfg := mustParse(t, `
+dataplane:
+  interfaces: ["eth0"]
+  ratelimit_profiles:
+    - {name: https_cap, pps: 20000}
+    - {name: partner_cap, pps: 2000}
+  static_rules:
+    - name: cap_https_per_source
+      match: {proto: tcp, dst_port: 443}
+      action: ratelimit
+      profile: https_cap
+    - name: cap_partner_https
+      match: {src: "198.51.100.0/24", proto: tcp, dst_port: 443}
+      action: ratelimit
+      profile: partner_cap
+`)
+	pol, err := PolicyFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("PolicyFromConfig: %v", err)
+	}
+	got := ShadowedStatics(pol)
+	if len(got) != 1 {
+		t.Fatalf("reported %v, want the second rule reported as unreachable", got)
+	}
+	if !strings.Contains(got[0], "cap_partner_https") || !strings.Contains(got[0], `"cap_https_per_source"`) {
+		t.Errorf("reported %q, want it to name both the dead rule and the one covering it", got[0])
+	}
+	t.Logf("%s", got[0])
 }
 
 func TestHealthSummary(t *testing.T) {

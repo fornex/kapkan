@@ -66,6 +66,22 @@ security-relevant.
   to decide all pass; a first fragment carrying one still matches while a later
   fragment does not; and the per-source bucket admits a burst then denies.
 
+- **Unreachable static rules are now reported.** Data-plane `static_rules` are
+  first match wins, so a rule whose match set is contained by an earlier one can
+  never fire — and nothing said so: its counter in `kapkan dataplane status`
+  stayed at zero, which is exactly what a healthy rule looks like when its
+  traffic has not arrived. Every apply (startup and reload) now names such rules
+  in the reload report and a `WARN` log line, raises the existing
+  `policy_shadowed` health condition, and publishes the new
+  `kapkan_dataplane_shadowed_static_rules` gauge (`0` is the only healthy value).
+  `kapkan -check-config` prints the same finding as a `WARNING`, so it is
+  catchable in CI before deployment. This extends the allowlist-shadowing
+  analysis that already existed to the rule-versus-rule axis; both report through
+  the same field. **Reported, not rejected**: a dead rule enforces nothing, so
+  refusing the config would trade a defect that costs zero packets for a daemon
+  that will not start, and rejecting a previously-valid config is a MAJOR change
+  by the policy above.
+
 ## [1.6.0] - 2026-08-14
 
 ### Security

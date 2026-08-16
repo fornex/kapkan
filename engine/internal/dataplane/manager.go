@@ -484,18 +484,24 @@ func (m *Manager) installPolicyLocked(pol StaticPolicy, gen uint32) (ReloadRepor
 	}
 	rep.ProtectedAdded, rep.ProtectedRemoved = prefixStrings(protAdded), prefixStrings(protRemoved)
 
-	// Reconciliation case config cannot see #1: a static rule the allowlist now
-	// makes unreachable. Precedence 1 stops evaluation, so adding a /16 to the
-	// allowlist silently disables every static drop aimed inside it.
-	if sh := shadowedStatics(pol); len(sh) > 0 {
+	// Reconciliation case config cannot see #1: a static rule that can never
+	// fire, because the allowlist (precedence 1, which stops evaluation) or an
+	// EARLIER static rule (precedence 3 is first match wins) already takes every
+	// packet it selects. Reported rather than rejected — see shadow.go for why —
+	// and reported loudly, because the symptom is a rule counter that sits at
+	// zero, which is exactly what a healthy rule looks like on a quiet day.
+	sh := ShadowedStatics(pol)
+	metrics.DataplaneShadowedStaticRules.Set(float64(len(sh)))
+	if len(sh) > 0 {
 		rep.ShadowedStatics = sh
-		m.log.Warn("static rules can never fire: the allowlist covers every source they match. "+
-			"Precedence 1 (allowlist) is evaluated before precedence 3 (static rules) in the kernel, "+
-			"so these rules are dead policy — remove them or narrow the allowlist entry",
+		m.log.Warn("static rules can never fire: something evaluated before them already takes every "+
+			"packet they match. The allowlist is precedence 1 and static rules are first match wins "+
+			"within precedence 3, so these rules are dead policy — remove them, move them above the "+
+			"rule that covers them, or narrow the allowlist entry",
 			"rules", sh)
 		m.setConditionLocked(Condition{
 			Kind:    CondPolicyShadowed,
-			Message: fmt.Sprintf("%d static rule(s) shadowed by the allowlist: %v", len(sh), sh),
+			Message: fmt.Sprintf("%d static rule(s) can never fire: %v", len(sh), sh),
 			Since:   m.now(),
 		})
 	} else {
