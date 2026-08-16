@@ -502,8 +502,9 @@ Three properties are worth knowing before you deploy this:
   Nodes view) is *advisory*: a compromised node token could inflate a report, but it can
   never keep a dead node attracting diverted traffic, because nothing acts on the report.
   For a *silent* death (power loss, a partition — nothing sends a FIN) the real detection
-  bound is `stale_after_seconds` **plus** the long-poll hold the node may be parked in (up
-  to 25 s) — size it against your blackhole tolerance with that sum in mind.
+  bound is `stale_after_seconds` **plus** the long-poll hold the node may be parked in (the
+  channel contract is ≤30 s) — size it against your blackhole tolerance with that sum in
+  mind.
 - **The node choice is frozen per ban** and survives node loss. It is made once at ban time
   (preferring nodes that are actually polling) so a reload reordering the list never moves
   a victim mid-attack. When a node goes stale the sweep re-announces its victims toward a
