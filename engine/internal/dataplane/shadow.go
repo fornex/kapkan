@@ -172,8 +172,8 @@ func matchCovers(a, b StaticRule, v6 bool) bool {
 // arrangement the documentation recommends. The canonical pair is a narrow
 // handshake ceiling above a broad port-443 ceiling:
 //
-//	- {proto: tcp, dst_port: 443, payload: tls_client_hello}   <- first
-//	- {proto: tcp, dst_port: 443}                              <- second
+//   - {proto: tcp, dst_port: 443, payload: tls_client_hello}   <- first
+//   - {proto: tcp, dst_port: 443}                              <- second
 //
 // Every scalar field agrees, so without this term the first rule "covers" the
 // second and the second is reported dead — when in fact it handles every packet
