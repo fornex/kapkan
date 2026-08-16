@@ -297,7 +297,12 @@ ladder runs `none < dataplane < flowspec < divert < blackhole`.
 
 `allowlist` (source prefixes that always pass) is a different axis from
 `protected_whitelist` (destinations that are never banned); both are enforced in the
-kernel. `limits.max_dynamic_rules` (default 4096) caps the mitigator's rules and must be at
+kernel. `static_rules` are **first match wins**, so a rule an earlier one already covers —
+or one whose sources the allowlist admits before any rule is reached — can never fire.
+Kapkan reports those on every apply rather than rejecting the config: a WARN line, the
+reload report, the `policy_shadowed` condition on `/healthz`, the
+`dataplane_shadowed_static_rules` metric, and a WARNING from `kapkan -check-config`.
+`limits.max_dynamic_rules` (default 4096) caps the mitigator's rules and must be at
 least `ban.max_active_bans × 8`, since a ban contributes up to 8 rules. Requirements,
 capabilities, tuning and the measured block rates are in the
 [data-plane guide](https://kapkan.io/docs/dataplane); `kapkan dataplane status` reports
@@ -540,7 +545,7 @@ honouring one of them.
 | `-config <path>` | `configs/dev.yaml` | Path to the YAML config file. |
 | `-log-format <fmt>` | `json` | `json` (for log collectors) or `text` (human-readable). Logs always go to stderr. |
 | `-log-level <lvl>` | `info` | `debug`, `info`, `warn` or `error`. |
-| `-check-config <path>` | — | Parse and validate that config — including cross-field rules a static schema cannot express — print the resolved result, and exit `0` valid / `1` invalid. Drops straight into CI or a pre-deploy gate. |
+| `-check-config <path>` | — | Parse and validate that config — including cross-field rules a static schema cannot express — print the resolved result, and exit `0` valid / `1` invalid. Drops straight into CI or a pre-deploy gate. A valid config may still print a `WARNING` — today, a static rule that can never fire — without changing the exit code. |
 | `-dump-schema` | `false` | Print the config's JSON schema to stdout and exit. |
 | `-version` | `false` | Print the build version and exit (also on `/api/v1/status` and the `kapkan_build_info` metric — zero egress). |
 | `-check-update` | `false` | Run the update check once and exit: `0` up to date, `10` newer release available, `1` error. Works regardless of the `update_check` setting. |
@@ -717,7 +722,10 @@ full table (labels, values and what to alert on) at
   upstreams that do not honour FlowSpec).
 - **Data plane** — `dataplane_degraded` (**the single series to alert on**),
   `dataplane_xdp_mode` (by interface and `native`/`generic`), `dataplane_attach_errors_total`,
-  `dataplane_reattach_total`, `dataplane_pins_rebuilt`, `dataplane_rules`,
+  `dataplane_reattach_total`, `dataplane_pins_rebuilt`,
+  `dataplane_shadowed_static_rules` (config static rules that can never fire, because the
+  allowlist or an earlier rule already takes every packet they select — `0` is the only
+  healthy value), `dataplane_rules`,
   `dataplane_packets_total` / `dataplane_bytes_total` (by terminal verdict),
   `dataplane_observations_total`, `dataplane_map_entries` / `dataplane_map_bytes`,
   `dataplane_policy_generation` / `dataplane_policy_apply_seconds`, and
