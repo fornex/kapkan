@@ -348,6 +348,20 @@ var (
 		Help:      "1 when an existing pinned program was rejected and rebuilt at startup (dynamic rules were lost).",
 	})
 
+	// DataplaneShadowedStaticRules is how many config static rules can never
+	// fire, because the allowlist or an earlier static rule already takes every
+	// packet they select. 0 is the only healthy value and it is worth an alert
+	// at any other, because this defect has NO other symptom: the rule's own
+	// counter stays at zero, which is what a correct rule looks like when its
+	// traffic has not arrived. Republished on every policy apply, so it clears
+	// on the reload that fixes the config.
+	DataplaneShadowedStaticRules = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "dataplane",
+		Name:      "shadowed_static_rules",
+		Help:      "Config static rules that can never fire (covered by the allowlist or by an earlier rule).",
+	})
+
 	// DataplanePacketsTotal counts packets the datapath reached a TERMINAL
 	// verdict on, by verdict name (pass_default, drop_static, drop_rl, ...).
 	//

@@ -157,30 +157,6 @@ func compilePolicy(pol StaticPolicy, sizing MapSizing, prev map[string]uint32) (
 	return c, nil
 }
 
-// familiesFor returns the address families a config static rule must be
-// compiled for, as a slice of "is v6" flags whose index is the rule's family
-// slot.
-//
-// The datapath tests a rule's family bit against the packet's unconditionally,
-// so a rule that names no source prefix has no family of its own and needs one
-// encoded rule per family. icmp and icmp6 are the exceptions: the protocol
-// number pins the family, so they get one rule each and the other slot stays
-// empty.
-func familiesFor(sr StaticRule) []bool {
-	if sr.Src.IsValid() {
-		return []bool{sr.Src.Addr().Is6()}
-	}
-	if sr.Proto != nil {
-		switch *sr.Proto {
-		case protoICMP:
-			return []bool{false}
-		case protoICMPv6:
-			return []bool{true}
-		}
-	}
-	return []bool{false, true}
-}
-
 /* ========================================================================= */
 /* Prefix trie reconciliation                                                 */
 /* ========================================================================= */
@@ -335,55 +311,10 @@ func mirrorPolicyBlocks(m *Maps, from, to, stride uint32) (occupied int, err err
 /* Shadowing                                                                  */
 /* ========================================================================= */
 
-// covers reports whether allow entirely contains target, i.e. every address
-// target can match is in allow. Same family, and allow no more specific.
-func covers(allow, target netip.Prefix) bool {
-	if !allow.IsValid() || !target.IsValid() {
-		return false
-	}
-	if allow.Addr().Is4() != target.Addr().Is4() {
-		return false
-	}
-	return allow.Bits() <= target.Bits() && allow.Contains(target.Masked().Addr())
-}
-
-// defaultRoute is the "any source" prefix for a family, which is what a static
-// rule with no match.src effectively names.
-func defaultRoute(v6 bool) netip.Prefix {
-	if v6 {
-		return netip.PrefixFrom(netip.IPv6Unspecified(), 0)
-	}
-	return netip.PrefixFrom(netip.AddrFrom4([4]byte{}), 0)
-}
-
-// shadowedStatics names the config static rules that can never fire because the
-// allowlist covers every source they match.
-//
-// This is a real and easy mistake: the allowlist is precedence 1 and stops
-// evaluation, so adding a /16 to it silently disables every static drop aimed at
-// a source inside that /16. Only non-pass rules are reported — a pass rule the
-// allowlist has already made redundant is harmless.
-func shadowedStatics(pol StaticPolicy) []string {
-	var out []string
-	for _, sr := range pol.Statics {
-		if sr.Action == ActionPass {
-			continue
-		}
-		for _, v6 := range familiesFor(sr) {
-			target := sr.Src
-			if !target.IsValid() {
-				target = defaultRoute(v6)
-			}
-			for _, a := range pol.Allow {
-				if covers(a, target) {
-					out = append(out, fmt.Sprintf("%s (allowlist %s covers %s)", sr.Name, a, target))
-					break
-				}
-			}
-		}
-	}
-	return out
-}
+// The static-rule half of this — an operator rule that can never fire, because
+// the allowlist or an earlier rule already takes every packet it selects — is
+// in shadow.go, untagged so it can be tested without a kernel. What is left
+// here needs one: it reads the rules the MITIGATOR installed.
 
 // shadowedDynamicRules counts the rules the MITIGATOR has installed whose source
 // prefix is now covered by one of the allowlist prefixes in scan.
