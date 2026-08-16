@@ -135,6 +135,7 @@ func compilePolicy(pol StaticPolicy, sizing MapSizing, prev map[string]uint32) (
 				Proto:     sr.Proto,
 				SrcPort:   sr.SrcPort,
 				DstPort:   sr.DstPort,
+				MatchExt:  sr.MatchExt,
 				IPv6:      v6,
 			}
 			r, err := spec.Encode()

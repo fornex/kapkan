@@ -173,6 +173,35 @@ const (
 	RuleIPv6     uint8 = 1 << 7
 )
 
+// Extended match bits, mirroring enum kapkan_match_ext. They live in
+// Rule.MatchExt rather than Rule.Flags because Flags is full — all eight bits
+// are spoken for, and widening it would move every field after it in a frozen
+// 64-byte layout. MatchExt was the struct's _pad0, so nothing moved.
+//
+// Adding a bit here does NOT oblige a MapSchemaVersion bump. That stamp is for
+// layout changes; this is not one, and tryAdopt already refuses a pinned
+// program whose tag differs from the one this binary loads, so a binary that
+// understands a new bit can never meet a program that does not.
+//
+// STATIC RULES ONLY. mitigate.FlowSpecRule has no counterpart for this axis
+// because RFC 8955 has no payload component, so a dynamic rule carrying one
+// would select different packets through this encoder than through the NLRI
+// encoder while claiming to be the same rule. TestDynamicRulesNeverSetMatchExt
+// holds that line.
+const (
+	// MatchTLSClientHello requires the TCP payload to open a TLS handshake
+	// record carrying a ClientHello. The datapath decides that from three
+	// bytes at fixed offsets and never reassembles, so a split or truncated
+	// record does not match and the packet is forwarded.
+	MatchTLSClientHello uint8 = 1 << 0
+)
+
+// knownMatchExt is every extended-match bit this build implements in the
+// datapath. Encode refuses a spec carrying anything outside it, because an
+// unimplemented narrowing predicate would be ignored in the kernel and the rule
+// would match more than the caller asked for.
+const knownMatchExt = MatchTLSClientHello
+
 // Stat indexes kapkan_stats. Append only — the console renders by index.
 //
 // Two kinds of counter share this space, and anything that aggregates them

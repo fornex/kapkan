@@ -902,6 +902,16 @@ type StaticMatch struct {
 	// SrcPort and DstPort match a single port each (0 = any).
 	SrcPort uint16 `yaml:"src_port"`
 	DstPort uint16 `yaml:"dst_port"`
+	// Payload narrows on what the L4 payload BEGINS with, for the one case
+	// where that is decidable from a fixed offset without reassembling a
+	// stream. Empty means the rule does not look at the payload at all, which
+	// is what every rule written before this field existed means.
+	//
+	// The only value is StaticPayloadTLSClientHello. This is not a hook for a
+	// pattern language: each value is a predicate the datapath implements in a
+	// handful of instructions, and anything needing more than that belongs
+	// somewhere other than an XDP program.
+	Payload string `yaml:"payload"`
 }
 
 // DataplaneLimits sizes the BPF maps. They are allocated once at attach, so a
@@ -944,6 +954,12 @@ const (
 	StaticActionDrop = "drop"
 	// StaticActionRateLimit caps matching traffic at a named profile.
 	StaticActionRateLimit = "ratelimit"
+	// StaticPayloadTLSClientHello matches a TCP segment whose payload opens a
+	// TLS handshake record carrying a ClientHello — the shape a TLS handshake
+	// flood is made of. Decided from three bytes at fixed offsets, with no
+	// stream reassembly, so a ClientHello split across segments does NOT match
+	// and is forwarded like any other packet.
+	StaticPayloadTLSClientHello = "tls_client_hello"
 )
 
 // Data-plane defaults, applied by validateDataplane.
@@ -2527,6 +2543,27 @@ func validateDataplaneBlock(d *Dataplane) (DataplaneSettings, error) {
 			if r.Match.SrcPort != 0 || r.Match.DstPort != 0 {
 				return DataplaneSettings{}, fmt.Errorf("dataplane.static_rules[%q]: ports are meaningless for %s", r.Name, r.Match.Proto)
 			}
+		}
+		switch r.Match.Payload {
+		case "":
+		case StaticPayloadTLSClientHello:
+			// proto: tcp is REQUIRED, not merely recommended, even though the
+			// datapath sets the ClientHello bit on TCP alone and an unset proto
+			// would select the same packets. The rule has to say what it means
+			// at the place an operator reads it: the commonest misreading of a
+			// bare "tls_client_hello" is that it also covers HTTP/3, whose
+			// handshake is inside QUIC on UDP/443 and is encrypted before this
+			// program ever sees it.
+			if r.Match.Proto != "tcp" {
+				return DataplaneSettings{}, fmt.Errorf(
+					"dataplane.static_rules[%q].match.payload %q requires proto: tcp (got %q) — "+
+						"the ClientHello is read from the TCP payload, and QUIC/HTTP3 handshakes on UDP are encrypted and never match",
+					r.Name, r.Match.Payload, r.Match.Proto)
+			}
+		default:
+			return DataplaneSettings{}, fmt.Errorf(
+				"dataplane.static_rules[%q].match.payload must be %s, got %q",
+				r.Name, StaticPayloadTLSClientHello, r.Match.Payload)
 		}
 
 		switch r.Action {

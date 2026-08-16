@@ -119,6 +119,43 @@ enum kapkan_rule_flag {
 	KAPKAN_RF_IPV6		= 1 << 7, /* address family of src/dst prefixes */
 };
 
+/*
+ * Extended match bits, in kapkan_rule.match_ext.
+ *
+ * WHY A SECOND BYTE. `flags` above is full — all eight bits are spoken for —
+ * and widening it would move every field after it. match_ext was the struct's
+ * _pad0, so the layout is byte-for-byte what it was: same size, same offsets,
+ * same alignment. A zero here means "no extended predicate", which is exactly
+ * what every rule an older userspace wrote already contains.
+ *
+ * NO MapSchemaVersion BUMP IS OWED FOR ADDING A BIT HERE, and the reasoning is
+ * worth writing down because the defensive reflex is to bump anyway and tear
+ * down every operator's pins for nothing. tryAdopt() compares the PROGRAM TAG
+ * of the pinned program against the one this binary loads, and any edit to
+ * kapkan_xdp.c changes that tag. So a binary that understands a new bit never
+ * meets a program that does not: the whole pin set is rebuilt, and the rules
+ * are re-encoded from config and from ban rehydration on the way. The version
+ * stamp is for LAYOUT changes, which this is not.
+ *
+ * THIS AXIS IS STATIC-RULE ONLY. It is the first thing in kapkan_rule with no
+ * mitigate.FlowSpecRule counterpart, because FlowSpec cannot express a payload
+ * predicate at all (RFC 8955 has no component for it). A dynamic rule that set
+ * one would select different packets through the BPF encoder than through the
+ * NLRI encoder while claiming to be the same rule — so dpencode.go must never
+ * emit it, and a test holds that line rather than a comment.
+ */
+enum kapkan_match_ext {
+	/*
+	 * The TCP payload begins a TLS handshake record carrying a
+	 * ClientHello. Set by the parser from three bytes at fixed offsets;
+	 * see kapkan_parse_l4(). Clear for everything else INCLUDING a
+	 * ClientHello this program could not see (truncated capture, a
+	 * segment-split record), because the parser fails open like the rest
+	 * of the file.
+	 */
+	KAPKAN_MX_TLS_CLIENT_HELLO = 1 << 0,
+};
+
 /* ======================================================================== */
 /* struct kapkan_rule — the in-kernel form of mitigate.FlowSpecRule           */
 /* ======================================================================== */
@@ -135,6 +172,9 @@ enum kapkan_rule_flag {
  *   FlowSpecRule.Fragment bool      -> RF_FRAGMENT
  *   FlowSpecRule.Action             -> action
  *   FlowSpecRule.RateBytes float64  -> profile
+ *
+ * match_ext is the one member with NO FlowSpecRule counterpart — see
+ * enum kapkan_match_ext. Static rules only.
  *
  * RateBytes does not appear directly: the datapath must not carry a float and
  * must not divide by a runtime value, so userspace INTERNS each distinct rate
@@ -169,7 +209,7 @@ struct kapkan_rule {
 	__u8 tcp_flags;	     /* expected bits, after masking                  */
 	__u8 tcp_flags_mask; /* 0 => do not test flags                        */
 	__u8 flags;	     /* enum kapkan_rule_flag bitset                  */
-	__u8 _pad0;
+	__u8 match_ext;	     /* enum kapkan_match_ext bitset; 0 = no extras   */
 	__u16 sport;	     /* host order                                    */
 	__u16 dport;	     /* host order                                    */
 	__u32 _pad1;

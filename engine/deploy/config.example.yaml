@@ -266,9 +266,19 @@ thresholds: # per destination host, after sampling correction
 #   ratelimit_profiles:
 #     - {name: icmp_cap, mbps: 10}
 #     - {name: dns_reply, pps: 50000}
+#     - {name: handshake_cap, pps: 20}   # per source, see cap_tls_handshakes
 #
 #   # Always-on operator rules, evaluated after the allowlists and before any
 #   # rule the detector installs. Names are required and unique.
+#   #
+#   # match takes src, proto, src_port, dst_port and payload. `payload` narrows
+#   # on what the L4 payload BEGINS with; its only value is tls_client_hello,
+#   # which matches a TCP segment opening a TLS ClientHello — the shape a TLS
+#   # handshake flood is made of, and the one an ordinary connection sends
+#   # exactly once. It requires proto: tcp, is read from a fixed offset with no
+#   # stream reassembly (a ClientHello split across segments does not match and
+#   # is forwarded), and does NOT cover HTTP/3, whose handshake is inside QUIC
+#   # on UDP and is encrypted before this filter sees it.
 #   static_rules:
 #     - name: drop_chargen
 #       match: {proto: udp, src_port: 19}
@@ -277,6 +287,10 @@ thresholds: # per destination host, after sampling correction
 #       match: {proto: icmp}
 #       action: ratelimit
 #       profile: icmp_cap
+#     - name: cap_tls_handshakes   # a per-source ceiling on new TLS handshakes
+#       match: {proto: tcp, dst_port: 443, payload: tls_client_hello}
+#       action: ratelimit
+#       profile: handshake_cap
 #
 #   limits:
 #     max_dynamic_rules: 4096      # must be >= ban.max_active_bans * 8

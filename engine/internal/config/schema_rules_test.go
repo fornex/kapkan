@@ -72,6 +72,29 @@ func TestParseAcceptsCarpetDataplane(t *testing.T) {
 	}
 }
 
+// TestParseAcceptsTLSClientHelloRule is the positive half of the three
+// rejection cases below: the shape an operator actually writes to shed a TLS
+// handshake flood — a per-source ceiling on ClientHellos to :443 — has to
+// survive validation intact, or the rejections are just a wall.
+func TestParseAcceptsTLSClientHelloRule(t *testing.T) {
+	yaml := validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n" +
+		"  ratelimit_profiles:\n    - {name: hs_per_src, pps: 20}\n" +
+		"  static_rules:\n    - name: cap_tls_handshakes\n" +
+		"      match: {proto: tcp, dst_port: 443, payload: tls_client_hello}\n" +
+		"      action: ratelimit\n      profile: hs_per_src\n"
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("a tls_client_hello ratelimit rule should parse, got: %v", err)
+	}
+	m := cfg.Dataplane.StaticRules[0].Match
+	if m.Payload != StaticPayloadTLSClientHello {
+		t.Errorf("match.payload = %q, want %q", m.Payload, StaticPayloadTLSClientHello)
+	}
+	if m.DstPort != 443 || m.Proto != "tcp" {
+		t.Errorf("match = %+v, want proto tcp on port 443", m)
+	}
+}
+
 func TestParseRejectsCrossFieldViolations(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -166,6 +189,24 @@ hostgroups:
 			name:    "duplicate static rule names",
 			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - {name: r, match: {proto: udp}, action: drop}\n    - {name: r, match: {proto: tcp}, action: drop}\n",
 			wantErr: "duplicate rule name",
+		},
+		{
+			// The bit is only ever set on TCP, so this rule would match the
+			// same packets either way — it is refused so the config file
+			// states the TCP-only nature at the place an operator reads it.
+			name:    "payload match without an explicit proto",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - {name: hs, match: {dst_port: 443, payload: tls_client_hello}, action: drop}\n",
+			wantErr: "requires proto: tcp",
+		},
+		{
+			name:    "payload match on udp",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - {name: hs, match: {proto: udp, dst_port: 443, payload: tls_client_hello}, action: drop}\n",
+			wantErr: "requires proto: tcp",
+		},
+		{
+			name:    "unknown payload predicate",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - {name: hs, match: {proto: tcp, payload: http_get}, action: drop}\n",
+			wantErr: "match.payload must be tls_client_hello",
 		},
 		{
 			name:    "ratelimit profile with neither pps nor mbps",

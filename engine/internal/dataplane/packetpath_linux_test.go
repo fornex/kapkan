@@ -102,6 +102,7 @@ type ruleOpts struct {
 	tcpFlags uint8 // expected bits
 	tcpMask  uint8 // 0 = do not test
 	fragment bool
+	matchExt uint8 // extended predicates (MatchTLSClientHello)
 	v6       bool
 }
 
@@ -126,6 +127,7 @@ func mkRule(o ruleOpts) Rule {
 		TCPFlags:     o.tcpFlags,
 		TCPFlagsMask: o.tcpMask,
 		Fragment:     o.fragment,
+		MatchExt:     o.matchExt,
 		IPv6:         o.v6,
 	}
 	if o.src != nil {
@@ -558,6 +560,220 @@ func TestPortMatching(t *testing.T) {
 
 // TestFragmentMatching: fragments are matchable via the rule's fragment bit and
 // are NEVER dropped merely for being fragments.
+/* ------------------------------------------------- the payload predicate */
+
+// tlsRecordHead builds the six bytes the datapath actually reads: a TLS record
+// header (type, major, minor, length) followed by a handshake message type.
+// Everything after is filler — the program never looks at it, and a test that
+// built a real ClientHello body would be asserting a parser we deliberately do
+// not have.
+func tlsRecordHead(recType, major, hsType byte, body int) []byte {
+	p := make([]byte, 6+body)
+	p[0] = recType
+	p[1] = major
+	p[2] = 0x03 // minor version; never tested
+	binary.BigEndian.PutUint16(p[3:], uint16(1+body))
+	p[5] = hsType
+	return p
+}
+
+// clientHello is the six bytes that must match, plus a plausible body.
+func clientHello() []byte { return tlsRecordHead(0x16, 0x03, 0x01, 200) }
+
+// tcpWithOptions is tcp() carrying `words` 32-bit words of options, so a test
+// can prove the payload offset is derived from doff rather than assumed to be
+// 20. Real first-data segments almost always carry options, so an
+// offset-by-constant bug would miss most production traffic while passing every
+// hand-built test that skipped this.
+func tcpWithOptions(sport, dport uint16, flags uint8, words int) []byte {
+	h := tcp(sport, dport, flags)
+	h[12] = byte(5+words) << 4
+	return append(h, make([]byte, words*4)...)
+}
+
+func tlsFrameFrom(src [4]byte, hdr, payload []byte) []byte {
+	return cat(eth(etherTypeIPv4),
+		ipv4From(src, victimIP, 6, 0, len(hdr)+len(payload)), hdr, payload)
+}
+
+// TestTLSClientHelloMatching is the whole payload predicate: what it catches,
+// and — the half that decides whether the feature is usable — what it leaves
+// alone. One rule serves every case, so a row that passes does so because the
+// packet did not match, not because the rule was different.
+//
+// The canonical deployment is a per-source ceiling on `tcp dst_port 443
+// payload tls_client_hello`. If that rule also caught the ACKs of a large
+// download it would throttle exactly the clients it exists to protect, which is
+// what the "established connection" rows below are really testing.
+func TestTLSClientHelloMatching(t *testing.T) {
+	const (
+		psh = 0x08
+		ack = 0x10
+	)
+	for _, tc := range []struct {
+		name    string
+		hdr     []byte
+		payload []byte
+		want    uint32
+		stat    Stat
+	}{
+		{
+			name: "a ClientHello is the thing we are after",
+			hdr:  tcp(51000, 443, psh|ack), payload: clientHello(),
+			want: xdpDrop, stat: StatDropStatic,
+		},
+		{
+			name: "TCP options shift the payload, and doff must find it",
+			hdr:  tcpWithOptions(51000, 443, psh|ack, 3), payload: clientHello(),
+			want: xdpDrop, stat: StatDropStatic,
+		},
+		{
+			// The row that matters most: a client mid-download sends a
+			// steady stream of these to :443, and they must not be touched.
+			name: "a bare ACK on an established connection is not a handshake",
+			hdr:  tcp(51000, 443, ack), payload: nil,
+			want: xdpPass, stat: StatPassDefault,
+		},
+		{
+			name: "application data (record type 0x17) is not a handshake",
+			hdr:  tcp(51000, 443, psh|ack), payload: tlsRecordHead(0x17, 0x03, 0x01, 200),
+			want: xdpPass, stat: StatPassDefault,
+		},
+		{
+			// Same record type, different message: this is the server's half
+			// of the handshake, and it arrives at the victim as a response
+			// only in the outgoing direction.
+			name: "a ServerHello is a handshake record but the wrong message",
+			hdr:  tcp(51000, 443, psh|ack), payload: tlsRecordHead(0x16, 0x03, 0x02, 200),
+			want: xdpPass, stat: StatPassDefault,
+		},
+		{
+			name: "SSLv2-era major version 0x02 is not TLS",
+			hdr:  tcp(51000, 443, psh|ack), payload: tlsRecordHead(0x16, 0x02, 0x01, 200),
+			want: xdpPass, stat: StatPassDefault,
+		},
+		{
+			// Fewer than six payload bytes: the peek cannot complete, so the
+			// bit stays clear and the packet is forwarded. Fail open, like
+			// every other bounded read in the program.
+			name: "a payload too short to decide passes",
+			hdr:  tcp(51000, 443, psh|ack), payload: []byte{0x16, 0x03, 0x01},
+			want: xdpPass, stat: StatPassDefault,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := loadObjects(t)
+			installStatics(t, objs, 0, mkRule(ruleOpts{
+				id: 140, action: ActionDrop, dst: &victimIP,
+				proto: u8p(6), dport: u16p(443), matchExt: MatchTLSClientHello,
+			}))
+			setCfgFull(t, objs, cfgOpts{staticCount: 1})
+
+			pkt := tlsFrameFrom(attackerIP, tc.hdr, tc.payload)
+			wantVerdict(t, objs, run(t, objs, pkt), tc.want, tc.stat)
+		})
+	}
+}
+
+// TestTLSClientHelloAndFragments pins the interaction the parser's own comment
+// is most careful about.
+//
+// kapkan_parse_l4 deliberately does NOT skip a FIRST fragment: it carries a
+// whole L4 header, and skipping it would make every port rule miss the leading
+// fragment of a fragmented flood. The payload peek inherits that, so a first
+// fragment carrying a ClientHello matches. A NON-first fragment never reaches
+// the parser at all — it has no L4 header, so it has no ports either, and a
+// rule naming :443 could not match it even if the peek had run.
+//
+// The pair matters because "fragment the handshake" is the obvious evasion to
+// try, and the honest answer is that the first fragment is still caught while
+// the rest is not the thing being metered anyway.
+func TestTLSClientHelloAndFragments(t *testing.T) {
+	objs := loadObjects(t)
+	installStatics(t, objs, 0, mkRule(ruleOpts{
+		id: 143, action: ActionDrop, dst: &victimIP,
+		proto: u8p(6), dport: u16p(443), matchExt: MatchTLSClientHello,
+	}))
+	setCfgFull(t, objs, cfgOpts{staticCount: 1})
+
+	// MF set, offset 0: a first fragment, L4 header present.
+	hdr, payload := tcp(51000, 443, 0x18), clientHello()
+	first := cat(eth(etherTypeIPv4),
+		ipv4From(attackerIP, victimIP, 6, 0x2000, len(hdr)+len(payload)), hdr, payload)
+	if got := run(t, objs, first); got != xdpDrop {
+		t.Errorf("first fragment of a ClientHello: verdict = %s, want XDP_DROP", verdictName(got))
+	}
+
+	// Offset 0xb9: a later fragment. No L4 header, so no ports.
+	later := cat(eth(etherTypeIPv4),
+		ipv4From(attackerIP, victimIP, 6, 0x00b9, 32), make([]byte, 32))
+	if got := run(t, objs, later); got != xdpPass {
+		t.Errorf("non-first fragment: verdict = %s, want XDP_PASS — it carries no L4 header, "+
+			"so a rule naming a port must not match it", verdictName(got))
+	}
+}
+
+// TestTLSClientHelloDoesNotWidenTheRestOfTheMatch: the predicate ANDs with
+// everything else, it does not replace it. A ClientHello aimed somewhere the
+// rule does not name must still pass — otherwise the canonical port-443 rule
+// would quietly become "every TLS handshake on this box".
+func TestTLSClientHelloDoesNotWidenTheRestOfTheMatch(t *testing.T) {
+	objs := loadObjects(t)
+	installStatics(t, objs, 0, mkRule(ruleOpts{
+		id: 141, action: ActionDrop, dst: &victimIP,
+		proto: u8p(6), dport: u16p(443), matchExt: MatchTLSClientHello,
+	}))
+	setCfgFull(t, objs, cfgOpts{staticCount: 1})
+
+	// Same handshake, port 8443. The rule names 443, so this is not its packet.
+	pkt := tlsFrameFrom(attackerIP, tcp(51000, 8443, 0x18), clientHello())
+	wantVerdict(t, objs, run(t, objs, pkt), xdpPass, StatPassDefault)
+}
+
+// TestTLSClientHelloPerSourceRateLimit is the shape an operator actually
+// deploys: not a drop, but a per-source ceiling on handshakes. It is worth its
+// own case because matching and metering are separate code paths — a rule that
+// matched but whose action never reached the token bucket would look correct in
+// every test above.
+//
+// A handshake flood is also the vector per-source buckets suit best: a
+// ClientHello can only arrive on a completed TCP handshake, so the sources are
+// real and the LRU is not filled with spoofed keys.
+func TestTLSClientHelloPerSourceRateLimit(t *testing.T) {
+	objs := loadObjects(t)
+	putProfile(t, objs, 1, 1 /*pps*/, 2 /*burst*/, 0, 0)
+	installStatics(t, objs, 0, mkRule(ruleOpts{
+		id: 142, action: ActionRateLimit, profile: 1, dst: &victimIP,
+		proto: u8p(6), dport: u16p(443), matchExt: MatchTLSClientHello,
+	}))
+	setCfgFull(t, objs, cfgOpts{staticCount: 1})
+
+	hs := func(src [4]byte) []byte {
+		return tlsFrameFrom(src, tcp(51000, 443, 0x18), clientHello())
+	}
+
+	var passed int
+	for i := 0; i < 5; i++ {
+		if run(t, objs, hs(attackerIP)) == xdpPass {
+			passed++
+		}
+	}
+	if passed != 2 {
+		t.Errorf("first source admitted %d handshakes, want its burst of 2", passed)
+	}
+
+	// A second source arrives with a full bucket, and the data flow of the
+	// first is untouched — only its handshakes were metered.
+	if got := run(t, objs, hs(otherIP)); got != xdpPass {
+		t.Errorf("second source = %s, want pass with its own budget", verdictName(got))
+	}
+	data := tlsFrameFrom(attackerIP, tcp(51000, 443, 0x10), tlsRecordHead(0x17, 0x03, 0x01, 400))
+	if got := run(t, objs, data); got != xdpPass {
+		t.Errorf("application data from the throttled source = %s, want pass — "+
+			"the ceiling is on handshakes, not on the connection", verdictName(got))
+	}
+}
+
 func TestFragmentMatching(t *testing.T) {
 	objs := loadObjects(t)
 	installStatics(t, objs, 0, mkRule(ruleOpts{
