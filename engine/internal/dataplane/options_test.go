@@ -145,6 +145,76 @@ dataplane:
 	}
 }
 
+// TestPayloadMatchCompilesToMatchExt walks the whole path a ClientHello rule
+// takes on its way to the kernel: config YAML -> StaticRule -> encoded
+// kapkan_rule. It is one test rather than three because the interesting failure
+// is a break anywhere along it, and the symptom is always the same silent one —
+// match_ext left at zero, so the rule stops narrowing and rate-limits every
+// packet the rest of its match admits, which for the canonical rule is all of
+// tcp/443.
+func TestPayloadMatchCompilesToMatchExt(t *testing.T) {
+	cfg := mustParse(t, `
+dataplane:
+  interfaces: ["eth0"]
+  ratelimit_profiles:
+    - {name: hs, pps: 20}
+  static_rules:
+    - name: cap-handshakes
+      match: {proto: tcp, dst_port: 443, payload: tls_client_hello}
+      action: ratelimit
+      profile: hs
+    - name: cap-https
+      match: {proto: tcp, dst_port: 443}
+      action: ratelimit
+      profile: hs
+`)
+	opts, err := OptionsFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("OptionsFromConfig: %v", err)
+	}
+	if len(opts.Policy.Statics) != 2 {
+		t.Fatalf("statics = %+v", opts.Policy.Statics)
+	}
+
+	hs := opts.Policy.Statics[0]
+	if hs.MatchExt != MatchTLSClientHello {
+		t.Errorf("cap-handshakes MatchExt = %#02x, want %#02x", hs.MatchExt, MatchTLSClientHello)
+	}
+	// The neighbouring rule differs only in the payload line. If it also
+	// carried the bit, the mapping would be reading the wrong field and the
+	// first assertion would still pass.
+	if plain := opts.Policy.Statics[1]; plain.MatchExt != 0 {
+		t.Errorf("cap-https MatchExt = %#02x, want 0 — it names no payload predicate", plain.MatchExt)
+	}
+
+	r, err := RuleSpec{
+		Action:   ActionRateLimit,
+		Proto:    hs.Proto,
+		DstPort:  hs.DstPort,
+		MatchExt: hs.MatchExt,
+	}.Encode()
+	if err != nil {
+		t.Fatalf("encoding the compiled rule: %v", err)
+	}
+	if r.MatchExt != MatchTLSClientHello {
+		t.Errorf("encoded MatchExt = %#02x, want %#02x", r.MatchExt, MatchTLSClientHello)
+	}
+}
+
+// TestEncodeRejectsUnknownMatchExt covers the direction that matters. An
+// unimplemented narrowing bit cannot be dropped on the floor: the datapath
+// would ignore it and the rule would match MORE than the caller asked for, so
+// the encoder refuses instead.
+func TestEncodeRejectsUnknownMatchExt(t *testing.T) {
+	_, err := RuleSpec{Action: ActionDrop, MatchExt: 1 << 7}.Encode()
+	if err == nil {
+		t.Fatal("Encode accepted an unimplemented match_ext bit; the rule would have widened silently")
+	}
+	if !strings.Contains(err.Error(), "match more than intended") {
+		t.Errorf("error %q does not say what goes wrong", err)
+	}
+}
+
 func prefixStringSet(p []netip.Prefix) map[string]bool {
 	out := map[string]bool{}
 	for _, x := range p {

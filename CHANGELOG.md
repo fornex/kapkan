@@ -19,6 +19,53 @@ security-relevant.
 
 ## [Unreleased]
 
+### Config changes
+
+- **Added** `dataplane.static_rules[].match.payload`, whose only value is
+  `tls_client_hello`. It matches a TCP segment opening a TLS ClientHello and
+  requires `proto: tcp`. Optional and absent by default; a config that does not
+  use it behaves exactly as before.
+
+### Added
+
+- **TLS handshake matching in the data plane.** A static rule can now narrow on
+  the shape of a TLS handshake, so a **TLS handshake flood** — connections that
+  complete the TCP handshake, start a ClientHello and go no further — can be
+  metered per source:
+
+  ```yaml
+  ratelimit_profiles:
+    - { name: handshake_cap, pps: 20 }
+  static_rules:
+    - name: cap_tls_handshakes
+      match: { proto: tcp, dst_port: 443, payload: tls_client_hello }
+      action: ratelimit
+      profile: handshake_cap
+  ```
+
+  This is the vector per-source buckets suit best: a ClientHello can only arrive
+  on a completed TCP handshake, so the sources are real addresses rather than
+  spoofed ones. Established connections are untouched — the rule matches the
+  handshake, not the traffic that follows it.
+
+  **Bounds, stated rather than buried.** The record is read from a fixed offset
+  and the data plane never reassembles a stream, so a ClientHello split across
+  segments does not match and is forwarded, like anything else the parser cannot
+  decide. It is TCP-only, which is why `proto: tcp` is required rather than
+  inferred, and it does **not** cover HTTP/3, whose handshake is encrypted inside
+  QUIC on UDP. Kapkan matches the shape of a handshake, never its contents; no
+  part of the data plane reads HTTP inside an established TLS session.
+
+  There is deliberately **no detector-side `tls_handshake_flood` vector**:
+  detection runs on sampled flow telemetry, which does not carry payload bytes.
+  This is an operator-written rule that is always on, not something a ban turns
+  on during an attack — so it is also not part of the measured block-rate table,
+  which covers detector-driven mitigation. Its coverage is the kernel packet-path
+  suite: a real ClientHello matches, with or without TCP options; a bare ACK,
+  application data, a ServerHello, an SSLv2-era version and a payload too short
+  to decide all pass; a first fragment carrying one still matches while a later
+  fragment does not; and the per-source bucket admits a burst then denies.
+
 ## [1.6.0] - 2026-08-14
 
 ### Security

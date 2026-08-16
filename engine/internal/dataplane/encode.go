@@ -81,6 +81,15 @@ type RuleSpec struct {
 	// mirrors FlowSpec, where an absent type-12 component means "any".
 	Fragment bool
 
+	// MatchExt is the extended-predicate bitset (MatchTLSClientHello and, in
+	// time, its siblings). Zero means "no extended predicate", which is what
+	// every rule the mitigator builds carries: this axis is STATIC RULES ONLY,
+	// because FlowSpec has no way to express a payload test and a dynamic rule
+	// setting one would mean the two encoders no longer select the same
+	// packets. Encode does not police that — the mitigator simply never sets
+	// it, and TestDynamicRulesNeverSetMatchExt proves it stays that way.
+	MatchExt uint8
+
 	// IPv6 selects the address family. It is only consulted when neither Src
 	// nor Dst is set; otherwise it must agree with them, and Encode rejects a
 	// disagreement rather than guessing.
@@ -117,7 +126,9 @@ func (s RuleSpec) MatchTCPFlagsExact(v uint8) RuleSpec {
 //   - an IPv4-mapped IPv6 prefix (::ffff:a.b.c.d), because the datapath
 //     deliberately does NOT normalise those — see the long note at the top of
 //     kapkan_xdp.c. Callers must Unmap() and pick a family on purpose;
-//   - flag bits set outside the flag mask, which can never match.
+//   - flag bits set outside the flag mask, which can never match;
+//   - an extended-match bit this build does not know, which the datapath would
+//     ignore — so the rule would match MORE than the caller asked for.
 func (s RuleSpec) Encode() (Rule, error) {
 	switch s.Action {
 	case ActionPass, ActionDrop, ActionRateLimit:
@@ -128,6 +139,17 @@ func (s RuleSpec) Encode() (Rule, error) {
 		return Rule{}, fmt.Errorf(
 			"dataplane: rule %d: tcp flags %#02x has bits outside mask %#02x, so it can never match",
 			s.ID, s.TCPFlags, s.TCPFlagsMask)
+	}
+	// Rejected rather than masked off, and the direction of the failure is the
+	// reason. An unknown flag bit is a narrowing predicate the datapath cannot
+	// apply, so silently dropping it would WIDEN the rule — a caller asking to
+	// rate-limit ClientHellos would instead rate-limit every packet the rest of
+	// the match admits.
+	if s.MatchExt&^knownMatchExt != 0 {
+		return Rule{}, fmt.Errorf(
+			"dataplane: rule %d: match_ext %#02x has bits this build does not implement (known: %#02x); "+
+				"the datapath would ignore them and the rule would match more than intended",
+			s.ID, s.MatchExt, knownMatchExt)
 	}
 
 	// Family resolution. -1 until a prefix pins it down.
@@ -175,6 +197,7 @@ func (s RuleSpec) Encode() (Rule, error) {
 		TcpFlagsMask: s.TCPFlagsMask,
 		Flags: RuleValid | RuleSrcAny | RuleDstAny |
 			RuleProtoAny | RuleSportAny | RuleDportAny,
+		MatchExt: s.MatchExt,
 	}
 	if v6 {
 		r.Flags |= RuleIPv6

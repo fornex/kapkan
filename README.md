@@ -268,8 +268,13 @@ dataplane:
 
   ratelimit_profiles:           # named ceilings, referenced by static rules
     - { name: icmp_cap, mbps: 10 }
+    - { name: handshake_cap, pps: 20 }
 
-  static_rules:                 # always-on operator policy
+  static_rules:                 # always-on operator policy, first match wins
+    - name: cap_tls_handshakes  # per-source ceiling on new TLS handshakes
+      match: { proto: tcp, dst_port: 443, payload: tls_client_hello }
+      action: ratelimit
+      profile: handshake_cap
     - name: drop_chargen
       match: { proto: udp, src_port: 19 }
       action: drop
@@ -298,7 +303,17 @@ ladder runs `none < dataplane < flowspec < divert < blackhole`.
 `allowlist` (source prefixes that always pass) is a different axis from
 `protected_whitelist` (destinations that are never banned); both are enforced in the
 kernel. `limits.max_dynamic_rules` (default 4096) caps the mitigator's rules and must be at
-least `ban.max_active_bans × 8`, since a ban contributes up to 8 rules. Requirements,
+least `ban.max_active_bans × 8`, since a ban contributes up to 8 rules.
+
+A `ratelimit` action is enforced **per source address** — each source gets its own token
+bucket, which is the one thing BGP FlowSpec structurally cannot express, since its
+traffic-rate caps an aggregate that attackers and legitimate clients then compete for.
+`match.payload: tls_client_hello` narrows a rule to TCP segments opening a TLS
+ClientHello, which is what a **TLS handshake flood** is made of and what a SYN-flags rule
+cannot see, because those connections are established. It is read from a fixed offset with
+no stream reassembly, so a split ClientHello does not match and is forwarded; it needs
+`proto: tcp`, and it does not cover HTTP/3, whose handshake is encrypted inside QUIC on
+UDP. Requirements,
 capabilities, tuning and the measured block rates are in the
 [data-plane guide](https://kapkan.io/docs/dataplane); `kapkan dataplane status` reports
 whether the kernel is actually filtering, and works with the daemon stopped.

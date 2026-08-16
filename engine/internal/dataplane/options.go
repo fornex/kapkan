@@ -121,6 +121,10 @@ type StaticRule struct {
 	Action Action
 	// Profile names a Profiles entry; set only for ActionRateLimit.
 	Profile string
+	// MatchExt is the extended-predicate bitset from match.payload. Zero for
+	// every rule that does not name one, which is every rule written before
+	// the field existed.
+	MatchExt uint8
 }
 
 // IP protocol numbers for config's proto names. icmp is v4-only and icmp6 is
@@ -248,6 +252,14 @@ func policyFromBlock(d *config.Dataplane, protected []netip.Addr) (StaticPolicy,
 		}
 		if r.Match.DstPort != 0 {
 			sr.DstPort = ptr(r.Match.DstPort)
+		}
+		switch r.Match.Payload {
+		case "":
+		case config.StaticPayloadTLSClientHello:
+			sr.MatchExt |= MatchTLSClientHello
+		default:
+			return StaticPolicy{}, fmt.Errorf("dataplane.static_rules[%q]: unknown payload %q "+
+				"(config.validate accepted it, so this package is out of step)", r.Name, r.Match.Payload)
 		}
 		switch r.Action {
 		case config.StaticActionPass:

@@ -107,6 +107,24 @@
  *   + kapkan_decide() global ................... 275,639  (27.6%)
  *   + kapkan_rule_match() global ................ 82,422  ( 8.2%)
  *
+ * Those four are one experiment, run against the program as it stood when the
+ * shapes were chosen; they are a RATIO, and the ratio is what the rule below
+ * rests on. The absolute figure moves whenever the program does — the TLS
+ * ClientHello peek in kapkan_parse_l4() took it to 108,601 (10.9%), because a
+ * bounded read inside an __always_inline parser is paid once per parser path
+ * and there are many. TestProgramSize prints the current number on every run;
+ * read it there rather than trusting this comment, and if a change ever puts
+ * the program near the budget, re-read the rule before optimising anything
+ * else.
+ *
+ * THE FLOOR KERNEL IS NOT THE WORST CASE, which is worth knowing before
+ * anyone budgets headroom for it: the same object measures 89,610 (9.0%) on
+ * 5.15 and 108,601 (10.9%) on 6.12. The intuition that an older verifier must
+ * process more is wrong here — the two walk different numbers of paths — so
+ * "it fits on 6.12" has been the binding constraint, not "it fits on 5.15".
+ * Both are measured by the kernel matrix (hack/kernel-matrix/run.sh); neither
+ * is inferred from the other.
+ *
  * The rule that produced those numbers:
  *
  *   __always_inline  — for tiny leaf helpers (bounds-checked pulls, mask
@@ -233,6 +251,7 @@ struct kapkan_pkt {
 	__u8 is_v6;
 	__u8 is_frag;
 	__u8 have_ports;
+	__u8 is_tls_chello; /* TCP payload opens a TLS ClientHello       */
 };
 
 /*
@@ -298,6 +317,8 @@ static __always_inline int kapkan_parse_l4(void *data, void *data_end,
 {
 	if (pkt->proto == IPPROTO_TCP) {
 		struct tcphdr *th = kapkan_pull(data, data_end, off, sizeof(*th));
+		__u32 dataoff, hlen;
+		__u8 *rec;
 
 		if (!th)
 			return -1;
@@ -311,6 +332,42 @@ static __always_inline int kapkan_parse_l4(void *data, void *data_end,
 					(th->ack << 4) | (th->urg << 5) |
 					(th->ece << 6) | (th->cwr << 7));
 		pkt->have_ports = 1;
+
+		/*
+		 * TLS ClientHello peek — KAPKAN_MX_TLS_CLIENT_HELLO.
+		 *
+		 * Six bytes at fixed offsets, and that is the whole feature:
+		 *
+		 *   [0]     0x16  TLS record type "handshake"
+		 *   [1]     0x03  record-layer major version (every TLS to date,
+		 *                 including 1.3, which keeps 0x03xx here for
+		 *                 middlebox compatibility)
+		 *   [2..4]        minor version + record length, not tested
+		 *   [5]     0x01  handshake type "client_hello"
+		 *
+		 * NO REASSEMBLY, and that bound is deliberate rather than
+		 * regrettable. A record split across segments, a ClientHello
+		 * that does not start the segment, a capture truncated before
+		 * byte six: all of them leave the bit CLEAR and the packet is
+		 * ordinary TCP. The failure direction is the one this whole
+		 * file is built on — a rule under-matches and the packet is
+		 * forwarded, never the reverse.
+		 *
+		 * The offset must come from th->doff (TCP options are common on
+		 * the first data segment, so assuming 20 would miss most real
+		 * traffic), and doff is attacker-controlled: range-check it
+		 * BEFORE it becomes an offset. Below 5 it is malformed and the
+		 * peek is skipped; the 4-bit field cannot exceed 15, so the
+		 * upper end needs no test and kapkan_pull's bounds check covers
+		 * the frame anyway.
+		 */
+		hlen = (__u32)th->doff * 4;
+		if (hlen < sizeof(*th))
+			return 0;
+		dataoff = *off - (__u32)sizeof(*th) + hlen;
+		rec = kapkan_pull(data, data_end, &dataoff, 6);
+		if (rec && rec[0] == 0x16 && rec[1] == 0x03 && rec[5] == 0x01)
+			pkt->is_tls_chello = 1;
 		return 0;
 	}
 
@@ -638,7 +695,8 @@ static __always_inline __u64 kapkan_test_mask(__u32 flags, __u32 any_shift)
  * GLOBAL (note the missing `static`) is the load-bearing half: a global
  * function is verified exactly once instead of on every path that reaches it.
  * That alone took the whole program from 275,639 processed instructions to
- * 82,422.
+ * 82,422 — both figures from the experiment in the header comment, which also
+ * says why the absolute number has moved since.
  *
  * BRANCHLESS is the supporting half, and it is worth being honest about the
  * measurement: folding the early-exit ladder into one accumulator made things
@@ -707,6 +765,12 @@ int kapkan_rule_match(const struct kapkan_rule *r,
 	/* RF_FRAGMENT set => the packet must be a fragment. Clear => the rule
 	 * is indifferent, so the term vanishes. */
 	bad |= ((f >> 6) & 1) & ((__u32)pkt->is_frag ^ 1);
+
+	/* MX_TLS_CLIENT_HELLO, same shape: set => the packet must be one.
+	 * Clear => the term vanishes, which is why every rule written before
+	 * this bit existed keeps matching exactly what it used to. */
+	bad |= (__u32)(r->match_ext & KAPKAN_MX_TLS_CLIENT_HELLO) &
+	       ((__u32)pkt->is_tls_chello ^ 1);
 
 	bad |= ((__u32)r->proto ^ (__u32)pkt->proto) &
 	       kapkan_test_mask(f, 3); /* RF_PROTO_ANY */

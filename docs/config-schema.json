@@ -379,6 +379,9 @@
                   "dst_port": {
                     "type": "integer"
                   },
+                  "payload": {
+                    "type": "string"
+                  },
                   "proto": {
                     "enum": [
                       "tcp",
