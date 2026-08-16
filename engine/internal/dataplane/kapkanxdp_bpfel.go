@@ -100,7 +100,7 @@ type kapkanXDPKapkanRule struct {
 	TcpFlags     uint8
 	TcpFlagsMask uint8
 	Flags        uint8
-	Pad0         uint8
+	MatchExt     uint8
 	Sport        uint16
 	Dport        uint16
 	Pad1         uint32

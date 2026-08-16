@@ -18,6 +18,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/app"
 	"github.com/kapkan-io/kapkan/internal/buildinfo"
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/logging"
 	"github.com/kapkan-io/kapkan/internal/update"
 )
@@ -105,7 +106,40 @@ func checkConfigFile(path string) int {
 	for _, g := range cfg.Groups {
 		fmt.Printf("    - %-20s calc=%-8s ban=%-5t  %s\n", g.Name, g.Calc, g.BanEnabled, ladderString(g.Escalation))
 	}
+	printDataplaneWarnings(cfg)
 	return 0
+}
+
+// printDataplaneWarnings reports the data-plane defects that are legal config
+// but cannot be what the operator meant. They do not fail the check — the file
+// loads, and the daemon will run it — so the exit code stays 0 and this is
+// printed after the OK line.
+//
+// Today that is exactly one thing: a static rule that can never fire. It is
+// worth catching here because here is the only place it can be caught BEFORE
+// the traffic it was supposed to filter arrives; once running, the symptom is a
+// rule counter that stays at zero, which looks like a quiet day.
+func printDataplaneWarnings(cfg *config.Config) {
+	if !cfg.DataplaneEnabled() {
+		return
+	}
+	pol, err := dataplane.PolicyFromConfig(cfg)
+	if err != nil {
+		// Unreachable short of a bug: validate() already accepted every field
+		// this parses. Say so rather than swallowing it.
+		fmt.Printf("  WARNING: could not analyse the dataplane policy: %v\n", err)
+		return
+	}
+	sh := dataplane.ShadowedStatics(pol)
+	if len(sh) == 0 {
+		return
+	}
+	fmt.Printf("  WARNING: %d static rule(s) can never fire (the allowlist is checked first, and\n"+
+		"           static rules are first match wins — move the rule above the one that covers\n"+
+		"           it, narrow the coverage, or delete it):\n", len(sh))
+	for _, s := range sh {
+		fmt.Printf("    - %s\n", s)
+	}
 }
 
 // checkForUpdate performs a one-shot update check and returns the process exit

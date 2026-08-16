@@ -85,8 +85,11 @@ const (
 	// torn down and rebuilt. Dynamic rules from the previous process are gone;
 	// static policy is not, it comes from the config file.
 	CondPinsRebuilt ConditionKind = "pins_rebuilt"
-	// CondPolicyShadowed: a static rule can never fire because the allowlist
-	// now covers everything it matches.
+	// CondPolicyShadowed: a static rule can never fire, because the allowlist
+	// now covers everything it matches or an earlier static rule already takes
+	// every packet it selects. It persists until a reload fixes the config,
+	// which is the point: the defect's only other symptom is a rule counter
+	// that never moves.
 	CondPolicyShadowed ConditionKind = "policy_shadowed"
 )
 
@@ -230,7 +233,10 @@ type ReloadReport struct {
 	AllowRemoved     []string `json:"allow_removed,omitempty"`
 	ProtectedAdded   []string `json:"protected_added,omitempty"`
 	ProtectedRemoved []string `json:"protected_removed,omitempty"`
-	// ShadowedStatics names static rules the allowlist now makes unreachable.
+	// ShadowedStatics names static rules that can never fire — because the
+	// allowlist covers every source they match, or because an earlier static
+	// rule already takes every packet they select (first match wins). Each
+	// entry names the rule and what takes its packets. See shadow.go.
 	ShadowedStatics []string `json:"shadowed_statics,omitempty"`
 	// ShadowedDynamicRules counts rules the MITIGATOR has installed whose
 	// source is now covered by an allowlist entry. Those rules stop dropping

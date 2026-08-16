@@ -537,6 +537,47 @@ func TestGeneratedRulesCompile(t *testing.T) {
 	}
 }
 
+// TestDynamicRulesNeverSetMatchExt holds the static-only line on the extended
+// match axis.
+//
+// dataplane.Rule.MatchExt has no mitigate.FlowSpecRule counterpart, because
+// RFC 8955 has no component for a payload predicate. That asymmetry is fine
+// while only the config file can set one — but a generated rule that carried
+// it would mean the two encoders no longer agree: the same ban would drop one
+// set of packets in this box's kernel and ask a FlowSpec peer to drop a wider
+// one, and the ladder's dataplane→flowspec escalation would silently widen the
+// blast radius at the moment it fires. Nothing in dpencode.go sets the field
+// today; this is what notices when something starts to.
+func TestDynamicRulesNeverSetMatchExt(t *testing.T) {
+	victim := netip.MustParseAddr("203.0.113.9")
+	victim6 := netip.MustParseAddr("2001:db8::9")
+
+	for _, tc := range attackShapes() {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range []netip.Addr{victim, victim6} {
+				for _, act := range []config.FlowSpecAction{config.FlowSpecDiscard, config.FlowSpecRateLimit} {
+					var rate float64
+					if act == config.FlowSpecRateLimit {
+						rate = 125_000
+					}
+					rules := generateRules(target, tc.dir, tc.cls, tc.sample, act, rate, tc.srcAnchored, 0.8)
+					set, err := dataplaneRules(rules, testTTL)
+					if err != nil {
+						t.Fatalf("compiling %s rules for %s: %v", tc.name, target, err)
+					}
+					for i, spec := range set.Specs {
+						if spec.MatchExt != 0 {
+							t.Errorf("spec %d of %s/%s carries match_ext %#02x; the data plane "+
+								"would then select different packets than the FlowSpec peer given "+
+								"the same ban", i, tc.name, target, spec.MatchExt)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 func attackShapes() []struct {
 	name        string
 	dir         engine.Direction

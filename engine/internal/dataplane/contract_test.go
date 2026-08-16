@@ -219,6 +219,57 @@ func TestRuleFlagsMatchC(t *testing.T) {
 	}
 }
 
+// TestMatchExtFlagsMatchC is TestRuleFlagsMatchC for the second flag byte.
+//
+// It is a separate test rather than a second table in that one because the two
+// bytes fail differently. A drifted KAPKAN_RF_* bit makes a rule match the
+// wrong field; a drifted KAPKAN_MX_* bit makes a NARROWING predicate vanish,
+// and a rule that was meant to catch ClientHellos silently catches every packet
+// the rest of its match admits. Same mechanism, opposite blast radius, so the
+// failure message has to say which one happened.
+func TestMatchExtFlagsMatchC(t *testing.T) {
+	src := readFile(t, mapsHeaderPath)
+	re := regexp.MustCompile(`(?m)^\s*KAPKAN_MX_(\w+)\s*=\s*1\s*<<\s*(\d+),`)
+	matches := re.FindAllStringSubmatch(src, -1)
+	if len(matches) == 0 {
+		t.Fatalf("no KAPKAN_MX_* enumerators found in %s", mapsHeaderPath)
+	}
+
+	want := map[string]uint8{"TLS_CLIENT_HELLO": MatchTLSClientHello}
+	seen := make(map[string]bool, len(want))
+	var all uint8
+	for _, m := range matches {
+		name, shift := m[1], m[2]
+		bit, err := strconv.Atoi(shift)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all |= 1 << bit
+		goVal, ok := want[name]
+		if !ok {
+			t.Errorf("KAPKAN_MX_%s exists in C with no constant in contract.go — "+
+				"Encode would reject the bit as unimplemented", name)
+			continue
+		}
+		seen[name] = true
+		if goVal != 1<<bit {
+			t.Errorf("KAPKAN_MX_%s = bit %d in C, %#x in Go — a rule would carry a predicate "+
+				"the datapath tests somewhere else", name, bit, goVal)
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("Go declares %s but KAPKAN_MX_%s is gone from the C header — every rule "+
+				"naming it would silently widen to whatever the rest of its match admits", name, name)
+		}
+	}
+	// knownMatchExt is what Encode accepts. If C grows a bit that Go knows and
+	// this constant does not, every rule using it is rejected at install time.
+	if all != knownMatchExt {
+		t.Errorf("C defines match_ext bits %#02x, knownMatchExt is %#02x", all, knownMatchExt)
+	}
+}
+
 // TestRulesPerPolicyMatchesBanCap ties the kernel-side policy block to
 // config.maxDataplaneRulesPerBan. A ban installs at most that many rules and
 // the block holds exactly RulesPerPolicy of them, so if the cap ever rises
