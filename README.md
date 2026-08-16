@@ -1,6 +1,6 @@
 # Kapkan
 
-**Free, open-source DDoS detection and RTBH mitigation for ISPs and hosting providers.**
+**Free, open-source DDoS detection and mitigation for ISPs and hosting providers.**
 
 > **Layout.** `engine/` — the Go engine + REST API (documented below); `console/` — the
 > operator-console UI (embedded into the binary). `make build` (root) produces a **single
@@ -9,21 +9,27 @@
 
 Kapkan is a single Go binary that ingests flow telemetry (NetFlow v5/v9, IPFIX, sFlow v5)
 from your routers, detects volumetric attacks against the prefixes you protect in seconds,
-and triggers automated BGP RTBH (remotely-triggered blackhole) mitigation — with a web API,
-Prometheus metrics, and Telegram/webhook notifications. It is a free replacement for the
-features commercial flow-DDoS products charge for.
+and mitigates them automatically — BGP RTBH (remotely-triggered blackhole), surgical BGP
+FlowSpec rules, diversion to a scrubbing node, or drops in this box's own in-kernel XDP
+data plane — with a web API, Prometheus metrics, and Telegram/webhook notifications. It is
+a free replacement for the features commercial flow-DDoS products charge for.
 
 It is **dry-run by default**: until you explicitly flip the switch, every would-be blackhole
 is logged and exposed via the API but never announced to your routers.
 
+The full user documentation — every config key, the deployment guides, the data plane and
+the network-integration lab — lives at **[kapkan.io/docs](https://kapkan.io/docs)**
+(English, Russian, German, French, Spanish). This README is the engine's own reference.
+
 ## Features
 
 - **Ingest** sFlow v5, NetFlow v5/v9 and IPFIX over UDP via [goflow2](https://github.com/netsampler/goflow2), in library mode (no sidecar).
-- **Detect** per-destination volumetric attacks using sampling-corrected pps / Mbps / flows-per-second thresholds over a sliding window. ≥20M flows/sec/core on the hot path.
-- **Mitigate** by announcing `/32` and `/128` blackhole routes via an embedded [GoBGP](https://github.com/osrg/gobgp) speaker, or — surgically — **BGP FlowSpec** rules (RFC 8955/8956) that drop only the attack vector and spare the victim's other traffic, IPv4 and IPv6 at parity.
+- **Detect** per-destination volumetric attacks using sampling-corrected pps / Mbps / flows-per-second thresholds over a sliding window. ≥20M flows/sec/core on the hot path. Diffuse subnet-spread floods are caught by [carpet-bomb detection](#carpet-bomb-detection).
+- **Mitigate** four ways, individually or as an [escalation ladder](#escalation-ladders): drop locally in an in-kernel **[XDP data plane](#in-kernel-data-plane-xdp)**; announce **BGP FlowSpec** rules (RFC 8955/8956) that drop only the attack vector, IPv4 and IPv6 at parity; **divert** the victim to a scrubbing node; or announce `/32` and `/128` **blackhole** routes — all through an embedded [GoBGP](https://github.com/osrg/gobgp) speaker.
+- **Scrub** with your own nodes: a second box running [`kapkan scrub`](#managed-scrubbing-nodes) takes the diverted traffic, is told exactly what to drop, and filters it in its own kernel — same binary, no second product.
 - **Safe by construction** — see [Safety model](#safety-model).
 - **Classify** each attack from its flow sample and per-protocol rates — amplification (NTP/DNS/CLDAP/memcached/SSDP/chargen), SYN/UDP/TCP/ICMP/fragment floods — with the inferred vector in events, notifications and the API.
-- **Observe** through a REST API, Prometheus `/metrics`, and Telegram, Slack, email, webhook and exec-hook notifications.
+- **Observe** through a REST API, Prometheus `/metrics`, an embedded operator console, and Telegram, Slack, email, webhook and exec-hook notifications.
 
 ## Quickstart
 
@@ -31,7 +37,7 @@ No build step — grab a prebuilt, signed release (see [Install](#install) to ve
 
 ```sh
 # Download and unpack a release (linux amd64/arm64) — or `apt install ./kapkan_*.deb`.
-VER=v1.0.0
+VER=v1.6.0
 curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.tar.gz"
 tar xzf "kapkan_${VER#v}_linux_amd64.tar.gz"   # yields ./kapkan and ./deploy/
 
@@ -55,15 +61,19 @@ throughout the tests) to validate detection end-to-end.
 
 ## Configuration
 
-Configuration is a single YAML file (see [`configs/dev.yaml`](configs/dev.yaml) for
-development and [`deploy/config.example.yaml`](deploy/config.example.yaml) for production).
-The full schema:
+Configuration is a single YAML file (see [`configs/dev.yaml`](engine/configs/dev.yaml) for
+development and [`deploy/config.example.yaml`](engine/deploy/config.example.yaml) for
+production). `kapkan -check-config <path>` validates one without starting the daemon, and
+`kapkan -dump-schema` prints the machine-readable JSON schema. The main keys — the complete
+reference, key by key, is [kapkan.io/docs/configuration](https://kapkan.io/docs/configuration):
 
 | Key | Meaning |
 | --- | --- |
 | `dry_run` | When true (default), blackholes are logged and tracked but **never announced**. |
 | `listen.sflow` / `listen.netflow` | UDP listen addresses. NetFlow v5/v9 and IPFIX share the netflow socket. At least one is required. |
 | `sampling.default_rate` | Sampling rate used when an exporter does not report its own (must be ≥ 1). |
+| `sampling.boundary[]` | Optional per-exporter boundary interfaces (`exporter`, `external_ifindexes`, `egress_sampling`). Telemetry from several vantage points counts the same packet once per exporter that sees it; naming the edge interfaces makes kapkan count traffic only where it crosses your border. `sampling.boundary_debug: true` temporarily emits a per-exporter/per-interface byte breakdown to find those ifIndexes. |
+| `flow_sources` | Optional allowlist of exporter addresses. Telemetry arrives over unauthenticated UDP, so the source address is spoofable: with this list set, only listed exporters get their own `exporter` metric label and everything else buckets under `other`, bounding metric cardinality. Does not affect detection. |
 | `networks` | Protected prefixes. Detection applies **only** to destinations inside these; they must not overlap. |
 | `protected_whitelist` | Addresses that are **never** banned, regardless of traffic. |
 | `thresholds.pps` / `.mbps` / `.flows_per_sec` | Per-destination thresholds, after sampling correction. All must be > 0. |
@@ -74,9 +84,18 @@ The full schema:
 | `samples.enabled` / `buffer_flows` / `flows_per_attack` | Traffic buffer for attack samples (defaults: on / 65536 / 20). Recent flows are buffered continuously so the moment a threshold trips, the attack's dominant sources, ports and protocols are already attached to the event, the notification and the API — no post-detection capture delay. Sizing changes require a restart. |
 | `geoip.enabled` / `asn_database` / `country_database` | Optional GeoIP/ASN attribution of attack-sample sources against MaxMind GeoLite2 (or GeoIP2) `.mmdb` files. Both databases are optional and independent. When an ASN database is loaded the sample, API and dashboard carry a **per-ASN top-talkers** breakdown ("from which AS"); a country database stamps each sampled source with its country. Database-path changes require a restart. Default off. |
 | `baseline` | Continuous learned per-host thresholds (see [Baselines](#baselines)). Optional; per-hostgroup overridable. |
+| `carpet` | Optional carpet-bomb detection: aggregate rates per supernet with a fan-out gate (see [Carpet-bomb detection](#carpet-bomb-detection)). Alert-only unless `carpet.mitigation` is set. |
+| `mitigation` | Default mitigation method for every group: `blackhole` (default), `flowspec`, `divert` or `dataplane`. Per-hostgroup overridable; superseded by `escalation` when that is present. |
+| `escalation[]` | An [escalation ladder](#escalation-ladders) — `after_seconds` + `action` rungs that step the response up while an attack persists. |
+| `flowspec.action` / `rate_mbps` | FlowSpec rule action: `discard`, or `rate_limit` with a ceiling (see [FlowSpec](#flowspec-surgical-mitigation)). |
+| `scrubbing` | Diversion target(s): the scalar `next_hop`/`next_hop6`/`community`/`local_pref` of a scrubbing center, plus `nodes[]` / `node_selection` / `on_all_nodes_lost` / `stale_after_seconds` for [managed scrubbing nodes](#managed-scrubbing-nodes). Per-hostgroup overridable. |
+| `dataplane` | The [in-kernel XDP data plane](#in-kernel-data-plane-xdp): `interfaces`, `xdp_mode`, `pin_path`, `on_exit`, `drop_malformed`, `allowlist`, `ratelimit_profiles[]`, `static_rules[]`, `limits`. Absent = off. |
 | `ban.ttl_seconds` | Every announcement auto-withdraws after this. No permanent bans. |
 | `ban.unban_hysteresis_seconds` | Traffic must stay below threshold this long before withdrawing, to prevent flapping. |
 | `ban.max_active_bans` | Hard cap on simultaneous bans; new bans past the cap are refused. |
+| `ban.max_banned_fraction` / `max_bans_per_window` + `ban_window_seconds` | Blast-radius guards: cap the share of your own address space that may be blackholed at once (per address family), and the rate of new bans. Both default to 0 = off. See [Safety model](#safety-model). |
+| `ban.fallback` | What happens when a peer rejects a `flowspec`/`divert` announce: `blackhole` (default — degrade rather than leave the victim undefended) or `none` (reject the ban). |
+| `ban.state_file` | Writable path where active bans are persisted and re-announced on startup, so an upgrade does not drop mitigation (see [Upgrading](#upgrading)). Empty = off; an unwritable path degrades to no persistence, never a startup failure. |
 | `bgp.local_asn` / `router_id` / `next_hop` / `next_hop6` / `community` | BGP identity, blackhole next-hops (v4/v6) and RTBH community (`ASN:value`). `router_id` must be IPv4. Optional `communities` (list, overrides `community`) and `local_pref`; both overridable per hostgroup via a group `bgp:` block. |
 | `bgp.neighbors[]` | eBGP peers: `address`, `remote_asn` (and optional `port` for testing). |
 | `notify.telegram.token_env` / `chat_id` | Telegram bot: the token is read from the named **environment variable**, never the file. |
@@ -85,7 +104,10 @@ The full schema:
 | `notify.email.smtp_host` / `from` / `to[]` / `username_env` / `password_env` / `require_tls` | Optional SMTP notifications. Credentials come from environment variables. STARTTLS is used when the server offers it and **required** when credentials are configured or `require_tls` is set; plaintext delivery to a non-loopback host is loudly logged. |
 | `notify.exec.command` / `timeout_seconds` / `format` | Optional hook executed on every attack event, no shell. The command must exist and be executable at config load. On timeout (default 10s) the hook's whole process group is killed. The hook receives a **minimal environment** (PATH/HOME/TZ/LANG/USER/TMPDIR) — the daemon's secrets are not inherited. `format` selects the convention: `kapkan` (default — event name as `argv[1]`, payload JSON on stdin, same schema as the webhook) or `fastnetmon` (see below). |
 | `api.listen` | REST API + metrics listen address. |
-| `api.token_env` / `api.tokens` | API auth: a single operator token (`token_env`) or a role-based `tokens` list (`viewer`/`operator`, each with an optional `tenant` scope); secrets come from the named env vars. See Authentication and [Multi-tenancy](#multi-tenancy). |
+| `api.token_env` / `api.tokens` | API auth: a single operator token (`token_env`) or a role-based `tokens` list (`viewer`/`operator`/`agent`, each with an optional `tenant` scope); secrets come from the named env vars. See [Authentication](#authentication) and [Multi-tenancy](#multi-tenancy). |
+| `api.dashboard` | Serve the embedded operator console on the API listener. Default true; false leaves only the JSON API and metrics. |
+| `storage.clickhouse` | Optional attack/traffic history in ClickHouse (see [Storage](#storage-optional)). Absent = kapkan runs entirely on live data. |
+| `update_check` | Opt-in check for a newer release (`enabled`, `interval_seconds`, `channel`, `url`, `notify`). **Off by default — kapkan never phones home.** When on it transmits only the HTTP request itself, never node identity, config or attack data. |
 
 Sampling: every rate is multiplied by the exporter's sampling rate (from the flow packet
 when present, else `sampling.default_rate`) so thresholds are expressed in real,
@@ -190,6 +212,97 @@ Learned levels are visible per host in the API (`baseline` / `baseline_out` in t
 hosts snapshot). Hostgroups inherit the global block or override it wholesale
 (`baseline: { enabled: false }` opts a group out).
 
+### Carpet-bomb detection
+
+A carpet bomb spreads the flood across a whole subnet so no single host ever crosses its
+threshold — the classic way to stay under a per-host detector while saturating the link
+all the same. With a `carpet` block kapkan also folds per-host rates into their supernet
+and evaluates the aggregate:
+
+```yaml
+carpet:
+  aggregation_prefix_v4: 24  # fold per /24 (default)
+  aggregation_prefix_v6: 48  # and per /48 (default)
+  min_hosts: 10              # fan-out gate (default 10, minimum 2)
+  thresholds:                # AGGREGATE volume over the whole prefix
+    pps: 2000000
+    mbps: 20000
+  # mitigation: flowspec     # optional; alert-only by default
+  # max_active_prefix_bans: 10
+```
+
+`min_hosts` is the fan-out gate: at least that many distinct destinations in the prefix
+must carry traffic in the window, so one heavy host — already caught per-host — is never
+re-reported as a carpet bomb. Set the aggregate thresholds well above the per-host ones;
+they sum the whole prefix. A carpet attack carries `scope: "prefix"`, the aggregation CIDR
+in `prefix` and its fan-out in `hosts`, alongside the usual sample and classification.
+
+Mitigation is **opt-in** and separate from host bans: `carpet.mitigation` accepts
+`flowspec` (vector-narrowed rules across the prefix), `dataplane` (the same rule installed
+locally, see below) or `blackhole` (drops the entire prefix — the heavy hammer). `divert`
+is deliberately not offered: steering a whole /24 into a scrubbing center is a routing
+decision an operator makes deliberately, not one a detector should make automatically.
+Any method **refuses** a prefix that contains a `protected_whitelist` address — the
+whitelist guarantee is absolute and a prefix-wide mitigation cannot exempt one member — and
+the alert still fires. Carpet bans have their own cap, `max_active_prefix_bans` (default
+10), so host bans and prefix bans can never starve each other.
+
+### In-kernel data plane (XDP)
+
+RTBH, FlowSpec and diversion are all *requests*: they ask a peer to drop or redirect, and
+depend on that peer being willing and able. The data plane instead drops the packets
+itself — kapkan loads an XDP program into the kernel of the box it runs on and writes the
+rules the detector already builds for FlowSpec into kernel maps. Nothing propagates, and no
+peer has to accept anything:
+
+```yaml
+dataplane:
+  interfaces: [eth0]            # NICs to attach to (at least one; restart to change)
+  xdp_mode: auto                # auto (native, fall back to generic) | native | generic
+  pin_path: /sys/fs/bpf/kapkan  # pinned policy survives a restart of this process
+  on_exit: keep                 # keep enforcing on shutdown, or `detach`
+  drop_malformed: false         # unparseable frames pass and are counted
+
+  allowlist:                    # SOURCE prefixes that always pass, checked first
+    - "192.0.2.0/24"
+
+  ratelimit_profiles:           # named ceilings, referenced by static rules
+    - { name: icmp_cap, mbps: 10 }
+
+  static_rules:                 # always-on operator policy
+    - name: drop_chargen
+      match: { proto: udp, src_port: 19 }
+      action: drop
+    - name: cap_icmp
+      match: { proto: icmp }
+      action: ratelimit
+      profile: icmp_cap
+
+mitigation: dataplane           # or a `dataplane` rung in an escalation ladder
+```
+
+**The one question that decides whether this applies to you:** the filter can only drop
+packets that *reach the machine kapkan runs on*. It helps when kapkan sits in the traffic
+path — a Linux border router, a bump-in-the-wire box, the attacked host itself, or a
+scrubbing node. In the classic off-path deployment (a VM that receives NetFlow and speaks
+BGP back), no attack traffic crosses that VM and there is nothing for it to drop; keep
+using RTBH and FlowSpec there. And an XDP filter runs on packets that already arrived, so
+it cannot un-saturate an upstream link — that is what the router-based rungs are for.
+
+The data plane is a mitigation *method* like the others and inherits the whole safety
+model: dry-run, whitelists, TTLs and the ban caps apply unchanged, because it plugs in at
+the same point — only the last step differs. Its default verdict is always PASS: it
+executes decisions made by the detector, it never classifies traffic. Severity across the
+ladder runs `none < dataplane < flowspec < divert < blackhole`.
+
+`allowlist` (source prefixes that always pass) is a different axis from
+`protected_whitelist` (destinations that are never banned); both are enforced in the
+kernel. `limits.max_dynamic_rules` (default 4096) caps the mitigator's rules and must be at
+least `ban.max_active_bans × 8`, since a ban contributes up to 8 rules. Requirements,
+capabilities, tuning and the measured block rates are in the
+[data-plane guide](https://kapkan.io/docs/dataplane); `kapkan dataplane status` reports
+whether the kernel is actually filtering, and works with the daemon stopped.
+
 ### FlowSpec (surgical mitigation)
 
 RTBH blackholing takes the whole victim offline — it trades the attack for an outage.
@@ -249,6 +362,7 @@ declaratively, where FastNetMon makes you write a callback script:
 ```yaml
 escalation:                         # supersedes `mitigation` when present
   - { after_seconds: 0,   action: none }       # alert only at first
+  - { after_seconds: 15,  action: dataplane }  # still under attack after 15s → drop in-kernel
   - { after_seconds: 30,  action: flowspec }   # still under attack after 30s → surgical drop
   - { after_seconds: 90,  action: divert }     # still under attack after 90s → scrub
   - { after_seconds: 300, action: blackhole }  # still under attack after 300s → blackhole
@@ -267,11 +381,14 @@ only after that succeeds, so the victim is never momentarily unprotected mid-swi
 announce fails the ban holds the working rung and retries on the next tick. (The one
 exception is `divert → blackhole`: both ride the same host-route NLRI, so the blackhole
 re-announce atomically replaces the divert route — no withdraw, no gap.) A ladder may only
-hold or strengthen the response (`none` < `flowspec` < `divert` < `blackhole`) —
-de-escalating between rungs is a config error. If several rungs come due at once (a
-long-running attack, or the daemon catching up after a pause) the ban jumps straight to the
-highest due rung and never announces the rungs it skips. The first rung must be at `0s`;
-`action` is `none` (alert only), `flowspec`, `divert`, or `blackhole`.
+hold or strengthen the response (`none` < `dataplane` < `flowspec` < `divert` <
+`blackhole`) — de-escalating between rungs is a config error. `dataplane` sits just above
+alert-only because it announces nothing and touches only traffic arriving on this box's
+NIC; `divert` sits below `blackhole` because it keeps the victim reachable. If several
+rungs come due at once (a long-running attack, or the daemon catching up after a pause) the
+ban jumps straight to the highest due rung and never announces the rungs it skips. The
+first rung must be at `0s`; `action` is `none` (alert only), `dataplane`, `flowspec`,
+`divert`, or `blackhole`.
 
 The ladder is per-hostgroup overridable and shares the rest of the ban lifecycle: TTL
 auto-withdrawal, the `max_active_bans` cap, whitelist-never, and dry-run (which advances
@@ -336,6 +453,72 @@ traffic (GRE, a VRF, a separate routing context) is the scrubber's job, outside 
 BGP signaling. Total groups cannot divert (no single victim route); an inherited divert
 stage degrades to blackhole there, an explicit one is a config error.
 
+#### Managed scrubbing nodes
+
+The scalar `next_hop` diverts toward **one** scrubber you operate or a provider runs, and
+kapkan's part ends at the announcement. A **managed scrubbing node** is kapkan's own
+scrubber: a box running the `kapkan scrub` role that receives the diverted traffic, drops
+the attack in its in-kernel [data plane](#in-kernel-data-plane-xdp) and reinjects the rest.
+Kapkan announces the victim toward the node **and** tells the node exactly what to drop —
+the same rules the detector generated for FlowSpec — so it filters the attack vector rather
+than every packet to the victim. Same binary, no second product:
+
+```yaml
+scrubbing:
+  next_hop: "192.0.2.100"        # still valid: the one-node case / catch-all target
+  node_selection: affinity       # affinity (default); least_loaded and ecmp parse but
+                                 #   are not implemented yet and warn + use affinity
+  on_all_nodes_lost: withdraw    # withdraw (default) | blackhole | flowspec
+  stale_after_seconds: 15        # a node unheard-from this long counts as lost
+  nodes:
+    - name: scrub-fra1           # must equal the node's controller.name
+      next_hop: "192.0.2.10"     # the node's IPv4 BGP next-hop (required)
+      next_hop6: "2001:db8::10"  # required to divert IPv6 victims to this node
+      capacity_mbps: 10000       # shown in the console; used by least_loaded
+      hostgroups: [game-servers] # this node serves only these groups (empty = any)
+    - name: scrub-ams1
+      next_hop: "192.0.2.11"
+```
+
+On the node itself, everything role-specific lives in its own file — the daemon's
+`config.yaml` is deliberately **not** read:
+
+```yaml
+# /etc/kapkan/scrub.yaml — then: kapkan scrub
+dry_run: true                              # the remote-role default: counts, drops nothing
+controller:
+  url: "https://kapkan.example.net:8443"   # the brain's API base
+  token_env: KAPKAN_AGENT_TOKEN            # an `agent`-role token (required)
+  name: scrub-fra1                         # must equal a scrubbing.nodes[] name
+dataplane:
+  interfaces: [eth0]                       # the dirty side: diverted traffic arrives here
+  pin_path: /sys/fs/bpf/kapkan
+```
+
+Three properties are worth knowing before you deploy this:
+
+- **Liveness is the poll, never the report.** A node is alive because it keeps long-polling
+  the brain for rules. Its self-report (load, drop counts, version — shown in the console's
+  Nodes view) is *advisory*: a compromised node token could inflate a report, but it can
+  never keep a dead node attracting diverted traffic, because nothing acts on the report.
+  For a *silent* death (power loss, a partition — nothing sends a FIN) the real detection
+  bound is `stale_after_seconds` **plus** the long-poll hold the node may be parked in (the
+  channel contract is ≤30 s) — size it against your blackhole tolerance with that sum in
+  mind.
+- **The node choice is frozen per ban** and survives node loss. It is made once at ban time
+  (preferring nodes that are actually polling) so a reload reordering the list never moves
+  a victim mid-attack. When a node goes stale the sweep re-announces its victims toward a
+  surviving eligible node make-before-break; the old node coming back does not pull them
+  home. Only when *no* eligible node survives does `on_all_nodes_lost` apply.
+- **The agent role is off the privilege ladder.** A node's token reaches exactly two routes
+  (the rule channel and its own self-report) and nothing else — not attacks, bans or audit
+  — because it lives on a remote, often less-guarded box. See [Authentication](#authentication).
+
+Getting the diverted traffic *to* a node and the clean traffic back out — L2 insertion,
+GRE/IPIP with MSS clamping, the return path and the asymmetric-routing traps — is your
+network's job, covered in the
+[network-integration guide](https://kapkan.io/docs/network-integration).
+
 ### Going live
 
 1. Run in dry-run and confirm in the logs / `/api/v1/attacks` that detection fires on the
@@ -343,6 +526,44 @@ stage degrades to blackhole there, an explicit one is a config error.
 2. Confirm BGP sessions reach `ESTABLISHED` (logged as `bgp peer state`). Peering happens
    even in dry-run, so you can validate connectivity before announcing anything.
 3. Set `dry_run: false` and reload (`SIGHUP` or `POST /api/v1/config/reload`).
+
+## Command line
+
+`kapkan [flags]` runs the daemon; `kapkan [flags] <command> [args]` runs a command and
+exits. Global flags come **before** the command, the command's own flags after it. A flag
+that exits on its own (`-version`, `-check-config`, `-dump-schema`, `-check-update`, `-s`)
+cannot be combined with a command — kapkan refuses the combination rather than silently
+honouring one of them.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-config <path>` | `configs/dev.yaml` | Path to the YAML config file. |
+| `-log-format <fmt>` | `json` | `json` (for log collectors) or `text` (human-readable). Logs always go to stderr. |
+| `-log-level <lvl>` | `info` | `debug`, `info`, `warn` or `error`. |
+| `-check-config <path>` | — | Parse and validate that config — including cross-field rules a static schema cannot express — print the resolved result, and exit `0` valid / `1` invalid. Drops straight into CI or a pre-deploy gate. |
+| `-dump-schema` | `false` | Print the config's JSON schema to stdout and exit. |
+| `-version` | `false` | Print the build version and exit (also on `/api/v1/status` and the `kapkan_build_info` metric — zero egress). |
+| `-check-update` | `false` | Run the update check once and exit: `0` up to date, `10` newer release available, `1` error. Works regardless of the `update_check` setting. |
+| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Where the daemon writes its pid on start; read by `-s`. A write failure is non-fatal. |
+| `-s <signal>` | — | Signal the running daemon and exit: `reload` (SIGHUP), `stop` / `quit` (SIGTERM) — nginx-style local control that needs no API token and works when the API is down. |
+
+```sh
+kapkan dataplane status    # is the kernel actually filtering? read-only; works with the daemon stopped
+kapkan scrub               # run the scrub-node role (its own -config, default /etc/kapkan/scrub.yaml)
+kapkan help                # the synopsis, commands and flag defaults
+```
+
+`dataplane status` is the diagnostic to reach for during an incident: it opens the pinned
+program and maps **read-only** (the descriptors carry `BPF_F_RDONLY`, so the *kernel*
+refuses a write through them) and never loads, attaches, detaches or rebuilds anything —
+unlike starting the daemon, which adopts-or-rebuilds the pin set and can discard the very
+rules you are diagnosing. With the default `on_exit: keep` the kernel keeps enforcing with
+no kapkan process at all, and this command reads the pins directly to say so. It leads with
+the verdict and the remedy, then the detail (attached interfaces and the mode actually in
+force, kernel and map-schema versions, rule counts, per-map occupancy, the dry-run flag,
+the verdict counters), and exits `0` only when `enforcing` — `10` not filtering but nothing
+broken, `11` something must be fixed first, `1` could not answer (usually permissions),
+`2` usage. Add `-json` for the machine-readable form.
 
 ## REST API
 
@@ -354,26 +575,36 @@ All endpoints are served on `api.listen`.
 | `GET /api/v1/attacks` | Currently active attacks plus the last 100 that ended (with samples and classification). |
 | `GET /api/v1/hosts` | Tracked-host snapshot: per-direction rates, learned baselines, attack state (top-talkers data). |
 | `GET /api/v1/bans` | All bans, active and historical. |
+| `GET /api/v1/traffic` | Persisted per-host rate history (the Traffic/Reports view). Returns `available: false` — not an error — when [storage](#storage-optional) is disabled. |
+| `GET /api/v1/audit` | Operator-attributed audit trail: who banned/unbanned/reloaded, when, and the outcome. Tenant-scoped server-side. Also `available: false` without storage. |
 | `POST /api/v1/ban` | Manually ban an address: `{"ip":"203.0.113.66"}`. Respects the whitelist, the cap, and the `networks` scope. |
 | `POST /api/v1/unban` | Manually withdraw a ban: `{"ip":"203.0.113.66"}`. |
 | `POST /api/v1/config/reload` | Re-read the config file (same as `SIGHUP`). |
-| `GET /metrics` | Prometheus metrics. |
+| `GET /api/v1/dataplane/rules` | The rule table a [scrub node](#managed-scrubbing-nodes) enforces, as a long poll (ETag'd). **`agent` or `operator` only** — not viewer. |
+| `POST /api/v1/dataplane/nodes/{name}/report` | A scrub node's self-report (load, drop counts, version). Advisory by contract, never liveness. `agent` or `operator`. |
+| `GET /api/v1/dataplane/nodes` | Scrub-node inventory for the console's Nodes view: configured nodes, whether each is polling, its frozen ban count and its last self-report. Viewer rank, unscoped tokens only. |
+| `GET /metrics` | Prometheus metrics. Unauthenticated. |
+| `GET /healthz` | Readiness probe: `503` until every component is up, `200` after. Unauthenticated (it leaks nothing) so an updater or supervisor can gate on it; the body also summarises the data plane's state. |
 
 Manual bans honour every safety rule: a whitelisted target returns `409` and is never
 announced; a target outside the configured `networks` returns `409`; exceeding
 `max_active_bans` returns `409`. POST endpoints require `Content-Type: application/json`.
 The `GET` routes need the **viewer** role; the mutating routes (`ban`, `unban`,
-`config/reload`) need the **operator** role (see Authentication).
+`config/reload`) need the **operator** role; the two scrub-node routes are granted by
+explicit membership to `agent` (and `operator`, so a human can curl what an agent sees) —
+see [Authentication](#authentication).
 
 ### Dashboard
 
-A self-contained web UI (no build step, no external assets — embedded in the binary via
+A self-contained web console (no build step, no external assets — embedded in the binary via
 `go:embed`) is served on the same `api.listen` address at `/`. It polls the API and shows
-the live mode, active and recent attacks with their classification and flow samples,
-top talkers with learned baselines, hostgroups, and the ban table — plus manual ban/unban
-and config-reload controls. It works fully on live data alone (no database required), the
-free answer to FastNetMon's per-user paid LiveView. Set `api.dashboard: false` to serve
-only the JSON API and metrics.
+the live mode, active and recent attacks with their classification and flow samples, top
+talkers with learned baselines, the ban table, hostgroups, traffic history and a read-only
+settings view — plus manual ban/unban and config-reload controls. A **Nodes** view appears
+when the config carries managed [scrubbing nodes](#managed-scrubbing-nodes): which are
+polling, how many bans each is holding, and each node's last self-report. It works fully on
+live data alone (no database required), the free answer to FastNetMon's per-user paid
+LiveView. Set `api.dashboard: false` to serve only the JSON API and metrics.
 
 ### Authentication
 
@@ -388,8 +619,8 @@ api:
 ```
 
 For role-based access use `tokens` instead — each names the env var holding its secret and
-a role: **viewer** (read-only: status, attacks, hosts, bans, metrics) or **operator**
-(read plus manual ban/unban and config reload):
+a role: **viewer** (read-only: status, attacks, hosts, bans, traffic, audit), **operator**
+(read plus manual ban/unban and config reload), or **agent** (a scrub node's credential):
 
 ```yaml
 api:
@@ -397,7 +628,14 @@ api:
   tokens:
     - { name: dashboard, token_env: "KAPKAN_API_RO", role: viewer }
     - { name: automation, token_env: "KAPKAN_API_RW", role: operator }
+    - { name: scrub-fra1, token_env: "KAPKAN_AGENT_FRA1", role: agent }
 ```
+
+The **agent** role sits deliberately **off** the privilege ladder — below viewer, not above
+it. An agent token lives on a remote scrubbing node, often a less-guarded box, and must not
+become a read-everything key if that box is compromised, so it is granted its two routes
+(`GET /api/v1/dataplane/rules` and its own `POST …/report`) by explicit membership rather
+than by rank. It reads no attacks, no bans, no audit, no status.
 
 `token_env` and `tokens` are mutually exclusive; `token_env` is exactly a single operator
 token. Every `/api/v1` request must carry `Authorization: Bearer <token>`; the presented
@@ -461,14 +699,34 @@ tenant configured anywhere = single-tenant behavior, unchanged.
 
 ## Metrics
 
-Prometheus metrics under the `kapkan_` namespace, including: `ingest_flows_total` (by
-protocol), `ingest_packets_total` (by exporter/protocol), `ingest_decode_errors_total`,
-`engine_active_attacks`, `engine_attacks_total`, `engine_process_latency_seconds`,
-`engine_tracked_hosts`, `mitigate_announced_routes` (by `real`/`dry_run` mode),
-`mitigate_flowspec_rules` (by mode), `mitigate_dataplane_bans` and
-`mitigate_dataplane_rules` (by mode, for the local XDP rung), `mitigate_bans_rejected_total`,
-`notify_notifications_total` (by channel/result), and `storage_rows_total` (by table and
-`written`/`dropped`/`error`).
+Prometheus metrics under the `kapkan_` namespace, on `/metrics`. The families, with the
+full table (labels, values and what to alert on) at
+[kapkan.io/docs/metrics](https://kapkan.io/docs/metrics):
+
+- **Ingest** — `ingest_flows_total` (by protocol), `ingest_packets_total` (by
+  exporter/protocol), `ingest_decode_errors_total`, `ingest_dropped_flows_total`.
+- **Engine** — `engine_active_attacks`, `engine_attacks_total`,
+  `engine_process_latency_seconds`, `engine_tracked_hosts`, `engine_events_dropped_total`
+  (by `kind` — should sit at zero), and `engine_boundary_debug_bytes_total` while
+  `sampling.boundary_debug` is on.
+- **Mitigation** — `mitigate_announced_routes` and `mitigate_flowspec_rules` (by
+  `real`/`dry_run` mode), `mitigate_dataplane_bans` / `mitigate_dataplane_rules` for the
+  local XDP rung, `mitigate_bans_rejected_total` (by `reason`: `max_active_bans`,
+  `blast_radius_fraction`, `blast_radius_rate`, `max_active_prefix_bans`), and
+  `mitigate_fallback_total` (by `from`/`to` — a non-zero `from="flowspec"` series flags
+  upstreams that do not honour FlowSpec).
+- **Data plane** — `dataplane_degraded` (**the single series to alert on**),
+  `dataplane_xdp_mode` (by interface and `native`/`generic`), `dataplane_attach_errors_total`,
+  `dataplane_reattach_total`, `dataplane_pins_rebuilt`, `dataplane_rules`,
+  `dataplane_packets_total` / `dataplane_bytes_total` (by terminal verdict),
+  `dataplane_observations_total`, `dataplane_map_entries` / `dataplane_map_bytes`,
+  `dataplane_policy_generation` / `dataplane_policy_apply_seconds`, and
+  `dataplane_filter_bypass_packets_total` / `_bytes_total` — an alarm, not a statistic:
+  packets forwarded without a single rule being evaluated. Alert on any non-zero rate.
+- **Delivery and build** — `notify_notifications_total` (by channel/result),
+  `storage_rows_total` (by table and `written`/`dropped`/`error`), `build_info` (the
+  `node_exporter` idiom — query fleet drift with `count by (version)(kapkan_build_info)`,
+  zero phone-home), and `update_available` when the opt-in update check finds a release.
 
 ## Storage (optional)
 
@@ -487,10 +745,12 @@ storage:
 
 kapkan talks to ClickHouse's **HTTP interface** with the standard library — no driver
 dependency; the only external dependency is the ClickHouse server itself. On start it
-creates two MergeTree tables (idempotently): `attack_events` (every start/end with type,
-direction, rates, sample top-sources, top-ASNs when GeoIP is enabled, ban state) and
-`traffic` (periodic per-host rate and baseline snapshots). Both carry a `ttl_days` TTL so
-retention is bounded without operator intervention.
+creates three MergeTree tables (idempotently): `attack_events` (every start/end with type,
+direction, rates, sample top-sources, top-ASNs when GeoIP is enabled, ban state),
+`traffic` (periodic per-host rate and baseline snapshots), and `audit_events` (who did
+what, with which role and tenant, to which target, and how it turned out — served back on
+`/api/v1/audit`). All three carry a `ttl_days` TTL so retention is bounded without
+operator intervention.
 
 Persistence is **best-effort and never blocks detection**: rows go onto a bounded queue
 (`queue_size`) with a non-blocking send and are flushed in batches (`batch_size` /
@@ -538,8 +798,13 @@ These rules are enforced in code and covered by tests; they are non-negotiable:
 2. **No permanent bans.** Every announcement carries a TTL and is auto-withdrawn — even if the attack is still ongoing.
 3. **Unban hysteresis.** A ban is withdrawn only after traffic stays below threshold for `unban_hysteresis_seconds`, preventing announce/withdraw flapping.
 4. **Hard ban cap.** Past `max_active_bans` simultaneous bans, new bans are refused and alerted — kapkan will never blackhole half your network.
-5. **Whitelist is absolute.** Addresses in `protected_whitelist` are never announced, by detection or manual request.
+5. **Whitelist is absolute.** Addresses in `protected_whitelist` are never announced, by detection or manual request — and a prefix-wide carpet mitigation that would cover a whitelisted address is refused outright rather than exempting one member.
 6. **Scoped detection.** Only destinations inside `networks` are ever acted on; other traffic is counted in metrics but never triggers a ban.
+7. **Bounded blast radius.** `ban.max_banned_fraction` caps the share of your own address space that may be blackholed simultaneously (per address family) and `ban.max_bans_per_window` caps the *rate* of new bans — the two failure modes a simple count cap cannot see: a poisoned baseline or a spoofed-source storm driving many individually-legal bans. Both are off by default; refusals are counted in `kapkan_mitigate_bans_rejected_total`.
+
+Every method inherits these — the [data plane](#in-kernel-data-plane-xdp) plugs in at the
+same point as a BGP announcement, so dry-run, whitelists, TTLs and the caps apply to an
+in-kernel drop exactly as they do to a route.
 
 ## Install
 
@@ -547,7 +812,7 @@ Every release ships prebuilt and signed for `linux/amd64` and `linux/arm64` — 
 build toolchain needed. The simplest path is a native package:
 
 ```sh
-VER=v1.0.0
+VER=v1.6.0
 # Debian / Ubuntu — sets up the kapkan user, /etc/kapkan and the systemd unit.
 curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.deb"
 sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"
@@ -560,7 +825,7 @@ release ships `checksums.txt` with a cosign-keyless signature; verifying is two
 commands (authenticity then integrity):
 
 ```sh
-VER=v1.0.0   # the release you want
+VER=v1.6.0   # the release you want
 base="https://github.com/fornex/kapkan/releases/download/$VER"
 curl -fLO "$base/kapkan_${VER#v}_linux_amd64.tar.gz"   # archive names drop the leading "v"
 curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
@@ -583,7 +848,7 @@ stamps the version the same way.)
 ## Deployment
 
 A hardened systemd unit and a production config example ship in the release
-archive's `deploy/` (and live in [`deploy/`](deploy/) in this repo):
+archive's `deploy/` (and live in [`engine/deploy/`](engine/deploy/) in this repo):
 
 ```sh
 sudo install -m 0755 kapkan /usr/local/bin/kapkan
@@ -601,7 +866,7 @@ sudo systemctl reload kapkan   # SIGHUP: hot-reload config
 `deploy/update.sh` performs a safe, signed upgrade on the host:
 
 ```sh
-sudo deploy/update.sh v1.3.0   # or: sudo deploy/update.sh   (latest stable)
+sudo deploy/update.sh v1.6.0   # or: sudo deploy/update.sh   (latest stable)
 ```
 
 It verifies the download (cosign signature over `checksums.txt`, then the
@@ -628,33 +893,61 @@ kapkan -check-update   # exit 10 if a newer release exists (0 = up to date)
 
 ## Development
 
+From the repo root (the root Makefile delegates to `engine/`):
+
 ```sh
-make test   # go test -race ./...
-make lint   # golangci-lint run
-make bench  # engine hot-path benchmarks
-make build  # static binary
+make build   # the single binary, with the console embedded
+make test    # go test -race -count=1
+make schema  # regenerate docs/config-schema.json from the Config struct
+```
+
+Inside `engine/` there are a few more, including the ones that need a Linux kernel:
+
+```sh
+make -C engine lint            # golangci-lint, run for GOOS=linux AND darwin
+make -C engine bench           # engine hot-path benchmarks
+make -C engine dataplane-test  # the XDP suite, in a privileged container
+make -C engine blockrate       # replay the 18 attack captures end to end
 ```
 
 Tests use synthetic NetFlow/sFlow datagrams built by `pkg/flowgen` (real wire format) and an
 in-process GoBGP peer; no real routers are ever contacted. The end-to-end test in
 `internal/app` replays an NTP-amplification flood over a real UDP socket against a dry-run
-instance and asserts the attack and its (auto-expiring) virtual ban appear in the API.
+instance and asserts the attack and its (auto-expiring) virtual ban appear in the API. The
+data-plane suites go further: they compile the detector's rules into real kernel maps and
+replay captured attack frames through the program, so every published block rate is a
+measurement rather than a claim.
 
 ## Architecture
 
+Paths below are relative to `engine/`:
+
 ```
-cmd/kapkan/        main, flag parsing, signal handling
-internal/app/      wiring of all components; end-to-end test
-internal/config/   YAML load, validation, SIGHUP hot-reload
-internal/ingest/   goflow2 library-mode ingestion -> normalized Flow
-internal/engine/   sharded per-host counters, sliding window, threshold eval
-internal/mitigate/ embedded GoBGP: RTBH announce/withdraw, TTL, caps, dry-run
-internal/notify/   Telegram + webhook notifications
-internal/api/      REST API + Prometheus metrics
-pkg/flowgen/       synthetic NetFlow/sFlow generator for tests and load
+cmd/kapkan/          main, flag parsing, signals, the dataplane/scrub commands
+cmd/kapkan-validate/ the same config validator compiled to WASM, so the kapkan.io
+                     config builder can show engine-exact errors in the browser
+internal/app/        wiring of all components; end-to-end test
+internal/config/     YAML load, validation, JSON schema, SIGHUP hot-reload
+internal/flow/       the normalized flow record: the hot path's contract
+internal/ingest/     goflow2 library-mode ingestion -> normalized Flow
+internal/engine/     sharded per-host counters, sliding window, threshold eval
+internal/mitigate/   embedded GoBGP: RTBH/FlowSpec/divert announce+withdraw, the
+                     escalation ladder, scrub-node selection, TTL, caps, dry-run
+internal/dataplane/  the XDP program and its maps: load, pin, attach, rule installs
+internal/scrub/      the scrub-node agent behind `kapkan scrub` (rule long-poll)
+internal/blockrate/  the eighteen attack captures behind every block-rate claim
+internal/storage/    optional ClickHouse persistence (attack, traffic, audit rows)
+internal/geoip/      MaxMind ASN/country attribution of attack samples
+internal/update/     the opt-in "is there a newer release" check
+internal/notify/     Telegram, Slack, email, webhook and exec-hook notifications
+internal/api/        REST API, embedded console, Prometheus metrics
+pkg/flowgen/         synthetic NetFlow/sFlow generator for tests and load
+pkg/pktgen/          synthetic attack frames for the data-plane suite
 ```
 
-Data flow: `ingest → engine (hot path) → [mitigate, notify, api]`.
+Data flow: `ingest → engine (hot path) → [mitigate, notify, api]`, where `mitigate`
+either announces through GoBGP or writes rules into `dataplane` — the same decision,
+a different executor.
 
 ## License
 
