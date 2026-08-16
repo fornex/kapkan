@@ -158,8 +158,29 @@ func matchCovers(a, b StaticRule, v6 bool) bool {
 	return coversField(a.Proto, b.Proto) &&
 		coversField(a.SrcPort, b.SrcPort) &&
 		coversField(a.DstPort, b.DstPort) &&
+		coversMatchExt(a.MatchExt, b.MatchExt) &&
 		coversSrc(a.Src, b.Src, v6)
 }
+
+// coversMatchExt is the same "any, or at least as permissive" test for the
+// extended-predicate bitset, where "unset" is a cleared bit rather than a nil
+// pointer: a covers b only when every predicate a REQUIRES is also required by
+// b. A bit set in a and clear in b makes a strictly narrower, so it cannot
+// cover.
+//
+// Leaving this out is not a missing refinement, it is a false positive on the
+// arrangement the documentation recommends. The canonical pair is a narrow
+// handshake ceiling above a broad port-443 ceiling:
+//
+//	- {proto: tcp, dst_port: 443, payload: tls_client_hello}   <- first
+//	- {proto: tcp, dst_port: 443}                              <- second
+//
+// Every scalar field agrees, so without this term the first rule "covers" the
+// second and the second is reported dead — when in fact it handles every packet
+// on that port that is not a ClientHello, which is nearly all of them. The
+// reverse order is the real defect this analysis exists to catch, and it still
+// is: a's bitset is then empty and covers b's.
+func coversMatchExt(a, b uint8) bool { return a&^b == 0 }
 
 // coversField is the "any, or the same value" test for the optional scalar
 // match fields.

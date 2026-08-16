@@ -437,6 +437,44 @@ func TestShadowedByEarlierRule(t *testing.T) {
 			},
 		},
 		{
+			// The arrangement the documentation recommends, and the one the
+			// shipped example config uses. Every scalar field agrees, so
+			// without the match_ext term the analysis "proves" the second rule
+			// dead — a warning on the correct config, pointing at the rule that
+			// handles nearly all the traffic on that port.
+			name: "a payload predicate makes the earlier rule narrower, not broader",
+			rules: []StaticRule{
+				{Name: "cap-handshakes", Action: ActionRateLimit, Profile: "hs",
+					Proto: ptr(protoTCP), DstPort: ptr(uint16(443)), MatchExt: MatchTLSClientHello},
+				{Name: "cap-https", Action: ActionRateLimit, Profile: "https",
+					Proto: ptr(protoTCP), DstPort: ptr(uint16(443))},
+			},
+		},
+		{
+			// The same pair the wrong way round: this IS the defect, and it is
+			// the one that motivated the whole check.
+			name: "a rule with no payload predicate shadows one that has it",
+			rules: []StaticRule{
+				{Name: "cap-https", Action: ActionRateLimit, Profile: "https",
+					Proto: ptr(protoTCP), DstPort: ptr(uint16(443))},
+				{Name: "cap-handshakes", Action: ActionRateLimit, Profile: "hs",
+					Proto: ptr(protoTCP), DstPort: ptr(uint16(443)), MatchExt: MatchTLSClientHello},
+			},
+			dead: "cap-handshakes",
+			by:   []string{"cap-https"},
+		},
+		{
+			name: "identical payload predicates shadow as any other equal field would",
+			rules: []StaticRule{
+				{Name: "drop-handshakes", Action: ActionDrop,
+					Proto: ptr(protoTCP), MatchExt: MatchTLSClientHello},
+				{Name: "cap-handshakes", Action: ActionRateLimit, Profile: "hs",
+					Proto: ptr(protoTCP), DstPort: ptr(uint16(443)), MatchExt: MatchTLSClientHello},
+			},
+			dead: "cap-handshakes",
+			by:   []string{"drop-handshakes"},
+		},
+		{
 			name: "containment, not equality, decides the source prefix",
 			rules: []StaticRule{
 				{Name: "drop-net", Action: ActionDrop, Src: pfx("10.0.0.0/8")},
@@ -508,10 +546,16 @@ func TestShadowedByEarlierRule(t *testing.T) {
 			// The example configuration shipped in deploy/config.example.yaml
 			// and quoted in the docs. It must stay silent, or every operator who
 			// copied it gets a warning on upgrade.
+			// Keep this in step with deploy/config.example.yaml. Shipping a
+			// commented-out block that the analysis would warn about teaches
+			// the wrong thing on first read, and the example is the one policy
+			// every operator starts from.
 			name: "the shipped example config",
 			rules: []StaticRule{
 				{Name: "drop_chargen", Action: ActionDrop, Proto: ptr(protoUDP), SrcPort: ptr(uint16(19))},
 				{Name: "cap_icmp", Action: ActionRateLimit, Profile: "icmp_cap", Proto: ptr(protoICMP)},
+				{Name: "cap_tls_handshakes", Action: ActionRateLimit, Profile: "handshake_cap",
+					Proto: ptr(protoTCP), DstPort: ptr(uint16(443)), MatchExt: MatchTLSClientHello},
 			},
 		},
 		{
