@@ -235,6 +235,47 @@ func TestReinstallAdvancesTheInKernelDeadline(t *testing.T) {
 	}
 }
 
+// TestPerSpecTTLGivesEachRuleItsOwnDeadline: a spec carrying its own TTL gets
+// its own in-kernel deadline; its neighbours keep the set-wide one. This is
+// what lets one source's policy block hold pairs that expire independently
+// (the source-block API), with both deadlines derived from the SAME boot-clock
+// read.
+func TestPerSpecTTLGivesEachRuleItsOwnDeadline(t *testing.T) {
+	m := mustOpen(t, testOptions(t, pinDir(t), "lo"))
+	inst := newInstaller(t, m)
+
+	bootNs := uint64(time.Hour)
+	inst.bootNs = func() uint64 { return bootNs }
+
+	proto := uint8(17)
+	set := DynamicRules{
+		Specs: []RuleSpec{
+			{Action: ActionDrop, Dst: instVictim, Proto: &proto, TTL: time.Minute},
+			{Action: ActionDrop, Dst: instVictim2, Proto: &proto}, // set-wide TTL
+		},
+		TTL: time.Hour,
+	}
+	if err := inst.Install(instVictim, set); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	block := blockOf(t, m, policyIDOf(t, inst, instVictim))
+	if got, want := block.Rules[0].ExpiresAtNs, bootNs+uint64(time.Minute); got != want {
+		t.Errorf("per-spec deadline = %d, want %d (boot clock + the spec's own 1m)", got, want)
+	}
+	if got, want := block.Rules[1].ExpiresAtNs, bootNs+uint64(time.Hour); got != want {
+		t.Errorf("set-wide deadline = %d, want %d (boot clock + the set's 1h)", got, want)
+	}
+
+	// A negative per-spec TTL is refused before anything is allocated.
+	bad := DynamicRules{
+		Specs: []RuleSpec{{Action: ActionDrop, Dst: instVictim, Proto: &proto, TTL: -time.Second}},
+		TTL:   time.Hour,
+	}
+	if err := inst.Install(instVictim2, bad); err == nil {
+		t.Fatal("negative per-spec ttl was accepted")
+	}
+}
+
 // TestReinstallRevivesARuleThatPassedItsDeadline is the same property from the
 // DATAPATH's side, which is the only place it can be proved: the deadline the
 // kernel enforces is the RE-INSTALLED one, in both directions.

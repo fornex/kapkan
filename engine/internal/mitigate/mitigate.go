@@ -189,6 +189,15 @@ type Mitigator struct {
 	// the CIDR. Kept separate from the host bans map so host lookups are
 	// untouched; both share the lifecycle, gauges and blast-radius accounting.
 	prefixBans map[netip.Prefix]*Ban
+	// sourceBlocks holds operator/API-initiated source blocks, keyed by the
+	// blocked SOURCE and then by the victim the block protects. Kept apart
+	// from the ban tables because the two anchor the kernel's victims trie at
+	// opposite ends of the packet — see sources.go.
+	sourceBlocks map[netip.Addr]map[netip.Addr]*SourceBlock
+	// sourceInstalled marks sources whose policy is actually in the kernel, so
+	// a source whose every pair is dry-run never reaches the backend at all —
+	// not even for a withdraw. Dry-run touching no map is a shipped promise.
+	sourceInstalled map[netip.Addr]bool
 
 	// banWindowStart / bansInWindow implement the ban.max_bans_per_window storm
 	// guard as a fixed window. Guarded by mu.
@@ -265,11 +274,13 @@ func WithDataplane(b dataplaneBackend) Option {
 // injected). The speaker is not started until Start is called.
 func New(store *config.Store, log *slog.Logger, opts ...Option) (*Mitigator, error) {
 	m := &Mitigator{
-		store:      store,
-		log:        log.With("component", "mitigate"),
-		bans:       make(map[netip.Addr]*Ban),
-		prefixBans: make(map[netip.Prefix]*Ban),
-		now:        time.Now,
+		store:           store,
+		log:             log.With("component", "mitigate"),
+		bans:            make(map[netip.Addr]*Ban),
+		prefixBans:      make(map[netip.Prefix]*Ban),
+		sourceBlocks:    make(map[netip.Addr]map[netip.Addr]*SourceBlock),
+		sourceInstalled: make(map[netip.Addr]bool),
+		now:             time.Now,
 	}
 	if sf := store.Get().Ban.StateFile; sf != "" {
 		m.persist = &banPersistor{path: sf}
@@ -1631,6 +1642,8 @@ func (m *Mitigator) sweepExpired() {
 		}
 		m.escalateLocked(b, now, cfg)
 	}
+	// Operator/API source blocks: same tick, own lifecycle (sources.go).
+	m.sweepSourceBlocksLocked(now, cfg)
 	// Managed scrubbing nodes: move or degrade divert bans whose node stopped
 	// polling. After the lifecycle loops on purpose — a ban the TTL just
 	// withdrew must not be relocated in the same tick.

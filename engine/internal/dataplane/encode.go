@@ -59,6 +59,15 @@ type RuleSpec struct {
 	// a customer blackholed.
 	ExpiresAt uint64
 
+	// TTL, when positive, gives THIS spec its own lifetime instead of the
+	// set-wide DynamicRules.TTL. It exists for policy blocks whose rules are
+	// independent entries with independent deadlines — an operator's source
+	// block holds one rule per protected victim, each with the TTL its API
+	// call asked for — and it is a DURATION for the same reason DynamicRules.TTL
+	// is: only the Installer may touch the boot clock. The deadline it becomes
+	// still lands in ExpiresAt, which stays Installer-owned either way.
+	TTL time.Duration
+
 	// Src and Dst are the match prefixes. An invalid (zero) Prefix means
 	// "any". Host bits are masked off; the datapath masks too, so this only
 	// keeps the map contents readable.
