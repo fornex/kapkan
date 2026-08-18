@@ -147,6 +147,10 @@ func TestSourceBlockErrorMapping(t *testing.T) {
 		{"invalid json", `{"victim":`, http.StatusBadRequest},
 		{"bad source", `{"victim":"203.0.113.10","source":"nope","ttl_seconds":60}`, http.StatusBadRequest},
 		{"bad ttl", `{"victim":"203.0.113.10","source":"198.51.100.7","ttl_seconds":0}`, http.StatusBadRequest},
+		// int64 wraparound bait: 18446744075 * 1e9 wraps to ~1.29s, which
+		// would pass the post-multiply range check — the pre-multiply bound
+		// must reject it instead of "blocking" for a second.
+		{"ttl overflow", `{"victim":"203.0.113.10","source":"198.51.100.7","ttl_seconds":18446744075}`, http.StatusBadRequest},
 		{"no data plane", `{"victim":"203.0.113.10","source":"198.51.100.7","ttl_seconds":60}`, http.StatusConflict},
 	}
 	for _, tc := range cases {
@@ -157,15 +161,12 @@ func TestSourceBlockErrorMapping(t *testing.T) {
 			}
 		})
 	}
-	// Exactly the policy refusals are audited: "bad ttl" is ErrSourceBlockInput
-	// (an input mistake reaching the mitigator) and IS audited as rejected too —
-	// only the two parse-level 400s never reach audit.
-	if len(aw.rows) != 2 {
-		t.Fatalf("audit rows = %d, want 2 (bad ttl, no data plane): %+v", len(aw.rows), aw.rows)
+	// Only refusals that reached the mitigator are audited; the parse-level
+	// and TTL-bound 400s never do.
+	if len(aw.rows) != 1 {
+		t.Fatalf("audit rows = %d, want 1 (no data plane): %+v", len(aw.rows), aw.rows)
 	}
-	for _, r := range aw.rows {
-		if r.Action != "source_block" || r.Result != "rejected" || r.Reason == "" {
-			t.Errorf("rejection audit = %+v, want action=source_block result=rejected with a reason", r)
-		}
+	if r := aw.rows[0]; r.Action != "source_block" || r.Result != "rejected" || r.Reason == "" {
+		t.Errorf("rejection audit = %+v, want action=source_block result=rejected with a reason", r)
 	}
 }

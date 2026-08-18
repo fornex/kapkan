@@ -332,17 +332,23 @@ func (m *Mitigator) rehydrateLocked(cfg *config.Config) {
 		}
 	}
 	// One install per restored source, after its pairs are all back — the
-	// per-pair loop above only rebuilds the table.
+	// per-pair loop above only rebuilds the table. A failed install DROPS the
+	// source's pairs (reinstallSourceLocked's invariant), the counterpart of
+	// rehydrated bans being dropped when their announce fails: a restart must
+	// never leave an entry recorded as enforced that the kernel knows nothing
+	// about. Recount below so the log reports what actually survived.
 	for source := range m.sourceBlocks {
-		if err := m.reinstallSourceLocked(source, now); err != nil {
-			m.log.Error("reinstalling rehydrated source blocks failed",
-				"source", source.String(), "err", err)
-		}
+		_ = m.reinstallSourceLocked(source, now)
 	}
+	restored := 0
+	for _, pairs := range m.sourceBlocks {
+		restored += len(pairs)
+	}
+	dropped += blocks - restored
 	m.updateGaugeLocked()
 	m.updateSourceGaugeLocked()
 	m.log.Warn("rehydrated active bans across restart",
-		"host_bans", host, "prefix_bans", prefix, "source_blocks", blocks,
+		"host_bans", host, "prefix_bans", prefix, "source_blocks", restored,
 		"dropped", dropped, "saved_at", st.SavedAt)
 }
 

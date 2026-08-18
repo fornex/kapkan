@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/metrics"
 )
 
@@ -94,6 +95,9 @@ var (
 		"source is inside the protected networks: block outside sources here; an internal host is a ban, not a source block")
 	ErrSourceVictimsFull = errors.New(
 		"this source's policy block is full: one source can be blocked for at most 8 victims at a time")
+	ErrSourceSlotsFull = errors.New(
+		"no policy slots left for source blocks: slots are shared with bans and every ban must keep " +
+			"its own; raise dataplane.limits.max_dynamic_rules or wait for blocks to expire")
 )
 
 // ErrSourceBlockNotFound is UnblockSource's miss (API: 404).
@@ -133,6 +137,16 @@ func (m *Mitigator) BlockSource(victim, source netip.Addr, ttl time.Duration, re
 		rejectSourceBlock("victims_full")
 		return nil, ErrSourceVictimsFull
 	}
+	// A NEW anchor claims a policy slot from the pool bans draw on, and the
+	// config only sizes that pool for bans (max_active_bans*8 must fit). Cap
+	// distinct sources at what is left after every ban — host and carpet —
+	// could claim its slot, so a burst of blocks can never starve a ban into
+	// its blackhole fallback. Enforced in dry-run too: it is also what bounds
+	// this table and the state file.
+	if pairs == nil && len(m.sourceBlocks) >= sourceAnchorBudget(cfg) {
+		rejectSourceBlock("slots_full")
+		return nil, ErrSourceSlotsFull
+	}
 
 	sb := &SourceBlock{
 		Source:    source,
@@ -152,18 +166,17 @@ func (m *Mitigator) BlockSource(victim, source netip.Addr, ttl time.Duration, re
 	pairs[victim] = sb
 
 	if err := m.reinstallSourceLocked(source, now); err != nil {
-		// All-or-nothing toward the caller: restore what was there before, so
-		// a failed request leaves no half-recorded pair behind.
-		if old != nil {
-			pairs[victim] = old
-		} else {
-			delete(pairs, victim)
-			if len(pairs) == 0 {
-				delete(m.sourceBlocks, source)
-			}
-		}
+		// reinstallSourceLocked has already DROPPED this source's pairs — the
+		// installer's rollback wipes the anchor's kernel state on any failure,
+		// previous rules included, and a recorded-but-unenforced pair is the
+		// one state this table must never hold. Restoring the old pairs here
+		// would restore exactly that lie. The error says so, loudly.
+		m.updateSourceGaugeLocked()
+		m.markDirty()
 		rejectSourceBlock("install_failed")
-		return nil, fmt.Errorf("install source block %s -> %s: %w", source, victim, err)
+		return nil, fmt.Errorf("install source block %s -> %s: %w "+
+			"(every pair for this source is withdrawn; re-add the ones you need)",
+			source, victim, err)
 	}
 
 	if sb.DryRun {
@@ -198,13 +211,11 @@ func (m *Mitigator) UnblockSource(victim, source netip.Addr) (*SourceBlock, erro
 		delete(m.sourceBlocks, source)
 	}
 	// Reinstall whatever remains for this source (or withdraw its policy when
-	// nothing does). An install failure here cannot resurrect the removed
-	// pair: the operator asked for the block to END, and the fail-open answer
-	// to "could not narrow the policy" is logging it, not keeping the block.
-	if err := m.reinstallSourceLocked(source, m.now()); err != nil {
-		m.log.Error("reinstall after source unblock failed; remaining pairs for this source are not enforced until the next change",
-			"source", source.String(), "err", err)
-	}
+	// nothing does). A failure cannot resurrect the removed pair — the
+	// operator asked for the block to END — and reinstallSourceLocked's
+	// invariant handles the remainder: pairs it could not keep enforced are
+	// dropped rather than left recorded as a lie.
+	_ = m.reinstallSourceLocked(source, m.now())
 	m.log.Info("source block removed", "source", source.String(), "victim", victim.String())
 	m.updateSourceGaugeLocked()
 	m.markDirty()
@@ -271,9 +282,30 @@ func rejectReason(err error) string {
 	return "other"
 }
 
+// sourceAnchorBudget is how many distinct sources may hold policy slots.
+// The pool is shared with bans and sized only for them (config validates
+// ban.max_active_bans*8 against max_dynamic_rules), so source anchors get
+// what is left after every ban — host and carpet — could claim its slot.
+func sourceAnchorBudget(cfg *config.Config) int {
+	budget := cfg.DataplaneCfg.MaxDynamicRules/dataplane.RulesPerPolicy - cfg.Ban.MaxActiveBans
+	if cfg.Carpet != nil {
+		budget -= cfg.Carpet.MaxActivePrefixBans
+	}
+	return budget
+}
+
 // reinstallSourceLocked makes the kernel match this source's live pairs: one
 // policy block anchored at the source, one rule per non-dry-run pair, each
 // with its own remaining TTL. No live pairs means withdrawing the policy.
+//
+// THE INVARIANT THIS FUNCTION OWNS: after it returns, the table and the
+// kernel agree about this source. The installer's rollback is all-or-nothing
+// INCLUDING rules a previous install left there, so a failed Install means
+// the kernel now enforces nothing for this anchor — and the only honest
+// response is to drop the source's pairs and say so, loudly. A pair the
+// table reports as blocked while the kernel forwards its traffic is the
+// exact lie the ban machinery's fallback ladder exists to prevent; source
+// blocks have no weaker rung to fall back to, so they fall to the floor.
 func (m *Mitigator) reinstallSourceLocked(source netip.Addr, now time.Time) error {
 	anchor := hostPrefix(source)
 
@@ -324,16 +356,29 @@ func (m *Mitigator) reinstallSourceLocked(source netip.Addr, now time.Time) erro
 	}
 	set, err := dataplaneRules(rules, maxTTL)
 	if err != nil {
-		return err
+		return m.dropSourceLocked(source, err)
 	}
 	for i, l := range lives {
 		set.Specs[i].TTL = l.ttl
 	}
 	if err := m.dp.Install(anchor, set); err != nil {
-		return err
+		return m.dropSourceLocked(source, err)
 	}
 	m.sourceInstalled[source] = true
 	return nil
+}
+
+// dropSourceLocked implements reinstallSourceLocked's failure half: the
+// kernel holds nothing for this anchor (the installer rolled everything
+// back), so the table must not claim otherwise. Gauge and persistence are the
+// caller's job — every caller already updates both on change.
+func (m *Mitigator) dropSourceLocked(source netip.Addr, cause error) error {
+	n := len(m.sourceBlocks[source])
+	delete(m.sourceBlocks, source)
+	delete(m.sourceInstalled, source)
+	m.log.Error("source blocks dropped: the kernel could not be made to match the table",
+		"source", source.String(), "pairs_dropped", n, "err", cause)
+	return cause
 }
 
 // sweepSourceBlocksLocked retires expired pairs and takes down pairs a config
@@ -353,6 +398,15 @@ func (m *Mitigator) sweepSourceBlocksLocked(now time.Time, cfg *config.Config) {
 				why = "victim now in protected_whitelist"
 			case cfg.DataplaneAllowlistContains(source):
 				why = "source now in dataplane.allowlist"
+			case cfg.InNetworks(source):
+				// The anchor-disjointness invariant: a ban's anchor is always
+				// a victim inside networks, a block's never is. A reload that
+				// onboards the source's range would let a ban for that very
+				// address claim the same trie key and the two lifecycles
+				// would silently clobber each other's rules — so the block
+				// goes, promptly, exactly as the ban sweep retires targets
+				// that LEFT networks.
+				why = "source now inside protected networks"
 			case m.dp == nil || !cfg.DataplaneCfg.Enabled:
 				why = "data plane no longer available"
 			}
@@ -370,10 +424,9 @@ func (m *Mitigator) sweepSourceBlocksLocked(now time.Time, cfg *config.Config) {
 		if len(pairs) == 0 {
 			delete(m.sourceBlocks, source)
 		}
-		if err := m.reinstallSourceLocked(source, now); err != nil {
-			m.log.Error("source-block reinstall after sweep failed",
-				"source", source.String(), "err", err)
-		}
+		// A reinstall failure drops the source's remaining pairs and logs —
+		// reinstallSourceLocked's invariant; changed already covers the gauge.
+		_ = m.reinstallSourceLocked(source, now)
 		changed = true
 	}
 	if changed {

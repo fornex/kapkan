@@ -9,12 +9,14 @@ package mitigate
 import (
 	"errors"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/metrics"
 
@@ -202,8 +204,8 @@ func TestBlockSourceVictimsCapAtPolicyBlock(t *testing.T) {
 	}
 }
 
-func TestBlockSourceInstallFailureLeavesNoRecord(t *testing.T) {
-	dp := &dpRecorder{failWith: errors.New("no policy slots")}
+func TestBlockSourceInstallFailureDropsTheSource(t *testing.T) {
+	dp := &dpRecorder{failWith: errors.New("bpf update failed")}
 	m := newSourceMitigator(t, srcYAML(), dp, nil)
 
 	_, err := m.BlockSource(netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("198.51.100.7"), time.Minute, "")
@@ -214,16 +216,21 @@ func TestBlockSourceInstallFailureLeavesNoRecord(t *testing.T) {
 		t.Fatal("failed install left a half-recorded pair")
 	}
 
-	// And a failed REFRESH restores the previous pair rather than dropping it.
+	// A failed change to a source with LIVE pairs drops them all: the real
+	// installer's rollback wipes the anchor's kernel state including the
+	// previously enforcing rules, so keeping the old records would report
+	// pairs as blocked that the kernel forwards. Record == enforcement.
 	dp.failWith = nil
-	first := mustBlock(t, m, "203.0.113.10", "198.51.100.7", time.Minute)
-	dp.failWith = errors.New("no policy slots")
-	if _, err := m.BlockSource(netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("198.51.100.7"), 10*time.Minute, ""); err == nil {
-		t.Fatal("failed refresh did not surface")
+	mustBlock(t, m, "203.0.113.10", "198.51.100.7", time.Minute)
+	dp.failWith = errors.New("bpf update failed")
+	if _, err := m.BlockSource(netip.MustParseAddr("203.0.113.20"), netip.MustParseAddr("198.51.100.7"), time.Minute, ""); err == nil {
+		t.Fatal("failed second-victim install did not surface")
 	}
-	got := m.SourceBlocks()
-	if len(got) != 1 || !got[0].ExpiresAt.Equal(first.ExpiresAt) {
-		t.Fatalf("failed refresh did not restore the old pair: %+v", got)
+	if got := m.SourceBlocks(); len(got) != 0 {
+		t.Fatalf("failed install left pairs recorded as enforced: %+v", got)
+	}
+	if m.sourceInstalled[netip.MustParseAddr("198.51.100.7")] {
+		t.Fatal("sourceInstalled stayed true after the kernel was wiped")
 	}
 }
 
@@ -315,6 +322,109 @@ func TestSweepRetiresExpiredSourceBlocks(t *testing.T) {
 	}
 	if dp.withdrawCount() != 1 {
 		t.Fatalf("withdraws = %d, want 1 after the last pair expired", dp.withdrawCount())
+	}
+}
+
+// TestSweepRetiresSourceNowInsideNetworks pins the anchor-disjointness
+// invariant across a reload: a ban's anchor is always a victim inside
+// `networks`, a block's never is — so a reload that onboards the blocked
+// source's range must retire the block promptly, before a ban for that very
+// address can claim the same kernel trie key and the two lifecycles start
+// clobbering each other's rules.
+func TestSweepRetiresSourceNowInsideNetworks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kapkan.yaml")
+	if err := os.WriteFile(path, []byte(srcYAML()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	store := config.NewStore(path, cfg)
+
+	dp := &dpRecorder{}
+	m, err := New(store, testLogger(t), withAnnouncer(newRecorder()), WithDataplane(dp))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.ctx = t.Context()
+
+	mustBlock(t, m, "203.0.113.10", "198.51.100.7", time.Hour)
+
+	// Onboard the source's range into networks and reload.
+	widened := strings.Replace(srcYAML(),
+		`  - "203.0.113.0/24"`,
+		"  - \"203.0.113.0/24\"\n  - \"198.51.100.0/25\"", 1)
+	if widened == srcYAML() {
+		t.Fatal("test fixture drifted: networks entry not found for replacement")
+	}
+	if err := os.WriteFile(path, []byte(widened), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	m.sweepExpired()
+	if got := m.SourceBlocks(); len(got) != 0 {
+		t.Fatalf("sweep kept a block whose source is now inside networks: %+v", got)
+	}
+	if dp.withdrawCount() != 1 {
+		t.Fatalf("withdraws = %d, want 1", dp.withdrawCount())
+	}
+}
+
+// TestBlockSourceAnchorBudget: distinct sources are capped at what the policy
+// pool has left after every ban could claim its slot, so a burst of blocks
+// can never starve a ban into its blackhole fallback — and the same budget is
+// what bounds the table in dry-run.
+func TestBlockSourceAnchorBudget(t *testing.T) {
+	// max_dynamic_rules 80 → 10 policy slots; max_active_bans 3 (baseYAML),
+	// no carpet block → budget = 7 distinct sources.
+	yaml := srcYAML() + "  limits:\n    max_dynamic_rules: 80\n"
+	dp := &dpRecorder{}
+	m := newSourceMitigator(t, yaml, dp, nil)
+
+	for i := 0; i < 7; i++ {
+		mustBlock(t, m, "203.0.113.10", "198.51.100."+strconv.Itoa(10+i), time.Minute)
+	}
+	_, err := m.BlockSource(netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("198.51.100.99"), time.Minute, "")
+	if !errors.Is(err, ErrSourceSlotsFull) {
+		t.Fatalf("err = %v, want ErrSourceSlotsFull", err)
+	}
+	// A second victim on an EXISTING anchor claims no new slot and still works.
+	if _, err := m.BlockSource(netip.MustParseAddr("203.0.113.20"), netip.MustParseAddr("198.51.100.10"), time.Minute, ""); err != nil {
+		t.Fatalf("existing-anchor pair refused under the budget: %v", err)
+	}
+}
+
+// TestRehydrateDropsWhatItCannotInstall: a restart whose reinstall fails must
+// not leave pairs recorded, gauged and persisted as blocked while the kernel
+// enforces nothing — the source-block counterpart of rehydrated bans being
+// dropped when their announce fails.
+func TestRehydrateDropsWhatItCannotInstall(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "bans.json")
+	yaml := strings.Replace(srcYAML(),
+		"  max_active_bans: 3\n",
+		"  max_active_bans: 3\n  state_file: "+state+"\n", 1)
+
+	clk := &mockClock{t: time.Now()}
+	m1 := newSourceMitigator(t, yaml, &dpRecorder{}, clk)
+	mustBlock(t, m1, "203.0.113.10", "198.51.100.7", time.Hour)
+	m1.flushPersist()
+
+	dp2 := &dpRecorder{failWith: errors.New("no policy slots")}
+	m2 := newSourceMitigator(t, yaml, dp2, clk)
+	m2.mu.Lock()
+	m2.rehydrateLocked(m2.store.Get())
+	m2.mu.Unlock()
+
+	if got := m2.SourceBlocks(); len(got) != 0 {
+		t.Fatalf("rehydrate kept pairs the kernel does not enforce: %+v", got)
+	}
+	if got := testutil.ToFloat64(metrics.MitigateSourceBlocks.WithLabelValues("real")); got != 0 {
+		t.Fatalf("real gauge = %v after a failed rehydrate install, want 0", got)
 	}
 }
 

@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"time"
@@ -73,6 +74,15 @@ func (s *Server) handleSourceBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bound BEFORE the Duration multiply: int64 wraparound is silent, and a
+	// wrapped absurd TTL would otherwise land back inside the accepted range
+	// and be "blocked" for ~a second while the caller believes years.
+	maxTTL := int64(mitigate.MaxSourceBlockTTL / time.Second)
+	if req.TTLSeconds < 1 || req.TTLSeconds > maxTTL {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("ttl_seconds must be within [1, %d], got %d", maxTTL, req.TTLSeconds))
+		return
+	}
 	sb, err := s.mit.BlockSource(victim, source, time.Duration(req.TTLSeconds)*time.Second, req.Reason)
 	if err != nil {
 		status := http.StatusConflict // policy refusal — well-formed, refused

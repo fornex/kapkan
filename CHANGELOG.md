@@ -53,9 +53,15 @@ security-relevant.
   `kapkan_mitigate_source_blocks_rejected_total`).
 
   One source can be blocked for up to 8 victims at a time (its pairs share one
-  policy block). Sizing note: `ban.max_active_bans × 8` must fit inside
-  `max_dynamic_rules` for bans alone, so leave headroom for source blocks when
-  sizing `dataplane.limits.max_dynamic_rules`.
+  policy block), and the cap is per source, not per tenant — in a multi-tenant
+  deployment, tenants blocking the same attacker share those 8 slots (a
+  per-tenant split is a fleet-milestone question, once tokens bind to nodes).
+  Distinct blocked sources are capped at the policy slots left after every ban
+  — host and carpet — could claim its own, so a burst of blocks can never
+  starve a ban into its blackhole fallback: the budget is
+  `max_dynamic_rules/8 − ban.max_active_bans − carpet.max_active_prefix_bans`.
+  At the defaults that leaves plenty; raise
+  `dataplane.limits.max_dynamic_rules` if you need more concurrent blocks.
 
 - **TLS handshake matching in the data plane.** A static rule can now narrow on
   the shape of a TLS handshake, so a **TLS handshake flood** — connections that
