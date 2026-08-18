@@ -380,6 +380,9 @@
                     "type": "integer"
                   },
                   "payload": {
+                    "enum": [
+                      "tls_client_hello"
+                    ],
                     "type": "string"
                   },
                   "proto": {

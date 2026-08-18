@@ -47,10 +47,11 @@ var enumValues = map[string][]string{
 	"scrubbing.node_selection":    {NodeSelectAffinity, NodeSelectLeastLoaded, NodeSelectECMP},
 	"scrubbing.on_all_nodes_lost": {NodesLostWithdraw, NodesLostBlackhole, NodesLostFlowSpec},
 
-	"dataplane.xdp_mode":                 {XDPModeAuto, XDPModeNative, XDPModeGeneric},
-	"dataplane.on_exit":                  {OnExitKeep, OnExitDetach},
-	"dataplane.static_rules.action":      {StaticActionPass, StaticActionDrop, StaticActionRateLimit},
-	"dataplane.static_rules.match.proto": {"tcp", "udp", "icmp", "icmp6"},
+	"dataplane.xdp_mode":                   {XDPModeAuto, XDPModeNative, XDPModeGeneric},
+	"dataplane.on_exit":                    {OnExitKeep, OnExitDetach},
+	"dataplane.static_rules.action":        {StaticActionPass, StaticActionDrop, StaticActionRateLimit},
+	"dataplane.static_rules.match.proto":   {"tcp", "udp", "icmp", "icmp6"},
+	"dataplane.static_rules.match.payload": {StaticPayloadTLSClientHello},
 }
 
 // numericBounds maps a yaml path to its inclusive {minimum,maximum} as enforced
