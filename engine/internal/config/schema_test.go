@@ -71,6 +71,10 @@ func TestSchemaEnumsPresent(t *testing.T) {
 		{"dataplane", "on_exit"},
 		{"dataplane", "static_rules", "action"},
 		{"dataplane", "static_rules", "match", "proto"},
+		// Reflected as a plain string until enumValues names it, which is
+		// exactly how it shipped: the config builder would take any payload predicate
+		// and the engine would reject the config it emitted.
+		{"dataplane", "static_rules", "match", "payload"},
 	} {
 		node := resolveField(t, doc, segs...)
 		enum, ok := node["enum"].([]any)
