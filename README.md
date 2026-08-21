@@ -311,6 +311,19 @@ reports those on every apply rather than rejecting the config: a WARN line, the 
 report, the `policy_shadowed` condition on `/healthz`, the
 `dataplane_shadowed_static_rules` metric, and a WARNING from `kapkan -check-config`.
 
+Rules also arrive from **outside** the detector: `POST /api/v1/dataplane/sources` lets
+whoever already terminates a victim's traffic (an nginx, a log exporter, an operator) hand
+kapkan a source to drop, scoped to that victim, with a mandatory TTL — HTTP awareness
+without kapkan parsing HTTP. The ban guarantees hold unabridged: bounded TTLs carried into
+the kernel per rule, accounting against `max_dynamic_rules`, dry-run honoured, one audited
+event per call including refusals, tenant scoping via the victim, and state-file
+persistence. A block anchors the kernel policy at the SOURCE, so one source holds at most
+8 victims and distinct sources get only the slots left after every ban could claim its own
+— blocks are refused before a ban is ever starved. An allowlisted source, a protected
+victim or an absent data plane are errors, not silent no-ops, because the datapath would
+pass those packets before reaching any rule. Full contract:
+[kapkan.io/docs/dataplane](https://kapkan.io/docs/dataplane#source-blocks-from-your-own-stack).
+
 A `ratelimit` action is enforced **per source address** — each source gets its own token
 bucket, which is the one thing BGP FlowSpec structurally cannot express, since its
 traffic-rate caps an aggregate that attackers and legitimate clients then compete for.
@@ -601,6 +614,8 @@ All endpoints are served on `api.listen`.
 | `POST /api/v1/ban` | Manually ban an address: `{"ip":"203.0.113.66"}`. Respects the whitelist, the cap, and the `networks` scope. |
 | `POST /api/v1/unban` | Manually withdraw a ban: `{"ip":"203.0.113.66"}`. |
 | `POST /api/v1/config/reload` | Re-read the config file (same as `SIGHUP`). |
+| `POST /api/v1/dataplane/sources` | Drop a source in the XDP data plane, scoped to one victim, with a **mandatory** TTL (1s-24h): `{"victim":"203.0.113.10","source":"198.51.100.7","ttl_seconds":600}`. For whoever already terminates the victim's traffic. `operator` only — `agent` is denied. |
+| `POST /api/v1/dataplane/sources/unblock` | Remove one source block immediately (same `victim`/`source` body). |
 | `GET /api/v1/dataplane/rules` | The rule table a [scrub node](#managed-scrubbing-nodes) enforces, as a long poll (ETag'd). **`agent` or `operator` only** — not viewer. |
 | `POST /api/v1/dataplane/nodes/{name}/report` | A scrub node's self-report (load, drop counts, version). Advisory by contract, never liveness. `agent` or `operator`. |
 | `GET /api/v1/dataplane/nodes` | Scrub-node inventory for the console's Nodes view: configured nodes, whether each is polling, its frozen ban count and its last self-report. Viewer rank, unscoped tokens only. |
@@ -611,9 +626,9 @@ Manual bans honour every safety rule: a whitelisted target returns `409` and is 
 announced; a target outside the configured `networks` returns `409`; exceeding
 `max_active_bans` returns `409`. POST endpoints require `Content-Type: application/json`.
 The `GET` routes need the **viewer** role; the mutating routes (`ban`, `unban`,
-`config/reload`) need the **operator** role; the two scrub-node routes are granted by
-explicit membership to `agent` (and `operator`, so a human can curl what an agent sees) —
-see [Authentication](#authentication).
+`config/reload`, and both `dataplane/sources` routes) need the **operator** role; the two
+scrub-node routes are granted by explicit membership to `agent` (and `operator`, so a human
+can curl what an agent sees) — see [Authentication](#authentication).
 
 ### Dashboard
 
@@ -732,7 +747,9 @@ full table (labels, values and what to alert on) at
   `sampling.boundary_debug` is on.
 - **Mitigation** — `mitigate_announced_routes` and `mitigate_flowspec_rules` (by
   `real`/`dry_run` mode), `mitigate_dataplane_bans` / `mitigate_dataplane_rules` for the
-  local XDP rung, `mitigate_bans_rejected_total` (by `reason`: `max_active_bans`,
+  local XDP rung, `mitigate_source_blocks` (by mode) and `mitigate_source_blocks_rejected_total`
+  (by `reason` — a rising `source_allowlisted` or `slots_full` means an integration is asking
+  for blocks that can never take effect), `mitigate_bans_rejected_total` (by `reason`: `max_active_bans`,
   `blast_radius_fraction`, `blast_radius_rate`, `max_active_prefix_bans`), and
   `mitigate_fallback_total` (by `from`/`to` — a non-zero `from="flowspec"` series flags
   upstreams that do not honour FlowSpec).
