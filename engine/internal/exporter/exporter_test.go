@@ -70,6 +70,14 @@ func TestParseLine(t *testing.T) {
 		{name: "combined format is not the contract", raw: `1.2.3.4 - - [22/Aug/2026] "GET /"`, over: override, wantErr: true},
 		{name: "no src", raw: `{"dst":"203.0.113.10","status":"200"}`, over: override, wantErr: true},
 		{name: "no dst and no override", raw: `{"src":"198.51.100.7","status":"200"}`, over: override, wantErr: true},
+		{
+			// A v6 client behind a v4 -victim override: the brain would
+			// refuse the mixed-family pair, so the line is skipped here
+			// rather than becoming one doomed, audited 400 per hot window.
+			name: "family mismatch with the override is skipped",
+			raw:  `{"src":"2001:db8::7","status":"200"}`,
+			over: addr("203.0.113.99"), wantErr: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,7 +107,7 @@ func TestEvaluate(t *testing.T) {
 			{v, s1}: {total: 600}, // 60 rps
 			{v, s2}: {total: 120}, // 12 rps — under
 		}
-		got := evaluate(w, &base)
+		got := evaluate(w, &base, base.Window)
 		if len(got) != 1 || got[0].p.source != s1 {
 			t.Fatalf("verdicts = %+v, want only %s", got, s1)
 		}
@@ -112,7 +120,7 @@ func TestEvaluate(t *testing.T) {
 		cfg := base
 		cfg.MinRequests = 1000
 		w := map[pair]*counts{{v, s1}: {total: 600}} // 60 rps but under the floor
-		if got := evaluate(w, &cfg); len(got) != 0 {
+		if got := evaluate(w, &cfg, cfg.Window); len(got) != 0 {
 			t.Fatalf("verdicts = %+v, want none under the floor", got)
 		}
 	})
@@ -124,7 +132,7 @@ func TestEvaluate(t *testing.T) {
 			{v, s1}: {total: 600, errors: 500}, // hot and erroring
 			{v, s2}: {total: 600, errors: 30},  // hot but healthy — a real client burst
 		}
-		got := evaluate(w, &cfg)
+		got := evaluate(w, &cfg, cfg.Window)
 		if len(got) != 1 || got[0].p.source != s1 {
 			t.Fatalf("verdicts = %+v, want only the erroring source", got)
 		}
@@ -132,8 +140,23 @@ func TestEvaluate(t *testing.T) {
 
 	t.Run("zero error-ratio disables the axis", func(t *testing.T) {
 		w := map[pair]*counts{{v, s1}: {total: 600}} // all 200s
-		if got := evaluate(w, &base); len(got) != 1 {
+		if got := evaluate(w, &base, base.Window); len(got) != 1 {
 			t.Fatalf("verdicts = %+v, want the well-formed flood armed anyway", got)
+		}
+	})
+
+	t.Run("a stalled loop divides by real elapsed time, not the nominal window", func(t *testing.T) {
+		// The reviewed false-block scenario: the loop stalled ~70s (a
+		// partitioned brain), a steady 8 rps client accumulated 560 requests.
+		// Against the nominal 10s window that reads as 56 rps and blocks an
+		// innocent source; against the real elapsed time it is 8 rps.
+		w := map[pair]*counts{{v, s1}: {total: 560}}
+		if got := evaluate(w, &base, 70*time.Second); len(got) != 0 {
+			t.Fatalf("verdicts = %+v — a backlog inflated a legitimate client into a flood", got)
+		}
+		// The same count inside a REAL 10s window is a flood and must arm.
+		if got := evaluate(w, &base, base.Window); len(got) != 1 {
+			t.Fatalf("verdicts = %+v, want the genuine 56 rps flood armed", got)
 		}
 	})
 }
@@ -156,6 +179,13 @@ func TestConfigValidate(t *testing.T) {
 		"zero min":         func(c *Config) { c.MinRequests = 0 },
 		"ratio over 1":     func(c *Config) { c.ErrorRatio = 1.5 },
 		"ttl out of range": func(c *Config) { c.TTL = 48 * time.Hour },
+		"ttl below twice the window": func(c *Config) {
+			c.Window, c.TTL = 30*time.Second, 45*time.Second
+		},
+		"api without a scheme": func(c *Config) { c.APIBase = "127.0.0.1:8080" },
+		"api with a bogus scheme": func(c *Config) {
+			c.APIBase = "file:///etc/passwd"
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := valid
@@ -219,14 +249,21 @@ func TestTailerFollowsAndSurvivesRotation(t *testing.T) {
 		t.Fatalf("second line = %q", got)
 	}
 
-	// logrotate create-new: move the file away, create a fresh one.
+	// logrotate create-new: move the file away, create a fresh one. nginx
+	// keeps writing to the RENAMED inode until it processes the reopen
+	// signal — those lines are evidence and must be drained from the old fd
+	// before the swap, in order, ahead of the new file's lines.
 	if err := os.Rename(path, path+".1"); err != nil {
 		t.Fatal(err)
 	}
+	appendTo(path+".1", "old tail after rename\n")
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	appendTo(path, "after rotation\n")
+	if got := next(); got != "old tail after rename" {
+		t.Fatalf("first post-rename line = %q, want the OLD file's tail drained before the swap", got)
+	}
 	if got := next(); got != "after rotation" {
 		t.Fatalf("post-rotation line = %q", got)
 	}

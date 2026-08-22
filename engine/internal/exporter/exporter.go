@@ -36,6 +36,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"net/url"
+	"strings"
 	"time"
 
 	"log/slog"
@@ -105,7 +107,35 @@ func (c *Config) Validate() error {
 	if c.TTL < time.Second || c.TTL > 24*time.Hour {
 		return fmt.Errorf("-ttl must be within [1s, 24h], got %s", c.TTL)
 	}
+	// The refresh contract ("a still-hot source is re-posted before its TTL
+	// lapses") is only true when at least two window ticks fit inside one
+	// TTL; a TTL shorter than that would let blocks flap on and off under a
+	// steady flood, so refuse the combination instead of documenting a lie.
+	if c.TTL < 2*c.Window {
+		return fmt.Errorf("-ttl (%s) must be at least twice -window (%s), or a still-hot "+
+			"source's block lapses between refreshes", c.TTL, c.Window)
+	}
+	u, err := url.Parse(c.APIBase)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("-api must be an http(s) URL like http://127.0.0.1:8080, got %q "+
+			"(a bad URL would otherwise surface only as the FIRST verdict failing, mid-attack)", c.APIBase)
+	}
 	return nil
+}
+
+// isLoopbackAPI reports whether the API base points at this machine — the one
+// place a cleartext operator token is not on a wire.
+func isLoopbackAPI(base string) bool {
+	u, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.IsLoopback()
 }
 
 // pair is the measurement key: the block the API takes is per (victim,
@@ -130,10 +160,20 @@ type verdict struct {
 
 // evaluate applies the thresholds to a closed window. Pure, so the decision
 // arithmetic is testable without a log file, a clock or a server.
-func evaluate(window map[pair]*counts, cfg *Config) []verdict {
+//
+// elapsed is the REAL time the window covered, not the nominal cfg.Window —
+// the difference is a false-block bug, not pedantry. When the loop stalls
+// (a partitioned brain making POSTs eat their timeouts), the log backlog
+// drains into one oversized window; dividing that by the nominal duration
+// inflates every source's rate by the stall factor, and the first thing an
+// inflated rate does is push a steady, legitimate client over the threshold.
+func evaluate(window map[pair]*counts, cfg *Config, elapsed time.Duration) []verdict {
+	if elapsed < cfg.Window {
+		elapsed = cfg.Window
+	}
 	var out []verdict
 	for p, c := range window {
-		rate := float64(c.total) / cfg.Window.Seconds()
+		rate := float64(c.total) / elapsed.Seconds()
 		ratio := 0.0
 		if c.total > 0 {
 			ratio = float64(c.errors) / float64(c.total)
@@ -145,6 +185,13 @@ func evaluate(window map[pair]*counts, cfg *Config) []verdict {
 	}
 	return out
 }
+
+// maxWindowPairs bounds the per-window measurement map. The sources behind it
+// are real HTTP clients, but "real" includes a routed IPv6 /64 handing one
+// attacker 2^64 addresses to rotate through — without a cap that is an OOM of
+// the exporter during exactly the flood it exists to watch. 64Ki pairs is a
+// few MB; everything past it is counted and reported, not silently eaten.
+const maxWindowPairs = 64 << 10
 
 // logLine is the documented log contract. Unknown fields are ignored on
 // purpose — the operator's log_format may carry more.
@@ -173,6 +220,12 @@ func parseLine(raw []byte, override netip.Addr) (pair, bool, error) {
 			return pair{}, false, fmt.Errorf("dst %q (and no -victim override): %w", l.Dst, err)
 		}
 	}
+	if victim.Unmap().Is4() != src.Unmap().Is4() {
+		// The brain refuses mixed-family pairs (a v4 rule cannot name a v6
+		// end); skipping here keeps a v6 client behind a v4 -victim override
+		// from costing one doomed, audited 400 per hot window.
+		return pair{}, false, fmt.Errorf("src %s and victim %s are different address families", src, victim)
+	}
 	isErr := len(l.Status) > 0 && (l.Status[0] == '4' || l.Status[0] == '5')
 	return pair{victim: victim.Unmap(), source: src.Unmap()}, isErr, nil
 }
@@ -197,6 +250,10 @@ func Run(ctx context.Context, cfg Config) error {
 	defer t.close()
 
 	cl := newClient(cfg.APIBase, cfg.Token)
+	if !cfg.Observe && strings.HasPrefix(cfg.APIBase, "http://") && !isLoopbackAPI(cfg.APIBase) {
+		log.Warn("the operator token will cross the network in CLEARTEXT: -api is plain http " +
+			"to a non-loopback host — put the brain behind TLS for anything but a lab")
+	}
 
 	log.Info("nginx-exporter started",
 		"log", cfg.LogPath, "api", cfg.APIBase, "window", cfg.Window.String(),
@@ -206,9 +263,12 @@ func Run(ctx context.Context, cfg Config) error {
 	var (
 		window   = make(map[pair]*counts)
 		blocked  = make(map[pair]time.Time) // pair -> expiry of the last posted TTL
+		retryAt  = make(map[pair]time.Time) // pair -> when a FAILED post may retry
+		overflow int                        // pairs the window cap refused this window
 		garbage  int
 		ticker   = time.NewTicker(cfg.Window)
 		lastNote time.Time
+		lastEval = time.Now()
 	)
 	defer ticker.Stop()
 
@@ -239,6 +299,10 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 			c := window[p]
 			if c == nil {
+				if len(window) >= maxWindowPairs {
+					overflow++
+					continue
+				}
 				c = &counts{}
 				window[p] = c
 			}
@@ -249,7 +313,14 @@ func Run(ctx context.Context, cfg Config) error {
 
 		case <-ticker.C:
 			now := time.Now()
-			for _, v := range evaluate(window, &cfg) {
+			elapsed := now.Sub(lastEval)
+			lastEval = now
+			if overflow > 0 {
+				log.Warn("window pair cap reached; excess pairs were counted but not measured",
+					"cap", maxWindowPairs, "overflow", overflow)
+				overflow = 0
+			}
+			for _, v := range evaluate(window, &cfg, elapsed) {
 				p, rate, ratio := v.p, v.rate, v.ratio
 				// Refresh only when the last posted TTL has burned below
 				// half, so a persistent offender costs two POSTs per TTL,
@@ -257,8 +328,16 @@ func Run(ctx context.Context, cfg Config) error {
 				if exp, ok := blocked[p]; ok && exp.Sub(now) > cfg.TTL/2 {
 					continue
 				}
+				// A pair whose last post FAILED waits out a backoff before
+				// another attempt: with a partitioned brain, retrying every
+				// hot pair every window turns each tick into N client
+				// timeouts back to back, and the stalled loop is what turns
+				// backlogs into oversized windows in the first place.
+				if ra, ok := retryAt[p]; ok && now.Before(ra) {
+					continue
+				}
 				reason := fmt.Sprintf("nginx-exporter: %.0f rps, %d%% errors over %s",
-					rate, int(ratio*100), cfg.Window)
+					rate, int(ratio*100), elapsed.Round(time.Second))
 				if cfg.Observe {
 					log.Warn("OBSERVE: would block source (not sent)",
 						"source", p.source.String(), "victim", p.victim.String(), "reason", reason)
@@ -267,24 +346,33 @@ func Run(ctx context.Context, cfg Config) error {
 				}
 				if err := cl.blockSource(ctx, p.victim, p.source, cfg.TTL, reason); err != nil {
 					// Refusals are the BRAIN's judgement (allowlisted source,
-					// protected victim, dry-run has its own path) — log them
-					// verbatim and do not retry within the window: the next
-					// hot window re-decides against fresh policy.
+					// protected victim, tenant scope) — log them verbatim; the
+					// next attempt re-decides against fresh policy after the
+					// backoff.
 					log.Error("source block refused or failed",
 						"source", p.source.String(), "victim", p.victim.String(), "err", err)
+					retryAt[p] = now.Add(2 * cfg.Window)
 					continue
 				}
+				delete(retryAt, p)
 				blocked[p] = now.Add(cfg.TTL)
 				log.Warn("source block posted",
 					"source", p.source.String(), "victim", p.victim.String(),
 					"ttl", cfg.TTL.String(), "reason", reason)
 			}
 			// The window is fixed, not sliding: simple to reason about, and
-			// the brain-side TTL padding covers the boundary seams.
-			clear(window)
+			// the brain-side TTL padding covers the boundary seams. A FRESH
+			// map rather than clear(): clear keeps the grown bucket array,
+			// which after one hostile window is hundreds of MB held forever.
+			window = make(map[pair]*counts)
 			for p, exp := range blocked {
 				if now.After(exp) {
 					delete(blocked, p)
+				}
+			}
+			for p, ra := range retryAt {
+				if now.After(ra) {
+					delete(retryAt, p)
 				}
 			}
 		}

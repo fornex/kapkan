@@ -34,6 +34,11 @@ type tailer struct {
 	// partial buffers an incomplete final line until its newline arrives —
 	// nginx writes lines atomically, but the reader can still race the write.
 	partial []byte
+	// pumpStarted hands ownership of f to the pump goroutine: after lines()
+	// launches it, only the pump may touch f (close() becomes its job too —
+	// a deferred close from the consumer racing maybeReopen's swap is a real
+	// TSan finding, not a theoretical one).
+	pumpStarted bool
 }
 
 func newTailer(path string) (*tailer, error) {
@@ -49,13 +54,21 @@ func newTailer(path string) (*tailer, error) {
 	return &tailer{path: path, f: f, r: bufio.NewReader(f), off: off}, nil
 }
 
-func (t *tailer) close() { _ = t.f.Close() }
+// close releases the file — but only before the pump exists. Once the pump
+// runs, IT owns f (maybeReopen swaps it), and it closes the current f on its
+// own way out; a second closer would be the data race this comment replaces.
+func (t *tailer) close() {
+	if !t.pumpStarted {
+		_ = t.f.Close()
+	}
+}
 
 // lines returns the channel of complete lines, starting the pump on first
 // use. One channel per tailer; Run is the only consumer.
 func (t *tailer) lines(ctx context.Context) <-chan []byte {
 	if t.ch == nil {
 		t.ch = make(chan []byte, 1024)
+		t.pumpStarted = true
 		go t.pump(ctx)
 	}
 	return t.ch
@@ -63,6 +76,7 @@ func (t *tailer) lines(ctx context.Context) <-chan []byte {
 
 func (t *tailer) pump(ctx context.Context) {
 	defer close(t.ch)
+	defer func() { _ = t.f.Close() }()
 	ticker := time.NewTicker(tailPollInterval)
 	defer ticker.Stop()
 	for {
@@ -73,7 +87,18 @@ func (t *tailer) pump(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t.maybeReopen()
+			if f := t.detectRotation(); f != nil {
+				// FINAL DRAIN of the old fd before the swap: the renamed
+				// inode is still fully readable through it, and the lines
+				// nginx appended since our last read are evidence like any
+				// other. Losing them silently was a reviewed-and-confirmed
+				// bug, not a hypothetical.
+				if err := t.drain(ctx); err != nil {
+					_ = f.Close()
+					return
+				}
+				t.swapTo(f)
+			}
 		}
 	}
 }
@@ -109,9 +134,14 @@ func (t *tailer) drain(ctx context.Context) error {
 	}
 }
 
-// maybeReopen detects rotation and swaps to the new file. Errors are
-// tolerated silently and retried next tick: a rotation window where the new
-// file does not exist yet is ordinary.
+// detectRotation reports rotation by returning the freshly opened NEW file
+// (nil when nothing rotated). Errors are tolerated silently and retried next
+// tick: a rotation window where the new file does not exist yet is ordinary.
+// The caller drains the OLD fd to EOF before swapping, so a create-new
+// rotation loses nothing that reached the old inode before the swap; what it
+// can still miss is bounded and honest — lines nginx keeps appending to the
+// renamed inode AFTER our swap, until nginx itself reopens on logrotate's
+// signal. That gap is logrotate's postrotate latency, typically milliseconds.
 //
 // THE COPYTRUNCATE BOUND, stated rather than hidden: a truncation is
 // detected by the size falling below the consumed offset, so a truncate
@@ -121,23 +151,28 @@ func (t *tailer) drain(ctx context.Context) error {
 // small tailer). The consequence is bounded and self-healing: the lines
 // written before the size caught up are missed, the first read lands
 // mid-line and parses as garbage (counted, throttled-logged), and everything
-// after flows normally. logrotate's default create-new mode has no such
-// window — the inode changes — and is what the deployment docs recommend.
-func (t *tailer) maybeReopen() {
+// after flows normally. Prefer logrotate's default create-new mode.
+func (t *tailer) detectRotation() *os.File {
 	st, err := os.Stat(t.path)
 	if err != nil {
-		return
+		return nil
 	}
 	cur, err := t.f.Stat()
 	if err == nil && os.SameFile(st, cur) && st.Size() >= t.off {
-		return // same file, nothing rewound
+		return nil // same file, nothing rewound
 	}
-	// Rotated (new inode) or truncated (size shrank): reopen from the start —
-	// everything in the new file is fresh traffic.
 	f, err := os.Open(t.path)
 	if err != nil {
-		return
+		return nil
 	}
+	return f
+}
+
+// swapTo moves the tailer onto the new file, from its start — everything in
+// it is fresh traffic. The partial from the old file is dropped: its
+// terminating newline lives in an inode nobody reads anymore, and gluing it
+// to the new file's first line would fabricate a request that never happened.
+func (t *tailer) swapTo(f *os.File) {
 	_ = t.f.Close()
 	t.f, t.r, t.off, t.partial = f, bufio.NewReader(f), 0, nil
 }

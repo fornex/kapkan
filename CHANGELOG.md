@@ -42,12 +42,17 @@ security-relevant.
   guarantee — TTL bounds, tenant scope, dry-run, the allowlist/whitelist
   refusals, auditing — is enforced brain-side and cannot be bypassed from
   here. It starts at the log's end (history is not evidence), follows
-  logrotate (create-new detected exactly; `copytruncate` has an inherent
-  one-poll detection window, stated in the docs), refreshes a still-hot
-  source before its TTL lapses instead of re-posting every window, and
-  `-observe` runs the full loop posting nothing — the trial mode against a
-  live brain. Scope its token to the tenant it serves; it can aim at nothing
-  else.
+  logrotate (a create-new rotation is drained to the old file's last line at
+  the switch; `copytruncate` has an inherent one-poll detection window —
+  both bounds stated in the docs), computes rates against the *real* elapsed
+  time so a stalled loop can never inflate a steady client into a "flood",
+  caps the per-window measurement map so a source-rotating IPv6 attacker
+  cannot balloon its memory, refreshes a still-hot source before its TTL
+  lapses (enforced: `-ttl` ≥ 2×`-window`), and `-observe` runs the full loop
+  posting nothing — the trial mode against a live brain. Its token is a full
+  operator credential for its tenant — scope it accordingly and put a remote
+  brain behind TLS; the docs also spell out why `src` must stay the socket's
+  `$remote_addr`, never a header-derived address.
 
 - **The source-block API: `POST /api/v1/dataplane/sources`.** Whoever already
   terminates a victim's traffic — an nginx in front of it, a log exporter, an
