@@ -811,14 +811,14 @@ func TestQUICInitialMatching(t *testing.T) {
 		stat    Stat
 	}{
 		{
-			name: "a v1 Initial is the thing we are after",
+			name:    "a v1 Initial is the thing we are after",
 			payload: quicInitial(),
-			want: xdpDrop, stat: StatDropStatic,
+			want:    xdpDrop, stat: StatDropStatic,
 		},
 		{
-			name: "the untested low bits (reserved/PN length) do not matter",
+			name:    "the untested low bits (reserved/PN length) do not matter",
 			payload: quicHead(0xC0, 1, 1195),
-			want: xdpDrop, stat: StatDropStatic,
+			want:    xdpDrop, stat: StatDropStatic,
 		},
 		{
 			// RFC 9000 says a client Initial arrives in a >=1200-byte
@@ -826,54 +826,54 @@ func TestQUICInitialMatching(t *testing.T) {
 			// runt "Initial" is exactly what an attacker crafts to slip
 			// under a size gate, and the victim's QUIC stack still has to
 			// parse it to discard it.
-			name: "a runt Initial still matches — there is no size gate to duck under",
+			name:    "a runt Initial still matches — there is no size gate to duck under",
 			payload: quicHead(0xC3, 1, 45),
-			want: xdpDrop, stat: StatDropStatic,
+			want:    xdpDrop, stat: StatDropStatic,
 		},
 		{
-			name: "0-RTT (type 01) is not an Initial",
+			name:    "0-RTT (type 01) is not an Initial",
 			payload: quicHead(0xD3, 1, 1195),
-			want: xdpPass, stat: StatPassDefault,
+			want:    xdpPass, stat: StatPassDefault,
 		},
 		{
-			name: "a Handshake packet (type 10) is not an Initial",
+			name:    "a Handshake packet (type 10) is not an Initial",
 			payload: quicHead(0xE3, 1, 200),
-			want: xdpPass, stat: StatPassDefault,
+			want:    xdpPass, stat: StatPassDefault,
 		},
 		{
-			name: "Retry (type 11) is not an Initial",
+			name:    "Retry (type 11) is not an Initial",
 			payload: quicHead(0xF0, 1, 100),
-			want: xdpPass, stat: StatPassDefault,
+			want:    xdpPass, stat: StatPassDefault,
 		},
 		{
 			// The row that matters most: every packet of every established
 			// QUIC connection is a short header, and none of them may match.
-			name: "a short-header packet is an established connection, left alone",
+			name:    "a short-header packet is an established connection, left alone",
 			payload: quicHead(0x43, 0xdeadbeef, 200),
-			want: xdpPass, stat: StatPassDefault,
+			want:    xdpPass, stat: StatPassDefault,
 		},
 		{
-			name: "version negotiation (version 0) is not a v1 Initial",
+			name:    "version negotiation (version 0) is not a v1 Initial",
 			payload: quicHead(0xC3, 0, 200),
-			want: xdpPass, stat: StatPassDefault,
+			want:    xdpPass, stat: StatPassDefault,
 		},
 		{
 			// The documented bound: v2 renumbers Initial to type 01 under
 			// version 0x6b3343cf, and the predicate deliberately speaks v1
 			// only until v2 deployment is worth five more instructions.
-			name: "a QUIC v2 Initial does not match, by documented bound",
+			name:    "a QUIC v2 Initial does not match, by documented bound",
 			payload: quicHead(0xD3, 0x6b3343cf, 1195),
-			want: xdpPass, stat: StatPassDefault,
+			want:    xdpPass, stat: StatPassDefault,
 		},
 		{
-			name: "a payload too short to decide passes",
+			name:    "a payload too short to decide passes",
 			payload: []byte{0xC3, 0x00, 0x00, 0x00},
-			want: xdpPass, stat: StatPassDefault,
+			want:    xdpPass, stat: StatPassDefault,
 		},
 		{
-			name: "ordinary UDP (a DNS-shaped datagram) is not QUIC",
+			name:    "ordinary UDP (a DNS-shaped datagram) is not QUIC",
 			payload: make([]byte, 64),
-			want: xdpPass, stat: StatPassDefault,
+			want:    xdpPass, stat: StatPassDefault,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
