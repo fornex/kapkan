@@ -29,6 +29,32 @@ security-relevant.
 
 ### Added
 
+- **`kapkan nginx-exporter` — the reference feeder for the source-block
+  channel**, and a supported component rather than an example. It tails an
+  nginx access log in a two-line documented JSON `log_format`, measures each
+  source's request rate (and optionally its 4xx/5xx share) against a victim
+  per window, and posts verdicts to `POST /api/v1/dataplane/sources` — so an
+  HTTP flood that nginx can see becomes an in-kernel drop that nginx never
+  has to serve again, with no Kapkan code parsing HTTP.
+
+  Grounding, stated up front: it is a fixed operator-written threshold, not a
+  detector (no baselines) and not a WAF (it reads source, destination and
+  status — never request content). It is an ordinary API caller: every
+  guarantee — TTL bounds, tenant scope, dry-run, the allowlist/whitelist
+  refusals, auditing — is enforced brain-side and cannot be bypassed from
+  here. It starts at the log's end (history is not evidence), follows
+  logrotate (a create-new rotation is drained to the old file's last line at
+  the switch; `copytruncate` has an inherent one-poll detection window —
+  both bounds stated in the docs), computes rates against the *real* elapsed
+  time so a stalled loop can never inflate a steady client into a "flood",
+  caps the per-window measurement map so a source-rotating IPv6 attacker
+  cannot balloon its memory, refreshes a still-hot source before its TTL
+  lapses (enforced: `-ttl` ≥ 2×`-window`), and `-observe` runs the full loop
+  posting nothing — the trial mode against a live brain. Its token is a full
+  operator credential for its tenant — scope it accordingly and put a remote
+  brain behind TLS; the docs also spell out why `src` must stay the socket's
+  `$remote_addr`, never a header-derived address.
+
 - **QUIC handshake matching in the data plane.** `payload: quic_initial` is
   the UDP twin of `tls_client_hello`: it narrows a static rule to datagrams
   opening a **QUIC v1 Initial** — the packet every QUIC/HTTP-3 handshake
