@@ -321,7 +321,10 @@ persistence. A block anchors the kernel policy at the SOURCE, so one source hold
 8 victims and distinct sources get only the slots left after every ban could claim its own
 — blocks are refused before a ban is ever starved. An allowlisted source, a protected
 victim or an absent data plane are errors, not silent no-ops, because the datapath would
-pass those packets before reaching any rule. Full contract:
+pass those packets before reaching any rule. The binary ships the reference caller:
+`kapkan nginx-exporter` tails an nginx JSON access log, measures per-source request rates
+per window, and posts the verdicts to this channel — a supported component, and the embryo
+of the future edge role. Full contract:
 [kapkan.io/docs/dataplane](https://kapkan.io/docs/dataplane#source-blocks-from-your-own-stack).
 
 A `ratelimit` action is enforced **per source address** — each source gets its own token

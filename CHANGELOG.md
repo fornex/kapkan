@@ -28,6 +28,27 @@ security-relevant.
 
 ### Added
 
+- **`kapkan nginx-exporter` — the reference feeder for the source-block
+  channel**, and a supported component rather than an example. It tails an
+  nginx access log in a two-line documented JSON `log_format`, measures each
+  source's request rate (and optionally its 4xx/5xx share) against a victim
+  per window, and posts verdicts to `POST /api/v1/dataplane/sources` — so an
+  HTTP flood that nginx can see becomes an in-kernel drop that nginx never
+  has to serve again, with no Kapkan code parsing HTTP.
+
+  Grounding, stated up front: it is a fixed operator-written threshold, not a
+  detector (no baselines) and not a WAF (it reads source, destination and
+  status — never request content). It is an ordinary API caller: every
+  guarantee — TTL bounds, tenant scope, dry-run, the allowlist/whitelist
+  refusals, auditing — is enforced brain-side and cannot be bypassed from
+  here. It starts at the log's end (history is not evidence), follows
+  logrotate (create-new detected exactly; `copytruncate` has an inherent
+  one-poll detection window, stated in the docs), refreshes a still-hot
+  source before its TTL lapses instead of re-posting every window, and
+  `-observe` runs the full loop posting nothing — the trial mode against a
+  live brain. Scope its token to the tenant it serves; it can aim at nothing
+  else.
+
 - **The source-block API: `POST /api/v1/dataplane/sources`.** Whoever already
   terminates a victim's traffic — an nginx in front of it, a log exporter, an
   operator — can hand Kapkan a source to drop in the XDP data plane, scoped to
