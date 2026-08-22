@@ -565,6 +565,35 @@ func TestShadowedByEarlierRule(t *testing.T) {
 				{Name: "cap_icmp", Action: ActionRateLimit, Profile: "icmp_cap", Proto: ptr(protoICMP)},
 				{Name: "cap_tls_handshakes", Action: ActionRateLimit, Profile: "handshake_cap",
 					Proto: ptr(protoTCP), DstPort: ptr(uint16(443)), MatchExt: MatchTLSClientHello},
+				{Name: "cap_quic_handshakes", Action: ActionRateLimit, Profile: "quic_handshake_cap",
+					Proto: ptr(protoUDP), DstPort: ptr(uint16(443)), MatchExt: MatchQUICInitial},
+			},
+		},
+		{
+			// The QUIC twin of the motivating case, and the migration trap the
+			// docs now warn about: the previous release's documented QUIC
+			// advice WAS the broad udp/443 ceiling, so an operator who adds
+			// the new handshake rule below it has built exactly this.
+			name: "a broad udp rule shadows a quic_initial rule below it",
+			rules: []StaticRule{
+				{Name: "cap-udp-443", Action: ActionRateLimit, Profile: "udp443",
+					Proto: ptr(protoUDP), DstPort: ptr(uint16(443))},
+				{Name: "cap-quic-handshakes", Action: ActionRateLimit, Profile: "qhs",
+					Proto: ptr(protoUDP), DstPort: ptr(uint16(443)), MatchExt: MatchQUICInitial},
+			},
+			dead: "cap-quic-handshakes",
+			by:   []string{"cap-udp-443"},
+		},
+		{
+			// Cross-bit: the two payload predicates are DIFFERENT narrowings,
+			// so neither covers the other — pinned here so coversMatchExt can
+			// never regress into treating match_ext as a boolean.
+			name: "a tls payload rule does not shadow a quic payload rule",
+			rules: []StaticRule{
+				{Name: "cap-tls-handshakes", Action: ActionRateLimit, Profile: "hs",
+					DstPort: ptr(uint16(443)), MatchExt: MatchTLSClientHello},
+				{Name: "cap-quic-handshakes", Action: ActionRateLimit, Profile: "qhs",
+					DstPort: ptr(uint16(443)), MatchExt: MatchQUICInitial},
 			},
 		},
 		{

@@ -36,12 +36,19 @@ security-relevant.
   handshakes can be metered per source with the same `ratelimit` profiles:
 
   ```yaml
+  ratelimit_profiles:
+    - { name: quic_handshake_cap, pps: 20 }
   static_rules:
     - name: cap_quic_handshakes
       match: { proto: udp, dst_port: 443, payload: quic_initial }
       action: ratelimit
-      profile: handshake_cap
+      profile: quic_handshake_cap
   ```
+
+  Give it its own profile rather than sharing the TLS rule's: the per-source
+  token bucket is keyed `{victim, source, profile}`, so rules naming one
+  profile draw down one shared budget per source, while separate profiles
+  meter independently.
 
   Only the handshake is metered: established QUIC connections use the short
   header and never match, so a client mid-download is not competing with new

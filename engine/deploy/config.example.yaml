@@ -266,7 +266,13 @@ thresholds: # per destination host, after sampling correction
 #   ratelimit_profiles:
 #     - {name: icmp_cap, mbps: 10}
 #     - {name: dns_reply, pps: 50000}
-#     - {name: handshake_cap, pps: 20}   # per source, see cap_tls_handshakes
+#     - {name: handshake_cap, pps: 20}       # per source, see cap_tls_handshakes
+#     - {name: quic_handshake_cap, pps: 20}  # per source, see cap_quic_handshakes
+#   # A profile is also the BUCKET: the per-source token bucket is keyed
+#   # {victim, source, profile}, so two rules naming the same profile draw
+#   # down ONE shared budget per source, while separate profiles meter
+#   # independently. Name one profile per independently-metered thing —
+#   # which is why the TLS and QUIC handshake caps above are two profiles.
 #
 #   # Always-on operator rules, evaluated after the allowlists and before any
 #   # rule the detector installs. Names are required and unique.
@@ -294,10 +300,10 @@ thresholds: # per destination host, after sampling correction
 #       match: {proto: tcp, dst_port: 443, payload: tls_client_hello}
 #       action: ratelimit
 #       profile: handshake_cap
-#     - name: cap_quic_handshakes  # ...and the same ceiling for QUIC/HTTP-3
+#     - name: cap_quic_handshakes  # ...and its own ceiling for QUIC/HTTP-3
 #       match: {proto: udp, dst_port: 443, payload: quic_initial}
 #       action: ratelimit
-#       profile: handshake_cap
+#       profile: quic_handshake_cap
 #
 #   limits:
 #     max_dynamic_rules: 4096      # must be >= ban.max_active_bans * 8

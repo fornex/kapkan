@@ -815,7 +815,7 @@ int kapkan_rule_match(const struct kapkan_rule *r,
 	 * before it can gate the term — bit 1's raw value is 2, and `2 & 1`
 	 * would erase the term no matter what the packet is. The TLS term
 	 * above skips the shift only because its flag IS bit 0; the
-	 * _Static_asserts below the pkt struct hold both in place. */
+	 * _Static_asserts at the top of this file hold both in place. */
 	bad |= (__u32)((r->match_ext >> 1) & 1) &
 	       ((__u32)pkt->is_quic_initial ^ 1);
 

@@ -2583,8 +2583,8 @@ func validateDataplaneBlock(d *Dataplane) (DataplaneSettings, error) {
 			if r.Match.Proto != "tcp" {
 				return DataplaneSettings{}, fmt.Errorf(
 					"dataplane.static_rules[%q].match.payload %q requires proto: tcp (got %q) — "+
-						"the ClientHello is read from the TCP payload, and QUIC/HTTP3 handshakes on UDP are encrypted and never match",
-					r.Name, r.Match.Payload, r.Match.Proto)
+						"the ClientHello is read from the TCP payload; for QUIC/HTTP3 handshakes on UDP use %q",
+					r.Name, r.Match.Payload, r.Match.Proto, StaticPayloadQUICInitial)
 			}
 		case StaticPayloadQUICInitial:
 			// proto: udp is REQUIRED for the same say-what-you-mean reason

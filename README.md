@@ -269,16 +269,17 @@ dataplane:
   ratelimit_profiles:           # named ceilings, referenced by static rules
     - { name: icmp_cap, mbps: 10 }
     - { name: handshake_cap, pps: 20 }
+    - { name: quic_handshake_cap, pps: 20 }
 
   static_rules:                 # always-on operator policy, first match wins
     - name: cap_tls_handshakes  # per-source ceiling on new TLS handshakes
       match: { proto: tcp, dst_port: 443, payload: tls_client_hello }
       action: ratelimit
       profile: handshake_cap
-    - name: cap_quic_handshakes # ...and the same ceiling for QUIC/HTTP-3
+    - name: cap_quic_handshakes # ...and its own ceiling for QUIC/HTTP-3
       match: { proto: udp, dst_port: 443, payload: quic_initial }
       action: ratelimit
-      profile: handshake_cap
+      profile: quic_handshake_cap
     - name: drop_chargen
       match: { proto: udp, src_port: 19 }
       action: drop

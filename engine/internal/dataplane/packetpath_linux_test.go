@@ -918,6 +918,39 @@ func TestQUICInitialDoesNotWidenTheRestOfTheMatch(t *testing.T) {
 	wantVerdict(t, objs2, run(t, objs2, tcpPkt), xdpPass, StatPassDefault)
 }
 
+// TestQUICInitialAndFragments pins the same interaction its TLS twin does,
+// and for a sharper reason: RFC 9000 forbids IP-fragmenting QUIC, which makes
+// "skip the peek for fragments" a plausible-looking future optimization — one
+// that would open the fragment-the-Initial evasion, since XDP sees
+// pre-reassembly fragments while the victim's stack sees the reassembled
+// datagram. A FIRST fragment carries the UDP header and the peek must run on
+// it; a non-first fragment has no L4 header and a port rule cannot match it.
+func TestQUICInitialAndFragments(t *testing.T) {
+	objs := loadObjects(t)
+	installStatics(t, objs, 0, mkRule(ruleOpts{
+		id: 149, action: ActionDrop, dst: &victimIP,
+		proto: u8p(17), dport: u16p(443), matchExt: MatchQUICInitial,
+	}))
+	setCfgFull(t, objs, cfgOpts{staticCount: 1})
+
+	// MF set, offset 0: a first fragment, UDP header present.
+	payload := quicInitial()
+	first := cat(eth(etherTypeIPv4),
+		ipv4From(attackerIP, victimIP, 17, 0x2000, 8+len(payload)),
+		udp(51000, 443, len(payload)), payload)
+	if got := run(t, objs, first); got != xdpDrop {
+		t.Errorf("first fragment of an Initial: verdict = %s, want XDP_DROP", verdictName(got))
+	}
+
+	// Offset 0xb9: a later fragment. No L4 header, so no ports.
+	later := cat(eth(etherTypeIPv4),
+		ipv4From(attackerIP, victimIP, 17, 0x00b9, 32), make([]byte, 32))
+	if got := run(t, objs, later); got != xdpPass {
+		t.Errorf("non-first fragment: verdict = %s, want XDP_PASS — it carries no L4 header, "+
+			"so a rule naming a port must not match it", verdictName(got))
+	}
+}
+
 // TestQUICInitialPerSourceRateLimit mirrors the TLS variant for the same
 // reason: the canonical deployment is a per-source ceiling on Initials, and
 // matching and metering are separate code paths.
