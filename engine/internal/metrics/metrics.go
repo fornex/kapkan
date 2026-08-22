@@ -203,6 +203,28 @@ var (
 		Help:      "Rules installed in the local XDP data plane by active bans, by mode (real|dry_run).",
 	}, []string{"mode"})
 
+	// MitigateSourceBlocks counts live operator/API source blocks (the
+	// source→victim pairs installed via POST /api/v1/dataplane/sources), by the
+	// pair's frozen dry-run flag. Same mode semantics as the gauges above:
+	// mode="dry_run" means "recorded, would have installed, installed nothing".
+	MitigateSourceBlocks = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "mitigate",
+		Name:      "source_blocks",
+		Help:      "Live API-installed source blocks (source→victim pairs), by mode (real|dry_run).",
+	}, []string{"mode"})
+
+	// MitigateSourceBlocksRejected counts source-block requests refused by
+	// policy — not input validation, which is the caller's bug, but the
+	// refusals an operator should see trending: an exporter aiming at an
+	// allowlisted source, a full policy block, an absent data plane.
+	MitigateSourceBlocksRejected = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "mitigate",
+		Name:      "source_blocks_rejected_total",
+		Help:      "Source-block requests refused by policy, by reason.",
+	}, []string{"reason"})
+
 	// NotificationsTotal counts notification deliveries by channel and result.
 	NotificationsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",

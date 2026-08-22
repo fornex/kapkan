@@ -186,6 +186,12 @@ func (i *Installer) Install(victim netip.Prefix, r DynamicRules) error {
 		return fmt.Errorf("dataplane: install %s: ttl must be positive, got %s "+
 			"(a zero deadline means 'never expires' and is reserved for static rules)", victim, r.TTL)
 	}
+	for n := range r.Specs {
+		if r.Specs[n].TTL < 0 {
+			return fmt.Errorf("dataplane: install %s: rule %d carries a negative ttl (%s)",
+				victim, n, r.Specs[n].TTL)
+		}
+	}
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -224,6 +230,14 @@ func (i *Installer) Install(victim netip.Prefix, r DynamicRules) error {
 		for n, s := range r.Specs {
 			s.ID = DynamicRuleID(policyID, n)
 			s.ExpiresAt = expiresAt
+			if s.TTL > 0 {
+				// A per-spec TTL gives this one rule its own deadline; the
+				// set-wide TTL above remains every other rule's. Both are
+				// durations converted against the SAME boot-clock read, so the
+				// suspend/resume hazard DynamicRules.TTL documents cannot
+				// reappear between two rules of one block.
+				s.ExpiresAt = now + uint64(s.TTL.Nanoseconds())
+			}
 			s.Profile = profileID
 			specs[n], ids[n] = s, s.ID
 		}

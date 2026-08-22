@@ -120,6 +120,12 @@ type Config struct {
 	// comparable so reload can detect the changes that require a restart
 	// (attachment and map sizing); the policy itself hot-reloads.
 	DataplaneCfg DataplaneSettings `yaml:"-"`
+	// DataplaneAllowlist is the parsed dataplane.allowlist — SOURCE prefixes
+	// the datapath passes before evaluating any rule. Kept off DataplaneCfg
+	// because a slice would break its ==-comparability; kept parsed here so
+	// callers can refuse to aim a dynamic rule at an allowlisted source (the
+	// kernel would install it and then silently never match it).
+	DataplaneAllowlist []netip.Prefix `yaml:"-"`
 	// groupRoutes maps prefixes to Groups indexes, longest prefix first.
 	groupRoutes []groupRoute
 }
@@ -2444,6 +2450,19 @@ func (c *Config) validateDataplane() error {
 		}
 	}
 	c.DataplaneCfg = set
+	if c.Dataplane != nil {
+		c.DataplaneAllowlist = make([]netip.Prefix, 0, len(c.Dataplane.Allowlist))
+		for _, s := range c.Dataplane.Allowlist {
+			p, err := parsePrefixOrAddr(s)
+			if err != nil {
+				// Unreachable: validateDataplaneBlock rejected malformed
+				// entries just above. Kept as an error rather than a panic so
+				// a future reordering fails loudly instead of half-parsing.
+				return fmt.Errorf("dataplane.allowlist: %w", err)
+			}
+			c.DataplaneAllowlist = append(c.DataplaneAllowlist, p)
+		}
+	}
 	return nil
 }
 
@@ -2982,6 +3001,20 @@ func (c *Config) ProtectedAddrs(is6 bool) float64 {
 func (c *Config) IsWhitelisted(addr netip.Addr) bool {
 	for _, a := range c.WhitelistAddrs {
 		if a == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// DataplaneAllowlistContains reports whether addr falls inside any
+// dataplane.allowlist entry. The datapath passes allowlisted sources before
+// evaluating any rule (precedence 1), so a dynamic rule aimed at one would be
+// installed and then silently never match — callers refuse up front instead.
+func (c *Config) DataplaneAllowlistContains(addr netip.Addr) bool {
+	a := addr.Unmap()
+	for _, p := range c.DataplaneAllowlist {
+		if p.Contains(a) {
 			return true
 		}
 	}

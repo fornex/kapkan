@@ -80,11 +80,30 @@ type banSnapshot struct {
 }
 
 // persistState is the on-disk document.
+//
+// SourceBlocks joined at version 1 UNBUMPED, by the same reasoning as the
+// dataplane totals above: load() hard-fails on a version mismatch, an old
+// kapkan ignores the unknown key, and a new kapkan reading an old file simply
+// rehydrates no source blocks — which is what that file says.
 type persistState struct {
-	Version    int           `json:"version"`
-	SavedAt    time.Time     `json:"saved_at"`
-	HostBans   []banSnapshot `json:"host_bans,omitempty"`
-	PrefixBans []banSnapshot `json:"prefix_bans,omitempty"`
+	Version      int                   `json:"version"`
+	SavedAt      time.Time             `json:"saved_at"`
+	HostBans     []banSnapshot         `json:"host_bans,omitempty"`
+	PrefixBans   []banSnapshot         `json:"prefix_bans,omitempty"`
+	SourceBlocks []sourceBlockSnapshot `json:"source_blocks,omitempty"`
+}
+
+// sourceBlockSnapshot persists one source→victim pair. It is the SourceBlock
+// fields verbatim — the pair IS its own description, there is no frozen
+// attribute set to recompute — but kept a separate type so the API shape and
+// the on-disk shape can drift apart without either noticing the other.
+type sourceBlockSnapshot struct {
+	Source    netip.Addr `json:"source"`
+	Victim    netip.Addr `json:"victim"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	DryRun    bool       `json:"dry_run,omitempty"`
+	Reason    string     `json:"reason,omitempty"`
 }
 
 func toSnapshot(b *Ban) banSnapshot {
@@ -185,6 +204,12 @@ func (m *Mitigator) snapshotLocked() persistState {
 			st.PrefixBans = append(st.PrefixBans, toSnapshot(b))
 		}
 	}
+	for _, sb := range m.sourceBlocksLocked() {
+		// A type CONVERSION on purpose: the day the API shape and the on-disk
+		// shape drift apart, this line stops compiling and the writer decides
+		// the mapping consciously instead of a field going quietly stale.
+		st.SourceBlocks = append(st.SourceBlocks, sourceBlockSnapshot(sb))
+	}
 	sort.Slice(st.HostBans, func(i, j int) bool { return st.HostBans[i].Target.Less(st.HostBans[j].Target) })
 	sort.Slice(st.PrefixBans, func(i, j int) bool { return st.PrefixBans[i].Prefix.String() < st.PrefixBans[j].Prefix.String() })
 	return st
@@ -280,11 +305,11 @@ func (m *Mitigator) rehydrateLocked(cfg *config.Config) {
 			"path", m.persist.path, "err", err)
 		return
 	}
-	if len(st.HostBans) == 0 && len(st.PrefixBans) == 0 {
+	if len(st.HostBans) == 0 && len(st.PrefixBans) == 0 && len(st.SourceBlocks) == 0 {
 		return
 	}
 	now := m.now()
-	var host, prefix, dropped int
+	var host, prefix, blocks, dropped int
 	for _, s := range st.HostBans {
 		if m.rehydrateHostLocked(s, cfg, now) {
 			host++
@@ -299,9 +324,76 @@ func (m *Mitigator) rehydrateLocked(cfg *config.Config) {
 			dropped++
 		}
 	}
+	for _, s := range st.SourceBlocks {
+		if m.rehydrateSourceBlockLocked(s, cfg, now) {
+			blocks++
+		} else {
+			dropped++
+		}
+	}
+	// One install per restored source, after its pairs are all back — the
+	// per-pair loop above only rebuilds the table. A failed install DROPS the
+	// source's pairs (reinstallSourceLocked's invariant), the counterpart of
+	// rehydrated bans being dropped when their announce fails: a restart must
+	// never leave an entry recorded as enforced that the kernel knows nothing
+	// about. Recount below so the log reports what actually survived.
+	for source := range m.sourceBlocks {
+		_ = m.reinstallSourceLocked(source, now)
+	}
+	restored := 0
+	for _, pairs := range m.sourceBlocks {
+		restored += len(pairs)
+	}
+	dropped += blocks - restored
 	m.updateGaugeLocked()
+	m.updateSourceGaugeLocked()
 	m.log.Warn("rehydrated active bans across restart",
-		"host_bans", host, "prefix_bans", prefix, "dropped", dropped, "saved_at", st.SavedAt)
+		"host_bans", host, "prefix_bans", prefix, "source_blocks", restored,
+		"dropped", dropped, "saved_at", st.SavedAt)
+}
+
+// rehydrateSourceBlockLocked validates and restores one persisted source
+// block, returning whether it survived. Validation mirrors BlockSource against
+// the CURRENT config — the persisted set never overrides a live safety rule —
+// plus the TTL check every rehydration does. The caller holds m.mu and
+// reinstalls per source afterwards.
+func (m *Mitigator) rehydrateSourceBlockLocked(s sourceBlockSnapshot, cfg *config.Config, now time.Time) bool {
+	source, victim := s.Source.Unmap(), s.Victim.Unmap()
+	if !source.IsValid() || !victim.IsValid() || victim.Is4() != source.Is4() {
+		return false
+	}
+	if now.After(s.ExpiresAt) {
+		m.log.Info("not rehydrating source block; TTL elapsed during downtime",
+			"source", source.String(), "victim", victim.String())
+		return false
+	}
+	if err := m.sourceBlockPolicy(cfg, victim, source); err != nil {
+		m.log.Warn("not rehydrating source block; refused by current config",
+			"source", source.String(), "victim", victim.String(), "reason", err)
+		return false
+	}
+	pairs := m.sourceBlocks[source]
+	if pairs == nil {
+		pairs = make(map[netip.Addr]*SourceBlock)
+		m.sourceBlocks[source] = pairs
+	} else if pairs[victim] == nil && len(pairs) >= maxRulesPerAttack {
+		// Cannot happen from our own snapshot, but the file is just a file.
+		m.log.Warn("not rehydrating source block; policy block full",
+			"source", source.String(), "victim", victim.String())
+		return false
+	}
+	pairs[victim] = &SourceBlock{
+		Source:    source,
+		Victim:    victim,
+		CreatedAt: s.CreatedAt,
+		ExpiresAt: s.ExpiresAt,
+		// Reconciled with the CURRENT config, exactly as ban rehydration does
+		// (see rehydrateHostLocked): the reinstall below is what enforces, and
+		// it honours this flag — a dry_run flip during downtime must win.
+		DryRun: cfg.DryRun,
+		Reason: s.Reason,
+	}
+	return true
 }
 
 // rehydrateHostLocked validates and re-announces one persisted host ban,

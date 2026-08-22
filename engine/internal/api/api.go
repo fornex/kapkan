@@ -295,6 +295,13 @@ func (s *Server) Handler() http.Handler {
 	write("POST /api/v1/ban", s.handleBan)
 	write("POST /api/v1/unban", s.handleUnban)
 	write("POST /api/v1/config/reload", s.handleReload)
+	// The source-block channel (sources.go): whoever already terminates the
+	// victim's traffic hands Kapkan a source to drop in-kernel. Deliberately
+	// NOT an extension of POST /api/v1/ban — that endpoint takes a VICTIM and
+	// blackholes it, the opposite operation, and overloading it would turn a
+	// caller's field-name typo into a self-inflicted outage.
+	write("POST /api/v1/dataplane/sources", s.handleSourceBlock)
+	write("POST /api/v1/dataplane/sources/unblock", s.handleSourceUnblock)
 	// The scrub-node channel (rules.go), granted by explicit membership: agent
 	// (the role that exists FOR this route) and operator (so a human can curl
 	// what the agent sees). It is a read that the viewer role deliberately does
@@ -915,10 +922,11 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	f := storage.AuditFilter{From: from, To: to}
 	if a := q.Get("action"); a != "" {
 		switch a {
-		case "ban", "unban", "config_reload":
+		case "ban", "unban", "config_reload", "source_block", "source_unblock":
 			f.Action = a
 		default:
-			writeError(w, http.StatusBadRequest, "invalid action (ban|unban|config_reload)")
+			writeError(w, http.StatusBadRequest,
+				"invalid action (ban|unban|config_reload|source_block|source_unblock)")
 			return
 		}
 	}

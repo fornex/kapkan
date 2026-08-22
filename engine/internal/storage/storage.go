@@ -103,13 +103,13 @@ type AttackRow struct {
 // JSON field names are the ClickHouse column names (JSONEachRow / SELECT alias).
 type AuditRow struct {
 	EventTime  string `json:"event_time"`  // "2006-01-02 15:04:05" UTC
-	Action     string `json:"action"`      // ban | unban | config_reload
-	Result     string `json:"result"`      // active | rejected | withdrawn | ok | error
+	Action     string `json:"action"`      // ban | unban | config_reload | source_block | source_unblock
+	Result     string `json:"result"`      // active | rejected | withdrawn | ok | error | blocked | removed
 	Operator   string `json:"operator"`    // matched API token name ("" in open/token-less mode)
 	Role       string `json:"role"`        // caller role
 	Tenant     string `json:"tenant"`      // caller's scope ("" = unscoped admin); scopes reads
-	Target     string `json:"target"`      // IP for ban/unban; empty for config_reload
-	TargetType string `json:"target_type"` // host | global
+	Target     string `json:"target"`      // IP for ban/unban; "src->victim" for source_(un)block; empty for config_reload
+	TargetType string `json:"target_type"` // host | global | source
 	Reason     string `json:"reason"`      // rejection/error detail; empty on success
 	Source     string `json:"source"`      // api (auto/reload reserved for engine-internal)
 	BanState   string `json:"ban_state"`   // final ban state for ban/unban; empty for reload

@@ -69,6 +69,16 @@ func TestRoleMatrix(t *testing.T) {
 		{"POST", "/api/v1/ban", `{"ip":"203.0.113.10"}`, "", map[string]bool{"operator": true}},
 		{"POST", "/api/v1/unban", `{"ip":"203.0.113.10"}`, "", map[string]bool{"operator": true}},
 		{"POST", "/api/v1/config/reload", `{}`, "", map[string]bool{"operator": true}},
+		// The source-block channel: operator-only writes, like ban/unban. The
+		// agent role is DENIED on purpose — its trust model is rules-read plus
+		// an advisory report, and a write that installs kernel rules must not
+		// ride on it before the fleet milestone binds tokens to nodes.
+		{"POST", "/api/v1/dataplane/sources",
+			`{"victim":"203.0.113.10","source":"198.51.100.7","ttl_seconds":60}`, "",
+			map[string]bool{"operator": true}},
+		{"POST", "/api/v1/dataplane/sources/unblock",
+			`{"victim":"203.0.113.10","source":"198.51.100.7"}`, "",
+			map[string]bool{"operator": true}},
 		// The scrub-node channel: the agent's routes, plus operator so a human
 		// can curl what the agent sees/sends. Viewer is denied on purpose —
 		// the rules document spans every tenant while viewer reads are

@@ -28,6 +28,41 @@ security-relevant.
 
 ### Added
 
+- **The source-block API: `POST /api/v1/dataplane/sources`.** Whoever already
+  terminates a victim's traffic — an nginx in front of it, a log exporter, an
+  operator — can hand Kapkan a source to drop in the XDP data plane, scoped to
+  that victim and with a mandatory TTL. This is HTTP awareness without parsing
+  HTTP: the decision is made where requests are visible, the enforcement
+  happens in the kernel. `POST /api/v1/dataplane/sources/unblock` removes a
+  pair immediately, so a mistaken block is an undo away rather than a TTL away.
+
+  The ban guarantees apply unabridged: TTLs are bounded (1s–24h, refresh to
+  extend — no permanent entries), each blocked source is accounted against
+  `dataplane.limits.max_dynamic_rules`, dry-run is honoured (the pair is
+  recorded, audited and reported; nothing reaches a map), every call — including
+  every refusal — writes one operator-attributed audit event, and tenant-scoped
+  tokens may only aim at victims inside their own tenant. Refusals are loud
+  rather than silent: a source inside `dataplane.allowlist` (the datapath would
+  pass it before any rule), a victim inside `protected_whitelist` (the datapath
+  passes its traffic before any rule), a source inside your own `networks`, and
+  a deployment with no data plane are all errors. Blocks survive a restart via
+  the existing `ban.state_file`, each pair expiring in-kernel exactly on its own
+  deadline even if the process never comes back. Operator role required; the
+  audit trail gains `source_block`/`source_unblock` actions and the API two
+  gauges (`kapkan_mitigate_source_blocks`,
+  `kapkan_mitigate_source_blocks_rejected_total`).
+
+  One source can be blocked for up to 8 victims at a time (its pairs share one
+  policy block), and the cap is per source, not per tenant — in a multi-tenant
+  deployment, tenants blocking the same attacker share those 8 slots (a
+  per-tenant split is a fleet-milestone question, once tokens bind to nodes).
+  Distinct blocked sources are capped at the policy slots left after every ban
+  — host and carpet — could claim its own, so a burst of blocks can never
+  starve a ban into its blackhole fallback: the budget is
+  `max_dynamic_rules/8 − ban.max_active_bans − carpet.max_active_prefix_bans`.
+  At the defaults that leaves plenty; raise
+  `dataplane.limits.max_dynamic_rules` if you need more concurrent blocks.
+
 - **TLS handshake matching in the data plane.** A static rule can now narrow on
   the shape of a TLS handshake, so a **TLS handshake flood** — connections that
   complete the TCP handshake, start a ClientHello and go no further — can be
