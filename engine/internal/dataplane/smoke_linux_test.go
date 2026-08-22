@@ -269,6 +269,8 @@ func TestAllMapsCreated(t *testing.T) {
 		MapCfg:       objs.KapkanCfg,
 		MapStats:     objs.KapkanStats,
 		MapRuleStats: objs.KapkanRuleStats,
+		MapFPEvents:  objs.KapkanFpEvents,
+		MapFPSampler: objs.KapkanFpSampler,
 	}
 	if len(byName) != len(AllMaps) {
 		t.Fatalf("this test checks %d maps, AllMaps has %d", len(byName), len(AllMaps))

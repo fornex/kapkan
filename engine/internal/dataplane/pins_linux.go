@@ -166,6 +166,8 @@ func mapFields(m *Maps) map[string]**ebpf.Map {
 		MapCfg:       &m.KapkanCfg,
 		MapStats:     &m.KapkanStats,
 		MapRuleStats: &m.KapkanRuleStats,
+		MapFPEvents:  &m.KapkanFpEvents,
+		MapFPSampler: &m.KapkanFpSampler,
 	}
 }
 

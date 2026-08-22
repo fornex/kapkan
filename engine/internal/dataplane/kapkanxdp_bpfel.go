@@ -30,13 +30,38 @@ type kapkanXDPKapkanConfig struct {
 	Flags            uint32
 	DryRun           uint8
 	DropMalformed    uint8
-	Pad              [6]uint8
+	FpEnabled        uint8
+	Pad              [5]uint8
+	FpBurst          uint64
+	FpRatePerNsQ32   uint64
 }
 
 type kapkanXDPKapkanCounter struct {
 	_     structs.HostLayout
 	Pkts  uint64
 	Bytes uint64
+}
+
+type kapkanXDPKapkanFpEvent struct {
+	_       structs.HostLayout
+	Src     [16]uint8
+	Dst     [16]uint8
+	Sport   uint16
+	Dport   uint16
+	IsV6    uint8
+	Proto   uint8
+	Axis    uint8
+	Pad     uint8
+	PktLen  uint32
+	SnapLen uint32
+	Pad2    uint32
+	Data    [1536]uint8
+}
+
+type kapkanXDPKapkanFpSampler struct {
+	_         structs.HostLayout
+	LastNs    uint64
+	TokensQ32 uint64
 }
 
 type kapkanXDPKapkanLpmKeyV4 struct {
@@ -113,6 +138,8 @@ const (
 	kapkanXDPMapKapkanAllow4     = "kapkan_allow4"
 	kapkanXDPMapKapkanAllow6     = "kapkan_allow6"
 	kapkanXDPMapKapkanCfg        = "kapkan_cfg"
+	kapkanXDPMapKapkanFpEvents   = "kapkan_fp_events"
+	kapkanXDPMapKapkanFpSampler  = "kapkan_fp_sampler"
 	kapkanXDPMapKapkanPolicies   = "kapkan_policies"
 	kapkanXDPMapKapkanProfiles   = "kapkan_profiles"
 	kapkanXDPMapKapkanProtect4   = "kapkan_protect4"
@@ -179,6 +206,8 @@ type kapkanXDPMapSpecs struct {
 	KapkanAllow4    *ebpf.MapSpec `ebpf:"kapkan_allow4"`
 	KapkanAllow6    *ebpf.MapSpec `ebpf:"kapkan_allow6"`
 	KapkanCfg       *ebpf.MapSpec `ebpf:"kapkan_cfg"`
+	KapkanFpEvents  *ebpf.MapSpec `ebpf:"kapkan_fp_events"`
+	KapkanFpSampler *ebpf.MapSpec `ebpf:"kapkan_fp_sampler"`
 	KapkanPolicies  *ebpf.MapSpec `ebpf:"kapkan_policies"`
 	KapkanProfiles  *ebpf.MapSpec `ebpf:"kapkan_profiles"`
 	KapkanProtect4  *ebpf.MapSpec `ebpf:"kapkan_protect4"`
@@ -221,6 +250,8 @@ type kapkanXDPMaps struct {
 	KapkanAllow4    *ebpf.Map `ebpf:"kapkan_allow4"`
 	KapkanAllow6    *ebpf.Map `ebpf:"kapkan_allow6"`
 	KapkanCfg       *ebpf.Map `ebpf:"kapkan_cfg"`
+	KapkanFpEvents  *ebpf.Map `ebpf:"kapkan_fp_events"`
+	KapkanFpSampler *ebpf.Map `ebpf:"kapkan_fp_sampler"`
 	KapkanPolicies  *ebpf.Map `ebpf:"kapkan_policies"`
 	KapkanProfiles  *ebpf.Map `ebpf:"kapkan_profiles"`
 	KapkanProtect4  *ebpf.Map `ebpf:"kapkan_protect4"`
@@ -239,6 +270,8 @@ func (m *kapkanXDPMaps) Close() error {
 		m.KapkanAllow4,
 		m.KapkanAllow6,
 		m.KapkanCfg,
+		m.KapkanFpEvents,
+		m.KapkanFpSampler,
 		m.KapkanPolicies,
 		m.KapkanProfiles,
 		m.KapkanProtect4,
