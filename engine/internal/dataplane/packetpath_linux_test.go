@@ -774,6 +774,220 @@ func TestTLSClientHelloPerSourceRateLimit(t *testing.T) {
 	}
 }
 
+/* ------------------------------------------------ the QUIC payload predicate */
+
+// quicHead builds the five bytes the datapath actually reads — the long-header
+// first byte and the four version bytes — followed by filler standing in for
+// DCID/SCID/token/length that the program never looks at.
+func quicHead(b0 byte, version uint32, body int) []byte {
+	p := make([]byte, 5+body)
+	p[0] = b0
+	binary.BigEndian.PutUint32(p[1:], version)
+	return p
+}
+
+// quicInitial is a plausible client Initial: first byte 0xC3 (long header,
+// fixed bit, type Initial, PN-length bits set — the common on-the-wire form),
+// version 1, padded to the RFC 9000 1200-byte floor.
+func quicInitial() []byte { return quicHead(0xC3, 1, 1195) }
+
+func quicFrameFrom(src [4]byte, sport, dport uint16, payload []byte) []byte {
+	return cat(eth(etherTypeIPv4),
+		ipv4From(src, victimIP, 17, 0, 8+len(payload)),
+		udp(sport, dport, len(payload)), payload)
+}
+
+// TestQUICInitialMatching is the UDP twin of TestTLSClientHelloMatching: one
+// rule, every row, so a pass means the packet did not match — not that the
+// rule was different. The rows that matter most are the ones that must be
+// left alone: short-header packets are every established QUIC connection on
+// the box, and 0-RTT/Handshake long headers are the rest of a legitimate
+// handshake in flight.
+func TestQUICInitialMatching(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		want    uint32
+		stat    Stat
+	}{
+		{
+			name:    "a v1 Initial is the thing we are after",
+			payload: quicInitial(),
+			want:    xdpDrop, stat: StatDropStatic,
+		},
+		{
+			name:    "the untested low bits (reserved/PN length) do not matter",
+			payload: quicHead(0xC0, 1, 1195),
+			want:    xdpDrop, stat: StatDropStatic,
+		},
+		{
+			// RFC 9000 says a client Initial arrives in a >=1200-byte
+			// datagram, and the datapath deliberately does not test that: a
+			// runt "Initial" is exactly what an attacker crafts to slip
+			// under a size gate, and the victim's QUIC stack still has to
+			// parse it to discard it.
+			name:    "a runt Initial still matches — there is no size gate to duck under",
+			payload: quicHead(0xC3, 1, 45),
+			want:    xdpDrop, stat: StatDropStatic,
+		},
+		{
+			name:    "0-RTT (type 01) is not an Initial",
+			payload: quicHead(0xD3, 1, 1195),
+			want:    xdpPass, stat: StatPassDefault,
+		},
+		{
+			name:    "a Handshake packet (type 10) is not an Initial",
+			payload: quicHead(0xE3, 1, 200),
+			want:    xdpPass, stat: StatPassDefault,
+		},
+		{
+			name:    "Retry (type 11) is not an Initial",
+			payload: quicHead(0xF0, 1, 100),
+			want:    xdpPass, stat: StatPassDefault,
+		},
+		{
+			// The row that matters most: every packet of every established
+			// QUIC connection is a short header, and none of them may match.
+			name:    "a short-header packet is an established connection, left alone",
+			payload: quicHead(0x43, 0xdeadbeef, 200),
+			want:    xdpPass, stat: StatPassDefault,
+		},
+		{
+			name:    "version negotiation (version 0) is not a v1 Initial",
+			payload: quicHead(0xC3, 0, 200),
+			want:    xdpPass, stat: StatPassDefault,
+		},
+		{
+			// The documented bound: v2 renumbers Initial to type 01 under
+			// version 0x6b3343cf, and the predicate deliberately speaks v1
+			// only until v2 deployment is worth five more instructions.
+			name:    "a QUIC v2 Initial does not match, by documented bound",
+			payload: quicHead(0xD3, 0x6b3343cf, 1195),
+			want:    xdpPass, stat: StatPassDefault,
+		},
+		{
+			name:    "a payload too short to decide passes",
+			payload: []byte{0xC3, 0x00, 0x00, 0x00},
+			want:    xdpPass, stat: StatPassDefault,
+		},
+		{
+			name:    "ordinary UDP (a DNS-shaped datagram) is not QUIC",
+			payload: make([]byte, 64),
+			want:    xdpPass, stat: StatPassDefault,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := loadObjects(t)
+			installStatics(t, objs, 0, mkRule(ruleOpts{
+				id: 145, action: ActionDrop, dst: &victimIP,
+				proto: u8p(17), dport: u16p(443), matchExt: MatchQUICInitial,
+			}))
+			setCfgFull(t, objs, cfgOpts{staticCount: 1})
+
+			pkt := quicFrameFrom(attackerIP, 51000, 443, tc.payload)
+			wantVerdict(t, objs, run(t, objs, pkt), tc.want, tc.stat)
+		})
+	}
+}
+
+// TestQUICInitialDoesNotWidenTheRestOfTheMatch: the predicate ANDs with
+// everything else. An Initial aimed at a port the rule does not name passes,
+// and a rule carrying ONLY the predicate (no proto term) still cannot match a
+// TCP packet — the bit is set by the UDP arm of the parser alone, so the
+// transports cannot bleed into each other through it.
+func TestQUICInitialDoesNotWidenTheRestOfTheMatch(t *testing.T) {
+	objs := loadObjects(t)
+	installStatics(t, objs, 0, mkRule(ruleOpts{
+		id: 146, action: ActionDrop, dst: &victimIP,
+		proto: u8p(17), dport: u16p(443), matchExt: MatchQUICInitial,
+	}))
+	setCfgFull(t, objs, cfgOpts{staticCount: 1})
+
+	// Same Initial, port 8443: not this rule's packet.
+	pkt := quicFrameFrom(attackerIP, 51000, 8443, quicInitial())
+	wantVerdict(t, objs, run(t, objs, pkt), xdpPass, StatPassDefault)
+
+	// A portless, protoless rule with only the QUIC bit: a TLS ClientHello
+	// over TCP must not match it.
+	objs2 := loadObjects(t)
+	installStatics(t, objs2, 0, mkRule(ruleOpts{
+		id: 147, action: ActionDrop, dst: &victimIP, matchExt: MatchQUICInitial,
+	}))
+	setCfgFull(t, objs2, cfgOpts{staticCount: 1})
+	tcpPkt := tlsFrameFrom(attackerIP, tcp(51000, 443, 0x18), clientHello())
+	wantVerdict(t, objs2, run(t, objs2, tcpPkt), xdpPass, StatPassDefault)
+}
+
+// TestQUICInitialAndFragments pins the same interaction its TLS twin does,
+// and for a sharper reason: RFC 9000 forbids IP-fragmenting QUIC, which makes
+// "skip the peek for fragments" a plausible-looking future optimization — one
+// that would open the fragment-the-Initial evasion, since XDP sees
+// pre-reassembly fragments while the victim's stack sees the reassembled
+// datagram. A FIRST fragment carries the UDP header and the peek must run on
+// it; a non-first fragment has no L4 header and a port rule cannot match it.
+func TestQUICInitialAndFragments(t *testing.T) {
+	objs := loadObjects(t)
+	installStatics(t, objs, 0, mkRule(ruleOpts{
+		id: 149, action: ActionDrop, dst: &victimIP,
+		proto: u8p(17), dport: u16p(443), matchExt: MatchQUICInitial,
+	}))
+	setCfgFull(t, objs, cfgOpts{staticCount: 1})
+
+	// MF set, offset 0: a first fragment, UDP header present.
+	payload := quicInitial()
+	first := cat(eth(etherTypeIPv4),
+		ipv4From(attackerIP, victimIP, 17, 0x2000, 8+len(payload)),
+		udp(51000, 443, len(payload)), payload)
+	if got := run(t, objs, first); got != xdpDrop {
+		t.Errorf("first fragment of an Initial: verdict = %s, want XDP_DROP", verdictName(got))
+	}
+
+	// Offset 0xb9: a later fragment. No L4 header, so no ports.
+	later := cat(eth(etherTypeIPv4),
+		ipv4From(attackerIP, victimIP, 17, 0x00b9, 32), make([]byte, 32))
+	if got := run(t, objs, later); got != xdpPass {
+		t.Errorf("non-first fragment: verdict = %s, want XDP_PASS — it carries no L4 header, "+
+			"so a rule naming a port must not match it", verdictName(got))
+	}
+}
+
+// TestQUICInitialPerSourceRateLimit mirrors the TLS variant for the same
+// reason: the canonical deployment is a per-source ceiling on Initials, and
+// matching and metering are separate code paths.
+func TestQUICInitialPerSourceRateLimit(t *testing.T) {
+	objs := loadObjects(t)
+	putProfile(t, objs, 1, 1 /*pps*/, 2 /*burst*/, 0, 0)
+	installStatics(t, objs, 0, mkRule(ruleOpts{
+		id: 148, action: ActionRateLimit, profile: 1, dst: &victimIP,
+		proto: u8p(17), dport: u16p(443), matchExt: MatchQUICInitial,
+	}))
+	setCfgFull(t, objs, cfgOpts{staticCount: 1})
+
+	hs := func(src [4]byte) []byte {
+		return quicFrameFrom(src, 51000, 443, quicInitial())
+	}
+
+	var passed int
+	for i := 0; i < 5; i++ {
+		if run(t, objs, hs(attackerIP)) == xdpPass {
+			passed++
+		}
+	}
+	if passed != 2 {
+		t.Errorf("first source admitted %d Initials, want its burst of 2", passed)
+	}
+	if got := run(t, objs, hs(otherIP)); got != xdpPass {
+		t.Errorf("second source = %s, want pass with its own budget", verdictName(got))
+	}
+	// Short-header traffic from the throttled source is the established
+	// connection, and the ceiling is on handshakes alone.
+	data := quicFrameFrom(attackerIP, 51000, 443, quicHead(0x43, 0xdeadbeef, 400))
+	if got := run(t, objs, data); got != xdpPass {
+		t.Errorf("short-header traffic from the throttled source = %s, want pass — "+
+			"the ceiling is on Initials, not on the connection", verdictName(got))
+	}
+}
+
 func TestFragmentMatching(t *testing.T) {
 	objs := loadObjects(t)
 	installStatics(t, objs, 0, mkRule(ruleOpts{

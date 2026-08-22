@@ -194,13 +194,19 @@ const (
 	// bytes at fixed offsets and never reassembles, so a split or truncated
 	// record does not match and the packet is forwarded.
 	MatchTLSClientHello uint8 = 1 << 0
+	// MatchQUICInitial requires the UDP payload to open a QUIC v1 Initial —
+	// the UDP twin of the bit above. The datapath decides that from five
+	// bytes at fixed offsets (long-header form + fixed bit + Initial type,
+	// then version 1); version negotiation and QUIC v2 do not match, and a
+	// payload too short to decide is forwarded.
+	MatchQUICInitial uint8 = 1 << 1
 )
 
 // knownMatchExt is every extended-match bit this build implements in the
 // datapath. Encode refuses a spec carrying anything outside it, because an
 // unimplemented narrowing predicate would be ignored in the kernel and the rule
 // would match more than the caller asked for.
-const knownMatchExt = MatchTLSClientHello
+const knownMatchExt = MatchTLSClientHello | MatchQUICInitial
 
 // Stat indexes kapkan_stats. Append only — the console renders by index.
 //

@@ -257,6 +257,8 @@ func policyFromBlock(d *config.Dataplane, protected []netip.Addr) (StaticPolicy,
 		case "":
 		case config.StaticPayloadTLSClientHello:
 			sr.MatchExt |= MatchTLSClientHello
+		case config.StaticPayloadQUICInitial:
+			sr.MatchExt |= MatchQUICInitial
 		default:
 			return StaticPolicy{}, fmt.Errorf("dataplane.static_rules[%q]: unknown payload %q "+
 				"(config.validate accepted it, so this package is out of step)", r.Name, r.Match.Payload)
