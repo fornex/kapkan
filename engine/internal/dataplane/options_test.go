@@ -168,12 +168,16 @@ dataplane:
       match: {proto: tcp, dst_port: 443}
       action: ratelimit
       profile: hs
+    - name: cap-quic
+      match: {proto: udp, dst_port: 443, payload: quic_initial}
+      action: ratelimit
+      profile: hs
 `)
 	opts, err := OptionsFromConfig(cfg)
 	if err != nil {
 		t.Fatalf("OptionsFromConfig: %v", err)
 	}
-	if len(opts.Policy.Statics) != 2 {
+	if len(opts.Policy.Statics) != 3 {
 		t.Fatalf("statics = %+v", opts.Policy.Statics)
 	}
 
@@ -186,6 +190,11 @@ dataplane:
 	// first assertion would still pass.
 	if plain := opts.Policy.Statics[1]; plain.MatchExt != 0 {
 		t.Errorf("cap-https MatchExt = %#02x, want 0 — it names no payload predicate", plain.MatchExt)
+	}
+	// Each payload value maps to ITS bit: quic_initial must not compile to
+	// the TLS bit or carry both.
+	if quic := opts.Policy.Statics[2]; quic.MatchExt != MatchQUICInitial {
+		t.Errorf("cap-quic MatchExt = %#02x, want %#02x", quic.MatchExt, MatchQUICInitial)
 	}
 
 	r, err := RuleSpec{

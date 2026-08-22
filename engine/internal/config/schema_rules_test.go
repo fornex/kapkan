@@ -206,7 +206,19 @@ hostgroups:
 		{
 			name:    "unknown payload predicate",
 			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - {name: hs, match: {proto: tcp, payload: http_get}, action: drop}\n",
-			wantErr: "match.payload must be tls_client_hello",
+			wantErr: "match.payload must be tls_client_hello or quic_initial",
+		},
+		{
+			// The mirror of the tls-on-udp case: quic_initial is read from
+			// the UDP payload, and the rule must say so where it is read.
+			name:    "quic payload match without an explicit proto",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - {name: qi, match: {dst_port: 443, payload: quic_initial}, action: drop}\n",
+			wantErr: "requires proto: udp",
+		},
+		{
+			name:    "quic payload match on tcp",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - {name: qi, match: {proto: tcp, dst_port: 443, payload: quic_initial}, action: drop}\n",
+			wantErr: "requires proto: udp",
 		},
 		{
 			name:    "ratelimit profile with neither pps nor mbps",

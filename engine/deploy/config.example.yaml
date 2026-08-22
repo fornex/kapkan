@@ -272,13 +272,16 @@ thresholds: # per destination host, after sampling correction
 #   # rule the detector installs. Names are required and unique.
 #   #
 #   # match takes src, proto, src_port, dst_port and payload. `payload` narrows
-#   # on what the L4 payload BEGINS with; its only value is tls_client_hello,
-#   # which matches a TCP segment opening a TLS ClientHello — the shape a TLS
-#   # handshake flood is made of, and the one an ordinary connection sends
-#   # exactly once. It requires proto: tcp, is read from a fixed offset with no
-#   # stream reassembly (a ClientHello split across segments does not match and
-#   # is forwarded), and does NOT cover HTTP/3, whose handshake is inside QUIC
-#   # on UDP and is encrypted before this filter sees it.
+#   # on what the L4 payload BEGINS with — the shape of a handshake, one value
+#   # per transport, and the one message an ordinary connection sends exactly
+#   # once:
+#   #   tls_client_hello  a TCP segment opening a TLS ClientHello; requires
+#   #                     proto: tcp
+#   #   quic_initial      a UDP datagram opening a QUIC v1 Initial (the
+#   #                     HTTP/3 handshake packet); requires proto: udp
+#   # Both are read from fixed offsets with no reassembly and no decryption:
+#   # a ClientHello split across segments, a QUIC v2 or version-negotiation
+#   # packet, and anything too short to decide do not match and are forwarded.
 #   static_rules:
 #     - name: drop_chargen
 #       match: {proto: udp, src_port: 19}
@@ -289,6 +292,10 @@ thresholds: # per destination host, after sampling correction
 #       profile: icmp_cap
 #     - name: cap_tls_handshakes   # a per-source ceiling on new TLS handshakes
 #       match: {proto: tcp, dst_port: 443, payload: tls_client_hello}
+#       action: ratelimit
+#       profile: handshake_cap
+#     - name: cap_quic_handshakes  # ...and the same ceiling for QUIC/HTTP-3
+#       match: {proto: udp, dst_port: 443, payload: quic_initial}
 #       action: ratelimit
 #       profile: handshake_cap
 #

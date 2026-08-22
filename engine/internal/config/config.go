@@ -913,8 +913,9 @@ type StaticMatch struct {
 	// stream. Empty means the rule does not look at the payload at all, which
 	// is what every rule written before this field existed means.
 	//
-	// The only value is StaticPayloadTLSClientHello. This is not a hook for a
-	// pattern language: each value is a predicate the datapath implements in a
+	// The values are StaticPayloadTLSClientHello (TCP) and
+	// StaticPayloadQUICInitial (UDP). This is not a hook for a pattern
+	// language: each value is a predicate the datapath implements in a
 	// handful of instructions, and anything needing more than that belongs
 	// somewhere other than an XDP program.
 	Payload string `yaml:"payload"`
@@ -966,6 +967,12 @@ const (
 	// stream reassembly, so a ClientHello split across segments does NOT match
 	// and is forwarded like any other packet.
 	StaticPayloadTLSClientHello = "tls_client_hello"
+	// StaticPayloadQUICInitial matches a UDP datagram whose payload opens a
+	// QUIC v1 Initial — the handshake packet a QUIC/HTTP3 flood is made of,
+	// and the UDP twin of tls_client_hello. Decided from five bytes at fixed
+	// offsets; version negotiation and QUIC v2 do NOT match, and a payload too
+	// short to decide is forwarded like any other packet.
+	StaticPayloadQUICInitial = "quic_initial"
 )
 
 // Data-plane defaults, applied by validateDataplane.
@@ -2579,10 +2586,21 @@ func validateDataplaneBlock(d *Dataplane) (DataplaneSettings, error) {
 						"the ClientHello is read from the TCP payload, and QUIC/HTTP3 handshakes on UDP are encrypted and never match",
 					r.Name, r.Match.Payload, r.Match.Proto)
 			}
+		case StaticPayloadQUICInitial:
+			// proto: udp is REQUIRED for the same say-what-you-mean reason
+			// tls_client_hello requires tcp: the commonest misreading of a
+			// bare "quic_initial" is that it is another way to spell the TLS
+			// handshake, when it selects the opposite transport.
+			if r.Match.Proto != "udp" {
+				return DataplaneSettings{}, fmt.Errorf(
+					"dataplane.static_rules[%q].match.payload %q requires proto: udp (got %q) — "+
+						"a QUIC Initial is read from the UDP payload; for TLS over TCP use %q",
+					r.Name, r.Match.Payload, r.Match.Proto, StaticPayloadTLSClientHello)
+			}
 		default:
 			return DataplaneSettings{}, fmt.Errorf(
-				"dataplane.static_rules[%q].match.payload must be %s, got %q",
-				r.Name, StaticPayloadTLSClientHello, r.Match.Payload)
+				"dataplane.static_rules[%q].match.payload must be %s or %s, got %q",
+				r.Name, StaticPayloadTLSClientHello, StaticPayloadQUICInitial, r.Match.Payload)
 		}
 
 		switch r.Action {

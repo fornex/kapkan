@@ -154,6 +154,20 @@ enum kapkan_match_ext {
 	 * of the file.
 	 */
 	KAPKAN_MX_TLS_CLIENT_HELLO = 1 << 0,
+
+	/*
+	 * The UDP payload opens a QUIC v1 Initial: long-header form + the QUIC
+	 * fixed bit with the Initial packet type, then version 0x00000001 —
+	 * five bytes at fixed offsets; see kapkan_parse_l4(). Clear for
+	 * everything else, INCLUDING version negotiation (version 0), QUIC v2
+	 * (a different version constant that also renumbers the Initial type;
+	 * negligible deployment, revisit when that changes), and any Initial
+	 * this program could not read — the parser fails open like the rest of
+	 * the file. This is the UDP twin of the bit above: the handshake
+	 * packet a server must parse and answer, matchable so a handshake
+	 * flood is meterable per source.
+	 */
+	KAPKAN_MX_QUIC_INITIAL = 1 << 1,
 };
 
 /* ======================================================================== */

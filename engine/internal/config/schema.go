@@ -51,7 +51,7 @@ var enumValues = map[string][]string{
 	"dataplane.on_exit":                    {OnExitKeep, OnExitDetach},
 	"dataplane.static_rules.action":        {StaticActionPass, StaticActionDrop, StaticActionRateLimit},
 	"dataplane.static_rules.match.proto":   {"tcp", "udp", "icmp", "icmp6"},
-	"dataplane.static_rules.match.payload": {StaticPayloadTLSClientHello},
+	"dataplane.static_rules.match.payload": {StaticPayloadTLSClientHello, StaticPayloadQUICInitial},
 }
 
 // numericBounds maps a yaml path to its inclusive {minimum,maximum} as enforced
