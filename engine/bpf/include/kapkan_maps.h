@@ -384,9 +384,11 @@ struct kapkan_config {
 	 * drop or admit a packet. The math mirrors kapkan_profile exactly: a
 	 * per-CPU token bucket refilled by (elapsed_ns * fp_rate_per_ns_q32) in
 	 * Q32, with fp_burst as the depth in packets. Userspace precomputes the
-	 * reciprocal; the datapath never divides. fp_rate_per_ns_q32 == 0 means
-	 * the bucket only ever yields its initial burst and then throttles — the
-	 * safe direction for a copy channel.
+	 * reciprocal; the datapath never divides. The bucket is a zero-initialised
+	 * PERCPU_ARRAY the datapath only reads (unlike kapkan_rl_admit, nothing
+	 * seeds it with a full burst); its first packet reaches the cap purely via
+	 * the clock-delta refill. So fp_rate_per_ns_q32 == 0 means it never refills
+	 * and copies NOTHING — the safe direction for a copy channel.
 	 */
 	__u64 fp_burst;		  /* sampler bucket depth, packets             */
 	__u64 fp_rate_per_ns_q32; /* copies/ns in Q32, precomputed by userspace */

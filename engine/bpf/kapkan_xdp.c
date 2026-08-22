@@ -1143,8 +1143,12 @@ static __always_inline void kapkan_fp_emit(void *data, void *data_end,
 	unsigned char *p;
 	int i;
 
+	/* The caller already gates on fp_off <= KAPKAN_FP_MAX_OFF, so this never
+	 * fires at runtime; it stays because it is what bounds `off` for the
+	 * verifier (data + off below must be a bounded variable-offset pointer) and
+	 * it keeps kapkan_fp_emit safe if ever called from a second site. */
 	if (off > KAPKAN_FP_MAX_OFF)
-		return; /* payload too deep to bound; do not copy from the wrong place */
+		return;
 
 	e = bpf_ringbuf_reserve(&kapkan_fp_events, sizeof(*e), 0);
 	if (!e) {
@@ -1637,8 +1641,16 @@ int kapkan_xdp_filter(struct xdp_md *ctx)
 	 * decision engine — but it is pure observation: it never reads or changes
 	 * `dec`, and skipping it (disabled, throttled, or ring full) is invisible
 	 * to the verdict. See "THE FINGERPRINT PLANE" above.
+	 *
+	 * ELIGIBILITY IS DECIDED HERE, BEFORE THE SAMPLER. A payload starting past
+	 * KAPKAN_FP_MAX_OFF cannot be copied (kapkan_fp_emit could not bound the
+	 * pointer), so such a packet is simply not eligible for fingerprinting: it
+	 * must not spend a sampler token or it would go uncounted (neither emitted,
+	 * throttled, nor ring-full), breaking the "every sampled copy is accounted"
+	 * invariant. Gating fp_off here keeps that invariant exact.
 	 */
-	if (cfg->fp_enabled && (pkt.is_tls_chello || pkt.is_quic_initial)) {
+	if (cfg->fp_enabled && (pkt.is_tls_chello || pkt.is_quic_initial) &&
+	    pkt.fp_off <= KAPKAN_FP_MAX_OFF) {
 		if (kapkan_fp_sample(cfg, pkt.now))
 			kapkan_fp_emit(data, data_end, &pkt);
 		else

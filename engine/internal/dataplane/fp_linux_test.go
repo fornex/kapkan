@@ -179,17 +179,113 @@ func TestFingerprintCopiesQUICInitial(t *testing.T) {
 	if ev.Dport != 443 {
 		t.Errorf("dport = %d, want 443", ev.Dport)
 	}
-	// A 1200-byte Initial exceeds the snapshot only if it is bigger than the
-	// ceiling; here it fits, captured to 64-byte granularity.
+	// The 1200-byte Initial fits under the 1536-byte ceiling, captured to
+	// 64-byte granularity (1200 -> 1152). The ceiling itself is exercised
+	// separately by TestFingerprintTruncatesAtSnapCeiling.
 	wantSnap := (len(payload) / 64) * 64
-	if wantSnap > FPSnapLen {
-		wantSnap = FPSnapLen
-	}
 	if int(ev.SnapLen) != wantSnap {
 		t.Errorf("snap_len = %d, want %d", ev.SnapLen, wantSnap)
 	}
 	if ev.Data[0] != 0xC3 {
 		t.Errorf("data[0] = %#x, want the QUIC long header 0xC3", ev.Data[0])
+	}
+}
+
+// TestFingerprintCopiesClientHelloIPv6 exercises the IPv6 path end to end: the
+// v6 fp_off derivation (payload after a 40-byte IPv6 header), the is_v6 flag,
+// and the full 16-byte address copy — none of which the IPv4 tests touch.
+func TestFingerprintCopiesClientHelloIPv6(t *testing.T) {
+	objs := loadObjects(t)
+	setFPCfg(t, objs, true, 1_000_000, 1000)
+	rd := openFP(t, objs)
+
+	// ipv6() carries the documentation prefix 2001:db8::1 -> 2001:db8::2.
+	wantSrc := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}
+	wantDst := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02}
+	hdr, payload := tcp(51000, 443, 0x18), clientHello()
+	pkt := cat(eth(etherTypeIPv6), ipv6(6, len(hdr)+len(payload)), hdr, payload)
+	if got := run(t, objs, pkt); got != xdpPass {
+		t.Fatalf("verdict = %s, want XDP_PASS", verdictName(got))
+	}
+
+	events := drainFP(t, rd)
+	if len(events) != 1 {
+		t.Fatalf("got %d copies, want exactly 1", len(events))
+	}
+	ev := events[0]
+	if ev.Axis != MatchTLSClientHello {
+		t.Errorf("axis = %#x, want MatchTLSClientHello (%#x)", ev.Axis, MatchTLSClientHello)
+	}
+	if ev.IsV6 != 1 || ev.Proto != 6 {
+		t.Errorf("is_v6/proto = %d/%d, want 1/6", ev.IsV6, ev.Proto)
+	}
+	if ev.Src != wantSrc || ev.Dst != wantDst {
+		t.Errorf("addrs = %x -> %x, want %x -> %x", ev.Src, ev.Dst, wantSrc, wantDst)
+	}
+	if ev.Data[0] != 0x16 || ev.Data[1] != 0x03 || ev.Data[5] != 0x01 {
+		t.Errorf("data[0..5] = % x, want a ClientHello record head", ev.Data[0:6])
+	}
+}
+
+// TestFingerprintCopyCoexistsWithDrop locks the safety-critical half of the
+// charter claim: the copy runs BEFORE the decision engine, so a ClientHello that
+// a rule drops is still both DROPPED and copied. The copy neither rescues the
+// packet nor is suppressed by the drop.
+func TestFingerprintCopyCoexistsWithDrop(t *testing.T) {
+	objs := loadObjects(t)
+	// A static rule that drops everything to the victim, plus the fp plane on.
+	installStatics(t, objs, 0, mkRule(ruleOpts{id: 1, action: ActionDrop, dst: &victimIP}))
+	if err := PutConfig(objs.MapSet(), ConfigSpec{
+		StaticCount: 1,
+		FPEnabled:   true,
+		FPSamplePPS: 1_000_000,
+		FPBurst:     1000,
+	}); err != nil {
+		t.Fatalf("write kapkan_cfg[0]: %v", err)
+	}
+	rd := openFP(t, objs)
+
+	pkt := tlsFrameFrom(attackerIP, tcp(51000, 443, 0x18), clientHello())
+	if got := run(t, objs, pkt); got != xdpDrop {
+		t.Fatalf("verdict = %s, want XDP_DROP (the static rule must still drop it)", verdictName(got))
+	}
+	if p, _ := readStat(t, objs, StatDropStatic); p != 1 {
+		t.Errorf("drop_static = %d, want 1", p)
+	}
+	if events := drainFP(t, rd); len(events) != 1 {
+		t.Errorf("got %d copies, want 1 — a dropped handshake must still be copied", len(events))
+	}
+}
+
+// TestFingerprintTruncatesAtSnapCeiling drives a payload larger than the
+// snapshot ceiling and proves the capture caps at FPSnapLen exactly — exercising
+// the copy loop's upper bound and the last 64-byte block ([1472:1536]).
+func TestFingerprintTruncatesAtSnapCeiling(t *testing.T) {
+	objs := loadObjects(t)
+	setFPCfg(t, objs, true, 1_000_000, 1000)
+	rd := openFP(t, objs)
+
+	// 6-byte record head + 1600 body = 1606 bytes of payload, comfortably past
+	// the 1536-byte ceiling.
+	payload := tlsRecordHead(0x16, 0x03, 0x01, 1600)
+	if len(payload) <= FPSnapLen {
+		t.Fatalf("test payload %d bytes does not exceed the %d ceiling", len(payload), FPSnapLen)
+	}
+	pkt := tlsFrameFrom(attackerIP, tcp(51000, 443, 0x18), payload)
+	if got := run(t, objs, pkt); got != xdpPass {
+		t.Fatalf("verdict = %s, want XDP_PASS", verdictName(got))
+	}
+
+	events := drainFP(t, rd)
+	if len(events) != 1 {
+		t.Fatalf("got %d copies, want exactly 1", len(events))
+	}
+	ev := events[0]
+	if int(ev.SnapLen) != FPSnapLen {
+		t.Errorf("snap_len = %d, want %d (capped at the ceiling)", ev.SnapLen, FPSnapLen)
+	}
+	if ev.Data[0] != 0x16 || ev.Data[5] != 0x01 {
+		t.Errorf("data head = % x, want a ClientHello record head", ev.Data[0:6])
 	}
 }
 
