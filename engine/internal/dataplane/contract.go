@@ -15,7 +15,12 @@ package dataplane
 // value equals this one; otherwise it tears the pins down and recreates them,
 // because the map layouts would be reinterpreted wrongly. Bump this on any
 // incompatible change to a struct in kapkan_maps.h.
-const MapSchemaVersion = 1
+//
+// 2: E2 added the kapkan_fp_events ring buffer and kapkan_fp_sampler maps and
+// appended the fp_* fields to kapkan_config. New maps and a changed kapkan_config
+// layout both require a previous process's pins to be rebuilt rather than
+// adopted.
+const MapSchemaVersion = 2
 
 // RulesPerPolicy is the number of match rules in one victim's policy block. It
 // mirrors both KAPKAN_RULES_PER_POLICY in C and config.maxDataplaneRulesPerBan
@@ -106,6 +111,18 @@ const (
 	// real bound on live rule ids, so it is a baked default and not a
 	// contract value.
 	defaultMaxRuleStats = 8192
+
+	// FPSnapLen is the per-event capture ceiling of the fingerprint plane, in
+	// bytes of L4 payload, mirroring KAPKAN_FP_SNAP_LEN. It sizes the Data field
+	// of a ring-buffer event and is the ceiling the reader decodes up to; the
+	// kernel records the real captured length in FPEvent.SnapLen.
+	FPSnapLen = 1536
+
+	// FPRingBytes is the byte size of the kapkan_fp_events ring, mirroring
+	// KAPKAN_FP_RING_BYTES. A full ring drops the copy (StatFPRingFull) rather
+	// than stalling the datapath, so this bounds only how much burst the reader
+	// may fall behind by, never the datapath.
+	FPRingBytes = 1 << 20
 )
 
 // Map names. These are contract: the pinned bpffs paths are derived from them,
@@ -125,6 +142,10 @@ const (
 	MapCfg       = "kapkan_cfg"
 	MapStats     = "kapkan_stats"
 	MapRuleStats = "kapkan_rule_stats"
+	// MapFPEvents is the fingerprint plane's copy ring (BPF_MAP_TYPE_RINGBUF);
+	// MapFPSampler is its per-CPU copy-rate limiter. Both are E2.
+	MapFPEvents  = "kapkan_fp_events"
+	MapFPSampler = "kapkan_fp_sampler"
 )
 
 // ProgramName is the BPF program the loader attaches. It lives in the "xdp"
@@ -146,6 +167,7 @@ var AllMaps = []string{
 	MapCfg,
 	MapStats,
 	MapRuleStats,
+	MapFPEvents, MapFPSampler,
 }
 
 // Action is a rule verdict, mirroring enum kapkan_action.
@@ -229,7 +251,10 @@ type Stat uint32
 func (s Stat) IsObservation() bool {
 	switch s {
 	case StatPassFragNoPorts, StatPassRuleExpired, StatDryRunWouldDrop,
-		StatErrPolicyMissing:
+		StatErrPolicyMissing,
+		// The fingerprint plane's copy counters co-occur with a terminal
+		// verdict — the packet is still passed or dropped on its own merits.
+		StatFPEmitted, StatFPThrottled, StatFPRingFull:
 		return true
 	}
 	return false
@@ -260,7 +285,10 @@ const (
 	StatDryRunWouldDrop  Stat = 18 // observation: a drop rewritten to a pass
 	StatErrCfgMissing    Stat = 19 // kapkan_cfg[0] lookup failed
 	StatErrPolicyMissing Stat = 20 // observation: victim hit, policy block absent
-	StatMax              Stat = 21
+	StatFPEmitted        Stat = 21 // observation: a fingerprint copy hit the ring
+	StatFPThrottled      Stat = 22 // observation: the sampler denied a copy
+	StatFPRingFull       Stat = 23 // observation: ring full, copy skipped
+	StatMax              Stat = 24
 )
 
 // statNames maps each counter to the identifier the C enum uses, so the API
@@ -287,6 +315,9 @@ var statNames = [StatMax]string{
 	StatDryRunWouldDrop:  "dryrun_would_drop",
 	StatErrCfgMissing:    "err_cfg_missing",
 	StatErrPolicyMissing: "err_policy_missing",
+	StatFPEmitted:        "fp_emitted",
+	StatFPThrottled:      "fp_throttled",
+	StatFPRingFull:       "fp_ring_full",
 }
 
 // String renders the counter's stable name, used as a Prometheus label and in

@@ -78,6 +78,7 @@ var bpf2goArgs = []string{
 	"-type", "kapkan_lpm_key_v6",
 	"-type", "kapkan_rl_key_v4",
 	"-type", "kapkan_rl_key_v6",
+	"-type", "kapkan_fp_event",
 	"kapkanXDP", "../../bpf/kapkan_xdp.c",
 	"--", "-I../../bpf/include", "-O2", "-g", "-Wall", "-Werror", "-mcpu=v2",
 }

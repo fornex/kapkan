@@ -358,8 +358,14 @@ func TestInspectSchemaSkew(t *testing.T) {
 	if !strings.Contains(ins.Reason, "RESTART KAPKAN") {
 		t.Errorf("reason does not name the fix: %s", ins.Reason)
 	}
-	if !strings.Contains(ins.Reason, "42") || !strings.Contains(ins.Reason, "1") {
-		t.Errorf("reason does not name both versions: %s", ins.Reason)
+	// Both versions must appear: the poisoned one on the pin and the one this
+	// binary speaks. Derived from MapSchemaVersion so the assertion does not
+	// drift when the schema is bumped (as E2 did, 1 -> 2).
+	poisoned := fmt.Sprintf("%d", MapSchemaVersion+41)
+	binary := fmt.Sprintf("%d", MapSchemaVersion)
+	if !strings.Contains(ins.Reason, poisoned) || !strings.Contains(ins.Reason, binary) {
+		t.Errorf("reason does not name both versions (poisoned %s, binary %s): %s",
+			poisoned, binary, ins.Reason)
 	}
 }
 

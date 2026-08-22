@@ -30,8 +30,17 @@
  * otherwise it tears the pins down and recreates them, because the layouts
  * below would be reinterpreted wrongly. Go mirrors this as
  * dataplane.MapSchemaVersion and a test asserts the two are equal.
+ *
+ * 1 -> 2 (E2, the off-path fingerprint plane): added the kapkan_fp_events
+ * ring buffer and the kapkan_fp_sampler per-CPU state, and appended the fp_*
+ * fields to struct kapkan_config. New maps and a changed kapkan_config layout
+ * are both reasons a previous process's pins must be rebuilt rather than
+ * adopted, so the stamp moves even though the program tag would already force
+ * a rebuild on any .c edit (tryAdopt checks the tag first). Appending to the
+ * TAIL of kapkan_config is otherwise a compatible change; the map additions
+ * are what make this a version bump.
  */
-#define KAPKAN_MAP_SCHEMA_VERSION 1
+#define KAPKAN_MAP_SCHEMA_VERSION 2
 
 /*
  * KAPKAN_RULES_PER_POLICY mirrors config.maxDataplaneRulesPerBan (= 8). One
@@ -90,6 +99,30 @@
 #define KAPKAN_MAX_PROFILES		256
 #define KAPKAN_MAX_PREFIXES		65536
 #define KAPKAN_MAX_RULE_STATS		8192
+
+/*
+ * The fingerprint plane (E2). See "THE FINGERPRINT PLANE" below and §6 of the
+ * edge spec: the datapath COPIES a bounded, sampled prefix of TLS ClientHello
+ * and QUIC Initial payloads into a ring buffer, and userspace CLASSIFIES it
+ * (JA4 + SNI). The kernel never classifies — the copy is pure observation and
+ * can NEVER change a packet's verdict.
+ *
+ * KAPKAN_FP_SNAP_LEN is the per-event capture ceiling, in bytes of L4 payload.
+ * It is sized to hold a whole QUIC v1 Initial datagram's payload (RFC 9000
+ * floors a client Initial at 1200 bytes) so QUIC decryption in userspace has
+ * the bytes it needs; a first-segment TLS ClientHello is far smaller and is
+ * captured whole. It MUST stay a multiple of 64: the datapath copies in fixed
+ * 64-byte blocks so the verifier proves every access without a byte loop (see
+ * kapkan_fp_emit).
+ *
+ * KAPKAN_FP_RING_BYTES is the ring's byte size (power of two, page-aligned).
+ * A full ring simply drops the copy and counts KAPKAN_STAT_FP_RING_FULL; it
+ * never applies backpressure to the datapath, so the plane cannot become its
+ * own DoS. Together with the in-kernel sampler (kapkan_fp_sampler) this is what
+ * caps copy volume under flood.
+ */
+#define KAPKAN_FP_SNAP_LEN		1536
+#define KAPKAN_FP_RING_BYTES		(1 << 20)
 
 /* ======================================================================== */
 /* Actions and rule flags                                                    */
@@ -342,7 +375,23 @@ struct kapkan_config {
 	__u32 flags;		  /* reserved                                  */
 	__u8 dry_run;
 	__u8 drop_malformed;	  /* config Dataplane.DropMalformed            */
-	__u8 _pad[6];
+	__u8 fp_enabled;	  /* fingerprint plane on (E2)                 */
+	__u8 _pad[5];
+	/*
+	 * Fingerprint-plane copy sampler, appended at the tail (schema 2). These
+	 * gate ONLY the observation ring, never a verdict, so a torn read of them
+	 * across a reload can at worst mis-sample a copy or two — it can never
+	 * drop or admit a packet. The math mirrors kapkan_profile exactly: a
+	 * per-CPU token bucket refilled by (elapsed_ns * fp_rate_per_ns_q32) in
+	 * Q32, with fp_burst as the depth in packets. Userspace precomputes the
+	 * reciprocal; the datapath never divides. The bucket is a zero-initialised
+	 * PERCPU_ARRAY the datapath only reads (unlike kapkan_rl_admit, nothing
+	 * seeds it with a full burst); its first packet reaches the cap purely via
+	 * the clock-delta refill. So fp_rate_per_ns_q32 == 0 means it never refills
+	 * and copies NOTHING — the safe direction for a copy channel.
+	 */
+	__u64 fp_burst;		  /* sampler bucket depth, packets             */
+	__u64 fp_rate_per_ns_q32; /* copies/ns in Q32, precomputed by userspace */
 };
 
 /* ======================================================================== */
@@ -366,7 +415,7 @@ struct kapkan_counter {
  *       count. Everything below except the four observation counters.
  *
  *   OBSERVATION — bumped on the way past, and therefore CO-OCCURRING with a
- *       terminal counter for the same packet. There are four (Stat.IsObservation
+ *       terminal counter for the same packet. There are seven (Stat.IsObservation
  *       in contract.go is the authority, and a test pins the two together):
  *         PASS_FRAG_NOPORTS   saw a non-first fragment (which is then
  *                             evaluated normally, and may well be dropped by
@@ -377,6 +426,9 @@ struct kapkan_counter {
  *         DRYRUN_WOULD_DROP   a drop was rewritten to a pass
  *         ERR_POLICY_MISSING  a victim resolved to a policy block that is not
  *                             there; the packet fell through
+ *         FP_EMITTED          a fingerprint copy was written to the ring
+ *         FP_THROTTLED        the sampler denied a fingerprint copy
+ *         FP_RING_FULL        the ring was full, so a copy was skipped
  *       and one near-miss worth naming because it looks like it belongs here:
  *         ERR_CFG_MISSING     is TERMINAL, not observational — it returns
  *                             XDP_PASS immediately rather than falling through
@@ -407,7 +459,18 @@ enum kapkan_stat {
 	KAPKAN_STAT_DRYRUN_WOULD_DROP	= 18, /* drop rewritten to pass       */
 	KAPKAN_STAT_ERR_CFG_MISSING	= 19, /* kapkan_cfg[0] lookup failed  */
 	KAPKAN_STAT_ERR_POLICY_MISSING	= 20, /* victim hit, policy block gone */
-	KAPKAN_STAT__MAX		= 21,
+	/*
+	 * The fingerprint plane (E2). All three are OBSERVATION counters: they are
+	 * bumped on the copy channel as a packet goes past and CO-OCCUR with
+	 * whatever terminal verdict the packet later gets, so they must NOT be
+	 * summed into the packet count. FP_THROTTLED climbing while FP_EMITTED
+	 * plateaus is the visible proof that the sampler is capping copy volume
+	 * under flood; FP_RING_FULL is userspace-drain backpressure, not a drop.
+	 */
+	KAPKAN_STAT_FP_EMITTED		= 21, /* a copy was written to the ring */
+	KAPKAN_STAT_FP_THROTTLED	= 22, /* sampler denied the copy        */
+	KAPKAN_STAT_FP_RING_FULL	= 23, /* ring full, copy skipped        */
+	KAPKAN_STAT__MAX		= 24,
 };
 
 /* ======================================================================== */
@@ -600,6 +663,80 @@ struct {
 	__type(value, struct kapkan_counter);
 	__uint(max_entries, KAPKAN_MAX_RULE_STATS);
 } kapkan_rule_stats SEC(".maps");
+
+/* ======================================================================== */
+/* THE FINGERPRINT PLANE (E2)                                                 */
+/* ======================================================================== */
+/*
+ * OFF-PATH BY CONSTRUCTION. The datapath already recognises the SHAPE of a TLS
+ * ClientHello and a QUIC v1 Initial at fixed offsets (see kapkan_parse_l4 and
+ * enum kapkan_match_ext). This plane adds one thing: a bounded, sampled COPY of
+ * those payloads to userspace, where JA4 + SNI are computed and a per-source
+ * policy comes back through the SAME source-block path E1 already built
+ * (mitigate.BlockSource -> the victims trie). The kernel copies; userspace
+ * classifies. Both the BPF charter (never classify) and the edge charter hold.
+ *
+ * THE COPY CANNOT BECOME A DoS, and that is enforced two ways: an in-kernel
+ * per-CPU token bucket (kapkan_fp_sampler) caps copies to a configured rate
+ * regardless of packet rate, and a full ring drops the copy rather than
+ * stalling the datapath. A lost copy costs nothing — userspace simply does not
+ * fingerprint that handshake — which is why the sampler's failure direction is
+ * the OPPOSITE of the charter's default-PASS: on any doubt it declines to copy.
+ */
+
+/*
+ * One fingerprint event: metadata plus a captured prefix of the L4 payload.
+ * data[] begins at the TLS record (TCP) or the QUIC long header (UDP), i.e. at
+ * kapkan_pkt.fp_off, so userspace parses the handshake without re-walking L2/L3.
+ * snap_len is how many bytes were actually captured (a 64-byte-granular prefix,
+ * possibly less than the frame carried); userspace classifies what it got and
+ * fails open on truncation. No __u64 members, so the struct's alignment is 4 and
+ * the Go decoder (bpf2go) sees exactly this layout.
+ */
+struct kapkan_fp_event {
+	__u8 src[16];	/* network order; v4 left-aligned in [0..3] */
+	__u8 dst[16];	/* network order; v4 left-aligned in [0..3] */
+	__u16 sport;	/* host order */
+	__u16 dport;	/* host order */
+	__u8 is_v6;
+	__u8 proto;	/* IPPROTO_TCP or IPPROTO_UDP */
+	__u8 axis;	/* enum kapkan_match_ext: which payload opened this */
+	__u8 _pad;
+	__u32 pkt_len;	/* full frame length, for context */
+	__u32 snap_len;	/* bytes captured in data[]; <= KAPKAN_FP_SNAP_LEN */
+	__u32 _pad2;
+	__u8 data[KAPKAN_FP_SNAP_LEN];
+};
+
+/* Per-CPU copy sampler. See the fp_* fields of kapkan_config for the math. */
+struct kapkan_fp_sampler {
+	__u64 last_ns;
+	__u64 tokens_q32;
+};
+
+/*
+ * The copy channel. A single MPSC ring buffer (5.8+, below Kapkan's 5.15
+ * floor). Typeless by design — bpf_ringbuf_reserve returns raw space that the
+ * datapath fills with a struct kapkan_fp_event; bpf2go still emits the Go type
+ * because the program references it. The reader is a userspace ringbuf.Reader.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, KAPKAN_FP_RING_BYTES);
+} kapkan_fp_events SEC(".maps");
+
+/*
+ * The sampler's per-CPU state, one entry. PERCPU so the hot gate is a plain
+ * lookup with no atomics; the aggregate copy ceiling is therefore the
+ * configured rate times the CPU count, a hard constant independent of packet
+ * rate, which is all the DoS bound requires.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, __u32);
+	__type(value, struct kapkan_fp_sampler);
+	__uint(max_entries, 1);
+} kapkan_fp_sampler SEC(".maps");
 
 /* ======================================================================== */
 /* Shared helpers                                                            */

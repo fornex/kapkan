@@ -242,6 +242,8 @@ _Static_assert(KAPKAN_MX_TLS_CLIENT_HELLO == 1u << 0,
 	       "MX_TLS_CLIENT_HELLO must be bit 0: its match term gates without a shift");
 _Static_assert(KAPKAN_MX_QUIC_INITIAL == 1u << 1,
 	       "MX_QUIC_INITIAL must be bit 1: its match term reads (match_ext >> 1) & 1");
+_Static_assert(KAPKAN_FP_SNAP_LEN % 64 == 0,
+	       "fingerprint snapshot must be a multiple of 64: kapkan_fp_emit copies in 64-byte blocks");
 
 struct kapkan_pkt {
 	union kapkan_addr src; /* network order; v4 left-aligned in [0..3] */
@@ -257,6 +259,9 @@ struct kapkan_pkt {
 	__u8 have_ports;
 	__u8 is_tls_chello;   /* TCP payload opens a TLS ClientHello     */
 	__u8 is_quic_initial; /* UDP payload opens a QUIC v1 Initial     */
+	__u32 fp_off;	 /* frame offset of the L4 payload to copy for the
+			  * fingerprint plane; only meaningful when one of the
+			  * two bits above is set. See kapkan_fp_emit.        */
 };
 
 /*
@@ -322,7 +327,7 @@ static __always_inline int kapkan_parse_l4(void *data, void *data_end,
 {
 	if (pkt->proto == IPPROTO_TCP) {
 		struct tcphdr *th = kapkan_pull(data, data_end, off, sizeof(*th));
-		__u32 dataoff, hlen;
+		__u32 dataoff, payload_off, hlen;
 		__u8 *rec;
 
 		if (!th)
@@ -369,10 +374,16 @@ static __always_inline int kapkan_parse_l4(void *data, void *data_end,
 		hlen = (__u32)th->doff * 4;
 		if (hlen < sizeof(*th))
 			return 0;
-		dataoff = *off - (__u32)sizeof(*th) + hlen;
+		payload_off = *off - (__u32)sizeof(*th) + hlen;
+		dataoff = payload_off;
 		rec = kapkan_pull(data, data_end, &dataoff, 6);
-		if (rec && rec[0] == 0x16 && rec[1] == 0x03 && rec[5] == 0x01)
+		if (rec && rec[0] == 0x16 && rec[1] == 0x03 && rec[5] == 0x01) {
 			pkt->is_tls_chello = 1;
+			/* Where the fingerprint plane copies from: the TLS record
+			 * start, i.e. the TCP payload. payload_off is the offset
+			 * before kapkan_pull advanced dataoff past the 6-byte peek. */
+			pkt->fp_off = payload_off;
+		}
 		return 0;
 	}
 
@@ -416,8 +427,13 @@ static __always_inline int kapkan_parse_l4(void *data, void *data_end,
 		qoff = *off;
 		q = kapkan_pull(data, data_end, &qoff, 5);
 		if (q && (q[0] & 0xF0) == 0xC0 && q[1] == 0x00 &&
-		    q[2] == 0x00 && q[3] == 0x00 && q[4] == 0x01)
+		    q[2] == 0x00 && q[3] == 0x00 && q[4] == 0x01) {
 			pkt->is_quic_initial = 1;
+			/* The fingerprint plane copies from the QUIC long header,
+			 * i.e. the UDP payload at *off (before kapkan_pull moved
+			 * qoff past the 5-byte peek). */
+			pkt->fp_off = *off;
+		}
 		return 0;
 	}
 
@@ -1026,6 +1042,164 @@ __kapkan_subprog int kapkan_rl_admit(const struct kapkan_pkt *pkt,
 }
 
 /* ======================================================================== */
+/* The fingerprint plane (E2)                                                 */
+/* ======================================================================== */
+/*
+ * Off-path observation, never a verdict. Both helpers below run only for a
+ * packet the parser recognised as a TLS ClientHello or a QUIC Initial, only
+ * when cfg->fp_enabled, and only AFTER the allowlist/protected checks have let
+ * the packet through — an allowlisted source can never be source-blocked, so
+ * fingerprinting it would be wasted copy. Nothing here can change what
+ * kapkan_xdp_filter returns.
+ */
+
+/*
+ * The copy sampler: a per-CPU token bucket, arithmetically identical to
+ * kapkan_rl_admit's, that caps how many copies this CPU emits per second. It is
+ * what makes the plane immune to becoming its own DoS: copy volume is bounded by
+ * the configured rate, not by packet rate.
+ *
+ * ITS FAILURE DIRECTION IS THE OPPOSITE OF THE REST OF THE FILE. Everywhere
+ * else a lookup miss PASSES the packet (fail open). Here a miss returns 0 = "do
+ * not copy" (fail closed), because a lost copy costs nothing — userspace simply
+ * does not fingerprint that one handshake — while a copy emitted on a failed
+ * lookup would be an uncapped copy, which is the exact attack surface the
+ * sampler exists to remove. Returns 1 to copy, 0 to skip.
+ */
+static __always_inline int kapkan_fp_sample(const struct kapkan_config *cfg, __u64 now)
+{
+	__u32 zero = 0;
+	struct kapkan_fp_sampler *s;
+	__u64 delta, tok, cap, q;
+
+	s = bpf_map_lookup_elem(&kapkan_fp_sampler, &zero);
+	if (!s)
+		return 0; /* fail closed — see the note above */
+
+	delta = now - s->last_ns;
+	if (delta > KAPKAN_RL_REFILL_CAP_NS)
+		delta = KAPKAN_RL_REFILL_CAP_NS;
+	s->last_ns = now;
+
+	q = cfg->fp_rate_per_ns_q32;
+	if (q > KAPKAN_Q32_MAX)
+		q = KAPKAN_Q32_MAX;
+	cap = cfg->fp_burst;
+	if (cap > KAPKAN_Q32_MAX)
+		cap = KAPKAN_Q32_MAX;
+	cap <<= 32;
+
+	tok = s->tokens_q32 + delta * q; /* < 2^32 * 2^32 == 2^64: cannot wrap */
+	if (tok > cap)
+		tok = cap;
+	if (tok < (1ULL << 32)) {
+		s->tokens_q32 = tok;
+		return 0;
+	}
+	s->tokens_q32 = tok - (1ULL << 32);
+	return 1;
+}
+
+/*
+ * The largest L4-payload offset the copy will start from. A recognised
+ * ClientHello/Initial sits a few dozen bytes into the frame (Ethernet + VLAN +
+ * IP(+ext hdrs) + TCP/UDP); this ceiling exists only so the verifier can treat
+ * `data + off` as a BOUNDED variable-offset packet pointer. A packet whose
+ * payload begins past it is not one we can usefully fingerprint, so it is
+ * skipped rather than copied from the wrong place.
+ */
+#define KAPKAN_FP_MAX_OFF 2048
+
+/*
+ * Copy the recognised handshake into the ring. Reserve a fixed-size record,
+ * fill the metadata, then copy a prefix of the L4 payload in fixed 64-byte
+ * blocks.
+ *
+ * THE COPY ADVANCES ONE PACKET POINTER, and that is a verifier requirement, not
+ * a style choice. The payload starts at a RUNTIME offset (fp_off, from the TCP
+ * header length), so `data + off` is a variable-offset packet pointer. Two rules
+ * make the loop verify on the 5.15 floor:
+ *   - `off` is bounded first (the KAPKAN_FP_MAX_OFF guard), or the verifier
+ *     cannot reason about `data + off` at all;
+ *   - a single pointer `p` is ADVANCED by 64 each block and re-checked against
+ *     data_end, rather than re-deriving `data + off + i*64` each iteration.
+ *     Re-deriving resets the proven readable range to zero and the verifier
+ *     rejects the access ("invalid access to packet ... r=0") — which is exactly
+ *     what the first cut of this did.
+ * Each block is a constant-length __builtin_memcpy at a compile-time dst offset,
+ * so no byte loop is needed and the instruction budget stays small. A block that
+ * would run past data_end stops the copy; snap_len records the 64-byte-granular
+ * prefix captured, and userspace fingerprints what it got and fails open.
+ *
+ * __always_inline with a single call site, so the copy is emitted once and the
+ * packet pointers stay direct (a global function cannot take PTR_TO_PACKET).
+ */
+static __always_inline void kapkan_fp_emit(void *data, void *data_end,
+					   const struct kapkan_pkt *pkt)
+{
+	struct kapkan_fp_event *e;
+	__u32 off = pkt->fp_off;
+	__u32 snap = 0;
+	unsigned char *p;
+	int i;
+
+	/* The caller already gates on fp_off <= KAPKAN_FP_MAX_OFF, so this never
+	 * fires at runtime; it stays because it is what bounds `off` for the
+	 * verifier (data + off below must be a bounded variable-offset pointer) and
+	 * it keeps kapkan_fp_emit safe if ever called from a second site. */
+	if (off > KAPKAN_FP_MAX_OFF)
+		return;
+
+	e = bpf_ringbuf_reserve(&kapkan_fp_events, sizeof(*e), 0);
+	if (!e) {
+		kapkan_count(KAPKAN_STAT_FP_RING_FULL, pkt->len);
+		return;
+	}
+
+	__builtin_memcpy(e->src, pkt->src.b, 16);
+	__builtin_memcpy(e->dst, pkt->dst.b, 16);
+	e->sport = pkt->sport;
+	e->dport = pkt->dport;
+	e->is_v6 = pkt->is_v6;
+	e->proto = pkt->proto;
+	e->axis = pkt->is_tls_chello ? KAPKAN_MX_TLS_CLIENT_HELLO
+				     : KAPKAN_MX_QUIC_INITIAL;
+	e->_pad = 0;
+	e->pkt_len = (__u32)pkt->len;
+	e->_pad2 = 0;
+
+	p = (unsigned char *)data + off;
+#pragma unroll
+	for (i = 0; i < KAPKAN_FP_SNAP_LEN / 64; i++) {
+		if (p + 64 > (unsigned char *)data_end)
+			break;
+		__builtin_memcpy(&e->data[i * 64], p, 64);
+		p += 64;
+		snap += 64;
+	}
+	e->snap_len = snap;
+
+	bpf_ringbuf_submit(e, 0);
+	kapkan_count(KAPKAN_STAT_FP_EMITTED, pkt->len);
+}
+
+/*
+ * BTF ANCHOR for struct kapkan_fp_event. A BPF_MAP_TYPE_RINGBUF is typeless —
+ * nothing declares the record as a map key or value — so clang emits the map
+ * but NOT the struct into the object's BTF, and bpf2go's `-type kapkan_fp_event`
+ * would fail to generate the Go decoder (verified: the type is absent from .BTF
+ * without this). A global (external-linkage) function names the type in its
+ * prototype, which forces the full definition into BTF exactly as the prototypes
+ * of kapkan_decide()/kapkan_rule_match() anchor struct kapkan_pkt. It is never
+ * called, so it is never linked into the loaded program and never verified; it
+ * exists only so the record type survives into BTF for the userspace reader.
+ */
+__attribute__((used)) int kapkan_fp_event_btf_anchor(const struct kapkan_fp_event *e)
+{
+	return e != NULL;
+}
+
+/* ======================================================================== */
 /* Applying a matched rule                                                   */
 /* ======================================================================== */
 
@@ -1459,6 +1633,29 @@ int kapkan_xdp_filter(struct xdp_md *ctx)
 	 * token bucket must agree on "now", and a helper call per rule would
 	 * be both slower and semantically worse. */
 	pkt.now = bpf_ktime_get_boot_ns();
+
+	/*
+	 * Fingerprint plane (E2): a sampled, bounded COPY of a recognised TLS
+	 * ClientHello or QUIC Initial to userspace, where JA4 + SNI are computed.
+	 * It sits here — past the allowlist/protected short-circuits, before the
+	 * decision engine — but it is pure observation: it never reads or changes
+	 * `dec`, and skipping it (disabled, throttled, or ring full) is invisible
+	 * to the verdict. See "THE FINGERPRINT PLANE" above.
+	 *
+	 * ELIGIBILITY IS DECIDED HERE, BEFORE THE SAMPLER. A payload starting past
+	 * KAPKAN_FP_MAX_OFF cannot be copied (kapkan_fp_emit could not bound the
+	 * pointer), so such a packet is simply not eligible for fingerprinting: it
+	 * must not spend a sampler token or it would go uncounted (neither emitted,
+	 * throttled, nor ring-full), breaking the "every sampled copy is accounted"
+	 * invariant. Gating fp_off here keeps that invariant exact.
+	 */
+	if (cfg->fp_enabled && (pkt.is_tls_chello || pkt.is_quic_initial) &&
+	    pkt.fp_off <= KAPKAN_FP_MAX_OFF) {
+		if (kapkan_fp_sample(cfg, pkt.now))
+			kapkan_fp_emit(data, data_end, &pkt);
+		else
+			kapkan_count(KAPKAN_STAT_FP_THROTTLED, pkt.len);
+	}
 
 	/* Precedence 3, 4 and 5, all inside one GLOBAL function so the
 	 * verifier checks them once instead of once per parser path. */

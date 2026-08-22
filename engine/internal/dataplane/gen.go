@@ -54,4 +54,4 @@ package dataplane
 // -mcpu=v2 holds the kernel floor at 5.15: v3 emits jump-32 and
 // zero-extension instructions that older verifiers reject.
 //
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -output-stem kapkanxdp -type kapkan_rule -type kapkan_policy_block -type kapkan_profile -type kapkan_bucket -type kapkan_config -type kapkan_counter -type kapkan_lpm_key_v4 -type kapkan_lpm_key_v6 -type kapkan_rl_key_v4 -type kapkan_rl_key_v6 kapkanXDP ../../bpf/kapkan_xdp.c -- -I../../bpf/include -O2 -g -Wall -Werror -mcpu=v2
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -output-stem kapkanxdp -type kapkan_rule -type kapkan_policy_block -type kapkan_profile -type kapkan_bucket -type kapkan_config -type kapkan_counter -type kapkan_lpm_key_v4 -type kapkan_lpm_key_v6 -type kapkan_rl_key_v4 -type kapkan_rl_key_v6 -type kapkan_fp_event kapkanXDP ../../bpf/kapkan_xdp.c -- -I../../bpf/include -O2 -g -Wall -Werror -mcpu=v2

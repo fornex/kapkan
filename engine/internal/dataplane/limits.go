@@ -203,6 +203,12 @@ func fixedSizes() map[string]uint32 {
 		MapProtect6: MaxPrefixes,
 		MapVictims4: MaxPrefixes,
 		MapVictims6: MaxPrefixes,
+		// The fingerprint plane (E2). The sampler is one per-CPU slot; the ring
+		// is a fixed byte size (max_entries on a RINGBUF is its byte length). The
+		// ring is not operator-tunable in E2 — a full ring drops copies rather
+		// than the datapath, so a bigger one only buys the reader more slack.
+		MapFPSampler: 1,
+		MapFPEvents:  FPRingBytes,
 	}
 }
 
