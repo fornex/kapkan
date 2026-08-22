@@ -235,7 +235,10 @@ func TestMatchExtFlagsMatchC(t *testing.T) {
 		t.Fatalf("no KAPKAN_MX_* enumerators found in %s", mapsHeaderPath)
 	}
 
-	want := map[string]uint8{"TLS_CLIENT_HELLO": MatchTLSClientHello}
+	want := map[string]uint8{
+		"TLS_CLIENT_HELLO": MatchTLSClientHello,
+		"QUIC_INITIAL":     MatchQUICInitial,
+	}
 	seen := make(map[string]bool, len(want))
 	var all uint8
 	for _, m := range matches {

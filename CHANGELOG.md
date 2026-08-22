@@ -21,10 +21,11 @@ security-relevant.
 
 ### Config changes
 
-- **Added** `dataplane.static_rules[].match.payload`, whose only value is
-  `tls_client_hello`. It matches a TCP segment opening a TLS ClientHello and
-  requires `proto: tcp`. Optional and absent by default; a config that does not
-  use it behaves exactly as before.
+- **Added** `dataplane.static_rules[].match.payload`, with two values:
+  `tls_client_hello` matches a TCP segment opening a TLS ClientHello and
+  requires `proto: tcp`; `quic_initial` matches a UDP datagram opening a QUIC
+  v1 Initial and requires `proto: udp`. Optional and absent by default; a
+  config that does not use it behaves exactly as before.
 
 ### Added
 
@@ -53,6 +54,44 @@ security-relevant.
   operator credential for its tenant — scope it accordingly and put a remote
   brain behind TLS; the docs also spell out why `src` must stay the socket's
   `$remote_addr`, never a header-derived address.
+
+- **QUIC handshake matching in the data plane.** `payload: quic_initial` is
+  the UDP twin of `tls_client_hello`: it narrows a static rule to datagrams
+  opening a **QUIC v1 Initial** — the packet every QUIC/HTTP-3 handshake
+  starts with and the shape a QUIC handshake flood is made of — so those
+  handshakes can be metered per source with the same `ratelimit` profiles:
+
+  ```yaml
+  ratelimit_profiles:
+    - { name: quic_handshake_cap, pps: 20 }
+  static_rules:
+    - name: cap_quic_handshakes
+      match: { proto: udp, dst_port: 443, payload: quic_initial }
+      action: ratelimit
+      profile: quic_handshake_cap
+  ```
+
+  Give it its own profile rather than sharing the TLS rule's: the per-source
+  token bucket is keyed `{victim, source, profile}`, so rules naming one
+  profile draw down one shared budget per source, while separate profiles
+  meter independently.
+
+  Only the handshake is metered: established QUIC connections use the short
+  header and never match, so a client mid-download is not competing with new
+  handshakes for the ceiling.
+
+  **Bounds, stated rather than buried.** The Initial is recognized from five
+  bytes at fixed offsets (long-header form + Initial type, version 1) and the
+  data plane decrypts nothing. Version negotiation and QUIC v2 do not match;
+  anything too short to decide is forwarded — under-match and forward, as
+  everywhere. There is deliberately **no minimum-size test** despite the RFC's
+  1200-byte floor for client Initials: the rule must meter everything the
+  victim's QUIC stack has to parse, and runt "Initials" are what an attacker
+  would craft to duck a size gate. Unlike a ClientHello — which can only
+  arrive on a completed TCP handshake — an Initial is the connection's first
+  packet, so **sources can be spoofed**; a per-source ceiling still caps each
+  address, but rotating sources moves load to the token-bucket LRU, so size
+  `limits.max_ratelimit_sources` accordingly.
 
 - **The source-block API: `POST /api/v1/dataplane/sources`.** Whoever already
   terminates a victim's traffic — an nginx in front of it, a log exporter, an

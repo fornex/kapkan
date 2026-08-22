@@ -110,12 +110,12 @@
  * Those four are one experiment, run against the program as it stood when the
  * shapes were chosen; they are a RATIO, and the ratio is what the rule below
  * rests on. The absolute figure moves whenever the program does — the TLS
- * ClientHello peek in kapkan_parse_l4() took it to 108,601 (10.9%), because a
- * bounded read inside an __always_inline parser is paid once per parser path
- * and there are many. TestProgramSize prints the current number on every run;
- * read it there rather than trusting this comment, and if a change ever puts
- * the program near the budget, re-read the rule before optimising anything
- * else.
+ * ClientHello peek in kapkan_parse_l4() took it to 108,601 (10.9%), and the
+ * QUIC Initial peek to 112,423 (11.2%), because a bounded read inside an
+ * __always_inline parser is paid once per parser path and there are many.
+ * TestProgramSize prints the current number on every run; read it there
+ * rather than trusting this comment, and if a change ever puts the program
+ * near the budget, re-read the rule before optimising anything else.
  *
  * THE FLOOR KERNEL IS NOT THE WORST CASE, which is worth knowing before
  * anyone budgets headroom for it: the same object measures 89,610 (9.0%) on
@@ -238,6 +238,10 @@ _Static_assert(KAPKAN_RF_SPORT_ANY == 1u << 4, "RF_SPORT_ANY must be bit 4: kapk
 _Static_assert(KAPKAN_RF_DPORT_ANY == 1u << 5, "RF_DPORT_ANY must be bit 5: kapkan_test_mask(f, 5)");
 _Static_assert(KAPKAN_RF_FRAGMENT == 1u << 6, "RF_FRAGMENT must be bit 6: read as (f >> 6) & 1");
 _Static_assert(KAPKAN_RF_IPV6 == 1u << 7, "RF_IPV6 must be bit 7: read as (f >> 7) & 1");
+_Static_assert(KAPKAN_MX_TLS_CLIENT_HELLO == 1u << 0,
+	       "MX_TLS_CLIENT_HELLO must be bit 0: its match term gates without a shift");
+_Static_assert(KAPKAN_MX_QUIC_INITIAL == 1u << 1,
+	       "MX_QUIC_INITIAL must be bit 1: its match term reads (match_ext >> 1) & 1");
 
 struct kapkan_pkt {
 	union kapkan_addr src; /* network order; v4 left-aligned in [0..3] */
@@ -251,7 +255,8 @@ struct kapkan_pkt {
 	__u8 is_v6;
 	__u8 is_frag;
 	__u8 have_ports;
-	__u8 is_tls_chello; /* TCP payload opens a TLS ClientHello       */
+	__u8 is_tls_chello;   /* TCP payload opens a TLS ClientHello     */
+	__u8 is_quic_initial; /* UDP payload opens a QUIC v1 Initial     */
 };
 
 /*
@@ -373,12 +378,46 @@ static __always_inline int kapkan_parse_l4(void *data, void *data_end,
 
 	if (pkt->proto == IPPROTO_UDP) {
 		struct udphdr *uh = kapkan_pull(data, data_end, off, sizeof(*uh));
+		__u32 qoff;
+		__u8 *q;
 
 		if (!uh)
 			return -1;
 		pkt->sport = bpf_ntohs(uh->source);
 		pkt->dport = bpf_ntohs(uh->dest);
 		pkt->have_ports = 1;
+
+		/*
+		 * QUIC v1 Initial peek — KAPKAN_MX_QUIC_INITIAL, the UDP twin of
+		 * the TLS peek above. Five bytes at fixed offsets, and that is
+		 * the whole feature:
+		 *
+		 *   [0]    0xC0..0xCF  long-header form (bit 7) + the QUIC fixed
+		 *                      bit (bit 6) + packet type Initial (bits
+		 *                      5-4 zero); the low four bits are
+		 *                      reserved/PN-length and are not tested
+		 *   [1..4] 0x00000001  QUIC version 1
+		 *
+		 * What deliberately does NOT match: version negotiation (version
+		 * 0), QUIC v2 (0x6b3343cf, which also renumbers Initial), and
+		 * anything shorter than five bytes — all leave the bit CLEAR and
+		 * the packet is ordinary UDP. Under-match and forward, never the
+		 * reverse.
+		 *
+		 * RFC 9000 requires a client Initial to arrive in a >=1200-byte
+		 * datagram, and that floor is deliberately NOT tested here: a
+		 * rule on this bit must meter everything the victim's QUIC stack
+		 * has to parse, and a flood of runt Initials is exactly the
+		 * traffic an attacker would craft to slip under a size gate.
+		 * Unlike the TCP arm there is no header-length arithmetic — the
+		 * payload starts right after the 8-byte UDP header, so there is
+		 * nothing attacker-controlled between *off and the peek.
+		 */
+		qoff = *off;
+		q = kapkan_pull(data, data_end, &qoff, 5);
+		if (q && (q[0] & 0xF0) == 0xC0 && q[1] == 0x00 &&
+		    q[2] == 0x00 && q[3] == 0x00 && q[4] == 0x01)
+			pkt->is_quic_initial = 1;
 		return 0;
 	}
 
@@ -771,6 +810,14 @@ int kapkan_rule_match(const struct kapkan_rule *r,
 	 * this bit existed keeps matching exactly what it used to. */
 	bad |= (__u32)(r->match_ext & KAPKAN_MX_TLS_CLIENT_HELLO) &
 	       ((__u32)pkt->is_tls_chello ^ 1);
+
+	/* MX_QUIC_INITIAL, one bit up. The shift collapses the flag to 0/1
+	 * before it can gate the term — bit 1's raw value is 2, and `2 & 1`
+	 * would erase the term no matter what the packet is. The TLS term
+	 * above skips the shift only because its flag IS bit 0; the
+	 * _Static_asserts at the top of this file hold both in place. */
+	bad |= (__u32)((r->match_ext >> 1) & 1) &
+	       ((__u32)pkt->is_quic_initial ^ 1);
 
 	bad |= ((__u32)r->proto ^ (__u32)pkt->proto) &
 	       kapkan_test_mask(f, 3); /* RF_PROTO_ANY */

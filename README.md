@@ -269,12 +269,17 @@ dataplane:
   ratelimit_profiles:           # named ceilings, referenced by static rules
     - { name: icmp_cap, mbps: 10 }
     - { name: handshake_cap, pps: 20 }
+    - { name: quic_handshake_cap, pps: 20 }
 
   static_rules:                 # always-on operator policy, first match wins
     - name: cap_tls_handshakes  # per-source ceiling on new TLS handshakes
       match: { proto: tcp, dst_port: 443, payload: tls_client_hello }
       action: ratelimit
       profile: handshake_cap
+    - name: cap_quic_handshakes # ...and its own ceiling for QUIC/HTTP-3
+      match: { proto: udp, dst_port: 443, payload: quic_initial }
+      action: ratelimit
+      profile: quic_handshake_cap
     - name: drop_chargen
       match: { proto: udp, src_port: 19 }
       action: drop
@@ -330,12 +335,13 @@ of the future edge role. Full contract:
 A `ratelimit` action is enforced **per source address** — each source gets its own token
 bucket, which is the one thing BGP FlowSpec structurally cannot express, since its
 traffic-rate caps an aggregate that attackers and legitimate clients then compete for.
-`match.payload: tls_client_hello` narrows a rule to TCP segments opening a TLS
-ClientHello, which is what a **TLS handshake flood** is made of and what a SYN-flags rule
-cannot see, because those connections are established. It is read from a fixed offset with
-no stream reassembly, so a split ClientHello does not match and is forwarded; it needs
-`proto: tcp`, and it does not cover HTTP/3, whose handshake is encrypted inside QUIC on
-UDP. Requirements,
+`match.payload` narrows a rule to the shape of a handshake, one value per transport:
+`tls_client_hello` matches TCP segments opening a TLS ClientHello — a **TLS handshake
+flood**, which a SYN-flags rule cannot see because those connections are established — and
+`quic_initial` matches UDP datagrams opening a QUIC v1 Initial, the packet every
+QUIC/HTTP-3 handshake starts with. Both are read from fixed offsets with no reassembly and
+no decryption: a split ClientHello, a QUIC v2 or version-negotiation packet, and anything
+too short to decide do not match and are forwarded. Requirements,
 capabilities, tuning and the measured block rates are in the
 [data-plane guide](https://kapkan.io/docs/dataplane); `kapkan dataplane status` reports
 whether the kernel is actually filtering, and works with the daemon stopped.

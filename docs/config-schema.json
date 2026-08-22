@@ -381,7 +381,8 @@
                   },
                   "payload": {
                     "enum": [
-                      "tls_client_hello"
+                      "tls_client_hello",
+                      "quic_initial"
                     ],
                     "type": "string"
                   },
