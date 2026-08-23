@@ -227,9 +227,12 @@ var (
 
 	// FingerprintEventsTotal counts fingerprint-plane ring events by outcome:
 	// classified, blocked (a JA4 on the blocklist was source-blocked),
-	// block_error (BlockSource refused — allowlisted/protected/full), unparsed
-	// (a truncated or non-ClientHello capture), quic_skipped (QUIC Initial,
-	// pending its own sub-PR), malformed (a short ring record), unknown_axis.
+	// would_block (a match in dry-run: recorded, nothing installed), suppressed
+	// (a repeat of a source already actioned within its cooldown), block_error
+	// (BlockSource refused — allowlisted/protected/full), unparsed (a truncated
+	// or non-ClientHello capture), quic_skipped (QUIC Initial, pending its own
+	// sub-PR), malformed (a short ring record), unknown_axis, panic (a recovered
+	// classify panic).
 	FingerprintEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "fingerprint",

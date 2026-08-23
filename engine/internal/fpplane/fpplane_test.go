@@ -27,15 +27,16 @@ type blockCall struct {
 	reason         string
 }
 
-// fakeBlocker captures calls and can be made to fail.
+// fakeBlocker captures calls and can be made to fail or report dry-run.
 type fakeBlocker struct {
-	calls []blockCall
-	err   error
+	calls  []blockCall
+	err    error
+	dryRun bool
 }
 
-func (f *fakeBlocker) block(victim, source netip.Addr, ttl time.Duration, reason string) error {
+func (f *fakeBlocker) block(victim, source netip.Addr, ttl time.Duration, reason string) (bool, error) {
 	f.calls = append(f.calls, blockCall{victim, source, ttl, reason})
-	return f.err
+	return f.dryRun, f.err
 }
 
 func be16(v uint16) []byte { return []byte{byte(v >> 8), byte(v)} }
@@ -93,6 +94,8 @@ func newTestReader(fb *fakeBlocker, pol Policy) *Reader {
 		block:  fb.block,
 		policy: func() Policy { return pol },
 		log:    discardLog(),
+		now:    time.Now,
+		recent: make(map[string]time.Time),
 	}
 }
 
@@ -166,6 +169,42 @@ func TestReaderBlockErrorIsNonFatal(t *testing.T) {
 	r.handle(fpRecord(testSrc, testDst, 51000, 443, dataplane.MatchTLSClientHello, ch))
 	if len(fb.calls) != 1 {
 		t.Fatalf("blocker calls = %d, want 1 (attempted)", len(fb.calls))
+	}
+}
+
+func TestReaderDryRunStillCallsBlockSource(t *testing.T) {
+	ch := clientHelloRecord("evil.example.com")
+	res, _ := fingerprint.TLSClientHello(ch)
+	fb := &fakeBlocker{dryRun: true}
+	r := newTestReader(fb, Policy{Blocklist: map[string]struct{}{res.JA4: {}}, TTL: time.Minute})
+	// In dry-run the reader still calls BlockSource (which records + audits and
+	// installs nothing) and must not panic or error; it just reports would-block.
+	r.handle(fpRecord(testSrc, testDst, 51000, 443, dataplane.MatchTLSClientHello, ch))
+	if len(fb.calls) != 1 {
+		t.Fatalf("blocker calls = %d, want 1 (dry-run still calls BlockSource)", len(fb.calls))
+	}
+}
+
+// TestReaderDedupsRepeatedSource proves an already-actioned source is not
+// re-blocked on every sampled copy, and is refreshed once its cooldown lapses.
+func TestReaderDedupsRepeatedSource(t *testing.T) {
+	ch := clientHelloRecord("evil.example.com")
+	res, _ := fingerprint.TLSClientHello(ch)
+	fb := &fakeBlocker{}
+	clock := time.Unix(1000, 0)
+	r := newTestReader(fb, Policy{Blocklist: map[string]struct{}{res.JA4: {}}, TTL: 10 * time.Second})
+	r.now = func() time.Time { return clock } // cooldown = TTL/2 = 5s
+
+	rec := fpRecord(testSrc, testDst, 51000, 443, dataplane.MatchTLSClientHello, ch)
+	r.handle(rec)
+	r.handle(rec) // within the 5s cooldown → suppressed
+	if len(fb.calls) != 1 {
+		t.Fatalf("blocker calls = %d, want 1 (repeat within cooldown deduped)", len(fb.calls))
+	}
+	clock = clock.Add(6 * time.Second) // past the cooldown
+	r.handle(rec)
+	if len(fb.calls) != 2 {
+		t.Fatalf("blocker calls = %d, want 2 (refreshed after cooldown)", len(fb.calls))
 	}
 }
 

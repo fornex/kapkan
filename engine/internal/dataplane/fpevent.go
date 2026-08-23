@@ -47,8 +47,8 @@ func (e *FPEvent) Payload() []byte {
 	if end > len(e.Data) {
 		end = len(e.Data)
 	}
-	off := int(e.PayloadOff)
-	if off < 0 || off >= end {
+	off := int(e.PayloadOff) // uint16, so never negative
+	if off >= end {
 		return nil
 	}
 	return e.Data[off:end]

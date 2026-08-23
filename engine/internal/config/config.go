@@ -2715,6 +2715,11 @@ func validateDataplaneBlock(d *Dataplane) (DataplaneSettings, error) {
 // block with stray values never blocks startup.
 func validateFingerprint(fp *DataplaneFingerprint) error {
 	if !fp.Enabled {
+		// Zero the kernel-affecting knob so a cosmetic edit to sample_pps on a
+		// disabled plane never trips the restart-required diff — it has no effect
+		// while the plane is off (mirrors how a disabled dataplane block resolves
+		// to the zero DataplaneSettings).
+		fp.SamplePPS = 0
 		return nil
 	}
 	if fp.SamplePPS == 0 {
@@ -3238,7 +3243,7 @@ func (s *Store) Reload() (*Config, error) {
 	// shadow-map flip; attachment and map sizing cannot change under a loaded
 	// program, and DataplaneSettings holds exactly those fields.
 	if next.DataplaneCfg != prev.DataplaneCfg {
-		return nil, fmt.Errorf("reload: dataplane attachment settings (interfaces, xdp_mode, pin_path, limits) cannot change at runtime (restart required)")
+		return nil, fmt.Errorf("reload: dataplane attachment settings (interfaces, xdp_mode, pin_path, limits, fingerprint enabled/sample_pps) cannot change at runtime (restart required)")
 	}
 	s.cur.Store(next)
 	return next, nil

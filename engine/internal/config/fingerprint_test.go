@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -40,6 +41,23 @@ func TestFingerprintDefaults(t *testing.T) {
 	}
 	if fp.BlockTTLSeconds != defaultFingerprintBlockTTLSeconds {
 		t.Errorf("block_ttl_seconds default = %d, want %d", fp.BlockTTLSeconds, defaultFingerprintBlockTTLSeconds)
+	}
+}
+
+// TestFingerprintDisabledSamplePPSNoRestart: editing sample_pps while the plane
+// is off has no kernel effect, so it must not resolve to a different (restart-
+// forcing) DataplaneSettings.
+func TestFingerprintDisabledSamplePPSNoRestart(t *testing.T) {
+	parse := func(pps int) DataplaneSettings {
+		cfg, err := Parse([]byte(validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n" +
+			"  fingerprint:\n    enabled: false\n    sample_pps: " + strconv.Itoa(pps) + "\n"))
+		if err != nil {
+			t.Fatalf("parse (pps=%d): %v", pps, err)
+		}
+		return cfg.DataplaneCfg
+	}
+	if a, b := parse(500), parse(600); a != b {
+		t.Errorf("a disabled-plane sample_pps edit forced a restart: %+v vs %+v", a, b)
 	}
 }
 

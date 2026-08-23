@@ -30,11 +30,15 @@ func startFingerprintReader(dp *dataplane.Manager, mit *mitigate.Mitigator, stor
 	if cfg.Dataplane == nil || !cfg.DataplaneCfg.FingerprintEnabled {
 		return nil, nil
 	}
-	// The Blocker adapts the mitigator's BlockSource to fpplane's smaller
-	// contract (no returned record), which keeps fpplane from importing mitigate.
-	block := fpplane.Blocker(func(victim, source netip.Addr, ttl time.Duration, reason string) error {
-		_, err := mit.BlockSource(victim, source, ttl, reason)
-		return err
+	// The Blocker adapts the mitigator's BlockSource to fpplane's contract,
+	// forwarding the block's frozen dry-run flag so the reader reports
+	// would-block vs blocked correctly. This keeps fpplane from importing mitigate.
+	block := fpplane.Blocker(func(victim, source netip.Addr, ttl time.Duration, reason string) (bool, error) {
+		sb, err := mit.BlockSource(victim, source, ttl, reason)
+		if err != nil {
+			return false, err
+		}
+		return sb.DryRun, nil
 	})
 	policy := func() fpplane.Policy { return fingerprintPolicy(store.Get()) }
 	return fpplane.New(dp.FingerprintRing(), block, policy, log.With("component", "fingerprint"))
