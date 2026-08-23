@@ -379,6 +379,16 @@ func (m *Mitigator) rehydrateSourceBlockLocked(s sourceBlockSnapshot, cfg *confi
 	}
 	pairs := m.sourceBlocks[source]
 	if pairs == nil {
+		// Re-check the fp reservation on rehydrate too, the way host/prefix bans
+		// re-check their caps (rehydrateHostLocked/rehydratePrefixLocked): a config
+		// that shrank max_dynamic_rules across the restart must not let the
+		// persisted set exceed the fp budget and reopen the very starvation window
+		// this budget closes.
+		if s.Auto && len(m.fpAnchors) >= fpSourceAnchorBudget(cfg) {
+			m.log.Warn("not rehydrating fingerprint source block; fp budget full under the current config",
+				"source", source.String(), "victim", victim.String())
+			return false
+		}
 		pairs = make(map[netip.Addr]*SourceBlock)
 		m.sourceBlocks[source] = pairs
 		if s.Auto {

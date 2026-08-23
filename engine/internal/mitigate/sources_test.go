@@ -490,6 +490,37 @@ func TestFingerprintBlockAutoPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+// TestFingerprintBudgetRecheckedOnRehydrate: a config that shrinks the budget
+// across a restart must not let the persisted fp set exceed the new fp cap — the
+// starvation window stays closed, matching how bans re-check their caps on
+// rehydrate.
+func TestFingerprintBudgetRecheckedOnRehydrate(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "bans.json")
+	withState := func(y string) string {
+		return strings.Replace(y, "  max_active_bans: 3\n", "  max_active_bans: 3\n  state_file: "+state+"\n", 1)
+	}
+	// Big budget: max_dynamic_rules 160 → 20 slots − 3 bans = 17; fp = 8.
+	clk := &mockClock{t: time.Now()}
+	m1 := newSourceMitigator(t, withState(srcYAML())+"  limits:\n    max_dynamic_rules: 160\n", &dpRecorder{}, clk)
+	victim := netip.MustParseAddr("203.0.113.10")
+	for i := 0; i < 5; i++ { // 5 fp anchors, well under the big fp budget
+		if _, err := m1.BlockSourceFingerprint(victim, netip.MustParseAddr("198.51.100."+strconv.Itoa(10+i)), time.Hour, "ja4:x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m1.flushPersist()
+
+	// Restart into a shrunk budget: max_dynamic_rules 80 → 10 − 3 = 7; fp = 3.
+	m2 := newSourceMitigator(t, withState(srcYAML())+"  limits:\n    max_dynamic_rules: 80\n", &dpRecorder{}, clk)
+	m2.mu.Lock()
+	m2.rehydrateLocked(m2.store.Get())
+	n := len(m2.fpAnchors)
+	m2.mu.Unlock()
+	if n != 3 {
+		t.Fatalf("rehydrated %d fp anchors, want 3 (the shrunk fp budget) — starvation window reopened", n)
+	}
+}
+
 // TestRehydrateDropsWhatItCannotInstall: a restart whose reinstall fails must
 // not leave pairs recorded, gauged and persisted as blocked while the kernel
 // enforces nothing — the source-block counterpart of rehydrated bans being
