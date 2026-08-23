@@ -103,7 +103,12 @@ type sourceBlockSnapshot struct {
 	CreatedAt time.Time  `json:"created_at"`
 	ExpiresAt time.Time  `json:"expires_at"`
 	DryRun    bool       `json:"dry_run,omitempty"`
-	Reason    string     `json:"reason,omitempty"`
+	// Auto keeps the fingerprint-plane attribution across a restart so a
+	// rehydrated fp block still counts against the fp budget, not the operator's.
+	// Field ORDER must match SourceBlock: the sourceBlockSnapshot(sb) conversion
+	// in toSnapshot relies on the two structs being field-identical.
+	Auto   bool   `json:"auto,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 func toSnapshot(b *Ban) banSnapshot {
@@ -374,8 +379,23 @@ func (m *Mitigator) rehydrateSourceBlockLocked(s sourceBlockSnapshot, cfg *confi
 	}
 	pairs := m.sourceBlocks[source]
 	if pairs == nil {
+		// Re-check the fp reservation on rehydrate too, the way host/prefix bans
+		// re-check their caps (rehydrateHostLocked/rehydratePrefixLocked): a config
+		// that shrank max_dynamic_rules across the restart must not let the
+		// persisted set exceed the fp budget and reopen the very starvation window
+		// this budget closes.
+		if s.Auto && len(m.fpAnchors) >= fpSourceAnchorBudget(cfg) {
+			m.log.Warn("not rehydrating fingerprint source block; fp budget full under the current config",
+				"source", source.String(), "victim", victim.String())
+			return false
+		}
 		pairs = make(map[netip.Addr]*SourceBlock)
 		m.sourceBlocks[source] = pairs
+		if s.Auto {
+			// Restore the fingerprint attribution so the fp budget is accounted
+			// correctly across a restart (set once per anchor, as at create time).
+			m.fpAnchors[source] = struct{}{}
+		}
 	} else if pairs[victim] == nil && len(pairs) >= maxRulesPerAttack {
 		// Cannot happen from our own snapshot, but the file is just a file.
 		m.log.Warn("not rehydrating source block; policy block full",
@@ -391,6 +411,7 @@ func (m *Mitigator) rehydrateSourceBlockLocked(s sourceBlockSnapshot, cfg *confi
 		// (see rehydrateHostLocked): the reinstall below is what enforces, and
 		// it honours this flag — a dry_run flip during downtime must win.
 		DryRun: cfg.DryRun,
+		Auto:   s.Auto,
 		Reason: s.Reason,
 	}
 	return true

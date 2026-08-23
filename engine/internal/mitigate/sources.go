@@ -64,6 +64,10 @@ type SourceBlock struct {
 	// DryRun is the config's dry-run flag frozen at creation, exactly as a
 	// ban freezes it: a dry-run pair is recorded and audited, installs nothing.
 	DryRun bool `json:"dry_run"`
+	// Auto is true when the fingerprint plane installed this block (a JA4 match)
+	// rather than an operator/API caller. Its anchor is budgeted separately so an
+	// attacker-craftable, spoofable trigger cannot starve operator source blocks.
+	Auto bool `json:"auto,omitempty"`
 	// Reason is the caller's note, carried into the audit trail.
 	Reason string `json:"reason,omitempty"`
 }
@@ -98,16 +102,32 @@ var (
 	ErrSourceSlotsFull = errors.New(
 		"no policy slots left for source blocks: slots are shared with bans and every ban must keep " +
 			"its own; raise dataplane.limits.max_dynamic_rules or wait for blocks to expire")
+	ErrFingerprintBlocksFull = errors.New(
+		"the fingerprint plane's source-block budget is full: it is capped at half the anchor budget so " +
+			"a spoofed crafted-JA4 flood cannot starve operator/API source blocks; existing fp blocks " +
+			"age out on their TTL")
 )
 
 // ErrSourceBlockNotFound is UnblockSource's miss (API: 404).
 var ErrSourceBlockNotFound = errors.New("no such source block")
 
-// BlockSource installs (or refreshes) a source→victim drop pair with the given
-// TTL. A pair that already exists keeps its CreatedAt and takes the new TTL
-// and reason — the refresh contract an exporter needs to keep a persistent
-// offender blocked without unblock/re-block churn.
+// BlockSource installs (or refreshes) an OPERATOR/API source→victim drop pair
+// with the given TTL. A pair that already exists keeps its CreatedAt and takes
+// the new TTL and reason — the refresh contract an exporter needs to keep a
+// persistent offender blocked without unblock/re-block churn.
 func (m *Mitigator) BlockSource(victim, source netip.Addr, ttl time.Duration, reason string) (*SourceBlock, error) {
+	return m.blockSource(victim, source, ttl, reason, false)
+}
+
+// BlockSourceFingerprint is BlockSource for the fingerprint plane (a JA4 match).
+// Its anchor draws from a SEPARATE, smaller budget (fpSourceAnchorBudget, half
+// the pool) so that a spoofable, attacker-craftable JA4 trigger cannot fill the
+// shared anchor budget and starve operator/API source blocks.
+func (m *Mitigator) BlockSourceFingerprint(victim, source netip.Addr, ttl time.Duration, reason string) (*SourceBlock, error) {
+	return m.blockSource(victim, source, ttl, reason, true)
+}
+
+func (m *Mitigator) blockSource(victim, source netip.Addr, ttl time.Duration, reason string, auto bool) (*SourceBlock, error) {
 	victim, source = victim.Unmap(), source.Unmap()
 	if !victim.IsValid() || !source.IsValid() {
 		return nil, fmt.Errorf("%w: victim and source must both be valid addresses", ErrSourceBlockInput)
@@ -147,6 +167,14 @@ func (m *Mitigator) BlockSource(victim, source netip.Addr, ttl time.Duration, re
 		rejectSourceBlock("slots_full")
 		return nil, ErrSourceSlotsFull
 	}
+	// A NEW fingerprint anchor is additionally capped at fpSourceAnchorBudget
+	// (half the pool), the reservation that keeps a spoofed crafted-JA4 flood
+	// from consuming every slot and starving operator blocks. Only a new anchor
+	// is checked: adding a victim to an existing fp anchor consumes no new slot.
+	if auto && pairs == nil && len(m.fpAnchors) >= fpSourceAnchorBudget(cfg) {
+		rejectSourceBlock("fp_budget_full")
+		return nil, ErrFingerprintBlocksFull
+	}
 
 	sb := &SourceBlock{
 		Source:    source,
@@ -154,6 +182,7 @@ func (m *Mitigator) BlockSource(victim, source netip.Addr, ttl time.Duration, re
 		CreatedAt: now,
 		ExpiresAt: now.Add(ttl),
 		DryRun:    cfg.DryRun,
+		Auto:      auto,
 		Reason:    reason,
 	}
 	if old != nil {
@@ -162,6 +191,12 @@ func (m *Mitigator) BlockSource(victim, source netip.Addr, ttl time.Duration, re
 	if pairs == nil {
 		pairs = make(map[netip.Addr]*SourceBlock)
 		m.sourceBlocks[source] = pairs
+		if auto {
+			// Attribute the anchor to the fingerprint plane for the separate
+			// budget. Keyed by source and set once at creation, so a later block
+			// of any origin on this anchor never changes its attribution.
+			m.fpAnchors[source] = struct{}{}
+		}
 	}
 	pairs[victim] = sb
 
@@ -209,6 +244,7 @@ func (m *Mitigator) UnblockSource(victim, source netip.Addr) (*SourceBlock, erro
 	delete(pairs, victim)
 	if len(pairs) == 0 {
 		delete(m.sourceBlocks, source)
+		delete(m.fpAnchors, source)
 	}
 	// Reinstall whatever remains for this source (or withdraw its policy when
 	// nothing does). A failure cannot resurrect the removed pair — the
@@ -294,6 +330,20 @@ func sourceAnchorBudget(cfg *config.Config) int {
 	return budget
 }
 
+// fpSourceAnchorBudget caps how many distinct sources the FINGERPRINT plane may
+// block, at HALF the shared anchor budget. That reservation is what guarantees
+// operator/API source blocks always have the other half: the fp trigger is a
+// stateless, spoofable, attacker-craftable JA4 match (a single spoofed packet
+// with a crafted ClientHello suffices), so its blocks must never be able to
+// consume the whole pool. Floors at 0 — on a budget too small to split, fp gets
+// no anchors rather than crowding out the operator's.
+func fpSourceAnchorBudget(cfg *config.Config) int {
+	if half := sourceAnchorBudget(cfg) / 2; half > 0 {
+		return half
+	}
+	return 0
+}
+
 // reinstallSourceLocked makes the kernel match this source's live pairs: one
 // policy block anchored at the source, one rule per non-dry-run pair, each
 // with its own remaining TTL. No live pairs means withdrawing the policy.
@@ -376,6 +426,7 @@ func (m *Mitigator) dropSourceLocked(source netip.Addr, cause error) error {
 	n := len(m.sourceBlocks[source])
 	delete(m.sourceBlocks, source)
 	delete(m.sourceInstalled, source)
+	delete(m.fpAnchors, source)
 	m.log.Error("source blocks dropped: the kernel could not be made to match the table",
 		"source", source.String(), "pairs_dropped", n, "err", cause)
 	return cause
@@ -423,6 +474,7 @@ func (m *Mitigator) sweepSourceBlocksLocked(now time.Time, cfg *config.Config) {
 		}
 		if len(pairs) == 0 {
 			delete(m.sourceBlocks, source)
+			delete(m.fpAnchors, source)
 		}
 		// A reinstall failure drops the source's remaining pairs and logs —
 		// reinstallSourceLocked's invariant; changed already covers the gauge.
