@@ -264,6 +264,19 @@ via a published per-version constant) — impractical in eBPF, ~a hundred lines 
 kernel copies, userspace classifies: both charters hold. Copy volume under flood is capped
 (sampled) — the plane must never become its own DoS.
 
+**A JA4 block is a source block on the CLAIMED source, and the trigger is spoofable.** The
+ClientHello is recognised by a stateless fixed-offset match — there is no completed TCP
+handshake behind it — so a single spoofed packet carrying a crafted ClientHello whose JA4 an
+operator has blocklisted will source-block whatever address the packet claims. That is the
+source-block model working as designed (it acts on the address on the wire), but with an
+attacker-craftable trigger it means an operator's JA4 blocklist can be turned into a lever to
+block a chosen third party's traffic toward the victim. Two consequences follow, and both are
+load-bearing: a JA4 blocklist is "block this fingerprint's *claimed* sources", never "these
+are bad hosts"; and the fingerprint plane's blocks draw from a **separate, smaller budget**
+(half the source-anchor pool) so that such a flood can fill only its own reservation and can
+never starve the operator/API source blocks that share the pool. Every fp block is still
+TTL'd and dry-run-honouring, so a misfire ages out on its own.
+
 ---
 
 ## 7. Non-goals

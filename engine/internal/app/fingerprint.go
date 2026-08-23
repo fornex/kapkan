@@ -34,7 +34,10 @@ func startFingerprintReader(dp *dataplane.Manager, mit *mitigate.Mitigator, stor
 	// forwarding the block's frozen dry-run flag so the reader reports
 	// would-block vs blocked correctly. This keeps fpplane from importing mitigate.
 	block := fpplane.Blocker(func(victim, source netip.Addr, ttl time.Duration, reason string) (bool, error) {
-		sb, err := mit.BlockSource(victim, source, ttl, reason)
+		// BlockSourceFingerprint (not BlockSource) so the block draws from the
+		// fingerprint plane's separate, smaller anchor budget — a spoofable JA4
+		// trigger must never starve operator/API source blocks.
+		sb, err := mit.BlockSourceFingerprint(victim, source, ttl, reason)
 		if err != nil {
 			return false, err
 		}

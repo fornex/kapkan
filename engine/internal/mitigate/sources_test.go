@@ -399,6 +399,97 @@ func TestBlockSourceAnchorBudget(t *testing.T) {
 	}
 }
 
+// TestFingerprintBlockBudget: fingerprint-plane blocks are capped at half the
+// anchor budget, so a spoofed crafted-JA4 flood cannot fill the pool and starve
+// operator source blocks — operators keep the other half.
+func TestFingerprintBlockBudget(t *testing.T) {
+	// max_dynamic_rules 80 → 10 slots − 3 bans = 7 anchor budget; fp gets 7/2 = 3.
+	yaml := srcYAML() + "  limits:\n    max_dynamic_rules: 80\n"
+	m := newSourceMitigator(t, yaml, &dpRecorder{}, nil)
+	victim := netip.MustParseAddr("203.0.113.10")
+	fp := func(src string) error {
+		_, err := m.BlockSourceFingerprint(victim, netip.MustParseAddr(src), time.Minute, "ja4:x")
+		return err
+	}
+
+	for i := 0; i < 3; i++ { // the fp half
+		if err := fp("198.51.100." + strconv.Itoa(10+i)); err != nil {
+			t.Fatalf("fp block %d refused under the fp budget: %v", i, err)
+		}
+	}
+	// The 4th fp anchor is refused by the fp budget even though the shared pool
+	// still has 4 slots free — that reservation is the whole point.
+	if err := fp("198.51.100.20"); !errors.Is(err, ErrFingerprintBlocksFull) {
+		t.Fatalf("4th fp block err = %v, want ErrFingerprintBlocksFull", err)
+	}
+	// Operators keep their half: 4 more anchors (3 fp + 4 op = 7) all succeed.
+	for i := 0; i < 4; i++ {
+		if _, err := m.BlockSource(victim, netip.MustParseAddr("198.51.100."+strconv.Itoa(30+i)), time.Minute, ""); err != nil {
+			t.Fatalf("operator block %d refused despite reserved headroom: %v", i, err)
+		}
+	}
+	// Now the shared pool is full.
+	if _, err := m.BlockSource(victim, netip.MustParseAddr("198.51.100.99"), time.Minute, ""); !errors.Is(err, ErrSourceSlotsFull) {
+		t.Fatalf("err = %v, want ErrSourceSlotsFull at the pool cap", err)
+	}
+}
+
+// TestFingerprintBudgetFreesOnUnblock: releasing an fp anchor returns its slot to
+// the fp budget.
+func TestFingerprintBudgetFreesOnUnblock(t *testing.T) {
+	yaml := srcYAML() + "  limits:\n    max_dynamic_rules: 80\n" // fp budget = 3
+	m := newSourceMitigator(t, yaml, &dpRecorder{}, nil)
+	victim := netip.MustParseAddr("203.0.113.10")
+	for i := 0; i < 3; i++ {
+		if _, err := m.BlockSourceFingerprint(victim, netip.MustParseAddr("198.51.100."+strconv.Itoa(10+i)), time.Minute, "ja4:x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.BlockSourceFingerprint(victim, netip.MustParseAddr("198.51.100.20"), time.Minute, "ja4:x"); !errors.Is(err, ErrFingerprintBlocksFull) {
+		t.Fatalf("want ErrFingerprintBlocksFull, got %v", err)
+	}
+	if _, err := m.UnblockSource(victim, netip.MustParseAddr("198.51.100.10")); err != nil {
+		t.Fatalf("unblock: %v", err)
+	}
+	if _, err := m.BlockSourceFingerprint(victim, netip.MustParseAddr("198.51.100.20"), time.Minute, "ja4:x"); err != nil {
+		t.Fatalf("fp block after freeing a slot refused: %v", err)
+	}
+}
+
+// TestFingerprintBlockAutoPersistsAcrossRestart: the fp attribution survives a
+// restart, so a rehydrated fp block still counts against the fp budget rather
+// than the operator's.
+func TestFingerprintBlockAutoPersistsAcrossRestart(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "bans.json")
+	yaml := strings.Replace(srcYAML(), "  max_active_bans: 3\n", "  max_active_bans: 3\n  state_file: "+state+"\n", 1)
+	clk := &mockClock{t: time.Now()}
+	m1 := newSourceMitigator(t, yaml, &dpRecorder{}, clk)
+	if _, err := m1.BlockSourceFingerprint(netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("198.51.100.7"), time.Hour, "ja4:x"); err != nil {
+		t.Fatal(err)
+	}
+	mustBlock(t, m1, "203.0.113.10", "198.51.100.8", time.Hour) // an operator block
+	m1.flushPersist()
+
+	m2 := newSourceMitigator(t, yaml, &dpRecorder{}, clk)
+	m2.mu.Lock()
+	m2.rehydrateLocked(m2.store.Get())
+	_, fpTracked := m2.fpAnchors[netip.MustParseAddr("198.51.100.7")]
+	_, opTracked := m2.fpAnchors[netip.MustParseAddr("198.51.100.8")]
+	m2.mu.Unlock()
+	if !fpTracked {
+		t.Error("rehydrated fp anchor missing from fpAnchors → it would draw on the operator budget")
+	}
+	if opTracked {
+		t.Error("operator anchor wrongly attributed to the fp budget after rehydrate")
+	}
+	for _, sb := range m2.SourceBlocks() {
+		want := sb.Source == netip.MustParseAddr("198.51.100.7")
+		if sb.Auto != want {
+			t.Errorf("rehydrated block %s Auto = %v, want %v", sb.Source, sb.Auto, want)
+		}
+	}
+}
+
 // TestRehydrateDropsWhatItCannotInstall: a restart whose reinstall fails must
 // not leave pairs recorded, gauged and persisted as blocked while the kernel
 // enforces nothing — the source-block counterpart of rehydrated bans being

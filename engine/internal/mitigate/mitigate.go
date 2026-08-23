@@ -198,6 +198,14 @@ type Mitigator struct {
 	// a source whose every pair is dry-run never reaches the backend at all —
 	// not even for a withdraw. Dry-run touching no map is a shipped promise.
 	sourceInstalled map[netip.Addr]bool
+	// fpAnchors is the set of source anchors created by the fingerprint plane
+	// (BlockSourceFingerprint), as opposed to operator/API blocks. Its size is
+	// capped separately (fpSourceAnchorBudget) so a spoofed crafted-JA4 flood
+	// cannot fill the shared anchor budget and starve operator source blocks.
+	// Membership is set when an fp anchor is created and cleared wherever an
+	// anchor is removed; it is keyed by source, so a later block of any origin on
+	// the same anchor never changes its attribution.
+	fpAnchors map[netip.Addr]struct{}
 
 	// banWindowStart / bansInWindow implement the ban.max_bans_per_window storm
 	// guard as a fixed window. Guarded by mu.
@@ -280,6 +288,7 @@ func New(store *config.Store, log *slog.Logger, opts ...Option) (*Mitigator, err
 		prefixBans:      make(map[netip.Prefix]*Ban),
 		sourceBlocks:    make(map[netip.Addr]map[netip.Addr]*SourceBlock),
 		sourceInstalled: make(map[netip.Addr]bool),
+		fpAnchors:       make(map[netip.Addr]struct{}),
 		now:             time.Now,
 	}
 	if sf := store.Get().Ban.StateFile; sf != "" {
