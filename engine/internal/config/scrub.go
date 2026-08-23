@@ -128,6 +128,16 @@ func (s *ScrubConfig) validate() error {
 	if !set.Enabled {
 		return fmt.Errorf("dataplane.enabled must not be false on a scrub node (remove the block's enabled key, or do not run this role)")
 	}
+	// The fingerprint plane has no reader on the scrub role — only the main
+	// daemon (kapkan) constructs it. Accepting it here would arm the kernel copy
+	// path (paying the sampling cost, filling and dropping the ring) with nothing
+	// draining it or enforcing a JA4 block: a silent no-op, exactly the "a plane
+	// that does not run" hazard. Fail closed until a scrub-side reader exists.
+	if s.Dataplane.Fingerprint.Enabled {
+		return fmt.Errorf("dataplane.fingerprint is not supported on the scrub role: " +
+			"the JA4 reader runs only in the main kapkan daemon, so enabling it here would " +
+			"copy handshakes in the kernel with nothing to classify or block them")
+	}
 	s.DataplaneCfg = set
 	return nil
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/engine"
+	"github.com/kapkan-io/kapkan/internal/fpplane"
 	"github.com/kapkan-io/kapkan/internal/geoip"
 	"github.com/kapkan-io/kapkan/internal/ingest"
 	"github.com/kapkan-io/kapkan/internal/metrics"
@@ -49,7 +50,11 @@ type App struct {
 	dpReport *dataplaneReporter
 	// dpCounters measures each active data-plane ban's in-kernel drop counters
 	// and publishes them onto the ban records. nil exactly when Dataplane is nil.
-	dpCounters  *banCounterScraper
+	dpCounters *banCounterScraper
+	// fpReader drains the fingerprint copy ring and source-blocks JA4-blocklisted
+	// clients. nil unless dataplane.fingerprint.enabled. Closed before the
+	// data-plane maps it reads, so its Run goroutine joins cleanly at shutdown.
+	fpReader    *fpplane.Reader
 	log         *slog.Logger
 	cancel      context.CancelFunc
 	storeCancel context.CancelFunc
@@ -148,6 +153,13 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 		a.API.SetDataplane(a.dpReport)
 		a.dpCounters = newBanCounterScraper(dpInstaller, mit, log, a.dpReport)
 	}
+	// The fingerprint plane (E2): drains the copy ring and source-blocks
+	// JA4-blocklisted clients. nil unless dataplane.fingerprint.enabled. A
+	// failure to open the ring the operator asked for is fatal, like the data
+	// plane itself — a plane that silently does not run is the thing to avoid.
+	if a.fpReader, err = startFingerprintReader(a.Dataplane, mit, store, log); err != nil {
+		return nil, fmt.Errorf("start fingerprint plane: %w", err)
+	}
 	a.API.SetReloadHook(a.ApplyReload)
 
 	// Always expose the running version as a zero-egress info metric.
@@ -236,6 +248,14 @@ func (a *App) Start(ctx context.Context) error {
 		go func() { defer a.wg.Done(); a.dpCounters.run(runCtx) }()
 	}
 
+	// The fingerprint-plane reader. Joined through wg so its Run has returned
+	// before closeDataplane closes the ring it reads; Stop calls fpReader.Close
+	// first to unblock the blocking ring Read (cancelling runCtx does not).
+	if a.fpReader != nil {
+		a.wg.Add(1)
+		go func() { defer a.wg.Done(); a.fpReader.Run(runCtx) }()
+	}
+
 	// Update check (opt-in): detached, never on the startup path, stops on ctx.
 	// No shutdown drain — it holds no state that must be flushed.
 	if a.Update != nil {
@@ -262,7 +282,8 @@ func (a *App) Stop() {
 	if a.cancel != nil {
 		a.cancel()
 	}
-	a.wg.Wait() // engine, consumeEvents and persistTraffic have stopped producing
+	a.closeFPReader() // unblock the ring Read so its goroutine joins wg.Wait below
+	a.wg.Wait()       // engine, consumeEvents and persistTraffic have stopped producing
 	a.finalBanCounterScrape()
 	a.Mitigate.Stop()
 	// After the mitigator: nothing installs rules any more, so honouring
@@ -293,6 +314,7 @@ func (a *App) StopForRestart() {
 	if a.cancel != nil {
 		a.cancel()
 	}
+	a.closeFPReader()
 	a.wg.Wait()
 	a.finalBanCounterScrape()
 	a.Mitigate.SignalRestart(context.Background())
@@ -336,6 +358,19 @@ func (a *App) closeDataplane(onExit string) {
 	}
 	if err := a.Dataplane.Close(onExit); err != nil {
 		a.log.Error("shutting down the XDP data plane", "err", err)
+	}
+}
+
+// closeFPReader stops the fingerprint reader. It MUST run before a.wg.Wait (the
+// reader's Run blocks in a ring Read that context cancellation does not
+// interrupt — only closing the ring does) and therefore before closeDataplane
+// closes the ring's map. A nil reader (plane disabled) is a no-op.
+func (a *App) closeFPReader() {
+	if a.fpReader == nil {
+		return
+	}
+	if err := a.fpReader.Close(); err != nil {
+		a.log.Error("closing the fingerprint reader", "err", err)
 	}
 }
 

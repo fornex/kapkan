@@ -235,6 +235,33 @@ func prefixStringSet(p []netip.Prefix) map[string]bool {
 
 // TestOptionsFromConfigRefusesDisabled proves a caller cannot accidentally get a
 // zero Options for a disabled block and attach it to nothing.
+func TestOptionsFromConfigFingerprint(t *testing.T) {
+	cfg := mustParse(t, `
+dataplane:
+  interfaces: ["eth0"]
+  fingerprint:
+    enabled: true
+    sample_pps: 750
+    block_ttl_seconds: 120
+    ja4_blocklist: ["t13d1516h2_8daaf6152771_e5627efa2ab1"]
+`)
+	opts, err := OptionsFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("OptionsFromConfig: %v", err)
+	}
+	if !opts.FPEnabled {
+		t.Error("FPEnabled = false, the config enabled the plane")
+	}
+	if opts.FPSamplePPS != 750 {
+		t.Errorf("FPSamplePPS = %d, want 750", opts.FPSamplePPS)
+	}
+	// FPBurst rides at 0 through Options; PutConfig defaults it from the rate, so
+	// the burst is a kernel-write concern, not a config-mapping one.
+	if opts.FPBurst != 0 {
+		t.Errorf("FPBurst = %d, want 0", opts.FPBurst)
+	}
+}
+
 func TestOptionsFromConfigRefusesDisabled(t *testing.T) {
 	for name, extra := range map[string]string{
 		"absent":   "",
@@ -318,6 +345,11 @@ dataplane:
 			wantRestart:   true,
 			wantSubstring: "xdp_mode",
 		},
+		{
+			name:          "fingerprint enabled — restart",
+			wantRestart:   true,
+			wantSubstring: "fingerprint",
+		},
 	}
 
 	prevCfg := mustParse(t, dpBase)
@@ -335,6 +367,7 @@ dataplane:
 		"max_ratelimit_sources shrunk — restart": "\ndataplane:\n  interfaces: [\"eth0\"]\n  limits:\n    max_ratelimit_sources: 65536\n",
 		"an interface added — restart":           "\ndataplane:\n  interfaces: [\"eth0\", \"eth1\"]\n  limits:\n    max_ratelimit_sources: 1048576\n",
 		"xdp_mode changed — restart":             "\ndataplane:\n  interfaces: [\"eth0\"]\n  xdp_mode: generic\n  limits:\n    max_ratelimit_sources: 1048576\n",
+		"fingerprint enabled — restart":          "\ndataplane:\n  interfaces: [\"eth0\"]\n  fingerprint:\n    enabled: true\n  limits:\n    max_ratelimit_sources: 1048576\n",
 	}
 
 	for _, tc := range cases {

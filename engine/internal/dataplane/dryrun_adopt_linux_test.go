@@ -74,7 +74,7 @@ func TestEffectiveDryRunReadsTheKernel(t *testing.T) {
 	}
 	// Flip the flag underneath the manager, the way a reload does.
 	if err := m.WithMaps(func(maps *Maps, _ uint32) error {
-		return putFlags(maps, true, false)
+		return putFlags(maps, Options{DryRun: true})
 	}); err != nil {
 		t.Fatalf("putFlags: %v", err)
 	}

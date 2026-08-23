@@ -870,8 +870,35 @@ type Dataplane struct {
 	// StaticRules are always-on operator rules, evaluated after the
 	// allowlists and before any rule the detector installs.
 	StaticRules []StaticRule `yaml:"static_rules"`
+	// Fingerprint configures the off-path fingerprint plane (E2): the datapath
+	// copies sampled TLS ClientHello / QUIC Initial handshakes to userspace,
+	// where JA4 is computed and a source whose JA4 is on ja4_blocklist is
+	// blocked in the kernel through the source-block path.
+	Fingerprint DataplaneFingerprint `yaml:"fingerprint"`
 	// Limits size the BPF maps. Changing them requires a restart.
 	Limits DataplaneLimits `yaml:"limits"`
+}
+
+// DataplaneFingerprint configures the off-path fingerprint plane. It never sees
+// or forwards client bytes beyond the handshake prefix the kernel already
+// recognises; it MEASURES (JA4) and pushes enforcement to the cheapest layer
+// (an XDP source block), matching the edge charter.
+type DataplaneFingerprint struct {
+	// Enabled turns the plane on. Requires dataplane.enabled. Because it flips a
+	// kernel flag written at attach and starts the copy sampler, changing it
+	// requires a restart (like the interface set).
+	Enabled bool `yaml:"enabled"`
+	// SamplePPS caps handshake copies per second per CPU — the in-kernel sampler
+	// that stops the plane from becoming its own DoS under a handshake flood.
+	// 0 selects the default. Restart required.
+	SamplePPS uint64 `yaml:"sample_pps"`
+	// BlockTTLSeconds is how long a JA4-triggered source block lives in the
+	// kernel before it must be refreshed; 0 selects the default. Hot-reloads.
+	BlockTTLSeconds int `yaml:"block_ttl_seconds"`
+	// JA4Blocklist is the set of JA4 client fingerprints to source-block on
+	// sight (exact match, e.g. "t13d1516h2_8daaf6152771_e5627efa2ab1").
+	// Hot-reloads: editing it takes effect on the next handshake, no restart.
+	JA4Blocklist []string `yaml:"ja4_blocklist"`
 }
 
 // RateLimitProfile is a named traffic ceiling. At least one of pps/mbps must
@@ -982,6 +1009,14 @@ const (
 	defaultMaxStaticRules      = 256
 	defaultMaxRatelimitSources = 1 << 20
 	defaultStaleAfterSeconds   = 15
+
+	// Fingerprint-plane defaults.
+	defaultFingerprintSamplePPS       = 1000
+	defaultFingerprintBlockTTLSeconds = 300
+	// maxFingerprintBlockTTLSeconds mirrors mitigate.MaxSourceBlockTTL (24h): a
+	// JA4 block is a source block, and a mistaken one must heal itself within a
+	// day even if nobody refreshes or notices it.
+	maxFingerprintBlockTTLSeconds = 24 * 60 * 60
 )
 
 // maxDataplaneRulesPerBan mirrors the mitigator's per-attack rule cap: an
@@ -1029,6 +1064,13 @@ type DataplaneSettings struct {
 	MaxDynamicRules     int
 	MaxStaticRules      int
 	MaxRatelimitSources int
+	// FingerprintEnabled and FingerprintSamplePPS are the fingerprint-plane
+	// knobs that touch the kernel (the fp_enabled flag and the copy sampler),
+	// resolved here as comparable scalars so a reload detects a change to them
+	// and demands a restart, exactly like the interface set. The blocklist and
+	// TTL are deliberately NOT here — they hot-reload, read live by the reader.
+	FingerprintEnabled   bool
+	FingerprintSamplePPS uint64
 }
 
 // Neighbor is one BGP peer.
@@ -2483,7 +2525,13 @@ func validateDataplaneBlock(d *Dataplane) (DataplaneSettings, error) {
 	}
 	if d.Enabled != nil && !*d.Enabled {
 		// Present but switched off: zero the resolved form so a cosmetic edit
-		// to a disabled block never demands a restart.
+		// to a disabled block never demands a restart. A fingerprint block that
+		// is on while the data plane is off is a misconfiguration, not a no-op:
+		// say so rather than silently ignoring it.
+		if d.Fingerprint.Enabled {
+			return DataplaneSettings{}, fmt.Errorf(
+				"dataplane.fingerprint.enabled requires dataplane.enabled: true (the plane runs in the kernel data plane)")
+		}
 		return DataplaneSettings{}, nil
 	}
 
@@ -2644,16 +2692,82 @@ func validateDataplaneBlock(d *Dataplane) (DataplaneSettings, error) {
 	if n := len(d.StaticRules); n > d.Limits.MaxStaticRules {
 		return DataplaneSettings{}, fmt.Errorf("dataplane: %d static_rules exceed limits.max_static_rules (%d)", n, d.Limits.MaxStaticRules)
 	}
+	if err := validateFingerprint(&d.Fingerprint); err != nil {
+		return DataplaneSettings{}, err
+	}
 	return DataplaneSettings{
-		Enabled:             true,
-		Interfaces:          strings.Join(d.Interfaces, ","),
-		XDPMode:             d.XDPMode,
-		PinPath:             d.PinPath,
-		OnExit:              d.OnExit,
-		MaxDynamicRules:     d.Limits.MaxDynamicRules,
-		MaxStaticRules:      d.Limits.MaxStaticRules,
-		MaxRatelimitSources: d.Limits.MaxRatelimitSources,
+		Enabled:              true,
+		Interfaces:           strings.Join(d.Interfaces, ","),
+		XDPMode:              d.XDPMode,
+		PinPath:              d.PinPath,
+		OnExit:               d.OnExit,
+		MaxDynamicRules:      d.Limits.MaxDynamicRules,
+		MaxStaticRules:       d.Limits.MaxStaticRules,
+		MaxRatelimitSources:  d.Limits.MaxRatelimitSources,
+		FingerprintEnabled:   d.Fingerprint.Enabled,
+		FingerprintSamplePPS: d.Fingerprint.SamplePPS,
 	}, nil
+}
+
+// validateFingerprint checks and defaults the fingerprint-plane block. It runs
+// only when the data plane is enabled (its caller has already returned for a
+// disabled block), and is a no-op when the plane itself is off so a disabled
+// block with stray values never blocks startup.
+func validateFingerprint(fp *DataplaneFingerprint) error {
+	if !fp.Enabled {
+		// Zero the kernel-affecting knob so a cosmetic edit to sample_pps on a
+		// disabled plane never trips the restart-required diff — it has no effect
+		// while the plane is off (mirrors how a disabled dataplane block resolves
+		// to the zero DataplaneSettings).
+		fp.SamplePPS = 0
+		return nil
+	}
+	if fp.SamplePPS == 0 {
+		fp.SamplePPS = defaultFingerprintSamplePPS
+	}
+	if fp.BlockTTLSeconds == 0 {
+		fp.BlockTTLSeconds = defaultFingerprintBlockTTLSeconds
+	}
+	if fp.BlockTTLSeconds < 1 || fp.BlockTTLSeconds > maxFingerprintBlockTTLSeconds {
+		return fmt.Errorf("dataplane.fingerprint.block_ttl_seconds must be within [1, %d], got %d",
+			maxFingerprintBlockTTLSeconds, fp.BlockTTLSeconds)
+	}
+	seen := make(map[string]struct{}, len(fp.JA4Blocklist))
+	for i, j := range fp.JA4Blocklist {
+		if !looksLikeJA4(j) {
+			return fmt.Errorf("dataplane.fingerprint.ja4_blocklist[%d]: %q is not a JA4 fingerprint "+
+				"(want a_b_c, e.g. t13d1516h2_8daaf6152771_e5627efa2ab1)", i, j)
+		}
+		if _, dup := seen[j]; dup {
+			return fmt.Errorf("dataplane.fingerprint.ja4_blocklist[%d]: duplicate entry %q", i, j)
+		}
+		seen[j] = struct{}{}
+	}
+	return nil
+}
+
+// looksLikeJA4 accepts the canonical JA4 shape a_b_c where b and c are the two
+// 12-hex-char hashes. It is a typo guard, not a full grammar for JA4's variants
+// (this build only ever matches against the canonical form it computes).
+func looksLikeJA4(s string) bool {
+	parts := strings.Split(s, "_")
+	if len(parts) != 3 || parts[0] == "" {
+		return false
+	}
+	return isHex12(parts[1]) && isHex12(parts[2])
+}
+
+func isHex12(s string) bool {
+	if len(s) != 12 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // DataplaneEnabled reports whether the in-kernel filter is configured and on.
@@ -3129,7 +3243,7 @@ func (s *Store) Reload() (*Config, error) {
 	// shadow-map flip; attachment and map sizing cannot change under a loaded
 	// program, and DataplaneSettings holds exactly those fields.
 	if next.DataplaneCfg != prev.DataplaneCfg {
-		return nil, fmt.Errorf("reload: dataplane attachment settings (interfaces, xdp_mode, pin_path, limits) cannot change at runtime (restart required)")
+		return nil, fmt.Errorf("reload: dataplane attachment settings (interfaces, xdp_mode, pin_path, limits, fingerprint enabled/sample_pps) cannot change at runtime (restart required)")
 	}
 	s.cur.Store(next)
 	return next, nil

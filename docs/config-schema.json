@@ -305,6 +305,28 @@
           "type": "boolean",
           "x-optional": true
         },
+        "fingerprint": {
+          "additionalProperties": false,
+          "properties": {
+            "block_ttl_seconds": {
+              "type": "integer"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "ja4_blocklist": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "x-optional": true
+            },
+            "sample_pps": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
         "interfaces": {
           "items": {
             "pattern": "^[A-Za-z0-9._@:-]{1,15}$",

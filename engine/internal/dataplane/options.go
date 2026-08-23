@@ -45,6 +45,14 @@ type Options struct {
 	// DropMalformed and DryRun go straight into kapkan_cfg[0].
 	DropMalformed bool
 	DryRun        bool
+	// Fingerprint-plane kernel knobs (E2), stamped into kapkan_cfg[0] like the
+	// two flags above. FPEnabled turns the copy path on; FPSamplePPS is the
+	// per-CPU copy ceiling; FPBurst is the sampler bucket depth (0 defaults to a
+	// second of the rate). The JA4 blocklist and block TTL are NOT here — they
+	// are read live by the userspace reader and hot-reload.
+	FPEnabled   bool
+	FPSamplePPS uint64
+	FPBurst     uint64
 	// Limits size the maps. See Limits.MapSizing.
 	Limits Limits
 	// Policy is the static (operator) half: allowlist, protected list,
@@ -181,6 +189,10 @@ func optionsFromBlock(d *config.Dataplane, set config.DataplaneSettings, dryRun 
 		// in a map, so it rides on Options and is re-stamped on reload.
 		DropMalformed: d.DropMalformed,
 		DryRun:        dryRun,
+		// Fingerprint kernel knobs from the resolved (comparable) settings, so a
+		// change to them is caught as restart-required on reload.
+		FPEnabled:   set.FingerprintEnabled,
+		FPSamplePPS: set.FingerprintSamplePPS,
 		Limits: Limits{
 			MaxDynamicRules:     set.MaxDynamicRules,
 			MaxStaticRules:      set.MaxStaticRules,
@@ -324,6 +336,15 @@ func (o Options) restartRequired(next Options) string {
 	}
 	if o.Limits != next.Limits {
 		diffs = append(diffs, fmt.Sprintf("limits %+v -> %+v", o.Limits, next.Limits))
+	}
+	// The fingerprint plane's kernel knobs: enabling it flips a flag written at
+	// attach and starts the copy sampler, so a change is restart-required —
+	// exactly the fields config carries in the comparable DataplaneSettings, so
+	// this manager check and Store.Reload's check stay in lockstep. (The blocklist
+	// and TTL are NOT here; they hot-reload, read live by the reader.)
+	if o.FPEnabled != next.FPEnabled || o.FPSamplePPS != next.FPSamplePPS {
+		diffs = append(diffs, fmt.Sprintf("fingerprint enabled=%v/pps=%d -> enabled=%v/pps=%d",
+			o.FPEnabled, o.FPSamplePPS, next.FPEnabled, next.FPSamplePPS))
 	}
 	return strings.Join(diffs, "; ")
 }

@@ -55,6 +55,7 @@ func TestParseScrubRejections(t *testing.T) {
 		{"dataplane disabled", strings.Replace(validScrubYAML, "dataplane:\n", "dataplane:\n  enabled: false\n", 1), "must not be false"},
 		{"unknown key", validScrubYAML + "policy: {}\n", "field policy not found"},
 		{"dataplane keys validated", strings.Replace(validScrubYAML, "[eth0]", "[\"bad iface!\"]", 1), "not a valid interface name"},
+		{"fingerprint on scrub", validScrubYAML + "  fingerprint:\n    enabled: true\n", "fingerprint is not supported on the scrub role"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

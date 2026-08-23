@@ -19,6 +19,8 @@ package dataplane
 import (
 	"fmt"
 	"runtime"
+
+	"github.com/cilium/ebpf"
 )
 
 // Manager is the non-Linux placeholder. It is never non-nil: Open is the only
@@ -62,3 +64,8 @@ func (m *Manager) ProfileID(string) (uint32, bool) { return 0, false }
 
 // Close does nothing.
 func (m *Manager) Close(string) error { return nil }
+
+// FingerprintRing has no ring here. Unlike Maps() (deliberately absent), this
+// returns a typed nil so the app's fingerprint wiring compiles on every host;
+// Open never returns a non-nil Manager, so it is never actually called.
+func (m *Manager) FingerprintRing() *ebpf.Map { return nil }
