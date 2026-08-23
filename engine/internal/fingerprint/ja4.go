@@ -69,22 +69,59 @@ func ja4c(ch clientHello) string {
 // zeroHash is JA4's sentinel for an empty cipher or extension list.
 const zeroHash = "000000000000"
 
-// ja4Version maps the negotiated TLS version to two characters. It prefers the
+// ja4Version maps the negotiated version to two characters. It prefers the
 // highest non-GREASE value in supported_versions (0x002b); absent that, the
 // ClientHello's legacy version.
+//
+// "Highest" is by RECENCY, not by numeric value: DTLS codepoints are inverted
+// (DTLS 1.3 = 0xfefc < DTLS 1.0 = 0xfeff), so a numeric max would pick the
+// oldest DTLS version. versionRank orders them correctly.
 func ja4Version(ch clientHello) string {
 	v := ch.legacyVer
 	if ch.hasSupportedVersions {
-		best := uint16(0)
+		bestRank := 0 // known versions rank >= 1; an all-unknown list keeps legacy
 		for _, sv := range ch.supportedVersions {
-			if !isGREASE(sv) && sv > best {
-				best = sv
+			if isGREASE(sv) {
+				continue
+			}
+			if r := versionRank(sv); r > bestRank {
+				bestRank, v = r, sv
 			}
 		}
-		if best != 0 {
-			v = best
-		}
 	}
+	return versionString(v)
+}
+
+// versionRank orders TLS/SSL/DTLS versions by recency (newer = higher). Unknown
+// codepoints rank 0 so they never displace a known version but still fall back
+// to the legacy field. Kept in lockstep with versionString.
+func versionRank(v uint16) int {
+	switch v {
+	case 0x0304: // TLS 1.3
+		return 9
+	case 0x0303: // TLS 1.2
+		return 8
+	case 0x0302: // TLS 1.1
+		return 7
+	case 0x0301: // TLS 1.0
+		return 6
+	case 0x0300: // SSL 3.0
+		return 5
+	case 0x0002: // SSL 2.0
+		return 4
+	case 0xfefc: // DTLS 1.3
+		return 3
+	case 0xfefd: // DTLS 1.2
+		return 2
+	case 0xfeff: // DTLS 1.0
+		return 1
+	default:
+		return 0
+	}
+}
+
+// versionString is JA4's two-character rendering of a version codepoint.
+func versionString(v uint16) string {
 	switch v {
 	case 0x0304:
 		return "13"

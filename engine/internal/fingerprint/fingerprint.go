@@ -163,12 +163,21 @@ func parseTLSClientHello(record []byte) (clientHello, error) {
 		return ch, ErrTruncated
 	}
 
-	// extensions <0..2^16-1> — optional in the struct, always present in practice.
+	// extensions <0..2^16-1>. The field is OPTIONAL: a ClientHello may end right
+	// after compression_methods (legal for TLS 1.2 and earlier) and simply have
+	// no extensions. But a length field that IS present and cannot be satisfied —
+	// the snapshot cut the extensions region (routine for a modern hello whose
+	// post-quantum key shares run past the capture ceiling), or an attacker
+	// inflated the length to erase SNI/ALPN/extensions from the fingerprint —
+	// must be ErrTruncated, NOT a silent zero-extension JA4 that misclassifies.
+	// Distinguish the two by what remains: nothing left = no field (legal);
+	// anything left must parse as a valid extensions vector.
+	if h.remaining() == 0 {
+		return ch, nil
+	}
 	extAll, ok := h.vec16()
 	if !ok {
-		// No extensions at all is legal (very old clients). JA4 handles the
-		// empty-extension case; return what we have.
-		return ch, nil
+		return ch, ErrTruncated
 	}
 	if err := ch.parseExtensions(extAll); err != nil {
 		return ch, err
@@ -177,9 +186,10 @@ func parseTLSClientHello(record []byte) (clientHello, error) {
 }
 
 // parseExtensions records each extension type in order and decodes the few whose
-// contents JA4/SNI/ALPN need. An extension whose body is truncated ends the walk
-// at what was captured rather than failing the whole parse — the fields already
-// read are still usable, and a truncated tail is the snapshot's doing.
+// contents JA4/SNI/ALPN need. A truncated or lying inner extension length is
+// ErrTruncated — the whole parse fails open to "unclassified" rather than
+// computing a JA4 over a partial extension list, which would be unstable and
+// would drop fields (matching how the outer extensions length is handled).
 func (ch *clientHello) parseExtensions(ext []byte) error {
 	r := cursor{b: ext}
 	for r.remaining() > 0 {
