@@ -242,8 +242,8 @@ _Static_assert(KAPKAN_MX_TLS_CLIENT_HELLO == 1u << 0,
 	       "MX_TLS_CLIENT_HELLO must be bit 0: its match term gates without a shift");
 _Static_assert(KAPKAN_MX_QUIC_INITIAL == 1u << 1,
 	       "MX_QUIC_INITIAL must be bit 1: its match term reads (match_ext >> 1) & 1");
-_Static_assert(KAPKAN_FP_SNAP_LEN % 64 == 0,
-	       "fingerprint snapshot must be a multiple of 64: kapkan_fp_emit copies in 64-byte blocks");
+_Static_assert(KAPKAN_FP_SNAP_LEN <= 2048,
+	       "fingerprint snapshot bounds the kapkan_fp_emit copy unroll; keep it modest for the verifier and program size");
 
 struct kapkan_pkt {
 	union kapkan_addr src; /* network order; v4 left-aligned in [0..3] */
@@ -1102,23 +1102,31 @@ static __always_inline int kapkan_fp_sample(const struct kapkan_config *cfg, __u
 
 /*
  * Copy the recognised handshake into the ring. Reserve a fixed-size record, fill
- * the metadata, then copy a prefix of the FRAME in fixed 64-byte blocks.
+ * the metadata, then copy a byte-granular prefix of the FRAME (see below).
  *
  * THE COPY STARTS AT FRAME OFFSET 0, and that is a verifier requirement, not a
  * style choice. The L4 payload starts at a RUNTIME offset (fp_off, from the TCP
  * header length), so copying from `data + fp_off` would advance a VARIABLE-offset
  * packet pointer — which the 5.15/6.1/6.6 verifiers reject ("invalid access to
  * packet ... r=0") even though 6.12 accepts it. Starting at `data` (a
- * compile-time constant offset) keeps `p` a constant-offset packet pointer at
- * every unrolled step (p, p+64, p+128, ...), exactly like the VLAN and IPv6
- * extension-header walks that already verify on 5.15. The cost is that data[]
+ * compile-time constant offset) keeps every access a constant-offset packet
+ * pointer at each unrolled step (data[0], data[1], data[2], ...), exactly like
+ * the VLAN and IPv6 extension-header walks that already verify on 5.15. The cost
+ * is that data[]
  * holds the frame from the L2 header, not the payload; payload_off records where
  * the handshake begins so userspace reads data[payload_off : snap_len].
  *
- * Each block is a constant-length __builtin_memcpy at a compile-time dst offset,
- * so no byte loop is needed and the instruction budget stays small. A block that
- * would run past data_end stops the copy; snap_len is the 64-byte-granular frame
- * prefix captured, and userspace fingerprints what it got and fails open.
+ * The copy is byte-granular: e->data[i] = data[i] for a compile-time-CONSTANT i
+ * (the unroll index), which keeps every packet read at a constant offset from
+ * `data` — the same property that lets the loop verify on 5.15 — while capturing
+ * the EXACT frame prefix. An earlier 64-byte-block form floored snap_len to a
+ * multiple of 64 and dropped the final partial block, truncating a ClientHello
+ * whose length is not a multiple of 64 (e.g. a 76-byte hello copied as 62 bytes)
+ * so its last extension was lost and JA4 could not be computed. A byte past
+ * data_end stops the copy; snap_len is the exact prefix captured, and userspace
+ * fingerprints what it got and fails open. The loop is bounded by the constant
+ * KAPKAN_FP_SNAP_LEN, and the emit is sampled, so the per-copy cost is off the
+ * per-packet hot path.
  *
  * __always_inline with a single call site, so the copy is emitted once and the
  * packet pointers stay direct (a global function cannot take PTR_TO_PACKET).
@@ -1155,12 +1163,14 @@ static __always_inline void kapkan_fp_emit(void *data, void *data_end,
 
 	p = (unsigned char *)data;
 #pragma unroll
-	for (i = 0; i < KAPKAN_FP_SNAP_LEN / 64; i++) {
-		if (p + 64 > (unsigned char *)data_end)
+	for (i = 0; i < KAPKAN_FP_SNAP_LEN; i++) {
+		/* Byte i occupies [p+i, p+i+1); it must lie within the frame. The
+		 * offset i is a compile-time constant (unrolled), so p+i+1 is a
+		 * constant-offset packet pointer the 5.15 verifier accepts. */
+		if (p + i + 1 > (unsigned char *)data_end)
 			break;
-		__builtin_memcpy(&e->data[i * 64], p, 64);
-		p += 64;
-		snap += 64;
+		e->data[i] = p[i];
+		snap = (__u32)i + 1;
 	}
 	e->snap_len = snap;
 

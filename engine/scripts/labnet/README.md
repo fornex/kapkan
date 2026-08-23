@@ -61,6 +61,34 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   and the source-block API — with real TLS/QUIC traffic, the one shape the
   block-rate fixtures deliberately do not cover.
 
+- **`edge-e2.sh`** — the edge track's E2 acceptance ("fingerprint plane,
+  off-path", [`engine/docs/edge-spec.md`](../../docs/edge-spec.md)) on real
+  kernel objects: the same nginx behind a kapkan daemon, but now the kernel
+  **copies** a bounded, sampled prefix of each TLS ClientHello to userspace, the
+  daemon computes **JA4**, and a blocklisted JA4 becomes a source block on the
+  existing XDP path. It proves the two E2 promises end to end — a client whose
+  JA4 is blocklisted is blocked in XDP purely from the copied ClientHello (nginx
+  never completes or logs the crafted handshake, so nothing on the terminator
+  drove it — off-path), and the copy volume stays capped under a ClientHello
+  flood (the per-CPU sampler sheds most copies while emitting only a bounded few,
+  so the plane never becomes its own DoS). The attacker's ClientHello is a fixed,
+  minimal record whose JA4 is computed by `engine/internal/fingerprint` from the
+  exact wire bytes, so the two cannot drift. Same one-binary recipe as E1:
+
+  ```sh
+  mkdir -p /tmp/lab
+  (cd engine && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/kapkan ./cmd/kapkan)
+  docker run --privileged --rm -v /tmp/lab:/lab -v "$PWD:/w" -w /w debian:12-slim \
+    sh -c 'apt-get update -qq && apt-get install -y -qq \
+             iproute2 nginx openssl curl python3 procps iputils-ping >/dev/null \
+           && KAPKAN=/lab/kapkan bash engine/scripts/labnet/edge-e2.sh'
+  ```
+
+  A reader-initiated JA4 block is logged and metered but not yet written to the
+  audit store (the mitigator has no audit handle from the fp reader — the known
+  `source=auto` deferral), so the rig asserts the reader's block log, not an
+  audit record; auditing reader blocks is tracked for E2.4.
+
 ## VRF
 
 The return-path recipe is verified with **policy routing** (route-leaking:

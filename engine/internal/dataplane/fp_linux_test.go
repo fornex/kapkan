@@ -104,12 +104,14 @@ func decodeFP(t *testing.T, raw []byte) FPEvent {
 
 // frameSnapshot is what the datapath should report for a frame of frameLen bytes
 // whose L4 payload is the trailing payloadLen bytes: the payload's offset within
-// data[] (the copy starts at frame offset 0) and the captured length — a
-// 64-byte-granular frame prefix, capped at the snapshot ceiling. Derived from the
-// built frame rather than hardcoded so the assertions do not bake in header sizes.
+// data[] (the copy starts at frame offset 0) and the captured length — the EXACT
+// frame prefix, capped at the snapshot ceiling. The copy is byte-granular, so a
+// frame shorter than the ceiling is captured whole (no 64-byte flooring, which
+// used to truncate a ClientHello's final extension). Derived from the built frame
+// rather than hardcoded so the assertions do not bake in header sizes.
 func frameSnapshot(frameLen, payloadLen int) (payloadOff, snapLen int) {
 	payloadOff = frameLen - payloadLen
-	snapLen = (frameLen / 64) * 64
+	snapLen = frameLen
 	if snapLen > FPSnapLen {
 		snapLen = FPSnapLen
 	}
@@ -159,7 +161,7 @@ func TestFingerprintCopiesClientHello(t *testing.T) {
 		t.Errorf("payload_off = %d, want %d", ev.PayloadOff, payloadOff)
 	}
 	if int(ev.SnapLen) != wantSnap {
-		t.Errorf("snap_len = %d, want %d (64-byte-granular frame prefix)", ev.SnapLen, wantSnap)
+		t.Errorf("snap_len = %d, want %d (exact frame prefix)", ev.SnapLen, wantSnap)
 	}
 	if ev.Data[payloadOff] != 0x16 || ev.Data[payloadOff+1] != 0x03 || ev.Data[payloadOff+5] != 0x01 {
 		t.Errorf("data[payload_off..+5] = % x, want a ClientHello record head (16 03 .. 01)",
@@ -195,15 +197,14 @@ func TestFingerprintCopiesQUICInitial(t *testing.T) {
 	if ev.Dport != 443 {
 		t.Errorf("dport = %d, want 443", ev.Dport)
 	}
-	// The Initial's frame fits under the ceiling, captured to 64-byte
-	// granularity. The ceiling itself is exercised by
-	// TestFingerprintTruncatesAtSnapCeiling.
+	// The Initial's frame fits under the ceiling, captured exactly. The ceiling
+	// itself is exercised by TestFingerprintTruncatesAtSnapCeiling.
 	payloadOff, wantSnap := frameSnapshot(len(pkt), len(payload))
 	if int(ev.PayloadOff) != payloadOff {
 		t.Errorf("payload_off = %d, want %d", ev.PayloadOff, payloadOff)
 	}
 	if int(ev.SnapLen) != wantSnap {
-		t.Errorf("snap_len = %d, want %d (64-byte-granular frame prefix)", ev.SnapLen, wantSnap)
+		t.Errorf("snap_len = %d, want %d (exact frame prefix)", ev.SnapLen, wantSnap)
 	}
 	if ev.Data[payloadOff] != 0xC3 {
 		t.Errorf("data[payload_off] = %#x, want the QUIC long header 0xC3", ev.Data[payloadOff])
@@ -288,7 +289,7 @@ func TestFingerprintCopyCoexistsWithDrop(t *testing.T) {
 
 // TestFingerprintTruncatesAtSnapCeiling drives a payload larger than the
 // snapshot ceiling and proves the capture caps at FPSnapLen exactly — exercising
-// the copy loop's upper bound and the last 64-byte block ([1472:1536]).
+// the copy loop's upper bound at FPSnapLen exactly.
 func TestFingerprintTruncatesAtSnapCeiling(t *testing.T) {
 	objs := loadObjects(t)
 	setFPCfg(t, objs, true, 1_000_000, 1000)
