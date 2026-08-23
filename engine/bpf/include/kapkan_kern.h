@@ -118,6 +118,7 @@ enum bpf_map_type {
 	BPF_MAP_TYPE_LPM_TRIE		= 11,
 	BPF_MAP_TYPE_ARRAY_OF_MAPS	= 12,
 	BPF_MAP_TYPE_HASH_OF_MAPS	= 13,
+	BPF_MAP_TYPE_RINGBUF		= 27, /* fingerprint plane (E2) */
 };
 
 /* bpf_map_update_elem() flags. */

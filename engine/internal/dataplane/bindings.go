@@ -48,6 +48,13 @@ type (
 	RLKeyV4 = kapkanXDPKapkanRlKeyV4
 	// RLKeyV6 keys the IPv6 token-bucket LRU.
 	RLKeyV6 = kapkanXDPKapkanRlKeyV6
+	// FPEvent is one fingerprint-plane copy: struct kapkan_fp_event. The
+	// ring-buffer reader decodes records into this. Data holds SnapLen bytes of
+	// the captured FRAME (from the L2 header — the kernel copies from offset 0
+	// so the loop verifies on every supported kernel); the handshake begins at
+	// PayloadOff, so read Data[PayloadOff:SnapLen]. Bytes past SnapLen are stale
+	// and must be ignored.
+	FPEvent = kapkanXDPKapkanFpEvent
 )
 
 // MapSet returns the loaded maps, so a caller holding Objects can pass them to

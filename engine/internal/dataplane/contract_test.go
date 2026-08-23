@@ -89,6 +89,11 @@ func TestContractMatchesC(t *testing.T) {
 		{"KAPKAN_MAX_PROFILES", MaxProfiles},
 		{"KAPKAN_MAX_PREFIXES", MaxPrefixes},
 		{"KAPKAN_MAX_RULE_STATS", defaultMaxRuleStats},
+
+		// The fingerprint plane (E2). FPSnapLen sizes the FPEvent.Data field the
+		// reader decodes and MUST match the C array; FPRingBytes is the ring size.
+		{"KAPKAN_FP_SNAP_LEN", FPSnapLen},
+		{"KAPKAN_FP_RING_BYTES", FPRingBytes},
 	} {
 		if got := cDefine(t, src, tc.cName); got != tc.goVal {
 			t.Errorf("%s = %d in C, %d in Go", tc.cName, got, tc.goVal)

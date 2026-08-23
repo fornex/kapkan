@@ -269,6 +269,16 @@ type ConfigSpec struct {
 	StaticCount   uint32
 	DryRun        bool
 	DropMalformed bool
+
+	// The fingerprint plane (E2). FPEnabled turns the copy path on; the sampler
+	// then caps copy volume so the plane cannot become its own DoS. FPSamplePPS
+	// is the per-CPU copy ceiling in events/s and FPBurst the bucket depth in
+	// events (0 defaults to one second's worth, mirroring a rate-limit profile).
+	// These gate only the observation ring and never a verdict, so PutConfig may
+	// write them outright with the rest of the config.
+	FPEnabled   bool
+	FPSamplePPS uint64
+	FPBurst     uint64
 }
 
 // PutConfig writes kapkan_cfg[0] outright. Use it at attach; use Activate for
@@ -285,6 +295,15 @@ func PutConfig(m *Maps, s ConfigSpec) error {
 		StaticCount:      s.StaticCount,
 		DryRun:           b2u8(s.DryRun),
 		DropMalformed:    b2u8(s.DropMalformed),
+		FpEnabled:        b2u8(s.FPEnabled),
+		FpBurst:          s.FPBurst,
+		FpRatePerNsQ32:   q32PerNs(s.FPSamplePPS),
+	}
+	// Default the sampler burst to one second of its rate, exactly as a
+	// rate-limit profile does, so a fresh CPU can emit a burst before the refill
+	// governs. Left at 0 when no rate is set (the plane copies nothing).
+	if s.FPBurst == 0 && s.FPSamplePPS > 0 {
+		cfg.FpBurst = max(s.FPSamplePPS, 1)
 	}
 	if err := m.KapkanCfg.Put(uint32(0), &cfg); err != nil {
 		return fmt.Errorf("dataplane: write kapkan_cfg[0]: %w", err)
