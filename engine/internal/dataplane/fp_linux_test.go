@@ -97,8 +97,23 @@ func decodeFP(t *testing.T, raw []byte) FPEvent {
 	ev.Axis = raw[38]
 	ev.PktLen = binary.LittleEndian.Uint32(raw[40:44])
 	ev.SnapLen = binary.LittleEndian.Uint32(raw[44:48])
+	ev.PayloadOff = binary.LittleEndian.Uint16(raw[48:50])
 	copy(ev.Data[:], raw[52:fpEventBytes])
 	return ev
+}
+
+// frameSnapshot is what the datapath should report for a frame of frameLen bytes
+// whose L4 payload is the trailing payloadLen bytes: the payload's offset within
+// data[] (the copy starts at frame offset 0) and the captured length — a
+// 64-byte-granular frame prefix, capped at the snapshot ceiling. Derived from the
+// built frame rather than hardcoded so the assertions do not bake in header sizes.
+func frameSnapshot(frameLen, payloadLen int) (payloadOff, snapLen int) {
+	payloadOff = frameLen - payloadLen
+	snapLen = (frameLen / 64) * 64
+	if snapLen > FPSnapLen {
+		snapLen = FPSnapLen
+	}
+	return payloadOff, snapLen
 }
 
 // TestFingerprintCopiesClientHello is the core E2.1 promise: a recognised TLS
@@ -138,16 +153,17 @@ func TestFingerprintCopiesClientHello(t *testing.T) {
 	if int(ev.PktLen) != len(pkt) {
 		t.Errorf("pkt_len = %d, want %d (full frame)", ev.PktLen, len(pkt))
 	}
-	// The whole payload fits under the snapshot ceiling, captured to 64-byte
-	// granularity: floor(len/64)*64.
-	wantSnap := (len(payload) / 64) * 64
-	if int(ev.SnapLen) != wantSnap {
-		t.Errorf("snap_len = %d, want %d (64-byte-granular prefix of a %d-byte payload)",
-			ev.SnapLen, wantSnap, len(payload))
+	// data[] is the frame from offset 0; the ClientHello begins at payload_off.
+	payloadOff, wantSnap := frameSnapshot(len(pkt), len(payload))
+	if int(ev.PayloadOff) != payloadOff {
+		t.Errorf("payload_off = %d, want %d", ev.PayloadOff, payloadOff)
 	}
-	// data[] must start at the TLS record, i.e. the six bytes the peek read.
-	if ev.Data[0] != 0x16 || ev.Data[1] != 0x03 || ev.Data[5] != 0x01 {
-		t.Errorf("data[0..5] = % x, want a ClientHello record head (16 03 .. 01)", ev.Data[0:6])
+	if int(ev.SnapLen) != wantSnap {
+		t.Errorf("snap_len = %d, want %d (64-byte-granular frame prefix)", ev.SnapLen, wantSnap)
+	}
+	if ev.Data[payloadOff] != 0x16 || ev.Data[payloadOff+1] != 0x03 || ev.Data[payloadOff+5] != 0x01 {
+		t.Errorf("data[payload_off..+5] = % x, want a ClientHello record head (16 03 .. 01)",
+			ev.Data[payloadOff:payloadOff+6])
 	}
 }
 
@@ -179,15 +195,18 @@ func TestFingerprintCopiesQUICInitial(t *testing.T) {
 	if ev.Dport != 443 {
 		t.Errorf("dport = %d, want 443", ev.Dport)
 	}
-	// The 1200-byte Initial fits under the 1536-byte ceiling, captured to
-	// 64-byte granularity (1200 -> 1152). The ceiling itself is exercised
-	// separately by TestFingerprintTruncatesAtSnapCeiling.
-	wantSnap := (len(payload) / 64) * 64
-	if int(ev.SnapLen) != wantSnap {
-		t.Errorf("snap_len = %d, want %d", ev.SnapLen, wantSnap)
+	// The Initial's frame fits under the ceiling, captured to 64-byte
+	// granularity. The ceiling itself is exercised by
+	// TestFingerprintTruncatesAtSnapCeiling.
+	payloadOff, wantSnap := frameSnapshot(len(pkt), len(payload))
+	if int(ev.PayloadOff) != payloadOff {
+		t.Errorf("payload_off = %d, want %d", ev.PayloadOff, payloadOff)
 	}
-	if ev.Data[0] != 0xC3 {
-		t.Errorf("data[0] = %#x, want the QUIC long header 0xC3", ev.Data[0])
+	if int(ev.SnapLen) != wantSnap {
+		t.Errorf("snap_len = %d, want %d (64-byte-granular frame prefix)", ev.SnapLen, wantSnap)
+	}
+	if ev.Data[payloadOff] != 0xC3 {
+		t.Errorf("data[payload_off] = %#x, want the QUIC long header 0xC3", ev.Data[payloadOff])
 	}
 }
 
@@ -222,8 +241,18 @@ func TestFingerprintCopiesClientHelloIPv6(t *testing.T) {
 	if ev.Src != wantSrc || ev.Dst != wantDst {
 		t.Errorf("addrs = %x -> %x, want %x -> %x", ev.Src, ev.Dst, wantSrc, wantDst)
 	}
-	if ev.Data[0] != 0x16 || ev.Data[1] != 0x03 || ev.Data[5] != 0x01 {
-		t.Errorf("data[0..5] = % x, want a ClientHello record head", ev.Data[0:6])
+	// The v6 payload sits after a 40-byte IPv6 header; the ClientHello begins at
+	// payload_off within the captured frame.
+	payloadOff, wantSnap := frameSnapshot(len(pkt), len(payload))
+	if int(ev.PayloadOff) != payloadOff {
+		t.Errorf("payload_off = %d, want %d", ev.PayloadOff, payloadOff)
+	}
+	if int(ev.SnapLen) != wantSnap {
+		t.Errorf("snap_len = %d, want %d", ev.SnapLen, wantSnap)
+	}
+	if ev.Data[payloadOff] != 0x16 || ev.Data[payloadOff+1] != 0x03 || ev.Data[payloadOff+5] != 0x01 {
+		t.Errorf("data[payload_off..+5] = % x, want a ClientHello record head",
+			ev.Data[payloadOff:payloadOff+6])
 	}
 }
 
@@ -284,8 +313,15 @@ func TestFingerprintTruncatesAtSnapCeiling(t *testing.T) {
 	if int(ev.SnapLen) != FPSnapLen {
 		t.Errorf("snap_len = %d, want %d (capped at the ceiling)", ev.SnapLen, FPSnapLen)
 	}
-	if ev.Data[0] != 0x16 || ev.Data[5] != 0x01 {
-		t.Errorf("data head = % x, want a ClientHello record head", ev.Data[0:6])
+	// The frame (>1536 B) is captured only up to the ceiling, but the ClientHello
+	// head sits at payload_off well within it.
+	payloadOff := len(pkt) - len(payload)
+	if int(ev.PayloadOff) != payloadOff {
+		t.Errorf("payload_off = %d, want %d", ev.PayloadOff, payloadOff)
+	}
+	if ev.Data[payloadOff] != 0x16 || ev.Data[payloadOff+5] != 0x01 {
+		t.Errorf("data[payload_off..] = % x, want a ClientHello record head",
+			ev.Data[payloadOff:payloadOff+6])
 	}
 }
 

@@ -107,13 +107,14 @@
  * (JA4 + SNI). The kernel never classifies — the copy is pure observation and
  * can NEVER change a packet's verdict.
  *
- * KAPKAN_FP_SNAP_LEN is the per-event capture ceiling, in bytes of L4 payload.
- * It is sized to hold a whole QUIC v1 Initial datagram's payload (RFC 9000
- * floors a client Initial at 1200 bytes) so QUIC decryption in userspace has
- * the bytes it needs; a first-segment TLS ClientHello is far smaller and is
- * captured whole. It MUST stay a multiple of 64: the datapath copies in fixed
- * 64-byte blocks so the verifier proves every access without a byte loop (see
- * kapkan_fp_emit).
+ * KAPKAN_FP_SNAP_LEN is the per-event capture ceiling, in bytes of FRAME (from
+ * the L2 header; see struct kapkan_fp_event for why the copy starts at frame
+ * offset 0). It is sized to hold a whole QUIC v1 Initial datagram plus its L2/
+ * L3/L4 headers (RFC 9000 floors a client Initial at 1200 bytes) so QUIC
+ * decryption in userspace has the bytes it needs; a first-segment TLS
+ * ClientHello is far smaller and is captured whole. It MUST stay a multiple of
+ * 64: the datapath copies in fixed 64-byte blocks so the verifier proves every
+ * access without a byte loop (see kapkan_fp_emit).
  *
  * KAPKAN_FP_RING_BYTES is the ring's byte size (power of two, page-aligned).
  * A full ring simply drops the copy and counts KAPKAN_STAT_FP_RING_FULL; it
@@ -685,26 +686,37 @@ struct {
  */
 
 /*
- * One fingerprint event: metadata plus a captured prefix of the L4 payload.
- * data[] begins at the TLS record (TCP) or the QUIC long header (UDP), i.e. at
- * kapkan_pkt.fp_off, so userspace parses the handshake without re-walking L2/L3.
- * snap_len is how many bytes were actually captured (a 64-byte-granular prefix,
- * possibly less than the frame carried); userspace classifies what it got and
- * fails open on truncation. No __u64 members, so the struct's alignment is 4 and
- * the Go decoder (bpf2go) sees exactly this layout.
+ * One fingerprint event: metadata plus a captured prefix of the FRAME.
+ *
+ * WHY data[] IS THE FRAME FROM OFFSET 0, NOT THE L4 PAYLOAD. The obvious design
+ * copies from the payload (kapkan_pkt.fp_off), but fp_off is a RUNTIME value, so
+ * `data + fp_off` is a variable-offset packet pointer — and advancing it through
+ * a copy loop is rejected by the 5.15/6.1/6.6 verifiers ("invalid access to
+ * packet ... r=0"), even though 6.12 accepts it. Copying from a COMPILE-TIME
+ * constant offset (0, the Ethernet header) keeps every pointer a constant-offset
+ * packet pointer, which every supported verifier handles — the same idiom as the
+ * VLAN and IPv6 extension-header walks. So data[] holds the frame from the L2
+ * header onward and payload_off says where the handshake begins inside it;
+ * userspace classifies data[payload_off : snap_len].
+ *
+ * snap_len is how many FRAME bytes were captured (a 64-byte-granular prefix,
+ * possibly a little less than the frame carried); userspace fails open on
+ * truncation or on payload_off >= snap_len. No __u64 members, so the struct's
+ * alignment is 4 and the Go decoder (bpf2go) sees exactly this layout.
  */
 struct kapkan_fp_event {
-	__u8 src[16];	/* network order; v4 left-aligned in [0..3] */
-	__u8 dst[16];	/* network order; v4 left-aligned in [0..3] */
-	__u16 sport;	/* host order */
-	__u16 dport;	/* host order */
+	__u8 src[16];	   /* network order; v4 left-aligned in [0..3] */
+	__u8 dst[16];	   /* network order; v4 left-aligned in [0..3] */
+	__u16 sport;	   /* host order */
+	__u16 dport;	   /* host order */
 	__u8 is_v6;
-	__u8 proto;	/* IPPROTO_TCP or IPPROTO_UDP */
-	__u8 axis;	/* enum kapkan_match_ext: which payload opened this */
+	__u8 proto;	   /* IPPROTO_TCP or IPPROTO_UDP */
+	__u8 axis;	   /* enum kapkan_match_ext: which payload opened this */
 	__u8 _pad;
-	__u32 pkt_len;	/* full frame length, for context */
-	__u32 snap_len;	/* bytes captured in data[]; <= KAPKAN_FP_SNAP_LEN */
-	__u32 _pad2;
+	__u32 pkt_len;	   /* full frame length, for context */
+	__u32 snap_len;	   /* frame bytes captured in data[]; <= KAPKAN_FP_SNAP_LEN */
+	__u16 payload_off; /* offset in data[] where the L4 payload begins */
+	__u16 _pad2;
 	__u8 data[KAPKAN_FP_SNAP_LEN];
 };
 

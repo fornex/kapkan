@@ -43,19 +43,20 @@ type kapkanXDPKapkanCounter struct {
 }
 
 type kapkanXDPKapkanFpEvent struct {
-	_       structs.HostLayout
-	Src     [16]uint8
-	Dst     [16]uint8
-	Sport   uint16
-	Dport   uint16
-	IsV6    uint8
-	Proto   uint8
-	Axis    uint8
-	Pad     uint8
-	PktLen  uint32
-	SnapLen uint32
-	Pad2    uint32
-	Data    [1536]uint8
+	_          structs.HostLayout
+	Src        [16]uint8
+	Dst        [16]uint8
+	Sport      uint16
+	Dport      uint16
+	IsV6       uint8
+	Proto      uint8
+	Axis       uint8
+	Pad        uint8
+	PktLen     uint32
+	SnapLen    uint32
+	PayloadOff uint16
+	Pad2       uint16
+	Data       [1536]uint8
 }
 
 type kapkanXDPKapkanFpSampler struct {

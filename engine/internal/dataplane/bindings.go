@@ -50,8 +50,10 @@ type (
 	RLKeyV6 = kapkanXDPKapkanRlKeyV6
 	// FPEvent is one fingerprint-plane copy: struct kapkan_fp_event. The
 	// ring-buffer reader decodes records into this. Data holds SnapLen bytes of
-	// captured L4 payload (up to FPSnapLen); the rest is stale and must be
-	// ignored.
+	// the captured FRAME (from the L2 header — the kernel copies from offset 0
+	// so the loop verifies on every supported kernel); the handshake begins at
+	// PayloadOff, so read Data[PayloadOff:SnapLen]. Bytes past SnapLen are stale
+	// and must be ignored.
 	FPEvent = kapkanXDPKapkanFpEvent
 )
 

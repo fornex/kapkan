@@ -1101,34 +1101,23 @@ static __always_inline int kapkan_fp_sample(const struct kapkan_config *cfg, __u
 }
 
 /*
- * The largest L4-payload offset the copy will start from. A recognised
- * ClientHello/Initial sits a few dozen bytes into the frame (Ethernet + VLAN +
- * IP(+ext hdrs) + TCP/UDP); this ceiling exists only so the verifier can treat
- * `data + off` as a BOUNDED variable-offset packet pointer. A packet whose
- * payload begins past it is not one we can usefully fingerprint, so it is
- * skipped rather than copied from the wrong place.
- */
-#define KAPKAN_FP_MAX_OFF 2048
-
-/*
- * Copy the recognised handshake into the ring. Reserve a fixed-size record,
- * fill the metadata, then copy a prefix of the L4 payload in fixed 64-byte
- * blocks.
+ * Copy the recognised handshake into the ring. Reserve a fixed-size record, fill
+ * the metadata, then copy a prefix of the FRAME in fixed 64-byte blocks.
  *
- * THE COPY ADVANCES ONE PACKET POINTER, and that is a verifier requirement, not
- * a style choice. The payload starts at a RUNTIME offset (fp_off, from the TCP
- * header length), so `data + off` is a variable-offset packet pointer. Two rules
- * make the loop verify on the 5.15 floor:
- *   - `off` is bounded first (the KAPKAN_FP_MAX_OFF guard), or the verifier
- *     cannot reason about `data + off` at all;
- *   - a single pointer `p` is ADVANCED by 64 each block and re-checked against
- *     data_end, rather than re-deriving `data + off + i*64` each iteration.
- *     Re-deriving resets the proven readable range to zero and the verifier
- *     rejects the access ("invalid access to packet ... r=0") — which is exactly
- *     what the first cut of this did.
+ * THE COPY STARTS AT FRAME OFFSET 0, and that is a verifier requirement, not a
+ * style choice. The L4 payload starts at a RUNTIME offset (fp_off, from the TCP
+ * header length), so copying from `data + fp_off` would advance a VARIABLE-offset
+ * packet pointer — which the 5.15/6.1/6.6 verifiers reject ("invalid access to
+ * packet ... r=0") even though 6.12 accepts it. Starting at `data` (a
+ * compile-time constant offset) keeps `p` a constant-offset packet pointer at
+ * every unrolled step (p, p+64, p+128, ...), exactly like the VLAN and IPv6
+ * extension-header walks that already verify on 5.15. The cost is that data[]
+ * holds the frame from the L2 header, not the payload; payload_off records where
+ * the handshake begins so userspace reads data[payload_off : snap_len].
+ *
  * Each block is a constant-length __builtin_memcpy at a compile-time dst offset,
  * so no byte loop is needed and the instruction budget stays small. A block that
- * would run past data_end stops the copy; snap_len records the 64-byte-granular
+ * would run past data_end stops the copy; snap_len is the 64-byte-granular frame
  * prefix captured, and userspace fingerprints what it got and fails open.
  *
  * __always_inline with a single call site, so the copy is emitted once and the
@@ -1138,17 +1127,9 @@ static __always_inline void kapkan_fp_emit(void *data, void *data_end,
 					   const struct kapkan_pkt *pkt)
 {
 	struct kapkan_fp_event *e;
-	__u32 off = pkt->fp_off;
 	__u32 snap = 0;
 	unsigned char *p;
 	int i;
-
-	/* The caller already gates on fp_off <= KAPKAN_FP_MAX_OFF, so this never
-	 * fires at runtime; it stays because it is what bounds `off` for the
-	 * verifier (data + off below must be a bounded variable-offset pointer) and
-	 * it keeps kapkan_fp_emit safe if ever called from a second site. */
-	if (off > KAPKAN_FP_MAX_OFF)
-		return;
 
 	e = bpf_ringbuf_reserve(&kapkan_fp_events, sizeof(*e), 0);
 	if (!e) {
@@ -1166,9 +1147,13 @@ static __always_inline void kapkan_fp_emit(void *data, void *data_end,
 				     : KAPKAN_MX_QUIC_INITIAL;
 	e->_pad = 0;
 	e->pkt_len = (__u32)pkt->len;
+	/* fp_off is a frame offset, always well under 64 KiB; the u16 cannot
+	 * truncate it for any real frame. If it somehow exceeds snap_len, userspace
+	 * sees no payload and fails open. */
+	e->payload_off = (__u16)pkt->fp_off;
 	e->_pad2 = 0;
 
-	p = (unsigned char *)data + off;
+	p = (unsigned char *)data;
 #pragma unroll
 	for (i = 0; i < KAPKAN_FP_SNAP_LEN / 64; i++) {
 		if (p + 64 > (unsigned char *)data_end)
@@ -1642,15 +1627,12 @@ int kapkan_xdp_filter(struct xdp_md *ctx)
 	 * `dec`, and skipping it (disabled, throttled, or ring full) is invisible
 	 * to the verdict. See "THE FINGERPRINT PLANE" above.
 	 *
-	 * ELIGIBILITY IS DECIDED HERE, BEFORE THE SAMPLER. A payload starting past
-	 * KAPKAN_FP_MAX_OFF cannot be copied (kapkan_fp_emit could not bound the
-	 * pointer), so such a packet is simply not eligible for fingerprinting: it
-	 * must not spend a sampler token or it would go uncounted (neither emitted,
-	 * throttled, nor ring-full), breaking the "every sampled copy is accounted"
-	 * invariant. Gating fp_off here keeps that invariant exact.
+	 * Every recognised handshake is eligible: kapkan_fp_emit copies from frame
+	 * offset 0 and records payload_off, so there is no offset it cannot handle
+	 * and thus no silent skip that would leave a sampled copy unaccounted. So the
+	 * invariant is exact: a sampled packet is emitted, throttled, or ring-full.
 	 */
-	if (cfg->fp_enabled && (pkt.is_tls_chello || pkt.is_quic_initial) &&
-	    pkt.fp_off <= KAPKAN_FP_MAX_OFF) {
+	if (cfg->fp_enabled && (pkt.is_tls_chello || pkt.is_quic_initial)) {
 		if (kapkan_fp_sample(cfg, pkt.now))
 			kapkan_fp_emit(data, data_end, &pkt);
 		else
