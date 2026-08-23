@@ -387,12 +387,19 @@ func ruleSrcPrefix(r Rule) netip.Prefix {
 // two are independent of the double buffer — dry_run rewrites a verdict at the
 // very end and drop_malformed decides a branch before any rule is read — so they
 // are written first and the flip stays exactly as analysed.
-func putFlags(m *Maps, dryRun, dropMalformed bool) error {
+func putFlags(m *Maps, o Options) error {
 	cfg, err := ReadConfig(m)
 	if err != nil {
 		return err
 	}
-	cfg.DryRun, cfg.DropMalformed = b2u8(dryRun), b2u8(dropMalformed)
+	cfg.DryRun, cfg.DropMalformed = b2u8(o.DryRun), b2u8(o.DropMalformed)
+	// Fingerprint-plane knobs are re-stamped here too, for the same reason as
+	// dry_run: an ADOPTED plane must not inherit the previous process's fp
+	// settings after the operator edited them (TestAdoptionRewritesFlags's
+	// hazard). fp_enabled/sample_pps are restart-required, so on reload this
+	// writes the unchanged values — a harmless no-op that keeps the one write
+	// path honest.
+	setFPConfig(&cfg, o.FPEnabled, o.FPSamplePPS, o.FPBurst)
 	if err := m.KapkanCfg.Put(uint32(0), &cfg); err != nil {
 		return fmt.Errorf("dataplane: write kapkan_cfg flags: %w", err)
 	}

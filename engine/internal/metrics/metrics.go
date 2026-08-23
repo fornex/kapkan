@@ -225,6 +225,18 @@ var (
 		Help:      "Source-block requests refused by policy, by reason.",
 	}, []string{"reason"})
 
+	// FingerprintEventsTotal counts fingerprint-plane ring events by outcome:
+	// classified, blocked (a JA4 on the blocklist was source-blocked),
+	// block_error (BlockSource refused — allowlisted/protected/full), unparsed
+	// (a truncated or non-ClientHello capture), quic_skipped (QUIC Initial,
+	// pending its own sub-PR), malformed (a short ring record), unknown_axis.
+	FingerprintEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "fingerprint",
+		Name:      "events_total",
+		Help:      "Fingerprint-plane ring events, by outcome.",
+	}, []string{"result"})
+
 	// NotificationsTotal counts notification deliveries by channel and result.
 	NotificationsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",

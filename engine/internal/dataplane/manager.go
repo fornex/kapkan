@@ -367,7 +367,7 @@ func (m *Manager) installInitialPolicy() error {
 		// pins are adopted while the kernel keeps rewriting every drop into a pass.
 		// The config said the filter was armed and the kernel disagreed, with
 		// nothing anywhere to say so. See TestAdoptionRewritesFlags.
-		if err := putFlags(maps, m.opts.DryRun, m.opts.DropMalformed); err != nil {
+		if err := putFlags(maps, m.opts); err != nil {
 			return err
 		}
 		gen, err := InactiveGeneration(maps)
@@ -390,6 +390,9 @@ func (m *Manager) installInitialPolicy() error {
 		Generation:    0,
 		DryRun:        m.opts.DryRun,
 		DropMalformed: m.opts.DropMalformed,
+		FPEnabled:     m.opts.FPEnabled,
+		FPSamplePPS:   m.opts.FPSamplePPS,
+		FPBurst:       m.opts.FPBurst,
 	}); err != nil {
 		return err
 	}
@@ -905,7 +908,7 @@ func (m *Manager) Reload(next Options) (ReloadReport, error) {
 	maps := m.objs.MapSet()
 	// Flags before the flip, so the two writes stay independent — see putFlags.
 	if next.DryRun != m.opts.DryRun || next.DropMalformed != m.opts.DropMalformed {
-		if err := putFlags(maps, next.DryRun, next.DropMalformed); err != nil {
+		if err := putFlags(maps, next); err != nil {
 			return ReloadReport{}, err
 		}
 		m.log.Info("data plane flags changed",
@@ -1032,6 +1035,20 @@ func (m *Manager) Maps() *Maps {
 		return nil
 	}
 	return m.objs.MapSet()
+}
+
+// FingerprintRing returns the fingerprint copy ring (kapkan_fp_events), or nil
+// after Close. It is the ONE map the E2 fingerprint reader needs, exposed
+// narrowly so that Maps() — whose value carries the bpf(2)-only helpers — stays
+// Linux-only by construction (see the note in manager_stub.go), while the app's
+// reader wiring stays cross-platform with a nil-returning stub.
+func (m *Manager) FingerprintRing() *ebpf.Map {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.objs == nil {
+		return nil
+	}
+	return m.objs.MapSet().KapkanFpEvents
 }
 
 // WithMaps runs fn with the map set and the LIVE generation, holding the

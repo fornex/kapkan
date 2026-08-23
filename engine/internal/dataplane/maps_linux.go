@@ -295,20 +295,27 @@ func PutConfig(m *Maps, s ConfigSpec) error {
 		StaticCount:      s.StaticCount,
 		DryRun:           b2u8(s.DryRun),
 		DropMalformed:    b2u8(s.DropMalformed),
-		FpEnabled:        b2u8(s.FPEnabled),
-		FpBurst:          s.FPBurst,
-		FpRatePerNsQ32:   q32PerNs(s.FPSamplePPS),
 	}
-	// Default the sampler burst to one second of its rate, exactly as a
-	// rate-limit profile does, so a fresh CPU can emit a burst before the refill
-	// governs. Left at 0 when no rate is set (the plane copies nothing).
-	if s.FPBurst == 0 && s.FPSamplePPS > 0 {
-		cfg.FpBurst = max(s.FPSamplePPS, 1)
-	}
+	setFPConfig(&cfg, s.FPEnabled, s.FPSamplePPS, s.FPBurst)
 	if err := m.KapkanCfg.Put(uint32(0), &cfg); err != nil {
 		return fmt.Errorf("dataplane: write kapkan_cfg[0]: %w", err)
 	}
 	return nil
+}
+
+// setFPConfig fills the fingerprint-plane fields of kapkan_cfg from resolved
+// settings, precomputing the sampler reciprocal the datapath multiplies by. The
+// burst defaults to one second of the rate (like a rate-limit profile) so a
+// fresh CPU may emit a burst before the refill governs; left 0 when no rate is
+// set, so the plane copies nothing. Shared by PutConfig (fresh attach) and
+// putFlags (adopt/reload), so the two paths can never stamp fp differently.
+func setFPConfig(cfg *Config, enabled bool, samplePPS, burst uint64) {
+	cfg.FpEnabled = b2u8(enabled)
+	cfg.FpRatePerNsQ32 = q32PerNs(samplePPS)
+	cfg.FpBurst = burst
+	if burst == 0 && samplePPS > 0 {
+		cfg.FpBurst = max(samplePPS, 1)
+	}
 }
 
 // ReadConfig reads kapkan_cfg[0].
