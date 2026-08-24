@@ -39,10 +39,11 @@ import (
 // carrying a crafted, blocklisted-JA4 ClientHello makes this block the CLAIMED
 // source. That is the source-block model working as designed (it blocks the
 // address on the wire), but with an attacker-craftable trigger it can block a
-// chosen third party's traffic toward the victim, and these blocks share the
-// source-block budget with operator/API blocks. Operators must read a JA4
-// blocklist as "block this fingerprint's claimed sources". See edge-spec §6;
-// budget isolation from operator blocks is a tracked follow-up.
+// chosen third party's traffic toward the victim. Operators must read a JA4
+// blocklist as "block this fingerprint's claimed sources". See edge-spec §6.
+// To bound the collateral, fp blocks draw from a separate, smaller budget than
+// operator/API blocks (mitigate.BlockSourceFingerprint), so a crafted-JA4 flood
+// cannot starve operator source blocks.
 type Blocker func(victim, source netip.Addr, ttl time.Duration, reason string) (dryRun bool, err error)
 
 // Policy is the hot-reloadable half the reader consults per matched event: the
