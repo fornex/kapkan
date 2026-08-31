@@ -174,12 +174,17 @@ one() {
 		docker kill "$name"
 	) >/dev/null 2>&1 &
 	local guard=$!
+	# 4 GiB (was 3): the ~180-test suite loads and tears down many programs and
+	# maps back to back — the 1 MiB fp ring, the per-source rate-limit maps — and
+	# on 5.15 a borderline guest intermittently failed a late `map create` with
+	# ENOMEM (seen twice, cleared on re-run). A GiB of headroom removes the flake;
+	# GitHub's 16 GiB runners have ample room.
 	docker run --rm --platform "$PLATFORM" --name "$name" \
 		$KVM_DEVICE \
 		-e KAPKAN_FLAGS="$TESTFLAGS" \
 		-e KAPKAN_RUNS="dataplane.test /engine/internal/dataplane" \
 		-e KAPKAN_VM_SMP="${VM_SMP:-2}" \
-		-e KAPKAN_VM_MEM="${VM_MEM:-3072}" \
+		-e KAPKAN_VM_MEM="${VM_MEM:-4096}" \
 		-v "$WORK:/work" -w /work "$IMAGE" \
 		bash /work/harness/boot.sh "$v" > "$log" 2>&1 || true
 	kill "$guard" 2>/dev/null || true

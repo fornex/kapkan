@@ -60,7 +60,7 @@ esac
 
 exec "$BIN" "${MACH[@]}" \
 	-smp "${KAPKAN_VM_SMP:-2}" \
-	-m "${KAPKAN_VM_MEM:-3072}" \
+	-m "${KAPKAN_VM_MEM:-4096}" \
 	-nographic -no-reboot \
 	-kernel "$KDIR/vmlinuz" \
 	-initrd /tmp/initramfs.cpio.gz \
