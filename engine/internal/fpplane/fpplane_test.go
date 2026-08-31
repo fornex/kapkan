@@ -274,8 +274,10 @@ func TestReaderDryRunStillCallsBlockSource(t *testing.T) {
 	res, _ := fingerprint.TLSClientHello(ch)
 	fb := &fakeBlocker{dryRun: true}
 	r := newTestReader(fb, Policy{Blocklist: map[string]struct{}{res.JA4: {}}, TTL: time.Minute})
-	// In dry-run the reader still calls BlockSource (which records + audits and
+	// In dry-run the reader still calls the Blocker (which records the block and
 	// installs nothing) and must not panic or error; it just reports would-block.
+	// The audit record for a reader block is written by the app's Blocker adapter
+	// (source="auto"), above this seam — see internal/app auditingBlocker.
 	r.handle(fpRecord(testSrc, testDst, 51000, 443, dataplane.MatchTLSClientHello, ch))
 	if len(fb.calls) != 1 {
 		t.Fatalf("blocker calls = %d, want 1 (dry-run still calls BlockSource)", len(fb.calls))

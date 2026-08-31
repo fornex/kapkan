@@ -86,10 +86,10 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
            && KAPKAN=/lab/kapkan bash engine/scripts/labnet/edge-e2.sh'
   ```
 
-  A reader-initiated JA4 block is logged and metered but not yet written to the
-  audit store (the mitigator has no audit handle from the fp reader — the known
-  `source=auto` deferral), so the rig asserts the reader's block log, not an
-  audit record; auditing reader blocks is tracked for E2.4.
+  A reader-initiated JA4 block is logged, metered, and written to the audit store
+  as a `source="auto"` `source_block` record (the app's Blocker adapter attributes
+  it to the engine, not an operator). This rig runs with storage disabled (no
+  ClickHouse), so it asserts the reader's block log rather than the audit row.
 
 ## VRF
 

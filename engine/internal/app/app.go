@@ -157,7 +157,7 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	// JA4-blocklisted clients. nil unless dataplane.fingerprint.enabled. A
 	// failure to open the ring the operator asked for is fatal, like the data
 	// plane itself — a plane that silently does not run is the thing to avoid.
-	if a.fpReader, err = startFingerprintReader(a.Dataplane, mit, store, log); err != nil {
+	if a.fpReader, err = startFingerprintReader(a.Dataplane, mit, store, a.Storage, log); err != nil {
 		return nil, fmt.Errorf("start fingerprint plane: %w", err)
 	}
 	a.API.SetReloadHook(a.ApplyReload)

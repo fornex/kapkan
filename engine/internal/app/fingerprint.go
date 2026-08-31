@@ -15,6 +15,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/fpplane"
 	"github.com/kapkan-io/kapkan/internal/mitigate"
+	"github.com/kapkan-io/kapkan/internal/storage"
 )
 
 // startFingerprintReader builds the fingerprint-plane reader, or returns nil
@@ -22,7 +23,7 @@ import (
 //
 // It is a construction step, not a goroutine: Start launches Run, and Stop
 // closes the reader before the data-plane maps it reads are closed.
-func startFingerprintReader(dp *dataplane.Manager, mit *mitigate.Mitigator, store *config.Store, log *slog.Logger) (*fpplane.Reader, error) {
+func startFingerprintReader(dp *dataplane.Manager, mit *mitigate.Mitigator, store *config.Store, audit storage.Writer, log *slog.Logger) (*fpplane.Reader, error) {
 	if dp == nil {
 		return nil, nil
 	}
@@ -33,7 +34,7 @@ func startFingerprintReader(dp *dataplane.Manager, mit *mitigate.Mitigator, stor
 	// The Blocker adapts the mitigator's BlockSource to fpplane's contract,
 	// forwarding the block's frozen dry-run flag so the reader reports
 	// would-block vs blocked correctly. This keeps fpplane from importing mitigate.
-	block := fpplane.Blocker(func(victim, source netip.Addr, ttl time.Duration, reason string) (bool, error) {
+	inner := fpplane.Blocker(func(victim, source netip.Addr, ttl time.Duration, reason string) (bool, error) {
 		// BlockSourceFingerprint (not BlockSource) so the block draws from the
 		// fingerprint plane's separate, smaller anchor budget — a spoofable JA4
 		// trigger must never starve operator/API source blocks.
@@ -44,7 +45,41 @@ func startFingerprintReader(dp *dataplane.Manager, mit *mitigate.Mitigator, stor
 		return sb.DryRun, nil
 	})
 	policy := func() fpplane.Policy { return fingerprintPolicy(store.Get()) }
-	return fpplane.New(dp.FingerprintRing(), block, policy, log.With("component", "fingerprint"))
+	return fpplane.New(dp.FingerprintRing(), auditingBlocker(inner, audit), policy, log.With("component", "fingerprint"))
+}
+
+// auditingBlocker wraps a Blocker so a SUCCESSFUL reader-initiated block writes an
+// audit record with source="auto" — the engine, not an operator, took the action,
+// so there is no caller/token/tenant (the operator path stamps those in the API
+// layer). Only successes are audited (dry-run included, marked DryRun): the reader
+// dedups repeats within the block's cooldown, so audit volume is bounded, whereas
+// a refusal is not deduped — auditing refusals would let a spoofed-JA4 flood spam
+// the audit store, so refusals are left to metrics and logs. The writer is
+// no-op when storage is disabled, so this is free in that case.
+func auditingBlocker(inner fpplane.Blocker, audit storage.Writer) fpplane.Blocker {
+	return func(victim, source netip.Addr, ttl time.Duration, reason string) (bool, error) {
+		dryRun, err := inner(victim, source, ttl, reason)
+		if err != nil {
+			return false, err
+		}
+		if audit != nil {
+			var dr uint8
+			if dryRun {
+				dr = 1
+			}
+			audit.WriteAudit(storage.AuditRow{
+				EventTime:  time.Now().UTC().Format("2006-01-02 15:04:05"),
+				Action:     "source_block",
+				Result:     "blocked",
+				Target:     source.String() + "->" + victim.String(),
+				TargetType: "source",
+				Reason:     reason,
+				Source:     "auto",
+				DryRun:     dr,
+			})
+		}
+		return dryRun, nil
+	}
 }
 
 // fingerprintPolicy resolves the live JA4 blocklist and block TTL from the
