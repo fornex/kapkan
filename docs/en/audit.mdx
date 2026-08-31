@@ -38,7 +38,7 @@ attribute):
 | `ban` | `POST /api/v1/ban` | `active` on success; `rejected` when a safety guard refuses it. A dry-run ban still records `active` — the simulation is signalled by the separate `dry_run` field. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` on success. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` on success; `error` when the new config fails to parse or validate. |
-| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` on success; `rejected` when policy refuses it. A refused block is itself an operator action, so it is attributed like a refused ban. |
+| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` on success; `rejected` when policy refuses it. A refused block is itself an operator action, so it is attributed like a refused ban. The [fingerprint plane](/docs/fingerprinting) also writes `source_block` records — `source: "auto"`, success only — when it blocks a JA4. |
 | `source_unblock` | `POST /api/v1/dataplane/sources/unblock` | `removed` on success. |
 
 `config_reload` is restricted to unscoped (admin) tokens. A tenant-scoped operator is refused
@@ -123,7 +123,7 @@ Each record carries these fields:
 | `target` | The IP for `ban`/`unban`; `source->victim` for `source_block`/`source_unblock`; empty for `config_reload`. |
 | `target_type` | `host` for `ban`/`unban`; `source` for `source_block`/`source_unblock`; `global` for `config_reload`. |
 | `reason` | Refusal or error detail; empty on success. |
-| `source` | `api` (operator action). Engine-internal automatic actions are reserved for a future `auto` source. |
+| `source` | `api` for an operator action, or `auto` for an engine-initiated one. Today the [fingerprint plane](/docs/fingerprinting) writes `source_block` records with `source: "auto"` — and no operator, role or tenant — when a client's JA4 is on the blocklist. |
 | `ban_state` | The final ban state for `ban`/`unban`; empty for `config_reload` and the source-block actions. |
 | `dry_run` | `1` when the deployment is in [dry-run](/docs/safety). |
 

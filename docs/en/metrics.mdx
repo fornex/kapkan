@@ -104,7 +104,7 @@ cheapest such guard.
 | `kapkan_dataplane_shadowed_static_rules` | — | Config static rules that can never fire, because the allowlist or an earlier static rule already takes every packet they select. `0` is the only healthy value, and it is worth an alert at any other — this defect has no other numeric symptom, since the dead rule's own counter also sits at zero, which is exactly what a correct rule looks like when its traffic has not arrived. Republished on every policy apply, so it clears on the reload that fixes the config. See [Rules that can never fire](/docs/dataplane-tuning#rules-that-can-never-fire). |
 | `kapkan_dataplane_packets_total` | `verdict` | Packets by terminal XDP verdict (`pass_default`, `pass_allow_src`, `drop_static`, `drop_rl`, …). Exactly one terminal verdict is counted per packet — see [Terminal verdicts and observations](#terminal-verdicts-and-observations) before summing it. |
 | `kapkan_dataplane_bytes_total` | `verdict` | Bytes, by the same terminal verdicts. A packets-per-second graph alone cannot tell a 64-byte SYN flood from a 1500-byte amplification reflection, and the two call for different responses. |
-| `kapkan_dataplane_observations_total` | `kind` | Datapath observations that accompany a terminal verdict rather than replacing it: `dryrun_would_drop`, `pass_rule_expired`, `pass_frag_noports`, `err_policy_missing`. A separate metric on purpose — see below. |
+| `kapkan_dataplane_observations_total` | `kind` | Datapath observations that accompany a terminal verdict rather than replacing it: `dryrun_would_drop`, `pass_rule_expired`, `pass_frag_noports`, `err_policy_missing`, and the [fingerprint plane](/docs/fingerprinting)'s copy sampler `fp_emitted` / `fp_throttled` / `fp_ring_full`. A separate metric on purpose — see below. |
 | `kapkan_dataplane_filter_bypass_packets_total` | `reason` | **An alarm, not a statistic.** Packets forwarded without a single rule being evaluated, because they hit a datapath parse limit first. One `reason` exists today, `ipv6_exthdr_cap`. Alert on any non-zero rate — see [The filter-bypass alarm](#the-filter-bypass-alarm). |
 | `kapkan_dataplane_filter_bypass_bytes_total` | `reason` | Bytes for the same, by the same `reason`. It separates a probe from a flood: a handful of crafted packets an hour is somebody measuring your parser, and a sustained bitrate is the attack that measurement was for. |
 | `kapkan_dataplane_rules` | `mode` | Rules the kernel is currently enforcing — static policy plus the mitigator's dynamic rules — split `real` / `dry_run` exactly as `kapkan_mitigate_flowspec_rules` is. The mode is the datapath's own flag read back from the kernel, not the config file's: an adopted pin set can still be running the previous process's flag. |
@@ -209,6 +209,19 @@ How much the kernel dropped **for one victim** is deliberately not here. `/metri
 unauthenticated, and a victim address in a label would publish who is under attack to anyone
 who can reach the listener. Those per-ban and per-rule counters are on the authenticated
 [`/api/v1/bans`](/docs/api) instead, under each ban's `dataplane` object.
+
+## Fingerprint plane
+
+The [fingerprint plane](/docs/fingerprinting) ([`dataplane.fingerprint.enabled: true`](/docs/fingerprinting))
+reports its userspace reader here; its in-kernel copy sampler is on
+`kapkan_dataplane_observations_total{kind="fp_emitted"|"fp_throttled"|"fp_ring_full"}` above.
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `kapkan_fingerprint_events_total` | `result` | Ring events by reader outcome: `classified` (a JA4 was computed), `blocked`, `would_block` (a dry-run match), `suppressed` (a repeat within the block's cooldown), `block_error` (refused by policy — allowlisted / protected / budget full), `unparsed` (truncated, not a handshake, or an undecryptable QUIC packet), `malformed`, `unknown_axis`, `panic`. A rising `block_error` is the signal worth an alert; a rising `unparsed` under load is usually just truncated snapshots and is benign. |
+
+`fp_throttled` climbing while `fp_emitted` plateaus is the sampler doing its job under a handshake
+flood; a sustained `fp_ring_full` means the reader cannot drain the ring fast enough.
 
 ## Scraping
 

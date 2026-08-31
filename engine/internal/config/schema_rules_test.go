@@ -176,6 +176,21 @@ hostgroups:
 			wantErr: "at least one interface",
 		},
 		{
+			name:    "fingerprint plane on with the data plane disabled",
+			yaml:    validBase + "\ndataplane:\n  enabled: false\n  interfaces: [\"eth0\"]\n  fingerprint:\n    enabled: true\n",
+			wantErr: "fingerprint.enabled requires dataplane.enabled",
+		},
+		{
+			name:    "fingerprint blocklist entry that is not a JA4",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  fingerprint:\n    enabled: true\n    ja4_blocklist: [\"not-a-ja4\"]\n",
+			wantErr: "is not a JA4 fingerprint",
+		},
+		{
+			name:    "duplicate JA4 in the fingerprint blocklist",
+			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  fingerprint:\n    enabled: true\n    ja4_blocklist: [\"t13d1516h2_8daaf6152771_e5627efa2ab1\", \"t13d1516h2_8daaf6152771_e5627efa2ab1\"]\n",
+			wantErr: "duplicate entry",
+		},
+		{
 			name:    "static rule ratelimit without a profile",
 			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - name: cap\n      match: {proto: icmp}\n      action: ratelimit\n",
 			wantErr: "requires profile",

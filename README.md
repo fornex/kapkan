@@ -90,7 +90,7 @@ reference, key by key, is [kapkan.io/docs/configuration](https://kapkan.io/docs/
 | `escalation[]` | An [escalation ladder](#escalation-ladders) — `after_seconds` + `action` rungs that step the response up while an attack persists. |
 | `flowspec.action` / `rate_mbps` | FlowSpec rule action: `discard`, or `rate_limit` with a ceiling (see [FlowSpec](#flowspec-surgical-mitigation)). |
 | `scrubbing` | Diversion target(s): the scalar `next_hop`/`next_hop6`/`community`/`local_pref` of a scrubbing center, plus `nodes[]` / `node_selection` / `on_all_nodes_lost` / `stale_after_seconds` for [managed scrubbing nodes](#managed-scrubbing-nodes). Per-hostgroup overridable. |
-| `dataplane` | The [in-kernel XDP data plane](#in-kernel-data-plane-xdp): `interfaces`, `xdp_mode`, `pin_path`, `on_exit`, `drop_malformed`, `allowlist`, `ratelimit_profiles[]`, `static_rules[]`, `limits`. Absent = off. |
+| `dataplane` | The [in-kernel XDP data plane](#in-kernel-data-plane-xdp): `interfaces`, `xdp_mode`, `pin_path`, `on_exit`, `drop_malformed`, `allowlist`, `ratelimit_profiles[]`, `static_rules[]`, `limits`, and the off-path `fingerprint` plane (JA4 source-blocking). Absent = off. |
 | `ban.ttl_seconds` | Every announcement auto-withdraws after this. No permanent bans. |
 | `ban.unban_hysteresis_seconds` | Traffic must stay below threshold this long before withdrawing, to prevent flapping. |
 | `ban.max_active_bans` | Hard cap on simultaneous bans; new bans past the cap are refused. |
@@ -346,6 +346,17 @@ too short to decide do not match and are forwarded. Requirements,
 capabilities, tuning and the measured block rates are in the
 [data-plane guide](https://kapkan.io/docs/dataplane); `kapkan dataplane status` reports
 whether the kernel is actually filtering, and works with the daemon stopped.
+
+Beyond matching a handshake's *shape*, the data plane can fingerprint the *client* behind
+it. With `dataplane.fingerprint.enabled: true` the kernel copies a sampled prefix of each
+TLS ClientHello and QUIC v1 Initial **off-path** to userspace — a per-CPU sampler caps the
+copy rate so the plane never becomes its own DoS — where kapkan computes the client's
+**JA4** and source-blocks any whose JA4 is on `ja4_blocklist` (QUIC Initials are decrypted
+with keys derived from their connection ID; no completed handshake needed). A JA4 block
+acts on the **claimed** source and the trigger is spoofable, so it draws from a separate,
+smaller budget than operator blocks — a crafted-JA4 flood can never starve them — and is
+written to the audit trail with `source: "auto"`. Contract:
+[kapkan.io/docs/fingerprinting](https://kapkan.io/docs/fingerprinting).
 
 ### FlowSpec (surgical mitigation)
 
