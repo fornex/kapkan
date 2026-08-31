@@ -113,6 +113,8 @@ var numericBounds = map[string]map[string]float64{
 	"dataplane.limits.max_dynamic_rules":     {"minimum": 0},
 	"dataplane.limits.max_static_rules":      {"minimum": 0},
 	"dataplane.limits.max_ratelimit_sources": {"minimum": 0},
+
+	"dataplane.fingerprint.block_ttl_seconds": {"minimum": 1, "maximum": 86400},
 }
 
 // stringPatterns maps a yaml path to a regex the value must match. Beyond these
