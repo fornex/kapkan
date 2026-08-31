@@ -105,6 +105,9 @@ add_ns() { # name ip cidr gw ; interface is v<first-letter-of-name>
 add_ns victim   203.0.113.10  24 203.0.113.1    # interface vv — XDP sees inbound client traffic
 add_ns legit    203.0.113.2   24 203.0.113.1    # interface vl — inside networks (a real client)
 add_ns attacker 198.51.100.3  24 198.51.100.1   # interface va — outside networks (a real attacker)
+# A second out-of-networks source for the QUIC arm, so its block is independent of
+# the TLS arm's block on .3 (a source block is per-source).
+ip netns exec attacker ip addr add 198.51.100.4/24 dev va
 ip netns exec legit    ping -c1 -W1 203.0.113.10 >/dev/null 2>&1 \
   && ok "legit (in-networks) can reach the victim" \
   || bad "no path legit -> victim (topology broken; nothing below is meaningful)"
@@ -207,7 +210,7 @@ edge_yaml "  fingerprint:
     enabled: true
     sample_pps: 200
     block_ttl_seconds: 30
-    ja4_blocklist: [\"t12d020100_62ed6f6ca7ad_000000000000\"]" > /tmp/edge-a.yaml
+    ja4_blocklist: [\"t12d020100_62ed6f6ca7ad_000000000000\", \"q12d020100_62ed6f6ca7ad_000000000000\"]" > /tmp/edge-a.yaml
 start_edge /tmp/edge-a.yaml
 grep -qi "attached" /tmp/edge.log && ok "the daemon attached XDP to vv with the fingerprint plane on" \
                                   || bad "the daemon did not attach XDP (see /tmp/edge.log)"
@@ -263,8 +266,90 @@ after=$(vc drop_dyn_src); after=${after:-0}
 [ "$after" -gt "$before" ] && ok "drop_dyn_src moved (+$((after-before))) — packets dropped by the JA4 source block" \
                            || bad "drop_dyn_src did not move — the block matched nothing"
 
-# ================================================================ ARM B: copy volume capped
-say "ARM B — the copy sampler caps volume under a ClientHello flood (no self-DoS)"
+# ================================================================ ARM B: off-path QUIC JA4 block
+say "ARM B — a QUIC Initial is DECRYPTED off-path (DCID-derived keys) and its JA4 blocked"
+# A fixed, valid QUIC v1 client Initial whose ClientHello yields the blocklisted
+# JA4 q12d020100_62ed6f6ca7ad_000000000000 (the QUIC twin of ARM A's fingerprint;
+# JA4's only transport-dependent digit differs). Built by internal/fingerprint
+# from known bytes, so the wire packet and the blocklisted JA4 cannot drift. It is
+# sent over UDP from .4; the victim runs no QUIC listener, but the kernel copies
+# the Initial off-path before it is dropped, which is the whole point.
+cat > /tmp/quicsend.py <<'PY'
+import socket, sys
+src, n = sys.argv[1], int(sys.argv[2])
+pkt = bytes.fromhex(
+    "cc00000001088394c8f03e5157080000449e41e5fdf7d1b1c93bd7689f16ec1139ba4b752db2e103e17c8cebd5c2f167b3c8b2267f0"
+    "523337ed8935a2bf0bbd51c260ec4c60d17b31f84ff157bb358129ca643aed62a39a174570cf1f5fc3f00fbb7529ec4de9057ed1dee"
+    "02c8bdfbb97c650e2b7acb05876c2feefcb2df671330c83711b3a043dc02a8ea627f956cf9580bfa26361a98a640c1cefdc300b9b4b"
+    "f0b088bccbca2be5b977ef09da0123e4681ebcc052f9d21b6f0b013ded5c10e4ecc26f79f0ec8ed33d0d420a0da1af37ec23c196c11"
+    "9df594cb31b77c75c513b1ea25fd548a6e0961c3e77eb64e2686601ac9b36c3fda5ade61a7b5d958df6bb860dbc3d4230e63fd4be1d"
+    "15fb6a8e5eba0fc3dd60bc8e30c5c4287e53805db059ae0648db2f64264ed5e39be2e20d82df566da8dd5998ccabdae053060ae6c7b"
+    "4378e846d29f37ed7b4ea9ec5d82e7961b7f25a9323851f681d582363aa5f89937f5a67258bf63ad6f1a0b1d96dbd4faddfcefc5266"
+    "ba6611722395c906556be52afe3f565636ad1b17d508b73d8743eeb524be22b3dcbc2c7468d54119c7468449a13d8e3b95811a198f3"
+    "491de3e7fe942b330407abf82a4ed7c1b311663ac69890f4157015853d91e923037c227a33cdd5ec281ca3f79c44546b9d90ca00f06"
+    "4c99e3dd97911d39fe9c5d0b23a229a234cb36186c4819e8b9c5927726632291d6a418211cc2962e20fe47feb3edf330f2c603a9d48"
+    "c0fcb5699dbfe5896425c5bac4aee82e57a85aaf4e2513e4f05796b07ba2ee47d80506f8d2c25e50fd14de71e6c418559302f939b0e"
+    "1abd576f279c4b2e0feb85c1f28ff18f58891ffef132eef2fa09346aee33c28eb130ff28f5b766953334113211996d20011a198e3fc"
+    "433f9f2541010ae17c1bf202580f6047472fb36857fe843b19f5984009ddc324044e847a4f4a0ab34f719595de37252d6235365e9b8"
+    "4392b061085349d73203a4a13e96f5432ec0fd4a1ee65accdd5e3904df54c1da510b0ff20dcc0c77fcb2c0e0eb605cb0504db87632c"
+    "f3d8b4dae6e705769d1de354270123cb11450efc60ac47683d7b8d0f811365565fd98c4c8eb936bcab8d069fc33bd801b03adea2e1f"
+    "bc5aa463d08ca19896d2bf59a071b851e6c239052172f296bfb5e72404790a2181014f3b94a4e97d117b438130368cc39dbb2d19806"
+    "5ae3986547926cd2162f40a29f0c3c8745c0f50fba3852e566d44575c29d39a03f0cda721984b6f440591f355e12d439ff150aab761"
+    "3499dbd49adabc8676eef023b15b65bfc5ca06948109f23f350db82123535eb8a7433bdabcb909271a6ecbcb58b936a88cd4e8f2e6f"
+    "f5800175f113253d8fa9ca8885c2f552e657dc603f252e1a8e308f76f0be79e2fb8f5d5fbbe2e30ecadd220723c8c0aea8078cdfcb3"
+    "868263ff8f0940054da48781893a7e49ad5aff4af300cd804a6b6279ab3ff3afb64491c85194aab760d58a606654f9f4400e8b38591"
+    "356fbf6425aca26dc85244259ff2b19c41b9f96f3ca9ec1dde434da7d2d392b905ddf3d1f9af93d1af5950bd493f5aa731b4056df31"
+    "bd267b6b90a079831aaf579be0a39013137aac6d404f518cfd46840647e78bfe706ca4cf5e9c5453e9f7cfd2b8b4c8d169a44e55c88"
+    "d4a9a7f94742417c82117b290595e0bbd75650f3dd1bdc")
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind((src, 0))
+for _ in range(n):
+    try:
+        s.sendto(pkt, ("203.0.113.10", 443))
+    except OSError:
+        pass
+PY
+
+qsrc=198.51.100.4
+# Baseline: prove .4 reaches nginx BEFORE any block, so the post-block 000 below
+# is genuinely the source block and not an unrelated reachability failure.
+[ "$(ip netns exec attacker curl -sk --interface "$qsrc" --max-time 4 -o /dev/null -w '%{http_code}' https://203.0.113.10/health 2>/dev/null)" = 200 ] \
+  && ok "baseline: $qsrc reaches nginx before any QUIC block (200)" \
+  || bad "$qsrc cannot reach nginx even before a block (topology issue; ARM B is meaningless)"
+qe0=$(vc fp_emitted); qe0=${qe0:-0}
+qd0=$(ip netns exec victim "$KAPKAN" dataplane status -pin-path "$PIN" 2>/dev/null | grep -oE 'dynamic +[0-9]+' | grep -oE '[0-9]+' | head -1); qd0=${qd0:-0}
+dbefore=$(vc drop_dyn_src); dbefore=${dbefore:-0}
+( ip netns exec attacker python3 /tmp/quicsend.py "$qsrc" 8 ) &
+qsender=$!
+qinstalled=0
+for i in $(seq 1 40); do
+  qd=$(ip netns exec victim "$KAPKAN" dataplane status -pin-path "$PIN" 2>/dev/null | grep -oE 'dynamic +[0-9]+' | grep -oE '[0-9]+' | head -1)
+  [ "${qd:-0}" -gt "$qd0" ] && { qinstalled=1; break; }
+  sleep 0.25
+done
+kill "$qsender" 2>/dev/null; wait "$qsender" 2>/dev/null
+qe1=$(vc fp_emitted); qe1=${qe1:-0}
+
+[ "$((qe1 - qe0))" -ge 1 ] && ok "the kernel copied the QUIC Initial off-path (+$((qe1-qe0)) fp_emitted)" \
+                          || bad "fp_emitted did not move for QUIC — the Initial was not copied"
+[ "$qinstalled" -eq 1 ] && ok "the reader decrypted the QUIC Initial and its JA4 block reached XDP" \
+                        || bad "no source block from the QUIC Initial (see /tmp/edge.log)"
+grep -qi "source blocked on JA4 fingerprint" /tmp/edge.log \
+  && grep -q "q12d020100_62ed6f6ca7ad_000000000000" /tmp/edge.log \
+  && grep -q "$qsrc" /tmp/edge.log \
+  && ok "the reader logged a QUIC (q...) JA4 block for $qsrc" \
+  || bad "no QUIC JA4 source-block log for $qsrc (see /tmp/edge.log)"
+sleep 0.5
+q_code=$(ip netns exec attacker curl -sk --interface "$qsrc" --max-time 3 -o /dev/null -w '%{http_code}' https://203.0.113.10/health 2>/dev/null)
+dafter=$(vc drop_dyn_src); dafter=${dafter:-0}
+{ [ -z "$q_code" ] || [ "$q_code" = 000 ]; } \
+  && ok "the QUIC-blocked source $qsrc is now dropped in XDP (all its traffic)" \
+  || bad "$qsrc still reached nginx (code $q_code) — the QUIC block is not enforcing"
+[ "$dafter" -gt "$dbefore" ] && ok "drop_dyn_src moved (+$((dafter-dbefore))) after the QUIC block" \
+                             || bad "drop_dyn_src did not move for the QUIC block"
+
+# ================================================================ ARM C: copy volume capped
+say "ARM C — the copy sampler caps volume under a ClientHello flood (no self-DoS)"
 pkill -f "$KAPKAN" 2>/dev/null; sleep 1  # restart: sample_pps and an empty blocklist need a fresh attach
 : > /tmp/edge.log
 # sample_pps 1 with an EMPTY blocklist: nothing gets blocked, so every flooded

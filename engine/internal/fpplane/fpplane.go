@@ -165,22 +165,27 @@ func (r *Reader) handle(raw []byte) {
 	}
 	switch ev.Axis {
 	case dataplane.MatchTLSClientHello:
-		r.classifyTLS(&ev)
+		r.classify(&ev, fingerprint.TLSClientHello)
 	case dataplane.MatchQUICInitial:
-		// QUIC Initial decryption (deterministic keys from the DCID) is the next
-		// E2 sub-PR; for now the copy is counted and dropped.
-		metrics.FingerprintEventsTotal.WithLabelValues("quic_skipped").Inc()
+		// A QUIC v1 Initial is decrypted with keys derived from its Destination
+		// Connection ID (public inputs), so an off-path copy is enough to recover
+		// and fingerprint the ClientHello it carries.
+		r.classify(&ev, fingerprint.QUICInitial)
 	default:
 		metrics.FingerprintEventsTotal.WithLabelValues("unknown_axis").Inc()
 	}
 }
 
-// classifyTLS computes JA4 for a captured ClientHello and blocks the source when
-// its JA4 is on the blocklist.
-func (r *Reader) classifyTLS(ev *dataplane.FPEvent) {
-	res, err := fingerprint.TLSClientHello(ev.Payload())
+// classify computes JA4 from a captured handshake and blocks the source when its
+// JA4 is on the blocklist. parse turns the axis's raw bytes — a TLS ClientHello
+// record or a QUIC Initial datagram — into a Result; every step after the parse
+// (the blocklist match, dedup, and source-anchored block) is identical for TLS
+// and QUIC, since the fingerprint and the enforcement action are the same.
+func (r *Reader) classify(ev *dataplane.FPEvent, parse func([]byte) (fingerprint.Result, error)) {
+	res, err := parse(ev.Payload())
 	if err != nil {
-		// Truncated by the snapshot, or not actually a ClientHello: fail open.
+		// Truncated by the snapshot, not actually a handshake, or (QUIC) an
+		// undecryptable/unsupported packet: fail open.
 		metrics.FingerprintEventsTotal.WithLabelValues("unparsed").Inc()
 		return
 	}
