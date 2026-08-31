@@ -66,14 +66,16 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   kernel objects: the same nginx behind a kapkan daemon, but now the kernel
   **copies** a bounded, sampled prefix of each TLS ClientHello to userspace, the
   daemon computes **JA4**, and a blocklisted JA4 becomes a source block on the
-  existing XDP path. It proves the two E2 promises end to end — a client whose
+  existing XDP path. It proves the E2 promises end to end — (A) a TLS client whose
   JA4 is blocklisted is blocked in XDP purely from the copied ClientHello (nginx
   never completes or logs the crafted handshake, so nothing on the terminator
-  drove it — off-path), and the copy volume stays capped under a ClientHello
-  flood (the per-CPU sampler sheds most copies while emitting only a bounded few,
-  so the plane never becomes its own DoS). The attacker's ClientHello is a fixed,
-  minimal record whose JA4 is computed by `engine/internal/fingerprint` from the
-  exact wire bytes, so the two cannot drift. Same one-binary recipe as E1:
+  drove it — off-path); (B) a **QUIC** v1 Initial is DECRYPTED off-path with keys
+  derived from its Destination Connection ID, and its `q…` JA4 blocked the same
+  way; and (C) the copy volume stays capped under a ClientHello flood (the per-CPU
+  sampler sheds most copies while emitting only a bounded few, so the plane never
+  becomes its own DoS). Both the ClientHello and the QUIC Initial are fixed records
+  whose JA4 is computed by `engine/internal/fingerprint` from the exact wire bytes,
+  so packet and blocklist cannot drift. Same one-binary recipe as E1:
 
   ```sh
   mkdir -p /tmp/lab

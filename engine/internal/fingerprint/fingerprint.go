@@ -96,35 +96,44 @@ func TLSClientHello(record []byte) (Result, error) {
 	return Result{JA4: ja4(ch), SNI: ch.sni, ALPN: ch.alpn}, nil
 }
 
-// parseTLSClientHello walks the record → handshake → ClientHello body → its
-// extensions. It reads only what JA4/SNI/ALPN need and skips the rest by length.
+// parseTLSClientHello strips the TLS record header and hands the handshake body
+// to parseClientHelloHandshake. The handshake must live inside the record, so it
+// clamps to the record length (a lying outer length can never walk past it) while
+// tolerating a body the snapshot truncated (recLen may exceed what we captured).
 func parseTLSClientHello(record []byte) (clientHello, error) {
-	ch := clientHello{transport: 't', legacyVer: 0x0301}
 	r := cursor{b: record}
 
 	// TLS record header: type(1) legacy_version(2) length(2).
 	recType, ok := r.u8()
 	if !ok {
-		return ch, ErrTruncated
+		return clientHello{transport: 't'}, ErrTruncated
 	}
 	if recType != tlsRecordHandshake {
-		return ch, ErrNotClientHello
+		return clientHello{transport: 't'}, ErrNotClientHello
 	}
 	if !r.skip(2) { // record legacy_version — not used
-		return ch, ErrTruncated
+		return clientHello{transport: 't'}, ErrTruncated
 	}
 	recLen, ok := r.u16()
 	if !ok {
-		return ch, ErrTruncated
+		return clientHello{transport: 't'}, ErrTruncated
 	}
-	// The handshake must live inside the record. Clamp the cursor to the record
-	// body so a lying outer length can never walk past it, but tolerate a body
-	// the snapshot truncated (recLen may exceed what we captured).
 	body := r.rest()
 	if int(recLen) < len(body) {
 		body = body[:recLen]
 	}
-	h := cursor{b: body}
+	return parseClientHelloHandshake(body, 't')
+}
+
+// parseClientHelloHandshake walks a TLS handshake message that must be a
+// ClientHello, starting at the msg_type byte (0x01): the layer QUIC CRYPTO frames
+// carry directly, and the layer inside a TLS record. The ClientHello bytes are
+// identical either way, so transport ('t' for TLS/TCP, 'q' for QUIC) is simply
+// stamped into the result. It reads only what JA4/SNI/ALPN need, skipping the
+// rest by length.
+func parseClientHelloHandshake(hs []byte, transport byte) (clientHello, error) {
+	ch := clientHello{transport: transport, legacyVer: 0x0301}
+	h := cursor{b: hs}
 
 	// Handshake header: msg_type(1) length(3).
 	msgType, ok := h.u8()
@@ -134,32 +143,41 @@ func parseTLSClientHello(record []byte) (clientHello, error) {
 	if msgType != tlsHandshakeCH {
 		return ch, ErrNotClientHello
 	}
-	if !h.skip(3) { // handshake length — we bound on the buffer, not on this
+	hsLen, ok := h.u24()
+	if !ok {
 		return ch, ErrTruncated
 	}
+	// Clamp to the handshake length so trailing bytes (record padding, a second
+	// CRYPTO-carried message) cannot leak into the ClientHello parse, but tolerate
+	// a body the snapshot truncated (hsLen may exceed what we captured).
+	body := h.rest()
+	if int(hsLen) < len(body) {
+		body = body[:hsLen]
+	}
+	b := cursor{b: body}
 
 	// ClientHello body: client_version(2) random(32) session_id opaque<0..32>.
-	lv, ok := h.u16()
+	lv, ok := b.u16()
 	if !ok {
 		return ch, ErrTruncated
 	}
 	ch.legacyVer = lv
-	if !h.skip(32) { // random
+	if !b.skip(32) { // random
 		return ch, ErrTruncated
 	}
-	if !h.skipVec8() { // session_id
+	if !b.skipVec8() { // session_id
 		return ch, ErrTruncated
 	}
 
 	// cipher_suites <2..2^16-2>.
-	csuites, ok := h.vec16()
+	csuites, ok := b.vec16()
 	if !ok {
 		return ch, ErrTruncated
 	}
 	ch.ciphers = u16s(csuites)
 
 	// compression_methods <1..2^8-1>.
-	if !h.skipVec8() {
+	if !b.skipVec8() {
 		return ch, ErrTruncated
 	}
 
@@ -172,10 +190,10 @@ func parseTLSClientHello(record []byte) (clientHello, error) {
 	// must be ErrTruncated, NOT a silent zero-extension JA4 that misclassifies.
 	// Distinguish the two by what remains: nothing left = no field (legal);
 	// anything left must parse as a valid extensions vector.
-	if h.remaining() == 0 {
+	if b.remaining() == 0 {
 		return ch, nil
 	}
-	extAll, ok := h.vec16()
+	extAll, ok := b.vec16()
 	if !ok {
 		return ch, ErrTruncated
 	}
@@ -317,6 +335,15 @@ func (c *cursor) u16() (uint16, bool) {
 	}
 	v := uint16(c.b[c.pos])<<8 | uint16(c.b[c.pos+1])
 	c.pos += 2
+	return v, true
+}
+
+func (c *cursor) u24() (uint32, bool) {
+	if c.remaining() < 3 {
+		return 0, false
+	}
+	v := uint32(c.b[c.pos])<<16 | uint32(c.b[c.pos+1])<<8 | uint32(c.b[c.pos+2])
+	c.pos += 3
 	return v, true
 }
 

@@ -260,9 +260,10 @@ The data plane's parser already finds the ClientHello in the kernel (the `tls_cl
 match axis); E2 adds a bounded ring-buffer copy of TLS ClientHellos and QUIC Initials to
 userspace, where JA4 + SNI are computed and policy comes back as per-source XDP entries or
 decision-service inputs. QUIC Initial decryption is deterministic (keys derive from the DCID
-via a published per-version constant) — impractical in eBPF, ~a hundred lines in Go. The
-kernel copies, userspace classifies: both charters hold. Copy volume under flood is capped
-(sampled) — the plane must never become its own DoS.
+via a published per-version constant) — impractical in eBPF, ~a hundred lines in Go, and
+implemented for QUIC v1 in `internal/fingerprint` (its JA4s carry transport `q`). The kernel
+copies, userspace classifies: both charters hold. Copy volume under flood is capped (sampled)
+— the plane must never become its own DoS.
 
 **A JA4 block is a source block on the CLAIMED source, and the trigger is spoofable.** The
 ClientHello is recognised by a stateless fixed-offset match — there is no completed TCP

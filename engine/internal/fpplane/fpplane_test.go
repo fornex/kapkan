@@ -1,6 +1,10 @@
 package fpplane
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"encoding/binary"
 	"io"
 	"log/slog"
@@ -12,7 +16,72 @@ import (
 	"github.com/kapkan-io/kapkan/internal/fingerprint"
 )
 
-// These tests drive the classify/enforce path directly (handle → classifyTLS)
+// buildQUICInitial seals a bare TLS handshake message into a valid QUIC v1 client
+// Initial datagram (RFC 9001 §5), keyed from a fixed Destination Connection ID.
+// It mirrors what a real client sends so the reader's QUIC path can be exercised
+// without a kernel; the packet is self-checking, since the RFC-anchored
+// fingerprint.QUICInitial must accept it.
+func buildQUICInitial(t *testing.T, handshake []byte) []byte {
+	t.Helper()
+	dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
+	salt := []byte{
+		0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
+		0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a,
+	}
+	expand := func(secret []byte, label string, n int) []byte {
+		full := "tls13 " + label
+		info := []byte{byte(n >> 8), byte(n), byte(len(full))}
+		info = append(info, full...)
+		info = append(info, 0)
+		out, err := hkdf.Expand(sha256.New, secret, string(info), n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	initialSecret, err := hkdf.Extract(sha256.New, dcid, salt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientSecret := expand(initialSecret, "client in", 32)
+	key := expand(clientSecret, "quic key", 16)
+	iv := expand(clientSecret, "quic iv", 12)
+	hp := expand(clientSecret, "quic hp", 16)
+
+	payload := []byte{0x06, 0x00, byte(len(handshake)>>8&0x3f) | 0x40, byte(len(handshake))}
+	payload = append(payload, handshake...)
+	for len(payload) < 1162 {
+		payload = append(payload, 0x00)
+	}
+	const pnLen = 4
+	length := uint64(pnLen + len(payload) + 16)
+
+	hdr := []byte{0xc0 | (pnLen - 1), 0x00, 0x00, 0x00, 0x01, byte(len(dcid))}
+	hdr = append(hdr, dcid...)
+	hdr = append(hdr, 0x00) // empty SCID
+	hdr = append(hdr, 0x00) // token length 0
+	hdr = append(hdr, byte(0x40|length>>8), byte(length))
+	pnOffset := len(hdr)
+	hdr = append(hdr, 0x00, 0x00, 0x00, 0x02) // packet number 2
+
+	block, _ := aes.NewCipher(key)
+	aead, _ := cipher.NewGCM(block)
+	nonce := make([]byte, len(iv))
+	copy(nonce, iv)
+	nonce[len(nonce)-1] ^= 0x02 // packet number 2
+	pkt := aead.Seal(hdr, nonce, payload, hdr)
+
+	hpBlock, _ := aes.NewCipher(hp)
+	var mask [16]byte
+	hpBlock.Encrypt(mask[:], pkt[pnOffset+4:pnOffset+4+16])
+	pkt[0] ^= mask[0] & 0x0f
+	for i := 0; i < pnLen; i++ {
+		pkt[pnOffset+i] ^= mask[1+i]
+	}
+	return pkt
+}
+
+// These tests drive the classify/enforce path directly (handle → classify)
 // with hand-built ring records and a fake blocker, so no kernel is needed. The
 // end-to-end path (kernel emits a copy → reader blocks the source) is the E2.5
 // lab rig; here we lock the wiring: which events block, which don't, and that a
@@ -141,14 +210,14 @@ func TestReaderIgnoresUnlistedJA4(t *testing.T) {
 	}
 }
 
-func TestReaderSkipsQUICAndMalformed(t *testing.T) {
+func TestReaderFailsOpenOnBadPayloads(t *testing.T) {
 	ch := clientHelloRecord("q.example.com")
 	res, _ := fingerprint.TLSClientHello(ch)
 	fb := &fakeBlocker{}
 	r := newTestReader(fb, Policy{Blocklist: map[string]struct{}{res.JA4: {}}, TTL: time.Minute})
 
-	// A QUIC-axis record must not be classified as TLS (QUIC decrypt is a later
-	// sub-PR), even though its bytes would parse as a ClientHello.
+	// A QUIC-axis record whose bytes are not a valid QUIC Initial (here a TLS
+	// record) fails open: it is decrypted as QUIC, not misparsed as TLS.
 	r.handle(fpRecord(testSrc, testDst, 51000, 443, dataplane.MatchQUICInitial, ch))
 	// A too-short ring record is dropped, not decoded.
 	r.handle([]byte{1, 2, 3})
@@ -157,6 +226,34 @@ func TestReaderSkipsQUICAndMalformed(t *testing.T) {
 
 	if len(fb.calls) != 0 {
 		t.Errorf("blocked on a QUIC/malformed/truncated event: %d calls", len(fb.calls))
+	}
+}
+
+// TestReaderBlocksOnQUICJA4 locks the QUIC routing end to end: a real QUIC v1
+// Initial on the QUIC axis is decrypted, its JA4 matched against the blocklist,
+// and the source blocked — the same enforcement as TLS, reached via a different
+// parser. The packet is a genuine encrypted Initial (buildQUICInitial), so a
+// mis-wired axis would fail to block and trip this test.
+func TestReaderBlocksOnQUICJA4(t *testing.T) {
+	host := "quic.evil.example"
+	record := clientHelloRecord(host)
+	res, err := fingerprint.QUICInitial(buildQUICInitial(t, record[5:]))
+	if err != nil {
+		t.Fatalf("build QUIC JA4: %v", err)
+	}
+	if res.JA4[0] != 'q' {
+		t.Fatalf("expected a QUIC fingerprint, got %q", res.JA4)
+	}
+
+	fb := &fakeBlocker{}
+	r := newTestReader(fb, Policy{Blocklist: map[string]struct{}{res.JA4: {}}, TTL: time.Minute})
+	r.handle(fpRecord(testSrc, testDst, 51000, 443, dataplane.MatchQUICInitial, buildQUICInitial(t, record[5:])))
+
+	if len(fb.calls) != 1 {
+		t.Fatalf("blocker calls = %d, want 1 (QUIC JA4 not blocked)", len(fb.calls))
+	}
+	if c := fb.calls[0]; c.source != testSrc || c.reason != "ja4:"+res.JA4 {
+		t.Errorf("blocked %s reason %q, want %s ja4:%s", c.source, c.reason, testSrc, res.JA4)
 	}
 }
 
