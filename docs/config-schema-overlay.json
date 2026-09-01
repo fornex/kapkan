@@ -64,6 +64,12 @@
     "scrubbing.stale_after_seconds": { "tier": "advanced", "defaultWhenAbsent": 15, "description": "How long a node may go without polling before it counts as lost." },
 
     "dataplane.enabled": { "tier": "advanced", "defaultWhenAbsent": true, "description": "Defaults to true when the dataplane block is present." },
+
+    "dataplane.fingerprint.enabled": { "tier": "advanced", "defaultWhenAbsent": false, "reloadImmutable": true, "crossField": "Requires dataplane.enabled: true.", "description": "Turn on the off-path fingerprint plane (E2): the kernel copies a sampled prefix of each TLS ClientHello and QUIC Initial to userspace, where JA4 is computed and a source whose JA4 is on ja4_blocklist is blocked. Off by default; changing it requires a restart." },
+    "dataplane.fingerprint.sample_pps": { "tier": "advanced", "reloadImmutable": true, "defaultWhenAbsent": 1000, "description": "Cap on handshake copies per second per CPU — the in-kernel sampler that keeps the plane from becoming its own DoS under a handshake flood. Changing it requires a restart." },
+    "dataplane.fingerprint.block_ttl_seconds": { "tier": "advanced", "defaultWhenAbsent": 300, "description": "How long a JA4-triggered source block lives in the kernel before it must be refreshed. Hot-reloads: editing it takes effect on the next handshake." },
+    "dataplane.fingerprint.ja4_blocklist": { "tier": "advanced", "format": "ja4", "description": "JA4 client fingerprints to source-block on sight (exact match), e.g. t13d1516h2_8daaf6152771_e5627efa2ab1; QUIC fingerprints start with q. The trigger is spoofable and the block acts on the CLAIMED source, so read it as \"block this fingerprint's claimed sources\". Hot-reloads." },
+
     "dataplane.interfaces": { "tier": "advanced", "reloadImmutable": true, "crossField": "At least one interface is required when the block is enabled.", "description": "Network interfaces to attach the XDP program to. Changing them requires a restart." },
     "dataplane.xdp_mode": { "tier": "advanced", "reloadImmutable": true, "defaultWhenAbsent": "auto", "description": "Attach mode: auto tries native and falls back to generic; native fails if the driver has no native XDP; generic forces the slower skb path (virtio, testing)." },
     "dataplane.pin_path": { "tier": "advanced", "reloadImmutable": true, "defaultWhenAbsent": "/sys/fs/bpf/kapkan", "serverVerified": true, "description": "bpffs directory holding the pinned program and maps so policy survives a restart of this process." },

@@ -1,0 +1,158 @@
+export const metadata = {
+  title: "Fingerprint-Ebene (JA4)",
+  description:
+    "Blockieren Sie Clients anhand ihres TLS/QUIC-Handshake-Fingerprints (JA4), der off-path aus einer gesampelten Kernel-Kopie jedes ClientHello und QUIC Initial berechnet wird. Was es ist, wie man es konfiguriert und warum eine JA4-Blockliste auf die angegebene Quelle wirkt.",
+};
+
+# Fingerprint-Ebene (JA4)
+
+Die [Datenebene](/docs/dataplane) verwirft und begrenzt Raten nach Adresse und nach der Form eines
+Handshake-Pakets. Die **Fingerprint-Ebene** fügt eine weitere Achse hinzu: Sie identifiziert den
+*Client* hinter einem Handshake anhand seines **JA4**-Fingerprints und erlaubt es Ihnen, Clients
+quellenseitig zu blockieren, deren Fingerprint Sie gelistet haben — unabhängig davon, von welcher
+Adresse sie kommen.
+
+Sie ist konstruktionsbedingt **off-path**. Der Kernel entscheidet nichts über einen Fingerprint; er
+**kopiert** einen begrenzten, gesampelten Präfix jedes TLS ClientHello und QUIC Initial über einen
+Ring-Buffer in den Userspace. Der Userspace berechnet den JA4, und wenn dieser JA4 auf Ihrer
+Blockliste steht, installiert er einen
+[Source-Block](/docs/dataplane#source-blocks-aus-ihrem-eigenen-stack) auf dem bestehenden XDP-Pfad — das
+gleiche Per-Source-Verwerfen, das ein Betreiber oder eine Integration über die API installiert. Der
+Kernel kopiert; der Userspace klassifiziert; die Durchsetzung ist der Source-Block-Pfad, den Sie
+bereits haben.
+
+<Callout type="info" title="Sie setzt auf der Datenebene auf">
+Die Fingerprint-Ebene ist Teil von `dataplane`: Sie benötigt `dataplane.enabled: true` und dieselbe
+Host-Vorbereitung ([Datenebene im Kernel](/docs/dataplane) — Linux 5.15+, das systemd-Drop-in, die
+Capabilities). Sie ist **standardmäßig deaktiviert**, selbst wenn die Datenebene aktiv ist.
+</Callout>
+
+## Was JA4 ist
+
+[JA4](https://github.com/FoxIO-LLC/ja4) (FoxIO, BSD-3) ist ein TLS/QUIC-**Client**-Fingerprint der
+Form `a_b_c`:
+
+```text
+t13d1516h2_8daaf6152771_e5627efa2ab1
+│└ version │ └ sha256(sorted ciphers)[:12]
+│  SNI d/i │           └ sha256(sorted extensions "_" sigalgs)[:12]
+└ transport: t = TLS-over-TCP, q = QUIC
+```
+
+Das erste Zeichen ist der Transport, sodass der Fingerprint eines QUIC-Clients mit `q` beginnt und
+derselbe Client über TCP mit `t`; die beiden Hashes werden aus den Cipher- und Extension-Listen
+abgeleitet und sind transportunabhängig. Kapkan berechnet JA4 (und extrahiert SNI und ALPN) mit
+einem reinen Go-Parser — keine Bibliothek, kein externer Dienst. Für QUIC entschlüsselt es zunächst
+das v1 Initial (siehe unten).
+
+## Wie es funktioniert
+
+1. **Kopieren (Kernel).** Wenn die Datenebene ein TLS ClientHello oder ein QUIC v1 Initial erkennt,
+   entscheidet ein Per-CPU-Token-Bucket-**Sampler**, ob es kopiert wird. Kopien landen in einem
+   Ring-Buffer; der Sampler begrenzt die Kopien pro Sekunde und CPU, sodass die Ebene unter einem
+   Handshake-flood (Handshake-Flut) niemals selbst zu einem DoS werden kann.
+2. **Klassifizieren (Userspace).** Ein Reader leert den Ring, berechnet den JA4 und schlägt ihn in
+   der Blockliste nach. Ein QUIC Initial wird zunächst mit Schlüsseln entschlüsselt, die aus seiner
+   Destination Connection ID abgeleitet werden — öffentliche Eingaben, kein geheimer Austausch,
+   was genau der Grund ist, warum eine Off-Path-Kopie ausreicht.
+3. **Durchsetzen.** Ein Blocklisten-Treffer installiert einen Source-Block mit TTL auf der
+   angegebenen Quelle in Richtung des Opfers, auf demselben XDP-Pfad wie ein API-Source-Block. Es
+   wird nichts an irgendeinen Peer angekündigt.
+
+Parsing und Entschlüsselung **schlagen offen fehl** (fail open): ein abgeschnittener Snapshot, ein
+über mehrere Pakete verteilter Handshake, eine andere QUIC-Version als v1 oder alles, was nicht
+geparst werden kann, wird schlicht *nicht gefingerprintet* — niemals falsch klassifiziert. Die Ebene
+setzt niemals über Datagramme hinweg wieder zusammen, sodass ein ClientHello, das größer als ein
+erfasstes Datagramm ist, hier nicht fingerprintbar ist.
+
+## Konfiguration
+
+Die Ebene lebt unter `dataplane.fingerprint`:
+
+```yaml
+dataplane:
+  enabled: true
+  interfaces: ["eth0"]
+  fingerprint:
+    enabled: true            # off by default; requires dataplane.enabled: true
+    sample_pps: 1000          # copies/sec/CPU cap (the DoS-safety sampler); default 1000
+    block_ttl_seconds: 300    # how long a JA4 block lives before it must refresh; default 300, max 86400
+    ja4_blocklist:            # exact-match JA4 fingerprints to source-block on sight
+      - t13d1516h2_8daaf6152771_e5627efa2ab1   # a TLS client
+      # QUIC fingerprints start with q; add the ones your telemetry flags
+```
+
+| Schlüssel | Bedeutung |
+| --- | --- |
+| `fingerprint.enabled` | Schaltet die Ebene ein. **Benötigt `dataplane.enabled: true`** (andernfalls wird die Konfiguration abgelehnt). Standardmäßig deaktiviert. Eine Änderung kippt ein Kernel-Flag, das beim Attach geschrieben wird, daher ist ein **Neustart erforderlich**. |
+| `fingerprint.sample_pps` | Obergrenze für Handshake-Kopien pro Sekunde und CPU — der In-Kernel-Sampler, der die Ebene unter einem flood begrenzt hält. `0` wählt den Standard (1000). **Neustart erforderlich.** |
+| `fingerprint.block_ttl_seconds` | Wie lange ein durch JA4 ausgelöster Source-Block im Kernel lebt, bevor er aufgefrischt werden muss. `0` wählt den Standard (300); muss innerhalb von `[1, 86400]` liegen. **Hot-Reload.** |
+| `fingerprint.ja4_blocklist` | Die zu blockierenden JA4-Fingerprints, **exakt** abgeglichen (`a_b_c`). QUIC-Fingerprints beginnen mit `q`. Duplikate werden abgelehnt. **Hot-Reload** — das Bearbeiten der Liste wird beim nächsten Handshake wirksam, ohne Neustart. |
+
+Die Blockliste und die TTL sind per Hot-Reload änderbar; das Enable-Flag und die Sampler-Rate werden
+beim Attach in den Kernel geschrieben und erfordern einen Neustart. Der
+[Config-Builder](https://kapkan.io/config) stellt diese Felder im erweiterten Datenebenen-Schritt
+dar.
+
+## Ein JA4-Block wirkt auf die *angegebene* Quelle
+
+Dies ist der tragende Vorbehalt, und er bestimmt, wie Sie eine Blockliste lesen sollten.
+
+Ein ClientHello wird durch einen **zustandslosen Abgleich mit festem Offset** erkannt — dahinter
+steht kein abgeschlossener TCP-Handshake — sodass ein einzelnes **gespooftes** Paket, das ein
+präpariertes ClientHello mit einem von Ihnen blockgelisteten JA4 trägt, jede Adresse quellenseitig
+blockiert, von der dieses Paket vorgibt zu stammen. Das ist das Source-Block-Modell, das genau wie
+vorgesehen arbeitet (es wirkt auf die Adresse auf dem Draht), aber mit einem vom Angreifer
+präparierbaren Auslöser bedeutet es, dass eine JA4-Blockliste in einen Hebel verwandelt werden kann,
+um den Datenverkehr eines beliebig gewählten Dritten in Richtung des Opfers zu blockieren.
+
+<Callout type="warning" title="Lesen Sie eine Blockliste als &quot;blockiere die angegebenen Quellen dieses Fingerprints&quot;">
+Ein JA4-Blocklisteneintrag ist **keine** Behauptung, dass ein Host bösartig ist. Behandeln Sie ihn
+als „blockiere die Quellen, die diesen Fingerprint präsentieren“, im Wissen, dass der Fingerprint —
+und damit die Quelle, auf die er wirkt — spoofbar ist. Jeder Fingerprint-Block hat eine TTL und
+respektiert [dry-run](/docs/going-live), sodass ein Fehlschuss von selbst ausläuft.
+</Callout>
+
+Um den Kollateralschaden zu begrenzen, ziehen Blöcke der Fingerprint-Ebene aus einem **separaten,
+kleineren Budget** als Betreiber- und API-Source-Blocks — der Hälfte des Source-Anchor-Pools. Eine
+Flut von präparierten JA4-Paketen kann nur die eigene Reservierung füllen und kann die
+Betreiber-/API-Source-Blocks, die sich den Pool teilen, **niemals** aushungern.
+
+## Auditing
+
+Ein Block der Fingerprint-Ebene wird im [Audit-Log](/docs/audit) als `source_block`-Datensatz mit
+`source: "auto"` geschrieben — die Engine hat die Aktion ausgeführt, nicht ein Betreiber, daher
+trägt er keinen Betreiber, keine Rolle und keinen Mandanten. Sein Grund ist der abgeglichene
+Fingerprint, z. B. `ja4:t13d1516h2_8daaf6152771_e5627efa2ab1`. Nur erfolgreiche Blöcke werden
+auditiert (ein dry-run-Block wird aufgezeichnet und markiert); Ablehnungen werden in Metriken und
+Logs gezählt, aber nicht in den Audit-Speicher geschrieben, sodass eine Flut gespoofter JA4 ihn
+nicht zuspammen kann.
+
+## Metriken
+
+| Metrik | Labels | Bedeutung |
+| --- | --- | --- |
+| `kapkan_fingerprint_events_total` | `result` | Ring-Events nach Ausgang: `classified`, `blocked`, `would_block` (ein dry-run-Treffer), `suppressed` (eine Wiederholung innerhalb der Cooldown-Zeit des Blocks), `block_error` (durch Richtlinie abgelehnt — allowgelistet / geschützt / Budget voll), `unparsed`, `malformed`, `unknown_axis`, `panic`. |
+| `kapkan_dataplane_observations_total` | `kind="fp_emitted"` | Handshakes, die der Sampler in den Userspace kopiert hat. |
+| `kapkan_dataplane_observations_total` | `kind="fp_throttled"` | Handshakes, die der Sampler abgeworfen hat, um unter `sample_pps` zu bleiben — es wird erwartet, dass dies unter einem flood ansteigt, während `fp_emitted` ein Plateau erreicht. |
+| `kapkan_dataplane_observations_total` | `kind="fp_ring_full"` | Kopien, die verworfen wurden, weil der Userspace den Ring nicht schnell genug geleert hat. Eine anhaltend von null verschiedene Rate hier bedeutet, dass der Reader nicht mithalten kann. |
+
+Siehe [Metriken](/docs/metrics) für die vollständige Datenebenen-Familie und wie Beobachtungen mit
+terminalen Verdikten zusammenhängen.
+
+## Einschränkungen
+
+- **Nur QUIC v1.** QUIC v2 und die Draft-Versionen verwenden andere Schlüssel und werden nicht
+  entschlüsselt; ihre Initials werden kopiert und verworfen, nicht gefingerprintet.
+- **Ein Datagramm.** Ein Handshake, der sich über mehrere Pakete oder Datagramme erstreckt, wird
+  nicht wieder zusammengesetzt, sodass ein sehr großes ClientHello (viele Extensions, große
+  Post-Quantum-Key-Shares) den erfassten Präfix überschreiten und ungefingerprintet bleiben kann.
+  Dies ist fail-open, kein Block.
+- **Benötigt die Datenebene.** `dataplane.enabled: true` und ein 5.15+-Kernel mit dem Drop-in.
+
+## Verwandtes
+
+- [Datenebene im Kernel](/docs/dataplane) — die Ebene, auf der die Fingerprint-Ebene aufsetzt, und Source-Blocks.
+- [Konfigurationsreferenz](/docs/configuration) — jeder Schlüssel in der YAML-Datei.
+- [Go-live](/docs/going-live) — Validierung mit dry-run vor der Durchsetzung.
+- [Audit-Log](/docs/audit) — die `source="auto"`-Datensätze, die diese Ebene schreibt.

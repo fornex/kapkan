@@ -1,0 +1,156 @@
+export const metadata = {
+  title: "Plano de huellas (JA4)",
+  description:
+    "Bloquea clientes por la huella de su handshake TLS/QUIC (JA4), calculada fuera de la ruta a partir de una copia muestreada en el kernel de cada ClientHello y QUIC Initial. Qué es, cómo configurarlo y por qué una lista de bloqueo JA4 actúa sobre el origen declarado.",
+};
+
+# Plano de huellas (JA4)
+
+El [plano de datos](/docs/dataplane) descarta y limita la tasa por dirección y por la forma de un
+paquete de handshake. El **plano de huellas** añade un eje más: identifica al *cliente* detrás de un
+handshake por su huella **JA4** y te permite bloquear en origen a los clientes cuya huella hayas
+listado — sin importar de qué dirección provengan.
+
+Es **fuera de la ruta** (off-path) por diseño. El kernel no decide nada sobre una huella;
+**copia** un prefijo acotado y muestreado de cada TLS ClientHello y QUIC Initial hacia el espacio de
+usuario a través de un ring buffer. El espacio de usuario calcula el JA4, y si ese JA4 está en tu
+lista de bloqueo instala un [bloqueo de origen](/docs/dataplane#bloqueos-de-origen-desde-tu-propio-stack)
+en la ruta XDP existente — el mismo descarte por origen que un operador o una integración instala a
+través de la API. El kernel copia; el espacio de usuario clasifica; la aplicación es la ruta de
+bloqueo de origen que ya tienes.
+
+<Callout type="info" title="Va montado sobre el plano de datos">
+El plano de huellas es parte de `dataplane`: necesita `dataplane.enabled: true` y la misma
+preparación del host ([Plano de datos en el kernel](/docs/dataplane) — Linux 5.15+, el drop-in de
+systemd, las capacidades). Está **desactivado por defecto** incluso cuando el plano de datos está
+activo.
+</Callout>
+
+## Qué es JA4
+
+[JA4](https://github.com/FoxIO-LLC/ja4) (FoxIO, BSD-3) es una huella de **cliente** TLS/QUIC con la
+forma `a_b_c`:
+
+```text
+t13d1516h2_8daaf6152771_e5627efa2ab1
+│└ version │ └ sha256(sorted ciphers)[:12]
+│  SNI d/i │           └ sha256(sorted extensions "_" sigalgs)[:12]
+└ transport: t = TLS-over-TCP, q = QUIC
+```
+
+El primer carácter es el transporte, así que la huella de un cliente QUIC empieza por `q` y la del
+mismo cliente sobre TCP empieza por `t`; los dos hashes se derivan de las listas de cifrados y
+extensiones y son independientes del transporte. Kapkan calcula el JA4 (y extrae SNI y ALPN) con un
+analizador puro en Go — sin librería, sin servicio externo. Para QUIC descifra primero el Initial v1
+(ver más abajo).
+
+## Cómo funciona
+
+1. **Copiar (kernel).** Cuando el plano de datos reconoce un TLS ClientHello o un QUIC Initial v1, un
+   **muestreador** (sampler) de tipo token-bucket por CPU decide si copiarlo. Las copias llegan a un
+   ring buffer; el muestreador limita las copias por segundo por CPU para que el plano nunca pueda
+   convertirse en su propio DoS bajo una avalancha (flood) de handshakes.
+2. **Clasificar (espacio de usuario).** Un lector vacía el ring, calcula el JA4 y lo busca en la
+   lista de bloqueo. Un QUIC Initial se descifra primero con claves derivadas de su Destination
+   Connection ID — entradas públicas, sin intercambio de secretos, que es exactamente por lo que una
+   copia fuera de la ruta es suficiente.
+3. **Aplicar.** Una coincidencia en la lista de bloqueo instala un bloqueo de origen con TTL sobre
+   el origen declarado hacia la víctima, en la misma ruta XDP que un bloqueo de origen de la API. No
+   se anuncia nada a ningún peer.
+
+El análisis y el descifrado **fallan de forma abierta** (fail open): una instantánea truncada, un
+handshake repartido entre paquetes, una versión de QUIC distinta de la v1, o cualquier cosa que no
+se analice simplemente *no se marca con huella* — nunca se clasifica mal. El plano nunca reensambla a
+través de datagramas, así que un ClientHello más grande que un datagrama capturado no es identificable
+por huella aquí.
+
+## Configuración
+
+El plano vive bajo `dataplane.fingerprint`:
+
+```yaml
+dataplane:
+  enabled: true
+  interfaces: ["eth0"]
+  fingerprint:
+    enabled: true            # off by default; requires dataplane.enabled: true
+    sample_pps: 1000          # copies/sec/CPU cap (the DoS-safety sampler); default 1000
+    block_ttl_seconds: 300    # how long a JA4 block lives before it must refresh; default 300, max 86400
+    ja4_blocklist:            # exact-match JA4 fingerprints to source-block on sight
+      - t13d1516h2_8daaf6152771_e5627efa2ab1   # a TLS client
+      # QUIC fingerprints start with q; add the ones your telemetry flags
+```
+
+| Clave | Significado |
+| --- | --- |
+| `fingerprint.enabled` | Activa el plano. **Requiere `dataplane.enabled: true`** (de lo contrario la configuración se rechaza). Desactivado por defecto. Cambiarlo alterna una bandera del kernel escrita al adjuntar, así que **requiere reinicio**. |
+| `fingerprint.sample_pps` | Límite de copias de handshake por segundo por CPU — el muestreador en el kernel que mantiene el plano acotado bajo una avalancha (flood). `0` selecciona el valor por defecto (1000). **Requiere reinicio.** |
+| `fingerprint.block_ttl_seconds` | Cuánto vive en el kernel un bloqueo de origen disparado por JA4 antes de que deba refrescarse. `0` selecciona el valor por defecto (300); debe estar dentro de `[1, 86400]`. **Recarga en caliente.** |
+| `fingerprint.ja4_blocklist` | Las huellas JA4 a bloquear en origen, con coincidencia **exacta** (`a_b_c`). Las huellas QUIC empiezan por `q`. Los duplicados se rechazan. **Recarga en caliente** — editar la lista surte efecto en el siguiente handshake, sin reinicio. |
+
+La lista de bloqueo y el TTL se recargan en caliente; la bandera de activación y la tasa del
+muestreador se escriben en el kernel al adjuntar y necesitan un reinicio. El
+[constructor de configuración](https://kapkan.io/config) muestra estos campos en el paso avanzado del
+plano de datos.
+
+## Un bloqueo JA4 actúa sobre el origen *declarado*
+
+Esta es la advertencia crucial, y determina cómo debes leer una lista de bloqueo.
+
+Un ClientHello se reconoce mediante una **coincidencia sin estado, a desplazamiento fijo** — no hay
+un handshake TCP completado detrás — así que un único paquete **falsificado** (spoofed) que lleve un
+ClientHello fabricado cuya JA4 hayas incluido en la lista de bloqueo bloqueará en origen cualquier
+dirección de la que ese paquete afirme provenir. Eso es el modelo de bloqueo de origen funcionando
+exactamente como se diseñó (actúa sobre la dirección que va en el cable), pero con un disparador
+fabricable por un atacante significa que una lista de bloqueo JA4 puede convertirse en una palanca
+para bloquear el tráfico de un tercero elegido hacia la víctima.
+
+<Callout type="warning" title="Lee una lista de bloqueo como &quot;bloquea los orígenes declarados de esta huella&quot;">
+Una entrada de una lista de bloqueo JA4 **no** es una afirmación de que un host sea malicioso.
+Trátala como "bloquea los orígenes que presentan esta huella", sabiendo que la huella — y por tanto
+el origen sobre el que recae — es falsificable. Cada bloqueo de huella tiene TTL y respeta el
+[dry-run](/docs/going-live), así que un disparo erróneo caduca por sí solo.
+</Callout>
+
+Para acotar los daños colaterales, los bloqueos del plano de huellas se toman de un **presupuesto
+separado y más pequeño** que los bloqueos de origen del operador y de la API — la mitad del pool de
+anclajes de origen. Una avalancha (flood) de paquetes con JA4 fabricada solo puede llenar su propia
+reserva y **nunca** puede dejar sin recursos a los bloqueos de origen del operador/API que comparten
+el pool.
+
+## Auditoría
+
+Un bloqueo del plano de huellas se escribe en el [registro de auditoría](/docs/audit) como un
+registro `source_block` con `source: "auto"` — el motor tomó la acción, no un operador, así que no
+lleva operador, rol ni tenant. Su motivo es la huella coincidente, p. ej.
+`ja4:t13d1516h2_8daaf6152771_e5627efa2ab1`. Solo se auditan los bloqueos exitosos (un bloqueo en
+dry-run se registra y se marca); los rechazos se cuentan en métricas y logs pero no se escriben en el
+almacén de auditoría, así que una avalancha de JA4 falsificadas no puede inundarlo.
+
+## Métricas
+
+| Métrica | Etiquetas | Significado |
+| --- | --- | --- |
+| `kapkan_fingerprint_events_total` | `result` | Eventos del ring por resultado: `classified`, `blocked`, `would_block` (una coincidencia en dry-run), `suppressed` (una repetición dentro del enfriamiento del bloqueo), `block_error` (rechazado por política — en lista de permitidos / protegido / presupuesto lleno), `unparsed`, `malformed`, `unknown_axis`, `panic`. |
+| `kapkan_dataplane_observations_total` | `kind="fp_emitted"` | Handshakes que el muestreador copió al espacio de usuario. |
+| `kapkan_dataplane_observations_total` | `kind="fp_throttled"` | Handshakes que el muestreador descartó para mantenerse por debajo de `sample_pps` — se espera que suba bajo una avalancha (flood) mientras `fp_emitted` se estabiliza. |
+| `kapkan_dataplane_observations_total` | `kind="fp_ring_full"` | Copias descartadas porque el espacio de usuario no vaciaba el ring con suficiente rapidez. Una tasa sostenida distinta de cero aquí significa que el lector no puede seguir el ritmo. |
+
+Consulta [Métricas](/docs/metrics) para conocer toda la familia del plano de datos y cómo las
+observaciones se relacionan con los veredictos finales.
+
+## Limitaciones
+
+- **Solo QUIC v1.** QUIC v2 y las versiones borrador usan claves distintas y no se descifran; sus
+  Initials se copian y descartan, no se marcan con huella.
+- **Un datagrama.** Un handshake que abarca varios paquetes o datagramas no se reensambla, así que un
+  ClientHello muy grande (muchas extensiones, grandes key shares postcuánticos) puede exceder el
+  prefijo capturado y quedar sin huella. Esto es fail-open, no un bloqueo.
+- **Requiere el plano de datos.** `dataplane.enabled: true` y un kernel 5.15+ con el drop-in.
+
+## Relacionado
+
+- [Plano de datos en el kernel](/docs/dataplane) — el plano sobre el que va montado el plano de huellas, y los bloqueos de origen.
+- [Referencia de configuración](/docs/configuration) — cada clave del archivo YAML.
+- [Puesta en marcha](/docs/going-live) — validar con dry-run antes de aplicar.
+- [Registro de auditoría](/docs/audit) — los registros `source="auto"` que escribe este plano.

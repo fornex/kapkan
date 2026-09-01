@@ -1,0 +1,146 @@
+export const metadata = {
+  title: "Fingerprint plane (JA4)",
+  description:
+    "Block clients by their TLS/QUIC handshake fingerprint (JA4), computed off-path from a sampled kernel copy of each ClientHello and QUIC Initial. What it is, how to configure it, and why a JA4 blocklist acts on the claimed source.",
+};
+
+# Fingerprint plane (JA4)
+
+The [data plane](/docs/dataplane) drops and rate-limits by address and by the shape of a handshake
+packet. The **fingerprint plane** adds one more axis: it identifies the *client* behind a handshake
+by its **JA4** fingerprint and lets you source-block clients whose fingerprint you have listed —
+regardless of which address they come from.
+
+It is **off-path** by construction. The kernel does not decide anything about a fingerprint; it
+**copies** a bounded, sampled prefix of each TLS ClientHello and QUIC Initial to userspace through a
+ring buffer. Userspace computes the JA4, and if that JA4 is on your blocklist it installs a
+[source block](/docs/dataplane#source-blocks-from-your-own-stack) on the existing XDP path — the
+same per-source drop an operator or an integration installs through the API. The kernel copies;
+userspace classifies; enforcement is the source-block path you already have.
+
+<Callout type="info" title="It rides on the data plane">
+The fingerprint plane is part of `dataplane`: it needs `dataplane.enabled: true` and the same host
+preparation ([In-kernel data plane](/docs/dataplane) — Linux 5.15+, the systemd drop-in, the
+capabilities). It is **off by default** even when the data plane is on.
+</Callout>
+
+## What JA4 is
+
+[JA4](https://github.com/FoxIO-LLC/ja4) (FoxIO, BSD-3) is a TLS/QUIC **client** fingerprint of the
+form `a_b_c`:
+
+```text
+t13d1516h2_8daaf6152771_e5627efa2ab1
+│└ version │ └ sha256(sorted ciphers)[:12]
+│  SNI d/i │           └ sha256(sorted extensions "_" sigalgs)[:12]
+└ transport: t = TLS-over-TCP, q = QUIC
+```
+
+The first character is the transport, so a QUIC client's fingerprint starts with `q` and the same
+client over TCP starts with `t`; the two hashes are derived from the cipher and extension lists and
+are transport-independent. Kapkan computes JA4 (and extracts SNI and ALPN) with a pure-Go parser —
+no library, no external service. For QUIC it decrypts the v1 Initial first (see below).
+
+## How it works
+
+1. **Copy (kernel).** When the data plane recognises a TLS ClientHello or a QUIC v1 Initial, a
+   per-CPU token-bucket **sampler** decides whether to copy it. Copies land in a ring buffer; the
+   sampler caps copies per second per CPU so the plane can never become its own DoS under a
+   handshake flood.
+2. **Classify (userspace).** A reader drains the ring, computes the JA4, and looks it up in the
+   blocklist. A QUIC Initial is decrypted first with keys derived from its Destination Connection
+   ID — public inputs, no secret exchange, which is exactly why an off-path copy is enough.
+3. **Enforce.** A blocklist match installs a TTL'd source block on the claimed source toward the
+   victim, on the same XDP path as an API source block. Nothing is announced to any peer.
+
+Parsing and decryption **fail open**: a truncated snapshot, a handshake split across packets, a
+QUIC version other than v1, or anything that does not parse is simply *not fingerprinted* — never
+misclassified. The plane never reassembles across datagrams, so a ClientHello larger than one
+captured datagram is not fingerprintable here.
+
+## Configuration
+
+The plane lives under `dataplane.fingerprint`:
+
+```yaml
+dataplane:
+  enabled: true
+  interfaces: ["eth0"]
+  fingerprint:
+    enabled: true            # off by default; requires dataplane.enabled: true
+    sample_pps: 1000          # copies/sec/CPU cap (the DoS-safety sampler); default 1000
+    block_ttl_seconds: 300    # how long a JA4 block lives before it must refresh; default 300, max 86400
+    ja4_blocklist:            # exact-match JA4 fingerprints to source-block on sight
+      - t13d1516h2_8daaf6152771_e5627efa2ab1   # a TLS client
+      # QUIC fingerprints start with q; add the ones your telemetry flags
+```
+
+| Key | Meaning |
+| --- | --- |
+| `fingerprint.enabled` | Turns the plane on. **Requires `dataplane.enabled: true`** (the config is rejected otherwise). Off by default. Changing it flips a kernel flag written at attach, so it is **restart-required**. |
+| `fingerprint.sample_pps` | Cap on handshake copies per second per CPU — the in-kernel sampler that keeps the plane bounded under a flood. `0` selects the default (1000). **Restart-required.** |
+| `fingerprint.block_ttl_seconds` | How long a JA4-triggered source block lives in the kernel before it must be refreshed. `0` selects the default (300); must be within `[1, 86400]`. **Hot-reloads.** |
+| `fingerprint.ja4_blocklist` | The JA4 fingerprints to source-block, matched **exactly** (`a_b_c`). QUIC fingerprints start with `q`. Duplicates are rejected. **Hot-reloads** — editing the list takes effect on the next handshake, no restart. |
+
+The blocklist and TTL hot-reload; the enable flag and the sampler rate are written into the kernel
+at attach and need a restart. The [config builder](https://kapkan.io/config) renders these fields
+on the advanced data-plane step.
+
+## A JA4 block acts on the *claimed* source
+
+This is the load-bearing caveat, and it governs how you should read a blocklist.
+
+A ClientHello is recognised by a **stateless, fixed-offset match** — there is no completed TCP
+handshake behind it — so a single **spoofed** packet carrying a crafted ClientHello whose JA4 you
+have blocklisted will source-block whatever address that packet claims to come from. That is the
+source-block model working exactly as designed (it acts on the address on the wire), but with an
+attacker-craftable trigger it means a JA4 blocklist can be turned into a lever to block a chosen
+third party's traffic toward the victim.
+
+<Callout type="warning" title="Read a blocklist as &quot;block this fingerprint's claimed sources&quot;">
+A JA4 blocklist entry is **not** an assertion that a host is bad. Treat it as "block the sources
+that present this fingerprint", knowing the fingerprint — and therefore the source it lands on — is
+spoofable. Every fingerprint block is TTL'd and honours [dry-run](/docs/going-live), so a misfire
+ages out on its own.
+</Callout>
+
+To bound the collateral, fingerprint-plane blocks draw from a **separate, smaller budget** than
+operator and API source blocks — half the source-anchor pool. A flood of crafted-JA4 packets can
+fill only its own reservation and can **never** starve the operator/API source blocks that share
+the pool.
+
+## Auditing
+
+A fingerprint-plane block is written to the [audit log](/docs/audit) as a `source_block` record
+with `source: "auto"` — the engine took the action, not an operator, so it carries no operator,
+role or tenant. Its reason is the matched fingerprint, e.g. `ja4:t13d1516h2_8daaf6152771_e5627efa2ab1`.
+Only successful blocks are audited (a dry-run block is recorded and marked); refusals are counted in
+metrics and logs but not written to the audit store, so a spoofed-JA4 flood cannot spam it.
+
+## Metrics
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `kapkan_fingerprint_events_total` | `result` | Ring events by outcome: `classified`, `blocked`, `would_block` (a dry-run match), `suppressed` (a repeat within the block's cooldown), `block_error` (refused by policy — allowlisted / protected / budget full), `unparsed`, `malformed`, `unknown_axis`, `panic`. |
+| `kapkan_dataplane_observations_total` | `kind="fp_emitted"` | Handshakes the sampler copied to userspace. |
+| `kapkan_dataplane_observations_total` | `kind="fp_throttled"` | Handshakes the sampler shed to stay under `sample_pps` — expected to rise under a flood while `fp_emitted` plateaus. |
+| `kapkan_dataplane_observations_total` | `kind="fp_ring_full"` | Copies dropped because userspace was not draining the ring fast enough. A sustained non-zero rate here means the reader cannot keep up. |
+
+See [Metrics](/docs/metrics) for the full data-plane family and how observations relate to terminal
+verdicts.
+
+## Limitations
+
+- **QUIC v1 only.** QUIC v2 and the draft versions use different keys and are not decrypted; their
+  Initials are copied and dropped, not fingerprinted.
+- **One datagram.** A handshake that spans multiple packets or datagrams is not reassembled, so a
+  very large ClientHello (many extensions, large post-quantum key shares) may exceed the captured
+  prefix and go un-fingerprinted. This is fail-open, not a block.
+- **Requires the data plane.** `dataplane.enabled: true` and a 5.15+ kernel with the drop-in.
+
+## Related
+
+- [In-kernel data plane](/docs/dataplane) — the plane the fingerprint plane rides on, and source blocks.
+- [Configuration reference](/docs/configuration) — every key in the YAML file.
+- [Going live](/docs/going-live) — validating with dry-run before enforcing.
+- [Audit log](/docs/audit) — the `source="auto"` records this plane writes.

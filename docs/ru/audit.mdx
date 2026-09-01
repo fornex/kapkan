@@ -37,7 +37,7 @@ unban — это `404 "no active ban"`, а не решение политики,
 | `ban` | `POST /api/v1/ban` | `active` при успехе; `rejected`, когда защитный механизм отказывает. Блокировка в режиме dry-run всё равно записывает `active` — симуляция обозначается отдельным полем `dry_run`. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` при успехе. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` при успехе; `error`, когда новую конфигурацию не удаётся разобрать или проверить. |
-| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` при успехе; `rejected`, когда политика отказывает. Отклонённая блокировка источника сама является действием оператора, поэтому привязывается так же, как отклонённая блокировка. |
+| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` при успехе; `rejected`, когда политика отказывает. Отклонённая блокировка источника сама является действием оператора, поэтому привязывается так же, как отклонённая блокировка. [Плоскость отпечатков](/docs/fingerprinting) также пишет записи `source_block` — `source: "auto"`, только при успехе — когда блокирует JA4. |
 | `source_unblock` | `POST /api/v1/dataplane/sources/unblock` | `removed` при успехе. |
 
 `config_reload` доступен только токенам без ограничения области (admin). Оператору с областью tenant
@@ -121,7 +121,7 @@ Authorization: Bearer <token>
 | `target` | IP для `ban`/`unban`; `source->victim` для `source_block`/`source_unblock`; пустой для `config_reload`. |
 | `target_type` | `host` для `ban`/`unban`; `source` для `source_block`/`source_unblock`; `global` для `config_reload`. |
 | `reason` | Детали отказа или ошибки; пустое при успехе. |
-| `source` | `api` (действие оператора). Внутренние автоматические действия движка зарезервированы за будущим источником `auto`. |
+| `source` | `api` для действия оператора или `auto` для действия, инициированного движком. Сегодня [плоскость отпечатков](/docs/fingerprinting) пишет записи `source_block` с `source: "auto"` — без оператора, роли и tenant — когда JA4 клиента находится в списке блокировки. |
 | `ban_state` | Итоговое состояние блокировки для `ban`/`unban`; пустое для `config_reload` и действий с блокировкой источников. |
 | `dry_run` | `1`, когда развёртывание находится в режиме [dry-run](/docs/safety). |
 

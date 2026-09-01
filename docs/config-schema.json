@@ -309,6 +309,8 @@
           "additionalProperties": false,
           "properties": {
             "block_ttl_seconds": {
+              "maximum": 86400,
+              "minimum": 1,
               "type": "integer"
             },
             "enabled": {
