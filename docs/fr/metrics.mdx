@@ -108,7 +108,7 @@ réellement — la garde la moins coûteuse est la présence de `kapkan_dataplan
 | `kapkan_dataplane_shadowed_static_rules` | — | Règles statiques de la configuration qui ne peuvent jamais s'appliquer, parce que l'allowlist ou une règle statique antérieure prend déjà chaque paquet qu'elles sélectionnent. `0` est la seule valeur saine, et toute autre mérite une alerte : ce défaut n'a aucun autre symptôme chiffré, puisque le compteur de la règle morte reste lui aussi à zéro — exactement ce à quoi ressemble une règle correcte dont le trafic n'est pas arrivé. Republiée à chaque application de politique, elle retombe donc à `0` au rechargement qui corrige la configuration. Voir [Règles qui ne peuvent jamais s'appliquer](/docs/dataplane-tuning#règles-qui-ne-peuvent-jamais-sappliquer). |
 | `kapkan_dataplane_packets_total` | `verdict` | Paquets par verdict XDP terminal (`pass_default`, `pass_allow_src`, `drop_static`, `drop_rl`, …). Exactement un verdict terminal est compté par paquet — lisez [Verdicts terminaux et observations](#verdicts-terminaux-et-observations) avant de les sommer. |
 | `kapkan_dataplane_bytes_total` | `verdict` | Octets, selon les mêmes verdicts terminaux. Un graphique en paquets par seconde seul ne distingue pas un SYN flood de 64 octets d'une réflexion par amplification de 1500 octets, et les deux appellent des réponses différentes. |
-| `kapkan_dataplane_observations_total` | `kind` | Observations du chemin de données qui accompagnent un verdict terminal au lieu de le remplacer : `dryrun_would_drop`, `pass_rule_expired`, `pass_frag_noports`, `err_policy_missing`. Une métrique distincte à dessein — voir ci-dessous. |
+| `kapkan_dataplane_observations_total` | `kind` | Observations du chemin de données qui accompagnent un verdict terminal au lieu de le remplacer : `dryrun_would_drop`, `pass_rule_expired`, `pass_frag_noports`, `err_policy_missing`, et l'échantillonneur par copie du [plan d'empreintes](/docs/fingerprinting) : `fp_emitted` / `fp_throttled` / `fp_ring_full`. Une métrique distincte à dessein — voir ci-dessous. |
 | `kapkan_dataplane_filter_bypass_packets_total` | `reason` | **Une alarme, pas une statistique.** Paquets transmis sans qu'une seule règle ait été évaluée, parce qu'ils ont d'abord atteint une limite d'analyse du chemin de données. Un seul `reason` existe aujourd'hui : `ipv6_exthdr_cap`. Alertez sur tout taux non nul — voir [L'alarme de contournement du filtre](#lalarme-de-contournement-du-filtre). |
 | `kapkan_dataplane_filter_bypass_bytes_total` | `reason` | Octets correspondants, selon le même `reason`. Cela distingue un sondage d'un déluge : une poignée de paquets fabriqués par heure, c'est quelqu'un qui mesure votre analyseur ; un débit soutenu, c'est l'attaque pour laquelle cette mesure a été faite. |
 | `kapkan_dataplane_rules` | `mode` | Règles que le noyau applique actuellement — la politique statique plus les règles dynamiques de l'atténuation — ventilées en `real` / `dry_run` exactement comme `kapkan_mitigate_flowspec_rules`. Le mode est le drapeau du chemin de données lui-même, relu depuis le noyau, et non celui du fichier de configuration : un jeu d'épinglages adopté peut encore tourner avec le drapeau du processus précédent. |
@@ -219,6 +219,19 @@ n'est pas authentifié, et une adresse de victime dans un label révélerait qui
 quiconque peut atteindre l'écouteur. Ces compteurs par bannissement et par règle se trouvent en
 revanche dans [`/api/v1/bans`](/docs/api), qui est authentifié, sous l'objet `dataplane` de chaque
 bannissement.
+
+## Plan d'empreintes
+
+Le [plan d'empreintes](/docs/fingerprinting) ([`dataplane.fingerprint.enabled: true`](/docs/fingerprinting))
+rend compte ici de son lecteur en espace utilisateur ; son échantillonneur par copie dans le noyau est sur
+`kapkan_dataplane_observations_total{kind="fp_emitted"|"fp_throttled"|"fp_ring_full"}` ci-dessus.
+
+| Métrique | Labels | Signification |
+| --- | --- | --- |
+| `kapkan_fingerprint_events_total` | `result` | Événements de l'anneau selon le résultat du lecteur : `classified` (un JA4 a été calculé), `blocked`, `would_block` (une correspondance en dry-run), `suppressed` (une répétition pendant le délai de refroidissement du blocage), `block_error` (refusé par la politique — allowlisté / protégé / budget plein), `unparsed` (tronqué, pas un handshake, ou un paquet QUIC indéchiffrable), `malformed`, `unknown_axis`, `panic`. Un `block_error` en hausse est le signal qui mérite une alerte ; un `unparsed` en hausse sous charge n'est généralement que des instantanés tronqués et reste bénin. |
+
+`fp_throttled` qui grimpe tandis que `fp_emitted` plafonne, c'est l'échantillonneur qui fait son travail sous un
+flood de handshakes ; un `fp_ring_full` soutenu signifie que le lecteur ne parvient pas à vider l'anneau assez vite.
 
 ## Collecte (scraping)
 

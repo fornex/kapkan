@@ -41,7 +41,7 @@ ein `404 "no active ban"`, keine Richtlinienentscheidung, es gibt also nichts zu
 | `ban` | `POST /api/v1/ban` | `active` bei Erfolg; `rejected`, wenn eine Sicherheitsabsicherung ihn verweigert. Ein Dry-Run-Ban zeichnet weiterhin `active` auf — die Simulation wird über das separate Feld `dry_run` signalisiert. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` bei Erfolg. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` bei Erfolg; `error`, wenn die neue Konfiguration nicht geparst oder validiert werden kann. |
-| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` bei Erfolg; `rejected`, wenn die Policy ihn verweigert. Ein verweigerter Source-Block ist selbst eine Operator-Aktion und wird wie ein verweigerter Ban attribuiert. |
+| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` bei Erfolg; `rejected`, wenn die Policy ihn verweigert. Ein verweigerter Source-Block ist selbst eine Operator-Aktion und wird wie ein verweigerter Ban attribuiert. Die [Fingerprint-Ebene](/docs/fingerprinting) schreibt ebenfalls `source_block`-Einträge — `source: "auto"`, nur bei Erfolg —, wenn sie eine JA4 blockiert. |
 | `source_unblock` | `POST /api/v1/dataplane/sources/unblock` | `removed` bei Erfolg. |
 
 Eine **abgelehnte** Aktion wird bewusst auditiert: ein Ban, der von der Whitelist, den
@@ -128,7 +128,7 @@ Jeder Eintrag trägt diese Felder:
 | `target` | Die IP bei `ban`/`unban`; `source->victim` bei `source_block`/`source_unblock`; leer bei `config_reload`. |
 | `target_type` | `host` bei `ban`/`unban`; `source` bei `source_block`/`source_unblock`; `global` bei `config_reload`. |
 | `reason` | Ablehnungs- oder Fehlerdetail; leer bei Erfolg. |
-| `source` | `api` (Operator-Aktion). Engine-interne automatische Aktionen sind für eine zukünftige `auto`-Quelle reserviert. |
+| `source` | `api` für eine Operator-Aktion oder `auto` für eine engine-initiierte. Heute schreibt die [Fingerprint-Ebene](/docs/fingerprinting) `source_block`-Einträge mit `source: "auto"` — und ohne Operator, Rolle oder Mandant —, wenn die JA4 eines Clients auf der Blockliste steht. |
 | `ban_state` | Der finale Ban-Zustand bei `ban`/`unban`; leer bei `config_reload` und den Source-Block-Aktionen. |
 | `dry_run` | `1`, wenn das Deployment im [dry-run](/docs/safety) ist. |
 

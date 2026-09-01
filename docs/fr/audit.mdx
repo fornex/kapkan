@@ -40,7 +40,7 @@ il n'y a donc rien à attribuer) :
 | `ban` | `POST /api/v1/ban` | `active` en cas de succès ; `rejected` lorsqu'un garde-fou de sécurité le refuse. Un bannissement en dry-run enregistre tout de même `active` — la simulation est signalée par le champ `dry_run` distinct. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` en cas de succès. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` en cas de succès ; `error` lorsque la nouvelle configuration ne peut être analysée ou validée. |
-| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` en cas de succès ; `rejected` lorsque la politique le refuse. Un blocage refusé est lui-même une action d'opérateur, il est donc attribué comme un bannissement refusé. |
+| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` en cas de succès ; `rejected` lorsque la politique le refuse. Un blocage refusé est lui-même une action d'opérateur, il est donc attribué comme un bannissement refusé. Le [plan d'empreintes](/docs/fingerprinting) écrit lui aussi des enregistrements `source_block` — `source: "auto"`, uniquement en cas de succès — lorsqu'il bloque une JA4. |
 | `source_unblock` | `POST /api/v1/dataplane/sources/unblock` | `removed` en cas de succès. |
 
 `config_reload` est restreint aux tokens non limités (admin). Un opérateur limité à un tenant est refusé
@@ -126,7 +126,7 @@ Chaque enregistrement comporte ces champs :
 | `target` | L'IP pour `ban`/`unban` ; `source->victim` pour `source_block`/`source_unblock` ; vide pour `config_reload`. |
 | `target_type` | `host` pour `ban`/`unban` ; `source` pour `source_block`/`source_unblock` ; `global` pour `config_reload`. |
 | `reason` | Détail du refus ou de l'erreur ; vide en cas de succès. |
-| `source` | `api` (action d'opérateur). Les actions automatiques internes au moteur sont réservées à une future source `auto`. |
+| `source` | `api` pour une action d'opérateur, ou `auto` pour une action initiée par le moteur. Aujourd'hui, le [plan d'empreintes](/docs/fingerprinting) écrit des enregistrements `source_block` avec `source: "auto"` — et sans opérateur, rôle ni tenant — lorsque la JA4 d'un client figure sur la liste de blocage. |
 | `ban_state` | L'état final du bannissement pour `ban`/`unban` ; vide pour `config_reload` et les actions de blocage de sources. |
 | `dry_run` | `1` lorsque le déploiement est en [dry-run](/docs/safety). |
 

@@ -40,7 +40,7 @@ log:
 | `ban` | `POST /api/v1/ban` | `active` en caso de éxito; `rejected` cuando una protección de seguridad lo deniega. Un baneo en dry-run sigue registrando `active` — la simulación se señala mediante el campo `dry_run` aparte. |
 | `unban` | `POST /api/v1/unban` | `withdrawn` en caso de éxito. |
 | `config_reload` | `POST /api/v1/config/reload` | `ok` en caso de éxito; `error` cuando la nueva configuración no se puede parsear o validar. |
-| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` en caso de éxito; `rejected` cuando la política lo deniega. Un bloqueo denegado es en sí una acción de operador, así que se atribuye igual que un baneo denegado. |
+| `source_block` | `POST /api/v1/dataplane/sources` | `blocked` en caso de éxito; `rejected` cuando la política lo deniega. Un bloqueo denegado es en sí una acción de operador, así que se atribuye igual que un baneo denegado. El [plano de fingerprints](/docs/fingerprinting) también escribe registros `source_block` — `source: "auto"`, solo en caso de éxito — cuando bloquea un JA4. |
 | `source_unblock` | `POST /api/v1/dataplane/sources/unblock` | `removed` en caso de éxito. |
 
 `config_reload` está restringido a tokens sin alcance (admin). Un operator acotado a un tenant es
@@ -126,7 +126,7 @@ Cada registro lleva estos campos:
 | `target` | La IP para `ban`/`unban`; `source->victim` para `source_block`/`source_unblock`; vacío para `config_reload`. |
 | `target_type` | `host` para `ban`/`unban`; `source` para `source_block`/`source_unblock`; `global` para `config_reload`. |
 | `reason` | Detalle de la denegación o el error; vacío en caso de éxito. |
-| `source` | `api` (acción de operator). Las acciones automáticas internas del motor se reservan para una futura fuente `auto`. |
+| `source` | `api` para una acción de operator, o `auto` para una iniciada por el motor. Hoy el [plano de fingerprints](/docs/fingerprinting) escribe registros `source_block` con `source: "auto"` — y sin operator, rol ni tenant — cuando el JA4 de un cliente está en la lista de bloqueo. |
 | `ban_state` | El estado de baneo final para `ban`/`unban`; vacío para `config_reload` y las acciones de bloqueo de origen. |
 | `dry_run` | `1` cuando el despliegue está en [dry-run](/docs/safety). |
 

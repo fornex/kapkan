@@ -1,0 +1,155 @@
+export const metadata = {
+  title: "Plan d'empreintes (JA4)",
+  description:
+    "Bloquer les clients d'après l'empreinte de leur négociation TLS/QUIC (JA4), calculée hors chemin à partir d'une copie noyau échantillonnée de chaque ClientHello et de chaque QUIC Initial. Ce que c'est, comment le configurer, et pourquoi une liste de blocage JA4 agit sur la source revendiquée.",
+};
+
+# Plan d'empreintes (JA4)
+
+Le [plan de données](/docs/dataplane) rejette et limite le débit par adresse et par la forme d'un
+paquet de négociation. Le **plan d'empreintes** ajoute un axe de plus : il identifie le *client*
+derrière une négociation par son empreinte **JA4** et vous permet de source-bloquer les clients dont
+vous avez listé l'empreinte — quelle que soit l'adresse dont ils proviennent.
+
+Il est **hors chemin** (off-path) par construction. Le noyau ne décide rien à propos d'une empreinte ;
+il **copie** un préfixe borné et échantillonné de chaque ClientHello TLS et de chaque QUIC Initial
+vers l'espace utilisateur via un tampon circulaire (ring buffer). L'espace utilisateur calcule le JA4,
+et si ce JA4 figure sur votre liste de blocage il installe un
+[source block](/docs/dataplane#blocages-de-sources-depuis-votre-propre-pile) sur le chemin XDP existant — le
+même rejet par source qu'un opérateur ou une intégration installe via l'API. Le noyau copie ;
+l'espace utilisateur classe ; l'application est le chemin de source-block que vous avez déjà.
+
+<Callout type="info" title="Il s'appuie sur le plan de données">
+Le plan d'empreintes fait partie de `dataplane` : il nécessite `dataplane.enabled: true` et la même
+préparation de l'hôte ([Plan de données dans le noyau](/docs/dataplane) — Linux 5.15+, le drop-in
+systemd, les capacités). Il est **désactivé par défaut** même lorsque le plan de données est activé.
+</Callout>
+
+## Ce qu'est le JA4
+
+[JA4](https://github.com/FoxIO-LLC/ja4) (FoxIO, BSD-3) est une empreinte **client** TLS/QUIC de la
+forme `a_b_c` :
+
+```text
+t13d1516h2_8daaf6152771_e5627efa2ab1
+│└ version │ └ sha256(sorted ciphers)[:12]
+│  SNI d/i │           └ sha256(sorted extensions "_" sigalgs)[:12]
+└ transport: t = TLS-over-TCP, q = QUIC
+```
+
+Le premier caractère est le transport : l'empreinte d'un client QUIC commence donc par `q` et celle
+du même client sur TCP commence par `t` ; les deux hachages sont dérivés des listes de chiffrements
+et d'extensions et sont indépendants du transport. Kapkan calcule le JA4 (et extrait le SNI et l'ALPN)
+avec un analyseur en Go pur — pas de bibliothèque, pas de service externe. Pour QUIC, il déchiffre
+d'abord le Initial v1 (voir ci-dessous).
+
+## Comment ça marche
+
+1. **Copier (noyau).** Lorsque le plan de données reconnaît un ClientHello TLS ou un QUIC Initial v1,
+   un **échantillonneur** à seau de jetons (token-bucket) par CPU décide s'il faut le copier. Les
+   copies atterrissent dans un tampon circulaire ; l'échantillonneur plafonne les copies par seconde
+   et par CPU, de sorte que le plan ne puisse jamais devenir son propre DoS sous un flot (flood) de
+   négociations.
+2. **Classer (espace utilisateur).** Un lecteur vide le ring, calcule le JA4 et le recherche dans la
+   liste de blocage. Un QUIC Initial est d'abord déchiffré avec des clés dérivées de son Destination
+   Connection ID — des entrées publiques, sans échange de secret, ce qui est précisément pourquoi une
+   copie hors chemin suffit.
+3. **Appliquer.** Une correspondance dans la liste de blocage installe un source block avec TTL sur la
+   source revendiquée en direction de la victime, sur le même chemin XDP qu'un source block d'API.
+   Rien n'est annoncé à aucun pair.
+
+L'analyse et le déchiffrement **échouent en mode ouvert** (fail open) : un instantané tronqué, une
+négociation répartie sur plusieurs paquets, une version de QUIC autre que v1, ou tout ce qui ne
+s'analyse pas n'est tout simplement *pas empreinté* — jamais mal classé. Le plan ne réassemble jamais
+entre datagrammes ; un ClientHello plus grand qu'un datagramme capturé n'est donc pas empreintable ici.
+
+## Configuration
+
+Le plan se trouve sous `dataplane.fingerprint` :
+
+```yaml
+dataplane:
+  enabled: true
+  interfaces: ["eth0"]
+  fingerprint:
+    enabled: true            # off by default; requires dataplane.enabled: true
+    sample_pps: 1000          # copies/sec/CPU cap (the DoS-safety sampler); default 1000
+    block_ttl_seconds: 300    # how long a JA4 block lives before it must refresh; default 300, max 86400
+    ja4_blocklist:            # exact-match JA4 fingerprints to source-block on sight
+      - t13d1516h2_8daaf6152771_e5627efa2ab1   # a TLS client
+      # QUIC fingerprints start with q; add the ones your telemetry flags
+```
+
+| Clé | Signification |
+| --- | --- |
+| `fingerprint.enabled` | Active le plan. **Nécessite `dataplane.enabled: true`** (sinon la configuration est rejetée). Désactivé par défaut. Le modifier bascule un indicateur noyau écrit au moment de l'attachement, donc il **nécessite un redémarrage**. |
+| `fingerprint.sample_pps` | Plafond de copies de négociations par seconde et par CPU — l'échantillonneur dans le noyau qui maintient le plan borné sous un flot. `0` sélectionne la valeur par défaut (1000). **Nécessite un redémarrage.** |
+| `fingerprint.block_ttl_seconds` | Durée de vie dans le noyau d'un source block déclenché par JA4 avant qu'il doive être rafraîchi. `0` sélectionne la valeur par défaut (300) ; doit être dans `[1, 86400]`. **Rechargement à chaud.** |
+| `fingerprint.ja4_blocklist` | Les empreintes JA4 à source-bloquer, mises en correspondance **exactement** (`a_b_c`). Les empreintes QUIC commencent par `q`. Les doublons sont rejetés. **Rechargement à chaud** — modifier la liste prend effet à la prochaine négociation, sans redémarrage. |
+
+La liste de blocage et le TTL se rechargent à chaud ; l'indicateur d'activation et le débit de
+l'échantillonneur sont écrits dans le noyau à l'attachement et nécessitent un redémarrage. Le
+[config builder](https://kapkan.io/config) affiche ces champs à l'étape avancée du plan de données.
+
+## Un blocage JA4 agit sur la source *revendiquée*
+
+C'est la réserve porteuse, et elle régit la façon dont vous devez lire une liste de blocage.
+
+Un ClientHello est reconnu par une **correspondance à décalage fixe, sans état** — il n'y a aucune
+négociation TCP achevée derrière — de sorte qu'un unique paquet **usurpé** (spoofed) transportant un
+ClientHello fabriqué dont vous avez mis le JA4 en liste de blocage source-bloquera toute adresse dont
+ce paquet prétend provenir. C'est le modèle de source-block qui fonctionne exactement comme prévu (il
+agit sur l'adresse présente sur le fil), mais avec un déclencheur fabricable par un attaquant, cela
+signifie qu'une liste de blocage JA4 peut être transformée en levier pour bloquer le trafic d'un tiers
+choisi en direction de la victime.
+
+<Callout type="warning" title="Lisez une liste de blocage comme &quot;bloquer les sources revendiquées de cette empreinte&quot;">
+Une entrée de liste de blocage JA4 n'est **pas** une affirmation qu'un hôte est malveillant. Traitez-la
+comme « bloquer les sources qui présentent cette empreinte », en sachant que l'empreinte — et donc la
+source sur laquelle elle atterrit — est usurpable. Chaque blocage d'empreinte est doté d'un TTL et
+respecte le [dry-run](/docs/going-live), de sorte qu'un tir manqué s'efface de lui-même avec le temps.
+</Callout>
+
+Pour borner les dommages collatéraux, les blocages du plan d'empreintes puisent dans un **budget
+distinct et plus petit** que les source blocks d'opérateur et d'API — la moitié du pool d'ancres de
+source. Un flot de paquets à JA4 fabriqué ne peut remplir que sa propre réservation et ne peut
+**jamais** affamer les source blocks opérateur/API qui partagent le pool.
+
+## Audit
+
+Un blocage du plan d'empreintes est écrit dans le [journal d'audit](/docs/audit) sous la forme d'un
+enregistrement `source_block` avec `source: "auto"` — c'est le moteur qui a pris l'action, pas un
+opérateur, donc il ne porte ni opérateur, ni rôle, ni locataire. Son motif est l'empreinte
+correspondante, par ex. `ja4:t13d1516h2_8daaf6152771_e5627efa2ab1`. Seuls les blocages réussis sont
+audités (un blocage en dry-run est enregistré et marqué) ; les refus sont comptés dans les métriques
+et les journaux mais non écrits dans le magasin d'audit, de sorte qu'un flot de JA4 usurpés ne puisse
+pas le submerger.
+
+## Métriques
+
+| Métrique | Étiquettes | Signification |
+| --- | --- | --- |
+| `kapkan_fingerprint_events_total` | `result` | Événements du ring par issue : `classified`, `blocked`, `would_block` (une correspondance en dry-run), `suppressed` (une répétition pendant le temps de recharge du blocage), `block_error` (refusé par la politique — sur liste d'autorisation / protégé / budget plein), `unparsed`, `malformed`, `unknown_axis`, `panic`. |
+| `kapkan_dataplane_observations_total` | `kind="fp_emitted"` | Négociations que l'échantillonneur a copiées vers l'espace utilisateur. |
+| `kapkan_dataplane_observations_total` | `kind="fp_throttled"` | Négociations que l'échantillonneur a délestées pour rester sous `sample_pps` — attendu à la hausse sous un flot pendant que `fp_emitted` plafonne. |
+| `kapkan_dataplane_observations_total` | `kind="fp_ring_full"` | Copies abandonnées parce que l'espace utilisateur ne vidait pas le ring assez vite. Un taux non nul soutenu ici signifie que le lecteur ne parvient pas à suivre. |
+
+Voir [Métriques](/docs/metrics) pour la famille complète du plan de données et pour la façon dont les
+observations se rapportent aux verdicts terminaux.
+
+## Limitations
+
+- **QUIC v1 uniquement.** QUIC v2 et les versions préliminaires (draft) utilisent des clés
+  différentes et ne sont pas déchiffrés ; leurs Initials sont copiés et abandonnés, pas empreintés.
+- **Un seul datagramme.** Une négociation qui s'étend sur plusieurs paquets ou datagrammes n'est pas
+  réassemblée ; un ClientHello très volumineux (nombreuses extensions, grands partages de clés
+  post-quantiques) peut donc dépasser le préfixe capturé et rester non empreinté. C'est un
+  échec en mode ouvert (fail-open), pas un blocage.
+- **Nécessite le plan de données.** `dataplane.enabled: true` et un noyau 5.15+ avec le drop-in.
+
+## Voir aussi
+
+- [Plan de données dans le noyau](/docs/dataplane) — le plan sur lequel s'appuie le plan d'empreintes, et les source blocks.
+- [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.
+- [Mise en production](/docs/going-live) — valider avec le dry-run avant d'appliquer.
+- [Journal d'audit](/docs/audit) — les enregistrements `source="auto"` que ce plan écrit.
