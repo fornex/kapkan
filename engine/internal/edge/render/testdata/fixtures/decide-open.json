@@ -1,0 +1,22 @@
+{
+  "doc": {
+    "version": 1,
+    "zones": [
+      {
+        "name": "example.com",
+        "origins": ["10.0.0.1:8080", "10.0.0.2:8080"],
+        "tls": {"min_version": "1.2"},
+        "policy": {"mode": "decide", "failure_mode": "open", "challenge": "off", "rate": {}}
+      }
+    ],
+    "acme_challenges": [],
+    "issuance_grants": []
+  },
+  "certs": {
+    "example.com": {
+      "fullchain": "/var/lib/kapkan/edge/certs/example.com/fullchain.pem",
+      "key": "/var/lib/kapkan/edge/certs/example.com/privkey.pem"
+    }
+  },
+  "node": {}
+}

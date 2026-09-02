@@ -11,7 +11,9 @@ package config
 // This file follows the house wasm discipline like the rest of the package: no
 // filesystem probes beyond reading the file (ParseZones is pure and is what the
 // browser-side validator will compile), no netlink, no imports outside the
-// standard library and yaml. A path in a zone (extra_directives_file) is checked
+// standard library and yaml — plus internal/edge/edgedoc, the standard-library-
+// only leaf that owns the policy vocabulary the brain and the node share. A
+// path in a zone (extra_directives_file) is checked
 // for SHAPE here and for existence on the node that renders it — the brain may
 // not even have that file.
 //
@@ -32,6 +34,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
 
 // Zones is the parsed zones.yaml.
@@ -105,19 +109,20 @@ type ZoneRate struct {
 	Concurrency uint64 `yaml:"concurrency"`
 }
 
-// Zone policy vocabulary. Exported so the API document and the node agree on
-// the exact strings without a second definition.
+// Zone policy vocabulary. ONE definition, owned by the wire-contract package
+// the node's renderer also imports, so the file, the API document and the node
+// cannot drift on a string.
 const (
-	ZonePolicyDecide = "decide"
-	ZonePolicyNone   = "none"
+	ZonePolicyDecide = edgedoc.ModeDecide
+	ZonePolicyNone   = edgedoc.ModeNone
 
-	ZoneFailOpen   = "open"
-	ZoneFailClosed = "closed"
+	ZoneFailOpen   = edgedoc.FailOpen
+	ZoneFailClosed = edgedoc.FailClosed
 
-	ZoneChallengeOff = "off"
+	ZoneChallengeOff = edgedoc.ChallengeOff
 
-	ZoneTLS12 = "1.2"
-	ZoneTLS13 = "1.3"
+	ZoneTLS12 = edgedoc.TLS12
+	ZoneTLS13 = edgedoc.TLS13
 )
 
 // hostnameLabelRe is one RFC 1123 label: 1-63 chars of [a-z0-9-], not starting
