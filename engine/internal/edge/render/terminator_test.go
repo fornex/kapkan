@@ -132,10 +132,14 @@ func TestRealTerminator(t *testing.T) {
 		if seen.Method != "GET" || seen.URL.Path != "/decide" {
 			t.Errorf("subrequest was %s %s, want GET /decide", seen.Method, seen.URL.Path)
 		}
-		for k, want := range map[string]string{"X-Kapkan-Zone": "example.com", "X-Kapkan-Uri": "/probe?x=1", "X-Kapkan-Method": "GET", "X-Kapkan-Host": "example.com"} {
+		for k, want := range map[string]string{"X-Kapkan-Zone": "example.com", "X-Kapkan-Uri": "/probe?x=1", "X-Kapkan-Method": "GET"} {
 			if got := seen.Header.Get(k); got != want {
 				t.Errorf("%s = %q, want %q", k, got, want)
 			}
+		}
+		// The requested host travels as the subrequest's own Host header.
+		if seen.Host != "example.com" {
+			t.Errorf("subrequest Host = %q, want example.com", seen.Host)
 		}
 		if seen.Header.Get("X-Kapkan-Client") == "" {
 			t.Error("X-Kapkan-Client is empty")
