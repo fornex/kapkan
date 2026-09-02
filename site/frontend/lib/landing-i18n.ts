@@ -22,7 +22,13 @@ export type LandingDict = {
   };
   hero: { eyebrow: string; h1a: string; h1b: string; sub: string; trust: string[] };
   stats: string[];
-  how: { heading: string; sub: string; steps: { title: string; body: string }[] };
+  how: {
+    heading: string;
+    sub: string;
+    // Labels for the architecture figure (components/Landing.tsx, HowDiagram).
+    diagram: { routers: string; flows: string; announce: string; announceNote: string; drop: string; dropNote: string };
+    steps: { title: string; body: string }[];
+  };
   features: { heading: string; sub: string; learnMore: string; cards: { title: string; body: string }[] };
   showcase: { heading: string; sub: string };
   compare: {
@@ -82,6 +88,7 @@ const en: LandingDict = {
   stats: ["≥20M flows/sec/core", "Detects in seconds", "IPv4 + IPv6 blackhole", "FlowSpec RFC 8955/8956", "One static binary"],
   how: {
     heading: "How it works",
+    diagram: { routers: "Your routers", flows: "NetFlow · IPFIX · sFlow", announce: "BGP RTBH / FlowSpec", announceNote: "your router drops it", drop: "XDP", dropNote: "this machine drops it" },
     sub: "One binary, nothing else to run: no extra services, no message queue, no database. Point your routers at it and go.",
     steps: [
       {
@@ -197,6 +204,7 @@ const ru: LandingDict = {
   stats: ["≥20M потоков/с/ядро", "Обнаружение за секунды", "Blackhole для IPv4 + IPv6", "FlowSpec RFC 8955/8956", "Один статический бинарник"],
   how: {
     heading: "Как это работает",
+    diagram: { routers: "Ваши маршрутизаторы", flows: "NetFlow · IPFIX · sFlow", announce: "BGP RTBH / FlowSpec", announceNote: "сбрасывает маршрутизатор", drop: "XDP", dropNote: "сбрасывает эта машина" },
     sub: "Один бинарник и больше ничего — ни лишних сервисов, ни очереди сообщений, ни базы данных. Направьте на него маршрутизаторы — и всё.",
     steps: [
       {
@@ -322,6 +330,7 @@ const de: LandingDict = {
   ],
   "how": {
     "heading": "So funktioniert es",
+    "diagram": { "routers": "Ihre Router", "flows": "NetFlow · IPFIX · sFlow", "announce": "BGP RTBH / FlowSpec", "announceNote": "Ihr Router verwirft", "drop": "XDP", "dropNote": "diese Maschine verwirft" },
     "sub": "Eine Binary, sonst nichts — keine zusätzlichen Dienste, keine Message-Queue, keine Datenbank. Richten Sie Ihre Router darauf und legen Sie los.",
     "steps": [
       {
@@ -504,6 +513,7 @@ const fr: LandingDict = {
   ],
   "how": {
     "heading": "Comment ça marche",
+    "diagram": { "routers": "Vos routeurs", "flows": "NetFlow · IPFIX · sFlow", "announce": "BGP RTBH / FlowSpec", "announceNote": "votre routeur rejette", "drop": "XDP", "dropNote": "cette machine rejette" },
     "sub": "Un seul binaire, rien d'autre à faire tourner — pas de services en plus, pas de file de messages, pas de base de données. Pointez vos routeurs dessus, c'est parti.",
     "steps": [
       {
@@ -686,6 +696,7 @@ const es: LandingDict = {
   ],
   "how": {
     "heading": "Cómo funciona",
+    "diagram": { "routers": "Tus routers", "flows": "NetFlow · IPFIX · sFlow", "announce": "BGP RTBH / FlowSpec", "announceNote": "tu router descarta", "drop": "XDP", "dropNote": "esta máquina descarta" },
     "sub": "Un solo binario, nada más que ejecutar — sin servicios extra, sin cola de mensajes, sin base de datos. Apunta tus routers hacia él y listo.",
     "steps": [
       {

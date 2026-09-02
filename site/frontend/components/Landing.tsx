@@ -56,6 +56,34 @@ function Frame({ children }: { children: React.ReactNode }) {
   return <div className="overflow-hidden rounded-lg border border-border bg-surface">{children}</div>;
 }
 
+// The architecture in one figure: flows in from the routers, Kapkan in the
+// middle, and the two ways a verdict leaves it. HTML rather than SVG so labels
+// lay out at their real length in every locale and the row wraps on phones.
+function HowDiagram({ d }: { d: (typeof landing)[Locale]["how"]["diagram"] }) {
+  const node = "rounded-md border border-border bg-surface px-4 py-3";
+  return (
+    <figure className="mb-10 flex flex-wrap items-center gap-3 text-sm">
+      <div className={node}>
+        <div className="font-medium">{d.routers}</div>
+        <div className="font-mono text-xs text-muted-foreground">{d.flows}</div>
+      </div>
+      <ArrowIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className={`${node} border-foreground font-semibold`}>Kapkan</div>
+      <ArrowIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className="flex flex-col gap-2">
+        <div className={node}>
+          <div className="font-medium">{d.announce}</div>
+          <div className="text-xs text-muted-foreground">{d.announceNote}</div>
+        </div>
+        <div className={node}>
+          <div className="font-medium">{d.drop}</div>
+          <div className="text-xs text-muted-foreground">{d.dropNote}</div>
+        </div>
+      </div>
+    </figure>
+  );
+}
+
 // The in-kernel card is last in `features.cards`; it gets the "see how" link.
 const XDP_CARD_INDEX = 9;
 
@@ -182,17 +210,20 @@ export function Landing({ locale, basePath = "" }: { locale: Locale; basePath?: 
             <div className="lg:col-span-4">
               <SectionHead heading={t.how.heading} sub={t.how.sub} />
             </div>
-            <ol className="lg:col-span-8">
-              {t.how.steps.map((step, i) => (
-                <li key={step.title} className="grid grid-cols-[3rem_1fr] gap-4 border-t border-border py-6 last:border-b sm:grid-cols-[4rem_1fr]">
-                  <span className="font-mono text-sm text-muted-foreground">0{i + 1}</span>
-                  <div>
-                    <h3 className="mb-2 font-semibold">{step.title}</h3>
-                    <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">{step.body}</p>
-                  </div>
-                </li>
-              ))}
-            </ol>
+            <div className="min-w-0 lg:col-span-8">
+              <HowDiagram d={t.how.diagram} />
+              <ol>
+                {t.how.steps.map((step, i) => (
+                  <li key={step.title} className="grid grid-cols-[3rem_1fr] gap-4 border-t border-border py-6 last:border-b sm:grid-cols-[4rem_1fr]">
+                    <span className="font-mono text-sm text-muted-foreground">0{i + 1}</span>
+                    <div>
+                      <h3 className="mb-2 font-semibold">{step.title}</h3>
+                      <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">{step.body}</p>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </div>
           </div>
         </section>
 
