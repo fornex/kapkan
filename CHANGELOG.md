@@ -19,6 +19,8 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-02
+
 ### Config changes
 
 - **Added** `dataplane.static_rules[].match.payload`, with two values:
@@ -27,7 +29,51 @@ security-relevant.
   v1 Initial and requires `proto: udp`. Optional and absent by default; a
   config that does not use it behaves exactly as before.
 
+- **Added** `dataplane.fingerprint`, the off-path fingerprint plane (see
+  *Added* below): `enabled` (off by default; requires `dataplane.enabled: true`
+  or the config is rejected; **restart-required**), `sample_pps` (handshake
+  copies per second per CPU, default `1000`; **restart-required**),
+  `block_ttl_seconds` (default `300`, must be within `1..86400`; hot-reloads)
+  and `ja4_blocklist` (exact-match `a_b_c` JA4 fingerprints, duplicates
+  rejected; hot-reloads). Absent by default; a config without it behaves
+  exactly as before.
+
 ### Added
+
+- **The fingerprint plane: source-block clients by their JA4, off-path.** With
+  `dataplane.fingerprint.enabled: true` the kernel copies a bounded, sampled
+  prefix of each TLS ClientHello and QUIC v1 Initial to a ring buffer; userspace
+  computes the client's JA4 (plus SNI and ALPN) with a pure-Go parser and, when
+  that JA4 is on `ja4_blocklist`, installs a TTL'd source block on the existing
+  XDP path — the same per-source drop `POST /api/v1/dataplane/sources` installs.
+  The kernel copies, userspace classifies, enforcement is the source-block path
+  you already have; nothing is announced to any peer. QUIC v1 Initials are
+  decrypted with keys derived from the Destination Connection ID — public
+  inputs, so an off-path copy is enough — and carry transport `q` in their JA4.
+  A per-CPU token-bucket sampler (`sample_pps`) caps copy volume so the plane
+  can never become its own DoS under a handshake flood, and parsing fails open:
+  a truncated snapshot, a handshake spanning datagrams, a QUIC version other
+  than v1, or anything that does not parse is simply not fingerprinted — never
+  misclassified.
+
+  Stated up front, because it governs how a blocklist must be read: **a JA4
+  block acts on the *claimed* source, and the trigger is spoofable.** A
+  ClientHello is recognised by a stateless fixed-offset match with no completed
+  handshake behind it, so a single spoofed packet carrying a crafted,
+  blocklisted JA4 source-blocks whatever address it claims. Read
+  `ja4_blocklist` as "block this fingerprint's claimed sources", never "these
+  hosts are bad". To bound the collateral, fingerprint blocks draw from a
+  separate, smaller budget — half the source-anchor pool — so a crafted-JA4
+  flood can fill only its own reservation and never starves operator/API
+  source blocks; every fingerprint block is TTL'd and honours dry-run. Each is
+  written to the audit trail as a `source_block` with `source: "auto"`
+  (engine-initiated, no operator/role/tenant; successes only, so a flood cannot
+  spam the store). Observability: `kapkan_fingerprint_events_total{result}` for
+  the reader, and the `fp_emitted` / `fp_throttled` / `fp_ring_full` kinds on
+  `kapkan_dataplane_observations_total` for the in-kernel sampler. The config
+  builder renders the new keys, and the docs gained a dedicated
+  [Fingerprint plane (JA4)](https://kapkan.io/docs/fingerprinting) page in all
+  five locales. Requires the data plane (Linux 5.15+).
 
 - **`kapkan nginx-exporter` — the reference feeder for the source-block
   channel**, and a supported component rather than an example. It tails an
