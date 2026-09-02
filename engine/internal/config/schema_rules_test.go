@@ -208,6 +208,13 @@ hostgroups:
 			wantErr: "duplicate node name",
 		},
 		{
+			// 0 means "default (15)" and is accepted, as for scrubbing; only a
+			// negative value is refused — the schema's minimum 0 must agree.
+			name:    "negative edge stale_after_seconds",
+			yaml:    validBase + "\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  stale_after_seconds: -1\n",
+			wantErr: "edge.stale_after_seconds must be > 0",
+		},
+		{
 			name:    "static rule ratelimit without a profile",
 			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - name: cap\n      match: {proto: icmp}\n      action: ratelimit\n",
 			wantErr: "requires profile",

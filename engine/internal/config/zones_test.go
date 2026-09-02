@@ -43,13 +43,44 @@ zones:
 	}
 }
 
-func TestParseZonesAcceptsEmptyList(t *testing.T) {
-	z, err := ParseZones([]byte("zones: []\n"))
-	if err != nil {
-		t.Fatalf("ParseZones(empty): %v", err)
+// TestParseZonesAcceptsEmpty: "an edge with nothing to serve yet" is legal in
+// every spelling a tenant might use for it — an explicit empty list, a 0-byte
+// file, a comment-only stub, a blank line — not only `zones: []`.
+func TestParseZonesAcceptsEmpty(t *testing.T) {
+	for _, in := range []string{"zones: []\n", "", "# zones go here\n", "\n", "---\n", "zones:\n"} {
+		z, err := ParseZones([]byte(in))
+		if err != nil {
+			t.Errorf("ParseZones(%q): %v, want an empty zone set", in, err)
+			continue
+		}
+		if len(z.Zones) != 0 {
+			t.Errorf("ParseZones(%q): zones = %d, want 0", in, len(z.Zones))
+		}
 	}
-	if len(z.Zones) != 0 {
-		t.Fatalf("zones = %d, want 0", len(z.Zones))
+}
+
+// TestParseZonesCanonicalisesOrigins pins the stored spelling of an origin:
+// lowercase hostname or canonical IP text (IPv6 re-bracketed), decimal port —
+// so the renderer and the duplicate check see one form per upstream, in file
+// order.
+func TestParseZonesCanonicalisesOrigins(t *testing.T) {
+	z, err := ParseZones([]byte(`
+zones:
+  - name: a.example
+    origins: ["Origin.Internal:443", "[2001:DB8::1]:8443", "10.0.0.1:80"]
+`))
+	if err != nil {
+		t.Fatalf("ParseZones: %v", err)
+	}
+	want := []string{"origin.internal:443", "[2001:db8::1]:8443", "10.0.0.1:80"}
+	got := z.Zones[0].Origins
+	if len(got) != len(want) {
+		t.Fatalf("origins = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("origins[%d] = %q, want canonical %q", i, got[i], want[i])
+		}
 	}
 }
 
@@ -78,6 +109,14 @@ func TestParseZonesRejects(t *testing.T) {
 		{"bad failure_mode", "zones:\n  - name: a.example\n" + ok + "\n    policy: {failure_mode: sometimes}\n", "policy.failure_mode must be"},
 		{"challenge not yet", "zones:\n  - name: a.example\n" + ok + "\n    policy: {challenge: js}\n", "policy.challenge \"js\" is not supported yet"},
 		{"relative extra directives", "zones:\n  - name: a.example\n" + ok + "\n    extra_directives_file: conf.d/extra.conf\n", "extra_directives_file must be an absolute path"},
+		{"trailing second document", "zones:\n  - name: a.example\n" + ok + "\n---\nzones: []\n", "exactly one YAML document"},
+		{"origin port with a sign", "zones:\n  - name: a.example\n    origins: [\"10.0.0.1:+80\"]\n", "port must be 1..65535"},
+		{"origin port with a leading zero", "zones:\n  - name: a.example\n    origins: [\"10.0.0.1:0080\"]\n", "leading zero"},
+		{"bracketed hostname origin", "zones:\n  - name: a.example\n    origins: [\"[origin.internal]:443\"]\n", "brackets are only for IPv6"},
+		{"bracketed IPv4 origin", "zones:\n  - name: a.example\n    origins: [\"[10.0.0.1]:443\"]\n", "brackets are only for IPv6"},
+		{"all-digit top-level label", "zones:\n  - name: example.123\n" + ok + "\n", "top-level label must not be all digits"},
+		{"duplicate origin after canonicalisation", "zones:\n  - name: a.example\n    origins: [\"Origin.Internal:443\", \"origin.internal:443\"]\n", "duplicate origin"},
+		{"duplicate IPv6 origin after canonicalisation", "zones:\n  - name: a.example\n    origins: [\"[2001:DB8::1]:443\", \"[2001:db8:0:0:0:0:0:1]:443\"]\n", "duplicate origin"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

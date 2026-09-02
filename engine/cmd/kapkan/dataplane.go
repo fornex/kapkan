@@ -30,6 +30,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -177,11 +178,19 @@ func resolvePinPath(explicit, configPath string) (dir, source string, cc *config
 	if explicit != "" {
 		return explicit, "-pin-path", nil
 	}
-	cfg, err := config.Load(configPath)
+	// Parse, not Load: the pin path lives in THIS file, and following
+	// edge.zones_file here would let a tenant's broken zones file block a
+	// diagnostic that exists for exactly such moments. Parse validates the edge
+	// block's shape and never reads the zones file.
+	raw, err := os.ReadFile(configPath)
+	var cfg *config.Config
+	if err == nil {
+		cfg, err = config.Parse(raw)
+	}
 	switch {
 	case err != nil:
 		return dataplane.DefaultPinPath, fmt.Sprintf(
-			"built-in default; %s could not be read, so dataplane.pin_path was not consulted — "+
+			"built-in default; %s could not be read or parsed, so dataplane.pin_path was not consulted — "+
 				"pass -config or -pin-path if your pin path is not the default", configPath), nil
 	case cfg.Dataplane == nil:
 		return dataplane.DefaultPinPath, fmt.Sprintf(
