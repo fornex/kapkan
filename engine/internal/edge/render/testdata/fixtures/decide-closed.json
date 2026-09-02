@@ -1,0 +1,22 @@
+{
+  "doc": {
+    "version": 1,
+    "zones": [
+      {
+        "name": "closed.example.net",
+        "origins": ["localhost:8080"],
+        "tls": {"min_version": "1.3"},
+        "policy": {"mode": "decide", "failure_mode": "closed", "challenge": "off", "rate": {"rps": 200, "concurrency": 50}}
+      }
+    ],
+    "acme_challenges": [],
+    "issuance_grants": []
+  },
+  "certs": {
+    "closed.example.net": {
+      "fullchain": "/var/lib/kapkan/edge/certs/closed.example.net/fullchain.pem",
+      "key": "/var/lib/kapkan/edge/certs/closed.example.net/privkey.pem"
+    }
+  },
+  "node": {}
+}

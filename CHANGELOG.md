@@ -19,6 +19,29 @@ security-relevant.
 
 ## [Unreleased]
 
+### Config changes
+
+- **Added** `edge` block (optional): `edge.zones_file` (absolute path to the tenant-owned
+  zones file, required when the block is present), `edge.nodes[].name` and
+  `edge.stale_after_seconds` (default 15). A config without an `edge` block behaves exactly
+  as before; the zones file is loaded and validated alongside `kapkan.yaml` and a broken one
+  keeps the previous zones on reload.
+
+### Added
+
+- Edge track, E3.1 — the zone model (`zones.yaml`: origins, TLS floor, ACME directory,
+  per-request policy) and the brain-side edge channel: `GET /api/v1/edge/zones` (held
+  long-poll on a content-hash ETag, woken by a successful reload), `POST
+  /api/v1/edge/nodes/{name}/report` and `GET /api/v1/edge/nodes` (inventory with liveness).
+  Unscoped tokens only; a node's poll is its liveness, a report never is.
+- Edge track, E3.2 — the nginx/Angie renderer (`internal/edge/render`: one shared file plus
+  one per zone, embedded templates, `auth_request`-based decision gate that fails open or
+  closed per zone, ACME challenge routing, JSON access log over a unix socket) and the
+  generation applier (`internal/edge/apply`: numbered generations behind a `live` symlink,
+  `nginx -t` gating every install, swap-back on failure, idempotent by content hash, paced).
+  CI now renders every fixture zone set and runs it on nginx 1.22, nginx stable and Angie,
+  `nginx -t` first and then live requests through it. No `kapkan edge` command yet (E3.5).
+
 ## [1.7.0] - 2026-09-02
 
 ### Config changes

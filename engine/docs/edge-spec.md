@@ -221,9 +221,23 @@ zones:
   validates the same bytes): JSON schema + overlay + the config-builder wizard + documentation
   in all five locales — **that schema/docs wave is the long pole of E3**, as it was for the
   data plane.
-- Rendering: templates embedded in the binary → `conf.d/kapkan_*.conf`. One documented escape
+- Rendering: templates embedded in the binary → `kapkan_*.conf` files. One documented escape
   hatch (`extra_directives_file`, included verbatim, "you own what it breaks"); no template
   override mechanism — that way lies unsupportable config drift.
+  *Decided in E3.2 (`internal/edge/render`, `internal/edge/apply`):* the node keeps rendered
+  generations under `/var/lib/kapkan/edge/conf/gen-N/` behind a `live` symlink, and the
+  operator's `nginx.conf` includes that once — `include /var/lib/kapkan/edge/conf/live/*.conf;`
+  inside `http{}`. An install is: write the generation whole, retarget `live`, `nginx -t`, then
+  reload — or, on a failed test, retarget back and keep the candidate as `failed-N` for reading.
+  A render whose bytes equal the live generation's is skipped (no test, no reload), and installs
+  are paced ≥1 s apart counted from the last attempt. Fail-open is `auth_request` plus a
+  location-level `error_page 500 502 503 504 = @kapkan_pass` (closed: `= @kapkan_unavailable`,
+  which answers 503); every allowed request ends in `@kapkan_pass` via `try_files`, so there is
+  one origin path; rate limits answer 429 so they never trip that `error_page`. A zone without a
+  certificate renders only its `:80` listener (ACME challenges, otherwise 503) — nothing is
+  proxied over cleartext. nginx floor: 1.22 (`listen … ssl http2`). CI renders every fixture and
+  runs it on nginx 1.22, nginx stable and Angie — `nginx -t` first, then live requests through
+  the served render, the fail-open path included.
 - The brain serves zones to nodes as a versioned ETag'd doc; per-node scoping (which node
   serves which zones) is a fleet concern deferred to E6 with hostgroup-scoped agent tokens.
 

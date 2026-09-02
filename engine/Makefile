@@ -32,7 +32,7 @@ BPF_BENCH_N ?= 300000
 
 .PHONY: build test lint bench run-dev clean console-sync schema \
 	dataplane-sync dataplane-test dataplane-bench dataplane-matrix \
-	blockrate blockrate-fixtures
+	blockrate blockrate-fixtures edge-terminator-test
 
 # The operator console lives in the monorepo's top-level console/ folder; the Go
 # binary go:embeds internal/api/static. Copy console/ there before any compile
@@ -170,6 +170,19 @@ dataplane-matrix:
 # TestCommittedFixturesMatchTheCatalog on every run, on every host.
 blockrate-fixtures:
 	go run ./internal/blockrate/cmd/mkfixtures internal/blockrate/testdata
+
+# The edge renderer against a real terminator. Renders every fixture zone set
+# under internal/edge/render/testdata, runs the image's `nginx -t` on each, then
+# SERVES the render and drives requests through it — the fail-open idiom
+# (edge-spec §2.4) is proven here, on the binary, not by reading docs. Needs
+# Docker; the decision-service arms need a Linux host (a unix socket does not
+# cross a Docker Desktop bind mount) and are skipped on macOS. CI runs the
+# three supported images; pass EDGE_TERMINATOR_IMAGE=nginx:1.22 for the floor
+# or docker.angie.software/angie:latest for Angie.
+EDGE_TERMINATOR_IMAGE ?= nginx:stable
+edge-terminator-test:
+	KAPKAN_EDGE_TERMINATOR=require KAPKAN_EDGE_TERMINATOR_IMAGE=$(EDGE_TERMINATOR_IMAGE) \
+		go test -count=1 -v -run 'TestRealTerminator' ./internal/edge/render/
 
 # Capacity numbers for the data plane, via the kernel's own PROG_TEST_RUN
 # repeat loop. Same container as dataplane-test. The absolute figures depend on

@@ -1,0 +1,9 @@
+{
+  "doc": {
+    "version": 1,
+    "zones": [],
+    "acme_challenges": [],
+    "issuance_grants": []
+  },
+  "node": {}
+}
