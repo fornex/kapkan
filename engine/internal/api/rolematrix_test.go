@@ -89,6 +89,14 @@ func TestRoleMatrix(t *testing.T) {
 		// The node inventory: viewer rank (the console's Nodes view), agent
 		// DENIED — an agent needs its rules, not the whole fleet topology.
 		{"GET", "/api/v1/dataplane/nodes", "", "", map[string]bool{"viewer": true, "operator": true}},
+		// The edge-node channel (edge.go), the scrub channel's twin: the same
+		// decisions for the same reasons — agent + operator on the document and
+		// the report, viewer denied there; the inventory at viewer rank with
+		// agent denied.
+		{"GET", "/api/v1/edge/zones", "", "", map[string]bool{"operator": true, "agent": true}},
+		{"POST", "/api/v1/edge/nodes/n1/report", `{}`, "POST /api/v1/edge/nodes/{name}/report",
+			map[string]bool{"operator": true, "agent": true}},
+		{"GET", "/api/v1/edge/nodes", "", "", map[string]bool{"viewer": true, "operator": true}},
 	}
 
 	// The two route sets must be IDENTICAL: every registered /api/v1 pattern
