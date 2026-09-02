@@ -116,7 +116,9 @@ var numericBounds = map[string]map[string]float64{
 
 	"dataplane.fingerprint.block_ttl_seconds": {"minimum": 1, "maximum": 86400},
 
-	"edge.stale_after_seconds": {"minimum": 1},
+	// 0 = "use the default (15)", exactly like scrubbing.stale_after_seconds;
+	// validateEdge rejects only negatives, and the schema must agree with it.
+	"edge.stale_after_seconds": {"minimum": 0},
 }
 
 // stringPatterns maps a yaml path to a regex the value must match. Beyond these

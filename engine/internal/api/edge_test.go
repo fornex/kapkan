@@ -1,7 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,25 +33,41 @@ const edgeZonesTwo = edgeZonesOne + `  - name: b.example
 `
 
 // edgeStore builds a Store from real files — a kapkan.yaml (apiYAML plus an
-// agent and an operator token and an edge block) referencing a zones.yaml — so
-// the zones are LOADED (storeFromYAML uses Parse, which never reads them) and a
+// agent, an unscoped operator and a TENANT-SCOPED operator token, a hostgroup
+// carrying that tenant, and an edge block) referencing a zones.yaml — so the
+// zones are LOADED (storeFromYAML uses Parse, which never reads them) and a
 // test can rewrite the zones file and Reload. Requests must carry a bearer:
-// configuring tokens ends open mode.
+// configuring tokens ends open mode. Bearers: agent-secret, op-secret,
+// scoped-secret.
 func edgeStore(t *testing.T, zonesYAML string) (store *config.Store, zonesPath string) {
+	t.Helper()
+	return edgeStoreWith(t, zonesYAML, 0)
+}
+
+// edgeStoreWith is edgeStore with an explicit edge.stale_after_seconds (0 =
+// leave the key out, so the default applies).
+func edgeStoreWith(t *testing.T, zonesYAML string, staleAfterSeconds int) (store *config.Store, zonesPath string) {
 	t.Helper()
 	t.Setenv("TEST_EDGE_AGENT", "agent-secret")
 	t.Setenv("TEST_EDGE_OP", "op-secret")
+	t.Setenv("TEST_EDGE_OP_SCOPED", "scoped-secret")
 	dir := t.TempDir()
 	zonesPath = filepath.Join(dir, "zones.yaml")
 	if err := os.WriteFile(zonesPath, []byte(zonesYAML), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	stale := ""
+	if staleAfterSeconds > 0 {
+		stale = fmt.Sprintf("  stale_after_seconds: %d\n", staleAfterSeconds)
 	}
 	cfgPath := filepath.Join(dir, "kapkan.yaml")
 	yaml := apiYAML +
 		"  tokens:\n" +
 		"    - { name: agent, token_env: TEST_EDGE_AGENT, role: agent }\n" +
 		"    - { name: op, token_env: TEST_EDGE_OP, role: operator }\n" +
-		"\nedge:\n  zones_file: " + zonesPath + "\n  nodes:\n    - name: e1\n"
+		"    - { name: op-scoped, token_env: TEST_EDGE_OP_SCOPED, role: operator, tenant: acme }\n" +
+		"hostgroups:\n  - name: acme-web\n    networks: [\"203.0.113.128/25\"]\n    tenant: acme\n" +
+		"\nedge:\n  zones_file: " + zonesPath + "\n" + stale + "  nodes:\n    - name: e1\n"
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -224,10 +243,18 @@ func TestEdgeZonesLongPollWakesOnReload(t *testing.T) {
 	if err := os.WriteFile(zonesPath, []byte(edgeZonesTwo), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	start := time.Now()
 	if _, err := store.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 	rec := <-done
+	// The answer must come from the WAKE, not from the deadline: endEdgeHold
+	// re-snapshots the store on the deadline too, so without this bound the
+	// test would pass with the Store.Changed subscription deleted — turning the
+	// long-poll into a plain timeout-poll, the channel's core latency contract.
+	if elapsed := time.Since(start); elapsed > s.rulesHold/2 {
+		t.Fatalf("held poll took %v to answer a zones reload; want a prompt wake, not the %v deadline", elapsed, s.rulesHold)
+	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("held poll = %d, want 200 after the zones reload", rec.Code)
 	}
@@ -243,11 +270,15 @@ func TestEdgeZonesLongPollWakesOnReload(t *testing.T) {
 
 // TestEdgeZonesReloadWithoutZoneChangeKeepsHolding: a reload that did not alter
 // the zones (Store.Changed fires on ANY successful reload) must not answer the
-// poll with a spurious "changed" — the loop re-hashes and keeps holding.
+// poll with a spurious "changed" — the loop re-hashes and keeps holding — AND
+// the loop must have re-subscribed after that wake, so a real change landing
+// next is still answered promptly. Both halves are asserted directly: the poll
+// is still parked after the no-op reload, and the follow-up change is answered
+// well inside the deadline (with the deadline far away, only a live loop can).
 func TestEdgeZonesReloadWithoutZoneChangeKeepsHolding(t *testing.T) {
 	store, zonesPath := edgeStore(t, edgeZonesOne)
 	s := testServer(t, store)
-	s.rulesHold = 300 * time.Millisecond
+	s.rulesHold = 3 * time.Second // far beyond every assertion below on purpose
 	h := s.Handler()
 
 	etag := getZones(h, "", "agent-secret", "").Header().Get("ETag")
@@ -262,9 +293,36 @@ func TestEdgeZonesReloadWithoutZoneChangeKeepsHolding(t *testing.T) {
 	if _, err := store.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
+	time.Sleep(200 * time.Millisecond) // give a wrongly-woken loop time to answer
+	select {
+	case rec := <-done:
+		t.Fatalf("poll answered %d after a no-op reload; it must keep holding", rec.Code)
+	default:
+	}
+	if heldEdgePolls(s) != 1 {
+		t.Fatalf("edge holds = %d after a no-op reload, want the poll still parked", heldEdgePolls(s))
+	}
+
+	// Now a real change: only a loop that re-subscribed after the first wake
+	// can answer before the 3-second deadline.
+	if err := os.WriteFile(zonesPath, []byte(edgeZonesTwo), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := store.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
 	rec := <-done
-	if rec.Code != http.StatusNotModified {
-		t.Fatalf("poll after a no-op reload = %d, want 304 on the deadline (not a spurious 200)", rec.Code)
+	if elapsed := time.Since(start); elapsed > s.rulesHold/2 {
+		t.Fatalf("poll took %v to answer the change after a no-op wake; the loop did not re-subscribe", elapsed)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("poll after the real change = %d, want 200", rec.Code)
+	}
+	var doc EdgeDoc
+	_ = json.Unmarshal(rec.Body.Bytes(), &doc)
+	if len(doc.Zones) != 2 {
+		t.Fatalf("doc after the change = %+v, want both zones", doc)
 	}
 }
 
@@ -421,23 +479,41 @@ func TestEdgeNodeReport(t *testing.T) {
 
 // TestEdgeReportCarriesNoKeyMaterial pins the contract that a report — written
 // with the least-guarded token in the deployment — has no field that could ever
-// carry a private key: no json key mentions key/private/secret/pem. (The zone
-// document's key_authorization is the PUBLIC ACME token digest, and lives in
-// EdgeDoc, not in the report.)
+// carry a private key or credential: no json key mentions key/private/secret/
+// pem/token/credential/passphrase/password/chain, and no field is an opaque or
+// free-form container (map, interface, byte slice, array) that could smuggle one
+// past a name check. (The zone document's key_authorization is the PUBLIC ACME
+// token digest, and lives in EdgeDoc, not in the report.) The walk terminates on
+// recursive types and skips time.Time, whose fields are its own business.
 func TestEdgeReportCarriesNoKeyMaterial(t *testing.T) {
-	var check func(t reflect.Type, path string)
+	bad := []string{"key", "private", "secret", "pem", "token", "credential", "passphrase", "password", "chain"}
+	seen := map[reflect.Type]bool{}
+	var check func(rt reflect.Type, path string)
 	check = func(rt reflect.Type, path string) {
 		for rt.Kind() == reflect.Pointer || rt.Kind() == reflect.Slice {
+			if rt.Kind() == reflect.Slice && rt.Elem().Kind() == reflect.Uint8 {
+				t.Errorf("%s is a byte slice — a report has no legitimate opaque field", path)
+				return
+			}
 			rt = rt.Elem()
 		}
-		if rt.Kind() != reflect.Struct {
+		switch rt.Kind() {
+		case reflect.Map, reflect.Interface, reflect.Array:
+			t.Errorf("%s is a %s — a report must not carry opaque or free-form fields", path, rt.Kind())
+			return
+		case reflect.Struct:
+		default:
 			return
 		}
+		if rt == reflect.TypeOf(time.Time{}) || seen[rt] {
+			return
+		}
+		seen[rt] = true
 		for i := 0; i < rt.NumField(); i++ {
 			f := rt.Field(i)
 			tag := strings.Split(f.Tag.Get("json"), ",")[0]
-			for _, bad := range []string{"key", "private", "secret", "pem"} {
-				if strings.Contains(strings.ToLower(tag), bad) {
+			for _, b := range bad {
+				if strings.Contains(strings.ToLower(tag), b) {
 					t.Errorf("%s.%s has json key %q — a report must never carry key material", path, f.Name, tag)
 				}
 			}
@@ -445,4 +521,124 @@ func TestEdgeReportCarriesNoKeyMaterial(t *testing.T) {
 		}
 	}
 	check(reflect.TypeOf(EdgeReport{}), "EdgeReport")
+}
+
+// TestEdgeRoutesRefuseScopedTokens pins the tenancy rule of this channel: the
+// zone document, the report path and the inventory are deployment-wide, so a
+// TENANT-SCOPED operator is refused on all three (403), while the unscoped
+// operator is served. Same rule, same reason as the scrub channel.
+func TestEdgeRoutesRefuseScopedTokens(t *testing.T) {
+	store, _ := edgeStore(t, edgeZonesOne)
+	s := testServer(t, store)
+	h := s.Handler()
+
+	if rec := getZones(h, "", "scoped-secret", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("scoped operator GET /edge/zones = %d, want 403", rec.Code)
+	}
+	if rec := postEdgeReport(h, "e1", `{}`, "scoped-secret"); rec.Code != http.StatusForbidden {
+		t.Errorf("scoped operator POST report = %d, want 403", rec.Code)
+	}
+	if _, code := getEdgeNodes(h, "scoped-secret"); code != http.StatusForbidden {
+		t.Errorf("scoped operator GET /edge/nodes = %d, want 403", code)
+	}
+	// The refusal must happen BEFORE any side effect: the scoped report above
+	// must not have been stored.
+	doc, code := getEdgeNodes(h, "op-secret")
+	if code != http.StatusOK {
+		t.Fatalf("unscoped operator GET /edge/nodes = %d, want 200", code)
+	}
+	if len(doc.Nodes) != 1 || doc.Nodes[0].Report != nil {
+		t.Errorf("a refused scoped report was stored: %+v", doc.Nodes)
+	}
+	if rec := postEdgeReport(h, "e1", `{}`, "op-secret"); rec.Code != http.StatusNoContent {
+		t.Errorf("unscoped operator POST report = %d, want 204", rec.Code)
+	}
+}
+
+// TestEdgeZonesShutdownReleasesHold mirrors the scrub channel's shutdown test:
+// a parked zones poll must not stall a graceful Shutdown, and is answered with
+// a verified 304 (nothing changed) as the server goes down.
+func TestEdgeZonesShutdownReleasesHold(t *testing.T) {
+	// Open mode, Parse-only store: the empty document is enough here.
+	s := testServer(t, storeFromYAML(t, apiYAML+"\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n"))
+	s.rulesHold = 30 * time.Second // far beyond the assertion below on purpose
+	srv := s.httpServer()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	base := fmt.Sprintf("http://%s/api/v1/edge/zones", ln.Addr())
+
+	resp, err := http.Get(base)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	etag := resp.Header.Get("ETag")
+	_ = resp.Body.Close()
+
+	type result struct {
+		code int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, base, nil)
+		req.Header.Set("If-None-Match", etag)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			done <- result{0, err}
+			return
+		}
+		_ = resp.Body.Close()
+		done <- result{resp.StatusCode, nil}
+	}()
+	waitEdgeHolds(t, s, 1)
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v (a held edge poll stalled the graceful shutdown)", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Shutdown took %v, want prompt release of the held poll", elapsed)
+	}
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("held poll errored on shutdown: %v", r.err)
+	}
+	if r.code != http.StatusNotModified {
+		t.Errorf("held edge poll on shutdown = %d, want 304", r.code)
+	}
+}
+
+// TestEdgePresenceHoldingCountsAsAlive pins the rule the overlay documents for
+// edge.stale_after_seconds: a node parked in a long-poll hold counts as present
+// even once its last COMPLETED poll is older than the stale window. With a
+// 1-second window and a poll parked past it, only the hold can be keeping the
+// node alive.
+func TestEdgePresenceHoldingCountsAsAlive(t *testing.T) {
+	store, _ := edgeStoreWith(t, edgeZonesOne, 1)
+	s := testServer(t, store)
+	s.rulesHold = 4 * time.Second
+	h := s.Handler()
+
+	etag := getZones(h, "", "agent-secret", "e1").Header().Get("ETag")
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- getZones(h, etag, "agent-secret", "e1") }()
+	waitEdgeHolds(t, s, 1)
+
+	time.Sleep(1300 * time.Millisecond) // past the 1-second stale window
+	doc, code := getEdgeNodes(h, "op-secret")
+	if code != http.StatusOK {
+		t.Fatalf("GET /edge/nodes = %d, want 200", code)
+	}
+	if doc.StaleAfterSeconds != 1 {
+		t.Errorf("stale_after_seconds = %d, want 1", doc.StaleAfterSeconds)
+	}
+	if len(doc.Nodes) != 1 || !doc.Nodes[0].Holding || !doc.Nodes[0].Alive {
+		t.Fatalf("node parked in a hold past the stale window = %+v, want holding=true alive=true", doc.Nodes)
+	}
+	<-done // let the parked poll time out before the test ends
 }

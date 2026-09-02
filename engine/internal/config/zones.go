@@ -20,7 +20,9 @@ package config
 // unchanged when those milestones land — they only widen the accepted values.
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -139,6 +141,17 @@ func ParseZones(raw []byte) (*Zones, error) {
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	dec.KnownFields(true)
 	if err := dec.Decode(z); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("parse zones: %w", err)
+		}
+		// An empty or comment-only file is the documented "nothing to serve
+		// yet" state, not an error; yaml.v3 reports it as io.EOF.
+		*z = Zones{}
+	} else if err := dec.Decode(&yaml.Node{}); err == nil {
+		// Exactly one YAML document: a trailing `---` document would otherwise
+		// be discarded silently, taking its zones with it.
+		return nil, fmt.Errorf("parse zones: the file must contain exactly one YAML document (remove the trailing --- document)")
+	} else if !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse zones: %w", err)
 	}
 	if err := z.validate(); err != nil {
@@ -172,15 +185,20 @@ func (zone *Zone) validate() error {
 	if len(zone.Origins) == 0 {
 		return fmt.Errorf("%s: origins: at least one host:port upstream is required", zone.Name)
 	}
+	// Origins are stored in their CANONICAL spelling (see canonicalHostPort), so
+	// two spellings of one upstream cannot slip past the duplicate check and the
+	// renderer never sees a form the terminator rejects. File order is kept.
 	seenOrigin := make(map[string]struct{}, len(zone.Origins))
 	for i, o := range zone.Origins {
-		if err := validateHostPort(o); err != nil {
+		c, err := canonicalHostPort(o)
+		if err != nil {
 			return fmt.Errorf("%s: origins[%d]: %w", zone.Name, i, err)
 		}
-		if _, dup := seenOrigin[o]; dup {
+		if _, dup := seenOrigin[c]; dup {
 			return fmt.Errorf("%s: origins[%d]: duplicate origin %q", zone.Name, i, o)
 		}
-		seenOrigin[o] = struct{}{}
+		seenOrigin[c] = struct{}{}
+		zone.Origins[i] = c
 	}
 
 	switch zone.TLS.MinVersion {
@@ -252,32 +270,67 @@ func normalizeHostname(s string) (string, error) {
 	if net.ParseIP(name) != nil {
 		return "", fmt.Errorf("%q is an IP address, not a hostname", s)
 	}
-	for _, label := range strings.Split(name, ".") {
+	labels := strings.Split(name, ".")
+	for _, label := range labels {
 		if !hostnameLabelRe.MatchString(label) {
 			return "", fmt.Errorf("%q is not a valid hostname (label %q must be 1-63 of [a-z0-9-], not starting or ending with '-')", s, label)
 		}
 	}
+	// RFC 3696 §2: the top-level label must not be all digits — such a name is
+	// not a DNS hostname and no CA will issue for it.
+	if last := labels[len(labels)-1]; strings.Trim(last, "0123456789") == "" {
+		return "", fmt.Errorf("%q: the top-level label must not be all digits", s)
+	}
 	return name, nil
 }
 
-// validateHostPort accepts an origin of the form host:port (or [v6]:port): the
-// host an IP or a hostname, the port 1..65535.
-func validateHostPort(s string) error {
+// canonicalHostPort validates an origin of the form host:port (or [v6]:port)
+// and returns its canonical spelling: a lowercase hostname or the IP's canonical
+// text (an IPv6 literal re-bracketed), and the port in plain decimal. Two
+// spellings of one upstream therefore compare equal, and the terminator config
+// never sees a form nginx rejects (a signed or zero-padded port, a bracketed
+// hostname). The host is an IP or a hostname; the port is 1..65535, unsigned,
+// with no leading zero.
+func canonicalHostPort(s string) (string, error) {
 	host, port, err := net.SplitHostPort(s)
 	if err != nil {
-		return fmt.Errorf("%q must be host:port", s)
+		return "", fmt.Errorf("%q must be host:port", s)
 	}
 	if host == "" {
-		return fmt.Errorf("%q: host is required", s)
+		return "", fmt.Errorf("%q: host is required", s)
 	}
-	if net.ParseIP(host) == nil {
-		if _, err := normalizeHostname(host); err != nil {
-			return fmt.Errorf("%q: host is neither an IP nor a valid hostname", s)
+	bracketed := strings.HasPrefix(s, "[")
+	var chost string
+	switch ip := net.ParseIP(host); {
+	case ip != nil && ip.To4() == nil:
+		// An IPv6 literal is only a valid host:port when bracketed (an
+		// unbracketed one never survives SplitHostPort), and nginx wants the
+		// brackets too.
+		if !bracketed {
+			return "", fmt.Errorf("%q: an IPv6 origin must be written [addr]:port", s)
 		}
+		chost = "[" + ip.String() + "]"
+	case ip != nil:
+		if bracketed {
+			return "", fmt.Errorf("%q: brackets are only for IPv6 addresses", s)
+		}
+		chost = ip.String()
+	default:
+		if bracketed {
+			return "", fmt.Errorf("%q: brackets are only for IPv6 addresses, not hostnames", s)
+		}
+		h, err := normalizeHostname(host)
+		if err != nil {
+			return "", fmt.Errorf("%q: host is neither an IP nor a valid hostname", s)
+		}
+		chost = h
 	}
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("%q: port must be 1..65535", s)
+	if len(port) > 1 && port[0] == '0' {
+		return "", fmt.Errorf("%q: port must not have a leading zero", s)
 	}
-	return nil
+	n, err := strconv.ParseUint(port, 10, 16) // rejects a sign as well as a range overflow
+	if err != nil || n < 1 {
+		return "", fmt.Errorf("%q: port must be 1..65535", s)
+	}
+	return chost + ":" + strconv.FormatUint(n, 10), nil
 }
