@@ -82,7 +82,17 @@ type Config struct {
 	// Absent (nil) disables it entirely and the binary behaves exactly as it
 	// does without the feature. Required when any ladder uses the dataplane
 	// action or method.
-	Dataplane   *Dataplane  `yaml:"dataplane"`
+	Dataplane *Dataplane `yaml:"dataplane"`
+	// Edge is the edge track's brain-side block (edge-spec §2.3/§4, E3): the
+	// zones file this brain serves to edge nodes and the nodes allowed to poll
+	// it. Absent (the default) it is off entirely: the edge routes serve an
+	// empty document and no other block references it.
+	Edge *Edge `yaml:"edge"`
+	// ZonesCfg is the loaded zones file named by Edge.ZonesFile — populated by
+	// Load, NEVER by Parse (which must stay pure for the browser-side
+	// validator), so it is nil unless the daemon was started or reloaded from a
+	// file whose edge.zones_file was read and validated in full.
+	ZonesCfg    *Zones      `yaml:"-"`
 	Notify      Notify      `yaml:"notify"`
 	API         API         `yaml:"api"`
 	UpdateCheck UpdateCheck `yaml:"update_check"`
@@ -832,6 +842,36 @@ type ScrubNode struct {
 	Hostgroups []string `yaml:"hostgroups"`
 }
 
+// Edge is the brain-side configuration of the edge track (edge-spec §2.3, §4;
+// milestone E3). It is deliberately small: WHAT to serve lives in the tenant's
+// zones file (see zones.go), and HOW a node serves it lives in the node's own
+// edge.yaml — this block only joins the two: the zones file this brain reads
+// and republishes, and the edge nodes allowed to poll for it.
+type Edge struct {
+	// ZonesFile is the absolute path of the zones.yaml this brain serves.
+	// Required when the block is present. It is a SECOND file on purpose —
+	// zones are tenant data, and a tenant's zone edit must never touch the
+	// operator's daemon configuration. Read and validated by Load on startup
+	// and on every reload; a broken zones file fails the whole reload, so the
+	// previous zones stay live (edge-spec: "a broken zone edit never reaches a
+	// running nginx" starts here, on the brain).
+	ZonesFile string `yaml:"zones_file"`
+	// Nodes lists the edge nodes (boxes running `kapkan edge`) allowed to
+	// present themselves on the zones poll. An unknown name is a loud 404, not
+	// a silently-created node, for the same reason scrubbing.nodes[] is closed.
+	Nodes []EdgeNode `yaml:"nodes"`
+	// StaleAfterSeconds is how long an edge node may go without polling
+	// before the inventory counts it as lost (default 15). As with scrubbing
+	// nodes, a node parked in a long-poll hold counts as present.
+	StaleAfterSeconds int `yaml:"stale_after_seconds"`
+}
+
+// EdgeNode is one edge node the brain knows by name.
+type EdgeNode struct {
+	// Name identifies the node and must match the name its agent presents.
+	Name string `yaml:"name"`
+}
+
 // Dataplane configures the in-kernel XDP filter. Everything here is policy the
 // operator writes; the rules that actually mitigate an attack are synthesized
 // by the detector and installed by the mitigator, exactly as they are for
@@ -1270,7 +1310,22 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	return Parse(raw)
+	cfg, err := Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	// edge.zones_file is a SECOND file, followed here and not in Parse: Parse
+	// must stay pure (it is what the browser-side validator compiles), and a
+	// reload that cannot read or validate the zones file must fail as a whole
+	// so the previous configuration — zones included — stays live.
+	if cfg.Edge != nil {
+		z, err := LoadZones(cfg.Edge.ZonesFile)
+		if err != nil {
+			return nil, fmt.Errorf("edge.zones_file %q: %w", cfg.Edge.ZonesFile, err)
+		}
+		cfg.ZonesCfg = z
+	}
+	return cfg, nil
 }
 
 // Parse parses and validates raw YAML configuration bytes.
@@ -1386,6 +1441,9 @@ func (c *Config) validate() error {
 		return err
 	}
 
+	if err := c.validateEdge(); err != nil {
+		return err
+	}
 	if err := c.validateHostgroups(); err != nil {
 		return err
 	}
@@ -2357,6 +2415,42 @@ func (c *Config) validateBGP() error {
 // target and resolves its community set. The next-hops are only REQUIRED when a
 // ladder actually diverts; that per-group check happens in validateHostgroups.
 // Here we just parse what is present so the values are ready as defaults.
+// validateEdge checks the brain-side edge block. The zones FILE is not read
+// here — validate() must stay pure (it is what the browser-side validator and
+// Parse run) — Load follows edge.zones_file afterwards and fails the whole load
+// if the zones do not validate.
+func (c *Config) validateEdge() error {
+	e := c.Edge
+	if e == nil {
+		return nil
+	}
+	if e.ZonesFile == "" {
+		return fmt.Errorf("edge.zones_file is required when the edge block is present (the zones.yaml this brain serves)")
+	}
+	if !filepath.IsAbs(e.ZonesFile) {
+		// Absolute so the daemon and `kapkan -check-config` resolve the same
+		// file regardless of working directory.
+		return fmt.Errorf("edge.zones_file must be an absolute path, got %q", e.ZonesFile)
+	}
+	seen := make(map[string]int, len(e.Nodes))
+	for i, n := range e.Nodes {
+		if !groupNameRe.MatchString(n.Name) {
+			return fmt.Errorf("edge.nodes[%d].name %q must match %s", i, n.Name, groupNameRe)
+		}
+		if j, dup := seen[n.Name]; dup {
+			return fmt.Errorf("edge.nodes[%d]: duplicate node name %q (also edge.nodes[%d])", i, n.Name, j)
+		}
+		seen[n.Name] = i
+	}
+	if e.StaleAfterSeconds == 0 {
+		e.StaleAfterSeconds = 15
+	}
+	if e.StaleAfterSeconds < 1 {
+		return fmt.Errorf("edge.stale_after_seconds must be > 0, got %d", e.StaleAfterSeconds)
+	}
+	return nil
+}
+
 func (c *Config) validateScrubbing() error {
 	s := &c.Scrubbing
 	if s.NextHop != "" {
@@ -3199,6 +3293,12 @@ func normalizeListen(s string) string {
 type Store struct {
 	path string
 	cur  atomic.Pointer[Config]
+	// changed is the closed-channel broadcast behind Changed(): a pointer to
+	// the channel handed to current waiters, swapped for nil and closed on
+	// every successful Reload. Lock-free so the hot path (Get) stays a plain
+	// atomic load and a burst of reloads costs one close per burst, not per
+	// waiter. Nil until the first Changed() call.
+	changed atomic.Pointer[chan struct{}]
 }
 
 // NewStore creates a Store serving cfg, remembering path for Reload.
@@ -3246,5 +3346,35 @@ func (s *Store) Reload() (*Config, error) {
 		return nil, fmt.Errorf("reload: dataplane attachment settings (interfaces, xdp_mode, pin_path, limits, fingerprint enabled/sample_pps) cannot change at runtime (restart required)")
 	}
 	s.cur.Store(next)
+	s.notifyChanged()
 	return next, nil
+}
+
+// Changed returns a channel that is closed on the next successful Reload, so a
+// component can block until the configuration it serves from may have moved —
+// the edge zones long-poll (api/edge.go) is the first consumer. Call it again
+// for a fresh channel after a wake: the classic closed-channel broadcast, so
+// any number of waiters share one channel and one close. A wake means "the
+// store was replaced", not "the part you care about differs" — re-read and
+// compare, exactly as Mitigator.RulesChanged waiters do.
+func (s *Store) Changed() <-chan struct{} {
+	for {
+		if p := s.changed.Load(); p != nil {
+			return *p
+		}
+		ch := make(chan struct{})
+		if s.changed.CompareAndSwap(nil, &ch) {
+			return ch
+		}
+		// Lost the race to another first subscriber; use theirs.
+	}
+}
+
+// notifyChanged wakes every Changed waiter. The Swap makes the close
+// exactly-once even under concurrent reloads: only the caller that swapped the
+// pointer out closes it; the next Changed call lazily creates a fresh channel.
+func (s *Store) notifyChanged() {
+	if p := s.changed.Swap(nil); p != nil {
+		close(*p)
+	}
 }
