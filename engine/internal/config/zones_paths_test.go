@@ -25,6 +25,8 @@ func TestParseZonesRejectsUnrenderableValues(t *testing.T) {
 		{"star in extra file", "zones:\n  - name: example.com\n    origins: [\"10.0.0.1:443\"]\n    extra_directives_file: \"/etc/kapkan/*.conf\"\n", "misread"},
 		{"semicolon in extra file", "zones:\n  - name: example.com\n    origins: [\"10.0.0.1:443\"]\n    extra_directives_file: \"/etc/kapkan/x.conf;\"\n", "misread"},
 		{"space in extra file", "zones:\n  - name: example.com\n    origins: [\"10.0.0.1:443\"]\n    extra_directives_file: \"/etc/kapkan/my extra.conf\"\n", "misread"},
+		{"fallback not a URL", "zones:\n  - name: example.com\n    origins: [\"10.0.0.1:443\"]\n    acme:\n      fallback: not-a-url\n", "acme.fallback must be an http(s) URL"},
+		{"fallback equals directory", "zones:\n  - name: example.com\n    origins: [\"10.0.0.1:443\"]\n    acme:\n      directory: https://ca.example/dir\n      fallback: https://ca.example/dir\n", "different directory"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -40,5 +42,9 @@ func TestParseZonesRejectsUnrenderableValues(t *testing.T) {
 	}
 	if _, err := ParseZones([]byte("zones:\n  - name: example.com\n    origins: [\"10.0.0.1:443\"]\n    extra_directives_file: /etc/kapkan/extra/example.com.conf\n")); err != nil {
 		t.Fatalf("plain extra_directives_file rejected: %v", err)
+	}
+	z, err := ParseZones([]byte("zones:\n  - name: example.com\n    origins: [\"10.0.0.1:443\"]\n    acme:\n      directory: https://ca.example/dir\n      fallback: https://other-ca.example/dir\n"))
+	if err != nil || z.Zones[0].ACME.Fallback != "https://other-ca.example/dir" {
+		t.Fatalf("acme.fallback: %+v %v", z, err)
 	}
 }

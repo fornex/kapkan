@@ -83,6 +83,11 @@ type ZoneACME struct {
 	// Directory overrides the node's default ACME directory URL for this zone
 	// (e.g. a staging or private CA). Empty means the node default.
 	Directory string `yaml:"directory"`
+	// Fallback is the directory a node turns to after repeated failures with
+	// the primary — the answer to Let's Encrypt's duplicate-certificate
+	// ceiling on a fleet (edge-spec §3, §9). Empty means the node default
+	// fallback, which may be none.
+	Fallback string `yaml:"fallback"`
 }
 
 // ZonePolicy is the per-request policy the edge node enforces locally
@@ -217,11 +222,17 @@ func (zone *Zone) validate() error {
 		return fmt.Errorf("%s: tls.h3 is not supported yet (HTTP/3 is a later milestone); remove the key or set false", zone.Name)
 	}
 
-	if d := zone.ACME.Directory; d != "" {
-		u, err := url.Parse(d)
-		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-			return fmt.Errorf("%s: acme.directory must be an http(s) URL with a host, got %q", zone.Name, d)
+	for _, d := range []struct{ key, url string }{{"acme.directory", zone.ACME.Directory}, {"acme.fallback", zone.ACME.Fallback}} {
+		if d.url == "" {
+			continue
 		}
+		u, err := url.Parse(d.url)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("%s: %s must be an http(s) URL with a host, got %q", zone.Name, d.key, d.url)
+		}
+	}
+	if zone.ACME.Fallback != "" && zone.ACME.Fallback == zone.ACME.Directory {
+		return fmt.Errorf("%s: acme.fallback must name a different directory than acme.directory", zone.Name)
 	}
 
 	p := &zone.Policy

@@ -1,0 +1,353 @@
+package acme
+
+// fakeCA is a hermetic ACME server for the tests: enough of RFC 8555 for
+// golang.org/x/crypto/acme to register, order, be validated and receive a
+// certificate — with a REAL HTTP-01 validation step that fetches the token
+// from an answerer the test provides, exactly as a CA would from a node.
+// Signatures are not verified (the test owns both ends); the account JWK is
+// parsed to compute the thumbprint the key authorization must carry.
+
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	xacme "golang.org/x/crypto/acme"
+)
+
+type fakeOrder struct {
+	id        string
+	zone      string
+	authz     string
+	token     string
+	status    string
+	certPEM   []byte
+	thumb     string
+	authzOK   bool
+	validated bool
+}
+
+type fakeCA struct {
+	t      *testing.T
+	srv    *httptest.Server
+	caKey  *ecdsa.PrivateKey
+	caCert *x509.Certificate
+	now    func() time.Time
+	// lifetime of issued certificates.
+	lifetime time.Duration
+	// answerer is where validation fetches tokens (the ChallengeTable's
+	// handler served by httptest); zone selects the Host header.
+	answerer string
+
+	mu       sync.Mutex
+	orders   map[string]*fakeOrder
+	accounts map[string]string // account URL -> thumbprint
+	seq      int
+	// failNewOrder makes newOrder answer with this ACME problem (e.g. 429).
+	failNewOrder int
+	newOrders    int
+	validations  []string // "zone/token" of every validation fetch
+}
+
+func newFakeCA(t *testing.T, now func() time.Time, answerer string) *fakeCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Fake Kapkan Test CA"},
+		NotBefore: now().Add(-time.Hour), NotAfter: now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, BasicConstraintsValid: true, IsCA: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, _ := x509.ParseCertificate(der)
+	f := &fakeCA{t: t, caKey: key, caCert: caCert, now: now, lifetime: 90 * 24 * time.Hour, answerer: answerer,
+		orders: make(map[string]*fakeOrder), accounts: make(map[string]string)}
+	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeCA) directory() string { return f.srv.URL + "/dir" }
+
+func (f *fakeCA) nextID() string {
+	f.seq++
+	return strconv.Itoa(f.seq)
+}
+
+// jws is the body of every ACME POST.
+type jws struct {
+	Protected string `json:"protected"`
+	Payload   string `json:"payload"`
+}
+
+type protectedHeader struct {
+	Nonce string          `json:"nonce"`
+	URL   string          `json:"url"`
+	KID   string          `json:"kid"`
+	JWK   json.RawMessage `json:"jwk"`
+}
+
+func b64url(s string) []byte {
+	b, _ := base64.RawURLEncoding.DecodeString(s)
+	return b
+}
+
+func (f *fakeCA) readJWS(r *http.Request) (protectedHeader, []byte) {
+	body, _ := io.ReadAll(r.Body)
+	var j jws
+	_ = json.Unmarshal(body, &j)
+	var ph protectedHeader
+	_ = json.Unmarshal(b64url(j.Protected), &ph)
+	return ph, b64url(j.Payload)
+}
+
+func (f *fakeCA) writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Replay-Nonce", "nonce-"+f.nextID())
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (f *fakeCA) problem(w http.ResponseWriter, status int, typ, detail string) {
+	w.Header().Set("Replay-Nonce", "nonce-"+f.nextID())
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"type": typ, "detail": detail, "status": status})
+}
+
+func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	base := f.srv.URL
+	switch {
+	case r.URL.Path == "/dir":
+		f.writeJSON(w, 200, map[string]any{
+			"newNonce": base + "/nonce", "newAccount": base + "/acct", "newOrder": base + "/order",
+			"revokeCert": base + "/revoke", "keyChange": base + "/keychange",
+			"meta": map[string]any{"termsOfService": base + "/tos"},
+		})
+	case r.URL.Path == "/nonce":
+		w.Header().Set("Replay-Nonce", "nonce-"+f.nextID())
+		w.WriteHeader(http.StatusOK)
+	case r.URL.Path == "/acct":
+		ph, _ := f.readJWS(r)
+		thumb, err := thumbprintFromJWK(ph.JWK)
+		if err != nil {
+			f.problem(w, 400, "urn:ietf:params:acme:error:malformed", err.Error())
+			return
+		}
+		for url, th := range f.accounts {
+			if th == thumb {
+				// Existing account: RFC 8555 answers 200 with the same Location.
+				w.Header().Set("Location", url)
+				f.writeJSON(w, 200, map[string]any{"status": "valid"})
+				return
+			}
+		}
+		url := base + "/acct/" + f.nextID()
+		f.accounts[url] = thumb
+		w.Header().Set("Location", url)
+		f.writeJSON(w, 201, map[string]any{"status": "valid"})
+	case r.URL.Path == "/order":
+		ph, payload := f.readJWS(r)
+		f.newOrders++
+		if f.failNewOrder != 0 {
+			f.problem(w, f.failNewOrder, "urn:ietf:params:acme:error:rateLimited", "too many certificates already issued")
+			return
+		}
+		var req struct {
+			Identifiers []struct{ Type, Value string } `json:"identifiers"`
+		}
+		_ = json.Unmarshal(payload, &req)
+		if len(req.Identifiers) != 1 || req.Identifiers[0].Type != "dns" {
+			f.problem(w, 400, "urn:ietf:params:acme:error:malformed", "one dns identifier expected")
+			return
+		}
+		o := &fakeOrder{id: f.nextID(), zone: req.Identifiers[0].Value, status: "pending", thumb: f.accounts[ph.KID]}
+		o.authz = f.nextID()
+		o.token = "tok-" + strings.Repeat("x", 20) + o.id
+		f.orders[o.id] = o
+		w.Header().Set("Location", base+"/order/"+o.id)
+		f.writeJSON(w, 201, f.orderJSON(o))
+	case strings.HasPrefix(r.URL.Path, "/order/") && strings.HasSuffix(r.URL.Path, "/finalize"):
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/order/"), "/finalize")
+		o := f.orders[id]
+		if o == nil || o.status != "ready" {
+			f.problem(w, 403, "urn:ietf:params:acme:error:orderNotReady", "order is not ready")
+			return
+		}
+		_, payload := f.readJWS(r)
+		var req struct {
+			CSR string `json:"csr"`
+		}
+		_ = json.Unmarshal(payload, &req)
+		csr, err := x509.ParseCertificateRequest(b64url(req.CSR))
+		if err != nil || len(csr.DNSNames) != 1 || csr.DNSNames[0] != o.zone {
+			f.problem(w, 400, "urn:ietf:params:acme:error:badCSR", "csr does not match the order")
+			return
+		}
+		serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 100))
+		tmpl := &x509.Certificate{
+			SerialNumber: serial, Subject: pkix.Name{CommonName: o.zone}, DNSNames: []string{o.zone},
+			NotBefore: f.now().Add(-time.Minute), NotAfter: f.now().Add(f.lifetime),
+			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, f.caCert, csr.PublicKey, f.caKey)
+		if err != nil {
+			f.problem(w, 500, "urn:ietf:params:acme:error:serverInternal", err.Error())
+			return
+		}
+		o.certPEM = append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: f.caCert.Raw})...)
+		o.status = "valid"
+		f.writeJSON(w, 200, f.orderJSON(o))
+	case strings.HasPrefix(r.URL.Path, "/order/"):
+		id := strings.TrimPrefix(r.URL.Path, "/order/")
+		o := f.orders[id]
+		if o == nil {
+			f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "no such order")
+			return
+		}
+		f.writeJSON(w, 200, f.orderJSON(o))
+	case strings.HasPrefix(r.URL.Path, "/authz/"):
+		o := f.orderByAuthz(strings.TrimPrefix(r.URL.Path, "/authz/"))
+		if o == nil {
+			f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "no such authorization")
+			return
+		}
+		f.writeJSON(w, 200, f.authzJSON(o))
+	case strings.HasPrefix(r.URL.Path, "/chal/"):
+		o := f.orderByAuthz(strings.TrimPrefix(r.URL.Path, "/chal/"))
+		if o == nil {
+			f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "no such challenge")
+			return
+		}
+		// Accept: validate NOW, the way a CA's VA would — by fetching the
+		// token from the zone (our answerer, Host set to the zone).
+		f.validate(o)
+		f.writeJSON(w, 200, f.challengeJSON(o))
+	case strings.HasPrefix(r.URL.Path, "/cert/"):
+		o := f.orders[strings.TrimPrefix(r.URL.Path, "/cert/")]
+		if o == nil || o.status != "valid" {
+			f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "no certificate")
+			return
+		}
+		w.Header().Set("Replay-Nonce", "nonce-"+f.nextID())
+		w.Header().Set("Content-Type", "application/pem-certificate-chain")
+		w.WriteHeader(200)
+		_, _ = w.Write(o.certPEM)
+	default:
+		f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "unknown endpoint "+r.URL.Path)
+	}
+}
+
+func (f *fakeCA) orderByAuthz(id string) *fakeOrder {
+	for _, o := range f.orders {
+		if o.authz == id {
+			return o
+		}
+	}
+	return nil
+}
+
+func (f *fakeCA) orderJSON(o *fakeOrder) map[string]any {
+	m := map[string]any{
+		"status": o.status, "expires": f.now().Add(time.Hour).Format(time.RFC3339),
+		"identifiers":    []map[string]string{{"type": "dns", "value": o.zone}},
+		"authorizations": []string{f.srv.URL + "/authz/" + o.authz},
+		"finalize":       f.srv.URL + "/order/" + o.id + "/finalize",
+	}
+	if o.status == "valid" {
+		m["certificate"] = f.srv.URL + "/cert/" + o.id
+	}
+	return m
+}
+
+func (f *fakeCA) authzJSON(o *fakeOrder) map[string]any {
+	status := "pending"
+	if o.authzOK {
+		status = "valid"
+	} else if o.validated {
+		status = "invalid"
+	}
+	return map[string]any{
+		"status": status, "expires": f.now().Add(time.Hour).Format(time.RFC3339),
+		"identifier": map[string]string{"type": "dns", "value": o.zone},
+		"challenges": []map[string]any{f.challengeJSON(o)},
+	}
+}
+
+func (f *fakeCA) challengeJSON(o *fakeOrder) map[string]any {
+	status := "pending"
+	switch {
+	case o.authzOK:
+		status = "valid"
+	case o.validated:
+		status = "invalid"
+	}
+	m := map[string]any{"type": "http-01", "url": f.srv.URL + "/chal/" + o.authz, "token": o.token, "status": status}
+	if o.validated && !o.authzOK {
+		m["error"] = map[string]any{"type": "urn:ietf:params:acme:error:unauthorized", "detail": "key authorization did not match"}
+	}
+	return m
+}
+
+// validate performs the HTTP-01 fetch against the answerer.
+func (f *fakeCA) validate(o *fakeOrder) {
+	o.validated = true
+	f.validations = append(f.validations, o.zone+"/"+o.token)
+	req, _ := http.NewRequest("GET", f.answerer+"/.well-known/acme-challenge/"+o.token, nil)
+	req.Host = o.zone
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	want := o.token + "." + o.thumb
+	if resp.StatusCode == 200 && strings.TrimSpace(string(body)) == want {
+		o.authzOK = true
+		o.status = "ready"
+	}
+}
+
+// thumbprintFromJWK computes the RFC 7638 thumbprint of an EC P-256 JWK, as
+// the key authorization is token || '.' || thumbprint.
+func thumbprintFromJWK(raw json.RawMessage) (string, error) {
+	var jwk struct {
+		Kty, Crv, X, Y string
+	}
+	if err := json.Unmarshal(raw, &jwk); err != nil {
+		return "", err
+	}
+	if jwk.Kty != "EC" || jwk.Crv != "P-256" {
+		return "", fmt.Errorf("unsupported jwk %s/%s", jwk.Kty, jwk.Crv)
+	}
+	pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(b64url(jwk.X)), Y: new(big.Int).SetBytes(b64url(jwk.Y))}
+	return xacme.JWKThumbprint(pub)
+}
+
+// client trusts the fake CA's certificate (the directory is plain http from
+// httptest, but the manager's client is shared with tests that check TLS).
+func (f *fakeCA) client() *http.Client {
+	return &http.Client{Timeout: 10 * time.Second}
+}
