@@ -180,7 +180,7 @@ export function DocsChrome({ lang, children }: { lang: Locale; children: React.R
 
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur">
+      <header className="sticky top-0 z-40 border-b border-border bg-background">
         <div className="mx-auto flex h-14 max-w-screen-xl items-center gap-3 px-4 sm:px-6">
           <button
             type="button"

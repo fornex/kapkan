@@ -74,7 +74,7 @@ export function MobileNav({
             aria-hidden
             tabIndex={-1}
             onClick={close}
-            className="fixed inset-0 top-16 z-40 cursor-default bg-background/60 backdrop-blur-sm"
+            className="fixed inset-0 top-16 z-40 cursor-default bg-background/60"
           />
           <nav className="fixed inset-x-0 top-16 z-50 border-b border-border bg-background p-4 shadow-xl">
             <ul className="flex flex-col gap-1">
@@ -85,7 +85,7 @@ export function MobileNav({
             <div className="mt-3 border-t border-border pt-3">
               {renderLink(
                 cta,
-                "block rounded-full bg-accent px-4 py-2.5 text-center text-base font-medium text-accent-foreground transition-opacity hover:opacity-90"
+                "block rounded-md bg-foreground px-4 py-2.5 text-center text-base font-medium text-background transition-opacity hover:opacity-90"
               )}
             </div>
             {children && <div className="mt-4 flex items-center justify-between border-t border-border pt-4">{children}</div>}

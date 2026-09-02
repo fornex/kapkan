@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 
-// Real operator-console screenshots, framed in a browser window. Tabs swap the
-// image; all four are emitted so switching is instant (no flash on first view).
+// Real operator-console screenshots. Tabs swap the image; all four are emitted
+// so switching is instant (no flash on first view).
 //
 // w/h are the images' intrinsic CSS sizes (the files themselves are 2×) and they
 // reserve layout space, so a wrong value shifts the page as the image loads.
@@ -21,58 +21,41 @@ export function ConsoleShowcase() {
 
   return (
     <div>
-      {/* Tab switcher */}
-      <div className="mb-8 flex justify-center">
-        <div className="inline-flex rounded-full border border-border bg-surface p-1">
-          {TABS.map((t) => (
+      {/* Tab switcher: underlined text tabs, the way a real app draws them. */}
+      <div role="tablist" className="mb-6 flex gap-6 border-b border-border text-sm">
+        {TABS.map((t) => {
+          const on = active === t.id;
+          return (
             <button
               key={t.id}
               type="button"
+              role="tab"
+              aria-selected={on}
               onClick={() => setActive(t.id)}
-              aria-pressed={active === t.id}
-              className={`rounded-full px-5 py-2 text-sm font-medium transition-colors ${
-                active === t.id
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:text-foreground"
+              className={`-mb-px border-b-2 pb-3 font-medium transition-colors ${
+                on ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
             >
               {t.label}
             </button>
-          ))}
-        </div>
+          );
+        })}
       </div>
 
-      {/* Window frame */}
-      <div className="overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl ring-1 ring-black/5">
-        {/* Browser chrome */}
-        <div className="flex h-11 items-center gap-4 border-b border-border bg-muted px-4">
-          <div className="flex gap-2">
-            <span className="h-3 w-3 rounded-full bg-border" />
-            <span className="h-3 w-3 rounded-full bg-border" />
-            <span className="h-3 w-3 rounded-full bg-border" />
-          </div>
-          <div className="flex flex-1 justify-center">
-            <span className="rounded-md border border-border bg-background px-4 py-1 text-center font-mono text-xs text-muted-foreground">
-              kapkan.local:8080/ui
-            </span>
-          </div>
-        </div>
-
-        {/* Screenshots — keep all mounted, toggle visibility for instant switching */}
-        <div className="relative bg-background">
-          {TABS.map((t) => (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              key={t.id}
-              src={t.src}
-              alt={`Kapkan operator console — ${t.label} view`}
-              width={t.w}
-              height={t.h}
-              loading="lazy"
-              className={`h-auto w-full ${active === t.id ? "block" : "hidden"}`}
-            />
-          ))}
-        </div>
+      {/* Plain 1px frame; the screenshot is the real thing and needs no chrome. */}
+      <div className="overflow-hidden rounded-lg border border-border bg-surface">
+        {TABS.map((t) => (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            key={t.id}
+            src={t.src}
+            alt={`Kapkan operator console — ${t.label} view`}
+            width={t.w}
+            height={t.h}
+            loading="lazy"
+            className={`h-auto w-full ${active === t.id ? "block" : "hidden"}`}
+          />
+        ))}
       </div>
     </div>
   );
