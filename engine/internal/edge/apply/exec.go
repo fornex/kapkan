@@ -96,7 +96,9 @@ func (r SignalReloader) Reload(_ context.Context) error {
 func Probe(ctx context.Context, binary string) (kind, version string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, binaryOr(binary), "-v").CombinedOutput()
+	c := exec.CommandContext(ctx, binaryOr(binary), "-v")
+	c.WaitDelay = time.Second
+	out, err := c.CombinedOutput()
 	if err != nil {
 		return "", "", fmt.Errorf("%s -v: %w: %s", binaryOr(binary), err, tail(out))
 	}
@@ -129,7 +131,13 @@ func runTool(ctx context.Context, binary string, args []string, timeout, def tim
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
+	c := exec.CommandContext(ctx, binary, args...)
+	// A killed nginx may leave a child holding the output pipe (a shell wrapper
+	// does, and so would a helper it spawned); without WaitDelay, Wait would
+	// block on that pipe until the grandchild exits and the timeout would be
+	// a fiction. One second after the kill the pipes are closed regardless.
+	c.WaitDelay = time.Second
+	out, err := c.CombinedOutput()
 	if err != nil {
 		cmd := binary + " " + strings.Join(args, " ")
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
