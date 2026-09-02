@@ -69,7 +69,12 @@ type Zone struct {
 	TLS     TLS      `json:"tls"`
 	// ACMEDirectory is the zone's CA directory override; empty means the node
 	// default.
-	ACMEDirectory       string `json:"acme_directory,omitempty"`
+	ACMEDirectory string `json:"acme_directory,omitempty"`
+	// ACMEFallback is the CA directory the node turns to after repeated
+	// failures with the primary (edge-spec §3: the LE duplicate-certificate
+	// ceiling); empty means the node default fallback. Added in E3.4 — an
+	// omitempty extension, per the rule above.
+	ACMEFallback        string `json:"acme_fallback,omitempty"`
 	Policy              Policy `json:"policy"`
 	ExtraDirectivesFile string `json:"extra_directives_file,omitempty"`
 }

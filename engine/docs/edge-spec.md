@@ -185,6 +185,21 @@ The channel is the one the scrub node already uses, with a second document famil
   limit caps a zone's fleet at roughly five first-time issuances a week. The design's answer:
   staggered initial rollout, renewal jitter, and a configurable fallback ACME directory per
   zone (ZeroSSL / Google Trust Services). The ceiling is documented, not hidden.
+  *Decided in E3.4 (`internal/edge/acme`, `internal/api/edge_acme.go`):* the node keeps one
+  account key per CA directory and `certs/<zone>/{privkey.pem 0600, fullchain.pem, meta.json}`
+  under its state directory, written whole and renamed, meta last. Renewal is due when less than
+  30 days remain (day 60 of 90) minus a per-zone jitter of up to a day; a failed order backs off
+  1 h → 24 h, and after three consecutive failures the next attempt uses the fallback directory
+  (`acme.fallback` in the zones file, else the node default), alternating from then on; a CA
+  429 is not retried within an order. The brain coordinates through two routes a node calls
+  with its agent token — `POST /api/v1/edge/nodes/{name}/acme/slot` (a per-zone lease of
+  10 min; `{"granted":false,"holder","retry_after_seconds"}` when another node holds it;
+  `release: true` returns it) and `POST …/acme/challenges` (token + key authorization, fanned
+  out in `acme_challenges` for 10 min) — both in memory, both waking parked zone polls, both
+  **advisory**: a node waits at most 15 min for a slot and then orders anyway, and a failed
+  fan-out leaves this node answering alone. The challenge answerer serves this node's pending
+  challenges plus the fanned-out ones over the unix socket the renderer routes the ACME location
+  to, GET/HEAD only. `kapkan_edge_cert_not_after_seconds{zone}` is the T−30 d alarm's source.
 - **Wildcard = DNS-01 = a DNS-provider integration:** deferred, v1 issues explicit names only.
 - **Session resumption across a multi-node PoP:** ticket keys must be shared or resumption
   breaks under anycast; single-node PoPs (v1) skip this. Rotating a shared ticket key via the

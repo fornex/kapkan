@@ -61,6 +61,7 @@ func TestFrozenKeyNames(t *testing.T) {
 		Origins:             []string{"10.0.0.1:443"},
 		TLS:                 TLS{MinVersion: TLS12, H3: true},
 		ACMEDirectory:       "https://ca.example/directory",
+		ACMEFallback:        "https://fallback-ca.example/directory",
 		Policy:              Policy{Mode: ModeDecide, FailureMode: FailOpen, Challenge: ChallengeOff, Rate: Rate{RPS: 5, Concurrency: 2}},
 		ExtraDirectivesFile: "/etc/kapkan/extra/example.com.conf",
 	})
@@ -71,7 +72,8 @@ func TestFrozenKeyNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"version":1,"zones":[{"name":"example.com","origins":["10.0.0.1:443"],"tls":{"min_version":"1.2","h3":true},` +
-		`"acme_directory":"https://ca.example/directory","policy":{"mode":"decide","failure_mode":"open","challenge":"off",` +
+		`"acme_directory":"https://ca.example/directory","acme_fallback":"https://fallback-ca.example/directory",` +
+		`"policy":{"mode":"decide","failure_mode":"open","challenge":"off",` +
 		`"rate":{"rps":5,"concurrency":2}},"extra_directives_file":"/etc/kapkan/extra/example.com.conf"}],` +
 		`"acme_challenges":[{"zone":"example.com","token":"tok","key_authorization":"tok.thumb","expires_at":"2026-01-02T03:04:05Z"}],` +
 		`"issuance_grants":[{"zone":"example.com","node":"e1","expires_at":"2026-01-02T03:04:05Z"}]}`

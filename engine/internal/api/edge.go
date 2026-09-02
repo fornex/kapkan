@@ -88,6 +88,7 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 			Origins:       origins,
 			TLS:           EdgeDocTLS{MinVersion: zn.TLS.MinVersion, H3: zn.TLS.H3},
 			ACMEDirectory: zn.ACME.Directory,
+			ACMEFallback:  zn.ACME.Fallback,
 			Policy: EdgeDocPolicy{
 				Mode:        zn.Policy.Mode,
 				FailureMode: zn.Policy.FailureMode,
@@ -114,9 +115,14 @@ func edgeDocBytes(doc EdgeDoc) (body []byte, etag string, err error) {
 	return body, `"` + hex.EncodeToString(sum[:16]) + `"`, nil
 }
 
-// edgeSnapshot builds the current document straight from the config store.
+// edgeSnapshot builds the current document: the zones from the config store,
+// plus the live issuance slots and fanned-out challenges (edge_acme.go).
+// buildEdgeDoc stays pure; the coordinator adds only entries whose times are
+// fixed for their lifetime, so the ETag moves exactly when there is news.
 func (s *Server) edgeSnapshot() ([]byte, string, error) {
-	return edgeDocBytes(buildEdgeDoc(s.store.Get().ZonesCfg))
+	doc := buildEdgeDoc(s.store.Get().ZonesCfg)
+	s.edgeIssuance.fill(&doc, time.Now())
+	return edgeDocBytes(doc)
 }
 
 // configuredEdgeNode returns the edge.nodes entry with this name, or nil.
@@ -199,6 +205,7 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		// ANY successful reload, not only a zones change: the loop re-hashes and
 		// keeps holding when the document is unchanged.
 		changed := s.store.Changed()
+		acmeChanged := s.edgeIssuance.Changed()
 		body, cur, err := s.edgeSnapshot()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "encoding zones document failed")
@@ -220,7 +227,10 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 			s.endEdgeHold(w, etag)
 			return
 		case <-changed:
-			// Woken; loop to rebuild and compare.
+			// Woken by a reload; loop to rebuild and compare.
+		case <-acmeChanged:
+			// Woken by a slot or challenge; a CA may be validating within
+			// seconds, so this must not wait for the deadline.
 		}
 	}
 }
