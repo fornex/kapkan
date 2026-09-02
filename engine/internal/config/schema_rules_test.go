@@ -191,6 +191,23 @@ hostgroups:
 			wantErr: "duplicate entry",
 		},
 		{
+			// The edge block (E3): the zones FILE is what the block is for, so a
+			// block without it is a mistake, not an empty edge.
+			name:    "edge block without a zones file",
+			yaml:    validBase + "\nedge:\n  nodes:\n    - name: e1\n",
+			wantErr: "edge.zones_file is required",
+		},
+		{
+			name:    "edge zones file with a relative path",
+			yaml:    validBase + "\nedge:\n  zones_file: zones.yaml\n",
+			wantErr: "edge.zones_file must be an absolute path",
+		},
+		{
+			name:    "duplicate edge node names",
+			yaml:    validBase + "\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  nodes:\n    - name: e1\n    - name: e1\n",
+			wantErr: "duplicate node name",
+		},
+		{
 			name:    "static rule ratelimit without a profile",
 			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - name: cap\n      match: {proto: icmp}\n      action: ratelimit\n",
 			wantErr: "requires profile",

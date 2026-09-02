@@ -115,6 +115,8 @@ var numericBounds = map[string]map[string]float64{
 	"dataplane.limits.max_ratelimit_sources": {"minimum": 0},
 
 	"dataplane.fingerprint.block_ttl_seconds": {"minimum": 1, "maximum": 86400},
+
+	"edge.stale_after_seconds": {"minimum": 1},
 }
 
 // stringPatterns maps a yaml path to a regex the value must match. Beyond these
@@ -132,6 +134,7 @@ var stringPatterns = map[string]string{
 	"scrubbing.nodes.name":              groupNameRe.String(),
 	"dataplane.interfaces":              ifaceNameRe.String(),
 	"dataplane.ratelimit_profiles.name": groupNameRe.String(),
+	"edge.nodes.name":                   groupNameRe.String(),
 	"dataplane.static_rules.name":       groupNameRe.String(),
 }
 
