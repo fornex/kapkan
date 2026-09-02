@@ -38,11 +38,56 @@ upstream kapkan_decide {
 upstream kapkan_challenge {
     server unix:{{.Node.ChallengeSocket}};
 }
-{{- range .Zones}}
-{{- if .RPS}}
-limit_req_zone $binary_remote_addr zone=kapkan_rps_{{.ID}}:10m rate={{.RPS}}r/s;
+
+# What @kapkan_pass sends as the Connection header: empty for an ordinary
+# request (upstream keepalive needs it cleared), "upgrade" when the client asked
+# for one, so a WebSocket handshake reaches the origin intact.
+map $http_upgrade $kapkan_connection {
+    default upgrade;
+    ""      "";
+}
+
+# A mark is believed only from a decision the service actually made — a 200.
+# An answer outside the contract that happens to carry the header is a failed
+# decision, and its mark must not reach the origin.
+map $upstream_status $kapkan_decided_mark {
+    default "";
+    200     $upstream_http_x_kapkan_mark;
+}
+{{- if .HashBucketSize}}
+
+# A zone name longer than 46 bytes does not fit nginx's default server-name
+# hash bucket (one CPU cache line) once a port carries two or more servers.
+# Set once, here; the operator's nginx.conf must not set it as well.
+server_names_hash_bucket_size {{.HashBucketSize}};
 {{- end}}
-{{- if .Concurrency}}
-limit_conn_zone $binary_remote_addr zone=kapkan_conn_{{.ID}}:10m;
+{{- if not .Node.OmitCatchAll}}
+
+# The catch-all: a Host or SNI that matches no zone is refused, instead of
+# landing in whichever zone sorts first (zones are tenant data, edge-spec §4).
+# 444 closes the connection without a response; ssl_reject_handshake answers
+# an unknown or absent SNI with a TLS alert and needs no certificate.
+server {
+    listen 80 default_server;
+{{- if not .Node.DisableIPv6}}
+    listen [::]:80 default_server;
 {{- end}}
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 443 ssl default_server;
+{{- if not .Node.DisableIPv6}}
+    listen [::]:443 ssl default_server;
+{{- end}}
+    server_name _;
+    ssl_reject_handshake on;
+    # nginx before 1.29.2 fixes the TLS protocol set from the DEFAULT server
+    # before SNI selects a zone's server, so on those versions this line is the
+    # node-wide floor: the lowest tls.min_version among the zones. From 1.29.2,
+    # and on Angie, each zone's own ssl_protocols is honoured.
+    ssl_protocols {{.NodeSSLProtocols}};
+    return 444;
+}
 {{- end}}

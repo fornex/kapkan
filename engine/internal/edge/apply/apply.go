@@ -3,33 +3,47 @@
 // installed, the old config keeps serving, the failure is a report field".
 //
 // THE LAYOUT. Under Root, each install is a numbered generation directory,
-// gen-000001, gen-000002, …, holding the rendered files plus a manifest with
-// their content hash; a symlink named `live` points at the generation nginx
-// includes (the operator's nginx.conf says `include <Root>/live/*.conf;`). A
-// generation is written whole into a temporary directory and renamed into
-// place, and the symlink is replaced with a rename, so a reader — nginx
-// re-reading its config on reload, an operator looking — sees either the old
-// generation or the new one, never a half-written directory. The numbers come
-// from what is on disk, so they keep increasing across restarts, and the
-// manifest lets a fresh process know what is live without re-rendering.
+// gen-000001, gen-000002, …, holding the rendered files, a manifest with their
+// content hash, and two markers written as the generation earns them:
+// .kapkan-tested once `nginx -t` passed, .kapkan-reloaded once the terminator
+// was told to load it. A symlink named `live` points at the generation nginx
+// includes (the operator's nginx.conf says `include <Root>/live/*.conf;` — the
+// glob never matches the dot-files). A generation is written whole into a
+// temporary directory and renamed into place, and the symlink is replaced with
+// a rename, so a reader — nginx re-reading its config on reload, an operator
+// looking — sees either the old generation or the new one, never a
+// half-written directory. Numbers come from what is on disk, so they keep
+// increasing across restarts and are never reused; the manifest and markers
+// let a fresh process know what is live, and how far it got, without
+// re-rendering.
 //
 // THE GATE, and why it is swap-test-swap-back. nginx can only test the
 // configuration it would actually load, and that configuration includes
 // `live/*.conf`, so the candidate is pointed to by `live` BEFORE `nginx -t`
-// runs and pointed away again if the test fails. In the milliseconds between,
-// `live` names an untested generation, which matters only if nginx were to
-// (re)start in exactly that window — a window this package keeps as short as
-// the test itself and never widens with a reload. A candidate that passes is
-// reloaded into; one that fails is moved aside as failed-N (kept for the
-// operator to read) and the previous generation stays live, exactly as it
-// was. The rename-based swap-back is the same operation as the swap, so it
-// cannot fail in a way the swap could not.
+// runs and pointed away again if the test fails. In between, `live` names an
+// untested generation. That matters if nginx were to (re)start in exactly
+// that window — kept as short as the test itself — and it matters if THIS
+// process dies in it: the tested marker is what tells the next process that
+// the live generation was never verified, so Apply refuses to trust it (the
+// idempotence check needs the marker) and Recover, run at startup, tests it
+// before anything else. A candidate that passes is marked tested and reloaded
+// into; one that fails is moved aside as failed-N (kept for the operator to
+// read) and `live` goes back to the previous tested generation — or, when the
+// previous link was not one of ours, to exactly what it pointed at before. The
+// rename-based swap-back is the same operation as the swap, so it cannot fail
+// in a way the swap could not.
 //
-// IDEMPOTENCE AND PACE. A render whose bytes equal the live generation's is
-// not a change: no directory, no test, no reload — a brain that re-sends an
-// unchanged document does not cost a reload storm (edge-spec §2.2). Applies
-// are also spaced at least MinInterval apart, counted from the last ATTEMPT,
-// so a document that fails the test on every poll cannot hammer `nginx -t`.
+// IDEMPOTENCE AND PACE. A render whose bytes equal the live, tested
+// generation's is not a change: no directory, no test — a brain that re-sends
+// an unchanged document does not cost a reload storm (edge-spec §2.2). One
+// exception: a generation that passed its test but never reached the
+// terminator (a reload that failed, or a crash between test and reload) is
+// reloaded on that path, so a missed reload is retried on the next poll rather
+// than on the next edit. Applies are also spaced at least MinInterval apart,
+// counted from the last ATTEMPT, so a document that fails the test on every
+// poll cannot hammer `nginx -t`. Root is locked (flock) for the duration of an
+// Apply, so two processes over one directory — the daemon and a one-shot
+// debug run — cannot pick the same generation number.
 //
 // The Tester and Reloader are interfaces so this logic is tested without an
 // nginx, and so `nginx -s reload` versus SIGHUP versus `systemctl reload` is a
@@ -44,10 +58,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -59,15 +75,22 @@ const (
 	// one — enough to diff "what changed" by hand after an incident.
 	DefaultKeep = 3
 
-	liveLink     = "live"
-	manifestFile = ".kapkan-manifest"
-	genPrefix    = "gen-"
-	failedPrefix = "failed-"
+	liveLink       = "live"
+	lockFile       = ".kapkan-lock"
+	manifestFile   = ".kapkan-manifest"
+	testedMarker   = ".kapkan-tested"
+	reloadedMarker = ".kapkan-reloaded"
+	genPrefix      = "gen-"
+	failedPrefix   = "failed-"
 )
 
 // ErrTestFailed wraps a Tester failure: the candidate was never installed and
-// the previous generation is still live. Result.TestError carries the message.
+// the previous generation is still live. Result.TestError carries the message;
+// the tester's own error is wrapped too, for errors.Is.
 var ErrTestFailed = errors.New("candidate configuration failed the terminator's test")
+
+// failedZoneRe finds the zone file nginx blamed: `… in /…/kapkan_zone_<name>.conf:12`.
+var failedZoneRe = regexp.MustCompile(`kapkan_zone_([a-z0-9.-]+)\.conf:[0-9]+`)
 
 // Tester runs the terminator's configuration test (`nginx -t`) against what
 // `live` currently points to.
@@ -81,7 +104,8 @@ type Reloader interface {
 }
 
 // Applier installs generations under Root. Safe for concurrent use; applies
-// are serialised.
+// are serialised within the process by a mutex and across processes by a lock
+// file in Root.
 type Applier struct {
 	// Root is the configuration directory (absolute). Created if missing.
 	Root     string
@@ -97,23 +121,27 @@ type Applier struct {
 	lastAttempt time.Time
 }
 
-// Result is what one Apply did, in the terms the node's report uses
-// (EdgeReportTerminator: generation, test_ok, test_error).
+// Result is what one Apply (or Recover) did, in the terms the node's report
+// uses (EdgeReportTerminator: generation, test_ok, test_error).
 type Result struct {
 	// Generation is the generation that is live after the call: the new one
-	// when the test passed, the previous one (0 if none) when it did not.
+	// when the test passed, the restored one (0 if none) when it did not.
 	Generation uint64
 	// Hash is the candidate's content hash.
 	Hash string
 	// Changed is false when the candidate equalled the live generation and
-	// nothing was written, tested or reloaded.
+	// nothing was written or tested.
 	Changed bool
 	// TestOK reports whether the live generation passed the test — true on the
 	// unchanged path too, because what is live did pass.
 	TestOK bool
 	// TestError is the tester's message when TestOK is false.
 	TestError string
-	// Reloaded reports whether the terminator was told to load the generation.
+	// FailedZone is the zone whose file the tester blamed, parsed from its
+	// "in <file>:<line>" message; "" when it named the common file or nothing.
+	FailedZone string
+	// Reloaded reports whether the terminator was told to load the generation
+	// during this call.
 	Reloaded bool
 }
 
@@ -133,16 +161,25 @@ func Hash(files map[string][]byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// liveState is what the `live` symlink and its manifest say.
+// liveState is what the `live` symlink and its generation say.
 type liveState struct {
-	ok     bool
-	gen    uint64
+	// exists: `live` is a symlink to something (target is its raw value).
+	exists bool
 	target string
-	hash   string
+	// gen is the parsed generation number, 0 when target is not one of ours.
+	gen uint64
+	// hash is the manifest's content hash, "" when unreadable.
+	hash     string
+	tested   bool
+	reloaded bool
+	// ok: a generation of ours with a readable manifest that passed its test —
+	// the only state the idempotence check may trust.
+	ok bool
 }
 
 // Live reports the generation currently pointed to by `live` and its content
-// hash; ok is false when nothing is live or the manifest is unreadable.
+// hash; ok is false when nothing is live, when the link is not a kapkan
+// generation, or when that generation never passed its test.
 func (a *Applier) Live() (gen uint64, hash string, ok bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -153,14 +190,8 @@ func (a *Applier) Live() (gen uint64, hash string, ok bool) {
 // Apply installs files as a new generation if they differ from the live one,
 // tests, and reloads. See the package doc for the sequence and its guarantees.
 func (a *Applier) Apply(ctx context.Context, files map[string][]byte) (Result, error) {
-	if a.Root == "" || !filepath.IsAbs(a.Root) {
-		return Result{}, fmt.Errorf("apply: root %q must be an absolute path", a.Root)
-	}
-	if a.Tester == nil {
-		return Result{}, errors.New("apply: no tester configured; a configuration is never installed untested")
-	}
-	if a.Reloader == nil {
-		return Result{}, errors.New("apply: no reloader configured")
+	if err := a.checkWired(); err != nil {
+		return Result{}, err
 	}
 	if len(files) == 0 {
 		return Result{}, errors.New("apply: nothing to install (a render always yields at least the common file)")
@@ -170,17 +201,32 @@ func (a *Applier) Apply(ctx context.Context, files map[string][]byte) (Result, e
 			return Result{}, fmt.Errorf("apply: %w", err)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-
-	if err := os.MkdirAll(a.Root, 0o755); err != nil {
+	unlock, err := a.lockRoot()
+	if err != nil {
 		return Result{}, fmt.Errorf("apply: %w", err)
 	}
+	defer unlock()
+
 	hash := Hash(files)
 	live := a.readLive()
 	if live.ok && live.hash == hash {
-		return Result{Generation: live.gen, Hash: hash, TestOK: true}, nil
+		res := Result{Generation: live.gen, Hash: hash, TestOK: true}
+		if !live.reloaded {
+			// Tested, never loaded: a failed reload, or a crash between the
+			// two. Retry now, not when the document next changes.
+			if err := a.Reloader.Reload(ctx); err != nil {
+				return res, fmt.Errorf("apply: generation %d is live and tested, but reload failed: %w", live.gen, err)
+			}
+			_ = a.mark(live.target, reloadedMarker)
+			res.Reloaded = true
+		}
+		return res, nil
 	}
 
 	if err := a.waitInterval(ctx); err != nil {
@@ -193,45 +239,115 @@ func (a *Applier) Apply(ctx context.Context, files map[string][]byte) (Result, e
 		return Result{}, fmt.Errorf("apply: %w", err)
 	}
 	genName := genPrefix + formatGen(next)
-	if err := writeGeneration(filepath.Join(a.Root, genName), files, hash); err != nil {
+	dir := filepath.Join(a.Root, genName)
+	if err := writeGeneration(dir, files, hash); err != nil {
 		return Result{}, fmt.Errorf("apply: %w", err)
 	}
 	if err := a.pointLive(genName); err != nil {
-		_ = os.RemoveAll(filepath.Join(a.Root, genName))
+		_ = os.RemoveAll(dir)
 		return Result{}, fmt.Errorf("apply: %w", err)
 	}
 
 	if err := a.Tester.Test(ctx); err != nil {
 		// Swap back first — the running terminator must never see the failed
-		// candidate on a restart — then move the evidence aside.
-		var swapErr error
-		if live.ok {
-			swapErr = a.pointLive(live.target)
-		} else {
-			swapErr = os.Remove(filepath.Join(a.Root, liveLink))
+		// candidate on a restart — then deal with the evidence.
+		nowLive, restoreErr := a.restore(live)
+		res := Result{Generation: nowLive, Hash: hash, Changed: true, TestError: err.Error(), FailedZone: failedZone(err.Error())}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// The caller gave up, the test did not finish: no verdict on the
+			// candidate, so it is not kept as a failure.
+			_ = os.RemoveAll(dir)
+			return res, ctxErr
 		}
-		_ = os.Rename(filepath.Join(a.Root, genName), filepath.Join(a.Root, failedPrefix+formatGen(next)))
-		a.prune(live.target)
-		res := Result{Generation: live.gen, Hash: hash, Changed: true, TestError: err.Error()}
-		if swapErr != nil {
-			return res, fmt.Errorf("%w: %s; and restoring the previous generation failed: %v", ErrTestFailed, err.Error(), swapErr)
+		_ = os.Rename(dir, filepath.Join(a.Root, failedPrefix+formatGen(next)))
+		a.prune(a.readLive().target)
+		if restoreErr != nil {
+			return res, fmt.Errorf("%w: %w; and restoring the previous generation failed: %v", ErrTestFailed, err, restoreErr)
 		}
-		return res, fmt.Errorf("%w: %s", ErrTestFailed, err.Error())
+		return res, fmt.Errorf("%w: %w", ErrTestFailed, err)
+	}
+	if err := a.mark(genName, testedMarker); err != nil {
+		// Live and tested, but the next process could not know that; better
+		// to report it than to reload on a state we cannot record.
+		return Result{Generation: next, Hash: hash, Changed: true, TestOK: true},
+			fmt.Errorf("apply: generation %d passed its test, but recording that failed: %w", next, err)
 	}
 
 	res := Result{Generation: next, Hash: hash, Changed: true, TestOK: true}
 	a.prune(genName)
 	if err := a.Reloader.Reload(ctx); err != nil {
 		// The generation is valid and live on disk; the terminator simply did
-		// not pick it up yet. The next reload or start will.
+		// not pick it up. The next Apply retries the reload (unchanged path).
 		return res, fmt.Errorf("apply: generation %d installed and tested, but reload failed: %w", next, err)
 	}
+	_ = a.mark(genName, reloadedMarker)
 	res.Reloaded = true
 	return res, nil
 }
 
+// Recover settles what a previous process may have left behind and should run
+// once at startup, before the first Apply: a `live` generation without the
+// tested marker (the process died between the swap and the test) is tested
+// now — marked on a pass, or moved aside as failed-N with `live` pointed back
+// at the newest tested generation on a failure — and a half-written
+// generation directory is removed. Result.Changed reports whether anything
+// had to be done; a passing generation that was never reloaded is left for
+// Apply's unchanged path to reload.
+func (a *Applier) Recover(ctx context.Context) (Result, error) {
+	if err := a.checkWired(); err != nil {
+		return Result{}, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	unlock, err := a.lockRoot()
+	if err != nil {
+		return Result{}, fmt.Errorf("recover: %w", err)
+	}
+	defer unlock()
+
+	a.removeTemporaries()
+	live := a.readLive()
+	if !live.exists || live.gen == 0 || live.tested {
+		return Result{Generation: live.gen, Hash: live.hash, TestOK: live.ok}, nil
+	}
+	dir := filepath.Join(a.Root, live.target)
+	if err := a.Tester.Test(ctx); err != nil {
+		nowLive, restoreErr := a.restore(liveState{})
+		res := Result{Generation: nowLive, Hash: live.hash, Changed: true, TestError: err.Error(), FailedZone: failedZone(err.Error())}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Undo nothing else: the generation stays where it was for the
+			// next Recover to judge.
+			_ = a.pointLive(live.target)
+			return res, ctxErr
+		}
+		_ = os.Rename(dir, filepath.Join(a.Root, failedPrefix+formatGen(live.gen)))
+		if restoreErr != nil {
+			return res, fmt.Errorf("%w: %w; and restoring the previous generation failed: %v", ErrTestFailed, err, restoreErr)
+		}
+		return res, fmt.Errorf("%w: %w", ErrTestFailed, err)
+	}
+	if err := a.mark(live.target, testedMarker); err != nil {
+		return Result{Generation: live.gen, Hash: live.hash, Changed: true, TestOK: true},
+			fmt.Errorf("recover: generation %d passed its test, but recording that failed: %w", live.gen, err)
+	}
+	return Result{Generation: live.gen, Hash: live.hash, Changed: true, TestOK: true}, nil
+}
+
+func (a *Applier) checkWired() error {
+	if a.Root == "" || !filepath.IsAbs(a.Root) {
+		return fmt.Errorf("apply: root %q must be an absolute path", a.Root)
+	}
+	if a.Tester == nil {
+		return errors.New("apply: no tester configured; a configuration is never installed untested")
+	}
+	if a.Reloader == nil {
+		return errors.New("apply: no reloader configured")
+	}
+	return nil
+}
+
 // checkFileName admits plain file names only: no separators, no dot-names
-// (which would hide from the include glob, or collide with the manifest).
+// (which would hide from the include glob, or collide with the markers).
 func checkFileName(name string) error {
 	if name == "" || name != filepath.Base(name) || strings.ContainsAny(name, `/\`) {
 		return fmt.Errorf("file name %q must be a plain name", name)
@@ -240,6 +356,26 @@ func checkFileName(name string) error {
 		return fmt.Errorf("file name %q must not start with a dot", name)
 	}
 	return nil
+}
+
+// lockRoot creates Root and takes an exclusive advisory lock on a file in it,
+// so two Applier values — in one process or two — never interleave.
+func (a *Applier) lockRoot() (func(), error) {
+	if err := os.MkdirAll(a.Root, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(a.Root, lockFile), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("lock %s: %w", lockFile, err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 func (a *Applier) waitInterval(ctx context.Context) error {
@@ -269,15 +405,61 @@ func (a *Applier) readLive() liveState {
 	if err != nil {
 		return liveState{}
 	}
+	st := liveState{exists: true, target: target}
 	gen, ok := parseGen(target, genPrefix)
 	if !ok {
-		return liveState{}
+		return st
 	}
-	hash, err := readManifest(filepath.Join(a.Root, target))
+	st.gen = gen
+	dir := filepath.Join(a.Root, target)
+	if h, err := readManifest(dir); err == nil {
+		st.hash = h
+	}
+	st.tested = fileExists(filepath.Join(dir, testedMarker))
+	st.reloaded = fileExists(filepath.Join(dir, reloadedMarker))
+	st.ok = st.hash != "" && st.tested
+	return st
+}
+
+// restore points `live` back after a failed test: at the previous generation
+// when it was a tested one of ours; else at the newest tested generation on
+// disk; else at exactly what the link named before (an untested generation or
+// a foreign target is still what the operator had); else it removes the link.
+// It returns the generation now live (0 when none of ours).
+func (a *Applier) restore(prev liveState) (uint64, error) {
+	if prev.ok {
+		return prev.gen, a.pointLive(prev.target)
+	}
+	if name, gen := a.newestTested(); name != "" {
+		return gen, a.pointLive(name)
+	}
+	if prev.exists {
+		return prev.gen, a.pointLive(prev.target)
+	}
+	if err := os.Remove(filepath.Join(a.Root, liveLink)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
+	return 0, nil
+}
+
+// newestTested finds the highest-numbered generation carrying the tested
+// marker; "" when there is none.
+func (a *Applier) newestTested() (string, uint64) {
+	entries, err := os.ReadDir(a.Root)
 	if err != nil {
-		return liveState{}
+		return "", 0
 	}
-	return liveState{ok: true, gen: gen, target: target, hash: hash}
+	var best uint64
+	for _, e := range entries {
+		n, ok := parseGen(e.Name(), genPrefix)
+		if ok && n > best && fileExists(filepath.Join(a.Root, e.Name(), testedMarker)) {
+			best = n
+		}
+	}
+	if best == 0 {
+		return "", 0
+	}
+	return genPrefix + formatGen(best), best
 }
 
 // nextGeneration is one above the highest number on disk, passed or failed, so
@@ -290,12 +472,26 @@ func (a *Applier) nextGeneration() (uint64, error) {
 	var max uint64
 	for _, e := range entries {
 		for _, prefix := range []string{genPrefix, failedPrefix} {
-			if n, ok := parseGen(e.Name(), prefix); ok && n > max {
+			if n, ok := parseGen(strings.TrimSuffix(e.Name(), ".tmp"), prefix); ok && n > max {
 				max = n
 			}
 		}
 	}
 	return max + 1, nil
+}
+
+// removeTemporaries deletes half-written generation directories a crashed
+// process left behind.
+func (a *Applier) removeTemporaries() {
+	entries, err := os.ReadDir(a.Root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), genPrefix) && strings.HasSuffix(e.Name(), ".tmp") {
+			_ = os.RemoveAll(filepath.Join(a.Root, e.Name()))
+		}
+	}
 }
 
 // pointLive atomically retargets the `live` symlink.
@@ -311,6 +507,11 @@ func (a *Applier) pointLive(target string) error {
 	}
 	syncDir(a.Root)
 	return nil
+}
+
+// mark records a milestone for a generation (tested, reloaded).
+func (a *Applier) mark(gen, marker string) error {
+	return writeSynced(filepath.Join(a.Root, gen, marker), []byte("ok\n"))
 }
 
 // prune removes passed generations beyond Keep (never the one named keep) and
@@ -426,6 +627,19 @@ func readManifest(dir string) (string, error) {
 		}
 	}
 	return "", errors.New("manifest has no hash line")
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// failedZone extracts the zone a tester message blamed, if it named a zone file.
+func failedZone(msg string) string {
+	if m := failedZoneRe.FindStringSubmatch(msg); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 func formatGen(n uint64) string {

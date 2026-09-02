@@ -73,6 +73,7 @@ func TestProbe(t *testing.T) {
 	}{
 		{"nginx version: nginx/1.22.1", "nginx", "1.22.1"},
 		{"nginx version: nginx/1.26.2\nbuilt by gcc 12.2.0", "nginx", "1.26.2"},
+		{"nginx version: nginx/1.24.0 (Ubuntu)", "nginx", "1.24.0"},
 		{"Angie version: Angie/1.6.2", "angie", "1.6.2"},
 	}
 	for _, c := range cases {

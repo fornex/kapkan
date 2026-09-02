@@ -154,6 +154,29 @@ func TestRenderIsDeterministic(t *testing.T) {
 	}
 }
 
+// A zone's policy.rate is a fast-path field (edge-spec §2.2): changing it must
+// not change a single rendered byte, or every rate change would be a reload.
+func TestRateDoesNotReachTheTerminator(t *testing.T) {
+	in := loadFixture(t, "decide-open")
+	before, err := render.Render(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Doc.Zones[0].Policy.Rate = edgedoc.Rate{RPS: 5, Concurrency: 2}
+	after, err := render.Render(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Hash() != after.Hash() {
+		t.Fatal("policy.rate changed the rendered configuration")
+	}
+	for _, f := range after {
+		if strings.Contains(string(f), "limit_req") || strings.Contains(string(f), "limit_conn") {
+			t.Fatal("rate limiting rendered into nginx")
+		}
+	}
+}
+
 // TestPolicyShapes pins which directives each policy produces — the decisions
 // the package doc explains — independently of the exact golden bytes.
 func TestPolicyShapes(t *testing.T) {
@@ -166,55 +189,92 @@ func TestPolicyShapes(t *testing.T) {
 			want: []string{
 				"listen 443 ssl http2;", "listen [::]:443 ssl http2;",
 				"auth_request /_kapkan/decide;",
-				"auth_request_set $kapkan_mark $upstream_http_x_kapkan_mark;",
+				"auth_request_set $kapkan_mark $kapkan_decided_mark;",
+				"proxy_intercept_errors on;",
+				"error_page 500 502 503 504 =200 /_kapkan/undecided;",
+				"location = /_kapkan/undecided {",
 				"error_page 500 502 503 504 = @kapkan_pass;",
 				"try_files /dev/null @kapkan_pass;",
 				"proxy_set_header X-Kapkan-Mark $kapkan_mark;",
+				"proxy_set_header X-Kapkan-Zone example.com;",
+				"proxy_set_header Connection $kapkan_connection;",
+				"proxy_set_header Upgrade $http_upgrade;",
+				"limit_except GET HEAD { deny all; }",
+				"proxy_pass_request_body off;",
 				"ssl_protocols TLSv1.2 TLSv1.3;", "ssl_ciphers ECDHE-",
 				"return 301 https://$host$request_uri;",
 				"location ^~ /.well-known/acme-challenge/",
 			},
-			wantNot: []string{"@kapkan_unavailable", "limit_req ", "limit_conn ", "include /"},
+			wantNot: []string{"@kapkan_unavailable", "limit_req", "limit_conn", "include /", "default_server"},
+		},
+		{
+			fixture: "decide-open", file: render.CommonFile,
+			want: []string{
+				"listen 80 default_server;", "listen [::]:80 default_server;",
+				"listen 443 ssl default_server;", "ssl_reject_handshake on;",
+				"ssl_protocols TLSv1.2 TLSv1.3;", "return 444;",
+				"map $http_upgrade $kapkan_connection {", "map $upstream_status $kapkan_decided_mark {",
+				"upstream kapkan_decide {", "keepalive 64;", "upstream kapkan_challenge {",
+			},
+			wantNot: []string{"server_names_hash_bucket_size", "limit_req_zone", "limit_conn_zone"},
 		},
 		{
 			fixture: "decide-closed", file: render.ZoneFile("closed.example.net"),
 			want: []string{
 				"error_page 500 502 503 504 = @kapkan_unavailable;",
 				"location @kapkan_unavailable {", "return 503;",
-				"limit_req zone=kapkan_rps_", "burst=200 nodelay;",
-				"limit_conn kapkan_conn_", " 50;",
 				"ssl_protocols TLSv1.3;",
 			},
-			wantNot: []string{"= @kapkan_pass;", "ssl_ciphers", "TLSv1.2"},
+			wantNot: []string{"/_kapkan/undecided", "proxy_intercept_errors", "= @kapkan_pass;", "ssl_ciphers", "TLSv1.2", "limit_req", "limit_conn"},
 		},
 		{
+			// A single TLS 1.3-only zone: the node-wide floor is 1.3 too.
 			fixture: "decide-closed", file: render.CommonFile,
-			want: []string{"limit_req_zone $binary_remote_addr zone=kapkan_rps_", "rate=200r/s;", "limit_conn_zone $binary_remote_addr zone=kapkan_conn_"},
+			want:    []string{"ssl_protocols TLSv1.3;"},
+			wantNot: []string{"TLSv1.2", "limit_"},
 		},
 		{
 			fixture: "mode-none", file: render.ZoneFile("static.example.org"),
-			want:    []string{"try_files /dev/null @kapkan_pass;", "include /etc/kapkan/extra/static.example.org.conf;", "server [2001:db8::10]:8080;"},
-			wantNot: []string{"auth_request", "error_page 500", "X-Kapkan-Mark", "acme-staging"},
+			want: []string{
+				"try_files /dev/null @kapkan_pass;",
+				"include /etc/kapkan/extra/static.example.org.conf;",
+				"server [2001:db8::10]:8080;",
+				`proxy_set_header X-Kapkan-Mark "";`,
+				"proxy_set_header X-Kapkan-Zone static.example.org;",
+			},
+			wantNot: []string{"auth_request", "error_page 500", "$kapkan_mark", "acme-staging"},
 		},
 		{
 			fixture: "no-cert", file: render.ZoneFile("new.example.com"),
-			want:    []string{"NO CERTIFICATE YET", "listen 80;", "return 503;", "location ^~ /.well-known/acme-challenge/"},
+			want:    []string{"NO CERTIFICATE YET", "listen 80;", "return 503;", "location ^~ /.well-known/acme-challenge/", "limit_except GET HEAD { deny all; }"},
 			wantNot: []string{"listen 443", "ssl_certificate", "auth_request", "return 301"},
 		},
 		{
+			// Mixed floors (a: 1.3, b: 1.2, c: 1.2 without a certificate): the
+			// catch-all carries the lowest; IPv6 off drops every [::] listener.
 			fixture: "multi", file: render.CommonFile,
-			want:    []string{"server unix:/run/kapkan-test/decide.sock;", "server unix:/run/kapkan-test/challenge.sock;"},
-			wantNot: []string{"/run/kapkan/edge-decide.sock"},
+			want:    []string{"server unix:/run/kapkan-test/decide.sock;", "server unix:/run/kapkan-test/challenge.sock;", "ssl_protocols TLSv1.2 TLSv1.3;", "listen 443 ssl default_server;"},
+			wantNot: []string{"/run/kapkan/edge-decide.sock", "[::]", "server_names_hash_bucket_size"},
+		},
+		{
+			fixture: "multi", file: render.ZoneFile("a.example.com"),
+			want:    []string{"ssl_protocols TLSv1.3;"},
+			wantNot: []string{"[::]", "TLSv1.2"},
 		},
 		{
 			fixture: "multi", file: render.ZoneFile("b.example.com"),
 			want:    []string{"listen 80;", "listen 443 ssl http2;", "root /srv/kapkan-empty;", "syslog:server=unix:/run/kapkan-test/log.sock,"},
-			wantNot: []string{"[::]"},
+			wantNot: []string{"[::]", "limit_req"},
 		},
 		{
 			fixture: "empty", file: render.CommonFile,
-			want:    []string{"log_format kapkan_edge", "upstream kapkan_decide", "upstream kapkan_challenge"},
-			wantNot: []string{"limit_req_zone", "limit_conn_zone"},
+			want:    []string{"log_format kapkan_edge", "upstream kapkan_decide", "upstream kapkan_challenge", "listen 80 default_server;", "ssl_protocols TLSv1.2 TLSv1.3;"},
+			wantNot: []string{"limit_req_zone", "limit_conn_zone", "server_names_hash_bucket_size"},
+		},
+		{
+			// A 75-byte name does not fit the stock 64-byte bucket.
+			fixture: "long-name", file: render.CommonFile,
+			want: []string{"server_names_hash_bucket_size 128;"},
 		},
 	}
 	for _, c := range cases {
@@ -255,6 +315,38 @@ func TestEmptyDocumentRendersOnlyTheCommonFile(t *testing.T) {
 	}
 }
 
+func TestOmitCatchAll(t *testing.T) {
+	in := baseInputs()
+	in.Node.OmitCatchAll = true
+	files, err := render.Render(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	common := string(files[render.CommonFile])
+	for _, w := range []string{"default_server", "ssl_reject_handshake", "return 444"} {
+		if strings.Contains(common, w) {
+			t.Errorf("catch-all rendered despite OmitCatchAll: %q", w)
+		}
+	}
+}
+
+func TestHashBucketGrowsWithTheLongestName(t *testing.T) {
+	in := baseInputs()
+	name := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 8) // 200
+	in.Doc.Zones[0].Name = name
+	in.Certs = nil
+	files, err := render.Render(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(files[render.CommonFile]), "server_names_hash_bucket_size 256;") {
+		t.Fatalf("no 256-byte bucket for a %d-byte name:\n%s", len(name), files[render.CommonFile])
+	}
+	if _, ok := files[render.ZoneFile(name)]; !ok {
+		t.Fatalf("zone file missing; have %v", files.Names())
+	}
+}
+
 func baseInputs() render.Inputs {
 	doc := edgedoc.Empty()
 	doc.Zones = append(doc.Zones, edgedoc.Zone{
@@ -274,6 +366,7 @@ func baseInputs() render.Inputs {
 // TestRenderRejects is the config-injection table: every value the renderer
 // interpolates is checked, because the document crossed a network.
 func TestRenderRejects(t *testing.T) {
+	tooLong := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 47) // 239
 	cases := []struct {
 		name    string
 		mutate  func(in *render.Inputs)
@@ -285,6 +378,7 @@ func TestRenderRejects(t *testing.T) {
 		{"empty label", func(in *render.Inputs) { in.Doc.Zones[0].Name = "a..b" }, "not a lower-case hostname"},
 		{"leading dash", func(in *render.Inputs) { in.Doc.Zones[0].Name = "-a.example" }, "not a lower-case hostname"},
 		{"zone with slash", func(in *render.Inputs) { in.Doc.Zones[0].Name = "a/b" }, "not a lower-case hostname"},
+		{"zone name over 238", func(in *render.Inputs) { in.Doc.Zones[0].Name = tooLong }, "longer than the 238"},
 		{"no origins", func(in *render.Inputs) { in.Doc.Zones[0].Origins = nil }, "no origins"},
 		{"origin ends a directive", func(in *render.Inputs) { in.Doc.Zones[0].Origins = []string{"10.0.0.1:8080;"} }, "not a canonical host:port"},
 		{"origin leading-zero port", func(in *render.Inputs) { in.Doc.Zones[0].Origins = []string{"10.0.0.1:0080"} }, "not a canonical host:port"},
@@ -302,11 +396,17 @@ func TestRenderRejects(t *testing.T) {
 			in.Certs["example.com"] = render.Cert{Fullchain: "certs/f.pem", Key: "/k.pem"}
 		}, "not an absolute path"},
 		{"cert with space", func(in *render.Inputs) { in.Certs["example.com"] = render.Cert{Fullchain: "/a b.pem", Key: "/k.pem"} }, "misread"},
+		{"cert with glob", func(in *render.Inputs) {
+			in.Certs["example.com"] = render.Cert{Fullchain: "/certs/*.pem", Key: "/k.pem"}
+		}, "misread"},
 		{"extra relative", func(in *render.Inputs) { in.Doc.Zones[0].ExtraDirectivesFile = "extra.conf" }, "extra_directives_file"},
 		{"extra ends a directive", func(in *render.Inputs) { in.Doc.Zones[0].ExtraDirectivesFile = "/etc/x.conf;" }, "misread"},
 		{"extra opens a block", func(in *render.Inputs) { in.Doc.Zones[0].ExtraDirectivesFile = "/etc/x.conf{" }, "misread"},
+		{"extra is a glob", func(in *render.Inputs) { in.Doc.Zones[0].ExtraDirectivesFile = "/etc/kapkan/[prod]-extra.conf" }, "misread"},
+		{"extra with star", func(in *render.Inputs) { in.Doc.Zones[0].ExtraDirectivesFile = "/etc/kapkan/*.conf" }, "misread"},
 		{"node socket relative", func(in *render.Inputs) { in.Node.DecideSocket = "run/x.sock" }, "node.decide_socket"},
 		{"node socket with newline", func(in *render.Inputs) { in.Node.LogSocket = "/run/x.sock\ninclude /etc/passwd" }, "node.log_socket"},
+		{"empty root is the filesystem root", func(in *render.Inputs) { in.Node.EmptyRoot = "/" }, "node.empty_root"},
 		{"duplicate zone", func(in *render.Inputs) { in.Doc.Zones = append(in.Doc.Zones, in.Doc.Zones[0]) }, "appears twice"},
 	}
 	for _, c := range cases {

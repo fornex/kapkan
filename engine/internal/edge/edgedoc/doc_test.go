@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeRoundTripsEmpty(t *testing.T) {
@@ -49,23 +50,31 @@ func TestDecodeRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
-// The wire shape is frozen: this test pins the exact key names at version 1.
+// The wire shape is frozen: this test pins every key name at version 1,
+// including the ACME challenge and issuance-grant shapes the issuance
+// coordinator will populate, and the RFC 3339 time encoding.
 func TestFrozenKeyNames(t *testing.T) {
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	d := Empty()
 	d.Zones = append(d.Zones, Zone{
-		Name:          "example.com",
-		Origins:       []string{"10.0.0.1:443"},
-		TLS:           TLS{MinVersion: TLS12, H3: false},
-		ACMEDirectory: "https://ca.example/directory",
-		Policy:        Policy{Mode: ModeDecide, FailureMode: FailOpen, Challenge: ChallengeOff, Rate: Rate{RPS: 5, Concurrency: 2}},
+		Name:                "example.com",
+		Origins:             []string{"10.0.0.1:443"},
+		TLS:                 TLS{MinVersion: TLS12, H3: true},
+		ACMEDirectory:       "https://ca.example/directory",
+		Policy:              Policy{Mode: ModeDecide, FailureMode: FailOpen, Challenge: ChallengeOff, Rate: Rate{RPS: 5, Concurrency: 2}},
+		ExtraDirectivesFile: "/etc/kapkan/extra/example.com.conf",
 	})
+	d.ACMEChallenges = append(d.ACMEChallenges, Challenge{Zone: "example.com", Token: "tok", KeyAuthorization: "tok.thumb", ExpiresAt: at})
+	d.IssuanceGrants = append(d.IssuanceGrants, Grant{Zone: "example.com", Node: "e1", ExpiresAt: at})
 	body, err := json.Marshal(d)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"version":1,"zones":[{"name":"example.com","origins":["10.0.0.1:443"],"tls":{"min_version":"1.2"},` +
+	want := `{"version":1,"zones":[{"name":"example.com","origins":["10.0.0.1:443"],"tls":{"min_version":"1.2","h3":true},` +
 		`"acme_directory":"https://ca.example/directory","policy":{"mode":"decide","failure_mode":"open","challenge":"off",` +
-		`"rate":{"rps":5,"concurrency":2}}}],"acme_challenges":[],"issuance_grants":[]}`
+		`"rate":{"rps":5,"concurrency":2}},"extra_directives_file":"/etc/kapkan/extra/example.com.conf"}],` +
+		`"acme_challenges":[{"zone":"example.com","token":"tok","key_authorization":"tok.thumb","expires_at":"2026-01-02T03:04:05Z"}],` +
+		`"issuance_grants":[{"zone":"example.com","node":"e1","expires_at":"2026-01-02T03:04:05Z"}]}`
 	if string(body) != want {
 		t.Fatalf("encoding changed — the v1 contract is frozen\n got %s\nwant %s", body, want)
 	}
