@@ -123,6 +123,13 @@ type Server struct {
 	// nodeReports holds each scrub node's last self-report (nodes.go). Advisory
 	// display data only; liveness lives in the mitigator.
 	nodeReports nodeReportStore
+	// The edge-node channel (edge.go): its own hold gate (same caps as the
+	// scrub channel's, so neither fleet can starve the other), the api-side
+	// presence tracker (edge liveness is NOT the mitigator's business), and the
+	// advisory report store.
+	edgeHolds    *holdGate
+	edgePresence edgePresence
+	edgeReports  edgeReportStore
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -140,6 +147,7 @@ func New(store *config.Store, eng *engine.Engine, mit *mitigate.Mitigator, log *
 		active:    make(map[string]*Attack),
 		quit:      make(chan struct{}),
 		holds:     newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
+		edgeHolds: newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
 		rulesHold: rulesHoldMax,
 	}
 }
@@ -315,6 +323,15 @@ func (s *Server) Handler() http.Handler {
 	// The node inventory for the console's Nodes view (nodes.go): viewer rank,
 	// but unscoped tokens only — the handler explains why.
 	read("GET /api/v1/dataplane/nodes", s.handleDataplaneNodes)
+	// The edge-node channel (edge.go), the scrub channel's twin: the zones
+	// document for agent + operator (the poll is the node's liveness; viewer is
+	// denied — the document spans every tenant's zones while viewer reads are
+	// scopable), the advisory self-report, and the inventory at viewer rank.
+	handle("GET /api/v1/edge/zones",
+		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleEdgeZones))
+	handle("POST /api/v1/edge/nodes/{name}/report",
+		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleEdgeNodeReport))
+	read("GET /api/v1/edge/nodes", s.handleEdgeNodes)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater
 	// or supervisor can confirm the daemon is fully up after a restart. 503 until

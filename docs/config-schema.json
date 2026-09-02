@@ -456,6 +456,34 @@
     "dry_run": {
       "type": "boolean"
     },
+    "edge": {
+      "additionalProperties": false,
+      "properties": {
+        "nodes": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "pattern": "^[A-Za-z0-9._-]{1,64}$",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array",
+          "x-optional": true
+        },
+        "stale_after_seconds": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "zones_file": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "x-optional": true
+    },
     "escalation": {
       "items": {
         "additionalProperties": false,
