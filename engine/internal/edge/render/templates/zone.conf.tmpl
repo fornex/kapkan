@@ -7,6 +7,8 @@
 {{- end}}
 
 upstream {{.OriginUpstream}} {
+    # A hostname here is resolved once, when nginx loads the configuration; a
+    # name that does not resolve fails `nginx -t` for the whole generation.
 {{- range .Origins}}
     server {{.}};
 {{- end}}
@@ -21,8 +23,13 @@ server {
     server_name {{.Name}};
     access_log syslog:server=unix:{{.Node.LogSocket}},nohostname,tag=kapkan kapkan_edge;
 
+    # ACME HTTP-01 (edge-spec §3): a GET/HEAD of a token, nothing else, and no
+    # body is ever carried into kapkan.
     location ^~ /.well-known/acme-challenge/ {
+        limit_except GET HEAD { deny all; }
         proxy_pass http://kapkan_challenge;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
         proxy_set_header Host $host;
         proxy_set_header X-Kapkan-Zone {{.Name}};
     }
@@ -49,6 +56,8 @@ server {
 
     ssl_certificate     {{.Cert.Fullchain}};
     ssl_certificate_key {{.Cert.Key}};
+    # Honoured per zone from nginx 1.29.2 and on Angie; older nginx applies the
+    # catch-all's node-wide floor instead (see {{.CommonFile}}).
     ssl_protocols {{.SSLProtocols}};
 {{- if .SSLCiphers}}
     ssl_ciphers {{.SSLCiphers}};
@@ -61,14 +70,16 @@ server {
     access_log syslog:server=unix:{{.Node.LogSocket}},nohostname,tag=kapkan kapkan_edge;
 
     # try_files below stats a path under this root and never finds one: the
-    # directory holds nothing. Rate-limit rejections answer 429, deliberately
-    # outside the 5xx set the decision error_page catches.
+    # directory holds nothing. Every directory on the way to it must be
+    # traversable by the terminator's worker user, or each request logs a
+    # [crit] stat failure (while still passing).
     root {{.Node.EmptyRoot}};
-    limit_req_status 429;
-    limit_conn_status 429;
 
     location ^~ /.well-known/acme-challenge/ {
+        limit_except GET HEAD { deny all; }
         proxy_pass http://kapkan_challenge;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
         proxy_set_header Host $host;
         proxy_set_header X-Kapkan-Zone {{.Name}};
     }
@@ -92,7 +103,23 @@ server {
         proxy_connect_timeout 50ms;
         proxy_send_timeout 100ms;
         proxy_read_timeout 200ms;
+{{- if .FailOpen}}
+        # failure_mode: open — a decider that is down, slow or off-contract is
+        # absorbed HERE, inside the subrequest, as an undecided 200. The main
+        # request never sees a 500 (which nginx would answer with
+        # Connection: close), so its keepalive survives, and the origin gets
+        # the request with no mark.
+        proxy_intercept_errors on;
+        error_page 500 502 503 504 =200 /_kapkan/undecided;
+{{- end}}
     }
+{{- if .FailOpen}}
+
+    location = /_kapkan/undecided {
+        internal;
+        return 200;
+    }
+{{- end}}
 {{- end}}
 
     # Every allowed request ends here, whether it came through the decision or
@@ -101,15 +128,19 @@ server {
     location @kapkan_pass {
         proxy_pass http://{{.OriginUpstream}};
         proxy_http_version 1.1;
-        proxy_set_header Connection "";
+        # Cleared for ordinary requests so upstream keepalive works; "upgrade"
+        # for an Upgrade request so a WebSocket tunnels (see {{.CommonFile}}).
+        proxy_set_header Connection $kapkan_connection;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Forwarded-Host $host;
-{{- if .Decide}}
-        proxy_set_header X-Kapkan-Mark $kapkan_mark;
-{{- end}}
+        # kapkan owns these two headers towards the origin: a client cannot
+        # forge a zone or a mark, and an empty value removes the header.
+        proxy_set_header X-Kapkan-Zone {{.Name}};
+        proxy_set_header X-Kapkan-Mark {{if .Decide}}$kapkan_mark{{else}}""{{end}};
     }
 {{- if and .Decide (not .FailOpen)}}
 
@@ -119,22 +150,15 @@ server {
 {{- end}}
 
     location / {
-{{- if .RPS}}
-        limit_req zone=kapkan_rps_{{.ID}} burst={{.Burst}} nodelay;
-{{- end}}
-{{- if .Concurrency}}
-        limit_conn kapkan_conn_{{.ID}} {{.Concurrency}};
-{{- end}}
 {{- if .Decide}}
         auth_request /_kapkan/decide;
-        auth_request_set $kapkan_mark $upstream_http_x_kapkan_mark;
+        auth_request_set $kapkan_mark $kapkan_decided_mark;
 {{- if .FailOpen}}
-        # failure_mode: open — a decider that is down or slow fails the
-        # subrequest with a 5xx, auth_request turns that into 500, and this
-        # error_page sends the request on to the origin undecided.
+        # Second net for failure_mode: open — anything the subrequest could
+        # not absorb (an off-contract 3xx, say) still passes, undecided.
         error_page 500 502 503 504 = @kapkan_pass;
 {{- else}}
-        # failure_mode: closed — the same failure is answered with 503.
+        # failure_mode: closed — a failed decision is answered with 503.
         error_page 500 502 503 504 = @kapkan_unavailable;
 {{- end}}
 {{- end}}

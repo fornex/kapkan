@@ -35,12 +35,18 @@ security-relevant.
   /api/v1/edge/nodes/{name}/report` and `GET /api/v1/edge/nodes` (inventory with liveness).
   Unscoped tokens only; a node's poll is its liveness, a report never is.
 - Edge track, E3.2 — the nginx/Angie renderer (`internal/edge/render`: one shared file plus
-  one per zone, embedded templates, `auth_request`-based decision gate that fails open or
-  closed per zone, ACME challenge routing, JSON access log over a unix socket) and the
+  one per zone, embedded templates, `auth_request`-based decision gate that fails open — with
+  the failure absorbed inside the subrequest, so keepalive survives — or closed per zone, a
+  kapkan-owned catch-all that refuses unknown Host/SNI traffic, WebSocket upgrade relay, ACME
+  challenge routing, JSON access log over a unix socket; `policy.rate` is deliberately not
+  rendered — it is the decision service's, so a rate change is never a reload) and the
   generation applier (`internal/edge/apply`: numbered generations behind a `live` symlink,
-  `nginx -t` gating every install, swap-back on failure, idempotent by content hash, paced).
-  CI now renders every fixture zone set and runs it on nginx 1.22, nginx stable and Angie,
-  `nginx -t` first and then live requests through it. No `kapkan edge` command yet (E3.5).
+  `nginx -t` gating every install, swap-back on failure, durable tested/reloaded markers with
+  startup `Recover`, idempotent by content hash, paced, flock'ed). CI now renders every fixture
+  zone set and runs it on nginx 1.22, nginx stable and Angie, `nginx -t` first and then live
+  requests through it. Known limitation: nginx before 1.29.2 applies the node-wide TLS floor
+  (the lowest `tls.min_version` on the node) to every zone; Angie and nginx ≥ 1.29.2 honour
+  per-zone floors. No `kapkan edge` command yet (E3.5).
 
 ## [1.7.0] - 2026-09-02
 

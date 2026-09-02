@@ -17,28 +17,50 @@
 // in a decide-mode zone is gated by auth_request on an internal location that
 // proxies headers-only to the decision service over a unix socket. The service
 // answers 200 (allow, optionally X-Kapkan-Mark) or 403 (deny) — nothing else,
-// by contract. If the service is down or slow the subrequest fails with a 5xx,
-// auth_request turns that into a 500 for the main request, and the zone's
-// failure_mode decides what a location-level error_page does with it: `open`
-// redirects the request to the named pass-through location and it reaches the
-// origin undecided; `closed` redirects it to a location that answers 503. The
-// pass-through location is where EVERY allowed request ends (try_files falls
-// through to it), so there is one origin path, not two; and because named
-// locations do not inherit a location's error_page, an origin failure inside
-// it is reported as-is, never retried. Rate limiting answers 429, deliberately
-// outside the 5xx set the error_page catches. This idiom is what the
+// by contract. If the service is down, slow or off-contract, the failure is
+// absorbed INSIDE the subrequest for a `failure_mode: open` zone: an
+// error_page there turns the 5xx into an undecided 200, so the main request
+// never sees a 500 (which nginx would answer with Connection: close) and the
+// origin gets the request with no mark — a mark is only believed from a real
+// 200 (a map on $upstream_status). A location-level error_page on the main
+// request is the second net for `open`, and for `closed` it is the whole
+// mechanism: a failed decision is redirected to a location that answers 503.
+// The pass-through location is where EVERY allowed request ends (try_files
+// falls through to it), so there is one origin path, not two; and because
+// named locations do not inherit a location's error_page, an origin failure
+// inside it is reported as-is, never retried. This idiom is what the
 // real-terminator test exercises on stock nginx and Angie: a config that only
 // passes `nginx -t` proves syntax, not that undecided requests pass.
 //
-// WHAT IT DOES NOT DO. There is no template override mechanism (edge-spec §4:
-// "that way lies unsupportable config drift"); the one escape hatch is a zone's
-// extra_directives_file, included verbatim at the end of the TLS server block
-// and guarded by nothing but `nginx -t`. Nothing is ever proxied over
-// cleartext: a zone without a certificate renders only the :80 listener, and
-// that serves ACME challenges and 503. HTTP/3 is refused upstream (E5), so no
-// QUIC directives appear here. Rendering is pure — no clock, no filesystem —
-// so the tests are tables and golden files, and the same inputs always give
-// the same bytes (the applier's idempotence check hashes them).
+// WHAT IS DELIBERATELY NOT RENDERED. A zone's policy.rate: edge-spec §2.2
+// freezes "rate policy tightened under attack → decision service, NEVER a
+// reload", so the per-source ceiling is the decision service's to enforce and
+// a rate change must not alter these files (it does not: the rendered bytes,
+// and so the applier's content hash, are independent of it). There is no
+// template override mechanism (edge-spec §4: "that way lies unsupportable
+// config drift"); the one escape hatch is a zone's extra_directives_file,
+// included verbatim at the end of the TLS server block and guarded by nothing
+// but `nginx -t`. Nothing is ever proxied over cleartext: a zone without a
+// certificate renders only the :80 listener, and that serves ACME challenges
+// and 503. HTTP/3 is refused upstream (E5), so no QUIC directives appear here.
+//
+// WHAT THE SHARED FILE ADDS. A kapkan-owned catch-all default server on :80
+// and :443 (444, and ssl_reject_handshake for an unknown or absent SNI), so a
+// Host or SNI that matches no zone is refused rather than served by whichever
+// tenant's zone sorts first; Node.OmitCatchAll is for an nginx.conf that
+// already declares default servers. Its ssl_protocols is the node-wide floor —
+// the lowest tls.min_version among the zones — because nginx before 1.29.2
+// fixes the protocol set from the default server before SNI selects a zone
+// (Angie and nginx ≥ 1.29.2 honour each zone's own line). Zone names longer
+// than 46 bytes get a server_names_hash_bucket_size, since the stock bucket
+// cannot hold them once a port has two servers. Two things a deployment must
+// know: a hostname origin is resolved once, at `nginx -t`, and an unresolvable
+// one fails the whole generation; and nginx ≥ 1.25.1 warns (only warns) about
+// the `listen … http2` form, which is kept for the 1.22 floor.
+//
+// Rendering is pure — no clock, no filesystem — so the tests are tables and
+// golden files, and the same inputs always give the same bytes (the applier's
+// idempotence check hashes them).
 //
 // LOGIC LIVES IN GO, TEMPLATES ARE DUMB. Every conditional a template takes is
 // a boolean or string computed and validated here first; a template never
@@ -89,6 +111,19 @@ const (
 	sslCiphersTLS12 = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:" +
 		"ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:" +
 		"ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
+
+	sslProtocolsTLS12 = "TLSv1.2 TLSv1.3"
+	sslProtocolsTLS13 = "TLSv1.3"
+
+	// MaxZoneNameLen bounds a zone name so that its file name
+	// (ZoneFilePrefix + name + ".conf") stays within NAME_MAX (255). DNS allows
+	// 253; nothing real is longer than this.
+	MaxZoneNameLen = 238
+
+	// hashBucketPlainMax is the longest server_name nginx's default
+	// server_names_hash_bucket_size (the CPU cache line, 64) can hold once an
+	// address:port carries two or more servers.
+	hashBucketPlainMax = 46
 )
 
 var (
@@ -137,6 +172,11 @@ type Node struct {
 	// DisableIPv6 drops the [::] listeners, for hosts and containers without an
 	// IPv6 stack (binding [::]:443 there fails at start, not at `nginx -t`).
 	DisableIPv6 bool `json:"disable_ipv6,omitempty"`
+	// OmitCatchAll drops kapkan's default servers on :80/:443, for an
+	// nginx.conf that already declares its own (a second default_server fails
+	// `nginx -t`). Refusing unknown Host/SNI traffic — and the node-wide TLS
+	// floor on nginx before 1.29.2 — then falls to the operator's servers.
+	OmitCatchAll bool `json:"omit_catch_all,omitempty"`
 }
 
 func (n Node) withDefaults() Node {
@@ -166,16 +206,22 @@ func (n Node) validate() error {
 			return fmt.Errorf("node.%s: %w", p.name, err)
 		}
 	}
+	if filepath.Clean(n.EmptyRoot) == "/" {
+		// try_files would then stat the real /dev/null and serve it.
+		return errors.New("node.empty_root: must not be the filesystem root")
+	}
 	return nil
 }
 
 // safeAbsPath accepts an absolute path free of the characters that would end
-// or comment out an nginx directive.
+// or comment out an nginx directive — and of the glob metacharacters that
+// would turn an `include` of a single file into a pattern, which matches
+// nothing without complaint and so silently voids the `nginx -t` guard.
 func safeAbsPath(p string) error {
 	if !filepath.IsAbs(p) {
 		return fmt.Errorf("%q is not an absolute path", p)
 	}
-	if strings.ContainsAny(p, " \t\r\n;{}#\"'\\$") {
+	if strings.ContainsAny(p, " \t\r\n;{}#\"'\\$*?[]") {
 		return fmt.Errorf("%q contains a character nginx would misread", p)
 	}
 	return nil
@@ -217,15 +263,23 @@ func ZoneFile(name string) string {
 type commonData struct {
 	Node  Node
 	Zones []zoneData
+	// NodeSSLProtocols is the catch-all's ssl_protocols: the lowest
+	// tls.min_version among the zones, i.e. the node-wide floor that nginx
+	// before 1.29.2 applies to every zone.
+	NodeSSLProtocols string
+	// HashBucketSize is server_names_hash_bucket_size, or 0 when every zone
+	// name fits nginx's default bucket.
+	HashBucketSize int
 }
 
 // zoneData is one zone with every decision already made. The template only
-// tests booleans and prints strings.
+// tests booleans and prints strings. policy.rate is deliberately absent: it
+// is the decision service's to enforce (package doc).
 type zoneData struct {
 	Name string
 	// ID is a nginx-identifier-safe derivative of Name used to name the zone's
-	// upstream and limit zones (dots and dashes are legal there too, but a
-	// stable, unambiguous identifier reads better in error messages).
+	// upstream (dots and dashes are legal there too, but a stable, unambiguous
+	// identifier reads better in error messages).
 	ID             string
 	Origins        []string
 	OriginUpstream string
@@ -234,11 +288,9 @@ type zoneData struct {
 	SSLProtocols   string
 	// SSLCiphers is empty when only TLS 1.3 is allowed (its suites are fixed).
 	SSLCiphers          string
+	AllowsTLS12         bool
 	Decide              bool
 	FailOpen            bool
-	RPS                 uint64
-	Burst               uint64
-	Concurrency         uint64
 	ExtraDirectivesFile string
 	CommonFile          string
 	Node                Node
@@ -276,9 +328,27 @@ func Render(in Inputs) (Files, error) {
 	// The brain sorts, but the output must not depend on that.
 	sort.Slice(zones, func(i, j int) bool { return zones[i].Name < zones[j].Name })
 
+	common := commonData{Node: node, Zones: zones, NodeSSLProtocols: sslProtocolsTLS13}
+	longest := 0
+	for i := range zones {
+		if zones[i].AllowsTLS12 {
+			common.NodeSSLProtocols = sslProtocolsTLS12
+		}
+		if l := len(zones[i].Name); l > longest {
+			longest = l
+		}
+	}
+	if len(zones) == 0 {
+		// Nothing to be stricter than; the catch-all refuses everything anyway.
+		common.NodeSSLProtocols = sslProtocolsTLS12
+	}
+	if longest > hashBucketPlainMax {
+		common.HashBucketSize = hashBucketSize(longest)
+	}
+
 	files := make(Files, len(zones)+1)
 	var buf bytes.Buffer
-	if err := tmpl.ExecuteTemplate(&buf, "common.conf.tmpl", commonData{Node: node, Zones: zones}); err != nil {
+	if err := tmpl.ExecuteTemplate(&buf, "common.conf.tmpl", common); err != nil {
 		return nil, fmt.Errorf("render: %w", err)
 	}
 	files[CommonFile] = append([]byte(nil), buf.Bytes()...)
@@ -296,6 +366,9 @@ func Render(in Inputs) (Files, error) {
 func prepareZone(z *edgedoc.Zone, cert Cert, node Node) (zoneData, error) {
 	if !zoneNameRe.MatchString(z.Name) {
 		return zoneData{}, fmt.Errorf("name %q is not a lower-case hostname", z.Name)
+	}
+	if len(z.Name) > MaxZoneNameLen {
+		return zoneData{}, fmt.Errorf("name is %d characters, longer than the %d this renderer accepts", len(z.Name), MaxZoneNameLen)
 	}
 	if len(z.Origins) == 0 {
 		return zoneData{}, errors.New("no origins")
@@ -318,10 +391,11 @@ func prepareZone(z *edgedoc.Zone, cert Cert, node Node) (zoneData, error) {
 
 	switch z.TLS.MinVersion {
 	case edgedoc.TLS12:
-		d.SSLProtocols = "TLSv1.2 TLSv1.3"
+		d.SSLProtocols = sslProtocolsTLS12
 		d.SSLCiphers = sslCiphersTLS12
+		d.AllowsTLS12 = true
 	case edgedoc.TLS13:
-		d.SSLProtocols = "TLSv1.3"
+		d.SSLProtocols = sslProtocolsTLS13
 	default:
 		return zoneData{}, fmt.Errorf("tls.min_version %q is not %q or %q", z.TLS.MinVersion, edgedoc.TLS12, edgedoc.TLS13)
 	}
@@ -346,11 +420,8 @@ func prepareZone(z *edgedoc.Zone, cert Cert, node Node) (zoneData, error) {
 	if z.Policy.Challenge != edgedoc.ChallengeOff {
 		return zoneData{}, fmt.Errorf("policy.challenge %q is not supported by this renderer (only %q)", z.Policy.Challenge, edgedoc.ChallengeOff)
 	}
-	d.RPS = z.Policy.Rate.RPS
-	// One second of burst, absorbed without delay: a page load's parallel
-	// fetches must not trip a limit meant for floods.
-	d.Burst = z.Policy.Rate.RPS
-	d.Concurrency = z.Policy.Rate.Concurrency
+	// z.Policy.Rate is not consulted: a fast-path field never reaches the
+	// terminator's configuration (package doc).
 
 	if cert.Fullchain != "" || cert.Key != "" {
 		if cert.Fullchain == "" || cert.Key == "" {
@@ -372,6 +443,17 @@ func prepareZone(z *edgedoc.Zone, cert Cert, node Node) (zoneData, error) {
 		d.ExtraDirectivesFile = z.ExtraDirectivesFile
 	}
 	return d, nil
+}
+
+// hashBucketSize is the smallest power of two that holds a server_name of the
+// given length in nginx's server-names hash (the entry carries the name, its
+// length and a pointer, aligned), starting at the stock 64.
+func hashBucketSize(longest int) int {
+	size := 64
+	for size < longest+32 {
+		size *= 2
+	}
+	return size
 }
 
 // zoneID maps a zone name onto [a-z0-9_] plus a short hash, so two names that

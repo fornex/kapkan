@@ -247,13 +247,32 @@ func (zone *Zone) validate() error {
 		return fmt.Errorf("%s: policy.challenge %q is not supported yet (challenges are a later milestone); only %q is accepted", zone.Name, p.Challenge, ZoneChallengeOff)
 	}
 
-	if f := zone.ExtraDirectivesFile; f != "" && !filepath.IsAbs(f) {
-		// Absolute so the file means the same thing on every node and in
-		// every review; existence is the node's business (see the field doc).
-		return fmt.Errorf("%s: extra_directives_file must be an absolute path, got %q", zone.Name, f)
+	if len(zone.Name) > maxZoneNameLen {
+		// The name becomes a file name on the node (kapkan_zone_<name>.conf,
+		// within NAME_MAX); DNS allows 253, nothing real is longer than this.
+		return fmt.Errorf("%s: name is %d characters; at most %d are accepted", zone.Name, len(zone.Name), maxZoneNameLen)
+	}
+	if f := zone.ExtraDirectivesFile; f != "" {
+		if !filepath.IsAbs(f) {
+			// Absolute so the file means the same thing on every node and in
+			// every review; existence is the node's business (see the field doc).
+			return fmt.Errorf("%s: extra_directives_file must be an absolute path, got %q", zone.Name, f)
+		}
+		// The path is interpolated into an nginx `include`. A character that
+		// ends or comments out the directive is a config injection; a glob
+		// metacharacter turns the include into a pattern, and a pattern that
+		// matches nothing passes `nginx -t` — voiding the one guard the escape
+		// hatch has. Refused here so a renderer never sees either.
+		if strings.ContainsAny(f, " \t\r\n;{}#\"'\\$*?[]") {
+			return fmt.Errorf("%s: extra_directives_file %q contains a character nginx would misread (whitespace, ; { } # quotes \\ $ or a glob metacharacter)", zone.Name, f)
+		}
 	}
 	return nil
 }
+
+// maxZoneNameLen bounds a zone name so that the node's per-zone file name
+// (kapkan_zone_<name>.conf) stays within NAME_MAX. Mirrored by the renderer.
+const maxZoneNameLen = 238
 
 // normalizeHostname lowercases and validates an explicit DNS hostname: RFC 1123
 // labels joined by dots, at most 253 characters, no wildcard, no trailing dot,

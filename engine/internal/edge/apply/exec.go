@@ -111,7 +111,8 @@ func Probe(ctx context.Context, binary string) (kind, version string, err error)
 	if i := strings.LastIndex(after, "/"); i >= 0 {
 		after = after[i+1:]
 	}
-	version = strings.TrimSpace(after)
+	// Distro builds append their --build name: "nginx/1.24.0 (Ubuntu)".
+	version, _, _ = strings.Cut(strings.TrimSpace(after), " ")
 	if kind == "" || version == "" {
 		return "", "", fmt.Errorf("%s -v: unrecognised output %q", binaryOr(binary), line)
 	}
