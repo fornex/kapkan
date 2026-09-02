@@ -92,19 +92,7 @@ function Pipeline({ t }: { t: (typeof xdp)[Locale]["how"]["diagram"] }) {
 /* ------------------------------------------------------------------ frame */
 function Shot({ src, alt, w, h }: { src: string; alt: string; w: number; h: number }) {
   return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl ring-1 ring-black/5">
-      <div className="flex h-11 items-center gap-4 border-b border-border bg-muted px-4">
-        <div className="flex gap-2">
-          <span className="h-3 w-3 rounded-full bg-border" />
-          <span className="h-3 w-3 rounded-full bg-border" />
-          <span className="h-3 w-3 rounded-full bg-border" />
-        </div>
-        <div className="flex flex-1 justify-center">
-          <span className="rounded-md border border-border bg-background px-4 py-1 text-center font-mono text-xs text-muted-foreground">
-            kapkan.local:8080/ui
-          </span>
-        </div>
-      </div>
+    <div className="overflow-hidden rounded-lg border border-border bg-surface">
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={src} alt={alt} width={w} height={h} className="h-auto w-full" />
     </div>
@@ -140,7 +128,7 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
   return (
     <div className="flex min-h-screen flex-col">
       {/* ---------------------------------------------------------- header */}
-      <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
+      <header className="sticky top-0 z-50 border-b border-border bg-background">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
           <Logo href={homeHref} />
           <nav className="hidden items-center gap-8 text-sm font-medium text-muted-foreground md:flex">
@@ -160,13 +148,13 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
               href={site.repo}
               target="_blank"
               rel="noopener noreferrer"
-              className="hidden items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground lg:flex"
+              className="hidden items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground lg:flex"
             >
-              <Icon name="star" className="h-3.5 w-3.5 text-amber-400" /> {nt.star}
+              GitHub
             </a>
             <div className="hidden sm:block"><LanguageSwitcher lang={locale} /></div>
             <ThemeToggle />
-            <Link href={docsIndexHref} className="hidden rounded-full bg-accent px-5 py-2 text-sm font-medium text-accent-foreground transition-opacity hover:opacity-90 sm:inline-flex">
+            <Link href={docsIndexHref} className="hidden rounded-md bg-foreground px-5 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90 sm:inline-flex">
               {nt.readDocs}
             </Link>
             <MobileNav links={mobileLinks} cta={{ label: nt.readDocs, href: docsIndexHref }} menuLabel={nt.menu}>
@@ -179,34 +167,22 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
 
       <main>
         {/* ------------------------------------------------------------ hero */}
-        <section className="relative overflow-hidden">
-          <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[600px]"
-            style={{ background: "radial-gradient(60% 60% at 50% -10%, rgba(245,158,11,0.14) 0%, rgba(245,158,11,0) 60%)" }} />
-          <div className="mx-auto max-w-7xl px-6 pb-16 pt-16 lg:pb-24 lg:pt-24">
-            <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-surface/60 px-3 py-1 backdrop-blur-sm">
-              <Icon name="cpu" className="h-3.5 w-3.5 text-amber-400" />
-              <span className="font-mono text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">{t.hero.eyebrow}</span>
-            </div>
+        <section className="border-b border-border">
+          <div className="mx-auto max-w-7xl px-6 pb-16 pt-16 lg:pb-20 lg:pt-20">
+            <p className="mb-6 font-mono text-xs text-muted-foreground">{t.hero.eyebrow}</p>
             <div className="grid grid-cols-1 items-start gap-12 lg:grid-cols-12">
               <div className="lg:col-span-5">
-                <h1 className="mb-6 text-4xl font-bold leading-[1.1] tracking-tight sm:text-5xl">
-                  {t.hero.h1a} <span className="text-amber-400">{t.hero.h1b}</span>
+                <h1 className="mb-6 text-4xl font-semibold leading-[1.08] tracking-tight sm:text-5xl">
+                  {t.hero.h1a} {t.hero.h1b}
                 </h1>
                 <p className="mb-8 max-w-xl text-lg leading-relaxed text-muted-foreground">{t.hero.sub}</p>
                 <div className="mb-8 flex flex-wrap items-center gap-3">
-                  <Link href={docsHref} className="rounded-full bg-accent px-6 py-3 font-medium text-accent-foreground transition-opacity hover:opacity-90">{t.hero.ctaDocs}</Link>
-                  <Link href={configHref} className="group flex items-center gap-1 rounded-full border border-border bg-surface px-6 py-3 font-medium transition-colors hover:bg-muted">
+                  <Link href={docsHref} className="rounded-md bg-foreground px-5 py-2.5 text-sm font-medium text-background transition-opacity hover:opacity-90">{t.hero.ctaDocs}</Link>
+                  <Link href={configHref} className="rounded-md border border-border bg-surface px-5 py-2.5 text-sm font-medium transition-colors hover:bg-muted">
                     {t.hero.ctaConfig}
-                    <Icon name="arrowRight" className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
                   </Link>
                 </div>
-                <ul className="flex flex-wrap items-center gap-x-4 gap-y-2 font-mono text-sm text-muted-foreground">
-                  {t.hero.trust.map((item) => (
-                    <li key={item} className="flex items-center gap-1.5">
-                      <Icon name="check" className="h-3.5 w-3.5 text-amber-400/80" /> {item}
-                    </li>
-                  ))}
-                </ul>
+                <p className="font-mono text-sm text-muted-foreground">{t.hero.trust.join(" · ")}</p>
               </div>
               <div className="lg:col-span-7">
                 <Shot src="/assets/screenshots/xdp/attacks-xdp-method.png" alt={t.hero.shotAlt} w={1440} h={644} />
@@ -220,7 +196,7 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
         <section className="border-y border-border bg-muted/20 py-24">
           <div className="mx-auto max-w-6xl px-6">
             <div className="mb-14 max-w-3xl">
-              <h2 className="mb-4 text-3xl font-bold tracking-tight">{t.contrast.heading}</h2>
+              <h2 className="mb-4 text-3xl font-semibold tracking-tight">{t.contrast.heading}</h2>
               <p className="text-muted-foreground">{t.contrast.sub}</p>
             </div>
             <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
@@ -228,7 +204,7 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
                 { icon: "route" as IconName, tone: "text-accent", d: t.contrast.announce },
                 { icon: "cpu" as IconName, tone: "text-amber-400", d: t.contrast.drop },
               ].map((col) => (
-                <div key={col.d.title} className="rounded-2xl border border-border bg-surface p-7">
+                <div key={col.d.title} className="rounded-lg border border-border bg-surface p-7">
                   <div className="mb-4 flex items-center gap-3">
                     <span className={`flex h-11 w-11 items-center justify-center rounded-xl border border-border bg-background ${col.tone}`}>
                       <Icon name={col.icon} className="h-6 w-6" />
@@ -253,12 +229,12 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
         {/* --------------------------------------------------- how it works */}
         <section className="mx-auto max-w-7xl px-6 py-24">
           <div className="mb-4 max-w-3xl">
-            <h2 className="mb-4 text-3xl font-bold tracking-tight">{t.how.heading}</h2>
+            <h2 className="mb-4 text-3xl font-semibold tracking-tight">{t.how.heading}</h2>
             <p className="text-muted-foreground">{t.how.sub}</p>
           </div>
           <div className="mt-12 grid grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-4">
             {t.how.steps.map((step, i) => (
-              <div key={step.title} className="relative rounded-2xl border border-border bg-surface p-6">
+              <div key={step.title} className="relative rounded-lg border border-border bg-surface p-6">
                 <div className="mb-4 flex items-center gap-3">
                   <span className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-background text-amber-400">
                     <Icon name={HOW_ICONS[i]} className="h-5 w-5" />
@@ -282,7 +258,7 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
               </span>
             </div>
             <div className="lg:col-span-11">
-              <h2 className="mb-4 max-w-3xl text-3xl font-bold tracking-tight">{t.ratelimit.heading}</h2>
+              <h2 className="mb-4 max-w-3xl text-3xl font-semibold tracking-tight">{t.ratelimit.heading}</h2>
               <p className="mb-6 max-w-3xl text-lg leading-relaxed text-muted-foreground">{t.ratelimit.body}</p>
               <p className="max-w-3xl border-l-2 border-amber-400/40 pl-4 text-sm italic leading-relaxed text-muted-foreground">{t.ratelimit.aside}</p>
             </div>
@@ -292,12 +268,12 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
         {/* ---------------------------------------------------------- safety */}
         <section className="mx-auto max-w-7xl px-6 py-24">
           <div className="mb-14 max-w-3xl">
-            <h2 className="mb-4 text-3xl font-bold tracking-tight">{t.safety.heading}</h2>
+            <h2 className="mb-4 text-3xl font-semibold tracking-tight">{t.safety.heading}</h2>
             <p className="text-muted-foreground">{t.safety.sub}</p>
           </div>
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
             {t.safety.cards.map((card, i) => (
-              <div key={card.title} className="rounded-2xl border border-border bg-surface p-6">
+              <div key={card.title} className="rounded-lg border border-border bg-surface p-6">
                 <Icon name={SAFETY_ICONS[i]} className="mb-4 h-6 w-6 text-green-500" />
                 <h3 className="mb-2 font-semibold">{card.title}</h3>
                 <p className="text-sm leading-relaxed text-muted-foreground">{card.body}</p>
@@ -310,12 +286,12 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
         <section className="border-y border-border bg-muted/20 py-24">
           <div className="mx-auto max-w-6xl px-6">
             <div className="mb-12 max-w-3xl">
-              <h2 className="mb-4 text-3xl font-bold tracking-tight">{t.measured.heading}</h2>
+              <h2 className="mb-4 text-3xl font-semibold tracking-tight">{t.measured.heading}</h2>
               <p className="text-muted-foreground">{t.measured.sub}</p>
             </div>
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
               {t.measured.stats.map((s) => (
-                <div key={s.label} className="rounded-2xl border border-border bg-surface p-6">
+                <div key={s.label} className="rounded-lg border border-border bg-surface p-6">
                   <div className="mb-2 font-mono text-3xl font-bold text-amber-400">{s.value}</div>
                   <p className="text-sm leading-relaxed text-muted-foreground">{s.label}</p>
                 </div>
@@ -335,12 +311,12 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
         <section className="border-y border-border bg-muted/20 py-24">
           <div className="mx-auto max-w-5xl px-6">
             <div className="mb-12 max-w-3xl">
-              <h2 className="mb-4 text-3xl font-bold tracking-tight">{t.limits.heading}</h2>
+              <h2 className="mb-4 text-3xl font-semibold tracking-tight">{t.limits.heading}</h2>
               <p className="text-muted-foreground">{t.limits.sub}</p>
             </div>
             <div className="space-y-5">
               {t.limits.items.map((it) => (
-                <div key={it.title} className="rounded-2xl border border-border bg-surface p-6">
+                <div key={it.title} className="rounded-lg border border-border bg-surface p-6">
                   <h3 className="mb-2 font-semibold">{it.title}</h3>
                   <p className="text-sm leading-relaxed text-muted-foreground">{it.body}</p>
                 </div>
@@ -352,7 +328,7 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
         {/* --------------------------------------------------- requirements */}
         <section className="mx-auto max-w-5xl px-6 py-24">
           <div className="mb-10 max-w-3xl">
-            <h2 className="mb-4 text-3xl font-bold tracking-tight">{t.requirements.heading}</h2>
+            <h2 className="mb-4 text-3xl font-semibold tracking-tight">{t.requirements.heading}</h2>
             <p className="text-muted-foreground">{t.requirements.sub}</p>
           </div>
           <ul className="space-y-3">
@@ -368,11 +344,11 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
         {/* -------------------------------------------------------------- cta */}
         <section className="border-t border-border">
           <div className="mx-auto max-w-4xl px-6 py-24 text-center">
-            <h2 className="mb-4 text-3xl font-bold tracking-tight sm:text-4xl">{t.cta.heading}</h2>
+            <h2 className="mb-4 text-3xl font-semibold tracking-tight sm:text-4xl">{t.cta.heading}</h2>
             <p className="mx-auto mb-8 max-w-xl text-muted-foreground">{t.cta.sub}</p>
             <div className="flex flex-wrap items-center justify-center gap-3">
-              <Link href={docsHref} className="rounded-full bg-accent px-6 py-3 font-medium text-accent-foreground transition-opacity hover:opacity-90">{t.cta.primary}</Link>
-              <Link href={configHref} className="rounded-full border border-border bg-surface px-6 py-3 font-medium transition-colors hover:bg-muted">{t.cta.secondary}</Link>
+              <Link href={docsHref} className="rounded-md bg-foreground px-5 py-2.5 text-sm font-medium text-background transition-opacity hover:opacity-90">{t.cta.primary}</Link>
+              <Link href={configHref} className="rounded-md border border-border bg-surface px-5 py-2.5 text-sm font-medium transition-colors hover:bg-muted">{t.cta.secondary}</Link>
             </div>
           </div>
         </section>

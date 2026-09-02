@@ -1,16 +1,21 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono, Poppins } from "next/font/google";
+import { IBM_Plex_Mono, IBM_Plex_Sans, Poppins } from "next/font/google";
 import "./globals.css";
 import { site } from "@/lib/site";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
+// Body and code faces. IBM Plex (not the framework's default Geist) so the
+// site does not read as an untouched starter template; the cyrillic subset
+// covers the ru locale and latin-ext the de/fr/es diacritics.
+const plexSans = IBM_Plex_Sans({
+  variable: "--font-plex-sans",
+  subsets: ["latin", "latin-ext", "cyrillic"],
+  weight: ["400", "500", "600"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+const plexMono = IBM_Plex_Mono({
+  variable: "--font-plex-mono",
+  subsets: ["latin", "latin-ext", "cyrillic"],
+  weight: ["400", "500"],
 });
 
 // Brand wordmark face — Poppins 600, self-hosted by next/font. Used only by
@@ -66,7 +71,7 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${geistSans.variable} ${geistMono.variable} ${poppins.variable} h-full antialiased`}
+      className={`${plexSans.variable} ${plexMono.variable} ${poppins.variable} h-full antialiased`}
     >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />

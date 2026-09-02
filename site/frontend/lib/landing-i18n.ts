@@ -22,8 +22,14 @@ export type LandingDict = {
   };
   hero: { eyebrow: string; h1a: string; h1b: string; sub: string; trust: string[] };
   stats: string[];
-  how: { heading: string; sub: string; steps: { title: string; body: string }[] };
-  features: { heading: string; sub: string; safetyTag: string; learnMore: string; cards: { title: string; body: string }[] };
+  how: {
+    heading: string;
+    sub: string;
+    // Labels for the architecture figure (components/Landing.tsx, HowDiagram).
+    diagram: { routers: string; flows: string; announce: string; announceNote: string; drop: string; dropNote: string };
+    steps: { title: string; body: string }[];
+  };
+  features: { heading: string; sub: string; learnMore: string; cards: { title: string; body: string }[] };
   showcase: { heading: string; sub: string };
   compare: {
     heading: string;
@@ -74,23 +80,24 @@ const en: LandingDict = {
   },
   hero: {
     eyebrow: "Open Source · Apache 2.0",
-    h1a: "Stop DDoS floods in seconds —",
+    h1a: "Stop DDoS floods in seconds",
     h1b: "with one binary.",
-    sub: "Kapkan reads the traffic stats your routers already export (NetFlow, IPFIX, sFlow), spots a flood against the IPs you protect within seconds, and stops it — by telling your router to drop the attack, or by dropping it itself in the Linux kernel. Free, open source, and in safe watch-only mode until you say otherwise.",
+    sub: "Kapkan reads the traffic stats your routers already export (NetFlow, IPFIX, sFlow), spots a flood against the IPs you protect within seconds, and stops it: by telling your router to drop the attack, or by dropping it itself in the Linux kernel. Free, open source, and in watch-only mode until you say otherwise.",
     trust: ["One Go binary", "Nothing else to install", "Watch-only by default", "IPv4 + IPv6"],
   },
   stats: ["≥20M flows/sec/core", "Detects in seconds", "IPv4 + IPv6 blackhole", "FlowSpec RFC 8955/8956", "One static binary"],
   how: {
-    heading: "How it works, in four steps.",
-    sub: "One binary, nothing else to run — no extra services, no message queue, no database. Point your routers at it and go.",
+    heading: "How it works",
+    diagram: { routers: "Your routers", flows: "NetFlow · IPFIX · sFlow", announce: "BGP RTBH / FlowSpec", announceNote: "your router drops it", drop: "XDP", dropNote: "this machine drops it" },
+    sub: "One binary, nothing else to run: no extra services, no message queue, no database. Point your routers at it and go.",
     steps: [
       {
         title: "INGEST",
-        body: "Point your routers at Kapkan. They already send a summary of every traffic flow — NetFlow, IPFIX or sFlow — so just aim it at Kapkan's port. One process reads it all; there's nothing else to install.",
+        body: "Point your routers at Kapkan. They already send a summary of every traffic flow (NetFlow, IPFIX or sFlow), so just aim it at Kapkan's port. One process reads it all; there's nothing else to install.",
       },
       {
         title: "DETECT",
-        body: "Kapkan counts packets, bits and connections per second for each IP you protect. Cross a limit you set — or one it learned from that host's normal traffic — and that's an attack, flagged within seconds.",
+        body: "Kapkan counts packets, bits and connections per second for each IP you protect. Cross a limit you set, or one it learned from that host's normal traffic, and that's an attack, flagged within seconds.",
       },
       {
         title: "MITIGATE",
@@ -103,33 +110,32 @@ const en: LandingDict = {
     ],
   },
   features: {
-    heading: "The features others charge for — free.",
-    sub: "What commercial flow-DDoS products bundle and charge thousands for, in one Apache 2.0 binary: detection, mitigation, an operator console, and the safety rails to run it in production.",
-    safetyTag: "SAFETY",
+    heading: "What it does",
+    sub: "Detection, mitigation, an operator console and the safety rails to run it in production, in one Apache 2.0 binary. Commercial flow-DDoS products sell these as separate modules.",
     learnMore: "See how in-kernel drop works",
     cards: [
-      { title: "Reads the flows you already export", body: "sFlow v5, NetFlow v5/v9 and IPFIX over UDP, read by Kapkan itself — no extra service to run." },
-      { title: "Spots floods in under a second", body: "Packet, bit and flow-per-second limits over a sliding window, corrected for sampling — ≥20M flows/sec per core." },
+      { title: "Reads the flows you already export", body: "sFlow v5, NetFlow v5/v9 and IPFIX over UDP, read by Kapkan itself. No extra service to run." },
+      { title: "Spots floods in under a second", body: "Packet, bit and flow-per-second limits over a sliding window, corrected for sampling. ≥20M flows/sec per core." },
       { title: "Blackhole, or drop just the attack", body: "Null-route the whole target IP (RTBH), or drop only the attack traffic and keep the rest (FlowSpec). Full IPv6 support, on par with IPv4." },
-      { title: "Tells you what kind of attack", body: "Amplification (NTP/DNS/memcached), SYN/UDP/ICMP floods — each with a plain 'why this fired' breakdown." },
+      { title: "Tells you what kind of attack", body: "Amplification (NTP/DNS/memcached), SYN/UDP/ICMP floods, each with a plain 'why this fired' breakdown." },
       { title: "Learns each host's normal", body: "Kapkan learns what normal traffic looks like for every host and tightens the limits on its own. No hand-tuning." },
-      { title: "Hard to misfire", body: "Starts in watch-only mode. Every block has an expiry and lifts itself, a cap limits how many hosts can be blocked at once, and your protected list is never blocked — not by Kapkan, not by you." },
+      { title: "Hard to misfire", body: "Starts in watch-only mode. Every block has an expiry and lifts itself, a cap limits how many hosts can be blocked at once, and your protected list is never blocked, not by Kapkan and not by you." },
       { title: "Catches carpet-bombing", body: "Spots low-and-slow floods spread across a whole IP range that stay under any single host's limit." },
       { title: "Watch it from anywhere", body: "REST API, Prometheus /metrics, and alerts over Telegram, Slack, email, webhook or a script you run." },
       { title: "Multi-tenant & audited", body: "Scope access per tenant, hand out viewer/operator API tokens, and get an audit log that names who did what." },
       {
         title: "In-kernel mitigation with XDP",
-        body: "Instead of asking a router to drop the attack, Kapkan can do it itself. The same rules it would announce as FlowSpec load straight into the Linux kernel and run there (XDP) — including a separate rate limit for each attacking source, which BGP FlowSpec can't do. Needs Linux 5.15+, compiles nothing on the box, and every rule expires inside the kernel, so a crashed Kapkan can't leave your traffic dropped. Still watch-only by default.",
+        body: "Instead of asking a router to drop the attack, Kapkan can do it itself. The same rules it would announce as FlowSpec load straight into the Linux kernel and run there (XDP), including a separate rate limit for each attacking source, which BGP FlowSpec can't do. Needs Linux 5.15+, compiles nothing on the box, and every rule expires inside the kernel, so a crashed Kapkan can't leave your traffic dropped. Still watch-only by default.",
       },
     ],
   },
   showcase: {
-    heading: "A real operator console, included — free.",
-    sub: "No digging through raw logs. Kapkan ships with a live web console for your on-call — attacks, hosts and blocks in one place.",
+    heading: "The operator console",
+    sub: "Kapkan ships with a live web console for your on-call: attacks, hosts and blocks in one place. No digging through raw logs.",
   },
   compare: {
-    heading: "How we compare.",
-    sub: "A modern, single-binary replacement for pricey legacy flow analyzers.",
+    heading: "Compared with commercial tools",
+    sub: "One static binary instead of a licensed appliance and a set of daemons.",
     colFeature: "Feature",
     colKapkan: "Kapkan",
     colThem: "Commercial tools",
@@ -140,19 +146,19 @@ const en: LandingDict = {
       { feature: "Threshold tuning", kapkan: "Learns automatically", them: "Offline calculator, copy-paste" },
       { feature: "Automation", kapkan: "Escalation rules in config", them: "Custom bash scripts" },
       { feature: "Architecture", kapkan: "One static binary, no extras", them: "Several daemons to run" },
-      { feature: "In-kernel drop", kapkan: "Built in — drops in Linux itself (XDP)", them: "Separate scrubbing appliance" },
+      { feature: "In-kernel drop", kapkan: "Built in, drops in Linux itself (XDP)", them: "Separate scrubbing appliance" },
     ],
   },
   quickstart: {
-    heading: "Running in minutes — watch-only first.",
+    heading: "Running in minutes, watch-only first",
     bodyBefore:
       "Kapkan is safe to run out of the box. It logs every block it would make and shows it in the API and console, but never announces anything to your routers until you explicitly set ",
     bodyAfter: ".",
     cta: "View full documentation",
   },
-  cta: { heading: "Set the trap. Protect your network.", sub: "Free forever. Apache 2.0. Up and running in an afternoon." },
+  cta: { heading: "Set the trap", sub: "Free, Apache 2.0, running in an afternoon. Start in watch-only mode and see what it would have blocked." },
   footer: {
-    tagline: "Free, open-source DDoS detection & mitigation — announce it, or drop it yourself.",
+    tagline: "Free, open-source DDoS detection and mitigation. Announce it, or drop it yourself.",
     product: "Product",
     docsCol: "Docs",
     project: "Project",
@@ -190,14 +196,15 @@ const ru: LandingDict = {
   },
   hero: {
     eyebrow: "Open Source · Apache 2.0",
-    h1a: "Останавливайте DDoS-флуд за секунды —",
+    h1a: "Останавливайте DDoS-флуд за секунды",
     h1b: "одним бинарником.",
     sub: "Kapkan читает статистику трафика, которую ваши маршрутизаторы и так экспортируют (NetFlow, IPFIX, sFlow), за секунды замечает флуд на защищаемые вами адреса и останавливает его — командой маршрутизатору сбросить атаку или сбрасывая её сам, прямо в ядре Linux. Бесплатно, открытый код, и в безопасном режиме «только наблюдение», пока вы не решите иначе.",
     trust: ["Один Go-бинарник", "Больше ничего ставить не нужно", "«Только наблюдение» по умолчанию", "IPv4 + IPv6"],
   },
   stats: ["≥20M потоков/с/ядро", "Обнаружение за секунды", "Blackhole для IPv4 + IPv6", "FlowSpec RFC 8955/8956", "Один статический бинарник"],
   how: {
-    heading: "Как это работает — четыре шага.",
+    heading: "Как это работает",
+    diagram: { routers: "Ваши маршрутизаторы", flows: "NetFlow · IPFIX · sFlow", announce: "BGP RTBH / FlowSpec", announceNote: "сбрасывает маршрутизатор", drop: "XDP", dropNote: "сбрасывает эта машина" },
     sub: "Один бинарник и больше ничего — ни лишних сервисов, ни очереди сообщений, ни базы данных. Направьте на него маршрутизаторы — и всё.",
     steps: [
       {
@@ -219,9 +226,8 @@ const ru: LandingDict = {
     ],
   },
   features: {
-    heading: "Возможности, за которые другие берут деньги, — бесплатно.",
-    sub: "Всё, что коммерческие flow-DDoS продукты собирают вместе и берут за это тысячи, — в одном бинарнике под Apache 2.0: обнаружение, подавление, операторская консоль и защита от собственных ошибок.",
-    safetyTag: "БЕЗОПАСНОСТЬ",
+    heading: "Что умеет",
+    sub: "Обнаружение, подавление, операторская консоль и защита от собственных ошибок в одном бинарнике под Apache 2.0. Коммерческие flow-DDoS продукты продают это отдельными модулями.",
     learnMore: "Как работает отброс в ядре",
     cards: [
       { title: "Читает потоки, которые вы уже экспортируете", body: "sFlow v5, NetFlow v5/v9 и IPFIX по UDP — читает сам Kapkan, без отдельного сервиса." },
@@ -240,12 +246,12 @@ const ru: LandingDict = {
     ],
   },
   showcase: {
-    heading: "Настоящая операторская консоль — в комплекте, бесплатно.",
-    sub: "Не нужно копаться в сырых логах. Kapkan идёт с живой веб-консолью для дежурной смены — атаки, хосты и блокировки в одном месте.",
+    heading: "Операторская консоль",
+    sub: "Kapkan идёт с живой веб-консолью для дежурной смены: атаки, хосты и блокировки в одном месте. Копаться в сырых логах не нужно.",
   },
   compare: {
-    heading: "Чем мы отличаемся.",
-    sub: "Современная замена дорогим устаревшим flow-анализаторам — один бинарник.",
+    heading: "Сравнение с коммерческими продуктами",
+    sub: "Один статический бинарник вместо лицензируемого устройства и набора демонов.",
     colFeature: "Возможность",
     colKapkan: "Kapkan",
     colThem: "Коммерческие продукты",
@@ -260,13 +266,13 @@ const ru: LandingDict = {
     ],
   },
   quickstart: {
-    heading: "Запуск за минуты — сначала «только наблюдение».",
+    heading: "Запуск за минуты, сначала «только наблюдение»",
     bodyBefore:
       "Kapkan безопасен из коробки. Он записывает каждую блокировку, которую сделал бы, и показывает её в API и консоли, но ничего не анонсирует вашим маршрутизаторам, пока вы явно не поставите ",
     bodyAfter: ".",
     cta: "Вся документация",
   },
-  cta: { heading: "Поставьте капкан. Защитите свою сеть.", sub: "Бесплатно навсегда. Apache 2.0. Развернёте за один вечер." },
+  cta: { heading: "Поставьте капкан", sub: "Бесплатно, Apache 2.0, разворачивается за вечер. Начните в режиме «только наблюдение» и посмотрите, что он заблокировал бы." },
   footer: {
     tagline: "Бесплатное open-source обнаружение DDoS — анонсировать маршрут или отбросить самому.",
     product: "Продукт",
@@ -305,7 +311,7 @@ const de: LandingDict = {
   },
   "hero": {
     "eyebrow": "Open Source · Apache 2.0",
-    "h1a": "Stoppen Sie DDoS-Fluten in Sekunden —",
+    "h1a": "Stoppen Sie DDoS-Fluten in Sekunden",
     "h1b": "mit einer einzigen Binary.",
     "sub": "Kapkan liest die Verkehrsstatistik, die Ihre Router ohnehin schon exportieren (NetFlow, IPFIX, sFlow), erkennt binnen Sekunden eine Flut gegen die IPs, die Sie schützen, und stoppt sie — indem es Ihren Router anweist, den Angriff zu verwerfen, oder indem es ihn selbst im Linux-Kernel verwirft. Kostenlos, quelloffen und im sicheren Modus „nur beobachten“, bis Sie es anders entscheiden.",
     "trust": [
@@ -323,7 +329,8 @@ const de: LandingDict = {
     "Eine statische Binary"
   ],
   "how": {
-    "heading": "So funktioniert es — in vier Schritten.",
+    "heading": "So funktioniert es",
+    "diagram": { "routers": "Ihre Router", "flows": "NetFlow · IPFIX · sFlow", "announce": "BGP RTBH / FlowSpec", "announceNote": "Ihr Router verwirft", "drop": "XDP", "dropNote": "diese Maschine verwirft" },
     "sub": "Eine Binary, sonst nichts — keine zusätzlichen Dienste, keine Message-Queue, keine Datenbank. Richten Sie Ihre Router darauf und legen Sie los.",
     "steps": [
       {
@@ -345,9 +352,8 @@ const de: LandingDict = {
     ]
   },
   "features": {
-    "heading": "Die Funktionen, für die andere Geld verlangen — kostenlos.",
-    "sub": "Was kommerzielle Flow-DDoS-Produkte zusammenpacken und für Tausende verkaufen — in einer einzigen Binary unter Apache 2.0: Erkennung, Abwehr, eine Operator-Konsole und die Sicherheitsleitplanken für den Produktivbetrieb.",
-    "safetyTag": "SICHERHEIT",
+    "heading": "Was es kann",
+    "sub": "Erkennung, Abwehr, eine Operator-Konsole und die Sicherheitsleitplanken für den Produktivbetrieb, in einer Binary unter Apache 2.0. Kommerzielle Flow-DDoS-Produkte verkaufen das als separate Module.",
     "learnMore": "So funktioniert das Verwerfen im Kernel",
     "cards": [
       {
@@ -393,12 +399,12 @@ const de: LandingDict = {
     ]
   },
   "showcase": {
-    "heading": "Eine echte Operator-Konsole, inklusive — kostenlos.",
-    "sub": "Kein Wühlen in rohen Logs. Kapkan bringt eine Live-Web-Konsole für Ihre Rufbereitschaft mit — Angriffe, Hosts und Sperren an einem Ort."
+    "heading": "Die Operator-Konsole",
+    "sub": "Kapkan bringt eine Live-Web-Konsole für Ihre Rufbereitschaft mit: Angriffe, Hosts und Sperren an einem Ort. Kein Wühlen in rohen Logs."
   },
   "compare": {
-    "heading": "Wie wir abschneiden.",
-    "sub": "Ein moderner Ersatz für teure Legacy-Flow-Analyzer — als eine einzige Binary.",
+    "heading": "Im Vergleich zu kommerziellen Tools",
+    "sub": "Eine statische Binary statt einer lizenzierten Appliance und einer Handvoll Daemons.",
     "colFeature": "Funktion",
     "colKapkan": "Kapkan",
     "colThem": "Kommerzielle Tools",
@@ -441,14 +447,14 @@ const de: LandingDict = {
     ]
   },
   "quickstart": {
-    "heading": "In Minuten startklar — erst „nur beobachten“.",
+    "heading": "In Minuten startklar, erst „nur beobachten“",
     "bodyBefore": "Kapkan ist von Haus aus sicher im Betrieb. Es protokolliert jede Sperre, die es verhängen würde, und zeigt sie in der API und der Konsole an, kündigt Ihren Routern aber nichts an, bis Sie ausdrücklich ",
     "bodyAfter": " setzen.",
     "cta": "Vollständige Doku ansehen"
   },
   "cta": {
-    "heading": "Stellen Sie die Falle. Schützen Sie Ihr Netzwerk.",
-    "sub": "Für immer kostenlos. Apache 2.0. An einem Nachmittag startklar."
+    "heading": "Stellen Sie die Falle",
+    "sub": "Kostenlos, Apache 2.0, an einem Nachmittag startklar. Starten Sie im Modus „nur beobachten“ und sehen Sie, was es gesperrt hätte."
   },
   "footer": {
     "tagline": "Kostenlose Open-Source-DDoS-Erkennung und -Abwehr — ankündigen oder selbst verwerfen.",
@@ -488,7 +494,7 @@ const fr: LandingDict = {
   },
   "hero": {
     "eyebrow": "Open Source · Apache 2.0",
-    "h1a": "Stoppez les floods DDoS en quelques secondes —",
+    "h1a": "Stoppez les floods DDoS en quelques secondes",
     "h1b": "avec un seul binaire.",
     "sub": "Kapkan lit les statistiques de trafic que vos routeurs exportent déjà (NetFlow, IPFIX, sFlow), repère en quelques secondes un flood visant les IP que vous protégez, et l'arrête — en demandant à votre routeur de rejeter l'attaque, ou en la rejetant lui-même dans le noyau Linux. Gratuit, open source, et en mode « observation seule », sans risque, jusqu'à ce que vous en décidiez autrement.",
     "trust": [
@@ -506,7 +512,8 @@ const fr: LandingDict = {
     "Un seul binaire statique"
   ],
   "how": {
-    "heading": "Comment ça marche, en quatre étapes.",
+    "heading": "Comment ça marche",
+    "diagram": { "routers": "Vos routeurs", "flows": "NetFlow · IPFIX · sFlow", "announce": "BGP RTBH / FlowSpec", "announceNote": "votre routeur rejette", "drop": "XDP", "dropNote": "cette machine rejette" },
     "sub": "Un seul binaire, rien d'autre à faire tourner — pas de services en plus, pas de file de messages, pas de base de données. Pointez vos routeurs dessus, c'est parti.",
     "steps": [
       {
@@ -528,9 +535,8 @@ const fr: LandingDict = {
     ]
   },
   "features": {
-    "heading": "Les fonctionnalités que les autres font payer — gratuites.",
-    "sub": "Tout ce que les produits flow-DDoS commerciaux regroupent et facturent des milliers, réuni dans un seul binaire Apache 2.0 : détection, mitigation, une console opérateur et les garde-fous pour l'exploiter en production.",
-    "safetyTag": "SÛRETÉ",
+    "heading": "Ce qu'il fait",
+    "sub": "Détection, mitigation, une console opérateur et les garde-fous pour l'exploiter en production, dans un seul binaire Apache 2.0. Les produits flow-DDoS commerciaux vendent tout cela en modules séparés.",
     "learnMore": "Voir comment fonctionne le rejet dans le noyau",
     "cards": [
       {
@@ -576,12 +582,12 @@ const fr: LandingDict = {
     ]
   },
   "showcase": {
-    "heading": "Une vraie console opérateur, incluse — gratuite.",
-    "sub": "Fini de fouiller dans les logs bruts. Kapkan est livré avec une console web en direct pour votre astreinte — attaques, hôtes et blocages au même endroit."
+    "heading": "La console opérateur",
+    "sub": "Kapkan est livré avec une console web en direct pour votre astreinte : attaques, hôtes et blocages au même endroit. Fini de fouiller dans les logs bruts."
   },
   "compare": {
-    "heading": "Comment on se situe.",
-    "sub": "Un remplacement moderne, à binaire unique, des coûteux analyseurs de flux hérités.",
+    "heading": "Face aux outils commerciaux",
+    "sub": "Un seul binaire statique au lieu d'une appliance sous licence et d'une poignée de daemons.",
     "colFeature": "Fonctionnalité",
     "colKapkan": "Kapkan",
     "colThem": "Outils commerciaux",
@@ -624,14 +630,14 @@ const fr: LandingDict = {
     ]
   },
   "quickstart": {
-    "heading": "Opérationnel en quelques minutes — « observation seule » d'abord.",
+    "heading": "Opérationnel en quelques minutes, « observation seule » d'abord",
     "bodyBefore": "Kapkan est sûr dès l'installation. Il journalise chaque blocage qu'il ferait et l'affiche dans l'API et la console, mais n'annonce jamais rien à vos routeurs tant que vous ne définissez pas explicitement ",
     "bodyAfter": ".",
     "cta": "Voir toute la documentation"
   },
   "cta": {
-    "heading": "Tendez le piège. Protégez votre réseau.",
-    "sub": "Gratuit pour toujours. Apache 2.0. Opérationnel en un après-midi."
+    "heading": "Tendez le piège",
+    "sub": "Gratuit, Apache 2.0, opérationnel en un après-midi. Démarrez en « observation seule » et voyez ce qu'il aurait bloqué."
   },
   "footer": {
     "tagline": "Détection et mitigation DDoS gratuites et open source — annoncez-la, ou rejetez-la vous-même.",
@@ -671,7 +677,7 @@ const es: LandingDict = {
   },
   "hero": {
     "eyebrow": "Open Source · Apache 2.0",
-    "h1a": "Detén los ataques DDoS en segundos —",
+    "h1a": "Detén los ataques DDoS en segundos",
     "h1b": "con un solo binario.",
     "sub": "Kapkan lee las estadísticas de tráfico que tus routers ya exportan (NetFlow, IPFIX, sFlow), detecta en segundos una avalancha contra las IPs que proteges y la detiene — diciéndole a tu router que descarte el ataque, o descartándolo él mismo en el kernel de Linux. Gratis, de código abierto y en modo seguro «solo observación» hasta que decidas otra cosa.",
     "trust": [
@@ -689,7 +695,8 @@ const es: LandingDict = {
     "Un binario estático"
   ],
   "how": {
-    "heading": "Cómo funciona, en cuatro pasos.",
+    "heading": "Cómo funciona",
+    "diagram": { "routers": "Tus routers", "flows": "NetFlow · IPFIX · sFlow", "announce": "BGP RTBH / FlowSpec", "announceNote": "tu router descarta", "drop": "XDP", "dropNote": "esta máquina descarta" },
     "sub": "Un solo binario, nada más que ejecutar — sin servicios extra, sin cola de mensajes, sin base de datos. Apunta tus routers hacia él y listo.",
     "steps": [
       {
@@ -711,9 +718,8 @@ const es: LandingDict = {
     ]
   },
   "features": {
-    "heading": "Las funciones por las que otros cobran — gratis.",
-    "sub": "Lo que los productos comerciales de flow-DDoS empaquetan y por lo que cobran miles, en un único binario Apache 2.0: detección, mitigación, una consola de operador y las salvaguardas para operarlo en producción.",
-    "safetyTag": "SEGURIDAD",
+    "heading": "Qué hace",
+    "sub": "Detección, mitigación, una consola de operador y las salvaguardas para operarlo en producción, en un único binario Apache 2.0. Los productos comerciales de flow-DDoS lo venden como módulos aparte.",
     "learnMore": "Mira cómo funciona el descarte en el kernel",
     "cards": [
       {
@@ -759,12 +765,12 @@ const es: LandingDict = {
     ]
   },
   "showcase": {
-    "heading": "Una consola de operador de verdad, incluida — gratis.",
-    "sub": "Sin escarbar en logs en bruto. Kapkan viene con una consola web en vivo para tu equipo de guardia — ataques, hosts y bloqueos en un solo lugar."
+    "heading": "La consola de operador",
+    "sub": "Kapkan viene con una consola web en vivo para tu equipo de guardia: ataques, hosts y bloqueos en un solo lugar. Sin escarbar en logs en bruto."
   },
   "compare": {
-    "heading": "Cómo nos comparamos.",
-    "sub": "Un reemplazo moderno, de un solo binario, para los caros analizadores de flujo heredados.",
+    "heading": "Frente a las herramientas comerciales",
+    "sub": "Un único binario estático en lugar de un appliance con licencia y un puñado de daemons.",
     "colFeature": "Función",
     "colKapkan": "Kapkan",
     "colThem": "Herramientas comerciales",
@@ -807,14 +813,14 @@ const es: LandingDict = {
     ]
   },
   "quickstart": {
-    "heading": "En marcha en minutos — primero «solo observación».",
+    "heading": "En marcha en minutos, primero «solo observación»",
     "bodyBefore": "Kapkan es seguro desde el primer momento. Registra cada bloqueo que haría y lo muestra en la API y la consola, pero nunca anuncia nada a tus routers hasta que establezcas explícitamente ",
     "bodyAfter": ".",
     "cta": "Ver toda la documentación"
   },
   "cta": {
-    "heading": "Tiende la trampa. Protege tu red.",
-    "sub": "Gratis para siempre. Apache 2.0. Funcionando en una tarde."
+    "heading": "Tiende la trampa",
+    "sub": "Gratis, Apache 2.0, funcionando en una tarde. Arranca en «solo observación» y mira qué habría bloqueado."
   },
   "footer": {
     "tagline": "Detección y mitigación de DDoS gratis y de código abierto — anúncialo, o descártalo tú mismo.",

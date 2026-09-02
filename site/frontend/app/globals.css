@@ -4,14 +4,19 @@
    default prefers-color-scheme, so the theme switch can override the OS. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* Palette. Warm paper rather than pure white, ink rather than pure black, and
+   the accent is the wordmark's own blue (--kapkan-word-tail) so the page and
+   the logo share one hue. The dark theme is built around #0f1419, the console's
+   own background, so the console screenshots sit flush on the page instead of
+   floating on a different black. */
 :root {
-  --background: #ffffff;
-  --surface: #ffffff;
-  --muted: #f4f4f5;
-  --foreground: #18181b;
-  --muted-foreground: #52525b;
-  --border: #e4e4e7;
-  --accent: #2563eb;
+  --background: #f7f5f0;
+  --surface: #fdfcfa;
+  --muted: #ede9e0;
+  --foreground: #16181c;
+  --muted-foreground: #5b5a55;
+  --border: #d8d3c8;
+  --accent: #1f6fd0;
   --accent-foreground: #ffffff;
 
   /* Kapkan wordmark — light backgrounds (AA-safe). The tile mark in <Logo>
@@ -21,14 +26,14 @@
 }
 
 .dark {
-  --background: #0a0a0a;
-  --surface: #111113;
-  --muted: #18181b;
-  --foreground: #ededed;
-  --muted-foreground: #a1a1aa;
-  --border: #27272a;
-  --accent: #60a5fa;
-  --accent-foreground: #0a0a0a;
+  --background: #0f1419;
+  --surface: #141a21;
+  --muted: #1b222b;
+  --foreground: #e6e4df;
+  --muted-foreground: #9a9a94;
+  --border: #29323d;
+  --accent: #8cc2ff;
+  --accent-foreground: #0f1419;
 
   /* Kapkan wordmark — dark backgrounds */
   --kapkan-word-front: #f2f6fb;
@@ -44,8 +49,8 @@
   --color-border: var(--border);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 body {
@@ -60,7 +65,7 @@ body {
 
 /* Kapkan wordmark: Poppins 600, lowercase, two-tone (kap → kan). */
 .kapkan-word {
-  font-family: var(--font-poppins), var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-poppins), var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
   font-weight: 600;
   letter-spacing: -0.015em;
 }
