@@ -57,6 +57,7 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/edge/render"
+	"github.com/kapkan-io/kapkan/internal/edge/rollup"
 )
 
 const (
@@ -188,12 +189,19 @@ func TestRealTerminator(t *testing.T) {
 	t.Run("serve/decide-open/decider", func(t *testing.T) {
 		s := h.serve(t, "decide-open", "decider")
 		d := h.startDecider(t)
+		logs := h.startLogSink(t)
 
 		d.set(403, "")
 		s.get(t, "example.com", "/probe?x=1").expect(t, 403, "")
 		seen := d.last()
 		if seen == nil {
 			t.Fatal("the decision service was not consulted")
+		}
+		// The access log names the request, the port and the decision — what
+		// the rollup will aggregate and what closes the decider's in-flight slot.
+		rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/probe?x=1" })
+		if rec.Zone != "example.com" || rec.Port != 443 || rec.Status != 403 || rec.Decision != "403" || rec.Method != "GET" || !rec.Decided() {
+			t.Errorf("access-log record: %+v", rec)
 		}
 		if seen.req.Method != "GET" || seen.req.URL.Path != "/decide" {
 			t.Errorf("subrequest was %s %s, want GET /decide", seen.req.Method, seen.req.URL.Path)
@@ -225,20 +233,27 @@ func TestRealTerminator(t *testing.T) {
 		}
 
 		d.set(200, "suspicious")
-		s.get(t, "example.com", "/").expect(t, 200, "origin-ok mark=suspicious;")
+		s.get(t, "example.com", "/marked").expect(t, 200, "origin-ok mark=suspicious;")
+		if rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/marked" }); rec.Decision != "200" || rec.Status != 200 {
+			t.Errorf("allowed request's record: %+v", rec)
+		}
 
-		// Off-contract answer: undecided, its mark dropped, keepalive intact.
+		// Off-contract answer: undecided, its mark dropped, keepalive intact —
+		// and the log says the decision was not made (a 5xx, not 200/403).
 		d.set(500, "leak")
-		res = s.get(t, "example.com", "/")
+		res = s.get(t, "example.com", "/undecided")
 		res.expect(t, 200, "origin-ok mark=;zone=example.com;")
 		if c := res.header.Get("Connection"); c != "keep-alive" {
 			t.Errorf("fail-open after an off-contract answer carries Connection %q", c)
 		}
+		if rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/undecided" }); rec.Decision != "500" || rec.Decided() || rec.Status != 200 {
+			t.Errorf("undecided request's record: %+v", rec)
+		}
 
-		// With every socket it needs present, the terminator logs nothing at
-		// crit level. The log socket is absent by design in this milestone: nginx
-		// reports that connect failure at alert, Angie at crit, so those lines are
-		// not counted (E3.3 brings the listener and drops this exception).
+		// With every socket it needs present — the log socket included, since
+		// this arm runs the real listener — the terminator logs nothing at crit
+		// level. Syslog connect failures are still excluded (critLines): the
+		// listener starts after the container, so the first lines may predate it.
 		if crit := critLines(s.logs(t)); len(crit) > 0 {
 			t.Errorf("terminator logged at crit level:\n%s", strings.Join(crit, "\n"))
 		}
@@ -670,6 +685,52 @@ func (h *harness) startChallenge(t *testing.T) {
 		token := strings.TrimPrefix(r.URL.Path, "/.well-known/acme-challenge/")
 		_, _ = fmt.Fprintf(w, "key-auth-for-%s zone=%s body=%d", token, r.Header.Get("X-Kapkan-Zone"), n)
 	}))
+}
+
+// logSink receives the terminator's access log on the work directory's log
+// socket, through the same listener a node runs (internal/edge/rollup).
+type logSink struct {
+	mu   sync.Mutex
+	recs []rollup.Record
+}
+
+func (h *harness) startLogSink(t *testing.T) *logSink {
+	t.Helper()
+	sink := &logSink{}
+	l := &rollup.Listener{Path: filepath.Join(h.work, "run", "log.sock"), Handle: func(r rollup.Record) {
+		sink.mu.Lock()
+		sink.recs = append(sink.recs, r)
+		sink.mu.Unlock()
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = l.Run(ctx); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return sink
+}
+
+// wait returns the first received record matching match, failing after 5 s.
+func (s *logSink) wait(t *testing.T, match func(rollup.Record) bool) rollup.Record {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		for _, r := range s.recs {
+			if match(r) {
+				s.mu.Unlock()
+				return r
+			}
+		}
+		s.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t.Fatalf("no matching access-log record received; have %d: %+v", len(s.recs), s.recs)
+	return rollup.Record{}
 }
 
 // serveUnix listens on <work>/run/<name> — the path the container sees as

@@ -265,6 +265,21 @@ zones:
   its own call). No challenge yet. A denial surfaces as 403, or as 429 through an `error_page`
   mapping in the rendered config — `auth_request` itself honors only 2xx/401/403 from the
   subrequest, and the renderer owns that translation.
+  *Decided in E3.3 (`internal/edge/decide`, `internal/edge/rollup`):* the service answers
+  `GET /decide` on a unix socket with 200 (+ optional `X-Kapkan-Mark`) or 403 — nothing else;
+  429 stays a renderer mapping for E4. It is the **only** enforcer of a zone's `policy.rate`
+  (the renderer emits no `limit_req`): a token bucket per (zone, source) refilling at `rps` with
+  one second of burst, and concurrency as an approximate in-flight count — every decision opens
+  one, every access-log line whose `decision` field is 200/403 closes one (the log gained `port`
+  and `decision` for this), swept after 60 s idle so drift is bounded. On top: a bounded
+  deny/mark verdict table with TTLs (zone-specific or every-zone), fed by the rollup's rules —
+  *flood*: a source denied ≥ 20 times in a 10 s window with denials ≥ 30 % of its requests is
+  denied outright for 1 min, doubling per repeat up to 10 min; *errors*: ≥ 50 requests with ≥ 90 %
+  origin 4xx/5xx is marked `errors` — and later by brain-shipped policy. Thresholds are fixed in
+  E3.3; E3.6 makes them zone knobs. Dry-run answers every deny as 200 with
+  `X-Kapkan-Mark: would-deny:<reason>` and counts it. Full tables pass the request untracked
+  (default-PASS) and count that; an unknown zone passes. The latency number lives in
+  `BenchmarkDecideOverUnixSocket` (`make bench`).
 - **E4 adds:** `challenge` — redirect to a PoW/JS page served by the node, clearance = signed
   cookie (HMAC, key distributed in the zone doc, rotated; bound to zone + source prefix + TTL;
   a no-JS fallback path is required, accessibility is a review gate, and the cookie must not

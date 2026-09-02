@@ -47,6 +47,16 @@ security-relevant.
   requests through it. Known limitation: nginx before 1.29.2 applies the node-wide TLS floor
   (the lowest `tls.min_version` on the node) to every zone; Angie and nginx ≥ 1.29.2 honour
   per-zone floors. No `kapkan edge` command yet (E3.5).
+- Edge track, E3.3 — the per-node decision service (`internal/edge/decide`: answers nginx's
+  `auth_request` over a unix socket with 200/403 and an optional `X-Kapkan-Mark`; enforces the
+  zone's `policy.rate` per source — token bucket for rps, approximate in-flight count for
+  concurrency — plus a bounded deny/mark verdict table with TTLs; dry-run answers every deny as
+  an allow marked `would-deny:<reason>`; never consults the brain) and the access-log rollups
+  (`internal/edge/rollup`: the terminator's JSON log over a unix datagram socket → per-zone,
+  per-source windows with real-elapsed rates and top sources; a flood rule promotes a source
+  that keeps pushing through its denials to a deny with escalating TTL, an error-share rule marks
+  scanners). The rendered access log gained `port` and `decision` fields. `make bench` now
+  reports `BenchmarkDecideOverUnixSocket`, the measured auth_request round trip.
 
 ## [1.7.0] - 2026-09-02
 

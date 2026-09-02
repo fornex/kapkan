@@ -153,6 +153,7 @@ server {
 {{- if .Decide}}
         auth_request /_kapkan/decide;
         auth_request_set $kapkan_mark $kapkan_decided_mark;
+        auth_request_set $kapkan_decision $upstream_status;
 {{- if .FailOpen}}
         # Second net for failure_mode: open — anything the subrequest could
         # not absorb (an off-contract 3xx, say) still passes, undecided.
