@@ -236,9 +236,11 @@ func TestRealTerminator(t *testing.T) {
 		}
 
 		// With every socket it needs present, the terminator logs nothing at
-		// crit level (the log socket is absent by design: that is [alert]).
-		if logs := s.logs(t); strings.Contains(logs, "[crit]") {
-			t.Errorf("terminator logged at crit level:\n%s", logs)
+		// crit level. The log socket is absent by design in this milestone: nginx
+		// reports that connect failure at alert, Angie at crit, so those lines are
+		// not counted (E3.3 brings the listener and drops this exception).
+		if crit := critLines(s.logs(t)); len(crit) > 0 {
+			t.Errorf("terminator logged at crit level:\n%s", strings.Join(crit, "\n"))
 		}
 	})
 	t.Run("serve/decide-closed/decider", func(t *testing.T) {
@@ -733,4 +735,16 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// critLines returns the terminator's [crit] log lines, minus the syslog
+// connect failures a deliberately absent log socket produces.
+func critLines(logs string) []string {
+	var out []string
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "[crit]") && !strings.Contains(line, "while logging to syslog") {
+			out = append(out, line)
+		}
+	}
+	return out
 }
