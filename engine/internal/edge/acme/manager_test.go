@@ -181,6 +181,26 @@ func TestAccountKeyIsPerDirectoryAndReused(t *testing.T) {
 			t.Fatalf("account key mode %v", st.Mode())
 		}
 	}
+	// A second directory gets its own key — and so a different account
+	// thumbprint at that CA.
+	other := newFakeCA(t, h.clock.now, h.answerer.URL)
+	zo := zone("c.example.com")
+	zo.ACMEDirectory = other.directory()
+	if _, _, err := m.Ensure(context.Background(), zo); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ = os.ReadDir(filepath.Join(h.dir, "acme")); len(entries) != 2 {
+		t.Fatalf("%d account keys for two directories", len(entries))
+	}
+	thumbs := map[string]bool{}
+	for _, th := range h.ca.accounts {
+		thumbs[th] = true
+	}
+	for _, th := range other.accounts {
+		if thumbs[th] {
+			t.Fatal("the same account key was used at two directories")
+		}
+	}
 }
 
 type fakeSlots struct {
@@ -270,28 +290,53 @@ func TestFailuresBackOffThenUseTheFallback(t *testing.T) {
 	z := zone("example.com")
 
 	// Three failures against the primary, each followed by a backoff during
-	// which Ensure does not even try.
+	// which Ensure does not even try. A 429 is not retried within an order:
+	// exactly one newOrder per attempt.
 	for i := 1; i <= fallbackAfter; i++ {
 		_, did, err := m.Ensure(context.Background(), z)
 		if err == nil || did {
 			t.Fatalf("attempt %d: did=%v err=%v", i, did, err)
 		}
-		before := h.ca.newOrders
-		if _, _, err := m.Ensure(context.Background(), z); err != nil || h.ca.newOrders != before {
-			t.Fatalf("attempt %d: backoff not honoured (orders %d -> %d, err %v)", i, before, h.ca.newOrders, err)
+		if h.ca.newOrders != i {
+			t.Fatalf("attempt %d: %d newOrder calls; a rate limit must not be retried inside the order", i, h.ca.newOrders)
+		}
+		if _, _, err := m.Ensure(context.Background(), z); err != nil || h.ca.newOrders != i {
+			t.Fatalf("attempt %d: backoff not honoured (orders %d, err %v)", i, h.ca.newOrders, err)
 		}
 		h.clock.add(backoff(i) + time.Second)
 	}
 	if fallback.newOrders != 0 {
 		t.Fatal("fallback used before the threshold")
 	}
-	// The next attempt turns to the fallback and succeeds.
+	// The fourth attempt turns to the fallback; when it fails too the fifth
+	// tries the primary again, the sixth the fallback (alternation).
+	fallback.failNewOrder = 429
+	if _, did, err := m.Ensure(context.Background(), z); err == nil || did || fallback.newOrders != 1 || h.ca.newOrders != fallbackAfter {
+		t.Fatalf("attempt 4: did=%v err=%v fallback=%d primary=%d", did, err, fallback.newOrders, h.ca.newOrders)
+	}
+	h.clock.add(backoff(fallbackAfter+1) + time.Second)
+	if _, _, _ = m.Ensure(context.Background(), z); h.ca.newOrders != fallbackAfter+1 || fallback.newOrders != 1 {
+		t.Fatalf("attempt 5 did not return to the primary: primary=%d fallback=%d", h.ca.newOrders, fallback.newOrders)
+	}
+	h.clock.add(backoff(fallbackAfter+2) + time.Second)
+	fallback.failNewOrder = 0
 	c, did, err := m.Ensure(context.Background(), z)
-	if err != nil || !did || c.Directory != fallback.directory() {
-		t.Fatalf("fallback attempt: %+v %v %v (fallback orders %d)", c, did, err, fallback.newOrders)
+	if err != nil || !did || c.Directory != fallback.directory() || fallback.newOrders != 2 {
+		t.Fatalf("attempt 6 (fallback): %+v %v %v (fallback orders %d)", c, did, err, fallback.newOrders)
 	}
 	if _, ok := m.Cert("example.com"); !ok {
 		t.Fatal("certificate not recorded")
+	}
+	// A success clears the failure state: the following renewal tries the
+	// primary first.
+	m.mu.Lock()
+	_, stillFailing := m.failures["example.com"]
+	m.mu.Unlock()
+	if stillFailing {
+		t.Fatal("failure state survived a success")
+	}
+	if d, fb := m.directoryFor(z); fb || d != h.ca.directory() {
+		t.Fatalf("after a fallback success the next attempt goes to %s (fallback=%v)", d, fb)
 	}
 	// A zone's own fallback wins over the node default.
 	zf := zone("other.example.com")
@@ -365,7 +410,14 @@ func TestChallengeServerOverUnixSocket(t *testing.T) {
 	c := newClock()
 	table := NewChallengeTable(c.now)
 	table.Add("example.com", "tok-"+strings.Repeat("d", 20), "d.thumb", time.Minute)
-	path := filepath.Join(t.TempDir(), "c.sock")
+	// A short directory: t.TempDir() plus this test's name runs to the 104-byte
+	// sun_path limit on macOS.
+	sockDir, err := os.MkdirTemp("", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	path := filepath.Join(sockDir, "c.sock")
 	srv := &ChallengeServer{Table: table, Path: path}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -374,7 +426,6 @@ func TestChallengeServerOverUnixSocket(t *testing.T) {
 		return dialUnix(ctx, path)
 	}}}
 	var resp *http.Response
-	var err error
 	for i := 0; i < 50; i++ {
 		req, _ := http.NewRequest("GET", "http://example.com/.well-known/acme-challenge/tok-"+strings.Repeat("d", 20), nil)
 		req.Header.Set("X-Kapkan-Zone", "example.com")

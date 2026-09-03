@@ -18,6 +18,18 @@ package api
 // content-hash ETag changes exactly when there is news, and the coordinator's
 // own broadcast wakes parked long-polls the way Store.Changed does for a
 // reload.
+//
+// TRUST, STATED PLAINLY. An agent token is a certificate-issuing credential:
+// a holder can publish a key authorization for any zone the fleet serves,
+// and every node will answer it, so the holder's own ACME account can
+// validate HTTP-01 for that zone. Binding tokens to nodes is the fleet
+// milestone (E6); until then the coordinator narrows what one token can do
+// and makes every use visible: a challenge is published only by the node
+// that holds the zone's slot, an existing live challenge is never overwritten
+// by a different key authorization (first writer wins), each node has a small
+// quota of live challenges, and every slot and challenge call is logged with
+// the node, the zone and the token's prefix. Rotate the agent token on any
+// node compromise.
 
 import (
 	"encoding/json"
@@ -39,9 +51,12 @@ const (
 	// edgeChallengeTTL is how long a fanned-out challenge is served. A CA
 	// validates within seconds of Accept.
 	edgeChallengeTTL = 10 * time.Minute
-	// maxFannedChallenges bounds the table: an agent token could otherwise
-	// grow the document without limit.
+	// maxFannedChallenges bounds the table across the fleet; per-node quotas
+	// below keep one node from filling it.
 	maxFannedChallenges = 1024
+	// maxChallengesPerNode is one node's share of live challenges: one order
+	// at a time per zone means a handful at most.
+	maxChallengesPerNode = 16
 	// maxEdgeACMEBodyBytes bounds a slot or challenge request body.
 	maxEdgeACMEBodyBytes = 4 << 10
 )
@@ -63,9 +78,21 @@ type fannedKey struct {
 }
 
 type fannedChallenge struct {
+	node    string
 	keyAuth string
 	until   time.Time
 }
+
+// publishResult is what publish decided.
+type publishResult int
+
+const (
+	publishOK publishResult = iota
+	publishNoSlot
+	publishConflict
+	publishQuota
+	publishFull
+)
 
 // issuanceCoordinator is the in-memory slot and challenge table.
 type issuanceCoordinator struct {
@@ -127,28 +154,59 @@ func (c *issuanceCoordinator) release(zone, node string) bool {
 	return true
 }
 
-// publish fans out a challenge; false when the table is full.
-func (c *issuanceCoordinator) publish(zone, token, keyAuth string, now time.Time) bool {
+// publish fans out a challenge from node. The node must hold the zone's
+// slot; a live challenge for the same (zone, token) with a different key
+// authorization is never overwritten; a node may hold maxChallengesPerNode
+// live entries; the fleet table is bounded.
+func (c *issuanceCoordinator) publish(zone, token, keyAuth, node string, now time.Time) publishResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweepLocked(now)
-	k := fannedKey{zone, token}
-	if _, exists := c.challenges[k]; !exists && len(c.challenges) >= maxFannedChallenges {
-		return false
+	if g, ok := c.grants[zone]; !ok || g.node != node {
+		return publishNoSlot
 	}
-	c.challenges[k] = fannedChallenge{keyAuth: keyAuth, until: now.Add(edgeChallengeTTL).Truncate(time.Second)}
+	k := fannedKey{zone, token}
+	if existing, ok := c.challenges[k]; ok {
+		if existing.keyAuth != keyAuth || existing.node != node {
+			return publishConflict
+		}
+		// Idempotent re-publish: refresh the deadline.
+		existing.until = now.Add(edgeChallengeTTL).Truncate(time.Second)
+		c.challenges[k] = existing
+		return publishOK
+	}
+	mine := 0
+	for _, ch := range c.challenges {
+		if ch.node == node {
+			mine++
+		}
+	}
+	if mine >= maxChallengesPerNode {
+		return publishQuota
+	}
+	if len(c.challenges) >= maxFannedChallenges {
+		return publishFull
+	}
+	c.challenges[k] = fannedChallenge{node: node, keyAuth: keyAuth, until: now.Add(edgeChallengeTTL).Truncate(time.Second)}
 	c.notify()
-	return true
+	return publishOK
 }
 
-// fill adds the live grants and challenges to a document. Times are whole
-// seconds and never recomputed, so the encoding — and the ETag — is stable
-// while an entry lives.
+// fill adds the live grants and challenges of the document's zones to it.
+// Times are whole seconds and never recomputed, so the encoding — and the
+// ETag — is stable while an entry lives.
 func (c *issuanceCoordinator) fill(doc *edgedoc.Doc, now time.Time) {
+	zones := make(map[string]bool, len(doc.Zones))
+	for _, z := range doc.Zones {
+		zones[z.Name] = true
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweepLocked(now)
 	for k, ch := range c.challenges {
+		if !zones[k.zone] {
+			continue
+		}
 		doc.ACMEChallenges = append(doc.ACMEChallenges, edgedoc.Challenge{Zone: k.zone, Token: k.token, KeyAuthorization: ch.keyAuth, ExpiresAt: ch.until})
 	}
 	sort.Slice(doc.ACMEChallenges, func(i, j int) bool {
@@ -159,6 +217,9 @@ func (c *issuanceCoordinator) fill(doc *edgedoc.Doc, now time.Time) {
 		return a.Token < b.Token
 	})
 	for zone, g := range c.grants {
+		if !zones[zone] {
+			continue
+		}
 		doc.IssuanceGrants = append(doc.IssuanceGrants, edgedoc.Grant{Zone: zone, Node: g.node, ExpiresAt: g.until})
 	}
 	sort.Slice(doc.IssuanceGrants, func(i, j int) bool { return doc.IssuanceGrants[i].Zone < doc.IssuanceGrants[j].Zone })
@@ -178,12 +239,13 @@ func (c *issuanceCoordinator) sweepLocked(now time.Time) {
 }
 
 // edgeACMEZoneKnown reports whether the zones document has this zone.
-func edgeACMEZoneKnown(cfg *configWithZones, zone string) bool {
-	if cfg == nil || cfg.zones == nil {
+func (s *Server) edgeACMEZoneKnown(zone string) bool {
+	z := s.store.Get().ZonesCfg
+	if z == nil {
 		return false
 	}
-	for _, z := range cfg.zones.Zones {
-		if z.Name == zone {
+	for _, zz := range z.Zones {
+		if zz.Name == zone {
 			return true
 		}
 	}
@@ -203,8 +265,8 @@ type EdgeSlotResponse struct {
 	// Holder and RetryAfterSeconds are set when not granted.
 	Holder            string `json:"holder,omitempty"`
 	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
-	// ExpiresAt is the lease deadline when granted.
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	// ExpiresAt is the lease deadline when granted; absent otherwise.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 // handleEdgeACMESlot serialises issuance per zone.
@@ -217,20 +279,25 @@ func (s *Server) handleEdgeACMESlot(w http.ResponseWriter, r *http.Request) {
 	if !decodeEdgeACMEBody(w, r, &req) {
 		return
 	}
-	if !edgeACMEZoneKnown(s.zonesForACME(), req.Zone) {
-		writeError(w, http.StatusNotFound, "unknown zone")
+	if req.Release {
+		// A release touches only the caller's own grant and is idempotent, so
+		// it is honoured even for a zone removed since — a lingering grant
+		// would otherwise sit in the document until its lease ran out.
+		released := s.edgeIssuance.release(req.Zone, name)
+		s.log.Info("edge acme slot released", "node", name, "zone", req.Zone, "held", released)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if req.Release {
-		s.edgeIssuance.release(req.Zone, name)
-		w.WriteHeader(http.StatusNoContent)
+	if !s.edgeACMEZoneKnown(req.Zone) {
+		writeError(w, http.StatusNotFound, "unknown zone")
 		return
 	}
 	now := time.Now()
 	granted, holder, until := s.edgeIssuance.acquire(req.Zone, name, now)
 	resp := EdgeSlotResponse{Granted: granted}
 	if granted {
-		resp.ExpiresAt = until
+		u := until
+		resp.ExpiresAt = &u
 	} else {
 		resp.Holder = holder
 		retry := int(until.Sub(now).Seconds()) + 1
@@ -242,6 +309,7 @@ func (s *Server) handleEdgeACMESlot(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.RetryAfterSeconds = retry
 	}
+	s.log.Info("edge acme slot requested", "node", name, "zone", req.Zone, "granted", granted, "holder", holder)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -254,14 +322,15 @@ type EdgeChallengeRequest struct {
 
 // handleEdgeACMEChallenge fans a pending HTTP-01 challenge out to the fleet.
 func (s *Server) handleEdgeACMEChallenge(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.edgeACMECaller(w, r); !ok {
+	name, ok := s.edgeACMECaller(w, r)
+	if !ok {
 		return
 	}
 	var req EdgeChallengeRequest
 	if !decodeEdgeACMEBody(w, r, &req) {
 		return
 	}
-	if !edgeACMEZoneKnown(s.zonesForACME(), req.Zone) {
+	if !s.edgeACMEZoneKnown(req.Zone) {
 		writeError(w, http.StatusNotFound, "unknown zone")
 		return
 	}
@@ -269,11 +338,40 @@ func (s *Server) handleEdgeACMEChallenge(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "token and key_authorization must be ACME base64url values")
 		return
 	}
-	if !s.edgeIssuance.publish(req.Zone, req.Token, req.KeyAuthorization, time.Now()) {
-		writeError(w, http.StatusServiceUnavailable, "challenge table is full; retry shortly")
-		return
+	res := s.edgeIssuance.publish(req.Zone, req.Token, req.KeyAuthorization, name, time.Now())
+	tokenPrefix := req.Token
+	if len(tokenPrefix) > 8 {
+		tokenPrefix = tokenPrefix[:8]
 	}
-	w.WriteHeader(http.StatusNoContent)
+	s.log.Info("edge acme challenge published", "node", name, "zone", req.Zone, "token", tokenPrefix+"…", "result", res)
+	switch res {
+	case publishOK:
+		w.WriteHeader(http.StatusNoContent)
+	case publishNoSlot:
+		writeError(w, http.StatusConflict, "this node does not hold the zone's issuance slot; acquire it first")
+	case publishConflict:
+		writeError(w, http.StatusConflict, "a live challenge with this token already exists with a different key authorization")
+	case publishQuota:
+		writeError(w, http.StatusTooManyRequests, "this node has too many live challenges; let them expire")
+	default:
+		writeError(w, http.StatusServiceUnavailable, "challenge table is full; retry shortly")
+	}
+}
+
+// String names a publishResult for logs.
+func (p publishResult) String() string {
+	switch p {
+	case publishOK:
+		return "ok"
+	case publishNoSlot:
+		return "no_slot"
+	case publishConflict:
+		return "conflict"
+	case publishQuota:
+		return "quota"
+	default:
+		return "full"
+	}
 }
 
 // edgeACMECaller applies the edge channel's rules to an ACME request: unscoped
@@ -304,24 +402,4 @@ func decodeEdgeACMEBody(w http.ResponseWriter, r *http.Request, v any) bool {
 		return false
 	}
 	return true
-}
-
-// configWithZones is the slice of config the ACME handlers look at.
-type configWithZones struct {
-	zones *edgedocZones
-}
-
-type edgedocZones = struct{ Zones []struct{ Name string } }
-
-// zonesForACME adapts the store's zones for edgeACMEZoneKnown.
-func (s *Server) zonesForACME() *configWithZones {
-	z := s.store.Get().ZonesCfg
-	if z == nil {
-		return &configWithZones{}
-	}
-	out := &edgedocZones{}
-	for _, zone := range z.Zones {
-		out.Zones = append(out.Zones, struct{ Name string }{zone.Name})
-	}
-	return &configWithZones{zones: out}
 }

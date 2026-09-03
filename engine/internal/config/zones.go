@@ -86,7 +86,11 @@ type ZoneACME struct {
 	// Fallback is the directory a node turns to after repeated failures with
 	// the primary — the answer to Let's Encrypt's duplicate-certificate
 	// ceiling on a fleet (edge-spec §3, §9). Empty means the node default
-	// fallback, which may be none.
+	// fallback, which may be none. A success from either directory clears
+	// the failure state, so the following renewal tries the primary first.
+	// A CA that requires an External Account Binding (ZeroSSL, Google Trust
+	// Services) needs its kid and HMAC key in the NODE's configuration — the
+	// zones file carries no secrets — or it refuses the account.
 	Fallback string `yaml:"fallback"`
 }
 

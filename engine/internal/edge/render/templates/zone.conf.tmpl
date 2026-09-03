@@ -56,6 +56,10 @@ server {
 
     ssl_certificate     {{.Cert.Fullchain}};
     ssl_certificate_key {{.Cert.Key}};
+{{- if .Cert.Serial}}
+    # certificate serial {{.Cert.Serial}} — the paths above are stable across
+    # renewals; this line is what makes a renewal a new, tested generation.
+{{- end}}
     # Honoured per zone from nginx 1.29.2 and on Angie; older nginx applies the
     # catch-all's node-wide floor instead (see {{.CommonFile}}).
     ssl_protocols {{.SSLProtocols}};

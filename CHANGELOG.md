@@ -64,14 +64,20 @@ security-relevant.
   `BenchmarkDecideOverUnixSocket` round trip (p50/p99) and the parallel throughput.
 - Edge track, E3.4 — per-node ACME (`internal/edge/acme`, on `golang.org/x/crypto/acme`, the
   repository's eighth direct dependency): one account key per CA directory and one certificate
-  per zone, keys generated on the node and kept `0600` under its state directory; HTTP-01 only;
-  renewal from day 60 of 90 with per-zone jitter, exponential backoff on failure and a fallback
-  CA after three consecutive failures; the challenge answerer on the unix socket the renderer
+  per zone, keys generated on the node and kept `0600` under its state directory as whole
+  certificate sets behind a `current` link — one rename switches, the pair is verified on load;
+  HTTP-01 only; renewal from day 60 of 90 (a third of the lifetime for shorter certificates)
+  with per-node, per-zone jitter, exponential backoff on failure and a fallback CA after three
+  consecutive failures; External Account Binding per directory for CAs that require one; the
+  certificate's serial reaches the rendered zone file so a renewal is a new, `nginx -t`-tested
+  generation; the challenge answerer on the unix socket the renderer
   routes `/.well-known/acme-challenge/` to, serving this node's pending challenges and the ones
   the brain fans out. Brain side: an in-memory issuance coordinator — per-zone slots with a
   10-minute lease (`POST /api/v1/edge/nodes/{name}/acme/slot`) and challenge fan-out through
-  the zones document (`POST …/acme/challenges`), both waking parked long-polls. Both are
-  advisory to the node: it renews with the brain gone. The zones file gained `acme.fallback`
+  the zones document (`POST …/acme/challenges`; only the slot holder may publish, a live
+  challenge is never overwritten, 16 live per node), both waking parked long-polls, both
+  logged. Both are advisory to the node: it waits up to 15 minutes for a slot on its own budget
+  and renews with the brain gone. The zones file gained `acme.fallback`
   (per-zone fallback directory) and the zone document `acme_fallback`. Metrics
   `kapkan_edge_cert_not_after_seconds{zone}` (the T−30 d alarm) and
   `kapkan_edge_acme_attempts_total`. `kapkan edge` wiring is E3.5.

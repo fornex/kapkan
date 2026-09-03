@@ -156,7 +156,7 @@ The channel is the one the scrub node already uses, with a second document famil
 
 | Failure | Behavior |
 |---|---|
-| Brain dies / partition | Node keeps serving: last zone doc + certs are on disk, ACME renewals continue autonomously, challenge policy freezes as-is, XDP dynamic rules age out on in-kernel TTL. Fail-static, indefinitely. |
+| Brain dies / partition | Node keeps serving: last zone doc + certs are on disk, ACME renewals continue autonomously, challenge policy freezes as-is, XDP dynamic rules age out on in-kernel TTL. Fail-static, indefinitely. Caveat: without the brain there is no challenge fan-out, so under a shared/anycast VIP a renewal succeeds only when the CA's validation lands on the ordering node (about 1/N per attempt); such attempts retry hourly and do not count toward the fallback CA. |
 | nginx dies | systemd restarts it. Kapkan reports the gap (`/healthz` condition + report field); it never supervises or respawns the terminator itself. |
 | Decision service dies / times out | Per-zone `failure_mode: open` (default — requests pass undecided, counted) or `closed` (503). Default is open: the edge analog of default-PASS. |
 | Renders produce a broken config | `nginx -t` against the candidate file gates every reload; a failing candidate is never installed, the old config keeps serving, the failure is a report field + metric. Mirrors the validate-before-apply gate the config package already enforces (the same validator that ships as `cmd/kapkan-validate`). |
@@ -186,20 +186,39 @@ The channel is the one the scrub node already uses, with a second document famil
   staggered initial rollout, renewal jitter, and a configurable fallback ACME directory per
   zone (ZeroSSL / Google Trust Services). The ceiling is documented, not hidden.
   *Decided in E3.4 (`internal/edge/acme`, `internal/api/edge_acme.go`):* the node keeps one
-  account key per CA directory and `certs/<zone>/{privkey.pem 0600, fullchain.pem, meta.json}`
-  under its state directory, written whole and renamed, meta last. Renewal is due when less than
-  30 days remain (day 60 of 90) minus a per-zone jitter of up to a day; a failed order backs off
-  1 h → 24 h, and after three consecutive failures the next attempt uses the fallback directory
-  (`acme.fallback` in the zones file, else the node default), alternating from then on; a CA
-  429 is not retried within an order. The brain coordinates through two routes a node calls
-  with its agent token — `POST /api/v1/edge/nodes/{name}/acme/slot` (a per-zone lease of
-  10 min; `{"granted":false,"holder","retry_after_seconds"}` when another node holds it;
-  `release: true` returns it) and `POST …/acme/challenges` (token + key authorization, fanned
-  out in `acme_challenges` for 10 min) — both in memory, both waking parked zone polls, both
-  **advisory**: a node waits at most 15 min for a slot and then orders anyway, and a failed
-  fan-out leaves this node answering alone. The challenge answerer serves this node's pending
+  account key per CA directory and, per zone, whole certificate *sets* —
+  `certs/<zone>/<generation>/{privkey.pem 0600, fullchain.pem, meta.json}` — behind a
+  `certs/<zone>/current` link that one rename retargets, so a crash never leaves a key from one
+  issuance beside a chain from another; on load the pair is verified and the dates, serial and
+  issuer are read from the leaf, `meta.json` being a marker only, and one unusable set is logged
+  and skipped, not fatal for the node. The renderer receives the certificate's serial and writes
+  it into the zone file, which is what makes a renewal a new generation (the paths through
+  `current` never change): tested by `nginx -t`, then reloaded. Renewal is due when less than
+  the window remains — 30 days, or a third of the certificate's lifetime when that is shorter —
+  minus a per-(node, zone) jitter of up to a day and never more than a quarter of the window; a
+  failed order backs off 1 h → 24 h, and after three consecutive failures the next attempt uses
+  the fallback directory (`acme.fallback` in the zones file, else the node default), alternating
+  from then on; a success from either directory clears the failure state, so the following
+  renewal tries the primary first; a CA 429 is not retried within an order. A CA that requires
+  an External Account Binding (ZeroSSL, Google Trust Services) gets one from the node's own
+  configuration (`acme.eab`, per directory: kid + HMAC key; E3.5 wires it) — without it those
+  directories refuse the account, so a fallback without EAB must be an EAB-free CA. The brain
+  coordinates through two routes a node calls with its agent token —
+  `POST /api/v1/edge/nodes/{name}/acme/slot` (a per-zone lease of 10 min;
+  `{"granted":false,"holder","retry_after_seconds"}` when another node holds it; `release: true`
+  returns it, honoured even for a zone since removed) and `POST …/acme/challenges` (token + key
+  authorization, fanned out in `acme_challenges` for 10 min) — both in memory, both waking parked
+  zone polls, both **advisory**: a node waits at most 15 min for a slot *under its own budget*
+  (the 5-min order clock starts only after the slot phase, and an unobtained slot is not a
+  counted failure) and then orders anyway, and a failed fan-out leaves this node answering
+  alone. The coordinator narrows what one agent token can do and makes every use visible: a
+  challenge is published only by the node holding the zone's slot, a live challenge is never
+  overwritten by a different key authorization (first writer wins, 409), each node has a quota
+  of 16 live challenges inside the fleet cap of 1024, and every slot and challenge call is
+  logged with node, zone and token prefix. The challenge answerer serves this node's pending
   challenges plus the fanned-out ones over the unix socket the renderer routes the ACME location
-  to, GET/HEAD only. `kapkan_edge_cert_not_after_seconds{zone}` is the T−30 d alarm's source.
+  to, GET/HEAD only. `kapkan_edge_cert_not_after_seconds{zone}` is the T−30 d alarm's source;
+  the series is dropped when a zone leaves the document.
 - **Wildcard = DNS-01 = a DNS-provider integration:** deferred, v1 issues explicit names only.
 - **Session resumption across a multi-node PoP:** ticket keys must be shared or resumption
   breaks under anycast; single-node PoPs (v1) skip this. Rotating a shared ticket key via the
@@ -430,7 +449,11 @@ protects layer 3 of the table in §1.
 5. **Scope creep toward a CDN/WAF** → the charter sentence + §7 table are the review contract,
    exactly as the data-plane charter is for `bpf/`.
 6. **Key theft from a node** → per-node blast radius by design; runbook: revoke via ACME,
-   reissue, rotate clearance keys; document that the brain holds nothing to steal.
+   reissue, rotate clearance keys; document that the brain holds nothing to steal. The agent
+   token is the exception to "one node": until tokens are bound to nodes (E6) it is a
+   certificate-issuing credential — a holder can publish a key authorization for any fleet zone
+   through the coordinator (visible: slot required, logged) — so the runbook also rotates the
+   agent token on any node compromise.
 7. **The second metric family bloats the engine** → L7 counters enter through the same
    hostgroup/threshold/baseline machinery, not a parallel engine; review holds that line.
 
