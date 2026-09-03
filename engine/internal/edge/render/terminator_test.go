@@ -228,17 +228,19 @@ func TestRealTerminator(t *testing.T) {
 		}
 
 		// Nothing the client sends can push the subrequest off the contract:
-		// 40 KiB of junk headers and a cookie never reach the decider, and the
+		// 22 KiB of junk headers and a cookie — above the 16 KiB the decider
+		// once capped at, below nginx's own 32 KiB (large_client_header_buffers)
+		// so nginx admits the request — never reach the decider, and the
 		// request is still decided (a 429, not an undecided 200).
 		junk := http.Header{"Cookie": {"session=" + strings.Repeat("c", 2000)}}
-		for i := 0; i < 40; i++ {
+		for i := 0; i < 20; i++ {
 			junk.Set(fmt.Sprintf("X-Junk-%d", i), strings.Repeat("j", 1000))
 		}
 		d.setReason(403, "rate")
 		s.request(t, "GET", true, "example.com", "/junk", "", junk).expect(t, 429, "")
-		seen = d.last()
-		if seen.req.URL.Path != "/decide" || seen.req.Header.Get("X-Junk-0") != "" || seen.req.Header.Get("Cookie") != "" || seen.req.Header.Get("X-Kapkan-Uri") != "/junk" {
-			t.Errorf("client headers reached the decider: %v", seen.req.Header)
+		seenJunk := d.last()
+		if seenJunk.req.URL.Path != "/decide" || seenJunk.req.Header.Get("X-Junk-0") != "" || seenJunk.req.Header.Get("Cookie") != "" || seenJunk.req.Header.Get("X-Kapkan-Uri") != "/junk" {
+			t.Errorf("client headers reached the decider: %v", seenJunk.req.Header)
 		}
 		// A control byte in a header value: nginx accepts it, the decider must
 		// never see it, and the decision still happens.
