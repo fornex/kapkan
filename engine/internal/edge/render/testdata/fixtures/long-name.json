@@ -1,0 +1,22 @@
+{
+  "doc": {
+    "version": 1,
+    "zones": [
+      {
+        "name": "a-very-long-zone-name-that-does-not-fit-the-default-hash-bucket.example.com",
+        "origins": ["10.0.0.9:8080"],
+        "tls": {"min_version": "1.2"},
+        "policy": {"mode": "decide", "failure_mode": "open", "challenge": "off", "rate": {}}
+      }
+    ],
+    "acme_challenges": [],
+    "issuance_grants": []
+  },
+  "certs": {
+    "a-very-long-zone-name-that-does-not-fit-the-default-hash-bucket.example.com": {
+      "fullchain": "/var/lib/kapkan/edge/certs/a-very-long-zone-name-that-does-not-fit-the-default-hash-bucket.example.com/fullchain.pem",
+      "key": "/var/lib/kapkan/edge/certs/a-very-long-zone-name-that-does-not-fit-the-default-hash-bucket.example.com/privkey.pem"
+    }
+  },
+  "node": {}
+}

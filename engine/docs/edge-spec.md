@@ -221,9 +221,36 @@ zones:
   validates the same bytes): JSON schema + overlay + the config-builder wizard + documentation
   in all five locales — **that schema/docs wave is the long pole of E3**, as it was for the
   data plane.
-- Rendering: templates embedded in the binary → `conf.d/kapkan_*.conf`. One documented escape
+- Rendering: templates embedded in the binary → `kapkan_*.conf` files. One documented escape
   hatch (`extra_directives_file`, included verbatim, "you own what it breaks"); no template
   override mechanism — that way lies unsupportable config drift.
+  *Decided in E3.2 (`internal/edge/render`, `internal/edge/apply`):* the node keeps rendered
+  generations under `/var/lib/kapkan/edge/conf/gen-N/` behind a `live` symlink, and the
+  operator's `nginx.conf` includes that once — `include /var/lib/kapkan/edge/conf/live/*.conf;`
+  inside `http{}`. An install is: write the generation whole, retarget `live`, `nginx -t`, then
+  reload — or, on a failed test, retarget back and keep the candidate as `failed-N` for reading.
+  A generation records what it earned (`.kapkan-tested`, `.kapkan-reloaded`), so a process that
+  died between swap and test cannot leave an untested generation trusted (`Recover` at startup
+  tests it) and a failed reload is retried on the next poll. A render whose bytes equal the live
+  generation's is skipped (no test, no reload), installs are paced ≥1 s apart counted from the
+  last attempt, and the directory is flock'ed across processes. **`policy.rate` is not rendered
+  at all** — it is the decision service's to enforce (§2.2), so a rate change never touches the
+  terminator. Fail-open is `auth_request` with the failure absorbed inside the subrequest
+  (`error_page 5xx =200 /_kapkan/undecided`, so the main request keeps its keepalive and a mark
+  is believed only from a real 200); closed answers 503; every allowed request ends in
+  `@kapkan_pass` via `try_files`, so there is one origin path, and kapkan owns `X-Kapkan-Zone` /
+  `X-Kapkan-Mark` towards the origin. The shared file adds a kapkan catch-all `default_server`
+  on :80/:443 (444, `ssl_reject_handshake`) so an unknown Host or SNI is refused rather than served
+  by whichever zone sorts first; its `ssl_protocols` is the node-wide floor (lowest
+  `tls.min_version`), because **nginx before 1.29.2 applies the default server's protocols to
+  every SNI** — per-zone floors hold on nginx ≥ 1.29.2 and Angie only, and the matrix asserts
+  which. A zone without a certificate renders only its `:80` listener (ACME challenges via
+  GET/HEAD, otherwise 503) — nothing is proxied over cleartext. Hostname origins are resolved once,
+  at `nginx -t`; an unresolvable one fails the whole generation (prefer `ip:port`). nginx floor:
+  1.22 (`listen … ssl http2`, which nginx ≥ 1.25.1 warns about). CI renders every fixture and runs
+  it on nginx 1.22, nginx stable and Angie — `nginx -t` first, then live requests through the
+  served render: fail-open with and without a decider, keepalive, WebSocket upgrade, catch-all,
+  TLS floor, ACME.
 - The brain serves zones to nodes as a versioned ETag'd doc; per-node scoping (which node
   serves which zones) is a fleet concern deferred to E6 with hostgroup-scoped agent tokens.
 

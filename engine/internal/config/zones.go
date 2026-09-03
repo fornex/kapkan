@@ -11,7 +11,9 @@ package config
 // This file follows the house wasm discipline like the rest of the package: no
 // filesystem probes beyond reading the file (ParseZones is pure and is what the
 // browser-side validator will compile), no netlink, no imports outside the
-// standard library and yaml. A path in a zone (extra_directives_file) is checked
+// standard library and yaml — plus internal/edge/edgedoc, the standard-library-
+// only leaf that owns the policy vocabulary the brain and the node share. A
+// path in a zone (extra_directives_file) is checked
 // for SHAPE here and for existence on the node that renders it — the brain may
 // not even have that file.
 //
@@ -32,6 +34,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
 
 // Zones is the parsed zones.yaml.
@@ -105,19 +109,20 @@ type ZoneRate struct {
 	Concurrency uint64 `yaml:"concurrency"`
 }
 
-// Zone policy vocabulary. Exported so the API document and the node agree on
-// the exact strings without a second definition.
+// Zone policy vocabulary. ONE definition, owned by the wire-contract package
+// the node's renderer also imports, so the file, the API document and the node
+// cannot drift on a string.
 const (
-	ZonePolicyDecide = "decide"
-	ZonePolicyNone   = "none"
+	ZonePolicyDecide = edgedoc.ModeDecide
+	ZonePolicyNone   = edgedoc.ModeNone
 
-	ZoneFailOpen   = "open"
-	ZoneFailClosed = "closed"
+	ZoneFailOpen   = edgedoc.FailOpen
+	ZoneFailClosed = edgedoc.FailClosed
 
-	ZoneChallengeOff = "off"
+	ZoneChallengeOff = edgedoc.ChallengeOff
 
-	ZoneTLS12 = "1.2"
-	ZoneTLS13 = "1.3"
+	ZoneTLS12 = edgedoc.TLS12
+	ZoneTLS13 = edgedoc.TLS13
 )
 
 // hostnameLabelRe is one RFC 1123 label: 1-63 chars of [a-z0-9-], not starting
@@ -242,13 +247,32 @@ func (zone *Zone) validate() error {
 		return fmt.Errorf("%s: policy.challenge %q is not supported yet (challenges are a later milestone); only %q is accepted", zone.Name, p.Challenge, ZoneChallengeOff)
 	}
 
-	if f := zone.ExtraDirectivesFile; f != "" && !filepath.IsAbs(f) {
-		// Absolute so the file means the same thing on every node and in
-		// every review; existence is the node's business (see the field doc).
-		return fmt.Errorf("%s: extra_directives_file must be an absolute path, got %q", zone.Name, f)
+	if len(zone.Name) > maxZoneNameLen {
+		// The name becomes a file name on the node (kapkan_zone_<name>.conf,
+		// within NAME_MAX); DNS allows 253, nothing real is longer than this.
+		return fmt.Errorf("%s: name is %d characters; at most %d are accepted", zone.Name, len(zone.Name), maxZoneNameLen)
+	}
+	if f := zone.ExtraDirectivesFile; f != "" {
+		if !filepath.IsAbs(f) {
+			// Absolute so the file means the same thing on every node and in
+			// every review; existence is the node's business (see the field doc).
+			return fmt.Errorf("%s: extra_directives_file must be an absolute path, got %q", zone.Name, f)
+		}
+		// The path is interpolated into an nginx `include`. A character that
+		// ends or comments out the directive is a config injection; a glob
+		// metacharacter turns the include into a pattern, and a pattern that
+		// matches nothing passes `nginx -t` — voiding the one guard the escape
+		// hatch has. Refused here so a renderer never sees either.
+		if strings.ContainsAny(f, " \t\r\n;{}#\"'\\$*?[]") {
+			return fmt.Errorf("%s: extra_directives_file %q contains a character nginx would misread (whitespace, ; { } # quotes \\ $ or a glob metacharacter)", zone.Name, f)
+		}
 	}
 	return nil
 }
+
+// maxZoneNameLen bounds a zone name so that the node's per-zone file name
+// (kapkan_zone_<name>.conf) stays within NAME_MAX. Mirrored by the renderer.
+const maxZoneNameLen = 238
 
 // normalizeHostname lowercases and validates an explicit DNS hostname: RFC 1123
 // labels joined by dots, at most 253 characters, no wildcard, no trailing dot,

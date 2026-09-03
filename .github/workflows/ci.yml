@@ -349,6 +349,52 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
 
+  # The edge renderer's output is only proven by the terminator it targets
+  # (edge-spec §9, risk 4): `nginx -t` on every fixture zone set, then live
+  # requests through the served render — the fail-open idiom included. One cell
+  # per supported terminator: nginx 1.22 (the documented floor), nginx stable,
+  # Angie current. Each reports independently for the same reason the kernel
+  # matrix does.
+  edge-terminator:
+    name: edge terminator (${{ matrix.slug }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "nginx:1.22", slug: "nginx-1.22" }
+          - { image: "nginx:stable", slug: "nginx-stable" }
+          - { image: "docker.angie.software/angie:latest", slug: "angie" }
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache: true
+          cache-dependency-path: engine/go.sum
+
+      - name: Render every fixture and run it on ${{ matrix.image }}
+        run: >
+          KAPKAN_EDGE_TERMINATOR=require
+          KAPKAN_EDGE_TERMINATOR_IMAGE=${{ matrix.image }}
+          KAPKAN_EDGE_TERMINATOR_OUT=${{ github.workspace }}/engine/.edge-terminator
+          go test -count=1 -v -run TestRealTerminator ./internal/edge/render/
+
+      # The rendered files and the terminator's own log are the whole product
+      # of a failure here; keep them on success too, so a passing render can
+      # be read against the one that later failed.
+      - name: Upload rendered configs and terminator logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-terminator-${{ matrix.slug }}
+          path: engine/.edge-terminator/**
+          include-hidden-files: true
+          if-no-files-found: warn
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest

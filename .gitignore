@@ -18,3 +18,8 @@ site/frontend/content/docs/
 # kernel-matrix scratch: cached guest kernels (~12MB each), the generated
 # initramfs payload and the per-kernel boot logs. See engine/hack/kernel-matrix.
 engine/.kernel-matrix/
+
+# edge-terminator scratch: rendered fixture configs, throwaway certificates
+# and terminator logs when KAPKAN_EDGE_TERMINATOR_OUT points inside the tree
+# (CI does, to upload them). See engine/internal/edge/render/terminator_test.go.
+engine/.edge-terminator/

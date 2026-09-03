@@ -1,0 +1,16 @@
+{
+  "doc": {
+    "version": 1,
+    "zones": [
+      {
+        "name": "new.example.com",
+        "origins": ["10.0.0.5:80"],
+        "tls": {"min_version": "1.2"},
+        "policy": {"mode": "decide", "failure_mode": "open", "challenge": "off", "rate": {}}
+      }
+    ],
+    "acme_challenges": [],
+    "issuance_grants": []
+  },
+  "node": {}
+}
