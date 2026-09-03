@@ -1,0 +1,208 @@
+export const metadata = {
+  title: "Einen Edge-Knoten installieren",
+  description:
+    "Schritt für Schritt: die Zonen und den Knoten auf dem Gehirn deklarieren, nginx oder Angie vorbereiten, die kapkan-edge-Unit installieren, prüfen und in den Echtbetrieb gehen.",
+};
+
+# Einen Edge-Knoten installieren
+
+Diese Anleitung führt eine Box vom unveränderten nginx- (oder Angie-)Paket zu einem verwalteten
+[Edge-Knoten](/docs/edge), der Ihre Zonen mit ausgestellten Zertifikaten und Entscheidungen pro
+Anfrage bedient. Lesen Sie zuerst die Konzeptseite, falls die Begriffe *Zone*,
+*Entscheidungsdienst* oder *Fast/Slow-Trennung* neu für Sie sind.
+
+Sie benötigen: ein Gehirn (den `kapkan`-Daemon), das von der Box über HTTPS erreichbar ist, ein
+`agent`-Token darauf, eine Linux-Box mit installiertem nginx ≥ 1.22 oder Angie, die Ports 80 und
+443 offen zur Welt, und DNS für die Zonen, das auf die Box zeigt (oder auf die Anycast-/VIP-Adresse,
+die sich die Boxen teilen).
+
+## 1. Auf dem Gehirn: Zonen und Knoten
+
+Schreiben Sie die Zonen-Datei — sie ist **Mandantendaten** und wird getrennt von `kapkan.yaml`
+gehalten — und richten Sie das Gehirn darauf:
+
+```yaml
+# /etc/kapkan/zones.yaml
+zones:
+  - name: shop.example.com
+    origins: ["10.0.0.10:8080"]
+    policy: { mode: decide, failure_mode: open, rate: { rps: 50, concurrency: 20 } }
+  - name: static.example.com
+    origins: ["10.0.0.20:80"]
+    policy: { mode: none }             # proxy only, no decisions
+```
+
+```yaml
+# /etc/kapkan/config.yaml (the brain)
+edge:
+  zones_file: /etc/kapkan/zones.yaml   # absolute; the whole reload fails on a broken file
+  nodes:
+    - name: edge-1                     # must equal the node's controller.name
+    - name: edge-2
+  stale_after_seconds: 15              # a node unheard-from this long counts as lost
+api:
+  tokens:
+    - { name: edge-agent, token_env: KAPKAN_EDGE_AGENT_TOKEN, role: agent }
+```
+
+`kapkan -check-config /etc/kapkan/config.yaml` validiert beide Dateien (es folgt
+`edge.zones_file`), und `kapkan -dump-zones-schema` gibt das JSON-Schema der Zonen-Datei für Ihren
+Editor aus. Eine Zonen-Datei, die sich bei einem Reload nicht lesen oder validieren lässt, **hält
+die vorherigen Zonen live** — das Gehirn liefert niemals ein halb defektes Dokument aus. Jeder
+Schlüssel steht in der [Zonen-Referenz](/docs/zones).
+
+<Callout type="info" title="Das agent-Token ist ein Credential zum Ausstellen von Zertifikaten">
+Ein Edge-Knoten authentifiziert sich mit einem `agent`-Token (siehe
+[Authentifizierung](/docs/authentication)). Neben dem Pollen des Dokuments nutzt er dieses Token,
+um die Zertifikatsausstellung über das Gehirn zu koordinieren. Bewahren Sie es in der
+Umgebungsdatei des Knotens auf, niemals in der `edge.yaml`, und rotieren Sie es, wenn ein Knoten
+kompromittiert ist.
+</Callout>
+
+## 2. Auf der Box: nginx oder Angie
+
+Kapkan besitzt ein Include-Verzeichnis und steuert `nginx -t` sowie die Reloads; es liefert nginx
+weder mit noch überwacht es ihn. Lassen Sie Ihre Hauptkonfiguration die aktive Generation
+**einmal** einbinden, innerhalb von `http {}`:
+
+```nginx
+http {
+    # ... your defaults ...
+    include /var/lib/kapkan-edge/conf/live/*.conf;
+}
+```
+
+Entfernen Sie jeden `default_server` auf `:80`/`:443` (oder planen Sie, ihn zu behalten, siehe
+unten) — Kapkan rendert sein eigenes Catch-all, das unbekannte Hosts abweist. Debians Default-Site
+deklariert eines; deaktivieren Sie entweder die Site oder setzen Sie `omit_catch_all: true` in der
+`edge.yaml`. Bestätigen Sie dann, dass das Include mit einem leeren Verzeichnis kompiliert:
+
+```sh
+mkdir -p /var/lib/kapkan-edge/conf/live && nginx -t
+```
+
+Ermitteln Sie die **Gruppe des Workers** — `nginx` für nginx.org-Pakete und das Docker-Image,
+`www-data` für Debians eigenes Paket, `angie` für Angie. Der Entscheidungs- und der Log-Socket
+werden mit `0660` für diese Gruppe angelegt.
+
+## 3. Der Knoten: `edge.yaml`, das Token, die Unit
+
+Installieren Sie dasselbe `kapkan`-Binary wie auf dem Gehirn, dann die eigene Konfiguration des
+Knotens:
+
+```yaml
+# /etc/kapkan/edge.yaml
+dry_run: true                          # watch-only until the counts look right
+controller:
+  url: https://kapkan.example.net:8443 # the brain's API base, https outside a lab
+  token_env: KAPKAN_EDGE_TOKEN         # the agent token's environment variable
+  name: edge-1                         # must equal an edge.nodes[] entry on the brain
+  report_interval_seconds: 10
+state_dir: /var/lib/kapkan-edge        # cached document, generations, keys, certificates
+sockets_dir: /run/kapkan-edge          # the three unix sockets nginx talks to
+socket_group: nginx                    # the terminator's worker group
+terminator:
+  binary: nginx                        # or angie
+  main_conf: /etc/nginx/nginx.conf     # passed as -c to `nginx -t` and `-s reload`
+  reload: exec                         # exec | signal | command
+  pid_file: /run/nginx.pid             # liveness check; required for reload: signal
+acme:
+  directory: ""                        # Let's Encrypt production when empty
+  fallback: ""                         # optional second CA after repeated failures
+  contact: ["mailto:ops@example.net"]
+status_listen: 127.0.0.1:9102          # /healthz + /metrics; keep it private
+```
+
+```sh
+install -m 600 /dev/null /etc/kapkan/edge.env
+echo 'KAPKAN_EDGE_TOKEN=...the agent token...' > /etc/kapkan/edge.env
+kapkan edge -config /etc/kapkan/edge.yaml -check
+```
+
+`-check` validiert die Datei und das, was sie auf dieser Box benennt: Die Socket-Gruppe muss
+existieren, und ein etwaiger External-Account-Binding-Schlüssel muss wohlgeformt sein (Probleme),
+während ein fehlendes Token, ein fehlendes Binary oder eine fehlende `main_conf` eine Warnung ist —
+die Prüfung darf laufen, bevor die Umgebungsdatei oder der Terminator an Ort und Stelle ist.
+
+Installieren Sie die mitgelieferte Unit, `deploy/kapkan-edge.service`, und starten Sie sie:
+
+```sh
+install -m 644 deploy/kapkan-edge.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now kapkan-edge
+journalctl -u kapkan-edge -f
+```
+
+Die Unit läuft als **root**, wie certbot und jeder Konfigurationsmanager, der nginx steuert:
+`nginx -t` öffnet die eigenen Log- und PID-Pfade von nginx, und `nginx -s reload` signalisiert
+einen root-Master. Sie ist mit `ProtectSystem=strict` und expliziten Schreibpfaden gehärtet
+(`/var/lib/kapkan-edge`, `/run` und das Log-Verzeichnis von nginx oder Angie — mit `-`
+vorangestellte Pfade werden übersprungen, wenn sie fehlen, sodass eine Unit beide Terminatoren
+bedient), und ihr Zustandsverzeichnis ist `0711`, damit der Worker zum leeren `try_files`-Root
+traversieren kann, während die ACME-Schlüssel in eigenen `0700`-Verzeichnissen bleiben. Die
+Verzeichnisse der Rolle gehören ihr allein — niemals die `/var/lib/kapkan` und `/run/kapkan` des
+Gehirns — sodass sich ein Gehirn und ein Edge einen Host teilen können.
+
+<Callout type="warning" title="Die Startreihenfolge spielt keine Rolle, die Sockets schon">
+Der Knoten bringt seine drei Unix-Sockets **zuerst** hoch, sodass nginx bereits laufen und sie
+abfragen darf; dann prüft er den Terminator, stellt eine Generation wieder her, die ein
+abgestürzter Vorgänger ungetestet hinterlassen hat, rendert das letzte Dokument, das er auf der
+Platte hatte, und pollt erst dann das Gehirn. Eine Komponente, die nicht starten kann — ein
+Socket, den ein anderer Prozess bereits bedient, eine Gruppe, die nicht existiert — beendet den
+Prozess mit diesem Fehler, und systemd startet ihn neu.
+</Callout>
+
+## 4. Prüfen
+
+- `journalctl -u kapkan-edge` zeigt `kapkan edge running`, dann `configuration installed` mit der
+  Generationsnummer und der Zonenanzahl.
+- `curl -s 127.0.0.1:9102/healthz` antwortet `200` mit `"healthy":true`, `"converged":true` und
+  dem gerenderten ETag; `ls /var/lib/kapkan-edge/conf/live/` listet `kapkan_00_common.conf` und
+  eine `kapkan_zone_<name>.conf` pro Zone.
+- Das Inventar des Gehirns, `GET /api/v1/edge/nodes`, führt den Knoten als lebendig mit seinem
+  Report auf; die Nodes-Ansicht der Konsole zeigt dasselbe.
+- Zertifikate: Die erste Bestellung braucht für jeden Zonennamen einen von der CA aus erreichbaren
+  Port 80. Achten Sie im Journal auf `certificate issued`, dann
+  `ls /var/lib/kapkan-edge/certs/<zone>/current/`. Bis eine Zone ein Zertifikat hat, antwortet ihr
+  `:80`-Listener auf alles außer ACME-Challenges mit `503` — Kapkan reicht eine Zone niemals im
+  Klartext per Proxy weiter.
+- Anfragen: Mit `dry_run: true` erreicht ein Client über der Rate der Zone den Origin weiterhin,
+  mit `X-Kapkan-Mark: would-deny:rate`. Beobachten Sie
+  `kapkan_edge_decisions_total{result="would-deny"}` auf `/metrics` und die Logs Ihres Origins.
+
+## 5. Echtbetrieb
+
+Setzen Sie `dry_run: false` in der `edge.yaml` und starten Sie die Unit neu. Von da an erhält ein
+Client über seiner Obergrenze `429` mit `Retry-After: 1`, und eine Quelle, die die Rollups zu einer
+Sperre hochgestuft haben, erhält `403`. Verschärfen Sie unter Angriff die `policy.rate` einer Zone
+auf dem Gehirn — diese Änderung erreicht den Entscheidungsdienst beim nächsten Poll und **lädt
+nginx niemals neu**.
+
+## Mehrere Knoten und eine gemeinsame Adresse
+
+Richten Sie den `controller.name` jedes Knotens auf seinen eigenen `edge.nodes[]`-Eintrag und
+stellen Sie dasselbe Zonen-Dokument vor alle. Unter Anycast oder einer gemeinsamen VIP kann die
+HTTP-01-Validierung der CA auf jedem Knoten landen: Der bestellende Knoten veröffentlicht seine
+Challenge-Antwort an das Gehirn, das sie im Dokument verteilt, und **jeder** Knoten beantwortet
+sie. Die Ausstellung wird pro Zone über den Slot des Gehirns serialisiert, damit eine Flotte nicht
+an einem Nachmittag die Duplikat-Zertifikat-Obergrenze einer CA verbrennt, und die Erneuerung ist
+pro Knoten mit Jitter versehen. All das ist beratend: Ohne Gehirn erneuert jeder Knoten weiterhin
+selbstständig.
+
+## Fehlerbehebung
+
+| Symptom | Ursache und Behebung |
+| --- | --- |
+| `nginx -t` schlägt mit *a duplicate default server* fehl | Ihre `nginx.conf` deklariert bereits einen `default_server` auf `:80` oder `:443`. Setzen Sie `omit_catch_all: true` oder entfernen Sie Ihren. |
+| `[crit] stat() ... failed` im Error-Log von nginx bei jeder Anfrage | Der Worker kann nicht zu `state_dir/empty` traversieren. `StateDirectoryMode=0711` der Unit erledigt das; ein von Hand angelegtes `state_dir` braucht `chmod 711`. |
+| `connect() to unix:/run/kapkan-edge/edge-decide.sock failed (13: Permission denied)` | `socket_group` ist nicht die Gruppe des Workers. Korrigieren Sie sie und starten Sie die Unit neu. |
+| `healthy: false`, `generation: 0` | Keine getestete Generation des Knotens selbst ist live: Das allererste Rendern ist an `nginx -t` gescheitert, oder eine wiederhergestellte Generation ist gescheitert. Lesen Sie `test_error` im Status-Body. |
+| `converged: false` mit `test_error` | Das neueste Dokument wurde abgelehnt; das vorherige bedient. Beheben Sie die Ursache (ein Origin, der sich nicht auflösen lässt, eine Direktive in `extra_directives_file`), und der Knoten versucht es selbstständig erneut. |
+| Zone bleibt auf `:80` mit `503` | Noch kein Zertifikat. Prüfen Sie die Erreichbarkeit von Port 80 aus dem Internet für diesen Namen, `kapkan_edge_acme_attempts_total` und die Zeile `certificate order failed` im Journal. |
+| Knoten wird auf dem Gehirn als verloren angezeigt, obwohl er läuft | Der Poll ist das Lebendigkeitssignal, und er wird bis zu 25 s gehalten; `stale_after_seconds` zählt ab dem letzten abgeschlossenen Poll. Prüfen Sie `controller.url`, das Token und dass `controller.name` unter `edge.nodes[]` deklariert ist. |
+
+## Verwandte Themen
+
+- [Edge-Knoten](/docs/edge) — Funktionsweise und was wie ausfällt
+- [Zonen-Referenz](/docs/zones)
+- [`kapkan edge`](/docs/cli#edge) — Flags und jeder Schlüssel der `edge.yaml`
+- [Der Edge-Kanal](/docs/api#der-edge-kanal)

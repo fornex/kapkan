@@ -573,6 +573,71 @@ next-hops y hostgroups, que es topología de despliegue. El recuento por sí sol
 en `/api/v1/status` para todos los roles, así que una consola puede decidir si mostrar las
 funcionalidades de nodos sin esta llamada.
 
+### El canal edge
+
+Estos endpoints existen para los [nodos edge](/docs/edge) — máquinas que ejecutan
+[`kapkan edge`](/docs/cli#edge). Como el canal de nodos de scrubbing, toman el rol `agent` o un
+token `operator` sin acotar, nunca un `viewer` ni un token acotado a un tenant: el documento de zonas
+abarca todos los tenants. **El cerebro distribuye política, nunca veredictos** — no existe ninguna
+llamada por petición, ni aquí ni en ningún otro sitio; un nodo responde a las peticiones por sí solo.
+
+#### GET /api/v1/edge/zones
+
+El documento de zonas que un nodo renderiza y aplica: cada zona del [archivo de zonas](/docs/zones)
+con sus orígenes, su versión mínima de TLS, sus directorios ACME y su política, más las concesiones
+de emisión vivas y los challenges ACME propagados. Un `GET` simple devuelve el documento con un
+`ETag` de hash de contenido; un `GET` cuyo `If-None-Match` nombra ese ETag se **retiene** hasta que
+el documento cambie — una recarga exitosa del archivo de zonas, un challenge de certificado publicado
+por un nodo — o hasta 25 s, y luego se responde `304`. Un nodo se identifica con `?node=<name>`, y
+**ese sondeo es la señal de vitalidad del nodo**, así que el nombre debe ser una entrada
+`edge.nodes[]` configurada (un nombre desconocido es `404`) y la petición debe llevar un token real.
+
+```json
+{
+  "version": 1,
+  "zones": [
+    {
+      "name": "shop.example.com",
+      "origins": ["10.0.0.10:8080"],
+      "tls": { "min_version": "1.2" },
+      "acme_directory": "",
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
+    }
+  ],
+  "acme_challenges": [],
+  "issuance_grants": []
+}
+```
+
+#### POST /api/v1/edge/nodes/\{name\}/report
+
+El autoinforme orientativo de un nodo — versión, dry-run del lado del nodo, el ETag del documento
+que ha **renderizado** (para que un operador pueda ver un nodo rezagado o que se niega), el tipo, la
+versión y la vitalidad del terminador, la generación activa y su resultado de `nginx -t`, y los
+certificados que posee (solo metadatos públicos, nunca una clave; una lista larga se recorta al
+límite de 64 KiB del cuerpo con un recuento `certs_truncated`) — almacenado para la
+[consola](/docs/dashboard). Nunca es una señal de vitalidad (el sondeo lo es). Un `{name}`
+desconocido es `404`; el éxito es `204 No Content`.
+
+#### GET /api/v1/edge/nodes
+
+El inventario de nodos: cada nodo edge configurado con la vitalidad de su sondeo unida a su último
+reporte. Una lectura de rango `viewer`, solo tokens sin acotar.
+
+#### POST /api/v1/edge/nodes/\{name\}/acme/slot y …/acme/challenges
+
+El **coordinador de emisión**, orientativo y en memoria. Un nodo pide un hueco por zona antes de
+solicitar un certificado (`{"zone": "…"}` → `{"granted": true, "expires_at": …}` o
+`{"granted": false, "holder": "…", "retry_after_seconds": …}`; `{"release": true}` lo devuelve), para
+que una flota no agote en una tarde el límite de certificados duplicados de una CA; espera como
+máximo 15 minutos y luego lo solicita de todos modos. Un nodo que posee el hueco publica su challenge
+HTTP-01 pendiente (`{"zone", "token", "key_authorization"}`) y el cerebro lo propaga en el documento
+de zonas durante diez minutos para que todos los nodos lo respondan — la validación de la CA puede
+caer en cualquier nodo detrás de una dirección compartida. Un challenge vivo nunca se sobrescribe con
+una autorización de clave distinta (`409`), un nodo puede tener 16 challenges vivos, y cada llamada
+se registra con el nodo, la zona y el prefijo del token: un token agent es una credencial que emite
+certificados; rótalo ante cualquier compromiso de un nodo.
+
 ### GET /metrics
 
 Sirve las métricas de Prometheus en el formato de exposición de texto estándar. Este endpoint no está

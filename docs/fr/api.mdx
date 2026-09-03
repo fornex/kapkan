@@ -585,6 +585,74 @@ l'inventaire nomme les next-hops et les hostgroups, ce qui relève de la topolog
 Le nombre seul (`nodes_total`) circule sur `/api/v1/status` pour tous les rôles, de sorte qu'une
 console peut décider d'afficher ou non les fonctionnalités liées aux nœuds sans cet appel.
 
+### Le canal edge
+
+Ces points de terminaison existent pour les [nœuds edge](/docs/edge) — des machines exécutant
+[`kapkan edge`](/docs/cli#edge). Comme le canal des nœuds de scrubbing, ils prennent le rôle
+`agent` ou un jeton `operator` non rattaché, jamais un `viewer` ni un jeton rattaché à un tenant :
+le document de zones couvre tous les tenants. **Le cerveau distribue la politique, jamais les
+verdicts** — il n'existe aucun appel par requête, ni ici ni ailleurs ; un nœud répond seul aux
+requêtes.
+
+#### GET /api/v1/edge/zones
+
+Le document de zones qu'un nœud rend et applique : chaque zone du [fichier de zones](/docs/zones)
+avec ses origines, sa version TLS minimale, ses URL de directory ACME et sa politique, plus les
+autorisations d'émission en cours et les challenges ACME diffusés à la flotte. Un `GET` simple
+renvoie le document avec un `ETag` de hachage de contenu ; un `GET` dont le `If-None-Match` nomme
+cet ETag est **retenu** jusqu'à ce que le document change — un rechargement réussi du fichier de
+zones, un challenge de certificat publié par un nœud — ou pendant 25 s au maximum, puis reçoit une
+réponse `304`. Un nœud s'identifie avec `?node=<name>`, et **cette interrogation est le signal de
+vivacité du nœud** ; le nom doit donc être une entrée `edge.nodes[]` configurée (un nom inconnu
+renvoie `404`) et la requête doit porter un vrai jeton.
+
+```json
+{
+  "version": 1,
+  "zones": [
+    {
+      "name": "shop.example.com",
+      "origins": ["10.0.0.10:8080"],
+      "tls": { "min_version": "1.2" },
+      "acme_directory": "",
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
+    }
+  ],
+  "acme_challenges": [],
+  "issuance_grants": []
+}
+```
+
+#### POST /api/v1/edge/nodes/\{name\}/report
+
+Le rapport consultatif d'un nœud sur lui-même — version, dry-run côté nœud, l'ETag du document
+qu'il a **rendu** (afin qu'un opérateur puisse repérer un nœud en retard ou qui refuse), le type,
+la version et la vivacité du terminateur, la génération active et son résultat `nginx -t`, et les
+certificats qu'il détient (métadonnées publiques uniquement, jamais une clé ; une longue liste est
+tronquée à la limite de 64 KiB du corps, avec un compteur `certs_truncated`) — stocké pour la
+[console](/docs/dashboard). Jamais un signal de vivacité (l'interrogation l'est). Un `{name}`
+inconnu renvoie `404` ; le succès est `204 No Content`.
+
+#### GET /api/v1/edge/nodes
+
+L'inventaire des nœuds : chaque nœud edge configuré avec la vivacité de son interrogation, joint à
+son dernier rapport. Une lecture de rang `viewer`, jetons non rattachés uniquement.
+
+#### POST /api/v1/edge/nodes/\{name\}/acme/slot et …/acme/challenges
+
+Le **coordinateur d'émission**, consultatif et en mémoire. Un nœud demande un créneau par zone
+avant de commander un certificat (`{"zone": "…"}` → `{"granted": true, "expires_at": …}` ou
+`{"granted": false, "holder": "…", "retry_after_seconds": …}` ; `{"release": true}` le restitue),
+afin qu'une flotte n'épuise pas en un après-midi le plafond de certificats dupliqués d'une CA ; il
+attend au plus 15 minutes, puis commande quand même. Un nœud qui détient le créneau publie son
+challenge HTTP-01 en attente (`{"zone", "token", "key_authorization"}`) et le cerveau le diffuse
+dans le document de zones pendant dix minutes afin que chaque nœud y réponde — la validation de la
+CA peut atterrir sur n'importe quel nœud derrière une adresse partagée. Un challenge actif n'est
+jamais écrasé par une key authorization différente (`409`), un nœud peut détenir 16 challenges
+actifs, et chaque appel est journalisé avec le nœud, la zone et le préfixe du token : un jeton
+agent est un identifiant qui émet des certificats, effectuez-en la rotation dès qu'un nœud est
+compromis.
+
 ### GET /metrics
 
 Sert les métriques Prometheus au format d'exposition texte standard. Ce point de terminaison n'est

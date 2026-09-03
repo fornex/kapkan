@@ -298,6 +298,89 @@ meldet `ENFORCING` und die installierte Regelanzahl — und die [Nodes-Ansicht](
 Gehirns zeigt ihn als lebendig. Den umgeleiteten Verkehr zum Knoten zu bekommen, ist Aufgabe des
 [Leitfadens zur Netzwerkintegration](/docs/network-integration).
 
+### `edge`
+
+```sh
+kapkan edge -config /etc/kapkan/edge.yaml
+```
+
+Führt die [Edge-Knoten](/docs/edge)-Rolle aus: Das nginx oder Angie der Box wird zu einem
+verwalteten HTTPS-Frontend für die Zonen, die das Gehirn bedient. Die Rolle pollt per Long-Poll
+das Zonendokument des Gehirns, rendert die Konfiguration des Terminators und installiert sie
+hinter `nginx -t`, beantwortet das `auth_request` von nginx aus einem lokalen
+Entscheidungsdienst, verdichtet das Access-Log zu Aggregaten pro Quelle, stellt die Zertifikate
+der Zonen auf der Box aus und erneuert sie, und meldet sich selbst. Der Poll dient zugleich als
+Lebendigkeitssignal des Knotens. Die Schritt-für-Schritt-Anleitung ist der
+[Installationsleitfaden](/docs/edge-install).
+
+Alles Rollenspezifische liegt in seiner eigenen `edge.yaml`; die `config.yaml` des Daemons wird
+**nicht** gelesen (`-config` hat hier den Standardwert `/etc/kapkan/edge.yaml`).
+
+```yaml
+dry_run: true                          # the remote-role default — marks, refuses nothing
+controller:
+  url: https://kapkan.example.net:8443 # the brain's API base (no path); https outside a lab
+  token_env: KAPKAN_EDGE_TOKEN         # env var holding the agent token (required)
+  name: edge-1                         # must equal an edge.nodes[] name on the brain
+  report_interval_seconds: 10          # self-report cadence
+state_dir: /var/lib/kapkan-edge        # document cache, generations, ACME keys and certificates
+sockets_dir: /run/kapkan-edge          # edge-decide.sock, edge-challenge.sock, edge-log.sock
+socket_group: nginx                    # the terminator's worker group (nginx | www-data | angie)
+terminator:
+  binary: nginx                        # nginx (default) | angie
+  main_conf: /etc/nginx/nginx.conf     # -c for `nginx -t` and `nginx -s reload`; empty = compiled default
+  reload: exec                         # exec (default) | signal | command
+  pid_file: /run/nginx.pid             # liveness check; required for reload: signal
+  # command: [systemctl, reload, nginx]
+acme:
+  directory: ""                        # default CA; empty = Let's Encrypt production
+  fallback: ""                         # optional second CA after three consecutive failures
+  contact: ["mailto:ops@example.net"]
+  # eab:                               # External Account Binding for CAs that require one
+  #   - directory: https://acme.zerossl.com/v2/DV90
+  #     kid: your-kid
+  #     hmac_key_env: KAPKAN_EDGE_ZEROSSL_HMAC
+  # disabled: true                     # issue nothing (zones stay on :80 answering 503)
+status_listen: 127.0.0.1:9102          # /healthz + /metrics; unauthenticated, keep it private
+omit_catch_all: false                  # true when nginx.conf has its own default_server
+disable_ipv6: false                    # true on hosts without an IPv6 stack
+```
+
+| Schlüssel | Bedeutung |
+| --- | --- |
+| `dry_run` | Fehlt oder `true`: Entscheidungen werden gezählt und markiert (`X-Kapkan-Mark: would-deny:<reason>` erreicht den Origin), keine wird durchgesetzt. Setzen Sie `false`, um abzulehnen. |
+| `controller.url` / `token_env` / `name` | Die API-Basis des Gehirns (kein Pfad, keine Anmeldedaten in der URL), die Umgebungsvariable mit dem **agent**-Token und der Name dieses Knotens — er muss einem `edge.nodes[]`-Eintrag auf dem Gehirn entsprechen, sonst ist jeder Poll ein lautstarker `404`. |
+| `state_dir` / `sockets_dir` | Die eigenen Verzeichnisse der Rolle (Standard `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — niemals `/var/lib/kapkan` und `/run/kapkan` des Gehirns, die systemd auf einem gemeinsam genutzten Host unter ihr weg-chownen und entfernen würde. Absolut, ohne Zeichen, die nginx falsch lesen würde. |
+| `socket_group` | Die Worker-Gruppe des Terminators. Der Entscheidungs- und der Log-Socket sind für sie `0660`; der Challenge-Socket ist `0666` (er beantwortet öffentliche Tokens). Leer lässt die beiden gruppenbeschränkten Sockets nur für den Eigentümer zugänglich. |
+| `terminator.binary` / `main_conf` | Was für `-t` und Reloads ausgeführt wird, und die Hauptkonfiguration, die als `-c` übergeben wird. Diese Datei muss einmal, innerhalb von `http {}`, `include /var/lib/kapkan-edge/conf/live/*.conf;` enthalten. |
+| `terminator.reload` | `exec` führt `<binary> -s reload` aus (muss den nginx-Master signalisieren — die Unit läuft als root); `signal` sendet `HUP` an die PID in `pid_file`; `command` führt `terminator.command` aus, z. B. `[systemctl, reload, nginx]`. |
+| `terminator.pid_file` | Wenn gesetzt, wird sie bei jedem Report-Tick gelesen und mit `0` signalisiert: `/healthz` antwortet `503` und der Report meldet `alive: false`, solange kein Prozess diese PID hat. |
+| `acme.directory` / `fallback` / `contact` | Die Standard-CA des Knotens (der eigene `acme`-Block einer Zone übersteuert Directory und Fallback), der Fallback, der nach drei aufeinanderfolgenden Fehlschlägen versucht wird (muss sich von der aufgelösten primären CA unterscheiden), und der Kontakt des Kontos. |
+| `acme.eab[]` | External Account Binding pro Directory-URL (`directory`, `kid`, `hmac_key_env`) für CAs, die eines verlangen — ZeroSSL, Google Trust Services. Der HMAC-Schlüssel ist ein Geheimnis und wird aus der genannten Umgebungsvariable gelesen. |
+| `acme.disabled` | Nichts ausstellen: Zonen bleiben auf `:80` und antworten `503` (ein Labor, das alles außer der Ausstellung durchspielt). Vom Betreiber bereitgestellte Zertifikate sind noch keine Funktion. |
+| `status_listen` | Stellt `/healthz` und `/metrics` bereit, wenn gesetzt. Unauthentifiziert — Loopback oder eine private Adresse. |
+| `omit_catch_all` / `disable_ipv6` | Kapkans `default_server`-Catch-all weglassen (Ihre `nginx.conf` deklariert selbst einen) / die `[::]`-Listener weglassen (kein IPv6-Stack). |
+
+<Callout type="warning" title="Ein Edge-Knoten läuft standardmäßig im Dry-Run">
+`dry_run` hat für eine entfernte Rolle den Standardwert **true** — der Knoten zählt und markiert,
+was er ablehnen *würde*, lehnt aber nichts ab, bis Sie `dry_run: false` explizit setzen. Er
+benötigt ein echtes agent-Token: Ohne eines tragen seine Polls keine Identität, und das Gehirn
+würde ihn als tot werten. Verwenden Sie außerhalb eines Labors `https` — eine `controller.url` im
+Klartext sendet das Token unverschlüsselt.
+</Callout>
+
+| Flag | Standard | Beschreibung |
+| --- | --- | --- |
+| `-config <path>` | `/etc/kapkan/edge.yaml` | Die Edge-Knoten-Konfiguration. |
+| `-check` | aus | Die Datei und das, was sie auf dieser Box benennt, validieren — die Socket-Gruppe muss existieren und jeder EAB-Schlüssel wohlgeformt sein (Probleme); ein fehlendes Token, Terminator-Binary oder `main_conf` ist eine Warnung — und dann beenden. |
+| `-log-format <fmt>` | `json` | `json` oder `text`. |
+| `-log-level <lvl>` | `info` | `debug`, `info`, `warn` oder `error`. |
+
+Bestätigen Sie einen laufenden Knoten mit `curl 127.0.0.1:9102/healthz` — `200` mit
+`"converged":true`, sobald das Dokument gerendert und live ist — und das Inventar des Gehirns
+(`GET /api/v1/edge/nodes`, die Nodes-Ansicht der Konsole) zeigt ihn als lebendig. Das
+gehirnseitige Schema der Zonendatei liefert `kapkan -dump-zones-schema`.
+
 ### `nginx-exporter`
 
 ```sh

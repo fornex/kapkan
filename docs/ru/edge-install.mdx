@@ -1,0 +1,202 @@
+export const metadata = {
+  title: "Установка граничного узла",
+  description:
+    "Шаг за шагом: объявите зоны и узел на мозге, подготовьте nginx или Angie, установите юнит kapkan edge, проверьте его и переведите в боевой режим.",
+};
+
+# Установка граничного узла
+
+Это руководство проводит одну машину от стандартного пакета nginx (или Angie) до управляемого
+[граничного узла](/docs/edge), обслуживающего ваши зоны с выпущенными сертификатами и решениями по
+каждому запросу. Если слова *зона*, *служба решений* или *разделение на быстрый и медленный пути*
+вам незнакомы, сначала прочитайте страницу с понятиями.
+
+Вам понадобятся: мозг (демон `kapkan`), доступный с машины по HTTPS, токен `agent` на нём,
+Linux-машина с установленным nginx ≥ 1.22 или Angie, открытые для всего мира порты 80 и 443 и DNS
+зон, указывающий на машину (или на anycast/VIP-адрес, общий для машин).
+
+## 1. На мозге: зоны и узлы
+
+Напишите файл зон — это **данные арендатора**, которые хранятся отдельно от `kapkan.yaml`, — и
+укажите его мозгу:
+
+```yaml
+# /etc/kapkan/zones.yaml
+zones:
+  - name: shop.example.com
+    origins: ["10.0.0.10:8080"]
+    policy: { mode: decide, failure_mode: open, rate: { rps: 50, concurrency: 20 } }
+  - name: static.example.com
+    origins: ["10.0.0.20:80"]
+    policy: { mode: none }             # proxy only, no decisions
+```
+
+```yaml
+# /etc/kapkan/config.yaml (the brain)
+edge:
+  zones_file: /etc/kapkan/zones.yaml   # absolute; the whole reload fails on a broken file
+  nodes:
+    - name: edge-1                     # must equal the node's controller.name
+    - name: edge-2
+  stale_after_seconds: 15              # a node unheard-from this long counts as lost
+api:
+  tokens:
+    - { name: edge-agent, token_env: KAPKAN_EDGE_AGENT_TOKEN, role: agent }
+```
+
+`kapkan -check-config /etc/kapkan/config.yaml` проверяет оба файла (он следует за
+`edge.zones_file`), а `kapkan -dump-zones-schema` выводит JSON-схему файла зон для вашего
+редактора. Файл зон, который при перезагрузке не удаётся прочитать или проверить, **оставляет в
+силе предыдущие зоны** — мозг никогда не отдаёт наполовину сломанный документ. Каждый ключ описан в
+[справочнике зон](/docs/zones).
+
+<Callout type="info" title="Токен агента — это учётные данные для выпуска сертификатов">
+Граничный узел аутентифицируется токеном `agent` (см. [аутентификацию](/docs/authentication)).
+Помимо опроса документа, он использует этот токен, чтобы координировать выпуск сертификатов через
+мозг. Держите его в файле окружения узла, никогда — в `edge.yaml`, и смените, если узел
+скомпрометирован.
+</Callout>
+
+## 2. На машине: nginx или Angie
+
+Kapkan владеет одним каталогом для включения (include) и запускает `nginx -t` и перезагрузки; сам
+nginx он не поставляет и не надзирает за ним. Сделайте так, чтобы ваша основная конфигурация
+включала действующее поколение **один раз**, внутри `http {}`:
+
+```nginx
+http {
+    # ... your defaults ...
+    include /var/lib/kapkan-edge/conf/live/*.conf;
+}
+```
+
+Удалите (или осознанно оставьте, см. ниже) любой `default_server` на `:80`/`:443` — Kapkan
+генерирует собственную заглушку, отвергающую неизвестные хосты. Сайт по умолчанию в Debian
+объявляет такой сервер: либо отключите сайт, либо задайте `omit_catch_all: true` в `edge.yaml`.
+Затем убедитесь, что include компилируется с пустым каталогом:
+
+```sh
+mkdir -p /var/lib/kapkan-edge/conf/live && nginx -t
+```
+
+Выясните **группу обработчиков** (worker) — `nginx` для пакетов с nginx.org и Docker-образа,
+`www-data` для собственного пакета Debian, `angie` для Angie. Сокеты решений и лога создаются с
+правами `0660` для этой группы.
+
+## 3. Узел: `edge.yaml`, токен, юнит
+
+Установите тот же бинарник `kapkan`, что и на мозге, затем собственную конфигурацию узла:
+
+```yaml
+# /etc/kapkan/edge.yaml
+dry_run: true                          # watch-only until the counts look right
+controller:
+  url: https://kapkan.example.net:8443 # the brain's API base, https outside a lab
+  token_env: KAPKAN_EDGE_TOKEN         # the agent token's environment variable
+  name: edge-1                         # must equal an edge.nodes[] entry on the brain
+  report_interval_seconds: 10
+state_dir: /var/lib/kapkan-edge        # cached document, generations, keys, certificates
+sockets_dir: /run/kapkan-edge          # the three unix sockets nginx talks to
+socket_group: nginx                    # the terminator's worker group
+terminator:
+  binary: nginx                        # or angie
+  main_conf: /etc/nginx/nginx.conf     # passed as -c to `nginx -t` and `-s reload`
+  reload: exec                         # exec | signal | command
+  pid_file: /run/nginx.pid             # liveness check; required for reload: signal
+acme:
+  directory: ""                        # Let's Encrypt production when empty
+  fallback: ""                         # optional second CA after repeated failures
+  contact: ["mailto:ops@example.net"]
+status_listen: 127.0.0.1:9102          # /healthz + /metrics; keep it private
+```
+
+```sh
+install -m 600 /dev/null /etc/kapkan/edge.env
+echo 'KAPKAN_EDGE_TOKEN=...the agent token...' > /etc/kapkan/edge.env
+kapkan edge -config /etc/kapkan/edge.yaml -check
+```
+
+`-check` проверяет файл и то, что он называет на этой машине: группа сокетов должна существовать, а
+ключ привязки внешнего аккаунта (External Account Binding), если он есть, — быть корректно
+сформирован (это проблемы), тогда как отсутствующий токен, бинарник или `main_conf` — лишь
+предупреждение: проверка может выполняться до того, как файл окружения или терминатор окажутся на
+месте.
+
+Установите поставляемый юнит `deploy/kapkan-edge.service` и запустите его:
+
+```sh
+install -m 644 deploy/kapkan-edge.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now kapkan-edge
+journalctl -u kapkan-edge -f
+```
+
+Юнит работает от **root**, как certbot и любой менеджер конфигурации, управляющий nginx: `nginx -t`
+открывает собственные пути nginx к логу и pid-файлу, а `nginx -s reload` посылает сигнал
+мастер-процессу под root. Он усилен `ProtectSystem=strict` и явными путями для записи
+(`/var/lib/kapkan-edge`, `/run` и каталог логов nginx или Angie — пути с префиксом `-`
+пропускаются, если отсутствуют, поэтому один юнит подходит обоим терминаторам), а его каталог
+состояния имеет права `0711`, чтобы обработчик мог пройти к пустому корню `try_files`, пока ключи
+ACME остаются в собственных каталогах `0700`. Каталоги роли — её собственные и никогда не совпадают
+с `/var/lib/kapkan` и `/run/kapkan` мозга, поэтому мозг и граничный узел могут делить одну машину.
+
+<Callout type="warning" title="Порядок запуска не важен, а вот сокеты — важны">
+Узел поднимает свои три unix-сокета **первыми**, так что nginx может уже работать и пробовать их;
+затем он проверяет терминатор, восстанавливает поколение, которое упавший предшественник оставил
+непроверенным, генерирует конфигурацию из последнего документа, который у него был на диске, и
+только потом опрашивает мозг. Компонент, который не может стартовать — сокет, который уже
+обслуживает другой процесс, несуществующая группа, — завершает процесс с этой ошибкой, и systemd
+перезапускает его.
+</Callout>
+
+## 4. Проверка
+
+- `journalctl -u kapkan-edge` показывает `kapkan edge running`, затем `configuration installed` с
+  номером поколения и числом зон.
+- `curl -s 127.0.0.1:9102/healthz` отвечает `200` с `"healthy":true`, `"converged":true` и ETag
+  обработанного документа; `ls /var/lib/kapkan-edge/conf/live/` показывает `kapkan_00_common.conf`
+  и по одному `kapkan_zone_<name>.conf` на зону.
+- Инвентарь мозга, `GET /api/v1/edge/nodes`, показывает узел живым с его отчётом; то же самое
+  показывает представление Nodes в консоли.
+- Сертификаты: для первого заказа порт 80 должен быть доступен со стороны CA для каждого имени
+  зоны. Дождитесь `certificate issued` в журнале, затем
+  `ls /var/lib/kapkan-edge/certs/<zone>/current/`. Пока у зоны нет сертификата, её слушатель `:80`
+  отвечает `503` на всё, кроме вызовов ACME, — Kapkan никогда не проксирует зону открытым текстом.
+- Запросы: при `dry_run: true` клиент, превысивший частоту зоны, всё равно доходит до исходного
+  сервера — с `X-Kapkan-Mark: would-deny:rate`. Следите за
+  `kapkan_edge_decisions_total{result="would-deny"}` на `/metrics` и за логами исходного сервера.
+
+## 5. Переход в боевой режим
+
+Задайте `dry_run: false` в `edge.yaml` и перезапустите юнит. С этого момента клиент, превысивший
+свой потолок, получает `429` с `Retry-After: 1`, а источник, который свёртки перевели в запрет, —
+`403`. Под атакой ужесточайте `policy.rate` зоны на мозге — это изменение достигает службы решений
+на следующем опросе и **никогда не перезагружает nginx**.
+
+## Несколько узлов и общий адрес
+
+Направьте `controller.name` каждого узла на его собственную запись `edge.nodes[]` и поставьте перед
+всеми ними один и тот же документ зон. Под anycast или общим VIP проверка HTTP-01 со стороны CA
+может прийти на любой узел: заказывающий узел публикует ответ на вызов на мозге, тот рассылает его в
+документе, и отвечает **каждый** узел. Выпуск упорядочен по зонам через слот на мозге, чтобы парк
+не сжёг за один вечер лимит CA на дублирующие сертификаты, а продление разнесено случайным разбросом
+по узлам. Всё это вспомогательно: без мозга каждый узел всё равно продлевает сертификат
+самостоятельно.
+
+## Устранение неполадок
+
+| Симптом | Причина и исправление |
+| --- | --- |
+| `nginx -t` падает с *a duplicate default server* | Ваш `nginx.conf` уже объявляет `default_server` на `:80` или `:443`. Задайте `omit_catch_all: true` или уберите свой. |
+| `[crit] stat() ... failed` в логе ошибок nginx на каждом запросе | Обработчик не может пройти к `state_dir/empty`. `StateDirectoryMode=0711` в юните решает это; для созданного вручную `state_dir` нужен `chmod 711`. |
+| `connect() to unix:/run/kapkan-edge/edge-decide.sock failed (13: Permission denied)` | `socket_group` — не группа обработчиков. Исправьте и перезапустите юнит. |
+| `healthy: false`, `generation: 0` | Не действует ни одно проверенное поколение, созданное самим узлом: самая первая генерация конфигурации не прошла `nginx -t`, либо не прошло восстановленное поколение. Прочитайте `test_error` в теле статуса. |
+| `converged: false` с `test_error` | Последний документ отклонён; обслуживает предыдущий. Устраните причину (исходный сервер, имя которого не разрешается, директива в `extra_directives_file`) — узел повторит попытку сам. |
+| Зона остаётся на `:80` с `503` | Сертификата ещё нет. Проверьте доступность порта 80 из интернета для этого имени, `kapkan_edge_acme_attempts_total` и строку `certificate order failed` в журнале. |
+| Узел показан потерянным на мозге, хотя работает | Опрос — это сигнал живости, и он удерживается до 25 с; `stale_after_seconds` отсчитывается от последнего завершённого опроса. Проверьте `controller.url`, токен и что `controller.name` объявлен под `edge.nodes[]`. |
+
+## Связанные разделы
+
+- [Граничные узлы](/docs/edge) — как это работает и что отказывает как
+- [Справочник зон](/docs/zones)
+- [`kapkan edge`](/docs/cli#edge) — флаги и каждый ключ `edge.yaml`
+- [Канал граничных узлов](/docs/api#канал-граничных-узлов)

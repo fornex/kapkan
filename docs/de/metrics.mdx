@@ -233,6 +233,23 @@ meldet hier ihren Userspace-Reader; ihr In-Kernel-Copy-Sampler steht oben auf
 seine Arbeit tut; ein anhaltendes `fp_ring_full` bedeutet, dass der Reader den Ring nicht schnell
 genug leeren kann.
 
+## Edge-Knoten
+
+Ein [Edge-Knoten](/docs/edge) stellt seine eigenen Zeitreihen auf `status_listen` (`/metrics`)
+bereit, neben denen der Go-Laufzeit:
+
+| Metrik | Typ | Labels | Bedeutung |
+| --- | --- | --- | --- |
+| `kapkan_edge_decisions_total` | counter | `zone`, `result` | Urteile des Entscheidungsdienstes: `allow`, `deny` (der Grund wird in `result` zu `deny` zusammengefasst), `would-deny` (Dry-Run), `untracked` (die Tabelle war voll, die Anfrage wurde durchgelassen). |
+| `kapkan_edge_log_records_total` | counter | `result` | Access-Log-Datagramme vom Terminator: `ok`, `malformed`, `oversized`, `dropped` (die Handler-Warteschlange war voll), `unknown_zone`. Eine stetige `dropped`-Rate bedeutet, dass `net.unix.max_dgram_qlen` zu klein ist. |
+| `kapkan_edge_inflight_resets_total` | counter | — | In-Flight-Zähler, die der Entscheidungsdienst zurückgesetzt hat, weil eine ausgelastete Quelle eine ganze Leerlaufperiode lang keinen Abschluss sah — ihr Log-Strom war verlustbehaftet oder tot. |
+| `kapkan_edge_verdict_table_entries` | gauge | — | Aktive Deny-/Mark-Einträge in der Urteilstabelle des Knotens. |
+| `kapkan_edge_cert_not_after_seconds` | gauge | `zone` | Ablauf des Zertifikats der Zone als Unix-Zeitstempel — der **T−30-d-Alarm**: Alarmieren Sie, wenn er weniger als 30 Tage entfernt ist. Wird entfernt, wenn eine Zone das Dokument verlässt. |
+| `kapkan_edge_acme_attempts_total` | counter | `zone`, `result` | Zertifikatsbestellungen: `issued`, `renewed`, `failed`, `fallback` (der Versuch hat die Fallback-CA verwendet). |
+
+Das Gehirn fügt seinen eigenen `/metrics` nichts pro Edge-Knoten hinzu; Lebendigkeit und letzter
+Report eines Knotens werden aus [`GET /api/v1/edge/nodes`](/docs/api#der-edge-kanal) gelesen.
+
 ## Scraping
 
 Fügen Sie Kapkan als Scrape-Target in Ihrer Prometheus-Konfiguration hinzu:
