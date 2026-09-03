@@ -96,6 +96,11 @@ func TestRoleMatrix(t *testing.T) {
 		{"GET", "/api/v1/edge/zones", "", "", map[string]bool{"operator": true, "agent": true}},
 		{"POST", "/api/v1/edge/nodes/n1/report", `{}`, "POST /api/v1/edge/nodes/{name}/report",
 			map[string]bool{"operator": true, "agent": true}},
+		// ACME coordination: the node's own business, same rank as its report.
+		{"POST", "/api/v1/edge/nodes/n1/acme/slot", `{"zone":"example.com"}`, "POST /api/v1/edge/nodes/{name}/acme/slot",
+			map[string]bool{"operator": true, "agent": true}},
+		{"POST", "/api/v1/edge/nodes/n1/acme/challenges", `{"zone":"example.com","token":"tok","key_authorization":"tok.thumb"}`,
+			"POST /api/v1/edge/nodes/{name}/acme/challenges", map[string]bool{"operator": true, "agent": true}},
 		{"GET", "/api/v1/edge/nodes", "", "", map[string]bool{"viewer": true, "operator": true}},
 	}
 
