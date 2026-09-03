@@ -30,12 +30,14 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
 
 const (
 	// edgeDocVersion versions the document shape, like ruleDocVersion. An agent
-	// refuses a version it does not know rather than guessing at fields.
-	edgeDocVersion = 1
+	// refuses a version it does not know rather than guessing at fields. The
+	// number is owned by the wire-contract package both ends import.
+	edgeDocVersion = edgedoc.Version
 
 	// maxEdgeReportBytes bounds a report body, same figure and reasoning as
 	// maxNodeReportBytes.
@@ -47,78 +49,19 @@ const (
 	defaultEdgeStaleAfter = 15 * time.Second
 )
 
-// EdgeDoc is the versioned document served to edge nodes. THE JSON CONTRACT IS
-// FROZEN HERE at version 1: docs and the agent are written against these key
-// names. The document must be deterministic — same zones file, same bytes —
-// because the ETag is a hash of the encoding; nothing volatile may be added.
-// Extension is by ADDING omitempty fields, never by renaming or retyping.
-type EdgeDoc struct {
-	Version int `json:"version"`
-	// Zones is every zone this brain serves, sorted by name. Always present
-	// (empty array, not null), so an agent ranges over it without a check.
-	Zones []EdgeDocZone `json:"zones"`
-	// ACMEChallenges is the HTTP-01 challenge table fanned out to every node so
-	// any of them can answer a CA's validation request (edge-spec §3). Always
-	// present; populated by the issuance coordinator (a later E3 step), empty
-	// until then. Sorted by (zone, token) for determinism.
-	ACMEChallenges []EdgeDocChallenge `json:"acme_challenges"`
-	// IssuanceGrants is the set of currently granted issuance slots (edge-spec
-	// §3: the brain serialises issuance per zone). Always present; populated by
-	// the same later step, empty until then.
-	IssuanceGrants []EdgeDocGrant `json:"issuance_grants"`
-}
-
-// EdgeDocZone is one zone as the node must render and enforce it. The
-// vocabulary is the zones file's (config.Zone) so a tenant reading the two sees
-// the same words; the shape is flattened where the file nests for editing.
-type EdgeDocZone struct {
-	Name    string     `json:"name"`
-	Origins []string   `json:"origins"`
-	TLS     EdgeDocTLS `json:"tls"`
-	// ACMEDirectory is the zone's CA directory override; empty means the node
-	// default.
-	ACMEDirectory       string        `json:"acme_directory,omitempty"`
-	Policy              EdgeDocPolicy `json:"policy"`
-	ExtraDirectivesFile string        `json:"extra_directives_file,omitempty"`
-}
-
-// EdgeDocTLS mirrors config.ZoneTLS.
-type EdgeDocTLS struct {
-	MinVersion string `json:"min_version"`
-	H3         bool   `json:"h3,omitempty"`
-}
-
-// EdgeDocPolicy mirrors config.ZonePolicy — always fully resolved (no empty
-// strings): the node never applies a default of its own.
-type EdgeDocPolicy struct {
-	Mode        string      `json:"mode"`
-	FailureMode string      `json:"failure_mode"`
-	Challenge   string      `json:"challenge"`
-	Rate        EdgeDocRate `json:"rate"`
-}
-
-// EdgeDocRate mirrors config.ZoneRate; 0 (omitted) means unlimited.
-type EdgeDocRate struct {
-	RPS         uint64 `json:"rps,omitempty"`
-	Concurrency uint64 `json:"concurrency,omitempty"`
-}
-
-// EdgeDocChallenge is one fanned-out HTTP-01 challenge: the node serves
-// KeyAuthorization at /.well-known/acme-challenge/<Token> for Zone until
-// ExpiresAt.
-type EdgeDocChallenge struct {
-	Zone             string    `json:"zone"`
-	Token            string    `json:"token"`
-	KeyAuthorization string    `json:"key_authorization"`
-	ExpiresAt        time.Time `json:"expires_at"`
-}
-
-// EdgeDocGrant is one issuance slot: Node may issue for Zone until ExpiresAt.
-type EdgeDocGrant struct {
-	Zone      string    `json:"zone"`
-	Node      string    `json:"node"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
+// The document types live in internal/edge/edgedoc — the leaf package both the
+// brain and the node import — and are aliased here so the brain-side code and
+// its tests keep the Edge* names. THE JSON CONTRACT IS FROZEN THERE (version 1);
+// see that package's doc for the extension rule.
+type (
+	EdgeDoc          = edgedoc.Doc
+	EdgeDocZone      = edgedoc.Zone
+	EdgeDocTLS       = edgedoc.TLS
+	EdgeDocPolicy    = edgedoc.Policy
+	EdgeDocRate      = edgedoc.Rate
+	EdgeDocChallenge = edgedoc.Challenge
+	EdgeDocGrant     = edgedoc.Grant
+)
 
 // buildEdgeDoc derives the document from a loaded zones file. Pure — no clock,
 // no server — so the doc-shape tests are tables. A nil zones file (no edge

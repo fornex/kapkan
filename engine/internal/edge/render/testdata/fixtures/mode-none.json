@@ -1,0 +1,24 @@
+{
+  "doc": {
+    "version": 1,
+    "zones": [
+      {
+        "name": "static.example.org",
+        "origins": ["[2001:db8::10]:8080"],
+        "tls": {"min_version": "1.2"},
+        "acme_directory": "https://acme-staging-v02.api.letsencrypt.org/directory",
+        "policy": {"mode": "none", "failure_mode": "open", "challenge": "off", "rate": {}},
+        "extra_directives_file": "/etc/kapkan/extra/static.example.org.conf"
+      }
+    ],
+    "acme_challenges": [],
+    "issuance_grants": []
+  },
+  "certs": {
+    "static.example.org": {
+      "fullchain": "/var/lib/kapkan/edge/certs/static.example.org/fullchain.pem",
+      "key": "/var/lib/kapkan/edge/certs/static.example.org/privkey.pem"
+    }
+  },
+  "node": {}
+}
