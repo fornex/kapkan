@@ -1,0 +1,96 @@
+export const metadata = {
+  title: "Référence des zones",
+  description:
+    "Chaque clé du fichier de zones que le cerveau sert aux nœuds edge : noms, origines, plancher TLS, annuaires ACME et la politique par requête.",
+};
+
+# Référence des zones
+
+Le **fichier de zones** est la liste des sites web que vos [nœuds edge](/docs/edge) servent en
+frontal : pour chaque zone, ses origines, son plancher TLS, l'autorité de certification à utiliser
+et la politique par requête que le service de décision du nœud applique. Il vit sur le cerveau,
+dans son propre fichier nommé par `edge.zones_file` dans `kapkan.yaml`, parce que les zones sont
+des données de locataire avec leur propre rythme de changement — le fichier est chargé et validé
+avec la configuration, et **un fichier de zones cassé garde les zones précédentes en service**
+plutôt que de servir un document à moitié cassé.
+
+```yaml
+zones:
+  - name: shop.example.com               # a lower-case hostname; no wildcards
+    origins:                             # at least one host:port; IPv6 as [addr]:port
+      - "10.0.0.10:8080"
+      - "10.0.0.11:8080"
+    tls:
+      min_version: "1.2"                 # "1.2" (default) or "1.3"
+    acme:
+      directory: ""                      # this zone's CA; empty = the node's default
+      fallback: ""                       # tried after repeated failures; empty = node default
+    policy:
+      mode: decide                       # decide (default) | none
+      failure_mode: open                 # open (default) | closed
+      challenge: "off"                   # only "off" today
+      rate:
+        rps: 50                          # requests per second per source; 0 = no ceiling
+        concurrency: 20                  # in-flight requests per source; 0 = no ceiling
+    extra_directives_file: ""            # optional nginx snippet, included last
+```
+
+Validez avec `kapkan -check-config /etc/kapkan/config.yaml` (il suit `edge.zones_file`), et
+générez le schéma JSON pour votre éditeur avec `kapkan -dump-zones-schema` — la copie versionnée
+est `docs/zones-schema.json`, régénérée avec `make -C engine schema` ; la suite de tests échoue
+sur une copie obsolète.
+
+## Clés
+
+| Clé | Signification |
+| --- | --- |
+| `zones[].name` | Le nom d'hôte de la zone, tel que le certificat sera émis pour lui : des labels RFC 1123 en minuscules, pas de joker, pas de point final, pas une adresse IP, au plus 238 caractères. Les majuscules sont rabattues en minuscules. Les noms doivent être uniques. |
+| `zones[].origins[]` | Là où nginx fait le proxy des requêtes de la zone : un ou plusieurs upstreams `host:port`, une adresse IPv6 entre crochets (`[2001:db8::10]:8080`), le port dans `1..65535` sans zéro initial. Une origine donnée par **nom d'hôte** est résolue une seule fois, quand nginx charge la configuration ; une qui ne se résout pas fait échouer toute la génération. Les doublons sont refusés. |
+| `zones[].tls.min_version` | La version TLS la plus basse que la zone accepte : `"1.2"` (par défaut) ou `"1.3"`. Avec TLS 1.2, le nœud génère le jeu de chiffrements ECDHE moderne ; avec 1.3, uniquement les suites TLS 1.3. Sur nginx avant 1.29.2, le plancher le **plus bas** de toutes les zones d'un nœud s'applique à chaque zone (les `ssl_protocols` du serveur par défaut l'emportent) ; Angie et nginx ≥ 1.29.2 le respectent par zone. |
+| `zones[].tls.h3` | HTTP/3. **Pas encore pris en charge** — `true` est refusé ; omettez-le ou mettez `false`. |
+| `zones[].acme.directory` | L'URL de l'annuaire ACME auprès duquel le certificat de cette zone est commandé (une CA de staging ou privée, par exemple). Vide signifie la valeur par défaut du nœud, à savoir Let's Encrypt production sauf si l'`edge.yaml` du nœud en dit autrement. Une URL `http(s)` avec un hôte. |
+| `zones[].acme.fallback` | Un second annuaire vers lequel un nœud se tourne après trois échecs consécutifs avec le principal (la réponse à un plafond de certificats en double sur une flotte), en alternant à partir de là ; un succès de l'un ou l'autre efface l'état d'échec et le renouvellement suivant essaie d'abord le principal. Doit différer d'`acme.directory`. Vide signifie la valeur par défaut du nœud, qui peut être aucune. Une CA qui exige un External Account Binding (ZeroSSL, Google Trust Services) a besoin de ses identifiants dans l'`edge.yaml` du **nœud** — le fichier de zones ne porte aucun secret. |
+| `zones[].policy.mode` | `decide` (par défaut) : chaque requête vers la zone interroge le service de décision du nœud via l'`auth_request` de nginx. `none` : proxy seul — pas de décision, pas de débit, pas de marques ; la zone reçoit tout de même son certificat et son journal d'accès. |
+| `zones[].policy.failure_mode` | Ce que nginx fait quand le service de décision est arrêté, lent ou hors contrat : `open` (par défaut) laisse passer la requête sans décision — l'équivalent côté edge du laisser-passer par défaut (default-pass) du plan de données — et la compte ; `closed` répond `503`. Avec `open`, l'échec est absorbé dans la sous-requête, de sorte que la connexion keepalive du client y survit ; avec `closed`, nginx répond `503` sur cette connexion. |
+| `zones[].policy.challenge` | Les défis clients (preuve de travail, JavaScript) viendront dans un jalon ultérieur ; seul `"off"` est accepté aujourd'hui. |
+| `zones[].policy.rate.rps` | Requêtes par seconde par **source** — une adresse IPv4, ou un `/64` IPv6 — appliquées par le service de décision avec un seau de jetons (token bucket) dont la rafale vaut une seconde de trafic. `0` (par défaut) ne fixe aucun plafond. Le modifier ne recharge jamais nginx. |
+| `zones[].policy.rate.concurrency` | Requêtes en cours par source, comptées approximativement à partir des décisions et des fins de requête dans le journal d'accès (une source dont le flux de journal se tait voit son plafond suspendu plutôt qu'appliqué à tort). `0` (par défaut) ne fixe aucun plafond. |
+| `zones[].extra_directives_file` | Un chemin **absolu** sur le nœud vers un extrait nginx inclus en dernier dans le serveur `:443` de la zone — l'unique échappatoire (un en-tête supplémentaire, une location personnalisée). Ce qu'il casse vous appartient ; `nginx -t` est le seul garde-fou, et un extrait qui y échoue laisse la génération précédente en service. Ni espace, ni `;`, ni `#`, ni accolades, ni guillemets, ni barre oblique inverse, ni `$`, ni caractères de glob (`* ? [ ]`) dans le chemin. |
+
+## Ce qu'une politique fait d'une requête
+
+Avec `mode: decide`, nginx interroge le service de décision du nœud avant de faire le proxy. La
+réponse est `200` — la requête va à l'origine, avec `X-Kapkan-Mark` renseigné quand la source porte
+une marque — ou `403` avec un motif :
+
+| Motif | nginx répond | Déclencheur |
+| --- | --- | --- |
+| `rate` | `429` avec `Retry-After: 1` | La source a dépassé `policy.rate.rps`. |
+| `concurrency` | `429` avec `Retry-After: 1` | La source a `policy.rate.concurrency` requêtes en cours. |
+| `table:<reason>` | `403` | La source est dans la table de verdicts du nœud : promue par les rollups (`table:flood` — une source qui a continué de forcer son plafond de débit est refusée pendant une minute, doublée jusqu'à dix en cas de récidive) ou, plus tard, par le palier d'escalade du cerveau. La marque en dry-run est `would-deny:table:<reason>`. |
+
+Deux en-têtes sont sous le contrôle de Kapkan et ne peuvent jamais être forgés par un client :
+`X-Kapkan-Zone` (le nom de la zone) atteint toujours l'origine ; `X-Kapkan-Mark` n'est présent que
+lorsque la source porte une marque, et absent sinon — une valeur envoyée par le client pour l'un ou
+l'autre est supprimée. Une source dont les requêtes sont presque toutes des `4xx`/`5xx` est marquée
+`errors` ; en **dry-run**, chaque refus qui aurait eu lieu devient une autorisation marquée
+`would-deny:<reason>`, de sorte que l'origine voit exactement ce que le mode réel aurait refusé.
+
+Le nœud garde un nombre borné de sources par zone ; quand la table est pleine, une nouvelle source
+passe **sans être suivie** (default-pass) et est comptée, jamais refusée par manque de place.
+
+## Certificats
+
+Chaque zone reçoit un certificat **par nœud**, émis et renouvelé sur le nœud par HTTP-01 ; la clé
+privée ne quitte jamais la machine. Le renouvellement démarre 30 jours avant l'expiration (un tiers
+de la durée de vie pour les certificats plus courts), avec un jitter par nœud et par zone. Jusqu'à
+l'arrivée du premier certificat, l'écouteur `:80` de la zone répond `503` à tout sauf au chemin du
+défi ACME — une zone n'est jamais servie en proxy en clair. Chaque nom est émis explicitement ; les
+jokers (DNS-01) viendront dans un jalon ultérieur.
+
+## Voir aussi
+
+- [Nœuds edge](/docs/edge) — le rôle, ses modes de panne et ses limites
+- [Installer un nœud edge](/docs/edge-install)
+- [`kapkan edge`](/docs/cli#edge) — l'`edge.yaml` propre au nœud
+- [Configuration](/docs/configuration) — le bloc `edge` du cerveau

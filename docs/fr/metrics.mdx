@@ -233,6 +233,23 @@ rend compte ici de son lecteur en espace utilisateur ; son échantillonneur par 
 `fp_throttled` qui grimpe tandis que `fp_emitted` plafonne, c'est l'échantillonneur qui fait son travail sous un
 flood de handshakes ; un `fp_ring_full` soutenu signifie que le lecteur ne parvient pas à vider l'anneau assez vite.
 
+## Nœuds edge
+
+Un [nœud edge](/docs/edge) expose ses propres séries sur `status_listen` (`/metrics`), à côté de
+celles du runtime Go :
+
+| Métrique | Type | Labels | Signification |
+| --- | --- | --- | --- |
+| `kapkan_edge_decisions_total` | compteur | `zone`, `result` | Verdicts du service de décision : `allow`, `allow_marked` (autorisée avec une marque), `deny_rate`, `deny_concurrency`, `deny_table`, `would_deny` (un refus en dry-run, répondu comme une autorisation), `untracked` (les tables par source étaient pleines, la requête est passée sans décision), `mode_none` (une zone sans décisions), `unknown_zone`, `bad_request` (une sous-requête hors contrat). |
+| `kapkan_edge_log_records_total` | compteur | `result` | Datagrammes du journal d'accès envoyés par le terminateur : `ok`, `malformed`, `oversized`, `dropped` (le gestionnaire propre au nœud n'a pas suivi — sa file de 8192 enregistrements était pleine), `unknown_zone`. Les datagrammes que le noyau rejette n'atteignent jamais le nœud et ne sont pas comptés ici. |
+| `kapkan_edge_inflight_resets_total` | compteur | — | Compteurs de requêtes en cours que le service de décision a réinitialisés parce qu'une source active n'a vu aucune complétion pendant toute une période d'inactivité — son flux de journal était lacunaire ou mort. Un taux constant signifie que des datagrammes du journal d'accès se perdent avant d'atteindre le nœud : augmentez `net.unix.max_dgram_qlen` (le nœud avertit au démarrage lorsqu'il est inférieur à 512). |
+| `kapkan_edge_verdict_table_entries` | jauge | — | Entrées deny/mark actives dans la table de verdicts du nœud. |
+| `kapkan_edge_cert_not_after_seconds` | jauge | `zone` | Expiration du certificat de la zone sous forme d'horodatage Unix — l'**alarme T−30 j** : alertez lorsqu'elle est à moins de 30 jours. Supprimée lorsqu'une zone quitte le document. |
+| `kapkan_edge_acme_attempts_total` | compteur | `zone`, `result` | Commandes de certificats : `issued`, `renewed`, `failed` (sur l'une ou l'autre CA), et `fallback` — un certificat obtenu auprès de la CA de repli, compté en plus de son entrée `issued`/`renewed` ; sommez donc `issued+renewed+failed` pour les tentatives. |
+
+Le cerveau n'ajoute rien par nœud edge à son propre `/metrics` ; la vivacité et le dernier rapport
+d'un nœud se lisent via [`GET /api/v1/edge/nodes`](/docs/api#le-canal-edge).
+
 ## Collecte (scraping)
 
 Ajoutez Kapkan comme cible de collecte dans votre configuration Prometheus :

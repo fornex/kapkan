@@ -1,0 +1,159 @@
+export const metadata = {
+  title: "Edge-Knoten (verwaltetes HTTPS-Frontend)",
+  description:
+    "Machen Sie aus einer Linux-Box mit nginx oder Angie ein verwaltetes HTTPS-Frontend für Ihre Zonen: Zertifikate werden auf dem Knoten ausgestellt, die Konfiguration erzeugt Kapkan, jede Anfrage wird lokal entschieden, und Kapkan selbst leitet nichts weiter.",
+};
+
+# Edge-Knoten (verwaltetes HTTPS-Frontend)
+
+<Callout type="info" title="Was das ist — und was nicht">
+Ein **Edge-Knoten** ist eine Linux-Box mit **nginx oder Angie**, die Kapkan verwaltet: Es stellt
+die Zertifikate der Zonen auf der Box aus, erzeugt die Konfiguration des Terminators, entscheidet
+pro Anfrage, ob ein Client durchgelassen wird, und meldet zurück. Kapkan **leitet niemals die
+Bytes eines Clients weiter** — nginx terminiert TLS und reicht die Anfragen per Proxy an Ihre
+Origins weiter; Kapkan sagt ihm, was es ausliefern soll und, für jede Anfrage, ob es sie
+ausliefern soll. Sie bringen das Netzwerk (Anycast, Transit, DNS) und die Boxen mit; Kapkan bringt
+die Schutzschleife mit.
+</Callout>
+
+Einfach gesagt: Sie führen Ihre Websites (Zonen) in einer Datei auf dem Gehirn auf, richten deren
+DNS auf Ihre Edge-Boxen, und jede Box erhält ein Zertifikat, eine erzeugte nginx-Konfiguration und
+einen lokalen Entscheidungsdienst, der jeden Client zählt und diejenigen abweist, die die
+Richtlinie der Zone überschreiten — ohne einen Round-Trip zu irgendetwas anderem.
+
+```yaml
+# zones.yaml on the brain (edge.zones_file) — see the zones reference
+zones:
+  - name: shop.example.com
+    origins: ["10.0.0.10:8080", "10.0.0.11:8080"]
+    tls: { min_version: "1.2" }
+    policy:
+      mode: decide            # every request asks the local decision service
+      failure_mode: open      # decider down → requests pass, undecided
+      rate: { rps: 50, concurrency: 20 }
+```
+
+Die Rolle ist die dritte desselben Binarys: `kapkan` (das Gehirn), [`kapkan scrub`](/docs/scrubbing#verwaltete-scrubbing-knoten)
+und nun [`kapkan edge`](/docs/cli#edge). Die Installation von Anfang bis Ende beschreibt die
+[Installationsanleitung](/docs/edge-install); die Zonen-Datei ist in der [Zonen-Referenz](/docs/zones) dokumentiert.
+
+## Funktionsweise
+
+```
+ client ──TLS──▶ nginx / Angie  (terminates, proxies to your origins)
+                    │ auth_request        │ access log (JSON, unix socket)
+                    ▼                     ▼
+               kapkan edge  ── decision service · rollups · ACME · renderer
+                    ▲ long-poll of the zone document, self-reports
+               kapkan (brain) — zones.yaml, issuance coordinator, console
+```
+
+- **Das Gehirn verteilt Richtlinien, niemals Verdikte.** `kapkan edge` pollt per Long-Poll ein
+  einziges Dokument — die Zonen mit ihren Origins, der TLS-Untergrenze, den ACME-Verzeichnissen
+  und der Richtlinie pro Anfrage — und hält eine Kopie auf der Platte. Jede Entscheidung pro
+  Anfrage wird **auf dem Knoten** getroffen; ein Gehirn, das ausgefallen oder nicht erreichbar
+  ist, ändert nichts daran, wie Anfragen beantwortet werden.
+- **Der Renderer** verwandelt das Dokument in nginx-Konfiguration unterhalb des
+  Zustandsverzeichnisses des Knotens: eine gemeinsame Datei (ein JSON-`log_format`, die Upstreams
+  für Kapkans Unix-Sockets, ein Catch-all, das unbekannte Hosts abweist) und eine Datei pro Zone
+  (der `:80`-Listener, der ACME-Challenges beantwortet und umleitet, der `:443`-Server, der hinter
+  einem `auth_request` an den Entscheidungsdienst per Proxy an die Origins weiterreicht). Jede
+  Generation wird mit `nginx -t` getestet, **bevor** sie installiert und neu geladen wird; ein
+  fehlschlagender Kandidat wird niemals installiert — die vorherige Konfiguration bedient weiter,
+  und der Fehler wird gemeldet.
+- **Der Entscheidungsdienst** beantwortet den `auth_request` von nginx über einen Unix-Socket in
+  Mikrosekunden: `200` (mit einem optionalen `X-Kapkan-Mark`-Header, den der Origin erhält) oder
+  `403`. Er setzt die `policy.rate` der Zone pro **Quelle** durch — eine IPv4-Adresse oder ein
+  IPv6-`/64` — mit einem Token-Bucket für Anfragen pro Sekunde und einer näherungsweisen Zählung
+  gleichzeitig laufender Anfragen für die Concurrency, und hält eine begrenzte Tabelle von
+  Verdikten (Sperre oder Markierung, mit TTL). Ein Client über seiner Obergrenze erhält `429` mit
+  `Retry-After`; ein Client, den die Tabelle abweist, erhält `403`.
+- **Die Rollups** lesen das Zugriffsprotokoll des Terminators (JSON über einen
+  Unix-Datagramm-Socket) in Fenster pro Zone und Quelle ein. Eine Quelle, die weiter gegen ihre
+  Ratenobergrenze drückt, wird zu einer Sperre hochgestuft (eine Minute, bei Wiederholung
+  verdoppelt bis auf zehn); eine Quelle, deren Anfragen fast ausschließlich Fehler sind, wird für
+  den Origin sichtbar mit `errors` markiert. Verdikte bleiben auf dem Knoten.
+- **ACME** läuft auf jedem Knoten: Account-Schlüssel und Zertifikate werden auf der Box erzeugt
+  und verlassen sie nie. Das Gehirn serialisiert lediglich die Ausstellung pro Zone (ein Knoten
+  bestellt zu einem Zeitpunkt) und verteilt eine ausstehende HTTP-01-Challenge an jeden Knoten,
+  sodass die Validierung der CA auf jedem von ihnen landen darf. Beides ist beratend: Ein Knoten
+  erneuert auch ohne Gehirn.
+
+### Die Fast/Slow-Trennung
+
+Das Ändern der **Rate** einer Zone oder eines **Verdikts** lädt nginx niemals neu; diese fließen
+zum Entscheidungsdienst und wirken bei der nächsten Anfrage. Nur **langsame** Änderungen — eine
+hinzugefügte oder entfernte Zone, ein geänderter Origin, die TLS-Untergrenze, ein ausgestelltes
+oder erneuertes Zertifikat — erzeugen eine neue Konfigurationsgeneration, die getestet und neu
+geladen wird. Genau das erlaubt es, eine Rate unter Angriff zu verschärfen, ohne den Terminator
+anzufassen.
+
+### Dry-Run: erst beobachten
+
+Wie jede entfernte Rolle läuft ein Edge-Knoten **standardmäßig im Dry-Run**: Entscheidungen werden
+gezählt und markiert, keine wird durchgesetzt. Eine Anfrage, die die Richtlinie abweisen würde,
+erreicht den Origin trotzdem, mit dem Header `X-Kapkan-Mark: would-deny:rate` (oder
+`would-deny:concurrency`, `would-deny:table:<reason>` — heute `would-deny:table:flood`, die
+Rollup-Regel, die die Quelle hochgestuft hat), sodass Sie die Logs Ihres Origins durchsuchen und
+die Metriken ansehen können, bevor ein einziger Client abgewiesen wird. Setzen Sie
+`dry_run: false` in der `edge.yaml` des Knotens, wenn die Zahlen stimmen.
+
+## Was der Knoten bei Ausfällen tut
+
+| Ausfall | Verhalten |
+| --- | --- |
+| Gehirn ausgefallen oder nicht erreichbar | Der Knoten bedient weiter mit dem letzten Dokument und den Zertifikaten von der Platte; Erneuerungen laufen weiter; ein Neustart kommt ohne Gehirn zurück in Betrieb (fail-static). Unter einer gemeinsamen oder Anycast-Adresse kann die HTTP-01-Validierung einer Erneuerung auf einem anderen Knoten landen, während das Gehirn ausgefallen ist; solche Versuche werden stündlich wiederholt und zählen niemals für die Fallback-CA. |
+| Entscheidungsdienst ausgefallen oder langsam | Pro Zone: `failure_mode: open` (der Standard) lässt die Anfrage unentschieden durch und zählt sie; `closed` antwortet `503`. |
+| Dokument abgelehnt (Renderer, oder `nginx -t` schlägt fehl) | Die vorherige Generation bedient weiter; der Knoten bleibt gesund, aber `converged: false`, meldet den ETag des **gerenderten** Dokuments (nicht des akzeptierten) und versucht es lokal alle 1 → 10 Minuten erneut, bis es angewendet wird oder ein neueres Dokument eintrifft. |
+| nginx stirbt | systemd startet es neu; mit gesetztem `terminator.pid_file` meldet der Knoten `alive: false` und antwortet unterdessen mit `503` auf seinem `/healthz`. Kapkan überwacht den Terminator selbst niemals. |
+| Zertifikat nicht erneuerbar | Das aktuelle Zertifikat bedient, bis es abläuft; `kapkan_edge_cert_not_after_seconds` ist der T−30-d-Alarm; nach drei Fehlschlägen versucht der Knoten die Fallback-CA. |
+| Knoten stirbt | Das Gehirn sieht den Poll ausbleiben (`edge.stale_after_seconds`) und zeigt es im Inventar; den Verkehr wegzulenken ist Aufgabe Ihres Netzwerks (Anycast-Withdraw, DNS). |
+
+## Den Knoten auslesen
+
+- **`/healthz`** auf `status_listen` antwortet `200`, solange eine getestete Generation des
+  Knotens selbst live ist (und der Terminator lebt, wenn eine PID-Datei konfiguriert ist), sonst
+  `503`. Der Body trägt `converged`, den gerenderten und den akzeptierten ETag, die aktive
+  Generation und ihr Testergebnis, den letzten Fehler, den nächsten Wiederholungsversuch, wann
+  das Gehirn zuletzt gesehen wurde, und `dry_run`.
+- **`/metrics`** auf derselben Adresse stellt die Prometheus-Reihen des Knotens bereit — siehe
+  [Metriken](/docs/metrics#edge-knoten).
+- **Das Inventar des Gehirns**, `GET /api/v1/edge/nodes`, verbindet die Lebendigkeit jedes
+  konfigurierten Knotens mit seinem letzten Selbstreport: Version, Dry-Run, gerenderter ETag, Art
+  und Version des Terminators, Generation und Testergebnis, Zertifikate (niemals ein Schlüssel).
+  Siehe [die API](/docs/api#der-edge-kanal).
+
+## Grenzen, die Sie kennen sollten
+
+- **TLS-Untergrenze auf älterem nginx.** nginx vor 1.29.2 wendet die `ssl_protocols` des
+  *Default*-Servers auf jeden Namen an, daher trägt das Catch-all des Knotens die **niedrigste**
+  `tls.min_version` aller seiner Zonen, und jede Zone erhält diese Untergrenze. Angie und nginx
+  ≥ 1.29.2 respektieren die Untergrenze pro Zone. Wo das eine Rolle spielt, halten Sie alle Zonen
+  auf derselben Untergrenze oder betreiben Sie Angie.
+- **Ein einziger Default-Server.** Kapkan rendert sein eigenes Catch-all-`default_server` auf
+  `:80` und `:443`, das unbekannte Hosts und SNI abweist. Wenn Ihre `nginx.conf` bereits eines
+  deklariert (Debians Default-Site tut das), schlägt `nginx -t` mit *a duplicate default server*
+  fehl — setzen Sie `omit_catch_all: true` und lassen Sie Ihre Server diese Rolle übernehmen.
+- **Origins werden zur Testzeit aufgelöst.** Ein Hostnamen-Origin wird einmal aufgelöst, wenn
+  nginx die Konfiguration lädt; einer, der sich nicht auflösen lässt, lässt `nginx -t` für die
+  gesamte Generation fehlschlagen (und wird erneut versucht). Bevorzugen Sie Adressen.
+- **Wildcards, HTTP/3 und Challenges sind spätere Meilensteine.** `tls.h3` und eine
+  `policy.challenge` außer `off` werden heute abgelehnt; jeder Name wird explizit aufgeführt.
+- **Obergrenzen für Duplikat-Zertifikate.** Zertifikate pro Knoten bedeuten, dass N Knoten auf
+  einer Zone N Bestellungen sind; Let's Encrypt begrenzt einen Namen auf etwa fünf pro Woche. Der
+  Ausstellungs-Slot des Gehirns und der Erneuerungs-Jitter verteilen sie; `acme.fallback` (ZeroSSL,
+  Google Trust Services — beide benötigen ein External Account Binding) ist der Notausgang. Planen
+  Sie CA-Accounts für große Flotten.
+- **Das agent-Token stellt Zertifikate aus.** Bis Tokens an Knoten gebunden sind, kann der
+  Inhaber des agent-Tokens über das Gehirn eine Challenge-Antwort für jede Zone veröffentlichen
+  (nur von einem Knoten aus, der den Ausstellungs-Slot der Zone hält, und jeder Aufruf wird
+  protokolliert). Rotieren Sie das Token, wenn ein Knoten kompromittiert ist.
+
+## Verwandte Themen
+
+- [Einen Edge-Knoten installieren](/docs/edge-install) — Gehirn-Seite, nginx-Seite, die Unit, Echtbetrieb
+- [Zonen-Referenz](/docs/zones) — jeder Schlüssel der `zones.yaml`
+- [`kapkan edge`](/docs/cli#edge) — der Befehl, seine Flags und die `edge.yaml`
+- [Der Edge-Kanal](/docs/api#der-edge-kanal) — die Routen des Gehirns
+- [Metriken](/docs/metrics#edge-knoten) — die `kapkan_edge_*`-Reihen
+- [Fingerprint-Ebene](/docs/fingerprinting) — Clients off-path per JA4 blockieren, vor dem Terminator

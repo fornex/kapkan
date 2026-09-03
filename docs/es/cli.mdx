@@ -10,7 +10,7 @@ Kapkan es un único binario. Lo que hace se selecciona mediante opciones de lín
 arrancar, más un pequeño número de **comandos** que inspeccionan el sistema en ejecución y
 terminan. Todos los registros van a **stderr**; la API REST y las métricas de Prometheus se sirven
 por HTTP en `api.listen` (predeterminado `127.0.0.1:8080`), mientras que las flags de utilidad
-(`-version`, `-dump-schema`) y los comandos imprimen su salida en **stdout**.
+(`-version`, `-dump-schema`, `-dump-zones-schema`) y los comandos imprimen su salida en **stdout**.
 
 ```sh
 kapkan [flags]                     # run the daemon
@@ -20,8 +20,9 @@ kapkan [flags] <command> [args]    # run a command and exit
 Las flags globales van **antes** del comando; las flags propias del comando van después. Así,
 `kapkan -config /etc/kapkan/config.yaml dataplane status -json` lee la ruta de la configuración de
 la `-config` global y pasa `-json` a `dataplane status`. Una flag que ya termina por sí sola
-(`-version`, `-check-config`, `-dump-schema`, `-check-update`, `-s`) no se puede combinar con un
-comando: Kapkan rechaza la combinación en lugar de atender en silencio solo a una de ellas.
+(`-version`, `-check-config`, `-dump-schema`, `-dump-zones-schema`, `-check-update`, `-s`) no se
+puede combinar con un comando: Kapkan rechaza la combinación en lugar de atender en silencio solo a
+una de ellas.
 
 ## Flags
 
@@ -32,6 +33,7 @@ comando: Kapkan rechaza la combinación en lugar de atender en silencio solo a u
 | `-log-level <lvl>` | `info` | Nivel mínimo de registro: `debug`, `info`, `warn`, `error`. Un valor no reconocido recae en `info`. |
 | `-check-config <path>` | — | Valida el archivo de configuración en `<path>` y termina; **no** inicia el demonio. Consulta [más abajo](#validar-una-configuración). |
 | `-dump-schema` | `false` | Imprime el esquema JSON de la configuración en stdout y termina. Consulta [más abajo](#volcar-el-esquema). |
+| `-dump-zones-schema` | `false` | Imprime en stdout el esquema JSON del [archivo de zonas](/docs/zones) que sirve un cerebro edge (`edge.zones_file`) y termina. |
 | `-version` | `false` | Imprime la versión de compilación y termina. La misma versión se expone en tiempo de ejecución mediante `/api/v1/status` y la [métrica](/docs/metrics) `kapkan_build_info`. |
 | `-check-update` | `false` | Ejecuta la [comprobación de actualizaciones](/docs/configuration) opcional una vez y termina: `0` actualizado, `10` hay una actualización disponible, `1` ante un error. Consulta la API de Releases de GitHub; envía solo la propia solicitud, nunca la identidad del nodo ni la configuración. |
 | `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Dónde escribe el demonio su id de proceso al arrancar (se elimina al apagarse limpiamente); lo lee `-s` para localizar el demonio en ejecución. Un fallo de escritura no es fatal: el demonio sigue ejecutándose, solo que `-s` no está disponible. |
@@ -135,6 +137,14 @@ kapkan -dump-schema
 
 Imprime el esquema JSON de la configuración en stdout y termina con `0` (o con `1` ante un error
 interno). El [generador de configuración](/config) usa este esquema para validar los campos en tu navegador.
+
+```sh
+kapkan -dump-zones-schema
+```
+
+Lo mismo para el [archivo de zonas](/docs/zones) que sirve un cerebro edge (`edge.zones_file`): su
+esquema JSON, con los enums y los límites del vocabulario de zonas, para tu editor o para las
+herramientas de un tenant.
 
 ### Imprimir la versión
 
@@ -286,6 +296,87 @@ laboratorio — un `controller.url` en texto plano envía el token en claro.
 Confirma que un nodo está en marcha con `kapkan dataplane status` en el propio nodo — informa
 `ENFORCING` y el recuento de reglas instaladas — y la [vista de Nodos](/docs/dashboard) del cerebro
 lo muestra vivo. Llevar el tráfico desviado hasta el nodo es la [guía de integración de red](/docs/network-integration).
+
+### `edge`
+
+```sh
+kapkan edge -config /etc/kapkan/edge.yaml
+```
+
+Ejecuta el rol de [nodo edge](/docs/edge): el nginx o Angie de la máquina se convierte en un frontal
+HTTPS gestionado para las zonas que sirve el cerebro. El rol hace long-poll del documento de zonas del
+cerebro, renderiza la configuración del terminador y la instala tras pasar `nginx -t`, responde al
+`auth_request` de nginx desde un servicio de decisión local, lee el access log y lo agrega por fuente,
+emite y renueva los certificados de las zonas en la propia máquina, y se autoinforma. El sondeo hace
+de paso las veces de señal de vitalidad del nodo. El paso a paso es la
+[guía de instalación](/docs/edge-install).
+
+Todo lo específico del rol vive en su propio `edge.yaml`; el `config.yaml` del demonio **no** se
+lee (`-config` aquí toma por defecto `/etc/kapkan/edge.yaml`).
+
+```yaml
+dry_run: true                          # the remote-role default — marks, refuses nothing
+controller:
+  url: https://kapkan.example.net:8443 # the brain's API base (no path); https outside a lab
+  token_env: KAPKAN_EDGE_TOKEN         # env var holding the agent token (required)
+  name: edge-1                         # must equal an edge.nodes[] name on the brain
+  report_interval_seconds: 10          # self-report cadence
+state_dir: /var/lib/kapkan-edge        # document cache, generations, ACME keys and certificates
+sockets_dir: /run/kapkan-edge          # edge-decide.sock, edge-challenge.sock, edge-log.sock
+socket_group: nginx                    # the terminator's worker group (nginx | www-data | angie)
+terminator:
+  binary: nginx                        # nginx (default) | angie
+  main_conf: /etc/nginx/nginx.conf     # -c for `nginx -t` and `nginx -s reload`; empty = compiled default
+  reload: exec                         # exec (default) | signal | command
+  pid_file: /run/nginx.pid             # liveness check; required for reload: signal
+  # command: [systemctl, reload, nginx]
+acme:
+  directory: ""                        # default CA; empty = Let's Encrypt production
+  fallback: ""                         # optional second CA after three consecutive failures
+  contact: ["mailto:ops@example.net"]
+  # eab:                               # External Account Binding for CAs that require one
+  #   - directory: https://acme.zerossl.com/v2/DV90
+  #     kid: your-kid
+  #     hmac_key_env: KAPKAN_EDGE_ZEROSSL_HMAC
+  # disabled: true                     # issue nothing (zones stay on :80 answering 503)
+status_listen: 127.0.0.1:9102          # /healthz + /metrics; unauthenticated, keep it private
+omit_catch_all: false                  # true when nginx.conf has its own default_server
+disable_ipv6: false                    # true on hosts without an IPv6 stack
+```
+
+| Clave | Significado |
+| --- | --- |
+| `dry_run` | Ausente o `true`: las decisiones se cuentan y se marcan (`X-Kapkan-Mark: would-deny:<reason>` llega al origen), pero ninguna se aplica. Ponlo en `false` para rechazar. |
+| `controller.url` / `token_env` / `name` | La base de la API del cerebro (sin ruta, sin credenciales en la URL), la variable de entorno que contiene el token **agent**, y el nombre de este nodo — debe coincidir con una entrada `edge.nodes[]` en el cerebro, o cada sondeo será un sonoro `404`. |
+| `state_dir` / `sockets_dir` | Los directorios propios del rol (por defecto `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — nunca los `/var/lib/kapkan` y `/run/kapkan` del cerebro, a los que systemd les cambiaría el propietario y que eliminaría bajo sus pies en un host compartido. Absolutos, sin caracteres que nginx pudiera malinterpretar. |
+| `socket_group` | El grupo de los workers del terminador. Los sockets de decisión y de log son `0660` para él; el socket de challenge es `0666` (responde tokens públicos). Vacío deja los dos sockets restringidos por grupo accesibles solo para el propietario. |
+| `terminator.binary` / `main_conf` | Qué ejecutar para `-t` y las recargas, y la configuración principal que pasar como `-c`. Ese archivo debe hacer `include /var/lib/kapkan-edge/conf/live/*.conf;` una sola vez, dentro de `http {}`. |
+| `terminator.reload` | `exec` ejecuta `<binary> -s reload` (necesita enviar una señal al master de nginx — la unidad se ejecuta como root); `signal` envía `HUP` al pid de `pid_file`; `command` ejecuta `terminator.command`, p. ej. `[systemctl, reload, nginx]`. |
+| `terminator.pid_file` | Cuando está definido, se lee en cada tick de reporte y se le envía la señal `0`: `/healthz` responde `503` y el reporte dice `alive: false` mientras ningún proceso tenga ese pid. |
+| `acme.directory` / `fallback` / `contact` | La CA predeterminada del nodo (el bloque `acme` propio de una zona prevalece sobre directory y fallback), la CA de respaldo que se intenta tras tres fallos consecutivos (debe ser distinta de la primaria resuelta) y el contacto de la cuenta — cada entrada una URL `mailto:` (`mailto:ops@example.net`), o el archivo se rechaza. |
+| `acme.eab[]` | External Account Binding por URL de directorio (`directory`, `kid`, `hmac_key_env`) para las CA que lo exigen — ZeroSSL, Google Trust Services. La clave HMAC es un secreto y se lee de la variable de entorno indicada. |
+| `acme.disabled` | No emitir nada: las zonas se quedan en `:80` respondiendo `503` (un laboratorio que ejercita todo salvo la emisión). Los certificados aportados por el operador aún no son una funcionalidad. |
+| `status_listen` | Sirve `/healthz` y `/metrics` cuando está definido. Sin autenticación — loopback o una dirección privada. |
+| `omit_catch_all` / `disable_ipv6` | Omite el `default_server` comodín de Kapkan (tu `nginx.conf` ya declara uno) / omite los listeners `[::]` (sin pila IPv6). |
+
+<Callout type="warning" title="Un nodo edge arranca en dry-run">
+`dry_run` toma por defecto **true** para un rol remoto — el nodo cuenta y marca lo que
+*rechazaría*, pero no rechaza nada, hasta que pongas `dry_run: false` explícitamente. Requiere un
+token agent real: sin uno sus sondeos no llevan identidad y el cerebro lo contaría como muerto. Usa
+`https` fuera de un laboratorio — un `controller.url` en texto plano envía el token en claro.
+</Callout>
+
+| Flag | Por defecto | Descripción |
+| --- | --- | --- |
+| `-config <path>` | `/etc/kapkan/edge.yaml` | La configuración del nodo edge. |
+| `-check` | desactivado | Valida el archivo y lo que nombra en esta máquina — el grupo del socket debe existir y cualquier clave EAB debe estar bien formada (problemas); un token, un binario del terminador o un `main_conf` ausentes son una advertencia — y termina. |
+| `-log-format <fmt>` | `json` | `json` o `text`. |
+| `-log-level <lvl>` | `info` | `debug`, `info`, `warn` o `error`. |
+
+Confirma que un nodo está en marcha con `curl 127.0.0.1:9102/healthz` — `200` con `"converged":true`
+una vez que el documento está renderizado y activo — y el inventario del cerebro
+(`GET /api/v1/edge/nodes`) lo muestra vivo. El esquema del archivo de zonas del lado del cerebro es
+`kapkan -dump-zones-schema`.
 
 ### `nginx-exporter`
 

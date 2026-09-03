@@ -1,0 +1,155 @@
+export const metadata = {
+  title: "Nodos edge (frontal HTTPS gestionado)",
+  description:
+    "Convierte una máquina Linux con nginx o Angie en un frontal HTTPS gestionado para tus zonas: certificados emitidos en el nodo, configuración generada por Kapkan, decisiones por petición tomadas localmente y nada reenviado por el propio Kapkan.",
+};
+
+# Nodos edge (frontal HTTPS gestionado)
+
+<Callout type="info" title="Qué es esto — y qué no es">
+Un **nodo edge** es una máquina Linux que ejecuta **nginx o Angie** y que Kapkan gestiona: emite
+los certificados de las zonas en la propia máquina, genera la configuración del terminador, decide
+en cada petición si deja pasar a un cliente e informa de vuelta. Kapkan **nunca reenvía los bytes
+de un cliente** — nginx termina el TLS y hace de proxy hacia tus orígenes; Kapkan le dice qué
+servir y, para cada petición, si servirla. Tú aportas la red (anycast, tránsito, DNS) y las
+máquinas; Kapkan aporta el bucle de protección.
+</Callout>
+
+En términos simples: enumeras tus sitios web (zonas) en un archivo en el cerebro, apuntas su DNS a
+tus máquinas edge, y cada máquina obtiene un certificado, una configuración de nginx generada y un
+servicio de decisión local que cuenta a cada cliente y rechaza a los que exceden la política de la
+zona — sin ningún viaje de ida y vuelta a ninguna parte.
+
+```yaml
+# zones.yaml on the brain (edge.zones_file) — see the zones reference
+zones:
+  - name: shop.example.com
+    origins: ["10.0.0.10:8080", "10.0.0.11:8080"]
+    tls: { min_version: "1.2" }
+    policy:
+      mode: decide            # every request asks the local decision service
+      failure_mode: open      # decider down → requests pass, undecided
+      rate: { rps: 50, concurrency: 20 }
+```
+
+El rol es el tercero del mismo binario: `kapkan` (el cerebro), [`kapkan scrub`](/docs/scrubbing#nodos-de-scrubbing-gestionados)
+y ahora [`kapkan edge`](/docs/cli#edge). Instalarlo de principio a fin es la
+[guía de instalación](/docs/edge-install); el archivo de zonas es la [referencia de zonas](/docs/zones).
+
+## Cómo funciona
+
+```
+ client ──TLS──▶ nginx / Angie  (terminates, proxies to your origins)
+                    │ auth_request        │ access log (JSON, unix socket)
+                    ▼                     ▼
+               kapkan edge  ── decision service · rollups · ACME · renderer
+                    ▲ long-poll of the zone document, self-reports
+               kapkan (brain) — zones.yaml, issuance coordinator, console
+```
+
+- **El cerebro distribuye la política, nunca los veredictos.** `kapkan edge` hace long-poll de un
+  único documento — las zonas con sus orígenes, la versión mínima de TLS, los directorios ACME y la
+  política por petición — y guarda una copia en disco. Cada decisión por petición se toma **en el
+  nodo**; un cerebro caído o inalcanzable no cambia nada en cómo se responden las peticiones.
+- **El renderizador** convierte el documento en configuración de nginx bajo el directorio de
+  estado del nodo: un archivo compartido (un `log_format` JSON, los upstreams para los sockets
+  unix de Kapkan, un catch-all que rechaza los hosts desconocidos) y un archivo por zona (el
+  listener `:80` que responde a los desafíos ACME y redirige, el servidor `:443` que hace de proxy
+  hacia los orígenes detrás de un `auth_request` al servicio de decisión). Cada generación se
+  prueba con `nginx -t` **antes** de instalarse y recargarse; una candidata que falla nunca se
+  instala — la configuración anterior sigue sirviendo y el fallo se reporta.
+- **El servicio de decisión** responde al `auth_request` de nginx por un socket unix en
+  microsegundos: `200` (con una cabecera opcional `X-Kapkan-Mark` que recibe el origen) o `403`.
+  Aplica el `policy.rate` de la zona por **fuente** — una dirección IPv4, o un `/64` IPv6 — con
+  un token bucket para las peticiones por segundo y un recuento aproximado de peticiones en curso
+  para la concurrencia, y mantiene una tabla acotada de veredictos (denegar o marcar, con un TTL).
+  Un cliente que supera su techo recibe `429` con `Retry-After`; un cliente al que la tabla
+  rechaza recibe `403`.
+- **Los rollups** (los agregados) leen el access log del terminador (JSON sobre un socket unix de
+  datagramas) en ventanas por zona y por fuente. Una fuente que sigue empujando a través de su
+  techo de tasa se promueve a una denegación (un minuto, que se duplica hasta diez si reincide);
+  una fuente cuyas peticiones son casi todas errores se marca como `errors` para que el origen lo
+  vea. Los veredictos se quedan en el nodo.
+- **ACME** se ejecuta en cada nodo: las claves de cuenta y los certificados se generan en la
+  máquina y nunca salen de ella. El cerebro solo serializa la emisión por zona (un nodo pide a la
+  vez) y reparte un desafío HTTP-01 pendiente a todos los nodos, de modo que la validación de la
+  CA puede caer en cualquiera de ellos. Ambas cosas son orientativas: un nodo renueva con el
+  cerebro ausente.
+
+### La división rápida/lenta
+
+Cambiar la **tasa** de una zona o un **veredicto** nunca recarga nginx; esos cambios fluyen al
+servicio de decisión y surten efecto en la siguiente petición. Solo los cambios **lentos** — una
+zona añadida o eliminada, un origen cambiado, la versión mínima de TLS, un certificado emitido o
+renovado — producen una nueva generación de configuración, probada y recargada. Esto es lo que
+permite endurecer una tasa bajo ataque sin tocar el terminador.
+
+### Dry-run: primero observa
+
+Como todo rol remoto, un nodo edge **arranca en dry-run por defecto**: las decisiones se cuentan y
+se marcan, ninguna se aplica. Una petición que la política rechazaría sigue llegando al origen,
+con la cabecera `X-Kapkan-Mark: would-deny:rate` (o `would-deny:concurrency`,
+`would-deny:table:<reason>` — hoy `would-deny:table:flood`, la regla de rollup que promovió a la
+fuente), de modo que puedes hacer grep en los logs de tu origen y mirar las métricas antes de que
+se rechace a un solo cliente. Pon `dry_run: false` en el `edge.yaml` del nodo cuando los recuentos
+tengan buena pinta.
+
+## Qué hace el nodo cuando algo falla
+
+| Fallo | Comportamiento |
+| --- | --- |
+| Cerebro caído o inalcanzable | El nodo sigue sirviendo el último documento y los certificados desde disco; las renovaciones continúan; un reinicio vuelve al servicio sin el cerebro (fail-static). Bajo una dirección compartida o anycast, la validación HTTP-01 de una renovación puede caer en otro nodo mientras el cerebro está caído; esos intentos se reintentan cada hora y nunca cuentan para la CA de respaldo. |
+| Servicio de decisión caído o lento | Por zona: `failure_mode: open` (el valor por defecto) deja pasar la petición sin decidir y la cuenta; `closed` responde `503`. |
+| Documento rechazado (el renderizador, o `nginx -t` falla) | La generación anterior sigue sirviendo; el nodo se mantiene sano pero con `converged: false`, reporta el ETag del documento **renderizado** (no el aceptado) y reintenta localmente cada 1 → 10 minutos hasta que se aplique o llegue un documento más nuevo. |
+| nginx muere | systemd lo reinicia; con `terminator.pid_file` configurado, el nodo reporta `alive: false` y responde `503` en su `/healthz` mientras tanto. Kapkan nunca supervisa el terminador por sí mismo. |
+| Certificado no renovable | El certificado actual sirve hasta que caduca; `kapkan_edge_cert_not_after_seconds` es la alarma a T−30 d; tras tres fallos el nodo prueba la CA de respaldo. |
+| El nodo muere | El cerebro ve que el sondeo se detiene (`edge.stale_after_seconds`) y lo muestra en el inventario; desviar el tráfico a otro sitio es tarea de tu red (retirada anycast, DNS). |
+
+## Leer el nodo
+
+- **`/healthz`** en `status_listen` responde `200` mientras haya en servicio una generación probada
+  del propio nodo (y el terminador esté vivo, cuando hay un archivo pid configurado), `503` en
+  caso contrario. El cuerpo lleva `converged`, los ETags renderizado y aceptado, la generación en
+  servicio y su resultado de prueba, el último error, el siguiente reintento, cuándo se vio por
+  última vez al cerebro y `dry_run`.
+- **`/metrics`** en la misma dirección expone las series Prometheus del nodo — ver
+  [métricas](/docs/metrics#nodos-edge).
+- **El inventario del cerebro**, `GET /api/v1/edge/nodes`, une la vitalidad de cada nodo
+  configurado con su último autoinforme: versión, dry-run, ETag renderizado, tipo y versión del
+  terminador, generación y resultado de prueba, certificados (nunca una clave). Ver
+  [la API](/docs/api#el-canal-edge).
+
+## Límites que conviene conocer
+
+- **Versión mínima de TLS en nginx antiguos.** nginx anterior a 1.29.2 aplica los `ssl_protocols`
+  del servidor *por defecto* a todos los nombres, así que el catch-all del nodo lleva el
+  `tls.min_version` **más bajo** de todas sus zonas y todas las zonas reciben ese mínimo. Angie y
+  nginx ≥ 1.29.2 respetan el mínimo por zona. Donde esto importe, mantén todas las zonas en el
+  mismo mínimo o usa Angie.
+- **Un solo servidor por defecto.** Kapkan renderiza su propio catch-all `default_server` en `:80`
+  y `:443` que rechaza los hosts y SNI desconocidos. Si tu `nginx.conf` ya declara uno (el sitio
+  por defecto de Debian lo hace), `nginx -t` falla con *a duplicate default server* — pon
+  `omit_catch_all: true` y deja que tus servidores asuman ese papel.
+- **Los orígenes se resuelven al probar.** Un origen con nombre de host se resuelve una sola vez,
+  cuando nginx carga la configuración; uno que no resuelve hace fallar `nginx -t` para toda la
+  generación (y se reintenta). Prefiere direcciones.
+- **Comodines, HTTP/3 y desafíos son hitos posteriores.** `tls.h3` y un `policy.challenge`
+  distinto de `off` se rechazan hoy; cada nombre se enumera explícitamente.
+- **Límites de certificados duplicados.** Certificados por nodo significa que N nodos en una zona
+  son N pedidos; Let's Encrypt limita un nombre a unos cinco por semana. El turno de emisión del
+  cerebro y el jitter de renovación los reparten; `acme.fallback` (ZeroSSL, Google Trust Services
+  — ambos necesitan un External Account Binding) es la vía de escape. Planifica las cuentas de CA
+  para flotas grandes.
+- **El token agent emite certificados.** Hasta que los tokens se vinculen a los nodos, quien posea
+  el token `agent` puede publicar una respuesta de desafío para cualquier zona a través del
+  cerebro (solo desde un nodo que tenga el turno de emisión de la zona, y cada llamada queda
+  registrada). Rota el token si un nodo se ve comprometido.
+
+## Relacionado
+
+- [Instalar un nodo edge](/docs/edge-install) — el lado del cerebro, el lado de nginx, la unidad, pasar a producción
+- [Referencia de zonas](/docs/zones) — cada clave de `zones.yaml`
+- [`kapkan edge`](/docs/cli#edge) — el comando, sus flags y `edge.yaml`
+- [El canal edge](/docs/api#el-canal-edge) — las rutas del cerebro
+- [Métricas](/docs/metrics#nodos-edge) — las series `kapkan_edge_*`
+- [Plano de huellas](/docs/fingerprinting) — bloquear clientes fuera de la ruta por JA4, antes del terminador

@@ -66,15 +66,17 @@ const (
 // always had, plus the FlagSet so callers can ask what was explicitly set and
 // what was left over as positional arguments.
 type cliFlags struct {
-	configPath  string
-	logFormat   string
-	logLevel    string
-	dumpSchema  bool
-	checkConfig string
-	showVersion bool
-	checkUpdate bool
-	pidFile     string
-	signalCmd   string
+	configPath string
+	logFormat  string
+	logLevel   string
+	dumpSchema bool
+	// dumpZonesSchema prints the edge zones file's schema (edge track).
+	dumpZonesSchema bool
+	checkConfig     string
+	showVersion     bool
+	checkUpdate     bool
+	pidFile         string
+	signalCmd       string
 
 	fs *flag.FlagSet
 }
@@ -98,6 +100,7 @@ func parseFlags(name string, argv []string, onError flag.ErrorHandling) (*cliFla
 	fs.StringVar(&c.logFormat, "log-format", "json", "log format: json or text")
 	fs.StringVar(&c.logLevel, "log-level", "info", "log level: debug, info, warn, error")
 	fs.BoolVar(&c.dumpSchema, "dump-schema", false, "print the config JSON schema to stdout and exit")
+	fs.BoolVar(&c.dumpZonesSchema, "dump-zones-schema", false, "print the edge zones file's JSON schema to stdout and exit")
 	fs.StringVar(&c.checkConfig, "check-config", "", "validate the config file at this path and exit (0 = valid, 1 = invalid)")
 	fs.BoolVar(&c.showVersion, "version", false, "print the version and exit")
 	fs.BoolVar(&c.checkUpdate, "check-update", false, "check for a newer release and exit (0 = up to date, 10 = update available, 1 = error)")
@@ -130,7 +133,7 @@ func (c *cliFlags) wasSet(name string) bool {
 // exitingFlags are the flags that make kapkan do one thing and exit. Combining
 // one with a subcommand is a contradiction, and silently honouring whichever
 // happens to be checked first is how a CLI teaches people not to trust it.
-var exitingFlags = []string{"version", "check-update", "dump-schema", "check-config", "s"}
+var exitingFlags = []string{"version", "check-update", "dump-schema", "dump-zones-schema", "check-config", "s"}
 
 // usage prints the synopsis, the command list and the flag defaults.
 func usage(w io.Writer, fs *flag.FlagSet) {

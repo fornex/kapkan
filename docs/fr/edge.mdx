@@ -1,0 +1,156 @@
+export const metadata = {
+  title: "Nœuds edge (frontal HTTPS géré)",
+  description:
+    "Transformez une machine Linux exécutant nginx ou Angie en frontal HTTPS géré pour vos zones : certificats émis sur le nœud, configuration générée par Kapkan, décisions prises localement à chaque requête, rien n'est relayé par Kapkan lui-même.",
+};
+
+# Nœuds edge (frontal HTTPS géré)
+
+<Callout type="info" title="Ce que c'est — et ce que ce n'est pas">
+Un **nœud edge** est une machine Linux exécutant **nginx ou Angie** que Kapkan gère : il émet les
+certificats des zones sur la machine, génère la configuration du terminateur, décide à chaque
+requête s'il faut laisser passer un client, et rend compte au cerveau. Kapkan **ne relaie jamais les
+octets d'un client** — nginx termine le TLS et fait le proxy vers vos origines ; Kapkan lui dit quoi
+servir et, pour chaque requête, s'il faut la servir. Vous apportez le réseau (anycast, transit, DNS)
+et les machines ; Kapkan apporte la boucle de protection.
+</Callout>
+
+En clair : vous listez vos sites web (les zones) dans un fichier sur le cerveau, vous pointez leur
+DNS vers vos machines edge, et chaque machine reçoit un certificat, une configuration nginx générée
+et un service de décision local qui compte chaque client et refuse ceux qui dépassent la politique
+de la zone — sans aller-retour vers quoi que ce soit.
+
+```yaml
+# zones.yaml on the brain (edge.zones_file) — see the zones reference
+zones:
+  - name: shop.example.com
+    origins: ["10.0.0.10:8080", "10.0.0.11:8080"]
+    tls: { min_version: "1.2" }
+    policy:
+      mode: decide            # every request asks the local decision service
+      failure_mode: open      # decider down → requests pass, undecided
+      rate: { rps: 50, concurrency: 20 }
+```
+
+Le rôle est le troisième du même binaire : `kapkan` (le cerveau), [`kapkan scrub`](/docs/scrubbing#nœuds-de-nettoyage-gérés)
+et désormais [`kapkan edge`](/docs/cli#edge). L'installer de bout en bout fait l'objet du
+[guide d'installation](/docs/edge-install) ; le fichier de zones est décrit dans la
+[référence des zones](/docs/zones).
+
+## Fonctionnement
+
+```
+ client ──TLS──▶ nginx / Angie  (terminates, proxies to your origins)
+                    │ auth_request        │ access log (JSON, unix socket)
+                    ▼                     ▼
+               kapkan edge  ── decision service · rollups · ACME · renderer
+                    ▲ long-poll of the zone document, self-reports
+               kapkan (brain) — zones.yaml, issuance coordinator, console
+```
+
+- **Le cerveau distribue la politique, jamais les verdicts.** `kapkan edge` interroge en long-poll
+  un seul document — les zones avec leurs origines, le plancher TLS, les annuaires ACME et la
+  politique par requête — et en garde une copie sur disque. Chaque décision par requête est prise
+  **sur le nœud** ; un cerveau arrêté ou injoignable ne change rien à la façon dont les requêtes
+  sont servies.
+- **Le générateur (renderer)** transforme le document en configuration nginx sous le répertoire
+  d'état du nœud : un fichier commun (un `log_format` JSON, les upstreams des sockets unix de
+  Kapkan, un fourre-tout qui refuse les hôtes inconnus) et un fichier par zone (l'écouteur `:80`
+  qui répond aux défis ACME et redirige, le serveur `:443` qui fait le proxy vers les origines
+  derrière un `auth_request` au service de décision). Chaque génération est testée avec `nginx -t`
+  **avant** d'être installée et rechargée ; un candidat qui échoue n'est jamais installé — la
+  configuration précédente continue de servir et l'échec est rapporté.
+- **Le service de décision** répond à l'`auth_request` de nginx sur un socket unix en quelques
+  microsecondes : `200` (avec un en-tête `X-Kapkan-Mark` optionnel que l'origine reçoit) ou `403`.
+  Il applique le `policy.rate` de la zone par **source** — une adresse IPv4, ou un `/64` IPv6 —
+  avec un seau de jetons (token bucket) pour les requêtes par seconde et un compte approximatif des
+  requêtes en cours pour la concurrence, et tient une table bornée de verdicts (refus ou marque,
+  avec un TTL). Un client au-dessus de son plafond reçoit `429` avec `Retry-After` ; un client que
+  la table refuse reçoit `403`.
+- **Les rollups** lisent le journal d'accès du terminateur (JSON sur un socket datagramme unix) et
+  l'agrègent en fenêtres par zone et par source. Une source qui continue de forcer son plafond de
+  débit est promue en refus (une minute, doublée jusqu'à dix en cas de récidive) ; une source dont
+  les requêtes sont presque toutes des erreurs est marquée `errors` à l'intention de l'origine. Les
+  verdicts restent sur le nœud.
+- **ACME** tourne sur chaque nœud : les clés de compte et les certificats sont générés sur la
+  machine et ne la quittent jamais. Le cerveau se contente de sérialiser l'émission par zone (un
+  seul nœud commande à la fois) et de diffuser un défi HTTP-01 en attente à tous les nœuds, de
+  sorte que la validation de la CA puisse atterrir sur n'importe lequel d'entre eux. Les deux sont
+  consultatifs : un nœud renouvelle même sans cerveau.
+
+### La séparation rapide/lent
+
+Modifier le **débit** (`rate`) d'une zone ou un **verdict** ne recharge jamais nginx ; ces
+changements vont au service de décision et prennent effet à la requête suivante. Seuls les
+changements **lents** — une zone ajoutée ou retirée, une origine modifiée, le plancher TLS, un
+certificat émis ou renouvelé — produisent une nouvelle génération de configuration, testée puis
+rechargée. C'est ce qui permet de resserrer un débit sous attaque sans toucher au terminateur.
+
+### Dry-run : observer d'abord
+
+Comme tout rôle distant, un nœud edge **démarre en dry-run par défaut** : les décisions sont
+comptées et marquées, aucune n'est appliquée. Une requête que la politique refuserait atteint tout
+de même l'origine, avec l'en-tête `X-Kapkan-Mark: would-deny:rate` (ou `would-deny:concurrency`,
+`would-deny:table:<reason>` — aujourd'hui `would-deny:table:flood`, la règle de rollup qui a promu
+la source), de sorte que vous pouvez fouiller les journaux de votre origine et regarder les
+métriques avant qu'un seul client ne soit refoulé. Définissez `dry_run: false` dans l'`edge.yaml`
+du nœud quand les comptes vous paraissent justes.
+
+## Ce que fait le nœud en cas de panne
+
+| Panne | Comportement |
+| --- | --- |
+| Cerveau arrêté ou injoignable | Le nœud continue de servir le dernier document et les certificats depuis le disque ; les renouvellements continuent ; un redémarrage revient en service sans le cerveau (fail-static). Sous une adresse partagée ou anycast, la validation HTTP-01 d'un renouvellement peut atterrir sur un autre nœud pendant que le cerveau est absent ; ces tentatives sont réessayées toutes les heures et ne comptent jamais pour la CA de repli. |
+| Service de décision arrêté ou lent | Par zone : `failure_mode: open` (la valeur par défaut) laisse passer la requête sans décision et la compte ; `closed` répond `503`. |
+| Document refusé (générateur, ou échec de `nginx -t`) | La génération précédente continue de servir ; le nœud reste sain mais `converged: false`, rapporte l'ETag du document **généré** (pas celui accepté), et réessaie localement toutes les 1 → 10 minutes jusqu'à ce qu'il s'applique ou qu'un document plus récent arrive. |
+| nginx meurt | systemd le redémarre ; avec `terminator.pid_file` défini, le nœud rapporte `alive: false` et répond `503` sur son `/healthz` entre-temps. Kapkan ne supervise jamais le terminateur lui-même. |
+| Certificat non renouvelable | Le certificat courant sert jusqu'à son expiration ; `kapkan_edge_cert_not_after_seconds` est l'alarme à J−30 ; après trois échecs le nœud essaie la CA de repli. |
+| Le nœud meurt | Le cerveau voit l'interrogation s'arrêter (`edge.stale_after_seconds`) et l'affiche dans l'inventaire ; détourner le trafic est le travail de votre réseau (retrait anycast, DNS). |
+
+## Lire l'état du nœud
+
+- **`/healthz`** sur `status_listen` répond `200` tant qu'une génération testée, propre au nœud,
+  est en service (et que le terminateur est vivant, lorsqu'un fichier pid est configuré), `503`
+  sinon. Le corps porte `converged`, les ETags généré et accepté, la génération en service et son
+  résultat de test, la dernière erreur, la prochaine tentative, la dernière fois que le cerveau a
+  été vu, et `dry_run`.
+- **`/metrics`** sur la même adresse expose les séries Prometheus du nœud — voir
+  [métriques](/docs/metrics#nœuds-edge).
+- **L'inventaire du cerveau**, `GET /api/v1/edge/nodes`, joint la vivacité de chaque nœud configuré
+  à son dernier rapport : version, dry-run, ETag généré, type et version du terminateur, génération
+  et résultat de test, certificats (jamais une clé). Voir [l'API](/docs/api#le-canal-edge).
+
+## Limites à connaître
+
+- **Plancher TLS sur les nginx anciens.** Avant 1.29.2, nginx applique les `ssl_protocols` du
+  serveur *par défaut* à tous les noms ; le fourre-tout du nœud porte donc le **plus bas**
+  `tls.min_version` de toutes ses zones, et chaque zone hérite de ce plancher. Angie et nginx
+  ≥ 1.29.2 respectent le plancher par zone. Là où cela compte, gardez toutes les zones sur le même
+  plancher ou utilisez Angie.
+- **Un seul serveur par défaut.** Kapkan génère son propre `default_server` fourre-tout sur `:80`
+  et `:443`, qui refuse les hôtes et SNI inconnus. Si votre `nginx.conf` en déclare déjà un (le
+  site par défaut de Debian le fait), `nginx -t` échoue avec *a duplicate default server* —
+  définissez `omit_catch_all: true` et laissez vos serveurs jouer ce rôle.
+- **Les origines sont résolues au moment du test.** Une origine donnée par nom d'hôte est résolue
+  une seule fois, quand nginx charge la configuration ; une qui ne se résout pas fait échouer
+  `nginx -t` pour toute la génération (qui est réessayée). Préférez des adresses.
+- **Jokers, HTTP/3 et défis viendront dans des jalons ultérieurs.** `tls.h3` et un
+  `policy.challenge` autre que `off` sont refusés aujourd'hui ; chaque nom est listé explicitement.
+- **Plafonds de certificats en double.** Des certificats par nœud signifient que N nœuds sur une
+  zone font N commandes ; Let's Encrypt limite un nom à environ cinq par semaine. Le créneau
+  d'émission du cerveau et le jitter des renouvellements les étalent ; `acme.fallback` (ZeroSSL,
+  Google Trust Services — les deux exigent un External Account Binding) est l'échappatoire.
+  Prévoyez les comptes CA pour les grandes flottes.
+- **Le token agent émet des certificats.** Tant que les tokens ne sont pas liés aux nœuds, un
+  détenteur du token agent peut publier une réponse de défi pour n'importe quelle zone via le
+  cerveau (seulement depuis un nœud qui détient le créneau d'émission de la zone, et chaque appel
+  est journalisé). Faites tourner le token si un nœud est compromis.
+
+## Voir aussi
+
+- [Installer un nœud edge](/docs/edge-install) — côté cerveau, côté nginx, l'unité, la mise en production
+- [Référence des zones](/docs/zones) — chaque clé de `zones.yaml`
+- [`kapkan edge`](/docs/cli#edge) — la commande, ses options et `edge.yaml`
+- [Le canal edge](/docs/api#le-canal-edge) — les routes du cerveau
+- [Métriques](/docs/metrics#nœuds-edge) — les séries `kapkan_edge_*`
+- [Plan d'empreintes](/docs/fingerprinting) — bloquer les clients hors chemin par JA4, avant le terminateur

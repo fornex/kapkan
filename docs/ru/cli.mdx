@@ -9,8 +9,8 @@ export const metadata = {
 Kapkan — это единый бинарник. Всё, что он делает, выбирается флагами командной строки при запуске,
 плюс есть небольшое число **команд**, которые осматривают работающую систему и завершаются. Все
 логи идут в **stderr**; REST API и метрики Prometheus отдаются по HTTP на `api.listen` (по
-умолчанию `127.0.0.1:8080`), а служебные флаги (`-version`, `-dump-schema`) и команды печатают свой
-вывод в **stdout**.
+умолчанию `127.0.0.1:8080`), а служебные флаги (`-version`, `-dump-schema`, `-dump-zones-schema`) и
+команды печатают свой вывод в **stdout**.
 
 ```sh
 kapkan [flags]                     # run the daemon
@@ -20,8 +20,9 @@ kapkan [flags] <command> [args]    # run a command and exit
 Глобальные флаги идут **до** команды; собственные флаги команды — после неё. Так,
 `kapkan -config /etc/kapkan/config.yaml dataplane status -json` берёт путь к конфигурации из
 глобального `-config` и передаёт `-json` команде `dataplane status`. Флаг, который сам по себе
-завершает работу (`-version`, `-check-config`, `-dump-schema`, `-check-update`, `-s`), нельзя
-сочетать с командой — Kapkan отвергает такое сочетание, а не выполняет молча что-то одно.
+завершает работу (`-version`, `-check-config`, `-dump-schema`, `-dump-zones-schema`, `-check-update`,
+`-s`), нельзя сочетать с командой — Kapkan отвергает такое сочетание, а не выполняет молча что-то
+одно.
 
 ## Флаги
 
@@ -32,6 +33,7 @@ kapkan [flags] <command> [args]    # run a command and exit
 | `-log-level <lvl>` | `info` | Минимальный уровень логов: `debug`, `info`, `warn`, `error`. Нераспознанное значение откатывается к `info`. |
 | `-check-config <path>` | — | Проверить файл конфигурации по пути `<path>` и завершиться — демон **не** запускается. См. [ниже](#проверка-конфигурации). |
 | `-dump-schema` | `false` | Напечатать JSON-схему конфигурации в stdout и завершиться. См. [ниже](#вывод-схемы). |
+| `-dump-zones-schema` | `false` | Напечатать JSON-схему [файла зон](/docs/zones), который мозг отдаёт граничным узлам (`edge.zones_file`), в stdout и завершиться. |
 | `-version` | `false` | Напечатать версию сборки и завершиться. Та же версия доступна во время работы через `/api/v1/status` и [метрику](/docs/metrics) `kapkan_build_info`. |
 | `-check-update` | `false` | Однократно выполнить опциональную [проверку обновлений](/docs/configuration) и завершиться — `0`, если версия актуальна, `10`, если доступно обновление, `1` при ошибке. Опрашивает GitHub Releases API; отправляет только сам запрос, никогда — идентичность узла или конфигурацию. |
 | `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Куда демон записывает свой идентификатор процесса при запуске (удаляется при корректном завершении); читается `-s`, чтобы найти работающий демон. Сбой записи не фатален — демон всё равно работает, недоступен только `-s`. |
@@ -132,6 +134,14 @@ kapkan -dump-schema
 
 Печатает JSON-схему конфигурации в stdout и завершается с кодом `0` (или `1` при внутренней ошибке).
 [Конструктор конфигурации](/config) использует эту схему, чтобы проверять поля прямо в вашем браузере.
+
+```sh
+kapkan -dump-zones-schema
+```
+
+То же для [файла зон](/docs/zones), который мозг отдаёт граничным узлам (`edge.zones_file`): его
+JSON-схема, с перечислениями и границами словаря зон, для вашего редактора или инструментов
+арендатора.
 
 ### Вывод версии
 
@@ -284,6 +294,86 @@ dataplane:
 `ENFORCING` и число установленных правил, — а [представление Nodes](/docs/dashboard) со стороны
 мозга показывает его живым. Доставка отведённого трафика до узла — это
 [руководство по сетевой интеграции](/docs/network-integration).
+
+### `edge`
+
+```sh
+kapkan edge -config /etc/kapkan/edge.yaml
+```
+
+Запускает роль [граничного узла](/docs/edge): nginx или Angie на этой машине становится управляемым
+HTTPS-фронтом для зон, которые обслуживает мозг. Роль длинными опросами (long-poll) читает документ
+зон мозга, отрисовывает конфигурацию терминатора и устанавливает её под защитой `nginx -t`, отвечает
+на `auth_request` nginx из локальной службы решений, читает лог доступа в сводки по источникам,
+выпускает и продлевает сертификаты зон на самой машине и отчитывается о себе. Опрос заодно служит
+сигналом живости узла. Пошаговое описание — в [руководстве по установке](/docs/edge-install).
+
+Всё специфичное для роли живёт в собственном `edge.yaml`; `config.yaml` демона **не** читается
+(`-config` здесь по умолчанию равен `/etc/kapkan/edge.yaml`).
+
+```yaml
+dry_run: true                          # the remote-role default — marks, refuses nothing
+controller:
+  url: https://kapkan.example.net:8443 # the brain's API base (no path); https outside a lab
+  token_env: KAPKAN_EDGE_TOKEN         # env var holding the agent token (required)
+  name: edge-1                         # must equal an edge.nodes[] name on the brain
+  report_interval_seconds: 10          # self-report cadence
+state_dir: /var/lib/kapkan-edge        # document cache, generations, ACME keys and certificates
+sockets_dir: /run/kapkan-edge          # edge-decide.sock, edge-challenge.sock, edge-log.sock
+socket_group: nginx                    # the terminator's worker group (nginx | www-data | angie)
+terminator:
+  binary: nginx                        # nginx (default) | angie
+  main_conf: /etc/nginx/nginx.conf     # -c for `nginx -t` and `nginx -s reload`; empty = compiled default
+  reload: exec                         # exec (default) | signal | command
+  pid_file: /run/nginx.pid             # liveness check; required for reload: signal
+  # command: [systemctl, reload, nginx]
+acme:
+  directory: ""                        # default CA; empty = Let's Encrypt production
+  fallback: ""                         # optional second CA after three consecutive failures
+  contact: ["mailto:ops@example.net"]
+  # eab:                               # External Account Binding for CAs that require one
+  #   - directory: https://acme.zerossl.com/v2/DV90
+  #     kid: your-kid
+  #     hmac_key_env: KAPKAN_EDGE_ZEROSSL_HMAC
+  # disabled: true                     # issue nothing (zones stay on :80 answering 503)
+status_listen: 127.0.0.1:9102          # /healthz + /metrics; unauthenticated, keep it private
+omit_catch_all: false                  # true when nginx.conf has its own default_server
+disable_ipv6: false                    # true on hosts without an IPv6 stack
+```
+
+| Ключ | Значение |
+| --- | --- |
+| `dry_run` | Отсутствует или `true`: решения подсчитываются и помечаются (`X-Kapkan-Mark: would-deny:<reason>` доходит до исходного сервера), но ни одно не применяется. Задайте `false`, чтобы отказывать. |
+| `controller.url` / `token_env` / `name` | Базовый адрес API мозга (без пути, без учётных данных в URL), переменная окружения с токеном **agent** и имя этого узла — оно должно совпадать с записью `edge.nodes[]` на мозге, иначе каждый опрос — это громкий `404`. |
+| `state_dir` / `sockets_dir` | Собственные каталоги роли (по умолчанию `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — никогда не `/var/lib/kapkan` и `/run/kapkan` мозга: на общем хосте systemd сменил бы им владельца и удалил бы их прямо из-под роли. Абсолютные, без символов, которые nginx мог бы истолковать неверно. |
+| `socket_group` | Группа обработчиков терминатора. Сокеты решений и лога имеют для неё режим `0660`; сокет challenge — `0666` (он отвечает на публичные токены). Пустое значение оставляет два ограниченных по группе сокета доступными только владельцу. |
+| `terminator.binary` / `main_conf` | Что запускать для `-t` и перезагрузок, и основная конфигурация, передаваемая как `-c`. Этот файл должен один раз содержать `include /var/lib/kapkan-edge/conf/live/*.conf;` внутри `http {}`. |
+| `terminator.reload` | `exec` запускает `<binary> -s reload` (нужно послать сигнал master-процессу nginx — юнит работает от root); `signal` посылает `HUP` процессу с pid из `pid_file`; `command` запускает `terminator.command`, например `[systemctl, reload, nginx]`. |
+| `terminator.pid_file` | Если задан, читается на каждом такте отчёта и проверяется сигналом `0`: `/healthz` отвечает `503`, а отчёт говорит `alive: false`, пока ни у одного процесса нет этого pid. |
+| `acme.directory` / `fallback` / `contact` | CA узла по умолчанию (собственный блок `acme` зоны переопределяет directory и fallback), запасной CA, который пробуется после трёх неудач подряд (должен отличаться от разрешённого основного), и контакт учётной записи — каждая запись в нём — это URL `mailto:` (`mailto:ops@example.net`), иначе файл отклоняется. |
+| `acme.eab[]` | External Account Binding для каждого URL directory (`directory`, `kid`, `hmac_key_env`) для CA, которые его требуют — ZeroSSL, Google Trust Services. Ключ HMAC — это секрет, и он читается из названной переменной окружения. |
+| `acme.disabled` | Ничего не выпускать: зоны остаются на `:80` и отвечают `503` (лаборатория, где отрабатывается всё, кроме выпуска). Сертификаты, предоставленные оператором, пока не поддерживаются. |
+| `status_listen` | Если задан, обслуживает `/healthz` и `/metrics`. Без аутентификации — loopback или приватный адрес. |
+| `omit_catch_all` / `disable_ipv6` | Убрать общий `default_server` Kapkan (ваш `nginx.conf` объявляет свой) / убрать слушатели `[::]` (нет стека IPv6). |
+
+<Callout type="warning" title="Граничный узел по умолчанию в режиме dry-run">
+`dry_run` по умолчанию равен **true** для удалённой роли — узел считает и помечает то, в чём
+*отказал бы*, но ни в чём не отказывает, пока вы явно не зададите `dry_run: false`. Он требует
+действительного токена agent: без него его опросы не несут идентичности, и мозг счёл бы его
+мёртвым. Используйте `https` вне лаборатории — открытый `controller.url` отправляет токен в
+незашифрованном виде.
+</Callout>
+
+| Флаг | По умолчанию | Описание |
+| --- | --- | --- |
+| `-config <path>` | `/etc/kapkan/edge.yaml` | Конфигурация граничного узла. |
+| `-check` | выключен | Проверить файл и то, что он называет на этой машине — группа сокетов должна существовать, а любой ключ EAB быть корректно сформирован (проблемы); отсутствующий токен, бинарник терминатора или `main_conf` — предупреждение, — и выйти. |
+| `-log-format <fmt>` | `json` | `json` или `text`. |
+| `-log-level <lvl>` | `info` | `debug`, `info`, `warn` или `error`. |
+
+Убедитесь, что узел работает, командой `curl 127.0.0.1:9102/healthz` — `200` с `"converged":true`,
+как только документ отрисован и введён в работу, — а инвентарь мозга (`GET /api/v1/edge/nodes`)
+показывает его живым. Схема файла зон со стороны мозга — `kapkan -dump-zones-schema`.
 
 ### `nginx-exporter`
 

@@ -1,0 +1,97 @@
+export const metadata = {
+  title: "Zonen-Referenz",
+  description:
+    "Jeder Schlüssel der Zonen-Datei, die das Gehirn an Edge-Knoten ausliefert: Namen, Origins, TLS-Untergrenze, ACME-Verzeichnisse und die Richtlinie pro Anfrage.",
+};
+
+# Zonen-Referenz
+
+Die **Zonen-Datei** ist die Liste der Websites, vor denen Ihre [Edge-Knoten](/docs/edge) stehen:
+für jede Zone ihre Origins, ihre TLS-Untergrenze, welche Zertifizierungsstelle zu verwenden ist
+und die Richtlinie pro Anfrage, die der Entscheidungsdienst des Knotens durchsetzt. Sie liegt auf
+dem Gehirn, in einer eigenen Datei, die `edge.zones_file` in `kapkan.yaml` benennt, denn Zonen
+sind Mandantendaten mit eigenem Änderungsrhythmus — die Datei wird zusammen mit der Konfiguration
+geladen und validiert, und **eine defekte Zonen-Datei hält die vorherigen Zonen live**, statt ein
+halb defektes Dokument auszuliefern.
+
+```yaml
+zones:
+  - name: shop.example.com               # a lower-case hostname; no wildcards
+    origins:                             # at least one host:port; IPv6 as [addr]:port
+      - "10.0.0.10:8080"
+      - "10.0.0.11:8080"
+    tls:
+      min_version: "1.2"                 # "1.2" (default) or "1.3"
+    acme:
+      directory: ""                      # this zone's CA; empty = the node's default
+      fallback: ""                       # tried after repeated failures; empty = node default
+    policy:
+      mode: decide                       # decide (default) | none
+      failure_mode: open                 # open (default) | closed
+      challenge: "off"                   # only "off" today
+      rate:
+        rps: 50                          # requests per second per source; 0 = no ceiling
+        concurrency: 20                  # in-flight requests per source; 0 = no ceiling
+    extra_directives_file: ""            # optional nginx snippet, included last
+```
+
+Validieren Sie mit `kapkan -check-config /etc/kapkan/config.yaml` (es folgt `edge.zones_file`),
+und erzeugen Sie das JSON-Schema für Ihren Editor mit `kapkan -dump-zones-schema` — die
+eingecheckte Kopie ist `docs/zones-schema.json`, neu erzeugt mit `make -C engine schema`; die
+Testsuite schlägt bei einer veralteten Kopie fehl.
+
+## Schlüssel
+
+| Schlüssel | Bedeutung |
+| --- | --- |
+| `zones[].name` | Der Hostname der Zone, so wie das Zertifikat dafür ausgestellt wird: kleingeschriebene RFC-1123-Labels, kein Wildcard, kein abschließender Punkt, keine IP-Adresse, höchstens 238 Zeichen. Großbuchstaben werden in Kleinbuchstaben umgewandelt. Namen müssen eindeutig sein. |
+| `zones[].origins[]` | Wohin nginx die Anfragen der Zone per Proxy weiterreicht: ein oder mehrere `host:port`-Upstreams, eine IPv6-Adresse in eckigen Klammern (`[2001:db8::10]:8080`), der Port `1..65535` ohne führende Null. Ein **Hostnamen**-Origin wird einmal aufgelöst, wenn nginx die Konfiguration lädt; einer, der sich nicht auflösen lässt, lässt die gesamte Generation fehlschlagen. Duplikate werden abgelehnt. |
+| `zones[].tls.min_version` | Die niedrigste TLS-Version, die die Zone akzeptiert: `"1.2"` (Standard) oder `"1.3"`. Mit TLS 1.2 rendert der Knoten den modernen ECDHE-Cipher-Satz; mit 1.3 nur TLS-1.3-Suiten. Auf nginx vor 1.29.2 gilt die **niedrigste** Untergrenze aller Zonen eines Knotens für jede Zone (die `ssl_protocols` des Default-Servers gewinnen); Angie und nginx ≥ 1.29.2 respektieren sie pro Zone. |
+| `zones[].tls.h3` | HTTP/3. **Noch nicht unterstützt** — `true` wird abgelehnt; lassen Sie es weg oder setzen Sie `false`. |
+| `zones[].acme.directory` | Die URL des ACME-Verzeichnisses, bei dem das Zertifikat dieser Zone bestellt wird (zum Beispiel eine Staging- oder private CA). Leer bedeutet den Standard des Knotens, also Let's Encrypt Production, sofern die `edge.yaml` des Knotens nichts anderes sagt. Eine `http(s)`-URL mit Host. |
+| `zones[].acme.fallback` | Ein zweites Verzeichnis, zu dem ein Knoten nach drei aufeinanderfolgenden Fehlschlägen mit dem primären wechselt (die Antwort auf eine Duplikat-Zertifikat-Obergrenze in einer Flotte) und von da an abwechselt; ein Erfolg bei einem der beiden löscht den Fehlerzustand, und die folgende Erneuerung versucht zuerst das primäre. Muss sich von `acme.directory` unterscheiden. Leer bedeutet den Standard des Knotens, der auch keiner sein kann. Eine CA, die ein External Account Binding verlangt (ZeroSSL, Google Trust Services), braucht ihre Zugangsdaten in der `edge.yaml` des **Knotens** — die Zonen-Datei trägt keine Geheimnisse. |
+| `zones[].policy.mode` | `decide` (Standard): Jede Anfrage an die Zone fragt über den `auth_request` von nginx den Entscheidungsdienst des Knotens. `none`: nur Proxy — keine Entscheidung, keine Rate, keine Markierungen; die Zone erhält trotzdem ihr Zertifikat und ihr Zugriffsprotokoll. |
+| `zones[].policy.failure_mode` | Was nginx tut, wenn der Entscheidungsdienst ausgefallen, langsam oder außerhalb des Vertrags ist: `open` (Standard) lässt die Anfrage unentschieden durch — das Edge-Gegenstück zum Default-Pass der Datenebene — und zählt sie; `closed` antwortet `503`. Mit `open` wird der Fehler innerhalb der Subrequest abgefangen, sodass die Keepalive-Verbindung des Clients ihn überlebt; mit `closed` antwortet nginx auf dieser Verbindung mit `503`. |
+| `zones[].policy.challenge` | Client-Challenges (Proof-of-Work, JavaScript) sind ein späterer Meilenstein; heute wird nur `"off"` akzeptiert. |
+| `zones[].policy.rate.rps` | Anfragen pro Sekunde pro **Quelle** — eine IPv4-Adresse oder ein IPv6-`/64` — durchgesetzt vom Entscheidungsdienst mit einem Token-Bucket, dessen Burst dem Wert einer Sekunde entspricht. `0` (Standard) setzt keine Obergrenze. Eine Änderung lädt nginx niemals neu. |
+| `zones[].policy.rate.concurrency` | Gleichzeitig laufende Anfragen pro Quelle, näherungsweise gezählt aus Entscheidungen und Abschlüssen im Zugriffsprotokoll (bei einer Quelle, deren Log-Strom verstummt, wird die Obergrenze ausgesetzt statt fälschlich durchgesetzt). `0` (Standard) setzt keine Obergrenze. |
+| `zones[].extra_directives_file` | Ein **absoluter** Pfad auf dem Knoten zu einem nginx-Snippet, das als Letztes in den `:443`-Server der Zone eingebunden wird — der eine Notausgang (ein zusätzlicher Header, eine eigene Location). Was es kaputt macht, verantworten Sie; `nginx -t` ist der einzige Schutz, und ein Snippet, das daran scheitert, lässt die vorherige Generation weiter bedienen. Keine Leerzeichen, `;`, `#`, geschweiften Klammern, Anführungszeichen, Backslash, `$` oder Glob-Zeichen (`* ? [ ]`) im Pfad. |
+
+## Was eine Richtlinie mit einer Anfrage macht
+
+Mit `mode: decide` fragt nginx den Entscheidungsdienst des Knotens, bevor es weiterreicht. Die
+Antwort ist `200` — die Anfrage geht an den Origin, mit gesetztem `X-Kapkan-Mark`, wenn die Quelle
+eine Markierung trägt — oder `403` mit einem Grund:
+
+| Grund | nginx antwortet | Gesetzt durch |
+| --- | --- | --- |
+| `rate` | `429` mit `Retry-After: 1` | Die Quelle hat `policy.rate.rps` überschritten. |
+| `concurrency` | `429` mit `Retry-After: 1` | Die Quelle hat `policy.rate.concurrency` Anfragen gleichzeitig laufen. |
+| `table:<reason>` | `403` | Die Quelle steht in der Verdikt-Tabelle des Knotens: hochgestuft durch die Rollups (`table:flood` — eine Quelle, die weiter gegen ihre Ratenobergrenze gedrückt hat, wird für eine Minute gesperrt, bei Wiederholung verdoppelt bis auf zehn) oder, später, durch die Stufenleiter des Gehirns. Die Dry-Run-Markierung ist `would-deny:table:<reason>`. |
+
+Zwei Header stehen unter Kapkans Kontrolle und können von einem Client niemals gefälscht werden:
+`X-Kapkan-Zone` (der Zonenname) erreicht den Origin immer; `X-Kapkan-Mark` ist nur vorhanden, wenn
+die Quelle eine Markierung trägt, und fehlt sonst — ein vom Client gesendeter Wert eines der beiden
+wird verworfen. Eine Quelle, deren Anfragen fast ausschließlich `4xx`/`5xx` sind, wird mit `errors`
+markiert; im **Dry-Run** wird jede eigentlich fällige Abweisung zu einem Allow, das mit
+`would-deny:<reason>` markiert ist, sodass der Origin genau sieht, was der Echtbetrieb abgewiesen
+hätte.
+
+Der Knoten hält eine begrenzte Anzahl Quellen pro Zone; ist die Tabelle voll, wird eine neue
+Quelle **unverfolgt** durchgelassen (Default-Pass) und gezählt, niemals aus Platzmangel abgewiesen.
+
+## Zertifikate
+
+Jede Zone erhält ein Zertifikat **pro Knoten**, ausgestellt und erneuert auf dem Knoten per
+HTTP-01; der private Schlüssel verlässt die Box nie. Die Erneuerung beginnt 30 Tage vor Ablauf
+(ein Drittel der Laufzeit bei kürzeren Zertifikaten), mit Jitter pro Knoten und Zone. Bis das erste
+Zertifikat eintrifft, antwortet der `:80`-Listener der Zone auf alles außer dem ACME-Challenge-Pfad
+mit `503` — eine Zone wird niemals im Klartext per Proxy weitergereicht. Jeder Name wird explizit
+ausgestellt; Wildcards (DNS-01) sind ein späterer Meilenstein.
+
+## Verwandte Themen
+
+- [Edge-Knoten](/docs/edge) — die Rolle, ihre Ausfallmodi und Grenzen
+- [Einen Edge-Knoten installieren](/docs/edge-install)
+- [`kapkan edge`](/docs/cli#edge) — die eigene `edge.yaml` des Knotens
+- [Konfiguration](/docs/configuration) — der `edge`-Block des Gehirns
