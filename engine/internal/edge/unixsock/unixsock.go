@@ -10,11 +10,29 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
+	"strconv"
 	"time"
 )
 
 // probeTimeout bounds the liveness probe of an existing socket file.
 const probeTimeout = 200 * time.Millisecond
+
+// GroupID resolves a group name or numeric id to a gid for Listen; "" means
+// -1 (keep the created group).
+func GroupID(name string) (int, error) {
+	if name == "" {
+		return -1, nil
+	}
+	if n, err := strconv.Atoi(name); err == nil {
+		return n, nil
+	}
+	g, err := user.LookupGroup(name)
+	if err != nil {
+		return -1, fmt.Errorf("socket group %q: %w", name, err)
+	}
+	return strconv.Atoi(g.Gid)
+}
 
 // Listen binds a unix socket at path — network "unix" (stream, returned as a
 // net.Listener) or "unixgram" (datagram, returned as a *net.UnixConn) — with

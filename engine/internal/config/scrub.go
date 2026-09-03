@@ -105,6 +105,11 @@ func (s *ScrubConfig) validate() error {
 		// a stray "?x=1" would produce a garbage URL with a misleading 404.
 		return fmt.Errorf("controller.url must not carry a query or fragment, got %q", c.URL)
 	}
+	if u.User != nil {
+		// Never sent (the bearer is the credential), but it would be echoed
+		// by every startup log line.
+		return fmt.Errorf("controller.url must not carry credentials (the token comes from %s)", c.TokenEnv)
+	}
 	if !envNameRe.MatchString(c.TokenEnv) {
 		return fmt.Errorf("controller.token_env %q is not a valid environment variable name (required: the poll identity needs a credential)", c.TokenEnv)
 	}
