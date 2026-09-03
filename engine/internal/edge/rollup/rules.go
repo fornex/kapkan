@@ -10,29 +10,38 @@ import (
 type Sink interface {
 	Deny(zone string, src netip.Addr, ttl time.Duration, reason string) bool
 	Mark(zone string, src netip.Addr, mark string, ttl time.Duration) bool
+	// Denied reports whether src is already under a live deny in zone — such
+	// a source's 403s are the table's own work, not new evidence.
+	Denied(zone string, src netip.Addr) bool
 }
 
 // Rules are the node-local thresholds that turn a window into verdicts
 // (edge-spec §5: "local policy thresholds produce local verdicts; sources that
-// stay hostile get promoted"). Two rules in E3.3, both relative to what the
-// decision service already did to the source:
+// stay hostile get promoted"). Two rules in E3.3, both about what the
+// decision service already saw of the source:
 //
-//   - flood: a source that was DENIED at least FloodMinDenied times in the
-//     window, and whose denials were at least FloodDeniedShare of its
+//   - flood: a source that ran over its ceiling (a rate or concurrency
+//     denial — or, in dry-run, a would-deny for one) at least FloodMinDenied
+//     times in the window, and for at least FloodDeniedShare of its DECIDED
 //     requests, is not a client that had a busy second — it is pushing
-//     through its rate ceiling for the whole window (at twice the ceiling
-//     the bucket refuses about 45 % once its burst is spent). It is denied
-//     outright for
-//     DenyTTL, doubling on every repeat up to MaxDenyTTL, so the per-request
-//     bucket stops being consulted for it (and, in E4, the XDP plane can
-//     take over).
+//     through its ceiling for the whole window (at twice the ceiling the
+//     bucket refuses about 45 % once its burst is spent). It is denied
+//     outright for DenyTTL, doubling on every repeat up to MaxDenyTTL, so the
+//     per-request bucket stops being consulted for it (and, in E4, the XDP
+//     plane can take over). A source the table already denies is skipped: its
+//     403s are the deny at work, and re-promoting on them would escalate a
+//     one-time offence into a never-expiring ban. A repeat therefore means a
+//     flood AFTER the previous deny expired.
 //   - errors: a source with at least ErrorMinRequests requests of which
-//     ErrorShare or more were 4xx/5xx from the origin (the decider's own 403s
-//     excluded) is MARKED "errors" for MarkTTL — a scanner or a broken
-//     client, for the origin to judge; never denied by this rule.
+//     ErrorShare or more were 4xx/5xx from the origin (the decider's 403s and
+//     undecided requests excluded) is MARKED "errors" for MarkTTL — a scanner
+//     or a broken client, for the origin to judge; never denied by this
+//     rule. The rule stands down when the zone as a whole is erroring at
+//     that share: that is an origin or decider outage, not a source.
 //
-// The thresholds are fixed here for E3.3; the zones schema wave (E3.6) makes
-// them per-zone knobs. Zero fields take the defaults.
+// Rules run over EVERY source of the window (OnWindowFull), not the report's
+// top-N. The thresholds are fixed here for E3.3; the zones schema wave (E3.6)
+// makes them per-zone knobs. Zero fields take the defaults.
 type Rules struct {
 	FloodMinDenied   uint64
 	FloodDeniedShare float64
@@ -112,9 +121,12 @@ func (r *Rules) defaults() {
 type Applied struct {
 	Denied int
 	Marked int
+	// Skipped counts sources the table already denied.
+	Skipped int
 }
 
-// Apply evaluates one closed window and installs its verdicts in sink.
+// Apply evaluates one closed window (with every source) and installs its
+// verdicts in sink.
 func (r *Rules) Apply(w WindowStats, sink Sink) Applied {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -123,16 +135,28 @@ func (r *Rules) Apply(w WindowStats, sink Sink) Applied {
 	// Forget stale escalation first, so a source quiet for repeatMemory starts
 	// again at the base TTL rather than at its old level.
 	r.forget(now)
+	// Origin-side errors across the zone: when the zone itself is failing at
+	// the error share, no source is to blame.
+	zoneErrors := w.Status4xx + w.Status5xx - w.Denied
+	zoneErroring := w.Requests >= r.ErrorMinRequests && float64(zoneErrors)/float64(w.Requests) >= r.ErrorShare
 	var out Applied
 	for _, s := range w.Sources {
 		if s.Requests == 0 {
 			continue
 		}
-		if s.Denied >= r.FloodMinDenied && float64(s.Denied)/float64(s.Requests) >= r.FloodDeniedShare {
+		if sink.Denied(w.Zone, s.Src) {
+			out.Skipped++
+			continue
+		}
+		over := s.DeniedRate + s.WouldDenyRate
+		if over >= r.FloodMinDenied && s.Decided > 0 && float64(over)/float64(s.Decided) >= r.FloodDeniedShare {
 			ttl := r.escalate(repeatKey{zone: w.Zone, src: s.Src}, now)
 			if sink.Deny(w.Zone, s.Src, ttl, "flood") {
 				out.Denied++
 			}
+			continue
+		}
+		if zoneErroring {
 			continue
 		}
 		errs := s.Errors4xx + s.Errors5xx

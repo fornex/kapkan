@@ -5,6 +5,9 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
+	"github.com/kapkan-io/kapkan/internal/metrics"
 )
 
 const (
@@ -12,21 +15,36 @@ const (
 	// that a flood shows up before the second poll and long enough that a
 	// rate computed from it means something.
 	DefaultWindow = 10 * time.Second
-	// DefaultMaxPairs bounds the (zone, source) pairs measured per window; the
-	// exporter's figure, for the same reason (an IPv6 /64 rotates addresses).
+	// DefaultMaxPairs bounds the sources measured per zone per window; the
+	// exporter's figure, for the same reason (a /64 rotates — though a source
+	// here is already a /64, see edgedoc.SourceKey).
 	DefaultMaxPairs = 64 << 10
 	// DefaultTopSources is how many sources a window's stats name.
 	DefaultTopSources = 20
 )
 
-// SourceStats is one source's window in one zone.
+// SourceStats is one source's window in one zone. Src is the accounting key
+// (edgedoc.SourceKey), not a client address.
 type SourceStats struct {
 	Src      netip.Addr
 	Requests uint64
-	// Denied counts requests the decision service refused (decision 403).
-	Denied uint64
-	// Errors4xx/5xx are origin (or terminator) statuses, excluding the
-	// decider's own 403s.
+	// Decided counts requests the decision service answered (200 or 403):
+	// the denominator of the flood rule. :80 traffic, ACME hits and
+	// undecided requests are requests, not decisions.
+	Decided uint64
+	// Denied counts requests the decision service refused, split by why:
+	// DeniedRate is a client over its ceiling (rate or concurrency) — the
+	// evidence of a flood; DeniedTable is a source the verdict table already
+	// refuses — not new evidence of anything.
+	Denied      uint64
+	DeniedRate  uint64
+	DeniedTable uint64
+	// WouldDenyRate counts dry-run denials for rate/concurrency: a 200 the
+	// decision service marked would-deny. Flood evidence in watch-only mode.
+	WouldDenyRate uint64
+	// Errors4xx/5xx are origin (or terminator) statuses of decided or
+	// non-deciding requests — the decider's own 403s and undecided requests
+	// excluded, since neither says anything about the source.
 	Errors4xx uint64
 	Errors5xx uint64
 	// RPS is Requests over the window's REAL elapsed time — never the nominal
@@ -41,6 +59,7 @@ type WindowStats struct {
 	Start    time.Time
 	Elapsed  time.Duration
 	Requests uint64
+	Decided  uint64
 	Denied   uint64
 	// Undecided counts requests the decision service could not answer (its
 	// socket down or slow), passed or refused by the zone's failure_mode.
@@ -51,10 +70,11 @@ type WindowStats struct {
 	Status5xx uint64
 	Bytes     uint64
 	RPS       float64
-	// Sources is the top-N by requests; SourcesTotal how many there were.
+	// Sources is the top-N by requests for OnWindow (the report); OnWindowFull
+	// receives every source. SourcesTotal is how many there were.
 	Sources      []SourceStats
 	SourcesTotal int
-	// Overflow reports that the per-window pair cap was hit: SourcesTotal is
+	// Overflow reports that the zone's pair cap was hit: SourcesTotal is
 	// then a floor and unnamed sources were counted in the zone totals only.
 	Overflow bool
 }
@@ -65,20 +85,26 @@ type zoneWindow struct {
 }
 
 // Aggregator folds records into fixed windows per zone and hands each closed
-// window to OnWindow. Safe for concurrent use; Observe is cheap (a map update).
+// window to OnWindow (top-N sources, for the report) and OnWindowFull (every
+// source, for the rules). Safe for concurrent use; Observe is cheap.
 type Aggregator struct {
 	// Window is the window length; 0 means DefaultWindow.
 	Window time.Duration
-	// MaxPairs bounds the sources measured per window across zones; 0 means
-	// DefaultMaxPairs.
+	// MaxPairs bounds the sources measured per ZONE per window; 0 means
+	// DefaultMaxPairs. Per zone, so one tenant's flood cannot empty another's
+	// window.
 	MaxPairs int
-	// TopSources bounds WindowStats.Sources; 0 means DefaultTopSources.
+	// TopSources bounds WindowStats.Sources for OnWindow; 0 means
+	// DefaultTopSources.
 	TopSources int
-	// OnWindow receives each zone's stats when a window closes, on the
-	// goroutine that closed it (an Observe or a Tick).
+	// OnWindow receives each zone's stats (top-N sources) when a window
+	// closes, on the goroutine that closed it (an Observe or a Tick).
 	OnWindow func(WindowStats)
-	// OnRecord receives every record before aggregation (the decider's
-	// Complete is wired here).
+	// OnWindowFull receives the same stats with EVERY source — the rules must
+	// see the 21st offender too.
+	OnWindowFull func(WindowStats)
+	// OnRecord receives every record of a known zone before aggregation (the
+	// decider's Complete is wired here).
 	OnRecord func(Record)
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
@@ -86,7 +112,7 @@ type Aggregator struct {
 	mu    sync.Mutex
 	start time.Time
 	zones map[string]*zoneWindow
-	pairs int
+	known map[string]bool
 }
 
 func (a *Aggregator) window() time.Duration {
@@ -103,15 +129,36 @@ func (a *Aggregator) now() time.Time {
 	return time.Now()
 }
 
+// SetZones names the zones the document has. Records for any other zone —
+// a forged line, or one from a zone removed since — are counted and dropped
+// rather than aggregated, so the log stream cannot allocate windows at will.
+// Until it is called, every zone is accepted.
+func (a *Aggregator) SetZones(names []string) {
+	known := make(map[string]bool, len(names))
+	for _, n := range names {
+		known[n] = true
+	}
+	a.mu.Lock()
+	a.known = known
+	a.mu.Unlock()
+}
+
 // Observe folds one record in, closing the current window first if it is
 // over.
 func (a *Aggregator) Observe(r Record) {
+	now := a.now()
+	a.mu.Lock()
+	if a.known != nil && !a.known[r.Zone] {
+		a.mu.Unlock()
+		metrics.EdgeLogRecordsTotal.WithLabelValues("unknown_zone").Inc()
+		return
+	}
+	a.mu.Unlock()
 	if a.OnRecord != nil {
 		a.OnRecord(r)
 	}
-	now := a.now()
 	a.mu.Lock()
-	closed := a.rollIfDue(now)
+	closedTop, closedFull := a.rollIfDue(now)
 	if a.zones == nil {
 		a.zones = make(map[string]*zoneWindow)
 		a.start = now
@@ -134,32 +181,50 @@ func (a *Aggregator) Observe(r Record) {
 	case 5:
 		zs.Status5xx++
 	}
+	decided := r.Decided()
 	denied := r.Decision == "403"
+	rateReason := r.Reason == "rate" || r.Reason == "concurrency"
+	wouldDeny := r.WouldDenyReason()
+	if decided {
+		zs.Decided++
+	}
 	if denied {
 		zs.Denied++
 	}
-	if len(r.Decision) == 3 && r.Decision[0] == '5' {
+	if r.Undecided() {
 		zs.Undecided++
 	}
-	ss := zw.sources[r.Src]
+	key := edgedoc.SourceKey(r.Src)
+	ss := zw.sources[key]
 	if ss == nil {
 		max := a.MaxPairs
 		if max <= 0 {
 			max = DefaultMaxPairs
 		}
-		if a.pairs >= max {
+		if len(zw.sources) >= max {
 			zs.Overflow = true
 		} else {
-			ss = &SourceStats{Src: r.Src}
-			zw.sources[r.Src] = ss
-			a.pairs++
+			ss = &SourceStats{Src: key}
+			zw.sources[key] = ss
 		}
 	}
 	if ss != nil {
 		ss.Requests++
+		if decided {
+			ss.Decided++
+		}
 		switch {
 		case denied:
 			ss.Denied++
+			if rateReason {
+				ss.DeniedRate++
+			} else {
+				ss.DeniedTable++
+			}
+		case wouldDeny == "rate" || wouldDeny == "concurrency":
+			ss.WouldDenyRate++
+		case r.Undecided():
+			// Says nothing about the source.
 		case r.Status >= 500:
 			ss.Errors5xx++
 		case r.Status >= 400:
@@ -167,7 +232,7 @@ func (a *Aggregator) Observe(r Record) {
 		}
 	}
 	a.mu.Unlock()
-	a.emit(closed)
+	a.emit(closedTop, closedFull)
 }
 
 // Tick closes the window if it is due even when no record arrives, so an
@@ -175,23 +240,23 @@ func (a *Aggregator) Observe(r Record) {
 // Call it from a timer at least once per window.
 func (a *Aggregator) Tick() {
 	a.mu.Lock()
-	closed := a.rollIfDue(a.now())
+	closedTop, closedFull := a.rollIfDue(a.now())
 	a.mu.Unlock()
-	a.emit(closed)
+	a.emit(closedTop, closedFull)
 }
 
 // rollIfDue closes the current window when it has run its length, returning
-// the closed zones' stats. Caller holds a.mu.
-func (a *Aggregator) rollIfDue(now time.Time) []WindowStats {
+// the closed zones' stats: with the sources truncated to TopSources, and in
+// full. Caller holds a.mu.
+func (a *Aggregator) rollIfDue(now time.Time) (top, full []WindowStats) {
 	if a.zones == nil || now.Sub(a.start) < a.window() {
-		return nil
+		return nil, nil
 	}
 	elapsed := now.Sub(a.start)
-	top := a.TopSources
-	if top <= 0 {
-		top = DefaultTopSources
+	limit := a.TopSources
+	if limit <= 0 {
+		limit = DefaultTopSources
 	}
-	out := make([]WindowStats, 0, len(a.zones))
 	for _, zw := range a.zones {
 		st := zw.stats
 		st.Elapsed = elapsed
@@ -208,25 +273,31 @@ func (a *Aggregator) rollIfDue(now time.Time) []WindowStats {
 			}
 			return st.Sources[i].Src.Less(st.Sources[j].Src)
 		})
-		if len(st.Sources) > top {
-			st.Sources = st.Sources[:top]
+		full = append(full, st)
+		truncated := st
+		if len(truncated.Sources) > limit {
+			truncated.Sources = truncated.Sources[:limit]
 		}
-		out = append(out, st)
+		top = append(top, truncated)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Zone < out[j].Zone })
+	sort.Slice(full, func(i, j int) bool { return full[i].Zone < full[j].Zone })
+	sort.Slice(top, func(i, j int) bool { return top[i].Zone < top[j].Zone })
 	// A fresh map, not clear(): the old one is referenced by nothing and the
 	// allocator reclaims it; clear() would keep a flood's bucket count.
 	a.zones = make(map[string]*zoneWindow)
 	a.start = now
-	a.pairs = 0
-	return out
+	return top, full
 }
 
-func (a *Aggregator) emit(closed []WindowStats) {
-	if a.OnWindow == nil {
-		return
+func (a *Aggregator) emit(top, full []WindowStats) {
+	if a.OnWindowFull != nil {
+		for _, w := range full {
+			a.OnWindowFull(w)
+		}
 	}
-	for _, w := range closed {
-		a.OnWindow(w)
+	if a.OnWindow != nil {
+		for _, w := range top {
+			a.OnWindow(w)
+		}
 	}
 }
