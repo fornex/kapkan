@@ -146,6 +146,9 @@ Commands:
                       stopped. Run "kapkan dataplane status -h" for its own flags.
   scrub               run the scrub-node role: pull the brain's rule table and enforce it
                       in the local XDP data plane. Run "kapkan scrub -h" for its flags.
+  edge                run the edge-node role: pull the brain's zone document, drive the
+                      local nginx/Angie, decide requests, issue certificates. Run
+                      "kapkan edge -h" for its flags.
   nginx-exporter      tail an nginx JSON access log and post per-source verdicts to the
                       brain's source-block API. Run "kapkan nginx-exporter -h" for its flags.
   help                print this message
@@ -184,6 +187,8 @@ func runSubcommand(f *cliFlags, out, errOut io.Writer) int {
 		return runDataplaneCommand(args[1:], f, out, errOut)
 	case "scrub":
 		return runScrubCommand(args[1:], f, out, errOut)
+	case "edge":
+		return runEdgeCommand(args[1:], f, out, errOut)
 	case "nginx-exporter":
 		return runExporterCommand(args[1:], f, out, errOut)
 	case "help":

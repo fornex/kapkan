@@ -117,6 +117,27 @@ The terminator is an operator-installed package with its own systemd unit. Kapka
 under a dedicated include directory and drives `nginx -t` + reload; it does not supervise the
 process (that is systemd's job) and does not ship nginx.
 
+*Decided in E3.5 (`internal/edge/node`, `kapkan edge`):* the role has its own `edge.yaml` (like
+`scrub.yaml`; `dry_run` defaults to **true**; `controller`, `state_dir`, `sockets_dir`,
+`socket_group`, `terminator {binary, main_conf, reload: exec|signal|command}`, `acme {directory,
+fallback, contact, eab[] — External Account Binding per directory, its HMAC key named by an
+environment variable}`, `status_listen`). Startup order: the three unix sockets first (nginx may
+already be probing
+them), then a probe of the terminator and `Recover` of an untested generation, then **start from
+disk** — the last accepted document is cached as raw bytes with its ETag under `state_dir`, so a
+node reboots into service with the brain gone and its first poll can answer 304 — and only then
+the long-poll. A new document takes the fast path first (decision-service zones, rollup zone set,
+fanned-out challenges — no file touched), is persisted, then rendered and applied; since the
+render does not depend on `policy.rate` or on verdicts, a rate change never reloads (§2.2). A
+certificate issued or renewed re-renders. The node self-reports every 10 s (version, dry-run,
+rendered ETag, terminator kind/version, generation and test result, certificates — never a key)
+and serves `/healthz` + `/metrics` on `status_listen` when set. The shipped unit runs as root,
+like certbot: `nginx -t` opens nginx's own log/pid paths and `nginx -s reload` signals a root
+master; it is hardened with `ProtectSystem=strict` and explicit `ReadWritePaths`, and
+`StateDirectoryMode=0711` so the terminator's worker can traverse to the `try_files` root while
+the ACME keys stay in 0700 directories. The "local XDP" box in the diagram is E3.5's remaining
+gap: the edge node does not yet attach a data plane (E4 promotes verdicts there).
+
 ### 2.2 The fast/slow split (frozen contract)
 
 | Change | Path | Terminator reload? |

@@ -81,6 +81,22 @@ security-relevant.
   (per-zone fallback directory) and the zone document `acme_fallback`. Metrics
   `kapkan_edge_cert_not_after_seconds{zone}` (the T−30 d alarm) and
   `kapkan_edge_acme_attempts_total`. `kapkan edge` wiring is E3.5.
+- Edge track, E3.5 — the `kapkan edge` role (`internal/edge/node`, `cmd/kapkan edge`, its own
+  `edge.yaml`: `controller`, `state_dir`, `sockets_dir`, `socket_group`, `terminator`
+  {binary, main_conf, reload: exec|signal|command}, `acme` {directory, fallback, contact, `eab[]`
+  — External Account Binding per directory, the HMAC key read from an environment variable like
+  the token}, `status_listen`; `dry_run` defaults to TRUE like every remote role). It brings the
+  three unix sockets up first, probes the terminator
+  and recovers an untested generation, starts from the last document cached on disk (so a node
+  reboots into service with the brain gone and its first poll can answer 304), then long-polls
+  `GET /api/v1/edge/zones`. A new document takes the fast path first — decision-service zones,
+  rollup zone set, fanned-out challenges — and is rendered and applied only when its bytes
+  change what the terminator serves, so a rate change never reloads; an issued certificate
+  re-renders. It self-reports every 10 s (version, dry-run, rendered ETag, terminator kind and
+  version, generation and test result, certificates), and serves `/healthz` + `/metrics` on
+  `status_listen` when set. `internal/edge/poll` is the long-poll generalised over the document.
+  A `-check` flag validates `edge.yaml` and exits. Ships `deploy/edge.example.yaml` and
+  `deploy/kapkan-edge.service`.
 
 ## [1.7.0] - 2026-09-02
 

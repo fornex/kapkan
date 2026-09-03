@@ -1,0 +1,54 @@
+[Unit]
+Description=Kapkan edge node (zones, decisions, certificates for the local nginx/Angie)
+Documentation=https://github.com/kapkan-io/kapkan
+After=network-online.target nginx.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=4
+
+[Service]
+Type=simple
+# Root, like certbot and every configuration manager that drives nginx: the
+# role runs `nginx -t` (which opens nginx's own log and pid paths) and `nginx
+# -s reload` (which signals nginx's root master), and it writes the include
+# directory nginx reads. A dedicated user is possible with terminator.reload:
+# command → [systemctl, reload, nginx] plus a polkit rule, and an nginx.conf
+# whose error_log the user may open — document both before choosing it.
+User=root
+Group=root
+ExecStart=/usr/local/bin/kapkan edge -config /etc/kapkan/edge.yaml -log-format json -log-level info
+Restart=on-failure
+RestartSec=5s
+
+# /run/kapkan: the three unix sockets (0660, group = the terminator's worker
+# group from edge.yaml's socket_group). 0755 so the worker can traverse it.
+RuntimeDirectory=kapkan
+RuntimeDirectoryMode=0755
+# /var/lib/kapkan: state_dir defaults to /var/lib/kapkan/edge. 0711 — not
+# 0700 — so nginx's worker can reach state_dir/empty (the try_files root);
+# the ACME keys sit in 0700 subdirectories of their own.
+StateDirectory=kapkan
+StateDirectoryMode=0711
+
+# The agent token: KAPKAN_EDGE_TOKEN=... in /etc/kapkan/edge.env (chmod 600).
+EnvironmentFile=-/etc/kapkan/edge.env
+
+# Hardening. Root, so this is what keeps the blast radius small: the process
+# may write only its state, its sockets, and what nginx needs to reload.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kapkan /run/kapkan /run/nginx.pid /var/log/nginx
+ReadOnlyPaths=/etc/kapkan /etc/nginx
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+# AF_UNIX for the sockets nginx connects to; AF_INET/6 for the brain and the CA.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
