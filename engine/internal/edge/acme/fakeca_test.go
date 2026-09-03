@@ -40,6 +40,12 @@ type fakeOrder struct {
 	thumb     string
 	authzOK   bool
 	validated bool
+	// processing: the challenge was accepted and the CA "is validating" —
+	// the next authorization poll completes it (asyncValidate).
+	processing bool
+	// finalizing: finalize answered "processing" once; the next order poll
+	// turns it valid (finalizeProcessing).
+	finalizing bool
 }
 
 type fakeCA struct {
@@ -62,6 +68,21 @@ type fakeCA struct {
 	failNewOrder int
 	newOrders    int
 	validations  []string // "zone/token" of every validation fetch
+	// requireEAB makes newAccount demand an External Account Binding whose
+	// kid is eabKID (urn:ietf:params:acme:error:externalAccountRequired).
+	requireEAB bool
+	eabKID     string
+	eabSeen    []string // kids of the bindings received
+	// asyncValidate: Accept answers "processing" and the validation happens
+	// on the next authorization poll, as a real VA does.
+	asyncValidate bool
+	// finalizeProcessing: finalize answers "processing" once (with the order's
+	// Location, RFC 8555 §7.4) before the certificate is ready.
+	finalizeProcessing bool
+	// misissue signs the certificate for a fresh key instead of the CSR's.
+	misissue bool
+	// nonces issued and not yet used; badNonce for a reuse.
+	nonces map[string]bool
 }
 
 func newFakeCA(t *testing.T, now func() time.Time, answerer string) *fakeCA {
@@ -81,7 +102,7 @@ func newFakeCA(t *testing.T, now func() time.Time, answerer string) *fakeCA {
 	}
 	caCert, _ := x509.ParseCertificate(der)
 	f := &fakeCA{t: t, caKey: key, caCert: caCert, now: now, lifetime: 90 * 24 * time.Hour, answerer: answerer,
-		orders: make(map[string]*fakeOrder), accounts: make(map[string]string)}
+		orders: make(map[string]*fakeOrder), accounts: make(map[string]string), nonces: make(map[string]bool)}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -112,24 +133,37 @@ func b64url(s string) []byte {
 	return b
 }
 
-func (f *fakeCA) readJWS(r *http.Request) (protectedHeader, []byte) {
+// readJWS parses a POST body; ok is false (and a badNonce problem written)
+// when the nonce was never issued or was used before.
+func (f *fakeCA) readJWS(w http.ResponseWriter, r *http.Request) (protectedHeader, []byte, bool) {
 	body, _ := io.ReadAll(r.Body)
 	var j jws
 	_ = json.Unmarshal(body, &j)
 	var ph protectedHeader
 	_ = json.Unmarshal(b64url(j.Protected), &ph)
-	return ph, b64url(j.Payload)
+	if !f.nonces[ph.Nonce] {
+		f.problem(w, 400, "urn:ietf:params:acme:error:badNonce", "nonce "+ph.Nonce+" is not fresh")
+		return ph, nil, false
+	}
+	delete(f.nonces, ph.Nonce)
+	return ph, b64url(j.Payload), true
+}
+
+func (f *fakeCA) nonce(w http.ResponseWriter) {
+	n := "nonce-" + f.nextID()
+	f.nonces[n] = true
+	w.Header().Set("Replay-Nonce", n)
 }
 
 func (f *fakeCA) writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Replay-Nonce", "nonce-"+f.nextID())
+	f.nonce(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
 func (f *fakeCA) problem(w http.ResponseWriter, status int, typ, detail string) {
-	w.Header().Set("Replay-Nonce", "nonce-"+f.nextID())
+	f.nonce(w)
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"type": typ, "detail": detail, "status": status})
@@ -141,20 +175,46 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 	base := f.srv.URL
 	switch {
 	case r.URL.Path == "/dir":
+		meta := map[string]any{"termsOfService": base + "/tos"}
+		if f.requireEAB {
+			meta["externalAccountRequired"] = true
+		}
 		f.writeJSON(w, 200, map[string]any{
 			"newNonce": base + "/nonce", "newAccount": base + "/acct", "newOrder": base + "/order",
 			"revokeCert": base + "/revoke", "keyChange": base + "/keychange",
-			"meta": map[string]any{"termsOfService": base + "/tos"},
+			"meta": meta,
 		})
 	case r.URL.Path == "/nonce":
-		w.Header().Set("Replay-Nonce", "nonce-"+f.nextID())
+		f.nonce(w)
 		w.WriteHeader(http.StatusOK)
 	case r.URL.Path == "/acct":
-		ph, _ := f.readJWS(r)
+		ph, payload, ok := f.readJWS(w, r)
+		if !ok {
+			return
+		}
 		thumb, err := thumbprintFromJWK(ph.JWK)
 		if err != nil {
 			f.problem(w, 400, "urn:ietf:params:acme:error:malformed", err.Error())
 			return
+		}
+		if f.requireEAB {
+			var acct struct {
+				EAB *jws `json:"externalAccountBinding"`
+			}
+			_ = json.Unmarshal(payload, &acct)
+			if acct.EAB == nil {
+				f.problem(w, 400, "urn:ietf:params:acme:error:externalAccountRequired", "this CA requires an external account binding")
+				return
+			}
+			var eabHdr struct {
+				KID string `json:"kid"`
+			}
+			_ = json.Unmarshal(b64url(acct.EAB.Protected), &eabHdr)
+			f.eabSeen = append(f.eabSeen, eabHdr.KID)
+			if eabHdr.KID != f.eabKID {
+				f.problem(w, 403, "urn:ietf:params:acme:error:unauthorized", "unknown eab kid "+eabHdr.KID)
+				return
+			}
 		}
 		for url, th := range f.accounts {
 			if th == thumb {
@@ -169,7 +229,10 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Location", url)
 		f.writeJSON(w, 201, map[string]any{"status": "valid"})
 	case r.URL.Path == "/order":
-		ph, payload := f.readJWS(r)
+		ph, payload, ok := f.readJWS(w, r)
+		if !ok {
+			return
+		}
 		f.newOrders++
 		if f.failNewOrder != 0 {
 			f.problem(w, f.failNewOrder, "urn:ietf:params:acme:error:rateLimited", "too many certificates already issued")
@@ -196,7 +259,10 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 			f.problem(w, 403, "urn:ietf:params:acme:error:orderNotReady", "order is not ready")
 			return
 		}
-		_, payload := f.readJWS(r)
+		_, payload, ok := f.readJWS(w, r)
+		if !ok {
+			return
+		}
 		var req struct {
 			CSR string `json:"csr"`
 		}
@@ -212,12 +278,27 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 			NotBefore: f.now().Add(-time.Minute), NotAfter: f.now().Add(f.lifetime),
 			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		}
-		der, err := x509.CreateCertificate(rand.Reader, tmpl, f.caCert, csr.PublicKey, f.caKey)
+		pub := csr.PublicKey
+		if f.misissue {
+			other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			pub = &other.PublicKey
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, f.caCert, pub, f.caKey)
 		if err != nil {
 			f.problem(w, 500, "urn:ietf:params:acme:error:serverInternal", err.Error())
 			return
 		}
 		o.certPEM = append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: f.caCert.Raw})...)
+		// RFC 8555 §7.4: the finalize response carries the order's URL, which
+		// the client polls when the answer is "processing".
+		w.Header().Set("Location", base+"/order/"+o.id)
+		if f.finalizeProcessing && !o.finalizing {
+			o.finalizing = true
+			o.status = "processing"
+			w.Header().Set("Retry-After", "1")
+			f.writeJSON(w, 200, f.orderJSON(o))
+			return
+		}
 		o.status = "valid"
 		f.writeJSON(w, 200, f.orderJSON(o))
 	case strings.HasPrefix(r.URL.Path, "/order/"):
@@ -227,6 +308,10 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 			f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "no such order")
 			return
 		}
+		if o.status == "processing" {
+			// The poll after a processing finalize finds the certificate.
+			o.status = "valid"
+		}
 		f.writeJSON(w, 200, f.orderJSON(o))
 	case strings.HasPrefix(r.URL.Path, "/authz/"):
 		o := f.orderByAuthz(strings.TrimPrefix(r.URL.Path, "/authz/"))
@@ -234,11 +319,27 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 			f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "no such authorization")
 			return
 		}
+		if o.processing {
+			// The VA finished between the Accept and this poll.
+			o.processing = false
+			f.validate(o)
+		}
 		f.writeJSON(w, 200, f.authzJSON(o))
 	case strings.HasPrefix(r.URL.Path, "/chal/"):
 		o := f.orderByAuthz(strings.TrimPrefix(r.URL.Path, "/chal/"))
 		if o == nil {
 			f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "no such challenge")
+			return
+		}
+		if _, _, ok := f.readJWS(w, r); !ok {
+			return
+		}
+		if f.asyncValidate {
+			// Accept: the VA will fetch the token "shortly" — on the next
+			// authorization poll here — and tells the client to come back.
+			o.processing = true
+			w.Header().Set("Retry-After", "1")
+			f.writeJSON(w, 200, f.challengeJSON(o))
 			return
 		}
 		// Accept: validate NOW, the way a CA's VA would — by fetching the
@@ -251,7 +352,7 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 			f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "no certificate")
 			return
 		}
-		w.Header().Set("Replay-Nonce", "nonce-"+f.nextID())
+		f.nonce(w)
 		w.Header().Set("Content-Type", "application/pem-certificate-chain")
 		w.WriteHeader(200)
 		_, _ = w.Write(o.certPEM)
@@ -284,9 +385,12 @@ func (f *fakeCA) orderJSON(o *fakeOrder) map[string]any {
 
 func (f *fakeCA) authzJSON(o *fakeOrder) map[string]any {
 	status := "pending"
-	if o.authzOK {
+	switch {
+	case o.authzOK:
 		status = "valid"
-	} else if o.validated {
+	case o.processing:
+		status = "pending"
+	case o.validated:
 		status = "invalid"
 	}
 	return map[string]any{
@@ -301,6 +405,8 @@ func (f *fakeCA) challengeJSON(o *fakeOrder) map[string]any {
 	switch {
 	case o.authzOK:
 		status = "valid"
+	case o.processing:
+		status = "processing"
 	case o.validated:
 		status = "invalid"
 	}

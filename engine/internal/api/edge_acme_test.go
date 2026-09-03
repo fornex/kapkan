@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
 
 // edgeStoreNodes is edgeStore with several configured edge nodes, for the
@@ -73,18 +75,27 @@ func slotResp(t *testing.T, rec *httptest.ResponseRecorder) EdgeSlotResponse {
 const validToken = "tok_" + "abcdefghijklmnopqrstuvwxyz0123456789"
 const validKeyAuth = validToken + "." + "thumbprint_abcdefghijklmnopqrstuvwxyz"
 
+func challengeBody(zone, token, keyAuth string) string {
+	return `{"zone":"` + zone + `","token":"` + token + `","key_authorization":"` + keyAuth + `"}`
+}
+
 func TestEdgeACMESlotIsExclusivePerZone(t *testing.T) {
 	s := testServer(t, edgeStoreNodes(t, edgeZonesTwo, "e1", "e2"))
 	h := s.Handler()
 
 	// e1 takes a.example; e2 is told who holds it and for how long.
 	r1 := slotResp(t, postACME(h, "e1", "slot", `{"zone":"a.example"}`, "agent-secret"))
-	if !r1.Granted || r1.ExpiresAt.IsZero() || time.Until(r1.ExpiresAt) > issuanceSlotTTL {
+	if !r1.Granted || r1.ExpiresAt == nil || time.Until(*r1.ExpiresAt) > issuanceSlotTTL {
 		t.Fatalf("e1 grant: %+v", r1)
 	}
-	r2 := slotResp(t, postACME(h, "e2", "slot", `{"zone":"a.example"}`, "agent-secret"))
+	rec2 := postACME(h, "e2", "slot", `{"zone":"a.example"}`, "agent-secret")
+	r2 := slotResp(t, rec2)
 	if r2.Granted || r2.Holder != "e1" || r2.RetryAfterSeconds < 1 || r2.RetryAfterSeconds > 60 {
 		t.Fatalf("e2 refusal: %+v", r2)
+	}
+	// A refusal carries no expires_at at all (the wire shape edge-spec §3 gives).
+	if strings.Contains(rec2.Body.String(), "expires_at") {
+		t.Fatalf("refusal body carries expires_at: %s", rec2.Body.String())
 	}
 	// Another zone is independent, and the holder re-acquiring extends.
 	if r := slotResp(t, postACME(h, "e2", "slot", `{"zone":"b.example"}`, "agent-secret")); !r.Granted {
@@ -105,6 +116,11 @@ func TestEdgeACMESlotIsExclusivePerZone(t *testing.T) {
 	}
 	if r := slotResp(t, postACME(h, "e2", "slot", `{"zone":"a.example"}`, "agent-secret")); !r.Granted {
 		t.Fatalf("e2 after e1 released: %+v", r)
+	}
+	// A release names a zone that is gone from the file: still 204 — it only
+	// touches the caller's own grant.
+	if rec := postACME(h, "e2", "slot", `{"zone":"gone.example","release":true}`, "agent-secret"); rec.Code != http.StatusNoContent {
+		t.Fatalf("release of an unknown zone: %d %s", rec.Code, rec.Body.String())
 	}
 	// The grants show in the zones document, sorted by zone.
 	rec := getZones(h, "", "op-secret", "")
@@ -143,6 +159,14 @@ func TestEdgeACMEChallengePublishFansOutAndWakesPollers(t *testing.T) {
 	s.rulesHold = 3 * time.Second
 	h := s.Handler()
 
+	// A publish needs the zone's slot: without it, 409 and nothing fanned out.
+	if rec := postACME(h, "e1", "challenges", challengeBody("a.example", validToken, validKeyAuth), "agent-secret"); rec.Code != http.StatusConflict {
+		t.Fatalf("publish without the slot: %d %s", rec.Code, rec.Body.String())
+	}
+	if r := slotResp(t, postACME(h, "e1", "slot", `{"zone":"a.example"}`, "agent-secret")); !r.Granted {
+		t.Fatalf("slot: %+v", r)
+	}
+
 	first := getZones(h, "", "agent-secret", "e1")
 	if first.Code != http.StatusOK {
 		t.Fatalf("first GET: %d", first.Code)
@@ -160,7 +184,7 @@ func TestEdgeACMEChallengePublishFansOutAndWakesPollers(t *testing.T) {
 	go func() { done <- getZones(h, etag, "agent-secret", "e2") }()
 	waitEdgeHolds(t, s, 1)
 	start := time.Now()
-	if rec := postACME(h, "e1", "challenges", `{"zone":"a.example","token":"`+validToken+`","key_authorization":"`+validKeyAuth+`"}`, "agent-secret"); rec.Code != http.StatusNoContent {
+	if rec := postACME(h, "e1", "challenges", challengeBody("a.example", validToken, validKeyAuth), "agent-secret"); rec.Code != http.StatusNoContent {
 		t.Fatalf("publish: %d %s", rec.Code, rec.Body.String())
 	}
 	select {
@@ -186,7 +210,7 @@ func TestEdgeACMEChallengePublishFansOutAndWakesPollers(t *testing.T) {
 	}
 	// Idempotent re-publish of the same token, and the document is stable
 	// between publishes (same ETag on two consecutive GETs).
-	if rec := postACME(h, "e1", "challenges", `{"zone":"a.example","token":"`+validToken+`","key_authorization":"`+validKeyAuth+`"}`, "agent-secret"); rec.Code != http.StatusNoContent {
+	if rec := postACME(h, "e1", "challenges", challengeBody("a.example", validToken, validKeyAuth), "agent-secret"); rec.Code != http.StatusNoContent {
 		t.Fatalf("re-publish: %d", rec.Code)
 	}
 	a := getZones(h, "", "op-secret", "")
@@ -194,32 +218,101 @@ func TestEdgeACMEChallengePublishFansOutAndWakesPollers(t *testing.T) {
 	if a.Header().Get("ETag") != b.Header().Get("ETag") {
 		t.Fatal("ETag churns without news")
 	}
+	// The same token with a DIFFERENT key authorization is refused — even
+	// from the node that now holds the slot: first live writer wins.
+	if rec := postACME(h, "e1", "challenges", challengeBody("a.example", validToken, validToken+".another_thumbprint_abcdefghijklmnop"), "agent-secret"); rec.Code != http.StatusConflict {
+		t.Fatalf("overwrite by the holder: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := postACME(h, "e1", "slot", `{"zone":"a.example","release":true}`, "agent-secret"); rec.Code != http.StatusNoContent {
+		t.Fatalf("release: %d", rec.Code)
+	}
+	if r := slotResp(t, postACME(h, "e2", "slot", `{"zone":"a.example"}`, "agent-secret")); !r.Granted {
+		t.Fatalf("e2 slot: %+v", r)
+	}
+	if rec := postACME(h, "e2", "challenges", challengeBody("a.example", validToken, validToken+".another_thumbprint_abcdefghijklmnop"), "agent-secret"); rec.Code != http.StatusConflict {
+		t.Fatalf("overwrite by another node: %d %s", rec.Code, rec.Body.String())
+	}
+	c := getZones(h, "", "op-secret", "")
+	var doc EdgeDoc
+	_ = json.Unmarshal(c.Body.Bytes(), &doc)
+	if len(doc.ACMEChallenges) != 1 || doc.ACMEChallenges[0].KeyAuthorization != validKeyAuth {
+		t.Fatalf("document after refused overwrites: %+v", doc.ACMEChallenges)
+	}
 }
 
 func TestEdgeACMEChallengeExpiresFromTheDocument(t *testing.T) {
 	c := newIssuanceCoordinator()
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
-	if !c.publish("a.example", validToken, validKeyAuth, now) {
-		t.Fatal("publish refused")
+	if granted, _, _ := c.acquire("a.example", "e1", now); !granted {
+		t.Fatal("slot refused")
 	}
-	doc := buildEdgeDoc(nil)
+	if got := c.publish("a.example", validToken, validKeyAuth, "e1", now); got != publishOK {
+		t.Fatalf("publish: %v", got)
+	}
+	withZone := func() edgedoc.Doc {
+		doc := buildEdgeDoc(nil)
+		doc.Zones = []edgedoc.Zone{{Name: "a.example"}}
+		return doc
+	}
+	doc := withZone()
 	c.fill(&doc, now.Add(edgeChallengeTTL-time.Second))
 	if len(doc.ACMEChallenges) != 1 {
 		t.Fatalf("live challenge missing: %+v", doc.ACMEChallenges)
 	}
+	// A zone the document no longer lists takes its grants and challenges
+	// with it.
 	doc = buildEdgeDoc(nil)
+	c.fill(&doc, now)
+	if len(doc.ACMEChallenges) != 0 || len(doc.IssuanceGrants) != 0 {
+		t.Fatalf("entries for an absent zone in the doc: %+v %+v", doc.ACMEChallenges, doc.IssuanceGrants)
+	}
+	doc = withZone()
 	c.fill(&doc, now.Add(edgeChallengeTTL))
 	if len(doc.ACMEChallenges) != 0 {
 		t.Fatalf("expired challenge still in the doc: %+v", doc.ACMEChallenges)
 	}
-	// The table is bounded.
-	for i := 0; i < maxFannedChallenges; i++ {
-		if !c.publish("a.example", validToken+"-"+strings.Repeat("x", 3)+string(rune('a'+i%26))+string(rune('a'+(i/26)%26))+string(rune('a'+(i/676)%26)), validKeyAuth, now) {
-			t.Fatalf("publish %d refused before the cap", i)
+}
+
+func TestEdgeACMEChallengeQuotas(t *testing.T) {
+	c := newIssuanceCoordinator()
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	c.acquire("a.example", "e1", now)
+	c.acquire("b.example", "e2", now)
+	token := func(i int) string { return fmt.Sprintf("%s-%06d", validToken, i) }
+	// One node fills its quota; the 17th is refused as the node's, not the
+	// fleet's, problem.
+	for i := 0; i < maxChallengesPerNode; i++ {
+		if got := c.publish("a.example", token(i), validKeyAuth, "e1", now); got != publishOK {
+			t.Fatalf("publish %d: %v", i, got)
 		}
 	}
-	if c.publish("a.example", validToken+"-overflow", validKeyAuth, now) {
-		t.Fatal("publish accepted past the cap")
+	if got := c.publish("a.example", token(maxChallengesPerNode), validKeyAuth, "e1", now); got != publishQuota {
+		t.Fatalf("past the node quota: %v", got)
+	}
+	// A re-publish of a live entry is not a new one.
+	if got := c.publish("a.example", token(0), validKeyAuth, "e1", now); got != publishOK {
+		t.Fatalf("re-publish under quota pressure: %v", got)
+	}
+	// Another node is untouched by e1's quota.
+	if got := c.publish("b.example", token(0), validKeyAuth, "e2", now); got != publishOK {
+		t.Fatalf("other node: %v", got)
+	}
+	// Without the slot, nothing.
+	if got := c.publish("a.example", token(99), validKeyAuth, "e2", now); got != publishNoSlot {
+		t.Fatalf("publish without the slot: %v", got)
+	}
+	// A different key authorization for a live token is a conflict, even from
+	// its own publisher.
+	if got := c.publish("a.example", token(0), validToken+".other_thumbprint_abcdefghijklmnopq", "e1", now); got != publishConflict {
+		t.Fatalf("overwrite: %v", got)
+	}
+	// Expiry frees the quota.
+	if got := c.publish("a.example", token(maxChallengesPerNode), validKeyAuth, "e1", now.Add(edgeChallengeTTL)); got != publishNoSlot {
+		// The slot lease (10 min) expired with the challenges; re-acquire.
+		c.acquire("a.example", "e1", now.Add(edgeChallengeTTL))
+		if got := c.publish("a.example", token(maxChallengesPerNode), validKeyAuth, "e1", now.Add(edgeChallengeTTL)); got != publishOK {
+			t.Fatalf("after expiry: %v", got)
+		}
 	}
 }
 
@@ -231,15 +324,16 @@ func TestEdgeACMERoutesValidate(t *testing.T) {
 		want                           int
 	}{
 		{"scoped token", "e1", "slot", `{"zone":"a.example"}`, "scoped-secret", http.StatusForbidden},
-		{"scoped token challenge", "e1", "challenges", `{"zone":"a.example","token":"` + validToken + `","key_authorization":"` + validKeyAuth + `"}`, "scoped-secret", http.StatusForbidden},
+		{"scoped token challenge", "e1", "challenges", challengeBody("a.example", validToken, validKeyAuth), "scoped-secret", http.StatusForbidden},
 		{"no token", "e1", "slot", `{"zone":"a.example"}`, "", http.StatusUnauthorized},
 		{"unknown node", "e9", "slot", `{"zone":"a.example"}`, "agent-secret", http.StatusNotFound},
 		{"unknown zone", "e1", "slot", `{"zone":"nobody.example"}`, "agent-secret", http.StatusNotFound},
 		{"bad json", "e1", "slot", `{"zone":`, "agent-secret", http.StatusBadRequest},
 		{"unknown field", "e1", "slot", `{"zone":"a.example","node":"e1"}`, "agent-secret", http.StatusBadRequest},
-		{"bad token", "e1", "challenges", `{"zone":"a.example","token":"short","key_authorization":"` + validKeyAuth + `"}`, "agent-secret", http.StatusBadRequest},
-		{"bad key auth", "e1", "challenges", `{"zone":"a.example","token":"` + validToken + `","key_authorization":"no dot here at all"}`, "agent-secret", http.StatusBadRequest},
-		{"challenge unknown zone", "e1", "challenges", `{"zone":"nobody.example","token":"` + validToken + `","key_authorization":"` + validKeyAuth + `"}`, "agent-secret", http.StatusNotFound},
+		{"bad token", "e1", "challenges", challengeBody("a.example", "short", validKeyAuth), "agent-secret", http.StatusBadRequest},
+		{"bad key auth", "e1", "challenges", challengeBody("a.example", validToken, "no dot here at all"), "agent-secret", http.StatusBadRequest},
+		{"challenge unknown zone", "e1", "challenges", challengeBody("nobody.example", validToken, validKeyAuth), "agent-secret", http.StatusNotFound},
+		{"challenge without slot", "e1", "challenges", challengeBody("a.example", validToken, validKeyAuth), "agent-secret", http.StatusConflict},
 		{"operator may too", "e1", "slot", `{"zone":"a.example"}`, "op-secret", http.StatusOK},
 		{"oversized", "e1", "challenges", `{"zone":"a.example","token":"` + strings.Repeat("a", 5000) + `"}`, "agent-secret", http.StatusRequestEntityTooLarge},
 	}
