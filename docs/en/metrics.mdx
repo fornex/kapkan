@@ -223,6 +223,23 @@ reports its userspace reader here; its in-kernel copy sampler is on
 `fp_throttled` climbing while `fp_emitted` plateaus is the sampler doing its job under a handshake
 flood; a sustained `fp_ring_full` means the reader cannot drain the ring fast enough.
 
+## Edge nodes
+
+An [edge node](/docs/edge) exposes its own series on `status_listen` (`/metrics`), beside the
+Go runtime's:
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `kapkan_edge_decisions_total` | counter | `zone`, `result` | Decision-service verdicts: `allow`, `deny` (with the reason folded into `result` as `deny`), `would-deny` (dry-run), `untracked` (the table was full, the request passed). |
+| `kapkan_edge_log_records_total` | counter | `result` | Access-log datagrams from the terminator: `ok`, `malformed`, `oversized`, `dropped` (the handler queue was full), `unknown_zone`. A steady `dropped` rate means `net.unix.max_dgram_qlen` is too small. |
+| `kapkan_edge_inflight_resets_total` | counter | — | In-flight counters the decision service reset because a busy source saw no completion for a whole idle period — its log stream was lossy or dead. |
+| `kapkan_edge_verdict_table_entries` | gauge | — | Live deny/mark entries in the node's verdict table. |
+| `kapkan_edge_cert_not_after_seconds` | gauge | `zone` | Expiry of the zone's certificate as a Unix timestamp — the **T−30 d alarm**: alert when it is less than 30 days away. Dropped when a zone leaves the document. |
+| `kapkan_edge_acme_attempts_total` | counter | `zone`, `result` | Certificate orders: `issued`, `renewed`, `failed`, `fallback` (the attempt used the fallback CA). |
+
+The brain adds nothing per edge node to its own `/metrics`; a node's liveness and last report
+are read from [`GET /api/v1/edge/nodes`](/docs/api#the-edge-channel).
+
 ## Scraping
 
 Add Kapkan as a scrape target in your Prometheus config:

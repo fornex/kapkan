@@ -12,6 +12,7 @@ export const docsNav: DocGroup[] = [
   { key: "configuration", slugs: ["configuration", "detection", "hostgroups", "baselines"] },
   { key: "mitigation", slugs: ["mitigation", "safety", "going-live", "flowspec", "scrubbing", "network-integration", "escalation"] },
   { key: "dataplane", slugs: ["dataplane", "dataplane-install", "dataplane-operate", "dataplane-tuning", "fingerprinting"] },
+  { key: "edge", slugs: ["edge", "edge-install", "zones"] },
   { key: "operating", slugs: ["api", "dashboard", "authentication", "multi-tenancy", "audit", "notifications", "metrics", "storage", "troubleshooting"] },
   { key: "deployment", slugs: ["deployment", "upgrading"] },
 ];

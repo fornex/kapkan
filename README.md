@@ -91,6 +91,7 @@ reference, key by key, is [kapkan.io/docs/configuration](https://kapkan.io/docs/
 | `flowspec.action` / `rate_mbps` | FlowSpec rule action: `discard`, or `rate_limit` with a ceiling (see [FlowSpec](#flowspec-surgical-mitigation)). |
 | `scrubbing` | Diversion target(s): the scalar `next_hop`/`next_hop6`/`community`/`local_pref` of a scrubbing center, plus `nodes[]` / `node_selection` / `on_all_nodes_lost` / `stale_after_seconds` for [managed scrubbing nodes](#managed-scrubbing-nodes). Per-hostgroup overridable. |
 | `dataplane` | The [in-kernel XDP data plane](#in-kernel-data-plane-xdp): `interfaces`, `xdp_mode`, `pin_path`, `on_exit`, `drop_malformed`, `allowlist`, `ratelimit_profiles[]`, `static_rules[]`, `limits`, and the off-path `fingerprint` plane (JA4 source-blocking). Absent = off. |
+| `edge` | Serve [edge nodes](https://kapkan.io/docs/edge) — boxes running `kapkan edge` that turn their nginx/Angie into a managed HTTPS front: `zones_file` (the tenant-owned zones list, its own file), `nodes[].name`, `stale_after_seconds`. Certificates are issued on each node, configuration is generated and tested before every reload, per-request decisions are local; Kapkan never forwards a client's bytes. Absent = off. |
 | `ban.ttl_seconds` | Every announcement auto-withdraws after this. No permanent bans. |
 | `ban.unban_hysteresis_seconds` | Traffic must stay below threshold this long before withdrawing, to prevent flapping. |
 | `ban.max_active_bans` | Hard cap on simultaneous bans; new bans past the cap are refused. |
@@ -329,8 +330,8 @@ persistence. A block anchors the kernel policy at the SOURCE, so one source hold
 victim or an absent data plane are errors, not silent no-ops, because the datapath would
 pass those packets before reaching any rule. The binary ships the reference caller:
 `kapkan nginx-exporter` tails an nginx JSON access log, measures per-source request rates
-per window, and posts the verdicts to this channel — a supported component, and the embryo
-of the future edge role. Full contract:
+per window, and posts the verdicts to this channel — a supported component beside the
+[edge role](https://kapkan.io/docs/edge), which makes those decisions on the node itself. Full contract:
 [kapkan.io/docs/dataplane](https://kapkan.io/docs/dataplane#source-blocks-from-your-own-stack).
 
 A `ratelimit` action is enforced **per source address** — each source gets its own token

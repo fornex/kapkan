@@ -568,6 +568,70 @@ knows (config, poll liveness, how many bans divert to it) joined with its last r
 which is deployment topology. The count alone (`nodes_total`) rides on `/api/v1/status` for every
 role, so a console can decide whether to show node affordances without this call.
 
+### The edge channel
+
+These endpoints exist for [edge nodes](/docs/edge) — boxes running [`kapkan edge`](/docs/cli#edge).
+Like the scrub-node channel they take the `agent` role or an unscoped `operator` token, never a
+`viewer` or a tenant-scoped token: the zones document spans every tenant. **The brain
+distributes policy, never verdicts** — no per-request call exists here or anywhere; a node
+answers requests alone.
+
+#### GET /api/v1/edge/zones
+
+The zone document a node renders and enforces: every zone of the [zones file](/docs/zones)
+with its origins, TLS floor, ACME directories and policy, plus the live issuance grants and
+fanned-out ACME challenges. A plain `GET` returns the document with a content-hash `ETag`; a
+`GET` whose `If-None-Match` names that ETag is **held** until the document changes — a
+successful reload of the zones file, a certificate challenge published by a node — or up to
+25 s, then answered `304`. A node identifies itself with `?node=<name>`, and **that poll is the
+node's liveness signal**, so the name must be a configured `edge.nodes[]` entry (an unknown
+name is `404`) and the request must carry a real token.
+
+```json
+{
+  "version": 1,
+  "zones": [
+    {
+      "name": "shop.example.com",
+      "origins": ["10.0.0.10:8080"],
+      "tls": { "min_version": "1.2" },
+      "acme_directory": "",
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
+    }
+  ],
+  "acme_challenges": [],
+  "issuance_grants": []
+}
+```
+
+#### POST /api/v1/edge/nodes/\{name\}/report
+
+A node's advisory self-report — version, node-side dry-run, the ETag of the document it has
+**rendered** (so an operator can see a node lagging or refusing), the terminator's kind,
+version and liveness, the live generation and its `nginx -t` result, and the certificates it
+holds (public metadata only, never a key; a long list is cut to the 64 KiB body limit with a
+`certs_truncated` count) — stored for the [console](/docs/dashboard). Never a liveness signal
+(the poll is). An unknown `{name}` is `404`; success is `204 No Content`.
+
+#### GET /api/v1/edge/nodes
+
+The node inventory: each configured edge node with its poll liveness joined with its last
+report. A `viewer`-rank read, unscoped tokens only.
+
+#### POST /api/v1/edge/nodes/\{name\}/acme/slot and …/acme/challenges
+
+The **issuance coordinator**, advisory and in memory. A node asks for a per-zone slot before
+ordering a certificate (`{"zone": "…"}` → `{"granted": true, "expires_at": …}` or
+`{"granted": false, "holder": "…", "retry_after_seconds": …}`; `{"release": true}` returns it), so
+a fleet does not burn a CA's duplicate-certificate ceiling in one afternoon; it waits at most
+15 minutes and then orders anyway. A node that holds the slot publishes its pending HTTP-01
+challenge (`{"zone", "token", "key_authorization"}`) and the brain fans it out in the zone
+document for ten minutes so every node answers it — the CA's validation may land on any node
+behind a shared address. A live challenge is never overwritten by a different key authorization
+(`409`), a node may hold 16 live challenges, and every call is logged with the node, the zone
+and the token's prefix: an agent token is a certificate-issuing credential, rotate it on any
+node compromise.
+
 ### GET /metrics
 
 Serves Prometheus metrics in the standard text exposition format. This endpoint is not
