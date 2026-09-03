@@ -46,7 +46,9 @@ api:
 
 `kapkan -check-config /etc/kapkan/config.yaml` validates both files (it follows
 `edge.zones_file`), and `kapkan -dump-zones-schema` prints the zones file's JSON schema for
-your editor. A zones file that fails to read or validate on a reload **keeps the previous zones
+your editor. Give each node its own `agent` token: the brain parks at most 4 polls per token
+name (8 in total) and answers a further one `429`, which a node treats as a failure and backs
+off from. A zones file that fails to read or validate on a reload **keeps the previous zones
 live** — the brain never serves a half-broken document. Every key is in the
 [zones reference](/docs/zones).
 
@@ -81,8 +83,8 @@ nginx -t
 ```
 
 `live` itself is a **symlink** the node creates and retargets on every generation — do not
-create it by hand; the node removes an empty directory left in its place, but refuses a
-non-empty one.
+create it by hand: a directory in its place stops every install (`apply: rename … live` in the
+journal) until it is removed.
 
 Find the **worker's group** — `nginx` for nginx.org packages and the Docker image, `www-data`
 for Debian's own package, `angie` for Angie. The decision and log sockets are created `0660`
@@ -158,14 +160,14 @@ ends the process with that error and systemd restarts it.
 - `curl -s 127.0.0.1:9102/healthz` answers `200` with `"healthy":true`, `"converged":true` and
   the rendered ETag; `ls /var/lib/kapkan-edge/conf/live/` lists `kapkan_00_common.conf` and one
   `kapkan_zone_<name>.conf` per zone.
-- The brain's inventory, `GET /api/v1/edge/nodes`, lists the node alive with its report; the
-  console's Nodes view shows the same.
+- The brain's inventory, `GET /api/v1/edge/nodes`, lists the node alive with its report (a
+  console view is a later milestone).
 - Certificates: the first order needs port 80 reachable from the CA for every zone name. Watch
   `certificate issued` in the journal, then `ls /var/lib/kapkan-edge/certs/<zone>/current/`.
   Until a zone has a certificate its `:80` listener answers `503` for everything but ACME
   challenges — Kapkan never proxies a zone over cleartext.
 - Requests: with `dry_run: true` a client over the zone's rate still reaches the origin, with
-  `X-Kapkan-Mark: would-deny:rate`. Watch `kapkan_edge_decisions_total{result="would-deny"}` on
+  `X-Kapkan-Mark: would-deny:rate`. Watch `kapkan_edge_decisions_total{result="would_deny"}` on
   `/metrics` and your origin's logs.
 
 ## 5. Go live
@@ -192,10 +194,11 @@ renews on its own.
 | `nginx -t` fails with *a duplicate default server* | Your `nginx.conf` already declares a `default_server` on `:80` or `:443`. Set `omit_catch_all: true` or remove yours. |
 | `[crit] stat() ... failed` in nginx's error log on every request | The worker cannot traverse to `state_dir/empty`. The unit's `StateDirectoryMode=0711` does that; a hand-made `state_dir` needs `chmod 711`. |
 | `connect() to unix:/run/kapkan-edge/edge-decide.sock failed (13: Permission denied)` | `socket_group` is not the worker's group. Fix it and restart the unit. |
-| `healthy: false`, `generation: 0` | No tested generation of the node's own is live: the very first render failed `nginx -t`, or a recovered generation failed. Read `test_error` in the status body. |
+| `healthy: false`, `generation: 0` | No tested generation of the node's own is live: the very first candidate failed `nginx -t` (read `test_error`), the renderer refused the document (read `last_error`), a recovered generation failed — or the node has never received a document at all (`brain_seen` absent; read the journal's poll errors: `controller.url`, the token, `controller.name`). |
+| `apply: rename … live: file exists` (or `is a directory`) on every apply | A directory sits where the node's `live` symlink goes — created by hand, or by an old install step. Move its contents away and `rmdir` it; the next attempt installs. |
 | `converged: false` with `test_error` | The latest document was refused; the previous one serves. Fix the cause (an origin that does not resolve, a directive in `extra_directives_file`) and the node retries on its own. |
 | Zone stays on `:80` with `503` | No certificate yet. Check port 80 reachability from the internet for that name, `kapkan_edge_acme_attempts_total`, and the journal's `certificate order failed` line. |
-| Node shown lost on the brain while running | The poll is the liveness signal, and it is held up to 25 s; `stale_after_seconds` counts from the last completed poll. Check `controller.url`, the token, and that `controller.name` is declared under `edge.nodes[]`. |
+| Node shown lost on the brain while running | The poll is the liveness signal and a poll parked in the brain's hold counts as alive, so a node shown lost has really stopped reaching the brain. Check `controller.url`, the token (`401`/`403` in the journal), that `controller.name` is declared under `edge.nodes[]` (`404`), and that the node is not sharing a token with more than four others (`429`). |
 
 ## Related
 

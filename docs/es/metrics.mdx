@@ -241,7 +241,7 @@ del runtime de Go:
 | --- | --- | --- | --- |
 | `kapkan_edge_decisions_total` | contador | `zone`, `result` | Veredictos del servicio de decisión: `allow`, `deny` (con el motivo plegado en `result` como `deny`), `would-deny` (dry-run), `untracked` (la tabla estaba llena, la petición pasó). |
 | `kapkan_edge_log_records_total` | contador | `result` | Datagramas de access log procedentes del terminador: `ok`, `malformed`, `oversized`, `dropped` (la cola del manejador estaba llena), `unknown_zone`. Una tasa constante de `dropped` significa que `net.unix.max_dgram_qlen` es demasiado pequeño. |
-| `kapkan_edge_inflight_resets_total` | contador | — | Contadores de peticiones en curso que el servicio de decisión reinició porque un origen ocupado no vio ninguna finalización durante todo un periodo de inactividad — su flujo de log tenía pérdidas o estaba muerto. |
+| `kapkan_edge_inflight_resets_total` | contador | — | Contadores de peticiones en curso que el servicio de decisión reinició porque una fuente ocupada no vio ninguna finalización durante todo un periodo de inactividad — su flujo de log tenía pérdidas o estaba muerto. |
 | `kapkan_edge_verdict_table_entries` | gauge | — | Entradas vivas de denegación/marca en la tabla de veredictos del nodo. |
 | `kapkan_edge_cert_not_after_seconds` | gauge | `zone` | Caducidad del certificado de la zona como marca de tiempo Unix — la **alarma T−30 d**: alerta cuando queden menos de 30 días. Se elimina cuando una zona abandona el documento. |
 | `kapkan_edge_acme_attempts_total` | contador | `zone`, `result` | Solicitudes de certificado: `issued`, `renewed`, `failed`, `fallback` (el intento usó la CA de respaldo). |

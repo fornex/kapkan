@@ -164,7 +164,7 @@ groupe qui n'existe pas — termine le processus avec cette erreur et systemd le
   zone en clair.
 - Requêtes : avec `dry_run: true`, un client au-dessus du débit de la zone atteint tout de même
   l'origine, avec `X-Kapkan-Mark: would-deny:rate`. Surveillez
-  `kapkan_edge_decisions_total{result="would-deny"}` sur `/metrics` et les journaux de votre
+  `kapkan_edge_decisions_total{result="would_deny"}` sur `/metrics` et les journaux de votre
   origine.
 
 ## 5. Mise en production

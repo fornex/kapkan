@@ -585,7 +585,10 @@ fanned-out ACME challenges. A plain `GET` returns the document with a content-ha
 successful reload of the zones file, a certificate challenge published by a node — or up to
 25 s, then answered `304`. A node identifies itself with `?node=<name>`, and **that poll is the
 node's liveness signal**, so the name must be a configured `edge.nodes[]` entry (an unknown
-name is `404`) and the request must carry a real token.
+name is `404`) and the request must carry a real token. At most 4 polls per token name and 8 in
+total may be parked at once; a further matching poll is answered `429` with `Retry-After: 1`
+(`too many concurrent zone holds`), which the node treats as a failure and backs off from (1 s
+doubling to 30 s) — give each node its own agent token.
 
 ```json
 {
@@ -595,7 +598,6 @@ name is `404`) and the request must carry a real token.
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "acme_directory": "",
       "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
@@ -604,14 +606,18 @@ name is `404`) and the request must carry a real token.
 }
 ```
 
+`acme_directory`, `acme_fallback`, `extra_directives_file` and `tls.h3` are omitted when unset;
+an absent `acme_directory` means the node orders from its own default CA (Let's Encrypt unless
+its `edge.yaml` says otherwise).
+
 #### POST /api/v1/edge/nodes/\{name\}/report
 
 A node's advisory self-report — version, node-side dry-run, the ETag of the document it has
 **rendered** (so an operator can see a node lagging or refusing), the terminator's kind,
 version and liveness, the live generation and its `nginx -t` result, and the certificates it
 holds (public metadata only, never a key; a long list is cut to the 64 KiB body limit with a
-`certs_truncated` count) — stored for the [console](/docs/dashboard). Never a liveness signal
-(the poll is). An unknown `{name}` is `404`; success is `204 No Content`.
+`certs_truncated` count) — stored and returned by `GET /api/v1/edge/nodes`. Never a liveness
+signal (the poll is). An unknown `{name}` is `404`; success is `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 

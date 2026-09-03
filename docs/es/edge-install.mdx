@@ -164,7 +164,7 @@ no existe — termina el proceso con ese error y systemd lo reinicia.
   una zona en texto claro.
 - Peticiones: con `dry_run: true` un cliente que supera la tasa de la zona sigue llegando al
   origen, con `X-Kapkan-Mark: would-deny:rate`. Observa
-  `kapkan_edge_decisions_total{result="would-deny"}` en `/metrics` y los logs de tu origen.
+  `kapkan_edge_decisions_total{result="would_deny"}` en `/metrics` y los logs de tu origen.
 
 ## 5. Pasar a producción
 

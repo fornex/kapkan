@@ -296,7 +296,7 @@ kapkan edge -config /etc/kapkan/edge.yaml
 Ejecuta el rol de [nodo edge](/docs/edge): el nginx o Angie de la máquina se convierte en un frontal
 HTTPS gestionado para las zonas que sirve el cerebro. El rol hace long-poll del documento de zonas del
 cerebro, renderiza la configuración del terminador y la instala tras pasar `nginx -t`, responde al
-`auth_request` de nginx desde un servicio de decisión local, lee el access log y lo agrega por origen,
+`auth_request` de nginx desde un servicio de decisión local, lee el access log y lo agrega por fuente,
 emite y renueva los certificados de las zonas en la propia máquina, y se autoinforma. El sondeo hace
 de paso las veces de señal de vitalidad del nodo. El paso a paso es la
 [guía de instalación](/docs/edge-install).

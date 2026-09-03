@@ -85,7 +85,8 @@ touching the terminator.
 
 Like every remote role, an edge node **defaults to dry-run**: decisions are counted and marked,
 none is enforced. A request the policy would refuse still reaches the origin, with the header
-`X-Kapkan-Mark: would-deny:rate` (or `would-deny:concurrency`, `would-deny:table`), so you can
+`X-Kapkan-Mark: would-deny:rate` (or `would-deny:concurrency`, `would-deny:table:<reason>` —
+today `would-deny:table:flood`, the rollup rule that promoted the source), so you can
 grep your origin's logs and look at the metrics before a single client is turned away. Set
 `dry_run: false` in the node's `edge.yaml` when the counts look right.
 

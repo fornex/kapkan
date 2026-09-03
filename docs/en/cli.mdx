@@ -9,8 +9,8 @@ export const metadata = {
 Kapkan is a single binary. What it does is selected by command-line flags at startup, plus a
 small number of **commands** that inspect the running system and exit. All logs go to
 **stderr**; the REST API and Prometheus metrics are served over HTTP on `api.listen` (default
-`127.0.0.1:8080`), while the utility flags (`-version`, `-dump-schema`) and the commands print
-their output to **stdout**.
+`127.0.0.1:8080`), while the utility flags (`-version`, `-dump-schema`, `-dump-zones-schema`)
+and the commands print their output to **stdout**.
 
 ```sh
 kapkan [flags]                     # run the daemon
@@ -20,8 +20,9 @@ kapkan [flags] <command> [args]    # run a command and exit
 Global flags come **before** the command; the command's own flags come after it. So
 `kapkan -config /etc/kapkan/config.yaml dataplane status -json` reads the config path from the
 global `-config` and passes `-json` to `dataplane status`. A flag that already exits on its own
-(`-version`, `-check-config`, `-dump-schema`, `-check-update`, `-s`) cannot be combined with a
-command — Kapkan refuses the combination rather than silently honouring one of them.
+(`-version`, `-check-config`, `-dump-schema`, `-dump-zones-schema`, `-check-update`, `-s`) cannot
+be combined with a command — Kapkan refuses the combination rather than silently honouring one
+of them.
 
 ## Flags
 
@@ -32,6 +33,7 @@ command — Kapkan refuses the combination rather than silently honouring one of
 | `-log-level <lvl>` | `info` | Minimum log level: `debug`, `info`, `warn`, `error`. An unrecognized value falls back to `info`. |
 | `-check-config <path>` | — | Validate the config file at `<path>` and exit — does **not** start the daemon. See [below](#validating-a-config). |
 | `-dump-schema` | `false` | Print the configuration JSON schema to stdout and exit. See [below](#dumping-the-schema). |
+| `-dump-zones-schema` | `false` | Print the JSON schema of the [zones file](/docs/zones) an edge brain serves (`edge.zones_file`) to stdout and exit. |
 | `-version` | `false` | Print the build version and exit. The same version is exposed at runtime via `/api/v1/status` and the `kapkan_build_info` [metric](/docs/metrics). |
 | `-check-update` | `false` | Run the opt-in [update check](/docs/configuration) once and exit — `0` up to date, `10` an update is available, `1` on error. Polls the GitHub Releases API; sends only the request itself, never node identity or config. |
 | `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Where the daemon writes its process id on start (removed on clean shutdown); read by `-s` to locate the running daemon. A write failure is non-fatal — the daemon still runs, only `-s` is unavailable. |
@@ -131,6 +133,13 @@ kapkan -dump-schema
 
 Prints the configuration's JSON schema to stdout and exits `0` (or `1` on an internal error).
 The [config builder](/config) consumes this schema to validate fields in your browser.
+
+```sh
+kapkan -dump-zones-schema
+```
+
+The same for the [zones file](/docs/zones) an edge brain serves (`edge.zones_file`): its JSON
+schema, with the zone vocabulary's enums and bounds, for your editor or a tenant's tooling.
 
 ### Printing the version
 
@@ -332,7 +341,7 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `terminator.binary` / `main_conf` | What to run for `-t` and reloads, and the main configuration to pass as `-c`. That file must `include /var/lib/kapkan-edge/conf/live/*.conf;` once, inside `http {}`. |
 | `terminator.reload` | `exec` runs `<binary> -s reload` (needs to signal nginx's master — the unit runs as root); `signal` sends `HUP` to the pid in `pid_file`; `command` runs `terminator.command`, e.g. `[systemctl, reload, nginx]`. |
 | `terminator.pid_file` | When set, read on every report tick and signalled with `0`: `/healthz` answers `503` and the report says `alive: false` while no process has that pid. |
-| `acme.directory` / `fallback` / `contact` | The node's default CA (a zone's own `acme` block overrides directory and fallback), the fallback tried after three consecutive failures (must differ from the resolved primary), and the account contact. |
+| `acme.directory` / `fallback` / `contact` | The node's default CA (a zone's own `acme` block overrides directory and fallback), the fallback tried after three consecutive failures (must differ from the resolved primary), and the account contact — each entry a `mailto:` URL (`mailto:ops@example.net`), or the file is refused. |
 | `acme.eab[]` | External Account Binding per directory URL (`directory`, `kid`, `hmac_key_env`) for CAs that require one — ZeroSSL, Google Trust Services. The HMAC key is a secret and is read from the named environment variable. |
 | `acme.disabled` | Issue nothing: zones stay on `:80` answering `503` (a lab that exercises everything but issuance). Operator-supplied certificates are not a feature yet. |
 | `status_listen` | Serves `/healthz` and `/metrics` when set. Unauthenticated — loopback or a private address. |
@@ -353,9 +362,8 @@ outside a lab — a plaintext `controller.url` sends the token in the clear.
 | `-log-level <lvl>` | `info` | `debug`, `info`, `warn` or `error`. |
 
 Confirm a running node with `curl 127.0.0.1:9102/healthz` — `200` with `"converged":true` once
-the document is rendered and live — and the brain's inventory (`GET /api/v1/edge/nodes`, the
-console's Nodes view) shows it alive. The brain-side schema of the zones file is
-`kapkan -dump-zones-schema`.
+the document is rendered and live — and the brain's inventory (`GET /api/v1/edge/nodes`) shows
+it alive. The brain-side schema of the zones file is `kapkan -dump-zones-schema`.
 
 ### `nginx-exporter`
 
