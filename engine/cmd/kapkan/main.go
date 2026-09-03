@@ -50,14 +50,18 @@ func main() {
 	if f.checkUpdate {
 		os.Exit(checkForUpdate(f.configPath))
 	}
-	if f.dumpSchema {
-		b, err := config.GenerateSchema()
+	if f.dumpSchema || f.dumpZonesSchema {
+		name, gen := "dump-schema", config.GenerateSchema
+		if f.dumpZonesSchema {
+			name, gen = "dump-zones-schema", config.GenerateZonesSchema
+		}
+		b, err := gen()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "dump-schema:", err)
+			fmt.Fprintln(os.Stderr, name+":", err)
 			os.Exit(1)
 		}
 		if _, err := os.Stdout.Write(b); err != nil {
-			fmt.Fprintln(os.Stderr, "dump-schema:", err)
+			fmt.Fprintln(os.Stderr, name+":", err)
 			os.Exit(1)
 		}
 		return
