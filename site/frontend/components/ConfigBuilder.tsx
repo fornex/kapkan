@@ -444,8 +444,11 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
     scrubbing: null,
     dataplane: null,
   });
-  // stage-3 service layer
-  const [filterModified, setFilterModified] = useState(false);
+  // stage-3 service layer.
+  // The pressed state of the @modified chip; what the form actually filters by
+  // is the derived `filterModified` below — a filter with nothing left to show
+  // must not stay in force.
+  const [filterModifiedOn, setFilterModifiedOn] = useState(false);
   // Deterministic initial values — a static export hydrates with these, then a
   // mount effect applies what the operator chose last time.
   const [showHelp, setShowHelp] = useState(false);
@@ -614,6 +617,10 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
 
   function set<K extends keyof WizardState>(k: K, v: WizardState[K]) {
     setS((p) => ({ ...p, [k]: v }));
+    // An edit made while the chip is pressed but the filter has nothing to show
+    // (it dropped itself) forgets the press — otherwise this very edit would
+    // snap the form back into the filtered view around the field just touched.
+    if (filterModifiedOn && !filterModified) setFilterModifiedOn(false);
   }
 
   function scrollToSection(id: SectionId) {
@@ -866,24 +873,37 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
     f.matrix ? st[f.matrix] : f.key ? st[f.key] : undefined;
   const fieldModified = (f: FieldDef): boolean =>
     JSON.stringify(fieldSlice(s, f)) !== JSON.stringify(fieldSlice(initialState, f));
+  // A field whose showIf gate is shut has no row to filter down to, so it is not
+  // a deviation the operator can see or act on — it must not be counted as one.
+  const fieldShown = (f: FieldDef): boolean => !f.showIf || f.showIf(s);
+  const fieldDeviates = (f: FieldDef): boolean => fieldModified(f) && fieldShown(f);
   function resetField(f: FieldDef) {
     if (f.matrix) set(f.matrix, JSON.parse(JSON.stringify(initialState[f.matrix])));
     else if (f.key) set(f.key, JSON.parse(JSON.stringify(initialState[f.key])) as WizardState[keyof WizardState]);
   }
+  // Every deviation, hidden ones included: this is what Reset/preset would wipe,
+  // so it is what their confirmations must count.
   const modifiedCount = ALL_DEFS.reduce((n, e) => n + (fieldModified(e.f) ? 1 : 0), 0);
-  // per-section deviation count for the rail (must come after fieldModified —
+  // per-section deviation count for the rail (must come after fieldDeviates —
   // a useMemo body runs during render, so an earlier call would hit its TDZ)
   const sectionModified = useMemo(() => {
     const out = {} as Record<SectionId, number>;
     for (const id of SECTION_IDS) {
-      out[id] = FIELDS[id].reduce((n, f) => n + (fieldModified(f) ? 1 : 0), 0);
+      out[id] = FIELDS[id].reduce((n, f) => n + (fieldDeviates(f) ? 1 : 0), 0);
     }
     for (const defs of Object.values(METHOD_FIELDS)) {
-      out.mitigation += defs.reduce((n, f) => n + (fieldModified(f) ? 1 : 0), 0);
+      out.mitigation += defs.reduce((n, f) => n + (fieldDeviates(f) ? 1 : 0), 0);
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s]);
+  // What the @modified view would actually list. The chip offers itself only
+  // while this is non-zero, and the filter is only in force while the chip is
+  // there to switch it off: resetting the last edit from inside the filtered
+  // view used to leave every section filtered away with the chip already gone —
+  // an empty page no click could undo, only a reload.
+  const shownModified = SECTION_IDS.reduce((n, id) => n + sectionModified[id], 0);
+  const filterModified = filterModifiedOn && shownModified > 0;
 
   function applyPreset(diff: StateDiff) {
     if (modifiedCount > 0 && !window.confirm(t.presets.confirm)) return;
@@ -896,7 +916,7 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
     clearLocal();
     setS(JSON.parse(JSON.stringify(initialState)));
     setImportDiag(null);
-    setFilterModified(false);
+    setFilterModifiedOn(false);
   }
 
   function shareLink() {
@@ -920,7 +940,7 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
       const lost = [...new Set(leafPaths(doc).filter((p) => !emittedLeaves.has(p)))];
       setS(next);
       setImportDiag({ lost });
-      setFilterModified(false);
+      setFilterModifiedOn(false);
     } catch (e) {
       setImportDiag({ lost: [], error: e instanceof Error ? e.message : String(e) });
     }
@@ -955,7 +975,8 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
     setSearchQ("");
     setSearchFocus(false);
     if (entry.group) setGroupOpen((p) => ({ ...p, [entry.group as string]: true }));
-    if (filterModified && !fieldModified(entry.f)) setFilterModified(false);
+    // a jump to a field the @modified view does not list has to leave that view
+    if (!filterModified || !fieldDeviates(entry.f)) setFilterModifiedOn(false);
     setFlashPath(entry.f.path);
     setTimeout(() => {
       const el = document.getElementById(`fw-${entry.f.path}`);
@@ -1816,11 +1837,11 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
     // @modified filter: flat list of just the changed fields, section hidden
     // entirely when it holds none.
     if (filterModified) {
-      const mod = defs.filter(fieldModified);
+      const mod = defs.filter(fieldDeviates);
       const methodMod =
         id === "mitigation"
           ? (Object.keys(METHOD_FIELDS) as Array<keyof typeof METHOD_FIELDS>).flatMap((g) =>
-              METHOD_FIELDS[g].filter(fieldModified),
+              METHOD_FIELDS[g].filter(fieldDeviates),
             )
           : [];
       if (mod.length + methodMod.length === 0) return null;
@@ -2254,18 +2275,18 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
             </span>
             {t.helpToggle}
           </button>
-          {modifiedCount > 0 && (
+          {shownModified > 0 && (
             <button
               type="button"
               aria-pressed={filterModified}
-              onClick={() => setFilterModified((v) => !v)}
+              onClick={() => setFilterModifiedOn(!filterModified)}
               className={`h-8 shrink-0 rounded-md border px-2.5 text-[12px] transition-colors ${
                 filterModified
                   ? "border-accent bg-accent/10 text-foreground"
                   : "border-border text-muted-foreground hover:bg-muted"
               }`}
             >
-              {t.modifiedChip.replace("{n}", String(modifiedCount))}
+              {t.modifiedChip.replace("{n}", String(shownModified))}
             </button>
           )}
           {/* zone C — source of the config: a preset menu (its descriptions are
