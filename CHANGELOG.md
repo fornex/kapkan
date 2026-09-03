@@ -128,8 +128,8 @@ security-relevant.
   refuses a populated one by name; and a fresh node's first certificate order was placed before
   the first generation was live, failing its validation and backing off for an hour — the node
   now wakes the ACME manager only after a document is rendered and live, and two seconds after
-  a reload (the old workers, which know nothing of a new zone, keep answering for a moment). A
-  third, against the
+  a reload (the old workers, which know nothing of a new zone, keep answering for a moment), and
+  the manager only ever sees the zones the live generation serves. A third, against the
   real CA: Pebble answers finalize with *processing* and no `Location` header, which leaves
   `x/crypto/acme` polling an empty URL — the manager now polls the order URL it already knows
   and fetches the certificate itself, and finalises where the ready order says to.

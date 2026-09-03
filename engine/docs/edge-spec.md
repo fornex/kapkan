@@ -451,16 +451,21 @@ headline and the long pole.
   the origin answers only to edge IPs; kill the brain — the node serves and renews
   indefinitely; a broken zone edit never reaches a running nginx; the auth_request overhead is
   a measured, in-repo number.
-  *Accepted 2026-09-03 — `engine/scripts/labnet/edge-e3.sh`, 53/53 on a real kernel with stock
+  *Accepted 2026-09-03 — `engine/scripts/labnet/edge-e3.sh`, 60/60 on a real kernel with stock
   nginx 1.22 and Pebble as the CA (a real HTTP-01 fetch on the edge's :80):* a zone is issued
   through the brain's slot and fan-out and served over TLS with `X-Kapkan-Zone` at the origin;
   dry-run marks then live 429s with `Retry-After`; a rate change reaches the node without a
   reload and a zone change reloads once; a broken `extra_directives_file` never goes live (the
   previous generation serves, `/healthz` stays 200 with `converged:false`, the report names the
-  rendered document); with the brain dead the node serves and decides, a restart comes back from
-  disk before the brain returns, and the returned brain is re-synced with a 304 (renewal with the
-  brain gone is proven by unit tests and was observed in a rig run: the slot and fan-out fail
-  open and the order completes); the rollups promote a flooding source to 403 while a legit
+  rendered document); with the brain dead the node serves and still refuses over-rate clients
+  with 429 (a denial only the local decision service can produce), a restart comes back from disk
+  before the brain returns, and a restarted node's first poll to the returned brain is answered
+  304 — proven by an unchanged ETag on a second kill/restart cycle, since the first brain restart
+  forgets the fanned-out challenges (10-minute TTL) still in the node's cached document and
+  re-sends an identical render (renewal with the brain gone is proven by unit tests and was
+  observed in a rig run: the slot and fan-out fail open and the order completes); the brain's
+  inventory flips the node to lost within `stale_after_seconds` of its last poll and back to
+  alive on the first poll after a restart; the rollups promote a flooding source to 403 while a legit
   client passes; the decision adds **+0.14 ms at p50** to a request against a `mode: none` zone
   on the same node. "The origin answers only to edge IPs" is the operator's firewall, not a
   Kapkan mechanism, and is outside the rig. The rig caught three defects on the way (a `live`
