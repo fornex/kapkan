@@ -130,6 +130,9 @@ type Server struct {
 	edgeHolds    *holdGate
 	edgePresence edgePresence
 	edgeReports  edgeReportStore
+	// edgeIssuance is the per-zone ACME slot and challenge fan-out table
+	// (edge_acme.go); its state is merged into the zones document.
+	edgeIssuance *issuanceCoordinator
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -139,16 +142,17 @@ type Server struct {
 // New creates the API server.
 func New(store *config.Store, eng *engine.Engine, mit *mitigate.Mitigator, log *slog.Logger) *Server {
 	return &Server{
-		store:     store,
-		eng:       eng,
-		mit:       mit,
-		log:       log.With("component", "api"),
-		start:     time.Now(),
-		active:    make(map[string]*Attack),
-		quit:      make(chan struct{}),
-		holds:     newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
-		edgeHolds: newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
-		rulesHold: rulesHoldMax,
+		store:        store,
+		eng:          eng,
+		mit:          mit,
+		log:          log.With("component", "api"),
+		start:        time.Now(),
+		active:       make(map[string]*Attack),
+		quit:         make(chan struct{}),
+		holds:        newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
+		edgeHolds:    newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
+		edgeIssuance: newIssuanceCoordinator(),
+		rulesHold:    rulesHoldMax,
 	}
 }
 
@@ -331,6 +335,13 @@ func (s *Server) Handler() http.Handler {
 		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleEdgeZones))
 	handle("POST /api/v1/edge/nodes/{name}/report",
 		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleEdgeNodeReport))
+	// ACME coordination (edge_acme.go): a node asks for its zone's issuance
+	// slot and publishes its pending challenge for fan-out. Agent + operator,
+	// like the report; both are advisory to the node.
+	handle("POST /api/v1/edge/nodes/{name}/acme/slot",
+		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleEdgeACMESlot))
+	handle("POST /api/v1/edge/nodes/{name}/acme/challenges",
+		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleEdgeACMEChallenge))
 	read("GET /api/v1/edge/nodes", s.handleEdgeNodes)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater

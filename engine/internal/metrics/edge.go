@@ -53,4 +53,23 @@ var (
 		Name:      "verdict_table_entries",
 		Help:      "Live deny/mark entries in the decision service's verdict table.",
 	})
+
+	// EdgeCertNotAfter is the expiry of the certificate this node holds for a
+	// zone, as unix seconds — the T−30 d alarm of edge-spec §2.4 is a rule on
+	// this gauge. Absent for a zone with no certificate yet.
+	EdgeCertNotAfter = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "cert_not_after_seconds",
+		Help:      "Expiry (unix seconds) of the certificate held for a zone.",
+	}, []string{"zone"})
+
+	// EdgeACMEAttemptsTotal counts issuance attempts by zone and result:
+	// issued, renewed, failed, fallback (the fallback CA was used).
+	EdgeACMEAttemptsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "acme_attempts_total",
+		Help:      "ACME issuance attempts, by zone and result.",
+	}, []string{"zone", "result"})
 )

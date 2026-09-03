@@ -141,6 +141,8 @@ var (
 	// dotted IPv4 or a lower-case hostname; a port without a leading zero).
 	// Anything else could carry a character with meaning to nginx.
 	originRe = regexp.MustCompile(`^(\[[0-9a-f:.]+\]|[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*):[1-9][0-9]{0,4}$`)
+	// serialRe is a certificate serial as the ACME store reports it.
+	serialRe = regexp.MustCompile(`^[0-9a-f]{1,64}$`)
 )
 
 // Inputs is everything a render needs. JSON tags make a whole Inputs a test
@@ -158,9 +160,16 @@ type Inputs struct {
 // Cert is the pair of files nginx loads for a zone. Both are absolute paths
 // under the node's state directory (edge-spec §3: keys 0600, never leave the
 // node). Only the PATHS pass through here; the renderer never reads them.
+// Serial, when set, is written into the zone file as a comment: the paths
+// are stable across renewals (they go through a `current` link), so without
+// it a renewed certificate would render byte-identical files, the applier
+// would see nothing to install, and nginx would keep serving the old one.
+// With it a renewal is a new generation — tested by `nginx -t`, which loads
+// the new files, then reloaded.
 type Cert struct {
 	Fullchain string `json:"fullchain"`
 	Key       string `json:"key"`
+	Serial    string `json:"serial,omitempty"`
 }
 
 // Node is where this node's own services listen and the few local paths the
@@ -438,6 +447,9 @@ func prepareZone(z *edgedoc.Zone, cert Cert, node Node) (zoneData, error) {
 		}
 		if err := safeAbsPath(cert.Key); err != nil {
 			return zoneData{}, fmt.Errorf("certificate key: %w", err)
+		}
+		if cert.Serial != "" && !serialRe.MatchString(cert.Serial) {
+			return zoneData{}, fmt.Errorf("certificate serial %q is not lower-case hex", cert.Serial)
 		}
 		d.HasCert = true
 		d.Cert = cert
