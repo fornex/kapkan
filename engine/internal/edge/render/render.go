@@ -15,9 +15,15 @@
 //
 // THE FAIL-OPEN IDIOM (the milestone's one real technical risk). Every request
 // in a decide-mode zone is gated by auth_request on an internal location that
-// proxies headers-only to the decision service over a unix socket. The service
-// answers 200 (allow, optionally X-Kapkan-Mark) or 403 (deny) — nothing else,
-// by contract. If the service is down, slow or off-contract, the failure is
+// proxies kapkan's own headers — and only those: proxy_pass_request_headers is
+// off, so a client's 40 KiB cookie or a control byte in a header can never
+// push the subrequest off the contract — to the decision service over a unix
+// socket. The service answers 200 (allow, optionally X-Kapkan-Mark) or 403
+// (deny, with X-Kapkan-Reason) — nothing else, by contract; a denial for rate
+// or concurrency is answered to the client as 429 with a Retry-After, a
+// verdict-table denial as 403 (error_page 403 → @kapkan_denied), and the
+// decision, reason and mark are logged for the rollup. If the service is
+// down, slow or off-contract, the failure is
 // absorbed INSIDE the subrequest for a `failure_mode: open` zone: an
 // error_page there turns the 5xx into an undecided 200, so the main request
 // never sees a 500 (which nginx would answer with Connection: close) and the

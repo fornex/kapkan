@@ -265,6 +265,37 @@ zones:
   its own call). No challenge yet. A denial surfaces as 403, or as 429 through an `error_page`
   mapping in the rendered config — `auth_request` itself honors only 2xx/401/403 from the
   subrequest, and the renderer owns that translation.
+  *Decided in E3.3 (`internal/edge/decide`, `internal/edge/rollup`):* the service answers
+  `GET /decide` on a unix socket with 200 (+ optional `X-Kapkan-Mark`) or 403 with
+  `X-Kapkan-Reason` (`rate`, `concurrency`, `table:<reason>`) — nothing else. The renderer maps
+  a rate/concurrency denial to **429 + `Retry-After: 1`** and keeps 403 for a table denial
+  (`error_page 403 = @kapkan_denied`), forwards none of the client's own headers to the
+  subrequest (`proxy_pass_request_headers off` — a client cannot push the decision off-contract),
+  and logs `decision`, `reason` and `mark`. A **source is a key**, not an address
+  (`edgedoc.SourceKey`): IPv4 as is, IPv6 by its /64 — on every table of the node. The service is
+  the **only** enforcer of a zone's `policy.rate` (the renderer emits no `limit_req`): a token
+  bucket per (zone, key) refilling at `rps` with one second of burst, and concurrency as an
+  approximate in-flight count — every decision opens one, every access-log line whose `decision`
+  is 200/403 closes one; a busy key with no completion for 60 s has its count reset (the log
+  stream is lossy) and the reset is counted. Tables are bounded per node and per zone (a quota
+  of the node cap), swept after 60 s idle, and a full table passes the request untracked
+  (default-PASS) *without* walking the tables for every miss (the on-full sweep is paced to 1/s).
+  On top: a bounded verdict table — denies and marks kept apart, any live deny outranking any
+  mark, zone entries and an every-zone wildcard — fed by the rollup's rules over **every** source
+  of a 10 s window: *flood*: ≥ 20 rate/concurrency denials (or dry-run would-denies) that are
+  ≥ 30 % of the source's *decided* requests → deny 1 min, doubling per repeat up to 10 min; a
+  source the table already denies is skipped (its 403s are the deny at work, never an
+  escalation); *errors*: ≥ 50 requests with ≥ 90 % origin 4xx/5xx → mark `errors`, suspended
+  while the zone as a whole errors at that share. Thresholds are fixed in E3.3; E3.6 makes them
+  zone knobs. Dry-run answers every deny as 200 with `X-Kapkan-Mark: would-deny:<reason>`, the
+  rollup reads the mark, and the loop previews its promotions as `would-deny:table:flood`. Both
+  unix sockets default to **0660** and take the terminator's worker group; a live socket is never
+  replaced by a second instance. **Caveat:** `$remote_addr` is the source only while the
+  operator's `nginx.conf` has no `real_ip` configuration covering clients — behind a trusted
+  balancer, `set_real_ip_from` must name that balancer alone. Datagram loss is bounded by
+  `net.unix.max_dgram_qlen` (≥ 512 recommended; the listener warns). The latency numbers live in
+  `BenchmarkDecideOverUnixSocket` (single-client round trip, p50/p99) and, through the terminator,
+  in the Linux arm of `TestRealTerminator` (`make bench`, `make edge-terminator-test`).
 - **E4 adds:** `challenge` — redirect to a PoW/JS page served by the node, clearance = signed
   cookie (HMAC, key distributed in the zone doc, rotated; bound to zone + source prefix + TTL;
   a no-JS fallback path is required, accessibility is a review gate, and the cookie must not
