@@ -10,7 +10,7 @@ Kapkan es un único binario. Lo que hace se selecciona mediante opciones de lín
 arrancar, más un pequeño número de **comandos** que inspeccionan el sistema en ejecución y
 terminan. Todos los registros van a **stderr**; la API REST y las métricas de Prometheus se sirven
 por HTTP en `api.listen` (predeterminado `127.0.0.1:8080`), mientras que las flags de utilidad
-(`-version`, `-dump-schema`) y los comandos imprimen su salida en **stdout**.
+(`-version`, `-dump-schema`, `-dump-zones-schema`) y los comandos imprimen su salida en **stdout**.
 
 ```sh
 kapkan [flags]                     # run the daemon
@@ -20,8 +20,9 @@ kapkan [flags] <command> [args]    # run a command and exit
 Las flags globales van **antes** del comando; las flags propias del comando van después. Así,
 `kapkan -config /etc/kapkan/config.yaml dataplane status -json` lee la ruta de la configuración de
 la `-config` global y pasa `-json` a `dataplane status`. Una flag que ya termina por sí sola
-(`-version`, `-check-config`, `-dump-schema`, `-check-update`, `-s`) no se puede combinar con un
-comando: Kapkan rechaza la combinación en lugar de atender en silencio solo a una de ellas.
+(`-version`, `-check-config`, `-dump-schema`, `-dump-zones-schema`, `-check-update`, `-s`) no se
+puede combinar con un comando: Kapkan rechaza la combinación en lugar de atender en silencio solo a
+una de ellas.
 
 ## Flags
 
@@ -32,6 +33,7 @@ comando: Kapkan rechaza la combinación en lugar de atender en silencio solo a u
 | `-log-level <lvl>` | `info` | Nivel mínimo de registro: `debug`, `info`, `warn`, `error`. Un valor no reconocido recae en `info`. |
 | `-check-config <path>` | — | Valida el archivo de configuración en `<path>` y termina; **no** inicia el demonio. Consulta [más abajo](#validar-una-configuración). |
 | `-dump-schema` | `false` | Imprime el esquema JSON de la configuración en stdout y termina. Consulta [más abajo](#volcar-el-esquema). |
+| `-dump-zones-schema` | `false` | Imprime en stdout el esquema JSON del [archivo de zonas](/docs/zones) que sirve un cerebro edge (`edge.zones_file`) y termina. |
 | `-version` | `false` | Imprime la versión de compilación y termina. La misma versión se expone en tiempo de ejecución mediante `/api/v1/status` y la [métrica](/docs/metrics) `kapkan_build_info`. |
 | `-check-update` | `false` | Ejecuta la [comprobación de actualizaciones](/docs/configuration) opcional una vez y termina: `0` actualizado, `10` hay una actualización disponible, `1` ante un error. Consulta la API de Releases de GitHub; envía solo la propia solicitud, nunca la identidad del nodo ni la configuración. |
 | `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Dónde escribe el demonio su id de proceso al arrancar (se elimina al apagarse limpiamente); lo lee `-s` para localizar el demonio en ejecución. Un fallo de escritura no es fatal: el demonio sigue ejecutándose, solo que `-s` no está disponible. |
@@ -135,6 +137,14 @@ kapkan -dump-schema
 
 Imprime el esquema JSON de la configuración en stdout y termina con `0` (o con `1` ante un error
 interno). El [generador de configuración](/config) usa este esquema para validar los campos en tu navegador.
+
+```sh
+kapkan -dump-zones-schema
+```
+
+Lo mismo para el [archivo de zonas](/docs/zones) que sirve un cerebro edge (`edge.zones_file`): su
+esquema JSON, con los enums y los límites del vocabulario de zonas, para tu editor o para las
+herramientas de un tenant.
 
 ### Imprimir la versión
 
@@ -343,7 +353,7 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `terminator.binary` / `main_conf` | Qué ejecutar para `-t` y las recargas, y la configuración principal que pasar como `-c`. Ese archivo debe hacer `include /var/lib/kapkan-edge/conf/live/*.conf;` una sola vez, dentro de `http {}`. |
 | `terminator.reload` | `exec` ejecuta `<binary> -s reload` (necesita enviar una señal al master de nginx — la unidad se ejecuta como root); `signal` envía `HUP` al pid de `pid_file`; `command` ejecuta `terminator.command`, p. ej. `[systemctl, reload, nginx]`. |
 | `terminator.pid_file` | Cuando está definido, se lee en cada tick de reporte y se le envía la señal `0`: `/healthz` responde `503` y el reporte dice `alive: false` mientras ningún proceso tenga ese pid. |
-| `acme.directory` / `fallback` / `contact` | La CA predeterminada del nodo (el bloque `acme` propio de una zona prevalece sobre directory y fallback), la CA de respaldo que se intenta tras tres fallos consecutivos (debe ser distinta de la primaria resuelta) y el contacto de la cuenta. |
+| `acme.directory` / `fallback` / `contact` | La CA predeterminada del nodo (el bloque `acme` propio de una zona prevalece sobre directory y fallback), la CA de respaldo que se intenta tras tres fallos consecutivos (debe ser distinta de la primaria resuelta) y el contacto de la cuenta — cada entrada una URL `mailto:` (`mailto:ops@example.net`), o el archivo se rechaza. |
 | `acme.eab[]` | External Account Binding por URL de directorio (`directory`, `kid`, `hmac_key_env`) para las CA que lo exigen — ZeroSSL, Google Trust Services. La clave HMAC es un secreto y se lee de la variable de entorno indicada. |
 | `acme.disabled` | No emitir nada: las zonas se quedan en `:80` respondiendo `503` (un laboratorio que ejercita todo salvo la emisión). Los certificados aportados por el operador aún no son una funcionalidad. |
 | `status_listen` | Sirve `/healthz` y `/metrics` cuando está definido. Sin autenticación — loopback o una dirección privada. |
@@ -365,8 +375,8 @@ token agent real: sin uno sus sondeos no llevan identidad y el cerebro lo contar
 
 Confirma que un nodo está en marcha con `curl 127.0.0.1:9102/healthz` — `200` con `"converged":true`
 una vez que el documento está renderizado y activo — y el inventario del cerebro
-(`GET /api/v1/edge/nodes`, la vista de Nodos de la consola) lo muestra vivo. El esquema del archivo
-de zonas del lado del cerebro es `kapkan -dump-zones-schema`.
+(`GET /api/v1/edge/nodes`) lo muestra vivo. El esquema del archivo de zonas del lado del cerebro es
+`kapkan -dump-zones-schema`.
 
 ### `nginx-exporter`
 

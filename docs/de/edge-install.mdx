@@ -47,9 +47,11 @@ api:
 
 `kapkan -check-config /etc/kapkan/config.yaml` validiert beide Dateien (es folgt
 `edge.zones_file`), und `kapkan -dump-zones-schema` gibt das JSON-Schema der Zonen-Datei für Ihren
-Editor aus. Eine Zonen-Datei, die sich bei einem Reload nicht lesen oder validieren lässt, **hält
-die vorherigen Zonen live** — das Gehirn liefert niemals ein halb defektes Dokument aus. Jeder
-Schlüssel steht in der [Zonen-Referenz](/docs/zones).
+Editor aus. Geben Sie jedem Knoten ein eigenes `agent`-Token: Das Gehirn parkt höchstens 4 Polls
+pro Token-Name (8 insgesamt) und beantwortet einen weiteren mit `429`, was ein Knoten als
+Fehlschlag wertet und mit Backoff beantwortet. Eine Zonen-Datei, die sich bei einem Reload nicht
+lesen oder validieren lässt, **hält die vorherigen Zonen live** — das Gehirn liefert niemals ein
+halb defektes Dokument aus. Jeder Schlüssel steht in der [Zonen-Referenz](/docs/zones).
 
 <Callout type="info" title="Das agent-Token ist ein Credential zum Ausstellen von Zertifikaten">
 Ein Edge-Knoten authentifiziert sich mit einem `agent`-Token (siehe
@@ -75,11 +77,16 @@ http {
 Entfernen Sie jeden `default_server` auf `:80`/`:443` (oder planen Sie, ihn zu behalten, siehe
 unten) — Kapkan rendert sein eigenes Catch-all, das unbekannte Hosts abweist. Debians Default-Site
 deklariert eines; deaktivieren Sie entweder die Site oder setzen Sie `omit_catch_all: true` in der
-`edge.yaml`. Bestätigen Sie dann, dass das Include mit einem leeren Verzeichnis kompiliert:
+`edge.yaml`. Bestätigen Sie dann, dass das Include kompiliert, bevor irgendetwas gerendert ist (ein
+Wildcard-Include eines Verzeichnisses, das noch nicht existiert, ist für nginx in Ordnung):
 
 ```sh
-mkdir -p /var/lib/kapkan-edge/conf/live && nginx -t
+nginx -t
 ```
+
+`live` selbst ist ein **Symlink**, den der Knoten bei jeder Generation anlegt und neu ausrichtet —
+legen Sie ihn nicht von Hand an: Ein Verzeichnis an seiner Stelle stoppt jede Installation
+(`apply: rename … live` im Journal), bis es entfernt ist.
 
 Ermitteln Sie die **Gruppe des Workers** — `nginx` für nginx.org-Pakete und das Docker-Image,
 `www-data` für Debians eigenes Paket, `angie` für Angie. Der Entscheidungs- und der Log-Socket
@@ -159,7 +166,7 @@ Prozess mit diesem Fehler, und systemd startet ihn neu.
   dem gerenderten ETag; `ls /var/lib/kapkan-edge/conf/live/` listet `kapkan_00_common.conf` und
   eine `kapkan_zone_<name>.conf` pro Zone.
 - Das Inventar des Gehirns, `GET /api/v1/edge/nodes`, führt den Knoten als lebendig mit seinem
-  Report auf; die Nodes-Ansicht der Konsole zeigt dasselbe.
+  Report auf (eine Konsolenansicht ist ein späterer Meilenstein).
 - Zertifikate: Die erste Bestellung braucht für jeden Zonennamen einen von der CA aus erreichbaren
   Port 80. Achten Sie im Journal auf `certificate issued`, dann
   `ls /var/lib/kapkan-edge/certs/<zone>/current/`. Bis eine Zone ein Zertifikat hat, antwortet ihr
@@ -195,10 +202,11 @@ selbstständig.
 | `nginx -t` schlägt mit *a duplicate default server* fehl | Ihre `nginx.conf` deklariert bereits einen `default_server` auf `:80` oder `:443`. Setzen Sie `omit_catch_all: true` oder entfernen Sie Ihren. |
 | `[crit] stat() ... failed` im Error-Log von nginx bei jeder Anfrage | Der Worker kann nicht zu `state_dir/empty` traversieren. `StateDirectoryMode=0711` der Unit erledigt das; ein von Hand angelegtes `state_dir` braucht `chmod 711`. |
 | `connect() to unix:/run/kapkan-edge/edge-decide.sock failed (13: Permission denied)` | `socket_group` ist nicht die Gruppe des Workers. Korrigieren Sie sie und starten Sie die Unit neu. |
-| `healthy: false`, `generation: 0` | Keine getestete Generation des Knotens selbst ist live: Das allererste Rendern ist an `nginx -t` gescheitert, oder eine wiederhergestellte Generation ist gescheitert. Lesen Sie `test_error` im Status-Body. |
+| `healthy: false`, `generation: 0` | Keine getestete Generation des Knotens selbst ist live: Der allererste Kandidat ist an `nginx -t` gescheitert (lesen Sie `test_error`), der Renderer hat das Dokument abgelehnt (lesen Sie `last_error`), eine wiederhergestellte Generation ist gescheitert — oder der Knoten hat überhaupt noch kein Dokument erhalten (`brain_seen` fehlt; lesen Sie die Poll-Fehler im Journal: `controller.url`, das Token, `controller.name`). |
+| `apply: rename … live: file exists` (oder `is a directory`) bei jedem Apply | Ein Verzeichnis sitzt dort, wo der `live`-Symlink des Knotens hingehört — von Hand angelegt oder durch einen alten Installationsschritt. Verschieben Sie seinen Inhalt weg und entfernen Sie es mit `rmdir`; der nächste Versuch installiert. |
 | `converged: false` mit `test_error` | Das neueste Dokument wurde abgelehnt; das vorherige bedient. Beheben Sie die Ursache (ein Origin, der sich nicht auflösen lässt, eine Direktive in `extra_directives_file`), und der Knoten versucht es selbstständig erneut. |
 | Zone bleibt auf `:80` mit `503` | Noch kein Zertifikat. Prüfen Sie die Erreichbarkeit von Port 80 aus dem Internet für diesen Namen, `kapkan_edge_acme_attempts_total` und die Zeile `certificate order failed` im Journal. |
-| Knoten wird auf dem Gehirn als verloren angezeigt, obwohl er läuft | Der Poll ist das Lebendigkeitssignal, und er wird bis zu 25 s gehalten; `stale_after_seconds` zählt ab dem letzten abgeschlossenen Poll. Prüfen Sie `controller.url`, das Token und dass `controller.name` unter `edge.nodes[]` deklariert ist. |
+| Knoten wird auf dem Gehirn als verloren angezeigt, obwohl er läuft | Der Poll ist das Lebendigkeitssignal, und ein im Hold des Gehirns geparkter Poll zählt als lebendig — ein als verloren angezeigter Knoten erreicht das Gehirn also wirklich nicht mehr. Prüfen Sie `controller.url`, das Token (`401`/`403` im Journal), dass `controller.name` unter `edge.nodes[]` deklariert ist (`404`), und dass sich der Knoten kein Token mit mehr als vier anderen teilt (`429`). |
 
 ## Verwandte Themen
 

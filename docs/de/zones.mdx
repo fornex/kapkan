@@ -37,8 +37,8 @@ zones:
 
 Validieren Sie mit `kapkan -check-config /etc/kapkan/config.yaml` (es folgt `edge.zones_file`),
 und erzeugen Sie das JSON-Schema für Ihren Editor mit `kapkan -dump-zones-schema` — die
-eingecheckte Kopie ist `docs/zones-schema.json`, die der Build neu erzeugt, sobald sich die Form
-der Datei ändert.
+eingecheckte Kopie ist `docs/zones-schema.json`, neu erzeugt mit `make -C engine schema`; die
+Testsuite schlägt bei einer veralteten Kopie fehl.
 
 ## Schlüssel
 
@@ -51,11 +51,11 @@ der Datei ändert.
 | `zones[].acme.directory` | Die URL des ACME-Verzeichnisses, bei dem das Zertifikat dieser Zone bestellt wird (zum Beispiel eine Staging- oder private CA). Leer bedeutet den Standard des Knotens, also Let's Encrypt Production, sofern die `edge.yaml` des Knotens nichts anderes sagt. Eine `http(s)`-URL mit Host. |
 | `zones[].acme.fallback` | Ein zweites Verzeichnis, zu dem ein Knoten nach drei aufeinanderfolgenden Fehlschlägen mit dem primären wechselt (die Antwort auf eine Duplikat-Zertifikat-Obergrenze in einer Flotte) und von da an abwechselt; ein Erfolg bei einem der beiden löscht den Fehlerzustand, und die folgende Erneuerung versucht zuerst das primäre. Muss sich von `acme.directory` unterscheiden. Leer bedeutet den Standard des Knotens, der auch keiner sein kann. Eine CA, die ein External Account Binding verlangt (ZeroSSL, Google Trust Services), braucht ihre Zugangsdaten in der `edge.yaml` des **Knotens** — die Zonen-Datei trägt keine Geheimnisse. |
 | `zones[].policy.mode` | `decide` (Standard): Jede Anfrage an die Zone fragt über den `auth_request` von nginx den Entscheidungsdienst des Knotens. `none`: nur Proxy — keine Entscheidung, keine Rate, keine Markierungen; die Zone erhält trotzdem ihr Zertifikat und ihr Zugriffsprotokoll. |
-| `zones[].policy.failure_mode` | Was nginx tut, wenn der Entscheidungsdienst ausgefallen, langsam oder außerhalb des Vertrags ist: `open` (Standard) lässt die Anfrage unentschieden durch — das Edge-Gegenstück zum Default-Pass der Datenebene — und zählt sie; `closed` antwortet `503`. Der Fehler wird innerhalb der Subrequest abgefangen, sodass die Keepalive-Verbindung eines Clients ihn überlebt. |
+| `zones[].policy.failure_mode` | Was nginx tut, wenn der Entscheidungsdienst ausgefallen, langsam oder außerhalb des Vertrags ist: `open` (Standard) lässt die Anfrage unentschieden durch — das Edge-Gegenstück zum Default-Pass der Datenebene — und zählt sie; `closed` antwortet `503`. Mit `open` wird der Fehler innerhalb der Subrequest abgefangen, sodass die Keepalive-Verbindung des Clients ihn überlebt; mit `closed` antwortet nginx auf dieser Verbindung mit `503`. |
 | `zones[].policy.challenge` | Client-Challenges (Proof-of-Work, JavaScript) sind ein späterer Meilenstein; heute wird nur `"off"` akzeptiert. |
 | `zones[].policy.rate.rps` | Anfragen pro Sekunde pro **Quelle** — eine IPv4-Adresse oder ein IPv6-`/64` — durchgesetzt vom Entscheidungsdienst mit einem Token-Bucket, dessen Burst dem Wert einer Sekunde entspricht. `0` (Standard) setzt keine Obergrenze. Eine Änderung lädt nginx niemals neu. |
 | `zones[].policy.rate.concurrency` | Gleichzeitig laufende Anfragen pro Quelle, näherungsweise gezählt aus Entscheidungen und Abschlüssen im Zugriffsprotokoll (bei einer Quelle, deren Log-Strom verstummt, wird die Obergrenze ausgesetzt statt fälschlich durchgesetzt). `0` (Standard) setzt keine Obergrenze. |
-| `zones[].extra_directives_file` | Ein **absoluter** Pfad auf dem Knoten zu einem nginx-Snippet, das als Letztes in den `:443`-Server der Zone eingebunden wird — der eine Notausgang (ein zusätzlicher Header, eine eigene Location). Was es kaputt macht, verantworten Sie; `nginx -t` ist der einzige Schutz, und ein Snippet, das daran scheitert, lässt die vorherige Generation weiter bedienen. Keine Leerzeichen, `;`, geschweiften Klammern, Anführungszeichen, `$` oder Glob-Zeichen im Pfad. |
+| `zones[].extra_directives_file` | Ein **absoluter** Pfad auf dem Knoten zu einem nginx-Snippet, das als Letztes in den `:443`-Server der Zone eingebunden wird — der eine Notausgang (ein zusätzlicher Header, eine eigene Location). Was es kaputt macht, verantworten Sie; `nginx -t` ist der einzige Schutz, und ein Snippet, das daran scheitert, lässt die vorherige Generation weiter bedienen. Keine Leerzeichen, `;`, `#`, geschweiften Klammern, Anführungszeichen, Backslash, `$` oder Glob-Zeichen (`* ? [ ]`) im Pfad. |
 
 ## Was eine Richtlinie mit einer Anfrage macht
 
@@ -67,13 +67,15 @@ eine Markierung trägt — oder `403` mit einem Grund:
 | --- | --- | --- |
 | `rate` | `429` mit `Retry-After: 1` | Die Quelle hat `policy.rate.rps` überschritten. |
 | `concurrency` | `429` mit `Retry-After: 1` | Die Quelle hat `policy.rate.concurrency` Anfragen gleichzeitig laufen. |
-| `table` | `403` | Die Quelle steht in der Verdikt-Tabelle des Knotens: hochgestuft durch die Rollups (eine Quelle, die weiter gegen ihre Ratenobergrenze gedrückt hat, wird für eine Minute gesperrt, bei Wiederholung verdoppelt bis auf zehn) oder, später, durch die Stufenleiter des Gehirns. |
+| `table:<reason>` | `403` | Die Quelle steht in der Verdikt-Tabelle des Knotens: hochgestuft durch die Rollups (`table:flood` — eine Quelle, die weiter gegen ihre Ratenobergrenze gedrückt hat, wird für eine Minute gesperrt, bei Wiederholung verdoppelt bis auf zehn) oder, später, durch die Stufenleiter des Gehirns. Die Dry-Run-Markierung ist `would-deny:table:<reason>`. |
 
-Zwei Header erreichen den Origin unter Kapkans Kontrolle immer und können von einem Client niemals
-gefälscht werden: `X-Kapkan-Zone` (der Zonenname) und `X-Kapkan-Mark` (leer, wenn es keine gibt).
-Eine Quelle, deren Anfragen fast ausschließlich `4xx`/`5xx` sind, wird mit `errors` markiert; im
-**Dry-Run** wird jede eigentlich fällige Abweisung zu einem Allow, das mit `would-deny:<reason>`
-markiert ist, sodass der Origin genau sieht, was der Echtbetrieb abgewiesen hätte.
+Zwei Header stehen unter Kapkans Kontrolle und können von einem Client niemals gefälscht werden:
+`X-Kapkan-Zone` (der Zonenname) erreicht den Origin immer; `X-Kapkan-Mark` ist nur vorhanden, wenn
+die Quelle eine Markierung trägt, und fehlt sonst — ein vom Client gesendeter Wert eines der beiden
+wird verworfen. Eine Quelle, deren Anfragen fast ausschließlich `4xx`/`5xx` sind, wird mit `errors`
+markiert; im **Dry-Run** wird jede eigentlich fällige Abweisung zu einem Allow, das mit
+`would-deny:<reason>` markiert ist, sodass der Origin genau sieht, was der Echtbetrieb abgewiesen
+hätte.
 
 Der Knoten hält eine begrenzte Anzahl Quellen pro Zone; ist die Tabelle voll, wird eine neue
 Quelle **unverfolgt** durchgelassen (Default-Pass) und gezählt, niemals aus Platzmangel abgewiesen.

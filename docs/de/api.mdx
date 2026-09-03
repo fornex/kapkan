@@ -602,7 +602,10 @@ Zonendatei, eine von einem Knoten veröffentlichte Zertifikats-Challenge — ode
 dann mit `304` beantwortet. Ein Knoten identifiziert sich mit `?node=<name>`, und **dieser Poll
 ist das Lebendigkeitssignal des Knotens** — der Name muss also ein konfigurierter
 `edge.nodes[]`-Eintrag sein (ein unbekannter Name ist `404`) und die Anfrage muss ein echtes Token
-mitführen.
+mitführen. Höchstens 4 Polls pro Token-Name und 8 insgesamt dürfen gleichzeitig geparkt sein; ein
+weiterer passender Poll wird mit `429` und `Retry-After: 1` beantwortet
+(`too many concurrent zone holds`), was der Knoten als Fehlschlag wertet und mit Backoff
+beantwortet (1 s, verdoppelt bis 30 s) — geben Sie jedem Knoten ein eigenes agent-Token.
 
 ```json
 {
@@ -612,7 +615,6 @@ mitführen.
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "acme_directory": "",
       "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
@@ -621,6 +623,10 @@ mitführen.
 }
 ```
 
+`acme_directory`, `acme_fallback`, `extra_directives_file` und `tls.h3` werden weggelassen, wenn sie
+nicht gesetzt sind; ein fehlendes `acme_directory` bedeutet, dass der Knoten bei seiner eigenen
+Standard-CA bestellt (Let's Encrypt, sofern seine `edge.yaml` nichts anderes sagt).
+
 #### POST /api/v1/edge/nodes/\{name\}/report
 
 Der beratende Selbstreport eines Knotens — Version, knotenseitiger Dry-Run, das ETag des
@@ -628,8 +634,8 @@ Dokuments, das er **gerendert** hat (damit ein Betreiber einen hinterherhinkende
 verweigernden Knoten erkennt), Art, Version und Lebendigkeit des Terminators, die aktive
 Generation und ihr `nginx -t`-Ergebnis sowie die Zertifikate, die er hält (nur öffentliche
 Metadaten, niemals ein Schlüssel; eine lange Liste wird auf die Body-Grenze von 64 KiB gekürzt,
-mit einem `certs_truncated`-Zähler) — gespeichert für die [Konsole](/docs/dashboard). Niemals ein
-Lebendigkeitssignal (das ist der Poll). Ein unbekanntes `{name}` ist `404`; Erfolg ist
+mit einem `certs_truncated`-Zähler) — gespeichert und von `GET /api/v1/edge/nodes` zurückgegeben.
+Niemals ein Lebendigkeitssignal (das ist der Poll). Ein unbekanntes `{name}` ist `404`; Erfolg ist
 `204 No Content`.
 
 #### GET /api/v1/edge/nodes

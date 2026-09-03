@@ -10,7 +10,8 @@ Kapkan ist ein einzelnes Binary. Was es tut, wird beim Start über Kommandozeile
 ausgewählt, dazu kommt eine kleine Zahl von **Befehlen**, die das laufende System inspizieren und
 sich dann beenden. Alle Logs gehen nach **stderr**; die REST-API und die Prometheus-Metriken
 werden über HTTP auf `api.listen` (Standard `127.0.0.1:8080`) bereitgestellt, während die
-Hilfs-Flags (`-version`, `-dump-schema`) und die Befehle ihre Ausgabe nach **stdout** schreiben.
+Hilfs-Flags (`-version`, `-dump-schema`, `-dump-zones-schema`) und die Befehle ihre Ausgabe nach
+**stdout** schreiben.
 
 ```sh
 kapkan [flags]                     # run the daemon
@@ -20,9 +21,9 @@ kapkan [flags] <command> [args]    # run a command and exit
 Globale Flags stehen **vor** dem Befehl; die eigenen Flags des Befehls folgen ihm.
 `kapkan -config /etc/kapkan/config.yaml dataplane status -json` liest den Konfigurationspfad also
 aus dem globalen `-config` und übergibt `-json` an `dataplane status`. Ein Flag, das sich ohnehin
-selbst beendet (`-version`, `-check-config`, `-dump-schema`, `-check-update`, `-s`), lässt sich
-nicht mit einem Befehl kombinieren — Kapkan verweigert die Kombination, statt stillschweigend nur
-eines von beiden zu befolgen.
+selbst beendet (`-version`, `-check-config`, `-dump-schema`, `-dump-zones-schema`, `-check-update`,
+`-s`), lässt sich nicht mit einem Befehl kombinieren — Kapkan verweigert die Kombination, statt
+stillschweigend nur eines von beiden zu befolgen.
 
 ## Flags
 
@@ -33,6 +34,7 @@ eines von beiden zu befolgen.
 | `-log-level <lvl>` | `info` | Minimales Log-Level: `debug`, `info`, `warn`, `error`. Ein unbekannter Wert fällt auf `info` zurück. |
 | `-check-config <path>` | — | Validiert die Konfigurationsdatei unter `<path>` und beendet sich — startet den Daemon **nicht**. Siehe [unten](#eine-konfiguration-validieren). |
 | `-dump-schema` | `false` | Gibt das JSON-Schema der Konfiguration auf stdout aus und beendet sich. Siehe [unten](#das-schema-ausgeben). |
+| `-dump-zones-schema` | `false` | Gibt das JSON-Schema der [Zonendatei](/docs/zones), die ein Edge-Gehirn ausliefert (`edge.zones_file`), auf stdout aus und beendet sich. |
 | `-version` | `false` | Gibt die Build-Version aus und beendet sich. Dieselbe Version wird zur Laufzeit über `/api/v1/status` und die `kapkan_build_info`-[Metrik](/docs/metrics) bereitgestellt. |
 | `-check-update` | `false` | Führt die optionale [Update-Prüfung](/docs/configuration) einmalig aus und beendet sich — `0` aktuell, `10` ein Update ist verfügbar, `1` bei einem Fehler. Fragt die GitHub-Releases-API ab; sendet nur die Anfrage selbst, niemals Knotenidentität oder Konfiguration. |
 | `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Wohin der Daemon beim Start seine Prozess-ID schreibt (bei sauberem Herunterfahren entfernt); wird von `-s` gelesen, um den laufenden Daemon zu finden. Ein Schreibfehler ist nicht fatal — der Daemon läuft trotzdem, nur `-s` ist nicht verfügbar. |
@@ -140,6 +142,14 @@ kapkan -dump-schema
 Gibt das JSON-Schema der Konfiguration auf stdout aus und endet mit `0` (oder `1` bei einem
 internen Fehler). Der [Konfigurations-Builder](/config) nutzt dieses Schema, um Felder direkt in
 Ihrem Browser zu prüfen.
+
+```sh
+kapkan -dump-zones-schema
+```
+
+Dasselbe für die [Zonendatei](/docs/zones), die ein Edge-Gehirn ausliefert (`edge.zones_file`): ihr
+JSON-Schema, mit den Enums und Grenzen des Zonen-Vokabulars, für Ihren Editor oder das Tooling
+eines Mandanten.
 
 ### Die Version ausgeben
 
@@ -355,7 +365,7 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `terminator.binary` / `main_conf` | Was für `-t` und Reloads ausgeführt wird, und die Hauptkonfiguration, die als `-c` übergeben wird. Diese Datei muss einmal, innerhalb von `http {}`, `include /var/lib/kapkan-edge/conf/live/*.conf;` enthalten. |
 | `terminator.reload` | `exec` führt `<binary> -s reload` aus (muss den nginx-Master signalisieren — die Unit läuft als root); `signal` sendet `HUP` an die PID in `pid_file`; `command` führt `terminator.command` aus, z. B. `[systemctl, reload, nginx]`. |
 | `terminator.pid_file` | Wenn gesetzt, wird sie bei jedem Report-Tick gelesen und mit `0` signalisiert: `/healthz` antwortet `503` und der Report meldet `alive: false`, solange kein Prozess diese PID hat. |
-| `acme.directory` / `fallback` / `contact` | Die Standard-CA des Knotens (der eigene `acme`-Block einer Zone übersteuert Directory und Fallback), der Fallback, der nach drei aufeinanderfolgenden Fehlschlägen versucht wird (muss sich von der aufgelösten primären CA unterscheiden), und der Kontakt des Kontos. |
+| `acme.directory` / `fallback` / `contact` | Die Standard-CA des Knotens (der eigene `acme`-Block einer Zone übersteuert Directory und Fallback), der Fallback, der nach drei aufeinanderfolgenden Fehlschlägen versucht wird (muss sich von der aufgelösten primären CA unterscheiden), und der Kontakt des Kontos — jeder Eintrag eine `mailto:`-URL (`mailto:ops@example.net`), andernfalls wird die Datei abgelehnt. |
 | `acme.eab[]` | External Account Binding pro Directory-URL (`directory`, `kid`, `hmac_key_env`) für CAs, die eines verlangen — ZeroSSL, Google Trust Services. Der HMAC-Schlüssel ist ein Geheimnis und wird aus der genannten Umgebungsvariable gelesen. |
 | `acme.disabled` | Nichts ausstellen: Zonen bleiben auf `:80` und antworten `503` (ein Labor, das alles außer der Ausstellung durchspielt). Vom Betreiber bereitgestellte Zertifikate sind noch keine Funktion. |
 | `status_listen` | Stellt `/healthz` und `/metrics` bereit, wenn gesetzt. Unauthentifiziert — Loopback oder eine private Adresse. |
@@ -378,8 +388,8 @@ Klartext sendet das Token unverschlüsselt.
 
 Bestätigen Sie einen laufenden Knoten mit `curl 127.0.0.1:9102/healthz` — `200` mit
 `"converged":true`, sobald das Dokument gerendert und live ist — und das Inventar des Gehirns
-(`GET /api/v1/edge/nodes`, die Nodes-Ansicht der Konsole) zeigt ihn als lebendig. Das
-gehirnseitige Schema der Zonendatei liefert `kapkan -dump-zones-schema`.
+(`GET /api/v1/edge/nodes`) zeigt ihn als lebendig. Das gehirnseitige Schema der Zonendatei liefert
+`kapkan -dump-zones-schema`.
 
 ### `nginx-exporter`
 

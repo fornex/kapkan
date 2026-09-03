@@ -89,9 +89,10 @@ permite endurecer una tasa bajo ataque sin tocar el terminador.
 Como todo rol remoto, un nodo edge **arranca en dry-run por defecto**: las decisiones se cuentan y
 se marcan, ninguna se aplica. Una petición que la política rechazaría sigue llegando al origen,
 con la cabecera `X-Kapkan-Mark: would-deny:rate` (o `would-deny:concurrency`,
-`would-deny:table`), de modo que puedes hacer grep en los logs de tu origen y mirar las métricas
-antes de que se rechace a un solo cliente. Pon `dry_run: false` en el `edge.yaml` del nodo cuando
-los recuentos tengan buena pinta.
+`would-deny:table:<reason>` — hoy `would-deny:table:flood`, la regla de rollup que promovió a la
+fuente), de modo que puedes hacer grep en los logs de tu origen y mirar las métricas antes de que
+se rechace a un solo cliente. Pon `dry_run: false` en el `edge.yaml` del nodo cuando los recuentos
+tengan buena pinta.
 
 ## Qué hace el nodo cuando algo falla
 

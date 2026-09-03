@@ -240,12 +240,12 @@ bereit, neben denen der Go-Laufzeit:
 
 | Metrik | Typ | Labels | Bedeutung |
 | --- | --- | --- | --- |
-| `kapkan_edge_decisions_total` | counter | `zone`, `result` | Urteile des Entscheidungsdienstes: `allow`, `deny` (der Grund wird in `result` zu `deny` zusammengefasst), `would-deny` (Dry-Run), `untracked` (die Tabelle war voll, die Anfrage wurde durchgelassen). |
-| `kapkan_edge_log_records_total` | counter | `result` | Access-Log-Datagramme vom Terminator: `ok`, `malformed`, `oversized`, `dropped` (die Handler-Warteschlange war voll), `unknown_zone`. Eine stetige `dropped`-Rate bedeutet, dass `net.unix.max_dgram_qlen` zu klein ist. |
-| `kapkan_edge_inflight_resets_total` | counter | — | In-Flight-Zähler, die der Entscheidungsdienst zurückgesetzt hat, weil eine ausgelastete Quelle eine ganze Leerlaufperiode lang keinen Abschluss sah — ihr Log-Strom war verlustbehaftet oder tot. |
+| `kapkan_edge_decisions_total` | counter | `zone`, `result` | Urteile des Entscheidungsdienstes: `allow`, `allow_marked` (erlaubt mit einer Markierung), `deny_rate`, `deny_concurrency`, `deny_table`, `would_deny` (ein Dry-Run-Deny, als Allow beantwortet), `untracked` (die Tabellen pro Quelle waren voll, die Anfrage wurde unentschieden durchgelassen), `mode_none` (eine Zone ohne Entscheidungen), `unknown_zone`, `bad_request` (eine Subrequest außerhalb des Vertrags). |
+| `kapkan_edge_log_records_total` | counter | `result` | Access-Log-Datagramme vom Terminator: `ok`, `malformed`, `oversized`, `dropped` (der eigene Handler des Knotens kam nicht hinterher — seine Warteschlange von 8192 Datensätzen war voll), `unknown_zone`. Datagramme, die der Kernel verwirft, erreichen den Knoten nie und werden hier nicht gezählt. |
+| `kapkan_edge_inflight_resets_total` | counter | — | In-Flight-Zähler, die der Entscheidungsdienst zurückgesetzt hat, weil eine ausgelastete Quelle eine ganze Leerlaufperiode lang keinen Abschluss sah — ihr Log-Strom war verlustbehaftet oder tot. Eine stetige Rate bedeutet, dass Access-Log-Datagramme verloren gehen, bevor sie den Knoten erreichen: Erhöhen Sie `net.unix.max_dgram_qlen` (der Knoten warnt beim Start, wenn der Wert unter 512 liegt). |
 | `kapkan_edge_verdict_table_entries` | gauge | — | Aktive Deny-/Mark-Einträge in der Urteilstabelle des Knotens. |
 | `kapkan_edge_cert_not_after_seconds` | gauge | `zone` | Ablauf des Zertifikats der Zone als Unix-Zeitstempel — der **T−30-d-Alarm**: Alarmieren Sie, wenn er weniger als 30 Tage entfernt ist. Wird entfernt, wenn eine Zone das Dokument verlässt. |
-| `kapkan_edge_acme_attempts_total` | counter | `zone`, `result` | Zertifikatsbestellungen: `issued`, `renewed`, `failed`, `fallback` (der Versuch hat die Fallback-CA verwendet). |
+| `kapkan_edge_acme_attempts_total` | counter | `zone`, `result` | Zertifikatsbestellungen: `issued`, `renewed`, `failed` (bei einer der beiden CAs) und `fallback` — ein von der Fallback-CA bezogenes Zertifikat, zusätzlich zu seinem `issued`-/`renewed`-Eintrag gezählt; summieren Sie also `issued+renewed+failed` für die Versuche. |
 
 Das Gehirn fügt seinen eigenen `/metrics` nichts pro Edge-Knoten hinzu; Lebendigkeit und letzter
 Report eines Knotens werden aus [`GET /api/v1/edge/nodes`](/docs/api#der-edge-kanal) gelesen.

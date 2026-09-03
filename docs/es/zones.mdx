@@ -37,7 +37,8 @@ zones:
 
 Valida con `kapkan -check-config /etc/kapkan/config.yaml` (sigue `edge.zones_file`), y genera el
 esquema JSON para tu editor con `kapkan -dump-zones-schema` — la copia versionada es
-`docs/zones-schema.json`, regenerada por el build cada vez que cambia la forma del archivo.
+`docs/zones-schema.json`, regenerada con `make -C engine schema`; la suite de pruebas falla con una
+copia obsoleta.
 
 ## Claves
 
@@ -50,11 +51,11 @@ esquema JSON para tu editor con `kapkan -dump-zones-schema` — la copia version
 | `zones[].acme.directory` | La URL del directorio ACME desde la que se pide el certificado de esta zona (una CA de staging o privada, por ejemplo). Vacío significa el valor por defecto del nodo, que es Let's Encrypt de producción salvo que el `edge.yaml` del nodo diga otra cosa. Una URL `http(s)` con host. |
 | `zones[].acme.fallback` | Un segundo directorio al que un nodo recurre tras tres fallos consecutivos con el primario (la respuesta a un límite de certificados duplicados en una flota), alternando desde entonces; un éxito con cualquiera de los dos borra el estado de fallo y la siguiente renovación prueba primero el primario. Debe ser distinto de `acme.directory`. Vacío significa el valor por defecto del nodo, que puede ser ninguno. Una CA que requiere un External Account Binding (ZeroSSL, Google Trust Services) necesita sus credenciales en el `edge.yaml` del **nodo** — el archivo de zonas no lleva secretos. |
 | `zones[].policy.mode` | `decide` (por defecto): cada petición a la zona consulta al servicio de decisión del nodo a través del `auth_request` de nginx. `none`: solo proxy — sin decisión, sin tasa, sin marcas; la zona sigue recibiendo su certificado y su access log. |
-| `zones[].policy.failure_mode` | Qué hace nginx cuando el servicio de decisión está caído, lento o fuera de contrato: `open` (por defecto) deja pasar la petición sin decidir — el equivalente en el edge del paso por defecto (default-pass) del plano de datos — y la cuenta; `closed` responde `503`. El fallo se absorbe dentro de la subpetición, de modo que la conexión keepalive de un cliente lo sobrevive. |
+| `zones[].policy.failure_mode` | Qué hace nginx cuando el servicio de decisión está caído, lento o fuera de contrato: `open` (por defecto) deja pasar la petición sin decidir — el equivalente en el edge del paso por defecto (default-pass) del plano de datos — y la cuenta; `closed` responde `503`. Con `open` el fallo se absorbe dentro de la subpetición, de modo que la conexión keepalive del cliente lo sobrevive; con `closed` nginx responde `503` en esa conexión. |
 | `zones[].policy.challenge` | Los desafíos al cliente (prueba de trabajo, JavaScript) son un hito posterior; hoy solo se acepta `"off"`. |
 | `zones[].policy.rate.rps` | Peticiones por segundo por **fuente** — una dirección IPv4, o un `/64` IPv6 — aplicadas por el servicio de decisión con un token bucket cuya ráfaga equivale a un segundo. `0` (por defecto) no fija ningún techo. Cambiarlo nunca recarga nginx. |
 | `zones[].policy.rate.concurrency` | Peticiones en curso por fuente, contadas de forma aproximada a partir de las decisiones y las finalizaciones en el access log (a una fuente cuyo flujo de log se queda en silencio se le suspende el techo en lugar de aplicárselo erróneamente). `0` (por defecto) no fija ningún techo. |
-| `zones[].extra_directives_file` | Una ruta **absoluta** en el nodo a un fragmento (snippet) de nginx incluido en último lugar en el servidor `:443` de la zona — la única vía de escape (una cabecera extra, un location personalizado). Lo que rompa es cosa tuya; `nginx -t` es la única salvaguarda, y un fragmento que la falla mantiene en servicio la generación anterior. Sin espacios en blanco, `;`, llaves, comillas, `$` ni caracteres glob en la ruta. |
+| `zones[].extra_directives_file` | Una ruta **absoluta** en el nodo a un fragmento (snippet) de nginx incluido en último lugar en el servidor `:443` de la zona — la única vía de escape (una cabecera extra, un location personalizado). Lo que rompa es cosa tuya; `nginx -t` es la única salvaguarda, y un fragmento que la falla mantiene en servicio la generación anterior. Sin espacios en blanco, `;`, `#`, llaves, comillas, barra invertida, `$` ni caracteres glob (`* ? [ ]`) en la ruta. |
 
 ## Qué hace una política con una petición
 
@@ -66,13 +67,15 @@ una marca — o `403` con un motivo:
 | --- | --- | --- |
 | `rate` | `429` con `Retry-After: 1` | La fuente superó `policy.rate.rps`. |
 | `concurrency` | `429` con `Retry-After: 1` | La fuente tiene `policy.rate.concurrency` peticiones en curso. |
-| `table` | `403` | La fuente está en la tabla de veredictos del nodo: promovida por los rollups (una fuente que siguió empujando a través de su techo de tasa se deniega durante un minuto, que se duplica hasta diez si reincide) o, más adelante, por la escalera del cerebro. |
+| `table:<reason>` | `403` | La fuente está en la tabla de veredictos del nodo: promovida por los rollups (`table:flood` — una fuente que siguió empujando a través de su techo de tasa se deniega durante un minuto, que se duplica hasta diez si reincide) o, más adelante, por la escalera del cerebro. La marca en dry-run es `would-deny:table:<reason>`. |
 
-Dos cabeceras llegan siempre al origen bajo el control de Kapkan y un cliente nunca puede
-falsificarlas: `X-Kapkan-Zone` (el nombre de la zona) y `X-Kapkan-Mark` (vacía cuando no hay
-ninguna). Una fuente cuyas peticiones son casi todas `4xx`/`5xx` se marca como `errors`; en
-**dry-run** cada denegación que se habría producido se convierte en un permiso marcado
-`would-deny:<reason>`, de modo que el origen ve exactamente lo que el modo real habría rechazado.
+Dos cabeceras están bajo el control de Kapkan y un cliente nunca puede falsificarlas:
+`X-Kapkan-Zone` (el nombre de la zona) llega siempre al origen; `X-Kapkan-Mark` está presente solo
+cuando la fuente lleva una marca y ausente en caso contrario — un valor de cualquiera de las dos
+enviado por el cliente se descarta. Una fuente cuyas peticiones son casi todas `4xx`/`5xx` se marca
+como `errors`; en **dry-run** cada denegación que se habría producido se convierte en un permiso
+marcado `would-deny:<reason>`, de modo que el origen ve exactamente lo que el modo real habría
+rechazado.
 
 El nodo mantiene un número acotado de fuentes por zona; cuando la tabla está llena, una fuente
 nueva pasa **sin seguimiento** (paso por defecto) y se cuenta, nunca se rechaza por falta de

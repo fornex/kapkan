@@ -47,9 +47,11 @@ api:
 
 `kapkan -check-config /etc/kapkan/config.yaml` valide les deux fichiers (il suit
 `edge.zones_file`), et `kapkan -dump-zones-schema` imprime le schéma JSON du fichier de zones pour
-votre éditeur. Un fichier de zones qui ne peut être lu ou validé lors d'un rechargement **garde les
-zones précédentes en service** — le cerveau ne sert jamais un document à moitié cassé. Chaque clé
-est dans la [référence des zones](/docs/zones).
+votre éditeur. Donnez à chaque nœud son propre token `agent` : le cerveau retient au plus 4
+interrogations par nom de token (8 au total) et répond `429` à la suivante, ce qu'un nœud traite
+comme un échec et qui le fait temporiser (back-off). Un fichier de zones qui ne peut être lu ou
+validé lors d'un rechargement **garde les zones précédentes en service** — le cerveau ne sert
+jamais un document à moitié cassé. Chaque clé est dans la [référence des zones](/docs/zones).
 
 <Callout type="info" title="Le token agent est un identifiant qui émet des certificats">
 Un nœud edge s'authentifie avec un token `agent` (voir [authentification](/docs/authentication)).
@@ -74,11 +76,16 @@ http {
 Retirez (ou prévoyez de garder, voir ci-dessous) tout `default_server` sur `:80`/`:443` — Kapkan
 génère son propre fourre-tout qui refuse les hôtes inconnus. Le site par défaut de Debian en
 déclare un ; désactivez ce site ou définissez `omit_catch_all: true` dans `edge.yaml`. Confirmez
-ensuite que l'inclusion compile avec un répertoire vide :
+ensuite que l'inclusion compile avant que quoi que ce soit ne soit généré (une inclusion à joker
+d'un répertoire qui n'existe pas encore convient à nginx) :
 
 ```sh
-mkdir -p /var/lib/kapkan-edge/conf/live && nginx -t
+nginx -t
 ```
+
+`live` lui-même est un **lien symbolique** que le nœud crée et recible à chaque génération — ne le
+créez pas à la main : un répertoire à sa place bloque chaque installation (`apply: rename … live`
+dans le journal) jusqu'à ce qu'il soit supprimé.
 
 Trouvez le **groupe du worker** — `nginx` pour les paquets nginx.org et l'image Docker, `www-data`
 pour le paquet propre à Debian, `angie` pour Angie. Les sockets de décision et de journal sont
@@ -155,8 +162,8 @@ groupe qui n'existe pas — termine le processus avec cette erreur et systemd le
 - `curl -s 127.0.0.1:9102/healthz` répond `200` avec `"healthy":true`, `"converged":true` et
   l'ETag généré ; `ls /var/lib/kapkan-edge/conf/live/` liste `kapkan_00_common.conf` et un
   `kapkan_zone_<name>.conf` par zone.
-- L'inventaire du cerveau, `GET /api/v1/edge/nodes`, liste le nœud vivant avec son rapport ; la vue
-  Nœuds de la console affiche la même chose.
+- L'inventaire du cerveau, `GET /api/v1/edge/nodes`, liste le nœud vivant avec son rapport (une vue
+  dans la console viendra dans un jalon ultérieur).
 - Certificats : la première commande a besoin que le port 80 soit joignable depuis la CA pour
   chaque nom de zone. Guettez `certificate issued` dans le journal, puis
   `ls /var/lib/kapkan-edge/certs/<zone>/current/`. Tant qu'une zone n'a pas de certificat, son
@@ -192,10 +199,11 @@ Tout cela est consultatif : sans cerveau, chaque nœud renouvelle encore de lui-
 | `nginx -t` échoue avec *a duplicate default server* | Votre `nginx.conf` déclare déjà un `default_server` sur `:80` ou `:443`. Définissez `omit_catch_all: true` ou retirez le vôtre. |
 | `[crit] stat() ... failed` dans le journal d'erreurs de nginx à chaque requête | Le worker ne peut pas traverser jusqu'à `state_dir/empty`. Le `StateDirectoryMode=0711` de l'unité s'en charge ; un `state_dir` créé à la main a besoin d'un `chmod 711`. |
 | `connect() to unix:/run/kapkan-edge/edge-decide.sock failed (13: Permission denied)` | `socket_group` n'est pas le groupe du worker. Corrigez-le et redémarrez l'unité. |
-| `healthy: false`, `generation: 0` | Aucune génération testée, propre au nœud, n'est en service : le tout premier rendu a échoué à `nginx -t`, ou une génération récupérée a échoué. Lisez `test_error` dans le corps du statut. |
+| `healthy: false`, `generation: 0` | Aucune génération testée, propre au nœud, n'est en service : le tout premier candidat a échoué à `nginx -t` (lisez `test_error`), le générateur a refusé le document (lisez `last_error`), une génération récupérée a échoué — ou le nœud n'a encore jamais reçu de document (`brain_seen` absent ; lisez les erreurs d'interrogation du journal : `controller.url`, le token, `controller.name`). |
+| `apply: rename … live: file exists` (ou `is a directory`) à chaque application | Un répertoire se trouve là où va le lien symbolique `live` du nœud — créé à la main, ou par une ancienne étape d'installation. Déplacez son contenu ailleurs et faites `rmdir` ; la tentative suivante installe. |
 | `converged: false` avec `test_error` | Le dernier document a été refusé ; le précédent sert. Corrigez la cause (une origine qui ne se résout pas, une directive dans `extra_directives_file`) et le nœud réessaie de lui-même. |
 | La zone reste sur `:80` en `503` | Pas encore de certificat. Vérifiez la joignabilité du port 80 depuis Internet pour ce nom, `kapkan_edge_acme_attempts_total`, et la ligne `certificate order failed` du journal. |
-| Nœud affiché perdu sur le cerveau alors qu'il tourne | L'interrogation est le signal de vivacité, et elle est retenue jusqu'à 25 s ; `stale_after_seconds` compte depuis la dernière interrogation achevée. Vérifiez `controller.url`, le token, et que `controller.name` est déclaré sous `edge.nodes[]`. |
+| Nœud affiché perdu sur le cerveau alors qu'il tourne | L'interrogation est le signal de vivacité et une interrogation retenue par le cerveau compte comme vivante ; un nœud affiché perdu a donc réellement cessé de joindre le cerveau. Vérifiez `controller.url`, le token (`401`/`403` dans le journal), que `controller.name` est déclaré sous `edge.nodes[]` (`404`), et que le nœud ne partage pas un token avec plus de quatre autres (`429`). |
 
 ## Voir aussi
 

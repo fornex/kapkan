@@ -91,7 +91,8 @@ rechargée. C'est ce qui permet de resserrer un débit sous attaque sans toucher
 Comme tout rôle distant, un nœud edge **démarre en dry-run par défaut** : les décisions sont
 comptées et marquées, aucune n'est appliquée. Une requête que la politique refuserait atteint tout
 de même l'origine, avec l'en-tête `X-Kapkan-Mark: would-deny:rate` (ou `would-deny:concurrency`,
-`would-deny:table`), de sorte que vous pouvez fouiller les journaux de votre origine et regarder les
+`would-deny:table:<reason>` — aujourd'hui `would-deny:table:flood`, la règle de rollup qui a promu
+la source), de sorte que vous pouvez fouiller les journaux de votre origine et regarder les
 métriques avant qu'un seul client ne soit refoulé. Définissez `dry_run: false` dans l'`edge.yaml`
 du nœud quand les comptes vous paraissent justes.
 

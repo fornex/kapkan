@@ -239,12 +239,12 @@ del runtime de Go:
 
 | Métrica | Tipo | Etiquetas | Significado |
 | --- | --- | --- | --- |
-| `kapkan_edge_decisions_total` | contador | `zone`, `result` | Veredictos del servicio de decisión: `allow`, `deny` (con el motivo plegado en `result` como `deny`), `would-deny` (dry-run), `untracked` (la tabla estaba llena, la petición pasó). |
-| `kapkan_edge_log_records_total` | contador | `result` | Datagramas de access log procedentes del terminador: `ok`, `malformed`, `oversized`, `dropped` (la cola del manejador estaba llena), `unknown_zone`. Una tasa constante de `dropped` significa que `net.unix.max_dgram_qlen` es demasiado pequeño. |
-| `kapkan_edge_inflight_resets_total` | contador | — | Contadores de peticiones en curso que el servicio de decisión reinició porque una fuente ocupada no vio ninguna finalización durante todo un periodo de inactividad — su flujo de log tenía pérdidas o estaba muerto. |
+| `kapkan_edge_decisions_total` | contador | `zone`, `result` | Veredictos del servicio de decisión: `allow`, `allow_marked` (permitida con una marca), `deny_rate`, `deny_concurrency`, `deny_table`, `would_deny` (una denegación en dry-run, respondida como permiso), `untracked` (las tablas por fuente estaban llenas, la petición pasó sin decidir), `mode_none` (una zona sin decisiones), `unknown_zone`, `bad_request` (una subpetición fuera del contrato). |
+| `kapkan_edge_log_records_total` | contador | `result` | Datagramas de access log procedentes del terminador: `ok`, `malformed`, `oversized`, `dropped` (el propio manejador del nodo no pudo seguir el ritmo — su cola de 8192 registros estaba llena), `unknown_zone`. Los datagramas que el kernel descarta nunca llegan al nodo y no se cuentan aquí. |
+| `kapkan_edge_inflight_resets_total` | contador | — | Contadores de peticiones en curso que el servicio de decisión reinició porque una fuente ocupada no vio ninguna finalización durante todo un periodo de inactividad — su flujo de log tenía pérdidas o estaba muerto. Una tasa constante significa que se están perdiendo datagramas de access log antes de llegar al nodo: sube `net.unix.max_dgram_qlen` (el nodo avisa al arrancar cuando está por debajo de 512). |
 | `kapkan_edge_verdict_table_entries` | gauge | — | Entradas vivas de denegación/marca en la tabla de veredictos del nodo. |
 | `kapkan_edge_cert_not_after_seconds` | gauge | `zone` | Caducidad del certificado de la zona como marca de tiempo Unix — la **alarma T−30 d**: alerta cuando queden menos de 30 días. Se elimina cuando una zona abandona el documento. |
-| `kapkan_edge_acme_attempts_total` | contador | `zone`, `result` | Solicitudes de certificado: `issued`, `renewed`, `failed`, `fallback` (el intento usó la CA de respaldo). |
+| `kapkan_edge_acme_attempts_total` | contador | `zone`, `result` | Solicitudes de certificado: `issued`, `renewed`, `failed` (con cualquiera de las dos CA) y `fallback` — un certificado obtenido de la CA de respaldo, contado junto a su entrada `issued`/`renewed`, así que suma `issued+renewed+failed` para obtener los intentos. |
 
 El cerebro no añade nada por nodo edge a su propio `/metrics`; la vitalidad y el último reporte de
 un nodo se leen de [`GET /api/v1/edge/nodes`](/docs/api#el-canal-edge).

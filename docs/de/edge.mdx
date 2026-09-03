@@ -93,7 +93,8 @@ anzufassen.
 Wie jede entfernte Rolle läuft ein Edge-Knoten **standardmäßig im Dry-Run**: Entscheidungen werden
 gezählt und markiert, keine wird durchgesetzt. Eine Anfrage, die die Richtlinie abweisen würde,
 erreicht den Origin trotzdem, mit dem Header `X-Kapkan-Mark: would-deny:rate` (oder
-`would-deny:concurrency`, `would-deny:table`), sodass Sie die Logs Ihres Origins durchsuchen und
+`would-deny:concurrency`, `would-deny:table:<reason>` — heute `would-deny:table:flood`, die
+Rollup-Regel, die die Quelle hochgestuft hat), sodass Sie die Logs Ihres Origins durchsuchen und
 die Metriken ansehen können, bevor ein einziger Client abgewiesen wird. Setzen Sie
 `dry_run: false` in der `edge.yaml` des Knotens, wenn die Zahlen stimmen.
 

@@ -604,7 +604,11 @@ cet ETag est **retenu** jusqu'à ce que le document change — un rechargement r
 zones, un challenge de certificat publié par un nœud — ou pendant 25 s au maximum, puis reçoit une
 réponse `304`. Un nœud s'identifie avec `?node=<name>`, et **cette interrogation est le signal de
 vivacité du nœud** ; le nom doit donc être une entrée `edge.nodes[]` configurée (un nom inconnu
-renvoie `404`) et la requête doit porter un vrai jeton.
+renvoie `404`) et la requête doit porter un vrai jeton. Au plus 4 interrogations par nom de jeton
+et 8 au total peuvent être retenues à la fois ; une interrogation supplémentaire correspondante
+reçoit `429` avec `Retry-After: 1` (`too many concurrent zone holds`), ce que le nœud traite comme
+un échec et qui le fait temporiser (1 s, doublant jusqu'à 30 s) — donnez à chaque nœud son propre
+jeton agent.
 
 ```json
 {
@@ -614,7 +618,6 @@ renvoie `404`) et la requête doit porter un vrai jeton.
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "acme_directory": "",
       "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
@@ -623,14 +626,18 @@ renvoie `404`) et la requête doit porter un vrai jeton.
 }
 ```
 
+`acme_directory`, `acme_fallback`, `extra_directives_file` et `tls.h3` sont omis lorsqu'ils ne sont
+pas définis ; un `acme_directory` absent signifie que le nœud commande auprès de sa propre CA par
+défaut (Let's Encrypt sauf si son `edge.yaml` en dit autrement).
+
 #### POST /api/v1/edge/nodes/\{name\}/report
 
 Le rapport consultatif d'un nœud sur lui-même — version, dry-run côté nœud, l'ETag du document
 qu'il a **rendu** (afin qu'un opérateur puisse repérer un nœud en retard ou qui refuse), le type,
 la version et la vivacité du terminateur, la génération active et son résultat `nginx -t`, et les
 certificats qu'il détient (métadonnées publiques uniquement, jamais une clé ; une longue liste est
-tronquée à la limite de 64 KiB du corps, avec un compteur `certs_truncated`) — stocké pour la
-[console](/docs/dashboard). Jamais un signal de vivacité (l'interrogation l'est). Un `{name}`
+tronquée à la limite de 64 KiB du corps, avec un compteur `certs_truncated`) — stocké et renvoyé
+par `GET /api/v1/edge/nodes`. Jamais un signal de vivacité (l'interrogation l'est). Un `{name}`
 inconnu renvoie `404` ; le succès est `204 No Content`.
 
 #### GET /api/v1/edge/nodes

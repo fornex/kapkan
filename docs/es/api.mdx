@@ -591,6 +591,10 @@ el documento cambie — una recarga exitosa del archivo de zonas, un challenge d
 por un nodo — o hasta 25 s, y luego se responde `304`. Un nodo se identifica con `?node=<name>`, y
 **ese sondeo es la señal de vitalidad del nodo**, así que el nombre debe ser una entrada
 `edge.nodes[]` configurada (un nombre desconocido es `404`) y la petición debe llevar un token real.
+Como máximo pueden estar retenidos a la vez 4 sondeos por nombre de token y 8 en total; a un sondeo
+más que coincida se le responde `429` con `Retry-After: 1` (`too many concurrent zone holds`), lo
+que el nodo trata como un fallo y ante el que espera antes de reintentar (1 s, duplicándose hasta
+30 s) — da a cada nodo su propio token agent.
 
 ```json
 {
@@ -600,7 +604,6 @@ por un nodo — o hasta 25 s, y luego se responde `304`. Un nodo se identifica c
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "acme_directory": "",
       "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
@@ -609,14 +612,18 @@ por un nodo — o hasta 25 s, y luego se responde `304`. Un nodo se identifica c
 }
 ```
 
+`acme_directory`, `acme_fallback`, `extra_directives_file` y `tls.h3` se omiten cuando no están
+definidos; un `acme_directory` ausente significa que el nodo pide a su propia CA por defecto (Let's
+Encrypt salvo que su `edge.yaml` diga otra cosa).
+
 #### POST /api/v1/edge/nodes/\{name\}/report
 
 El autoinforme orientativo de un nodo — versión, dry-run del lado del nodo, el ETag del documento
 que ha **renderizado** (para que un operador pueda ver un nodo rezagado o que se niega), el tipo, la
 versión y la vitalidad del terminador, la generación activa y su resultado de `nginx -t`, y los
 certificados que posee (solo metadatos públicos, nunca una clave; una lista larga se recorta al
-límite de 64 KiB del cuerpo con un recuento `certs_truncated`) — almacenado para la
-[consola](/docs/dashboard). Nunca es una señal de vitalidad (el sondeo lo es). Un `{name}`
+límite de 64 KiB del cuerpo con un recuento `certs_truncated`) — almacenado y devuelto por
+`GET /api/v1/edge/nodes`. Nunca es una señal de vitalidad (el sondeo lo es). Un `{name}`
 desconocido es `404`; el éxito es `204 No Content`.
 
 #### GET /api/v1/edge/nodes
