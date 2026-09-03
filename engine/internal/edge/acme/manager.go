@@ -457,8 +457,19 @@ func (m *Manager) issue(ctx context.Context, zone, directory string, prev Cert, 
 			return Cert{}, info, fmt.Errorf("validation: %w", err)
 		}
 	}
-	if _, err := client.WaitOrder(octx, order.URI); err != nil {
+	ready, err := client.WaitOrder(octx, order.URI)
+	if err != nil {
 		return Cert{}, info, fmt.Errorf("order: %w", err)
+	}
+	// Finalize where the READY order says to. RFC 8555 puts the finalize URL
+	// on every order object; the ready order is the fresh copy, the newOrder
+	// response the stale one.
+	finalizeURL := ready.FinalizeURL
+	if finalizeURL == "" {
+		finalizeURL = order.FinalizeURL
+	}
+	if finalizeURL == "" {
+		return Cert{}, info, errors.New("order: the CA returned no finalize URL")
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -469,9 +480,21 @@ func (m *Manager) issue(ctx context.Context, zone, directory string, prev Cert, 
 	if err != nil {
 		return Cert{}, info, err
 	}
-	chain, _, err := client.CreateOrderCert(octx, order.FinalizeURL, csr, true)
+	chain, _, err := client.CreateOrderCert(octx, finalizeURL, csr, true)
 	if err != nil {
-		return Cert{}, info, fmt.Errorf("finalize: %w", err)
+		// x/crypto polls a "processing" finalize answer at the Location header
+		// of that answer; a CA that omits it (Pebble does) leaves it polling
+		// an empty URL. We know the order's URL: poll it ourselves, and fetch
+		// the certificate once the order is valid. A finalize that really
+		// failed leaves the order short of valid and the original error stands.
+		o, werr := client.WaitOrder(octx, order.URI)
+		if werr != nil || o.Status != xacme.StatusValid || o.CertURL == "" {
+			return Cert{}, info, fmt.Errorf("finalize: %w", err)
+		}
+		chain, err = client.FetchCert(octx, o.CertURL, true)
+		if err != nil {
+			return Cert{}, info, fmt.Errorf("fetch certificate: %w", err)
+		}
 	}
 	leaf, err := x509.ParseCertificate(chain[0])
 	if err != nil {
