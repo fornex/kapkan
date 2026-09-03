@@ -24,13 +24,16 @@ controller:
 # Where the cached document, the rendered generations (state_dir/conf/gen-N,
 # live/), the ACME account keys and certificates (0600) and the empty root
 # live. The terminator's WORKER must be able to traverse to
-# state_dir/empty (the unit's StateDirectoryMode=0711 does that).
-state_dir: /var/lib/kapkan/edge
+# state_dir/empty (the unit's StateDirectoryMode=0711 does that). The
+# role's OWN directory, not the brain's /var/lib/kapkan: a brain and an edge
+# on one host must not share systemd-managed directories.
+state_dir: /var/lib/kapkan-edge
 
-# The three unix sockets nginx talks to: edge-decide.sock, edge-challenge.sock,
-# edge-log.sock. The decide and log sockets are 0660, owned by kapkan and the
-# group below; the directory must be traversable by the worker (0755).
-sockets_dir: /run/kapkan
+# The three unix sockets nginx talks to: edge-decide.sock and edge-log.sock
+# are 0660, owned by root and the group below; edge-challenge.sock is 0666
+# (it answers public ACME tokens). The directory must be traversable by the
+# worker (0755).
+sockets_dir: /run/kapkan-edge
 # The terminator's worker group: nginx (Debian/Ubuntu nginx.org packages and
 # the docker image), www-data (Debian's own package), angie.
 socket_group: nginx
@@ -40,7 +43,7 @@ terminator:
   binary: nginx
   # Passed as -c to `nginx -t` and `nginx -s reload`; empty uses the compiled
   # default. This file must include the live generation once, inside http{}:
-  #     include /var/lib/kapkan/edge/conf/live/*.conf;
+  #     include /var/lib/kapkan-edge/conf/live/*.conf;
   # and must not declare its own default_server on :80/:443 unless
   # omit_catch_all below is true.
   main_conf: /etc/nginx/nginx.conf
@@ -48,7 +51,10 @@ terminator:
   # as this unit does); signal: SIGHUP to the pid in pid_file; command: run an
   # argv, e.g. [systemctl, reload, nginx].
   reload: exec
-  # pid_file: /run/nginx.pid
+  # pid_file, when set, is also the terminator-liveness check: /healthz
+  # answers 503 and the report says alive=false while no process has that
+  # pid. Required for reload: signal.
+  pid_file: /run/nginx.pid
   # command: [systemctl, reload, nginx]
 
 acme:
@@ -68,10 +74,13 @@ acme:
   #   - directory: https://acme.zerossl.com/v2/DV90
   #     kid: your-eab-kid
   #     hmac_key_env: KAPKAN_EDGE_ZEROSSL_HMAC
-  # disabled: true          # a lab with its own certificates
+  # disabled: true   # issue nothing: zones stay on :80 answering 503 (a lab
+  #                  # that exercises everything but issuance)
 
-# /healthz (200 when a tested generation is live) and /metrics for this node.
-# Unauthenticated: keep it on loopback or a private address.
+# /healthz (200 while a tested generation is live and, with pid_file set, the
+# terminator is alive; a refused document keeps 200 with converged=false and
+# the error in the body) and /metrics for this node. Unauthenticated: keep
+# it on loopback or a private address.
 status_listen: 127.0.0.1:9102
 
 # Only when the operator's nginx.conf already declares default servers on

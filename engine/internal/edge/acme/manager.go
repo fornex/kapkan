@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	// DefaultDirectory is Let's Encrypt production.
-	DefaultDirectory = "https://acme-v02.api.letsencrypt.org/directory"
+	// DefaultDirectory is Let's Encrypt production — the one definition, shared
+	// with the configuration's validation through edgedoc.
+	DefaultDirectory = edgedoc.DefaultACMEDirectory
 	// DefaultRenewBefore renews when this much of the lifetime remains: day
 	// 60 of a 90-day certificate (edge-spec §2.4). For a shorter certificate
 	// the threshold is a third of its lifetime instead.
@@ -122,6 +123,9 @@ type Manager struct {
 	log   *slog.Logger
 	now   func() time.Time
 
+	// wake carries at most one pending request for an immediate Run pass.
+	wake chan struct{}
+
 	mu       sync.Mutex
 	certs    map[string]Cert
 	failures map[string]*zoneFailures
@@ -170,7 +174,7 @@ func New(opts Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Manager{opts: opts, store: st, log: opts.Logger.With("component", "edge-acme"), now: opts.Now,
+	m := &Manager{opts: opts, store: st, log: opts.Logger.With("component", "edge-acme"), now: opts.Now, wake: make(chan struct{}, 1),
 		certs: make(map[string]Cert), failures: make(map[string]*zoneFailures), ordering: make(map[string]bool)}
 	inv, broken, err := st.inventory()
 	if err != nil {
@@ -542,10 +546,23 @@ func (m *Manager) acquireSlot(ctx context.Context, zone string) func() {
 	}
 }
 
+// Wake asks Run for a pass now — the node calls it when a new document
+// arrives, so a fresh node's first certificates, or a zone added later, are
+// ordered at once instead of at the next CheckEvery tick. Safe to call from
+// any goroutine and at any rate: a pass over zones already current or in
+// backoff is a no-op.
+func (m *Manager) Wake() {
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+
 // Run keeps every zone's certificate current until ctx is done: a pass at
-// start, then one every CheckEvery. zones returns the current zone list (the
-// agent's copy of the document); a zone that disappears is left alone (its
-// files stay, its renewals stop) and its expiry gauge is dropped.
+// start, then one every CheckEvery or on Wake. zones returns the current
+// zone list (the agent's copy of the document); a zone that disappears is
+// left alone (its files stay, its renewals stop) and its expiry gauge is
+// dropped.
 func (m *Manager) Run(ctx context.Context, zones func() []edgedoc.Zone) error {
 	t := time.NewTicker(m.opts.CheckEvery)
 	defer t.Stop()
@@ -571,6 +588,7 @@ func (m *Manager) Run(ctx context.Context, zones func() []edgedoc.Zone) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
+		case <-m.wake:
 		}
 	}
 }
