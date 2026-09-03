@@ -263,7 +263,10 @@ type EdgeReport struct {
 	// Terminator is the node's view of the nginx/Angie it orchestrates.
 	Terminator *EdgeReportTerminator `json:"terminator,omitempty"`
 	// Certs lists the certificates the node currently holds, one per zone.
-	Certs []EdgeReportCert `json:"certs,omitempty"`
+	// CertsTruncated counts entries the node dropped to keep the report under
+	// the body limit (the list is zone-sorted; the tail went).
+	Certs          []EdgeReportCert `json:"certs,omitempty"`
+	CertsTruncated int              `json:"certs_truncated,omitempty"`
 }
 
 // EdgeReportTerminator is the state of the orchestrated terminator.
@@ -278,6 +281,9 @@ type EdgeReportTerminator struct {
 	// generation stayed live (edge-spec §2.4).
 	TestOK    bool   `json:"test_ok,omitempty"`
 	TestError string `json:"test_error,omitempty"`
+	// Alive is the node's pid-file liveness check of the terminator; absent
+	// when the node has no pid file configured to check.
+	Alive *bool `json:"alive,omitempty"`
 }
 
 // EdgeReportCert is one held certificate. Public metadata only — never a key.

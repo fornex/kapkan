@@ -1,0 +1,71 @@
+[Unit]
+Description=Kapkan edge node (zones, decisions, certificates for the local nginx/Angie)
+Documentation=https://github.com/kapkan-io/kapkan
+# After, not Wants/Requires: the role is designed to come up before the
+# terminator too (sockets first, then start from disk), and the operator's
+# unit may be called nginx.service, angie.service or something else.
+After=network-online.target nginx.service angie.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=4
+
+[Service]
+Type=simple
+# Root, like certbot and every configuration manager that drives nginx: the
+# role runs `nginx -t` (which opens nginx's own log and pid paths) and `nginx
+# -s reload` (which signals nginx's root master), and it writes the include
+# directory nginx reads. A dedicated user is possible with terminator.reload:
+# command → [systemctl, reload, nginx] plus a polkit rule, and an nginx.conf
+# whose error_log the user may open — document both before choosing it.
+User=root
+Group=root
+ExecStart=/usr/local/bin/kapkan edge -config /etc/kapkan/edge.yaml -log-format json -log-level info
+Restart=on-failure
+RestartSec=5s
+
+# Directories of this role's OWN — not kapkan.service's /run/kapkan and
+# /var/lib/kapkan: systemd re-chowns a shared StateDirectory to each unit's
+# user on every start and removes a shared RuntimeDirectory on stop, so a
+# brain and an edge on one host would wreck each other's trees.
+#
+# /run/kapkan-edge: the three unix sockets nginx talks to — edge-decide.sock
+# and edge-log.sock 0660 with group = edge.yaml's socket_group (the
+# terminator's worker group), edge-challenge.sock 0666 (it answers public
+# tokens). 0755 so the worker can traverse it.
+RuntimeDirectory=kapkan-edge
+RuntimeDirectoryMode=0755
+# /var/lib/kapkan-edge: edge.yaml's state_dir. 0711 — not 0700 — so nginx's
+# worker can reach state_dir/empty (the try_files root); the ACME keys sit
+# in 0700 subdirectories of their own.
+StateDirectory=kapkan-edge
+StateDirectoryMode=0711
+
+# The agent token (KAPKAN_EDGE_TOKEN=...) and any acme.eab HMAC keys live in
+# /etc/kapkan/edge.env (chmod 600), never in edge.yaml.
+EnvironmentFile=-/etc/kapkan/edge.env
+
+# Hardening. Root, so this is what keeps the blast radius small: the process
+# may write only its state, its sockets, and what the terminator needs for
+# `-t` and a reload. Paths prefixed with `-` are skipped when absent, so the
+# same unit serves an nginx or an Angie host; an unusual layout (OpenResty, a
+# custom error_log outside /var/log/nginx) needs its log directory added here
+# or `nginx -t` cannot open it. /run as a whole is writable because nginx's
+# pid file (/run/nginx.pid) exists only while nginx runs and cannot be bound
+# on its own.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kapkan-edge /run -/var/log/nginx -/var/log/angie
+ReadOnlyPaths=/etc/kapkan -/etc/nginx -/etc/angie
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+# AF_UNIX for the sockets nginx connects to; AF_INET/6 for the brain and the CA.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
