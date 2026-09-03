@@ -70,8 +70,11 @@ lint: console-sync
 		GOOS=$$goos golangci-lint run || exit 1; \
 	done
 
+# The edge decision service's numbers are here too: BenchmarkDecide (in-process
+# floor) and BenchmarkDecideOverUnixSocket (the auth_request round trip edge-spec
+# §5 asks to have measured, in µs/decision).
 bench: console-sync
-	go test -run '^$$' -bench . -benchmem ./internal/engine/...
+	go test -run '^$$' -bench . -benchmem ./internal/engine/... ./internal/edge/...
 
 run-dev: build
 	./$(BINARY) -config configs/dev.yaml -log-format text

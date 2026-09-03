@@ -47,6 +47,21 @@ security-relevant.
   requests through it. Known limitation: nginx before 1.29.2 applies the node-wide TLS floor
   (the lowest `tls.min_version` on the node) to every zone; Angie and nginx ≥ 1.29.2 honour
   per-zone floors. No `kapkan edge` command yet (E3.5).
+- Edge track, E3.3 — the per-node decision service (`internal/edge/decide`: answers nginx's
+  `auth_request` over a unix socket with 200/403, an optional `X-Kapkan-Mark` and, on a denial,
+  `X-Kapkan-Reason`; enforces the zone's `policy.rate` per source key — an IPv4 address or an
+  IPv6 /64 — with a token bucket for rps and an approximate, self-correcting in-flight count for
+  concurrency, per-zone quotas of a bounded node table; a bounded deny/mark verdict table with
+  TTLs where a deny always outranks a mark; dry-run answers every deny as an allow marked
+  `would-deny:<reason>`; never consults the brain) and the access-log rollups
+  (`internal/edge/rollup`: the terminator's JSON log over a unix datagram socket → per-zone,
+  per-source windows with real-elapsed rates; a flood rule promotes a source that keeps pushing
+  through its rate ceiling to a deny with escalating TTL — a source already denied is never
+  re-escalated — and an error-share rule marks scanners). The renderer forwards none of the
+  client's headers to the decision, answers a rate/concurrency denial as 429 with `Retry-After`
+  and a table denial as 403, and logs `port`, `decision`, `reason` and `mark`. Edge unix sockets
+  default to 0660 with a configurable group. `make bench` reports the single-client
+  `BenchmarkDecideOverUnixSocket` round trip (p50/p99) and the parallel throughput.
 
 ## [1.7.0] - 2026-09-02
 
