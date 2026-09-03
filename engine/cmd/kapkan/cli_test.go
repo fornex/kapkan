@@ -27,15 +27,17 @@ func parse(t *testing.T, argv ...string) (*cliFlags, error) {
 // a deliberate act rather than the side effect of an edit.
 func TestFlagInventoryIsFrozen(t *testing.T) {
 	want := map[string]string{
-		"config":       "configs/dev.yaml",
-		"log-format":   "json",
-		"log-level":    "info",
-		"dump-schema":  "false",
-		"check-config": "",
-		"version":      "false",
-		"check-update": "false",
-		"pid-file":     "/run/kapkan/kapkan.pid",
-		"s":            "",
+		"config":      "configs/dev.yaml",
+		"log-format":  "json",
+		"log-level":   "info",
+		"dump-schema": "false",
+		// The edge zones file's schema (edge track, E3.6).
+		"dump-zones-schema": "false",
+		"check-config":      "",
+		"version":           "false",
+		"check-update":      "false",
+		"pid-file":          "/run/kapkan/kapkan.pid",
+		"s":                 "",
 	}
 	f, err := parse(t)
 	if err != nil {
@@ -123,6 +125,11 @@ func TestExistingInvocationsAreUntouched(t *testing.T) {
 				t.Error("-dump-schema did not set dumpSchema")
 			}
 		}},
+		{"dump-zones-schema", []string{"-dump-zones-schema"}, func(t *testing.T, f *cliFlags) {
+			if !f.dumpZonesSchema || f.dumpSchema {
+				t.Error("-dump-zones-schema did not set dumpZonesSchema alone")
+			}
+		}},
 		{"check-update with config", []string{"-check-update", "-config", "/etc/kapkan/config.yaml"},
 			func(t *testing.T, f *cliFlags) {
 				if !f.checkUpdate || f.configPath != "/etc/kapkan/config.yaml" {
@@ -201,6 +208,7 @@ func TestExitingFlagWithSubcommandIsRefused(t *testing.T) {
 	for _, argv := range [][]string{
 		{"-version", "dataplane", "status"},
 		{"-dump-schema", "dataplane", "status"},
+		{"-dump-zones-schema", "dataplane", "status"},
 		{"-s", "reload", "dataplane", "status"},
 		{"-check-config", "/x.yaml", "dataplane", "status"},
 		{"-check-update", "dataplane", "status"},

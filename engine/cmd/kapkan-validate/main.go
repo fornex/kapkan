@@ -1,11 +1,13 @@
 //go:build js && wasm
 
 // Command kapkan-validate compiles the engine's real config Parse+validate
-// chain to WebAssembly and exposes it to the browser as kapkanValidateConfig(),
-// so the kapkan.io config builder can show engine-exact errors inline without
-// sending the config anywhere. Filesystem checks (geoip database, exec hook)
-// are deferred to the server here (see internal/config/statfile_js.go); the
-// authoritative file check is `kapkan -check-config` on the host.
+// chain to WebAssembly and exposes it to the browser as kapkanValidateConfig()
+// — and the zones file's chain as kapkanValidateZones() — so the kapkan.io
+// config builder and the zones editor can show engine-exact errors inline
+// without sending anything anywhere. Filesystem checks (geoip database, exec
+// hook, the zones file a kapkan.yaml points at) are deferred to the server here
+// (see internal/config/statfile_js.go); the authoritative check is `kapkan
+// -check-config` on the host, which follows edge.zones_file.
 package main
 
 import (
@@ -18,7 +20,8 @@ import (
 
 func main() {
 	js.Global().Set("kapkanValidateConfig", js.FuncOf(validate))
-	// Keep the Go runtime alive so the exported function stays callable.
+	js.Global().Set("kapkanValidateZones", js.FuncOf(validateZones))
+	// Keep the Go runtime alive so the exported functions stay callable.
 	select {}
 }
 
@@ -38,6 +41,22 @@ func validate(_ js.Value, args []js.Value) any {
 	return map[string]any{"ok": true, "summary": summarize(cfg)}
 }
 
+// validateZones parses and validates a zones file (edge.zones_file) passed as
+// args[0] with the same shape of answer.
+func validateZones(_ js.Value, args []js.Value) any {
+	if len(args) < 1 {
+		return map[string]any{"ok": false, "error": "no zones file provided"}
+	}
+	z, err := config.ParseZones([]byte(args[0].String()))
+	if err != nil {
+		msg := err.Error()
+		msg = strings.TrimPrefix(msg, "validate zones: ")
+		msg = strings.TrimPrefix(msg, "parse zones: ")
+		return map[string]any{"ok": false, "error": msg}
+	}
+	return map[string]any{"ok": true, "summary": summarizeZones(z)}
+}
+
 func summarize(cfg *config.Config) string {
 	var b strings.Builder
 	mode := "dry-run — announcements simulated"
@@ -49,6 +68,22 @@ func summarize(cfg *config.Config) string {
 	fmt.Fprintf(&b, "groups: %d (including the implicit global group)\n", len(cfg.Groups))
 	for _, g := range cfg.Groups {
 		fmt.Fprintf(&b, "  • %-16s calc=%-8s ban=%-5t %s\n", g.Name, g.Calc, g.BanEnabled, ladder(g.Escalation))
+	}
+	return b.String()
+}
+
+func summarizeZones(z *config.Zones) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "zones: %d\n", len(z.Zones))
+	for _, zone := range z.Zones {
+		policy := zone.Policy.Mode
+		if zone.Policy.Mode == config.ZonePolicyDecide {
+			policy = fmt.Sprintf("decide/%s", zone.Policy.FailureMode)
+			if zone.Policy.Rate.RPS > 0 || zone.Policy.Rate.Concurrency > 0 {
+				policy += fmt.Sprintf(" rps=%d conc=%d", zone.Policy.Rate.RPS, zone.Policy.Rate.Concurrency)
+			}
+		}
+		fmt.Fprintf(&b, "  • %-40s tls>=%s %-24s origins=%s\n", zone.Name, zone.TLS.MinVersion, policy, strings.Join(zone.Origins, ","))
 	}
 	return b.String()
 }

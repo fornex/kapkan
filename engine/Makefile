@@ -84,6 +84,7 @@ run-dev: build
 # Depends on console-sync because cmd/kapkan go:embeds the console at compile.
 schema: console-sync
 	go run ./cmd/kapkan -dump-schema > ../docs/config-schema.json
+	go run ./cmd/kapkan -dump-zones-schema > ../docs/zones-schema.json
 
 # Regenerate the XDP object and its bpf2go bindings from bpf/*.c. Unlike
 # console-sync this is deliberately NOT a prerequisite of build/test: the .o and

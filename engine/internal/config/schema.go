@@ -260,7 +260,9 @@ func lookupEnum(path string) []string {
 			return v
 		}
 	}
-	return nil
+	// The zones file (zones_schema.go) shares the generator; its paths are
+	// rooted at "zones." and never collide with kapkan.yaml's.
+	return lookupZoneEnum(path)
 }
 
 func lookupBounds(path string) map[string]float64 {
@@ -272,7 +274,7 @@ func lookupBounds(path string) map[string]float64 {
 			return v
 		}
 	}
-	return nil
+	return lookupZoneBounds(path)
 }
 
 func lookupPattern(path string) (string, bool) {
