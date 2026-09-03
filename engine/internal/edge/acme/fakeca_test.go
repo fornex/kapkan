@@ -342,7 +342,15 @@ func thumbprintFromJWK(raw json.RawMessage) (string, error) {
 	if jwk.Kty != "EC" || jwk.Crv != "P-256" {
 		return "", fmt.Errorf("unsupported jwk %s/%s", jwk.Kty, jwk.Crv)
 	}
-	pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(b64url(jwk.X)), Y: new(big.Int).SetBytes(b64url(jwk.Y))}
+	x, y := b64url(jwk.X), b64url(jwk.Y)
+	if len(x) != 32 || len(y) != 32 {
+		return "", fmt.Errorf("jwk coordinates are %d/%d bytes, want 32", len(x), len(y))
+	}
+	point := append(append([]byte{0x04}, x...), y...)
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
+	if err != nil {
+		return "", err
+	}
 	return xacme.JWKThumbprint(pub)
 }
 
