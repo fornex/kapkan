@@ -72,12 +72,17 @@ http {
 
 Remove (or plan to keep, see below) any `default_server` on `:80`/`:443` — Kapkan renders its
 own catch-all that refuses unknown hosts. Debian's default site declares one; either disable
-the site or set `omit_catch_all: true` in `edge.yaml`. Then confirm the include compiles with
-an empty directory:
+the site or set `omit_catch_all: true` in `edge.yaml`. Then confirm the include compiles
+before anything is rendered (a wildcard include of a directory that does not exist yet is fine
+for nginx):
 
 ```sh
-mkdir -p /var/lib/kapkan-edge/conf/live && nginx -t
+nginx -t
 ```
+
+`live` itself is a **symlink** the node creates and retargets on every generation — do not
+create it by hand; the node removes an empty directory left in its place, but refuses a
+non-empty one.
 
 Find the **worker's group** — `nginx` for nginx.org packages and the Docker image, `www-data`
 for Debian's own package, `angie` for Angie. The decision and log sockets are created `0660`
