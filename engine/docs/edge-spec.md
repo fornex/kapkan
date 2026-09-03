@@ -129,14 +129,29 @@ node reboots into service with the brain gone and its first poll can answer 304 
 the long-poll. A new document takes the fast path first (decision-service zones, rollup zone set,
 fanned-out challenges — no file touched), is persisted, then rendered and applied; since the
 render does not depend on `policy.rate` or on verdicts, a rate change never reloads (§2.2). A
-certificate issued or renewed re-renders. The node self-reports every 10 s (version, dry-run,
-rendered ETag, terminator kind/version, generation and test result, certificates — never a key)
-and serves `/healthz` + `/metrics` on `status_listen` when set. The shipped unit runs as root,
-like certbot: `nginx -t` opens nginx's own log/pid paths and `nginx -s reload` signals a root
-master; it is hardened with `ProtectSystem=strict` and explicit `ReadWritePaths`, and
+certificate issued or renewed re-renders, and a new document wakes the ACME manager so a fresh
+node's first certificates are ordered at once. The slow path is one serialised section that
+reads its inputs (document, certificate inventory) inside the lock, so two triggers converge on
+the newest state. The node keeps two ETags: *accepted* (the fast path's document) and *rendered*
+(what the terminator serves); only the rendered one seeds the first poll after a restart and
+goes into the report, so a document the renderer or `nginx -t` refuses is offered again, retried
+locally on a 1 → 10 min backoff, and never reported as rendered. A refused document keeps the
+previous generation serving and `/healthz` at 200 (`converged: false`, the error in the body);
+`/healthz` is 503 only when no tested generation of ours is live or, with `terminator.pid_file`
+set, the terminator process is gone. The node self-reports every 10 s (version, dry-run,
+rendered ETag, terminator kind/version/liveness, generation and test result, certificates — never
+a key; the list is cut to the 64 KiB body limit with a `certs_truncated` count) and serves
+`/healthz` + `/metrics` on `status_listen` when set. A component that cannot start (a socket
+already served, an unknown group) ends the process with its error so systemd restarts it. The
+role owns `/var/lib/kapkan-edge` and `/run/kapkan-edge` — never the brain's `/var/lib/kapkan`
+and `/run/kapkan`, which systemd would re-chown and remove under it on a shared host. The
+shipped unit runs as root, like certbot: `nginx -t` opens nginx's own log/pid paths and `nginx -s
+reload` signals a root master; it is hardened with `ProtectSystem=strict` and explicit
+`ReadWritePaths` (terminator paths `-`-prefixed so one unit serves nginx or Angie), and
 `StateDirectoryMode=0711` so the terminator's worker can traverse to the `try_files` root while
-the ACME keys stay in 0700 directories. The "local XDP" box in the diagram is E3.5's remaining
-gap: the edge node does not yet attach a data plane (E4 promotes verdicts there).
+the ACME keys stay in 0700 directories; the decide and log sockets are 0660 with the worker's
+group, the challenge socket 0666 (public tokens). The "local XDP" box in the diagram is E3.5's
+remaining gap: the edge node does not yet attach a data plane (E4 promotes verdicts there).
 
 ### 2.2 The fast/slow split (frozen contract)
 
@@ -191,7 +206,7 @@ The channel is the one the scrub node already uses, with a second document famil
 - **Client:** `golang.org/x/crypto/acme` in `kapkan edge` — small, control over ordering.
   Deliberately **not** Angie's built-in ACME module (would make Angie required rather than
   recommended) and not certmagic (dependency footprint).
-- **Keys:** generated on the node, `0600` under `/var/lib/kapkan/edge/`, never in reports,
+- **Keys:** generated on the node, `0600` under `/var/lib/kapkan-edge/`, never in reports,
   never in any API response, redacted from support bundles. Compromise blast radius is one
   node — that asymmetry is *why* per-node was chosen.
 - **HTTP-01 under a shared/anycast VIP:** the CA's validation request lands on *any* node, not
@@ -280,8 +295,8 @@ zones:
   hatch (`extra_directives_file`, included verbatim, "you own what it breaks"); no template
   override mechanism — that way lies unsupportable config drift.
   *Decided in E3.2 (`internal/edge/render`, `internal/edge/apply`):* the node keeps rendered
-  generations under `/var/lib/kapkan/edge/conf/gen-N/` behind a `live` symlink, and the
-  operator's `nginx.conf` includes that once — `include /var/lib/kapkan/edge/conf/live/*.conf;`
+  generations under `/var/lib/kapkan-edge/conf/gen-N/` behind a `live` symlink, and the
+  operator's `nginx.conf` includes that once — `include /var/lib/kapkan-edge/conf/live/*.conf;`
   inside `http{}`. An install is: write the generation whole, retarget `live`, `nginx -t`, then
   reload — or, on a failed test, retarget back and keep the candidate as `failed-N` for reading.
   A generation records what it earned (`.kapkan-tested`, `.kapkan-reloaded`), so a process that

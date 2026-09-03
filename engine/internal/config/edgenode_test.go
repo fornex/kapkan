@@ -20,7 +20,7 @@ func TestParseEdgeNodeDefaults(t *testing.T) {
 	if !e.DryRunResolved() {
 		t.Fatal("dry_run must default to true")
 	}
-	if e.StateDir != "/var/lib/kapkan/edge" || e.SocketsDir != "/run/kapkan" || e.Terminator.Binary != "nginx" || e.Terminator.Reload != EdgeReloadExec || e.Controller.ReportIntervalSeconds != 10 {
+	if e.StateDir != "/var/lib/kapkan-edge" || e.SocketsDir != "/run/kapkan-edge" || e.Terminator.Binary != "nginx" || e.Terminator.Reload != EdgeReloadExec || e.Controller.ReportIntervalSeconds != 10 {
 		t.Fatalf("defaults: %+v", e)
 	}
 	full := edgeYAML + `

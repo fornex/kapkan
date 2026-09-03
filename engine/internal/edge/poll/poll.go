@@ -37,9 +37,11 @@ type Options struct {
 	// Token is the agent bearer; Node the identity sent as ?node=.
 	Token string
 	Node  string
-	// OnDocument receives every new document (a 200) with its ETag; an error
-	// means the document was refused and the poll backs off, keeping the old
-	// ETag so the same document is offered again later.
+	// OnDocument receives every new document (a 200) with its ETag. An error
+	// means the caller refused it; the poll still advances to that ETag — the
+	// brain has nothing newer, re-fetching the same bytes every backoff would
+	// only make the node look dead — and records the refusal (LastRefusal).
+	// Retrying what was refused is the caller's job; it holds the bytes.
 	OnDocument func(body []byte, etag string) error
 	// ETag seeds the first poll (a document restored from disk), so a brain
 	// with nothing new answers 304 at once.
@@ -61,9 +63,13 @@ type Poller struct {
 
 	mu   sync.Mutex
 	etag string
-	// lastOK is when a poll last succeeded (200 or 304): the node's own view
-	// of whether the brain is reachable.
+	// lastOK is when a poll last reached the brain (200 or 304, whatever the
+	// caller made of the document): the node's own view of whether the brain
+	// is reachable.
 	lastOK time.Time
+	// lastRefusal is the last document the caller refused, "" when the last
+	// delivered document was accepted.
+	lastRefusal string
 }
 
 // New validates the options and returns a Poller.
@@ -101,11 +107,19 @@ func (p *Poller) ETag() string {
 	return p.etag
 }
 
-// LastOK is when a poll last succeeded; zero when never.
+// LastOK is when a poll last reached the brain; zero when never.
 func (p *Poller) LastOK() time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.lastOK
+}
+
+// LastRefusal is the refusal message for the last delivered document, "" when
+// it was accepted.
+func (p *Poller) LastRefusal() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastRefusal
 }
 
 // Run polls until ctx is done. A healthy poll (200 or 304) is followed at
@@ -169,13 +183,18 @@ func (p *Poller) Once(ctx context.Context) bool {
 			p.log.Warn("document response carried no ETag (a proxy stripping it?); backing off instead of busy-polling")
 			return false
 		}
+		// The brain answered: it is reachable whatever the document's fate.
+		p.mu.Lock()
+		p.lastOK = time.Now()
+		p.mu.Unlock()
+		refusal := ""
 		if err := p.opt.OnDocument(body, et); err != nil {
-			p.log.Error("document refused; keeping the last one", "err", err)
-			return false
+			refusal = err.Error()
+			p.log.Error("document refused; the terminator keeps serving the previous one", "etag", et, "err", err)
 		}
 		p.mu.Lock()
 		p.etag = et
-		p.lastOK = time.Now()
+		p.lastRefusal = refusal
 		p.mu.Unlock()
 		return true
 	case http.StatusNotModified:

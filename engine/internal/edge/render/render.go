@@ -9,7 +9,7 @@
 // the decision service and proxies to the origin. The operator's nginx.conf
 // includes the live generation once, inside http{}:
 //
-//	include /var/lib/kapkan/edge/conf/live/*.conf;
+//	include /var/lib/kapkan-edge/conf/live/*.conf;
 //
 // nginx includes a glob in name order, which is why the shared file sorts first.
 //
@@ -105,11 +105,11 @@ const (
 	ZoneFilePrefix = "kapkan_zone_"
 
 	// Defaults for the node-side paths. /run is where the kapkan edge process
-	// listens; /var/lib/kapkan/edge is its state directory (edge-spec §3).
-	DefaultDecideSocket    = "/run/kapkan/edge-decide.sock"
-	DefaultChallengeSocket = "/run/kapkan/edge-challenge.sock"
-	DefaultLogSocket       = "/run/kapkan/edge-log.sock"
-	DefaultEmptyRoot       = "/var/lib/kapkan/edge/empty"
+	// listens; /var/lib/kapkan-edge is its state directory (edge-spec §3).
+	DefaultDecideSocket    = "/run/kapkan-edge/edge-decide.sock"
+	DefaultChallengeSocket = "/run/kapkan-edge/edge-challenge.sock"
+	DefaultLogSocket       = "/run/kapkan-edge/edge-log.sock"
+	DefaultEmptyRoot       = "/var/lib/kapkan-edge/empty"
 
 	// sslCiphersTLS12 is the ECDHE subset of Mozilla's "intermediate" list: no
 	// DHE (would need a dhparam file the node does not manage), no CBC. Only

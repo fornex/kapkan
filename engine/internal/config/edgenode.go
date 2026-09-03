@@ -9,6 +9,7 @@ package config
 // brain as the document and are cached on disk by the role.
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/url"
@@ -17,6 +18,18 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
+)
+
+// Default locations of the edge role's own directories — its own, not the
+// brain's /var/lib/kapkan and /run/kapkan: systemd re-chowns a shared
+// StateDirectory to each unit's user on every start and removes a shared
+// RuntimeDirectory on stop, so a brain and an edge on one host must not
+// share them.
+const (
+	DefaultEdgeStateDir   = "/var/lib/kapkan-edge"
+	DefaultEdgeSocketsDir = "/run/kapkan-edge"
 )
 
 // EdgeNodeConfig is the parsed edge.yaml.
@@ -32,15 +45,16 @@ type EdgeNodeConfig struct {
 	Controller Controller `yaml:"controller"`
 	// StateDir holds the cached document, the rendered generations, the ACME
 	// account keys and certificates (0600) and the empty root. Absolute;
-	// default /var/lib/kapkan/edge.
+	// default /var/lib/kapkan-edge.
 	StateDir string `yaml:"state_dir"`
 	// SocketsDir holds the decision, challenge and log sockets nginx talks
-	// to. Absolute; default /run/kapkan.
+	// to. Absolute; default /run/kapkan-edge.
 	SocketsDir string `yaml:"sockets_dir"`
 	// SocketGroup is the terminator's worker group (nginx, www-data, angie):
-	// the decision and log sockets are 0660 and chowned to it. Empty leaves
-	// the sockets owner-only — fine only when kapkan and the terminator run
-	// as one user.
+	// the decision and log sockets are 0660 and chowned to it; the challenge
+	// socket answers public tokens and is 0666. Empty leaves the two
+	// group-restricted sockets owner-only — fine only when kapkan and the
+	// terminator run as one user.
 	SocketGroup string `yaml:"socket_group"`
 	// Terminator is how the node drives nginx or Angie.
 	Terminator EdgeTerminator `yaml:"terminator"`
@@ -85,7 +99,9 @@ type EdgeACME struct {
 	// secret and comes from an environment variable, like the agent token;
 	// a directory without an entry here registers with the account key alone.
 	EAB []EdgeACMEEAB `yaml:"eab"`
-	// Disabled turns issuance off (a lab with its own certificates).
+	// Disabled issues nothing: zones stay on :80 answering 503 (a lab that
+	// exercises everything but issuance). Operator-supplied certificates are
+	// not a feature yet.
 	Disabled bool `yaml:"disabled"`
 }
 
@@ -106,21 +122,25 @@ type EdgeEABCredentials struct {
 	HMACKey string
 }
 
-// ResolveEAB reads every binding's HMAC key from its environment variable and
-// returns them keyed by directory URL. A missing variable is an error: a node
-// that silently registered without the binding would fail at the CA later,
-// with a worse message.
+// ResolveEAB reads every binding's HMAC key from its environment variable,
+// checks it is base64url (a CA portal's padded form is accepted and
+// normalised) and returns the bindings keyed by directory URL. A missing or
+// malformed key is an error: a node that silently registered without the
+// binding would fail at the CA later, with a worse message.
 func (a *EdgeACME) ResolveEAB() (map[string]EdgeEABCredentials, error) {
 	if len(a.EAB) == 0 {
 		return nil, nil
 	}
 	out := make(map[string]EdgeEABCredentials, len(a.EAB))
 	for _, b := range a.EAB {
-		key := os.Getenv(b.HMACKeyEnv)
+		key := strings.TrimRight(strings.TrimSpace(os.Getenv(b.HMACKeyEnv)), "=")
 		if key == "" {
 			return nil, fmt.Errorf("acme.eab for %s: environment variable %s is empty or unset", b.Directory, b.HMACKeyEnv)
 		}
-		out[b.Directory] = EdgeEABCredentials{KID: b.KID, HMACKey: strings.TrimSpace(key)}
+		if _, err := base64.RawURLEncoding.DecodeString(key); err != nil {
+			return nil, fmt.Errorf("acme.eab for %s: %s is not a base64url HMAC key", b.Directory, b.HMACKeyEnv)
+		}
+		out[b.Directory] = EdgeEABCredentials{KID: b.KID, HMACKey: key}
 	}
 	return out, nil
 }
@@ -164,10 +184,10 @@ func (e *EdgeNodeConfig) validate() error {
 		return err
 	}
 	if e.StateDir == "" {
-		e.StateDir = "/var/lib/kapkan/edge"
+		e.StateDir = DefaultEdgeStateDir
 	}
 	if e.SocketsDir == "" {
-		e.SocketsDir = "/run/kapkan"
+		e.SocketsDir = DefaultEdgeSocketsDir
 	}
 	for _, d := range []struct{ key, path string }{{"state_dir", e.StateDir}, {"sockets_dir", e.SocketsDir}} {
 		if !filepath.IsAbs(d.path) || strings.ContainsAny(d.path, " \t\r\n;{}#\"'\\$*?[]") {
@@ -208,8 +228,15 @@ func (e *EdgeNodeConfig) validate() error {
 			return fmt.Errorf("%s must be an http(s) URL with a host, got %q", d.key, d.url)
 		}
 	}
-	if e.ACME.Fallback != "" && e.ACME.Fallback == e.ACME.Directory {
-		return fmt.Errorf("acme.fallback must name a different directory than acme.directory")
+	// An empty acme.directory means Let's Encrypt production; a fallback
+	// equal to the RESOLVED primary would alternate between two identical
+	// CAs and never escape the duplicate-certificate ceiling it exists for.
+	primary := e.ACME.Directory
+	if primary == "" {
+		primary = edgedoc.DefaultACMEDirectory
+	}
+	if e.ACME.Fallback != "" && e.ACME.Fallback == primary {
+		return fmt.Errorf("acme.fallback must name a different directory than the primary (%s)", primary)
 	}
 	for _, c := range e.ACME.Contact {
 		if !strings.HasPrefix(c, "mailto:") {
@@ -256,6 +283,11 @@ func (c *Controller) validate(peer string) error {
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("controller.url must not carry a query or fragment, got %q", c.URL)
+	}
+	if u.User != nil {
+		// Basic-auth userinfo is never sent (the bearer is the credential) but
+		// it would be echoed by -check and every startup log line.
+		return fmt.Errorf("controller.url must not carry credentials (the token comes from %s)", c.TokenEnv)
 	}
 	if !envNameRe.MatchString(c.TokenEnv) {
 		return fmt.Errorf("controller.token_env %q is not a valid environment variable name (required: the poll identity needs a credential)", c.TokenEnv)

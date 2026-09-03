@@ -92,11 +92,23 @@ security-relevant.
   `GET /api/v1/edge/zones`. A new document takes the fast path first — decision-service zones,
   rollup zone set, fanned-out challenges — and is rendered and applied only when its bytes
   change what the terminator serves, so a rate change never reloads; an issued certificate
-  re-renders. It self-reports every 10 s (version, dry-run, rendered ETag, terminator kind and
-  version, generation and test result, certificates), and serves `/healthz` + `/metrics` on
-  `status_listen` when set. `internal/edge/poll` is the long-poll generalised over the document.
-  A `-check` flag validates `edge.yaml` and exits. Ships `deploy/edge.example.yaml` and
-  `deploy/kapkan-edge.service`.
+  re-renders (and wakes the ACME manager, so a new zone is issued at once). The slow path is
+  serialised and reads its inputs inside the serialisation. The node keeps two ETags: the
+  ACCEPTED document (fast path) and the RENDERED one (what the terminator serves) — a document
+  the renderer or `nginx -t` refuses leaves the previous generation serving, is reported as such
+  (`zones_etag` names the rendered document), and is retried locally on a 1 → 10 min backoff
+  until it applies or a newer one arrives; the poll parks on it meanwhile, so the brain sees the
+  node alive. `/healthz` is 200 while a tested generation of ours is live (and, with
+  `terminator.pid_file` set, the terminator process is alive), with `converged` and the error in
+  the body; a refused document does not take a fleet out of its load balancer. It self-reports
+  every 10 s (version, dry-run, rendered ETag, terminator kind, version and liveness, generation
+  and test result, certificates — cut to the 64 KiB limit with a `certs_truncated` count), and
+  serves `/healthz` + `/metrics` on `status_listen` when set. A component that fails to start
+  ends the process with its error (systemd restarts it). `internal/edge/poll` is the long-poll
+  generalised over the document. `-check` validates `edge.yaml` and what it names on the box
+  (socket group, EAB key shape; the terminator binary and secrets as warnings). The role owns
+  `/var/lib/kapkan-edge` and `/run/kapkan-edge` (never the brain's directories). Ships
+  `deploy/edge.example.yaml` and `deploy/kapkan-edge.service`.
 
 ## [1.7.0] - 2026-09-02
 
