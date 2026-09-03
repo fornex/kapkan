@@ -23,13 +23,27 @@ var (
 
 	// EdgeLogRecordsTotal counts access-log datagrams from the terminator by
 	// result: ok, malformed (no JSON, or fields the renderer never emits),
-	// oversized (a datagram that did not fit the receive buffer).
+	// oversized (a datagram that did not fit the receive buffer), dropped (the
+	// handler queue was full), unknown_zone (a zone the document does not
+	// have — a forged or stale line).
 	EdgeLogRecordsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "edge",
 		Name:      "log_records_total",
 		Help:      "Access-log datagrams received from the terminator, by result.",
 	}, []string{"result"})
+
+	// EdgeInflightResetsTotal counts in-flight concurrency counters the
+	// decision service reset because a busy source had seen no completion for
+	// a whole idle period — the access-log stream for it was lossy or dead, so
+	// the count was meaningless. A steady rate here means log datagrams are
+	// being lost (see net.unix.max_dgram_qlen).
+	EdgeInflightResetsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "inflight_resets_total",
+		Help:      "In-flight counters reset for lack of completions while a source stayed busy.",
+	})
 
 	// EdgeVerdictTableEntries is the number of live deny/mark entries in the
 	// decision service's verdict table.

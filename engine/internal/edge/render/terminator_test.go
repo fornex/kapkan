@@ -46,10 +46,12 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -198,10 +200,50 @@ func TestRealTerminator(t *testing.T) {
 			t.Fatal("the decision service was not consulted")
 		}
 		// The access log names the request, the port and the decision — what
-		// the rollup will aggregate and what closes the decider's in-flight slot.
+		// the rollup will aggregate and what closes the decider's in-flight
+		// slot — and its src is the very address the decider was asked about.
 		rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/probe?x=1" })
-		if rec.Zone != "example.com" || rec.Port != 443 || rec.Status != 403 || rec.Decision != "403" || rec.Method != "GET" || !rec.Decided() {
+		if rec.Zone != "example.com" || rec.Port != 443 || rec.Status != 403 || rec.Decision != "403" || rec.Method != "GET" || !rec.Decided() || rec.Host != "example.com" {
 			t.Errorf("access-log record: %+v", rec)
+		}
+		if client, err := netipParse(seen.req.Header.Get("X-Kapkan-Client")); err != nil || client != rec.Src {
+			t.Errorf("log src %v differs from the decider's client %q", rec.Src, seen.req.Header.Get("X-Kapkan-Client"))
+		}
+
+		// A denial's reason decides its status: rate → 429 + Retry-After,
+		// table → 403; both are logged with the reason.
+		d.setReason(403, "rate")
+		res429 := s.get(t, "example.com", "/limited")
+		res429.expect(t, 429, "")
+		if ra := res429.header.Get("Retry-After"); ra != "1" {
+			t.Errorf("Retry-After = %q on a rate denial", ra)
+		}
+		if rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/limited" }); rec.Status != 429 || rec.Decision != "403" || rec.Reason != "rate" {
+			t.Errorf("rate denial's record: %+v", rec)
+		}
+		d.setReason(403, "table:flood")
+		s.get(t, "example.com", "/banned").expect(t, 403, "")
+		if rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/banned" }); rec.Status != 403 || rec.Reason != "table:flood" {
+			t.Errorf("table denial's record: %+v", rec)
+		}
+
+		// Nothing the client sends can push the subrequest off the contract:
+		// 40 KiB of junk headers and a cookie never reach the decider, and the
+		// request is still decided (a 429, not an undecided 200).
+		junk := http.Header{"Cookie": {"session=" + strings.Repeat("c", 2000)}}
+		for i := 0; i < 40; i++ {
+			junk.Set(fmt.Sprintf("X-Junk-%d", i), strings.Repeat("j", 1000))
+		}
+		d.setReason(403, "rate")
+		s.request(t, "GET", true, "example.com", "/junk", "", junk).expect(t, 429, "")
+		seen = d.last()
+		if seen.req.URL.Path != "/decide" || seen.req.Header.Get("X-Junk-0") != "" || seen.req.Header.Get("Cookie") != "" || seen.req.Header.Get("X-Kapkan-Uri") != "/junk" {
+			t.Errorf("client headers reached the decider: %v", seen.req.Header)
+		}
+		// A control byte in a header value: nginx accepts it, the decider must
+		// never see it, and the decision still happens.
+		if line := s.rawRequest(t, "example.com", "GET /ctl HTTP/1.1\r\nHost: example.com\r\nX-Bad: a\x01b\r\nConnection: close\r\n\r\n"); !strings.Contains(line, " 429 ") {
+			t.Errorf("control byte in a client header: status line %q, want a decided 429", line)
 		}
 		if seen.req.Method != "GET" || seen.req.URL.Path != "/decide" {
 			t.Errorf("subrequest was %s %s, want GET /decide", seen.req.Method, seen.req.URL.Path)
@@ -257,6 +299,15 @@ func TestRealTerminator(t *testing.T) {
 		if crit := critLines(s.logs(t)); len(crit) > 0 {
 			t.Errorf("terminator logged at crit level:\n%s", strings.Join(crit, "\n"))
 		}
+
+		// The auth_request tax, measured through the terminator (edge-spec §5,
+		// §8): keep-alive GETs with a 200-answering decider versus a zone that
+		// does not decide. Logged, not gated — the runner's noise is not ours.
+		d.set(200, "")
+		p50, p99 := s.timeGets(t, "example.com", 200)
+		none := h.serve(t, "mode-none", "overhead")
+		n50, n99 := none.timeGets(t, "static.example.org", 200)
+		t.Logf("auth_request overhead through %s: decide p50 %v / p99 %v, none p50 %v / p99 %v, added p50 %v", image, p50, p99, n50, n99, p50-n50)
 	})
 	t.Run("serve/decide-closed/decider", func(t *testing.T) {
 		s := h.serve(t, "decide-closed", "decider")
@@ -511,7 +562,12 @@ func (h *harness) serve(t *testing.T, name, arm string) *served {
 	})
 	s.port443 = s.publishedPort(t, "443/tcp")
 	s.port80 = s.publishedPort(t, "80/tcp")
-	s.waitReady(t)
+	tlsZone := ""
+	for zone := range loadFixture(t, name).Certs {
+		tlsZone = zone
+		break
+	}
+	s.waitReady(t, tlsZone)
 	return s
 }
 
@@ -535,22 +591,92 @@ func (s *served) publishedPort(t *testing.T, port string) string {
 }
 
 // waitReady probes the published :80 — rendered for every zone, certificate
-// or not — until the terminator accepts, or reports a container that died.
-func (s *served) waitReady(t *testing.T) {
+// or not — until the terminator accepts, and, when the fixture has a TLS
+// zone, completes a TLS handshake with it: a worker that accepts on :80 may
+// still be a moment away from serving TLS (Angie reset the first handshake
+// once on CI), and the first assertion must not be that moment.
+func (s *served) waitReady(t *testing.T, tlsZone string) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
+	accepted := false
 	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", s.port80, time.Second)
-		if err == nil {
-			_ = c.Close()
-			return
+		if !accepted {
+			c, err := net.DialTimeout("tcp", s.port80, time.Second)
+			if err == nil {
+				_ = c.Close()
+				accepted = true
+			}
+		}
+		if accepted {
+			if tlsZone == "" {
+				return
+			}
+			d := &net.Dialer{Timeout: time.Second}
+			c, err := tls.DialWithDialer(d, "tcp", s.port443, &tls.Config{InsecureSkipVerify: true, ServerName: tlsZone})
+			if err == nil {
+				_ = c.Close()
+				return
+			}
 		}
 		if out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", s.id).Output(); err == nil && strings.TrimSpace(string(out)) == "false" {
 			t.Fatalf("terminator exited during start:\n%s", s.logs(t))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("terminator not accepting on %s after 20s", s.port80)
+	t.Fatalf("terminator not ready on %s / %s after 20s", s.port80, s.port443)
+}
+
+// rawRequest writes a request line and headers verbatim over TLS to the zone
+// and returns the status line — for headers Go's client refuses to send.
+func (s *served) rawRequest(t *testing.T, zone, raw string) string {
+	t.Helper()
+	d := &net.Dialer{Timeout: 5 * time.Second}
+	c, err := tls.DialWithDialer(d, "tcp", s.port443, &tls.Config{InsecureSkipVerify: true, ServerName: zone})
+	if err != nil {
+		t.Fatalf("tls dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.Write([]byte(raw)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, 4096)
+	n, err := c.Read(buf)
+	if err != nil && n == 0 {
+		t.Fatalf("read: %v", err)
+	}
+	line, _, _ := strings.Cut(string(buf[:n]), "\r\n")
+	return line
+}
+
+// timeGets measures n keep-alive GETs to the zone on one connection and
+// returns the p50 and p99 round trips.
+func (s *served) timeGets(t *testing.T, zone string, n int) (p50, p99 time.Duration) {
+	t.Helper()
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", s.port443)
+		},
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true, ServerName: zone},
+		MaxIdleConnsPerHost: 1,
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 10 * time.Second}
+	samples := make([]time.Duration, 0, n)
+	for i := 0; i < n+5; i++ {
+		start := time.Now()
+		resp, err := client.Get("https://" + zone + "/bench")
+		if err != nil {
+			t.Fatalf("GET %d: %v", i, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if i >= 5 { // the first few warm the connection and the caches
+			samples = append(samples, time.Since(start))
+		}
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	return samples[len(samples)/2], samples[len(samples)*99/100]
 }
 
 type response struct {
@@ -640,6 +766,7 @@ type decider struct {
 	mu     sync.Mutex
 	status int
 	mark   string
+	reason string
 	seen   *seenRequest
 }
 
@@ -651,7 +778,15 @@ type seenRequest struct {
 func (d *decider) set(status int, mark string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.status, d.mark = status, mark
+	d.status, d.mark, d.reason = status, mark, ""
+}
+
+// setReason answers status with an X-Kapkan-Reason, as the real service does
+// on a denial.
+func (d *decider) setReason(status int, reason string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.status, d.mark, d.reason = status, "", reason
 }
 
 func (d *decider) last() *seenRequest {
@@ -667,6 +802,9 @@ func (d *decider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	d.seen = &seenRequest{req: r.Clone(r.Context()), body: n}
 	if d.mark != "" {
 		w.Header().Set("X-Kapkan-Mark", d.mark)
+	}
+	if d.reason != "" {
+		w.Header().Set("X-Kapkan-Reason", d.reason)
 	}
 	w.WriteHeader(d.status)
 }
@@ -697,7 +835,7 @@ type logSink struct {
 func (h *harness) startLogSink(t *testing.T) *logSink {
 	t.Helper()
 	sink := &logSink{}
-	l := &rollup.Listener{Path: filepath.Join(h.work, "run", "log.sock"), Handle: func(r rollup.Record) {
+	l := &rollup.Listener{Path: filepath.Join(h.work, "run", "log.sock"), Mode: 0o666, Handle: func(r rollup.Record) {
 		sink.mu.Lock()
 		sink.recs = append(sink.recs, r)
 		sink.mu.Unlock()
@@ -734,7 +872,9 @@ func (s *logSink) wait(t *testing.T, match func(rollup.Record) bool) rollup.Reco
 }
 
 // serveUnix listens on <work>/run/<name> — the path the container sees as
-// /w/run/<name> — world-connectable so the terminator's worker user may use it.
+// /w/run/<name> — world-connectable so the terminator's worker user may use it
+// (a deployment uses 0660 and the worker's group; the container's uid is not
+// in any group of ours).
 func (h *harness) serveUnix(t *testing.T, name string, handler http.Handler) {
 	t.Helper()
 	path := filepath.Join(h.work, "run", name)
@@ -796,6 +936,11 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func netipParse(s string) (netip.Addr, error) {
+	a, err := netip.ParseAddr(s)
+	return a.Unmap(), err
 }
 
 // critLines returns the terminator's [crit] log lines, minus the syslog

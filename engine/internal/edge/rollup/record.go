@@ -9,11 +9,15 @@
 //
 // The wire is what the renderer emits (internal/edge/render): a datagram
 // `<PRI>Mmm dd hh:mm:ss kapkan: {json}` per request (nohostname, tag=kapkan),
-// with the fields of log_format kapkan_edge. Parse looks for the JSON and
-// ignores everything before it, so a hostname or a different tag would not
-// break it. Datagrams are fire-and-forget: a slow reader drops them at the
-// kernel's receive queue, which is acceptable for advisory rollups and is
-// counted when detectable (a datagram larger than the buffer).
+// with the fields of log_format kapkan_edge — among them the decision
+// service's answer for the request ("decision": its status, "reason": why it
+// denied, "mark": what it marked), so the rules can tell a client that ran
+// over its ceiling from one the verdict table already refuses. Parse looks for
+// the JSON and ignores everything before it, so a hostname or a different tag
+// would not break it. Datagrams are fire-and-forget: the kernel drops them
+// when the receive queue is full (net.unix.max_dgram_qlen, a COUNT of
+// datagrams — not SO_RCVBUF), which is acceptable for advisory rollups and is
+// counted when detectable.
 package rollup
 
 import (
@@ -23,6 +27,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -31,7 +36,9 @@ type Record struct {
 	// TS is the request's completion time as the terminator saw it.
 	TS   time.Time
 	Zone string
-	Src  netip.Addr
+	// Src is the client address as logged; Key is what it is accounted under
+	// (edgedoc.SourceKey: the address, or its /64).
+	Src netip.Addr
 	// Port is the server port the request arrived on: 443 for decided
 	// traffic, 80 for the redirect/ACME listener.
 	Port   int
@@ -50,12 +57,32 @@ type Record struct {
 	// (undecided, passed or refused by failure_mode), "" when the zone does
 	// not decide or the request never reached the decision (e.g. :80).
 	Decision string
+	// Reason is the decision service's X-Kapkan-Reason for a denial: "rate",
+	// "concurrency" or "table:<reason>"; "" otherwise.
+	Reason string
+	// Mark is the X-Kapkan-Mark the origin received; in dry-run a denial is
+	// a 200 with "would-deny:<reason>".
+	Mark string
 }
 
 // Decided reports whether the decision service answered this request (and so
 // opened an in-flight slot the decider must be told to close).
 func (r Record) Decided() bool {
 	return r.Decision == "200" || r.Decision == "403"
+}
+
+// Undecided reports a request the decision service could not answer.
+func (r Record) Undecided() bool {
+	return r.Decision != "" && !r.Decided()
+}
+
+// WouldDenyReason is the reason of a dry-run denial ("" when this request
+// was not one).
+func (r Record) WouldDenyReason() string {
+	if reason, ok := strings.CutPrefix(r.Mark, "would-deny:"); ok {
+		return reason
+	}
+	return ""
 }
 
 // ErrNoJSON is returned for a datagram without a JSON object.
@@ -79,10 +106,14 @@ type wire struct {
 	URT      string  `json:"urt"`
 	UA       string  `json:"ua"`
 	Decision string  `json:"decision"`
+	Reason   string  `json:"reason"`
+	Mark     string  `json:"mark"`
 }
 
 // Parse decodes one datagram. The syslog header (anything before the first
-// '{') is skipped; trailing NUL/newline is tolerated.
+// '{') is skipped; trailing NUL/newline is tolerated. Upstream variables nginx
+// joins across attempts ("502, 200" when a pooled connection had to be
+// retried) are reduced to the last attempt — the one that answered.
 func Parse(datagram []byte) (Record, error) {
 	i := bytes.IndexByte(datagram, '{')
 	if i < 0 {
@@ -109,6 +140,16 @@ func Parse(datagram []byte) (Record, error) {
 	}
 	return Record{
 		TS: ts, Zone: w.Zone, Src: src.Unmap(), Port: w.Port, Method: w.Method, Host: w.Host, URI: w.URI,
-		Status: w.Status, Bytes: w.Bytes, RT: w.RT, URT: w.URT, UA: w.UA, Decision: w.Decision,
+		Status: w.Status, Bytes: w.Bytes, RT: w.RT, URT: lastAttempt(w.URT), UA: w.UA,
+		Decision: lastAttempt(w.Decision), Reason: lastAttempt(w.Reason), Mark: lastAttempt(w.Mark),
 	}, nil
+}
+
+// lastAttempt reduces an nginx multi-attempt upstream variable ("502, 200")
+// to its final element.
+func lastAttempt(s string) string {
+	if i := strings.LastIndex(s, ","); i >= 0 {
+		return strings.TrimSpace(s[i+1:])
+	}
+	return strings.TrimSpace(s)
 }
