@@ -68,11 +68,15 @@ export KAPKAN_API_TOKEN=optok KAPKAN_EDGE_TOKEN=agenttok
 
 cleanup() {
   # Keep the logs where the host can read them (the container is --rm).
-  if [ -d /lab ]; then mkdir -p /lab/logs && cp -f /tmp/*.log /lab/logs/ 2>/dev/null; cp -f /tmp/zones.yaml /tmp/edge.yaml /tmp/brain.yaml /lab/logs/ 2>/dev/null; fi
-  pkill -f "$KAPKAN" 2>/dev/null; pkill -f "$PEBBLE" 2>/dev/null
-  pkill -f nginx 2>/dev/null; pkill -f origin.py 2>/dev/null
+  if [ -d /lab ]; then mkdir -p /lab/logs && cp -f /tmp/*.log /tmp/*.out /tmp/*.txt /tmp/hdr-* /lab/logs/ 2>/dev/null; cp -f /tmp/zones.yaml /tmp/edge.yaml /tmp/brain.yaml /lab/logs/ 2>/dev/null; fi
+  # Anchored patterns: the documented `sh -c '… KAPKAN=/lab/kapkan …'` parent
+  # carries these strings in its argv and must not be killed.
+  kill "$(cat /tmp/brain.pid 2>/dev/null)" "$(cat /tmp/edge-nginx.pid 2>/dev/null)" 2>/dev/null
+  pkill -f "^$KAPKAN " 2>/dev/null; pkill -f "^$PEBBLE " 2>/dev/null
+  pkill -f '^nginx: master' 2>/dev/null; pkill -f '^python3 /tmp/origin.py' 2>/dev/null; pkill -f '^python3 /tmp/flood.py' 2>/dev/null
   for ns in edge brain origin ca legit attacker bursty; do ip netns del "$ns" 2>/dev/null; done
   ip link del br0 2>/dev/null
+  sed -i "/ $ZONE\$/d;/ $ZONE2\$/d" /etc/hosts 2>/dev/null
 }
 trap cleanup EXIT
 cleanup
@@ -105,6 +109,9 @@ add_ns attacker 198.51.100.3 24 198.51.100.1
 # 10 s window is exactly what the rollups promote to a deny (arm G proves it),
 # and the legit client must stay legit for the whole run.
 add_ns bursty   203.0.113.4  24 203.0.113.1
+# One source address per burst-test, so no arm inherits a verdict the previous
+# arm's denials earned (the flood rule counts denials per source per window).
+for i in 5 6 7; do ip netns exec bursty ip addr add 203.0.113.$i/24 dev vbursty; done
 # The zone names resolve to the edge for everyone in the container — the CA's
 # validation fetch included, exactly as public DNS would.
 printf '%s %s\n%s %s\n' "$EDGE" "$ZONE" "$EDGE" "$ZONE2" >> /etc/hosts
@@ -142,7 +149,7 @@ cat > /tmp/pebble.json <<JSON
 JSON
 PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 ip netns exec ca "$PEBBLE" -config /tmp/pebble.json -strict=false >/tmp/pebble.log 2>&1 &
 for i in $(seq 1 30); do ip netns exec edge curl -sk -m1 https://$CA:14000/dir >/dev/null 2>&1 && break; sleep 0.3; done
-ip netns exec edge curl -sk -m2 https://$CA:14000/dir | grep -q newOrder && ok "Pebble directory is up" || bad "Pebble not answering (see /tmp/pebble.log)"
+grep -q newOrder <<< "$(ip netns exec edge curl -sk -m2 https://$CA:14000/dir)" && ok "Pebble directory is up" || bad "Pebble not answering (see /tmp/pebble.log)"
 
 # ---------------------------------------------------------------- the brain
 say "starting the brain with the zones file and the edge block"
@@ -231,7 +238,11 @@ YAML
 start_edge() {
   SSL_CERT_FILE=/tmp/pebble.crt ip netns exec edge "$KAPKAN" edge -config /tmp/edge.yaml -log-format text -log-level info >>/tmp/edge.log 2>&1 &
 }
-stop_edge() { pkill -f "$KAPKAN edge" 2>/dev/null; for i in $(seq 1 30); do pgrep -f "$KAPKAN edge" >/dev/null || break; sleep 0.2; done; }
+stop_edge() { # SIGTERM, then wait for the process to be gone — and say so if it is not
+  local t0=$(date +%s%N); pkill -f "^$KAPKAN edge" 2>/dev/null
+  for i in $(seq 1 100); do pgrep -f "^$KAPKAN edge" >/dev/null || break; sleep 0.1; done
+  pgrep -f "^$KAPKAN edge" >/dev/null && bad "the node did not stop within 10 s of SIGTERM" || echo "  (node stopped in $(( ($(date +%s%N) - t0) / 1000000 )) ms)"
+}
 status() { ip netns exec edge curl -s -m2 http://127.0.0.1:9102/healthz 2>/dev/null; }
 sfield() { status | python3 -c "import json,sys; d=json.load(sys.stdin); v=d.get('$1',''); print(v if not isinstance(v,bool) else str(v).lower())" 2>/dev/null; }
 wait_status() { # field value timeout-seconds
@@ -239,6 +250,14 @@ wait_status() { # field value timeout-seconds
 }
 # get NS URL [curl args...] -> http code
 get() { local ns=$1 url=$2; shift 2; ip netns exec "$ns" curl -s -o /dev/null -w '%{http_code}' -m5 --cacert /tmp/pebble-root.crt --resolve "$ZONE:443:$EDGE" --resolve "$ZONE2:443:$EDGE" "$@" "$url" 2>/dev/null; }
+# getsrc IP URL [curl args...] -> http code, from the bursty netns bound to IP
+getsrc() { local ip=$1 url=$2; shift 2; ip netns exec bursty curl -s -o /dev/null -w '%{http_code}' -m5 --interface "$ip" --cacert /tmp/pebble-root.crt --resolve "$ZONE:443:$EDGE" "$@" "$url" 2>/dev/null; }
+# alive -> the brain's poll-based liveness flag for the NODE (not the report's
+# terminator.alive, which a substring match would confuse it with)
+alive() { brain_api "http://$BRAIN:8080/api/v1/edge/nodes" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+sys.exit(0 if any(n.get('name')=='edge-1' and n.get('alive') is True for n in d.get('nodes',[])) else 1)" 2>/dev/null; }
 # report FIELD -> the node's report field as the brain returns it (JSON-decoded)
 report_field() { brain_api "http://$BRAIN:8080/api/v1/edge/nodes" | python3 -c "
 import json,sys
@@ -274,9 +293,14 @@ for i in $(seq 1 50); do [ "$(get legit https://$ZONE/hello)" = "200" ] && break
 [ "$(get legit https://$ZONE/hello)" = "200" ] && ok "TLS request to the zone is served through nginx to the origin" || bad "zone not served over TLS (see /tmp/edge-nginx-error.log)"
 grep -q "\"zone\": \"$ZONE\"" /tmp/origin.log && ok "origin received X-Kapkan-Zone" || bad "X-Kapkan-Zone did not reach the origin"
 [ "$(get legit http://$ZONE/hello)" = "301" ] && ok ":80 redirects to https" || bad ":80 did not redirect"
-[ "$(get legit https://203.0.113.10/ --resolve unknown.test:443:$EDGE -H 'Host: unknown.test')" != "200" ] && ok "an unknown host is refused by the catch-all" || bad "unknown host served"
+# An unknown SNI must hit the catch-all's ssl_reject_handshake (curl 000), not
+# be served by the first zone's server as nginx would without a catch-all.
+code=$(ip netns exec legit curl -sk -o /dev/null -w '%{http_code}' -m5 --resolve "unknown.test:443:$EDGE" https://unknown.test/ 2>/dev/null)
+[ "$code" = "000" ] && ok "an unknown SNI is refused by the catch-all (handshake rejected)" || bad "unknown SNI served ($code)"
+code=$(ip netns exec legit curl -s -o /dev/null -w '%{http_code}' -m5 -H 'Host: unknown.test' "http://$EDGE/" 2>/dev/null)
+[ "$code" != "200" ] && ok "an unknown Host on :80 is refused by the catch-all ($code)" || bad "unknown Host served on :80"
 GEN1=$(sfield generation); [ "$GEN1" -ge 2 ] 2>/dev/null && ok "issuance produced a new tested generation ($GEN1)" || bad "generation after issuance: $GEN1"
-brain_api "http://$BRAIN:8080/api/v1/edge/nodes" | grep -q '"edge-1"' && ok "the brain's inventory lists the node" || bad "node missing from the brain's inventory"
+grep -q '"edge-1"' <<< "$(brain_api "http://$BRAIN:8080/api/v1/edge/nodes")" && alive && ok "the brain's inventory lists the node as alive (its poll is the liveness signal)" || bad "node missing or not alive in the brain's inventory"
 sleep 1.5
 brain_api "http://$BRAIN:8080/api/v1/edge/nodes" | grep -q "\"generation\": *$GEN1" && ok "the node's report reached the brain with its live generation" || bad "no report with generation $GEN1 on the brain"
 
@@ -284,28 +308,38 @@ say "ARM B — dry-run marks, then live 429s"
 : > /tmp/origin.log
 # In a subshell: a bare `wait` in the main shell would wait for every service
 # started in the background above (origin, Pebble, brain, nginx, the node).
-( for i in $(seq 1 20); do get bursty https://$ZONE/burst-$i >/dev/null & done; wait )
+( for i in $(seq 1 20); do getsrc 203.0.113.4 https://$ZONE/burst-$i >/dev/null & done; wait )
 grep -q 'would-deny:rate' /tmp/origin.log && ok "dry-run: over-rate requests reached the origin marked would-deny:rate" || bad "no would-deny:rate mark at the origin in dry-run"
 [ "$(grep -c '"path"' /tmp/origin.log)" -ge 20 ] && ok "dry-run refused nothing (all 20 reached the origin)" || bad "dry-run dropped requests: $(grep -c '"path"' /tmp/origin.log)/20"
 stop_edge
+# Stopped for longer than stale_after_seconds (5): the brain's inventory flips
+# to dead — the poll, not the report, is the liveness signal.
+sleep 6
+alive && { bad "the brain still counts a stopped node as alive"; brain_api "http://$BRAIN:8080/api/v1/edge/nodes" | cut -c1-400; echo; } || ok "the brain counts the stopped node as lost (no poll for stale_after_seconds)"
 edge_yaml false
 start_edge
 wait_status healthy true 30 && ok "live node back up (started from disk, no re-issuance)" || bad "live node not healthy"
 grep -c 'certificate issued' /tmp/edge.log | grep -q '^1$' && ok "no second issuance on restart (the certificate was on disk)" || bad "restart re-issued the certificate"
+for i in $(seq 1 30); do alive && break; sleep 0.2; done; alive && ok "the brain counts the restarted node as alive again" || bad "restarted node not alive on the brain"
 sleep 1.2  # let the bucket refill after the dry-run burst
-codes=$(for i in $(seq 1 20); do get bursty https://$ZONE/live-$i & done; wait)
+# Headers are captured INSIDE the burst: a second sequential probe would race
+# the bucket's refill and add denials of its own.
+rm -f /tmp/hdr-*
+codes=$(for i in $(seq 1 20); do ip netns exec bursty curl -s -D /tmp/hdr-$i -o /dev/null -w '%{http_code}\n' -m5 --interface 203.0.113.5 --cacert /tmp/pebble-root.crt --resolve "$ZONE:443:$EDGE" https://$ZONE/live-$i 2>/dev/null & done; wait)
 echo "$codes" | grep -q 429 && ok "live: a 20-request burst at rps=5 gets 429s ($(echo "$codes" | grep -o 429 | wc -l | tr -d ' ') of 20)" || bad "no 429 in a live burst: $codes"
-for i in $(seq 1 8); do ip netns exec bursty curl -s -D - -o /dev/null -m5 --cacert /tmp/pebble-root.crt --resolve "$ZONE:443:$EDGE" https://$ZONE/ra-$i 2>/dev/null; done > /tmp/ra.txt
-grep -q ' 429' /tmp/ra.txt && grep -qi 'retry-after' /tmp/ra.txt && ok "a 429 carries Retry-After" || { bad "429 without Retry-After"; grep -i 'HTTP/\|retry' /tmp/ra.txt | head -6; }
+# No `cat … | grep -q` here: under pipefail a grep that stops at the first
+# match hands cat a SIGPIPE and the pipeline "fails" with the header present.
+grep -qi 'retry-after' /tmp/hdr-* 2>/dev/null && ok "a 429 carries Retry-After" || { bad "429 without Retry-After"; for f in /tmp/hdr-*; do grep -q '429' "$f" 2>/dev/null && { echo "  --- $f"; cat "$f"; break; }; done; }
 sleep 1.5
 [ "$(get legit https://$ZONE/slow)" = "200" ] && ok "a slow client passes" || bad "slow client refused ($(get legit https://$ZONE/slow2))"
 
 say "ARM C — fast path: a rate change never reloads nginx"
-GEN_BEFORE=$(sfield generation); RELOADS_BEFORE=$(grep -c 'configuration installed' /tmp/edge.log)
+GEN_BEFORE=$(sfield generation); RELOADS_BEFORE=$(grep -c 'configuration installed' /tmp/edge.log); ETAG_C=$(sfield accepted_etag)
 zones_yaml 100 "" ""; reload_brain
-for i in $(seq 1 50); do [ "$(sfield accepted_etag)" != "$(sfield zones_etag)" ] || { grep -q 'rps: 100' /tmp/zones.yaml && break; }; sleep 0.2; done
-sleep 1.5
-codes=$(for i in $(seq 1 20); do get bursty https://$ZONE/fast-$i & done; wait)
+for i in $(seq 1 50); do [ "$(sfield accepted_etag)" != "$ETAG_C" ] && break; sleep 0.2; done
+[ "$(sfield accepted_etag)" != "$ETAG_C" ] && ok "the node accepted the rate change (new ETag)" || bad "the rate change never reached the node"
+sleep 0.5
+codes=$(for i in $(seq 1 20); do getsrc 203.0.113.6 https://$ZONE/fast-$i & done; wait)
 echo "$codes" | grep -q 429 && bad "rate raised to 100 but the burst still got 429: $codes" || ok "the new rate (100 rps) is enforced: 20-request burst all served"
 [ "$(sfield generation)" = "$GEN_BEFORE" ] && ok "generation unchanged ($GEN_BEFORE): no render, no reload" || bad "a rate change produced a new generation ($GEN_BEFORE -> $(sfield generation))"
 [ "$(grep -c 'configuration installed' /tmp/edge.log)" = "$RELOADS_BEFORE" ] && ok "no 'configuration installed' line for the rate change" || bad "the rate change installed a configuration"
@@ -341,7 +375,7 @@ for i in $(seq 1 100); do [ -n "$(sfield test_error)" ] && break; sleep 0.2; don
 code=$(get legit https://$ZONE/still); [ "$code" = "200" ] && ok "requests are still served during the refusal" || bad "serving broke during a refused document (got $code)"
 sleep 1.5
 [ "$(report_field zones_etag)" = "$ETAG_GOOD" ] && ok "the brain's report names the RENDERED document" || bad "report does not carry the rendered ETag (report: $(report_field zones_etag), rendered: $ETAG_GOOD)"
-brain_api "http://$BRAIN:8080/api/v1/edge/nodes" | grep -q 'bogus_directive' && ok "the brain's report carries the tester's message" || bad "test error not reported to the brain"
+grep -q 'bogus_directive' <<< "$(brain_api "http://$BRAIN:8080/api/v1/edge/nodes")" && ok "the brain's report carries the tester's message" || bad "test error not reported to the brain"
 # Fix it: the next document applies at once (a newer document, not the retry).
 zones_yaml 100 "  - name: $ZONE2
     origins: [\"$ORIGIN:8081\"]
@@ -350,21 +384,45 @@ zones_yaml 100 "  - name: $ZONE2
 reload_brain
 wait_status converged true 30 && ok "fixed document converged again" || bad "did not converge after the fix: $(sfield last_error)"
 
-say "ARM F — kill the brain: the node keeps serving, restarts from disk, then re-syncs with a 304"
-pkill -f "$KAPKAN -config /tmp/brain.yaml" 2>/dev/null; sleep 1
+say "ARM F — kill the brain: the node keeps serving and deciding, restarts from disk, then re-syncs"
+ZONE2_YAML="  - name: $ZONE2
+    origins: [\"$ORIGIN:8081\"]
+    acme: { directory: \"https://$CA:14000/dir\" }
+    policy: { mode: none }"
+# Tighten the rate first: a 429 can only come from the local decision service,
+# so a 429 with the brain dead PROVES decisions continue (a plain 200 would be
+# what failure_mode: open answers with the decider dead too).
+ETAG_F=$(sfield accepted_etag); zones_yaml 5 "$ZONE2_YAML" ""; reload_brain
+for i in $(seq 1 50); do [ "$(sfield accepted_etag)" != "$ETAG_F" ] && break; sleep 0.2; done
+kill_brain() { kill "$(cat /tmp/brain.pid 2>/dev/null)" 2>/dev/null; for i in $(seq 1 30); do ip netns exec brain curl -s -m1 "http://$BRAIN:8080/healthz" >/dev/null 2>&1 || return 0; sleep 0.2; done; return 1; }
+kill_brain && ok "the brain is dead (its API no longer answers)" || bad "the brain is still answering"
 INSTALLS_BEFORE=$(installs)
 code=$(get legit https://$ZONE/nobrain); [ "$code" = "200" ] && ok "served with the brain dead" || bad "not served with the brain dead (got $code)"
-codes=$(for i in $(seq 1 20); do get attacker https://$ZONE/nobrain-$i & done; wait)
-echo "$codes" | grep -q 200 && ok "decisions are still made locally with the brain dead" || bad "no request decided with the brain dead: $codes"
+codes=$(for i in $(seq 1 20); do getsrc 203.0.113.7 https://$ZONE/nobrain-$i & done; wait)
+echo "$codes" | grep -q 429 && ok "decisions are still made locally with the brain dead (a 429 in a 20-request burst at rps=5)" || bad "no denial with the brain dead: $codes"
 stop_edge; start_edge
 wait_status healthy true 20 && ok "restarted node is serving from disk before the brain is back" || bad "restart with the brain dead did not come back"
 [ "$(sfield zones)" = "2" ] && [ "$(get legit https://$ZONE/afterrestart)" = "200" ] && ok "both zones and the certificates came from disk" || bad "disk start lost state"
 BRAIN_SEEN=$(sfield brain_seen)
-: > /tmp/brain.log; start_brain
-for i in $(seq 1 50); do [ "$(sfield brain_seen)" != "$BRAIN_SEEN" ] && break; sleep 0.2; done
+mv /tmp/brain.log /tmp/brain-1.log; start_brain
+for i in $(seq 1 100); do [ "$(sfield brain_seen)" != "$BRAIN_SEEN" ] && break; sleep 0.3; done
 [ "$(sfield brain_seen)" != "$BRAIN_SEEN" ] && ok "brain back: the node's poll reaches it again" || bad "node did not see the returned brain"
 sleep 1
-[ "$(installs)" = "$INSTALLS_BEFORE" ] && ok "re-sync with the unchanged document installed nothing (first poll answered 304)" || bad "re-sync with an unchanged document installed a generation ($INSTALLS_BEFORE -> $(installs))"
+# This first poll is a 200: the restarted brain forgot the fanned-out
+# challenges (10-minute TTL) that the node's cached document still carries, so
+# the ETags differ — but the render is identical and nothing is installed.
+[ "$(installs)" = "$INSTALLS_BEFORE" ] && ok "re-sync with an identical render installed nothing" || bad "re-sync installed a generation ($INSTALLS_BEFORE -> $(installs))"
+# A second cycle proves the 304 itself: the node now holds the challenge-free
+# document, so a restarted node's first poll presents an ETag the brain has.
+sleep 1; AE=$(sfield accepted_etag)
+kill_brain || bad "the brain is still answering (second cycle)"
+stop_edge; start_edge
+wait_status healthy true 20 || bad "second restart with the brain dead did not come back"
+BRAIN_SEEN=$(sfield brain_seen); INSTALLS_BEFORE=$(installs)
+mv /tmp/brain.log /tmp/brain-2.log; start_brain
+for i in $(seq 1 100); do [ "$(sfield brain_seen)" != "$BRAIN_SEEN" ] && break; sleep 0.3; done
+[ "$(sfield accepted_etag)" = "$AE" ] && [ "$(sfield brain_seen)" != "$BRAIN_SEEN" ] && ok "first poll after a restart answered 304 (the node's ETag is unchanged)" || bad "restart re-delivered the document (etag $AE -> $(sfield accepted_etag))"
+[ "$(installs)" = "$INSTALLS_BEFORE" ] && ok "nothing installed on the 304" || bad "a 304 installed a generation"
 
 say "ARM G — rollups promote a persistent over-rate source to a deny"
 zones_yaml 5 "  - name: $ZONE2

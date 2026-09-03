@@ -488,8 +488,17 @@ func (m *Manager) issue(ctx context.Context, zone, directory string, prev Cert, 
 		// the certificate once the order is valid. A finalize that really
 		// failed leaves the order short of valid and the original error stands.
 		o, werr := client.WaitOrder(octx, order.URI)
-		if werr != nil || o.Status != xacme.StatusValid || o.CertURL == "" {
-			return Cert{}, info, fmt.Errorf("finalize: %w", err)
+		if werr != nil {
+			// The CA's own verdict on the order, when it gave one, is the
+			// message that helps; the empty-URL symptom is not.
+			var oe *xacme.OrderError
+			if errors.As(werr, &oe) && oe.Problem != nil {
+				return Cert{}, info, fmt.Errorf("finalize: the order is %s afterwards: %s (%w)", oe.Status, oe.Problem.Detail, werr)
+			}
+			return Cert{}, info, fmt.Errorf("finalize: %w; polling the order afterwards: %v", err, werr)
+		}
+		if o.Status != xacme.StatusValid || o.CertURL == "" {
+			return Cert{}, info, fmt.Errorf("finalize: %w (the order is %q afterwards)", err, o.Status)
 		}
 		chain, err = client.FetchCert(octx, o.CertURL, true)
 		if err != nil {
