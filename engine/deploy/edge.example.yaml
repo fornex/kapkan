@@ -1,0 +1,82 @@
+# kapkan edge — the edge-node role (edge-spec §2.1). One file per node; the
+# zones themselves are never here: they come from the brain as the zone
+# document (edge.zones_file on the brain) and are cached under state_dir.
+#
+#   kapkan edge -config /etc/kapkan/edge.yaml -check    # validate and exit
+#   kapkan edge -config /etc/kapkan/edge.yaml           # run (see kapkan-edge.service)
+
+# Watch-only is the default for every remote role: decisions are counted and
+# marked (X-Kapkan-Mark: would-deny:<reason> reaches the origin), nothing is
+# refused. Set false once the rollups look right.
+dry_run: true
+
+controller:
+  # The brain's API base. https outside a lab: the agent token travels here.
+  url: https://kapkan.example.net:8443
+  # The environment variable holding this node's agent token (role: agent on
+  # the brain). Put it in /etc/kapkan/edge.env (chmod 600), never here.
+  token_env: KAPKAN_EDGE_TOKEN
+  # This node's name; it must equal an edge.nodes[] entry on the brain.
+  name: edge-1
+  # Self-report cadence (seconds). The poll, not the report, is liveness.
+  report_interval_seconds: 10
+
+# Where the cached document, the rendered generations (state_dir/conf/gen-N,
+# live/), the ACME account keys and certificates (0600) and the empty root
+# live. The terminator's WORKER must be able to traverse to
+# state_dir/empty (the unit's StateDirectoryMode=0711 does that).
+state_dir: /var/lib/kapkan/edge
+
+# The three unix sockets nginx talks to: edge-decide.sock, edge-challenge.sock,
+# edge-log.sock. The decide and log sockets are 0660, owned by kapkan and the
+# group below; the directory must be traversable by the worker (0755).
+sockets_dir: /run/kapkan
+# The terminator's worker group: nginx (Debian/Ubuntu nginx.org packages and
+# the docker image), www-data (Debian's own package), angie.
+socket_group: nginx
+
+terminator:
+  # nginx or angie.
+  binary: nginx
+  # Passed as -c to `nginx -t` and `nginx -s reload`; empty uses the compiled
+  # default. This file must include the live generation once, inside http{}:
+  #     include /var/lib/kapkan/edge/conf/live/*.conf;
+  # and must not declare its own default_server on :80/:443 unless
+  # omit_catch_all below is true.
+  main_conf: /etc/nginx/nginx.conf
+  # exec: `<binary> -s reload` (needs to signal nginx's master — run as root,
+  # as this unit does); signal: SIGHUP to the pid in pid_file; command: run an
+  # argv, e.g. [systemctl, reload, nginx].
+  reload: exec
+  # pid_file: /run/nginx.pid
+  # command: [systemctl, reload, nginx]
+
+acme:
+  # The default CA; a zone's own acme.directory overrides it. Let's Encrypt
+  # production when empty. Use the staging directory while setting up:
+  # https://acme-staging-v02.api.letsencrypt.org/directory
+  directory: ""
+  # Tried after three consecutive failures with the primary (the LE
+  # duplicate-certificate ceiling on a fleet, edge-spec §3). Optional.
+  fallback: ""
+  # Account contact, optional.
+  contact: ["mailto:ops@example.net"]
+  # External Account Binding for CAs that require one (ZeroSSL, Google Trust
+  # Services) — typically the fallback. The HMAC key is a secret: name the
+  # environment variable that holds it (put it in /etc/kapkan/edge.env).
+  # eab:
+  #   - directory: https://acme.zerossl.com/v2/DV90
+  #     kid: your-eab-kid
+  #     hmac_key_env: KAPKAN_EDGE_ZEROSSL_HMAC
+  # disabled: true          # a lab with its own certificates
+
+# /healthz (200 when a tested generation is live) and /metrics for this node.
+# Unauthenticated: keep it on loopback or a private address.
+status_listen: 127.0.0.1:9102
+
+# Only when the operator's nginx.conf already declares default servers on
+# :80/:443 (Debian's default site does): kapkan's catch-all would then fail
+# `nginx -t` with "a duplicate default server".
+omit_catch_all: false
+# Hosts without an IPv6 stack (binding [::] fails at start, not at -t).
+disable_ipv6: false
