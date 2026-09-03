@@ -117,6 +117,22 @@ security-relevant.
   `kapkan edge` section of the CLI reference with every `edge.yaml` key, the brain's `edge` block
   in the configuration reference, *The edge channel* in the API reference, the `kapkan_edge_*`
   series in the metrics reference, a README row — in all five languages.
+- Edge track, E3.7 — the E3 acceptance rig `engine/scripts/labnet/edge-e3.sh`: one privileged
+  container, a netns per role (brain, edge with stock nginx, origin, Pebble as a real ACME CA
+  validating HTTP-01 on the edge's `:80`, a legit client, an attacker), proving issuance through
+  the brain's slot and fan-out, dry-run marks then live `429`s, the fast path without a reload,
+  the slow path with one, a broken edit that never goes live, kill-brain with a restart from disk
+  and a `304` re-sync, rollup promotion to a deny, and the decision's latency. It caught two
+  traps, both fixed: a `live` directory created by hand (the install guide's own first draft
+  said to) wedged every install with *file exists* — the applier now removes an empty one and
+  refuses a populated one by name; and a fresh node's first certificate order was placed before
+  the first generation was live, failing its validation and backing off for an hour — the node
+  now wakes the ACME manager only after a document is rendered and live, and two seconds after
+  a reload (the old workers, which know nothing of a new zone, keep answering for a moment). A
+  third, against the
+  real CA: Pebble answers finalize with *processing* and no `Location` header, which leaves
+  `x/crypto/acme` polling an empty URL — the manager now polls the order URL it already knows
+  and fetches the certificate itself, and finalises where the ready order says to.
 
 ## [1.7.0] - 2026-09-02
 

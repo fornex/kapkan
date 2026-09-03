@@ -81,6 +81,11 @@ type fakeCA struct {
 	finalizeProcessing bool
 	// misissue signs the certificate for a fresh key instead of the CSR's.
 	misissue bool
+	// lateFinalize omits the order's finalize URL while it is pending.
+	lateFinalize bool
+	// finalizeNoLocation answers finalize without the order's Location header
+	// (Pebble), so a "processing" answer leaves the client nothing to poll.
+	finalizeNoLocation bool
 	// nonces issued and not yet used; badNonce for a reuse.
 	nonces map[string]bool
 }
@@ -290,8 +295,11 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		o.certPEM = append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: f.caCert.Raw})...)
 		// RFC 8555 §7.4: the finalize response carries the order's URL, which
-		// the client polls when the answer is "processing".
-		w.Header().Set("Location", base+"/order/"+o.id)
+		// the client polls when the answer is "processing" — unless the CA
+		// forgets it (Pebble does).
+		if !f.finalizeNoLocation {
+			w.Header().Set("Location", base+"/order/"+o.id)
+		}
 		if f.finalizeProcessing && !o.finalizing {
 			o.finalizing = true
 			o.status = "processing"
@@ -375,7 +383,11 @@ func (f *fakeCA) orderJSON(o *fakeOrder) map[string]any {
 		"status": o.status, "expires": f.now().Add(time.Hour).Format(time.RFC3339),
 		"identifiers":    []map[string]string{{"type": "dns", "value": o.zone}},
 		"authorizations": []string{f.srv.URL + "/authz/" + o.authz},
-		"finalize":       f.srv.URL + "/order/" + o.id + "/finalize",
+	}
+	// RFC 8555 puts the finalize URL on every order; a CA that fills it only
+	// once the order is ready must still work. Model both.
+	if !f.lateFinalize || o.status == "ready" || o.status == "processing" || o.status == "valid" {
+		m["finalize"] = f.srv.URL + "/order/" + o.id + "/finalize"
 	}
 	if o.status == "valid" {
 		m["certificate"] = f.srv.URL + "/cert/" + o.id

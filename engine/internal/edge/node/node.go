@@ -474,27 +474,42 @@ func (n *Node) acceptDocument(ctx context.Context, body []byte, etag string, per
 			n.log.Error("persisting the document failed; a restart with the brain gone would serve the previous one", "err", err)
 		}
 	}
-	if n.certs != nil {
-		// A fresh node's first document, or a zone added later, is issued
-		// now rather than at the manager's next hourly pass.
-		n.certs.Wake()
+	reloaded, err := n.renderAndApply(ctx)
+	if err == nil && n.certs != nil {
+		// A fresh node's first document, or a zone added later, is issued now
+		// rather than at the manager's next hourly pass — but only once the
+		// document is RENDERED and live: the :80 listener that answers the
+		// CA's HTTP-01 fetch is part of it, and an order placed before the
+		// first reload would fail its validation and back off for an hour.
+		// A reload is asynchronous — the old workers keep answering for a
+		// moment, and they know nothing of a new zone — so give the
+		// terminator that moment before a CA is asked to fetch from it.
+		if reloaded {
+			time.AfterFunc(reloadSettle, n.certs.Wake)
+		} else {
+			n.certs.Wake()
+		}
 	}
-	return n.renderAndApply(ctx)
+	return err
 }
+
+// reloadSettle is how long a reloaded terminator gets to bring its new
+// workers up before the ACME manager is woken to order for a new zone.
+const reloadSettle = 2 * time.Second
 
 // renderAndApply is the slow path: the terminator's configuration from the
 // document and the certificates this node holds, read INSIDE the
 // serialisation so two callers (the poller, the certificate hook) converge
 // on the newest state whatever their order. A failure schedules a local
-// retry.
-func (n *Node) renderAndApply(ctx context.Context) error {
+// retry. It reports whether the terminator was reloaded.
+func (n *Node) renderAndApply(ctx context.Context) (reloaded bool, err error) {
 	n.renderMu.Lock()
 	defer n.renderMu.Unlock()
 	n.mu.Lock()
 	doc, etag := n.doc, n.acceptedETag
 	n.mu.Unlock()
 	if doc == nil {
-		return nil
+		return false, nil
 	}
 	certs := map[string]render.Cert{}
 	if n.certs != nil {
@@ -512,7 +527,7 @@ func (n *Node) renderAndApply(ctx context.Context) error {
 		err = fmt.Errorf("render: %w", err)
 		n.record(apply.Result{}, err)
 		n.scheduleRetry()
-		return err
+		return false, err
 	}
 	res, err := n.applier.Apply(ctx, files)
 	n.record(res, err)
@@ -520,7 +535,7 @@ func (n *Node) renderAndApply(ctx context.Context) error {
 		if ctx.Err() == nil {
 			n.scheduleRetry()
 		}
-		return err
+		return false, err
 	}
 	n.mu.Lock()
 	n.renderedETag = etag
@@ -529,7 +544,7 @@ func (n *Node) renderAndApply(ctx context.Context) error {
 	if res.Changed {
 		n.log.Info("configuration installed", "generation", res.Generation, "reloaded", res.Reloaded, "zones", len(doc.Zones), "etag", etag)
 	}
-	return nil
+	return res.Reloaded, nil
 }
 
 // scheduleRetry arms the local retry of a document that did not apply,
@@ -555,8 +570,17 @@ func (n *Node) retryIfDue(ctx context.Context) {
 	}
 	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	if err := n.renderAndApply(rctx); err != nil && ctx.Err() == nil {
+	reloaded, err := n.renderAndApply(rctx)
+	if err != nil && ctx.Err() == nil {
 		n.log.Warn("retrying the refused document failed; will retry again", "err", err)
+	}
+	if err == nil && n.certs != nil {
+		// The retried document may carry a new zone too.
+		if reloaded {
+			time.AfterFunc(reloadSettle, n.certs.Wake)
+		} else {
+			n.certs.Wake()
+		}
 	}
 }
 
@@ -564,7 +588,7 @@ func (n *Node) retryIfDue(ctx context.Context) {
 func (n *Node) onCertificate(zone string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := n.renderAndApply(ctx); err != nil {
+	if _, err := n.renderAndApply(ctx); err != nil {
 		n.log.Error("re-rendering after a certificate change failed", "zone", zone, "err", err)
 	}
 }
