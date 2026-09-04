@@ -564,12 +564,17 @@ func (h *harness) serve(t *testing.T, name, arm string) *served {
 	})
 	s.port443 = s.publishedPort(t, "443/tcp")
 	s.port80 = s.publishedPort(t, "80/tcp")
+	fx := loadFixture(t, name)
 	tlsZone := ""
-	for zone := range loadFixture(t, name).Certs {
+	for zone := range fx.Certs {
 		tlsZone = zone
 		break
 	}
-	s.waitReady(t, tlsZone)
+	zone80 := ""
+	if len(fx.Doc.Zones) > 0 {
+		zone80 = fx.Doc.Zones[0].Name
+	}
+	s.waitReady(t, zone80, tlsZone)
 	return s
 }
 
@@ -593,18 +598,26 @@ func (s *served) publishedPort(t *testing.T, port string) string {
 }
 
 // waitReady probes the published :80 — rendered for every zone, certificate
-// or not — until the terminator accepts, and, when the fixture has a TLS
-// zone, completes a TLS handshake with it: a worker that accepts on :80 may
-// still be a moment away from serving TLS (Angie reset the first handshake
-// once on CI), and the first assertion must not be that moment.
-func (s *served) waitReady(t *testing.T, tlsZone string) {
+// or not — until the terminator ANSWERS a request for zone80 (any status: a
+// 301 to https or a no-certificate 503 both mean a worker is serving), and,
+// when the fixture has a TLS zone, completes a TLS handshake with it: a
+// worker that accepts on :80 may still be a moment away from serving TLS
+// (Angie reset the first handshake once on CI), and the first assertion must
+// not be that moment. A bare TCP connect is not proof of anything here: the
+// port is published through Docker's userland proxy, which accepts before
+// the container listens and resets the first real request (nginx:stable did
+// exactly that to the no-cert arm once on CI).
+func (s *served) waitReady(t *testing.T, zone80, tlsZone string) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	accepted := false
 	for time.Now().Before(deadline) {
 		if !accepted {
-			c, err := net.DialTimeout("tcp", s.port80, time.Second)
-			if err == nil {
+			if zone80 != "" {
+				if _, err := s.try("GET", false, zone80, "/", "", nil, 0); err == nil {
+					accepted = true
+				}
+			} else if c, err := net.DialTimeout("tcp", s.port80, time.Second); err == nil {
 				_ = c.Close()
 				accepted = true
 			}
