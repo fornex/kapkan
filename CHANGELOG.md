@@ -174,8 +174,11 @@ security-relevant.
   challenge is then a 200 marked `would-challenge:<why>`, as it is under the node's dry-run, so a
   zone shows who it would ask before it asks anyone; `challenge_options.exempt_paths` names path
   prefixes never challenged — the one place the edge reads a request path, for an exemption only,
-  and it reads nginx's normalised path (`X-Kapkan-Path`, dot segments merged), never the raw
-  target, so `/healthz/../admin` is `/admin`. The zones file accepts the three words and the
+  and it needs nginx's normalised path (`X-Kapkan-Path`, dot segments merged, forwarded only when
+  printable ASCII — a decoded control byte would otherwise make the subrequest malformed) AND the
+  raw target to agree, with no dot segment, path parameter or encoded slash in either, so
+  `/healthz/../admin`, `/healthz/..;/admin` and `/admin/..%2Fhealthz` are all challenged. The
+  zones file accepts the three words and the
   options (schema regenerated). The renderer emits the machinery for EVERY decide-mode zone —
   the cookie and path headers on the subrequest, `error_page 401 = @kapkan_clearance` to a
   named location that proxies the fourth socket (`edge-clearance.sock`, `upstream

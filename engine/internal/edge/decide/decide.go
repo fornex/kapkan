@@ -4,12 +4,17 @@
 //
 // THE CONTRACT is what the renderer emits (internal/edge/render): GET /decide
 // with X-Kapkan-Zone (the zone name, literal in the rendered config — trusted),
-// X-Kapkan-Client (the remote address), X-Kapkan-Method / -URI, the original
-// Host, and — the ONE client-controlled value, since E4.2 — X-Kapkan-Clearance,
-// the kapkan_clr cookie's value alone, bounded and verified here, never
-// trusted; the client's other headers are NOT forwarded
-// (proxy_pass_request_headers off), so nothing else a client sends can push
-// the subrequest off the contract. The answer is 200 (allow, optionally an
+// X-Kapkan-Client (the remote address), X-Kapkan-Method, the original Host,
+// and three CLIENT-DERIVED values, each shaped by nginx before it travels and
+// bounded here, none trusted: X-Kapkan-URI (the raw request target, which
+// nginx already refuses with control bytes), X-Kapkan-Path (the normalised,
+// decoded path, forwarded only when printable ASCII) and X-Kapkan-Clearance
+// (the kapkan_clr cookie's value, forwarded only when shaped like a token).
+// The shaping matters: a value Go's server would refuse as a malformed header
+// is a failed decision, and failure_mode: open would pass the request. The
+// client's own headers are NOT forwarded (proxy_pass_request_headers off), so
+// nothing else a client sends can push the subrequest off the contract. The
+// answer is 200 (allow, optionally an
 // X-Kapkan-Mark header the origin receives), 403 (deny) or 401 (challenge:
 // the client must clear the proof-of-work rung first), the last two with
 // X-Kapkan-Reason naming why — rate, concurrency, table:<reason>,
@@ -185,12 +190,17 @@ type Request struct {
 	Zone string
 	Src  netip.Addr
 	// Path is the request path as the terminator NORMALISED it (X-Kapkan-Path
-	// = nginx's $uri: dot segments merged, percent-decoding done, no query) —
-	// consulted ONLY against challenge_options.exempt_paths, never for a
-	// verdict of its own. The raw request target is not used: an origin
-	// resolves "/healthz/../admin" to /admin, and a prefix test on the raw
-	// form would exempt it.
-	Path string
+	// = nginx's $uri: dot segments merged, percent-decoding done, no query;
+	// absent when it was not printable ASCII) and RawURI the request target
+	// as the client sent it (X-Kapkan-URI). Both are consulted ONLY against
+	// challenge_options.exempt_paths, never for a verdict of their own — and
+	// an exemption needs BOTH to say so: an origin may normalise less than
+	// nginx ("/admin/..%2Fhealthz" is /healthz to nginx and an /admin route
+	// to many frameworks) or more ("/healthz/..;/admin" is /admin to a servlet
+	// container), so a path that reads differently in the two forms is not
+	// exempt.
+	Path   string
+	RawURI string
 	// Clearance is the kapkan_clr cookie's value ("" for none): the one
 	// client-controlled value the subrequest carries. Verified against the
 	// zone's keys, never trusted.
@@ -463,7 +473,7 @@ func (s *Service) DecideRequest(req Request) Verdict {
 			result = "allow_marked"
 		}
 		why := zs.challengeWhy(e, now)
-		if why != "" && pathExempt(zs.exempt, req.Path) {
+		if why != "" && pathExempt(zs.exempt, req.Path, req.RawURI) {
 			why = ""
 		}
 		if why == "" && e != nil && e.challenge {
@@ -558,25 +568,51 @@ func (zs *zoneState) challengeWhy(e *entry, now time.Time) string {
 	return ""
 }
 
-// pathExempt reports whether the request's normalised path starts with one
-// of the exempt prefixes. The path is nginx's $uri — dot segments already
-// merged — but a form that still carries one, a backslash or an encoded
-// byte is refused rather than trusted: the origin might read it differently.
-func pathExempt(exempt []string, path string) bool {
-	if len(exempt) == 0 || path == "" || path[0] != '/' {
+// pathExempt reports whether the request is exempt from the rung: its
+// NORMALISED path (nginx's $uri) and its RAW target (as the client sent it,
+// still percent-encoded, query cut off) must BOTH start with one exempt
+// prefix, and neither may carry anything an origin could read as a different
+// path than nginx did — a dot segment, a path parameter (';'), a backslash,
+// an encoded slash, dot or backslash, a byte outside printable ASCII. A path
+// that fails the test is simply not exempt: the rung applies.
+func pathExempt(exempt []string, path, rawURI string) bool {
+	if len(exempt) == 0 {
 		return false
 	}
-	path, _, _ = strings.Cut(path, "?")
-	if strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") || strings.Contains(path, "/./") ||
-		strings.HasSuffix(path, "/.") || strings.ContainsAny(path, "\\%") {
+	raw, _, _ := strings.Cut(rawURI, "?")
+	if !plainPath(path) || !plainPath(raw) {
+		return false
+	}
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%2e") {
 		return false
 	}
 	for _, p := range exempt {
-		if strings.HasPrefix(path, p) {
+		if strings.HasPrefix(path, p) && strings.HasPrefix(raw, p) {
 			return true
 		}
 	}
 	return false
+}
+
+// plainPath admits an absolute path of printable ASCII whose segments are
+// ordinary names: no "." or ".." (or a segment beginning with ".."), no ';',
+// no backslash.
+func plainPath(p string) bool {
+	if p == "" || p[0] != '/' || len(p) > 4096 {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if c := p[i]; c < 0x21 || c > 0x7e || c == ';' || c == '\\' {
+			return false
+		}
+	}
+	for _, seg := range strings.Split(p[1:], "/") {
+		if seg == "." || seg == ".." || strings.HasPrefix(seg, "..") {
+			return false
+		}
+	}
+	return true
 }
 
 // Challenge installs a challenge verdict for src in zone ("" = every zone)

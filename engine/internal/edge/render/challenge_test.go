@@ -63,7 +63,7 @@ func TestChallengeMachineryShape(t *testing.T) {
 	for _, want := range []string{
 		"proxy_set_header X-Kapkan-Clearance $kapkan_clr_safe;",
 		"set $kapkan_path $uri;",
-		"proxy_set_header X-Kapkan-Path $kapkan_path;",
+		"proxy_set_header X-Kapkan-Path $kapkan_path_safe;",
 		"error_page 401 = @kapkan_clearance;",
 		"location @kapkan_clearance {",
 		"recursive_error_pages on;",
@@ -81,7 +81,7 @@ func TestChallengeMachineryShape(t *testing.T) {
 	// Nothing rewrites the URI on the way to the page: a rewrite in the named
 	// location would follow a fallen-back request into @kapkan_pass and reach
 	// the origin as the page's path. The raw cookie never travels either.
-	for _, no := range []string{"rewrite ^", "$cookie_kapkan_clr;"} {
+	for _, no := range []string{"rewrite ^", "$cookie_kapkan_clr;", "X-Kapkan-Path $kapkan_path;", "X-Kapkan-Path $uri;"} {
 		if strings.Contains(zone, no) {
 			t.Errorf("decide-open zone contains %q", no)
 		}
@@ -103,6 +103,7 @@ func TestChallengeMachineryShape(t *testing.T) {
 	for _, want := range []string{
 		"upstream kapkan_clearance {", "server unix:/run/kapkan-edge/edge-clearance.sock;",
 		"map $cookie_kapkan_clr $kapkan_clr_safe {", `"~^[A-Za-z0-9._-]{1,512}$" $cookie_kapkan_clr;`,
+		"map $kapkan_path $kapkan_path_safe {", `"~^/[\x21-\x7e]{0,2048}\z" $kapkan_path;`,
 	} {
 		if !strings.Contains(common, want) {
 			t.Errorf("common file lacks %q", want)
