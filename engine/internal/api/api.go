@@ -133,6 +133,9 @@ type Server struct {
 	// edgeIssuance is the per-zone ACME slot and challenge fan-out table
 	// (edge_acme.go); its state is merged into the zones document.
 	edgeIssuance *issuanceCoordinator
+	// edgeClearance is the proof-of-work clearance keyring (edge_clearance.go);
+	// its per-zone keys are merged into the zones document.
+	edgeClearance *clearanceKeyring
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -142,17 +145,18 @@ type Server struct {
 // New creates the API server.
 func New(store *config.Store, eng *engine.Engine, mit *mitigate.Mitigator, log *slog.Logger) *Server {
 	return &Server{
-		store:        store,
-		eng:          eng,
-		mit:          mit,
-		log:          log.With("component", "api"),
-		start:        time.Now(),
-		active:       make(map[string]*Attack),
-		quit:         make(chan struct{}),
-		holds:        newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
-		edgeHolds:    newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
-		edgeIssuance: newIssuanceCoordinator(),
-		rulesHold:    rulesHoldMax,
+		store:         store,
+		eng:           eng,
+		mit:           mit,
+		log:           log.With("component", "api"),
+		start:         time.Now(),
+		active:        make(map[string]*Attack),
+		quit:          make(chan struct{}),
+		holds:         newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
+		edgeHolds:     newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
+		edgeIssuance:  newIssuanceCoordinator(),
+		edgeClearance: newClearanceKeyring(log),
+		rulesHold:     rulesHoldMax,
 	}
 }
 

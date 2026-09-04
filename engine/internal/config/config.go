@@ -864,6 +864,12 @@ type Edge struct {
 	// before the inventory counts it as lost (default 15). As with scrubbing
 	// nodes, a node parked in a long-poll hold counts as present.
 	StaleAfterSeconds int `yaml:"stale_after_seconds"`
+	// StateFile is a writable absolute path where the brain persists the edge
+	// fleet's clearance keys (the proof-of-work rung's signing masters,
+	// edge-spec §5) so a brain restart does not re-key the fleet and make
+	// every cleared visitor solve a puzzle again. Optional: empty keeps the
+	// keys in memory. Written 0600 — it is key material.
+	StateFile string `yaml:"state_file"`
 }
 
 // EdgeNode is one edge node the brain knows by name.
@@ -2447,6 +2453,12 @@ func (c *Config) validateEdge() error {
 	}
 	if e.StaleAfterSeconds < 1 {
 		return fmt.Errorf("edge.stale_after_seconds must be > 0, got %d", e.StaleAfterSeconds)
+	}
+	if e.StateFile != "" && !filepath.IsAbs(e.StateFile) {
+		return fmt.Errorf("edge.state_file must be an absolute path, got %q", e.StateFile)
+	}
+	if e.StateFile != "" && e.StateFile == c.Ban.StateFile {
+		return fmt.Errorf("edge.state_file %q must not be the same file as ban.state_file", e.StateFile)
 	}
 	return nil
 }
