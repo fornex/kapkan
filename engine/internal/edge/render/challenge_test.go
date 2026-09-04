@@ -62,7 +62,8 @@ func TestChallengeMachineryShape(t *testing.T) {
 	zone := string(files[render.ZoneFile("example.com")])
 	for _, want := range []string{
 		"proxy_set_header X-Kapkan-Clearance $kapkan_clr_safe;",
-		"proxy_set_header X-Kapkan-Path $uri;",
+		"set $kapkan_path $uri;",
+		"proxy_set_header X-Kapkan-Path $kapkan_path;",
 		"error_page 401 = @kapkan_clearance;",
 		"location @kapkan_clearance {",
 		"recursive_error_pages on;",
