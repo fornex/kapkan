@@ -333,16 +333,17 @@ func TestExpiredDocumentKeysDoNotWallEveryoneOut(t *testing.T) {
 	if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip, Clearance: cookieFor(t, local, "shop.example", edgedoc.SourceKey(ip).String(), c)}); !v.Allow || v.Mark != MarkCleared {
 		t.Fatalf("own key after the document's expired: %+v", v)
 	}
-	// With no live key at all (no entropy at start), the rung is off rather
-	// than a wall.
-	s2 := newService(t, c, z)
-	s2.mu.Lock()
-	for _, zs := range s2.zones {
-		zs.keys = nil
+	// With no LIVE key at all — a node without a local key (no entropy at
+	// start) whose document keys have expired — the rung is off rather than
+	// a wall: keys exist, none is live.
+	s2 := New(Options{Now: c.now})
+	s2.localMaster = nil
+	s2.SetZones(doc(z))
+	if keys := s2.Keys("shop.example"); len(keys) != 1 || keys[0].ID != "c1" {
+		t.Fatalf("keys without a local master: %+v", keys)
 	}
-	s2.mu.Unlock()
 	if v := s2.DecideRequest(Request{Zone: "shop.example", Src: ip}); !v.Allow || v.Challenge {
-		t.Fatalf("a zone with no live key challenged: %+v", v)
+		t.Fatalf("a zone with keys but no live key challenged: %+v", v)
 	}
 }
 
@@ -398,23 +399,53 @@ func TestDormantChallengeEntryKeepsTheMark(t *testing.T) {
 	}
 }
 
-// TestExemptPathsRefuseUnnormalisedForms pins the defence behind X-Kapkan-Path:
-// the terminator hands the decider a normalised path, and anything that still
-// looks unnormalised — a dot segment, a backslash, an encoded byte — is not
-// exempt, whatever prefix it starts with.
+// TestExemptPathsRefuseUnnormalisedForms pins the defence behind the two path
+// headers: an exemption needs the normalised path AND the raw target to start
+// with the prefix, and anything an origin could read differently from nginx
+// — a dot segment, a path parameter, a backslash, an encoded slash/dot, a
+// byte outside printable ASCII — is not exempt, whatever prefix it shows.
 func TestExemptPathsRefuseUnnormalisedForms(t *testing.T) {
 	c := newClock()
 	z, _ := challengeZone(t, "shop.example", edgedoc.ChallengeManual, 0)
 	z.Policy.ChallengeOptions.ExemptPaths = []string{"/healthz", "/api/"}
 	s := newService(t, c, z)
-	for _, p := range []string{"/healthz/../admin", "/healthz/..", "/healthz/./x", "/healthz/.", "/api/%2e%2e/admin", "/healthz\\..\\admin", "healthz", ""} {
-		if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.58"), Path: p}); v.Allow || !v.Challenge {
-			t.Fatalf("path %q was exempt: %+v", p, v)
+	ip := src("198.51.100.58")
+	refused := []struct{ path, raw string }{
+		{"/healthz/../admin", "/healthz/../admin"}, {"/healthz/..", "/healthz/.."}, {"/healthz/./x", "/healthz/./x"},
+		{"/api/%2e%2e/admin", "/api/%2e%2e/admin"}, {"/healthz\\..\\admin", "/healthz\\..\\admin"},
+		{"/healthz/..;/admin", "/healthz/..;/admin"},   // a servlet container reads ..; as ..
+		{"/healthz", "/admin/..%2Fhealthz"},            // nginx collapsed it; an /admin route elsewhere
+		{"/healthz", "/admin/..%2fhealthz?x=1"},        // lower-case escape, query
+		{"/healthz/x", "/healthz%2Fx"},                 // an encoded slash: one segment to some routers
+		{"/healthz", "/he%61lthz"},                     // an encoded letter is fine on its own, but...
+		{"/healthz", ""},                               // ...a missing raw target is not exempt
+		{"", "/healthz"},                               // nor a missing (unshaped) normalised path
+		{"healthz", "healthz"}, {"/healthz\x01", "/healthz%01"}, {"/héalthz", "/h%C3%A9althz"},
+		{"/api/x", "/API/x"},                           // prefixes are case-sensitive on both sides
+	}
+	for _, r := range refused {
+		if r.path == "/healthz" && r.raw == "/he%61lthz" {
+			continue // the one row that IS exempt, asserted below
+		}
+		if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: r.path, RawURI: r.raw}); v.Allow || !v.Challenge {
+			t.Fatalf("path %q raw %q was exempt: %+v", r.path, r.raw, v)
 		}
 	}
-	if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.58"), Path: "/healthz.old"}); !v.Allow {
-		// A plain prefix match — the operator asked for a prefix.
-		t.Fatalf("prefix match refused: %+v", v)
+	for _, ok := range []struct{ path, raw string }{
+		{"/healthz", "/healthz"}, {"/healthz.old", "/healthz.old?deep=1"}, {"/api/v1/x", "/api/v1/x"}, {"/healthz", "/he%61lthz"},
+	} {
+		if ok.raw == "/he%61lthz" {
+			// An encoded letter inside the prefix: the raw form no longer starts
+			// with the prefix, so it is NOT exempt — the operator's prefix is
+			// matched literally on both forms.
+			if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.60"), Path: ok.path, RawURI: ok.raw}); v.Allow {
+				t.Fatalf("encoded prefix letter exempted: %+v", v)
+			}
+			continue
+		}
+		if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.61"), Path: ok.path, RawURI: ok.raw}); !v.Allow || v.Challenge {
+			t.Fatalf("plain exempt path %q refused: %+v", ok.path, v)
+		}
 	}
 }
 
@@ -466,9 +497,8 @@ func TestHandlerContractChallenge(t *testing.T) {
 		}
 		if path != "" {
 			req.Header.Set(headerPath, path)
+			req.Header.Set(headerURI, path+"?raw=1")
 		}
-		// The raw target is not what exemptions read.
-		req.Header.Set("X-Kapkan-URI", "/healthz?raw=1")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec
@@ -487,7 +517,18 @@ func TestHandlerContractChallenge(t *testing.T) {
 		t.Fatalf("exempt path: %d", rec.Code)
 	}
 	if rec := do("", "/cart"); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("a raw X-Kapkan-URI under an exempt prefix must not exempt: %d", rec.Code)
+		t.Fatalf("a non-exempt path: %d", rec.Code)
+	}
+	// The normalised path alone (raw target elsewhere) does not exempt.
+	raw := httptest.NewRequest("GET", "/decide", nil)
+	raw.Header.Set(headerZone, "shop.example")
+	raw.Header.Set(headerClient, "198.51.100.60")
+	raw.Header.Set(headerPath, "/healthz")
+	raw.Header.Set(headerURI, "/admin/..%2Fhealthz")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, raw)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("normalised path exempt while the raw target says /admin: %d", rec.Code)
 	}
 	s.SetDryRun(true)
 	if rec := do("", "/"); rec.Code != 200 || rec.Header().Get(headerMark) != "would-challenge:manual" || rec.Header().Get(headerReason) != "challenge:manual" {

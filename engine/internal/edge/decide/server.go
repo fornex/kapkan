@@ -28,10 +28,11 @@ const (
 	headerClient = "X-Kapkan-Client"
 	headerMark   = "X-Kapkan-Mark"
 	headerReason = "X-Kapkan-Reason"
-	// headerPath is nginx's normalised, decoded request path ($uri: dot
-	// segments merged, percent-decoding done, no query) — what exempt_paths
-	// are matched against. Never the raw request target, which the origin
-	// would normalise differently from a prefix test.
+	// headerURI is the raw request target; headerPath nginx's normalised,
+	// decoded request path ($uri: dot segments merged, percent-decoding done,
+	// no query; forwarded only when printable ASCII). exempt_paths are matched
+	// against BOTH — an origin may normalise a target differently from nginx.
+	headerURI  = "X-Kapkan-URI"
 	headerPath = "X-Kapkan-Path"
 	// headerClearance carries the kapkan_clr cookie's value — the ONE
 	// client-controlled value the renderer forwards, and only when it is
@@ -84,7 +85,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		// Oversized is invalid, and not worth a byte of work.
 		clr = ""
 	}
-	v := s.Service.DecideRequest(Request{Zone: zone, Src: src.Unmap(), Path: r.Header.Get(headerPath), Clearance: clr})
+	v := s.Service.DecideRequest(Request{Zone: zone, Src: src.Unmap(), Path: r.Header.Get(headerPath), RawURI: r.Header.Get(headerURI), Clearance: clr})
 	if v.Mark != "" {
 		w.Header().Set(headerMark, v.Mark)
 	}

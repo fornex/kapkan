@@ -361,12 +361,36 @@ func TestRealTerminator(t *testing.T) {
 		if got := d.last().req.Header.Get("X-Kapkan-Clearance"); got != "" {
 			t.Errorf("an unshaped cookie was forwarded: %q", got)
 		}
-		// Exemptions are matched on nginx's NORMALISED path: the decider sees
-		// /admin for a dot-segment request, beside the raw target.
+		// Exemptions are matched on nginx's NORMALISED path beside the raw
+		// target: the decider sees /admin for a dot-segment request.
 		s.get(t, "example.com", "/healthz/../admin?x=1").expect(t, 200, "")
 		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/admin" || seen.req.Header.Get("X-Kapkan-Uri") != "/healthz/../admin?x=1" {
 			t.Errorf("path normalisation: %v", seen.req.Header)
 		}
+		// A percent-encoded control byte decodes into $uri; it must NOT reach
+		// the decider as a header byte (Go would refuse the subrequest — a
+		// failed decision, which fail-open would pass). The request is still
+		// DECIDED, with the path header simply absent.
+		d.set(403, "")
+		s.get(t, "example.com", "/x/%01?y=1").expect(t, 403, "")
+		if seen := d.last(); seen == nil || seen.req.Header.Get("X-Kapkan-Uri") != "/x/%01?y=1" || seen.req.Header.Get("X-Kapkan-Path") != "" {
+			t.Errorf("control byte in the decoded path: decider saw %v", seen)
+		}
+		s.get(t, "example.com", "/x/%7f").expect(t, 403, "")
+		if seen := d.last(); seen == nil || seen.req.Header.Get("X-Kapkan-Path") != "" {
+			t.Errorf("DEL in the decoded path: decider saw %v", seen)
+		}
+		// Non-ASCII decodes too, and is likewise not forwarded; ordinary
+		// paths are.
+		s.get(t, "example.com", "/caf%C3%A9").expect(t, 403, "")
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "" {
+			t.Errorf("non-ASCII path forwarded: %q", seen.req.Header.Get("X-Kapkan-Path"))
+		}
+		s.get(t, "example.com", "/plain/path.txt?q=1").expect(t, 403, "")
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/plain/path.txt" {
+			t.Errorf("plain path not forwarded: %q", seen.req.Header.Get("X-Kapkan-Path"))
+		}
+		d.set(200, "")
 
 		// The page's public endpoints are reachable from outside without a
 		// decision, GET/HEAD/POST with a small body, kapkan's headers only;
