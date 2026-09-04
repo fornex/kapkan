@@ -17,9 +17,10 @@ package api
 // visitor solves a puzzle once more — nodes keep verifying with the keys they
 // cached until the new document lands. The file is written as soon as memory
 // holds a master the file lacks (a path adopted by a reload mid-day, a save
-// that failed), not only at midnight; a file that is not a clearance state
-// file is never overwritten, so a mistyped path cannot destroy an operator's
-// file.
+// that failed), not only at midnight; a file that does not carry this file's
+// own kind tag is never overwritten, so a mistyped path cannot destroy an
+// operator's file — not the zones file, not the ban state, not a node's cache
+// (the last two are JSON with a version of their own).
 //
 // The document therefore carries SECRETS: an agent-token holder can mint
 // clearances for any zone (a bypass of the rung, never of the rate). The
@@ -52,8 +53,11 @@ const (
 	// live), so a cookie's TTL must stay well under the difference.
 	clearanceEpoch   = 24 * time.Hour
 	clearanceKeyLife = 2 * clearanceEpoch
-	// clearanceStateVersion marks the state file as ours: a file without it
-	// is somebody else's and is left alone.
+	// clearanceStateKind marks the state file as ours: a file without it is
+	// somebody else's and is left alone. A bare version number would not do
+	// — the ban state and a node's document cache are JSON with "version": 1
+	// too. clearanceStateVersion is this file's own shape version.
+	clearanceStateKind    = "kapkan-edge-clearance"
 	clearanceStateVersion = 1
 )
 
@@ -71,8 +75,15 @@ func (m clearanceMaster) valid() bool {
 
 // clearanceState is the persisted shape.
 type clearanceState struct {
+	Kind    string            `json:"kind"`
 	Version int               `json:"version"`
 	Masters []clearanceMaster `json:"masters"`
+}
+
+// ours reports whether decoded content is a clearance state file: the kind
+// tag, the version and the masters key all present.
+func (st clearanceState) ours() bool {
+	return st.Kind == clearanceStateKind && st.Version == clearanceStateVersion && st.Masters != nil
 }
 
 // clearanceKeyring holds the live masters and derives the document's keys.
@@ -145,7 +156,7 @@ func (k *clearanceKeyring) setPath(path string) {
 		return
 	default:
 		var st clearanceState
-		if err := json.Unmarshal(raw, &st); err != nil || st.Version != clearanceStateVersion {
+		if err := json.Unmarshal(raw, &st); err != nil || !st.ours() {
 			k.unusable = true
 			k.log.Error("edge.state_file is not a clearance state file; refusing to overwrite it, keys stay in memory (a restart re-keys the fleet) — fix the path or remove the file, then restart", "path", path)
 			return
@@ -250,20 +261,24 @@ func (k *clearanceKeyring) flushLocked() {
 	k.dirty, k.saveFailed = false, false
 }
 
-// saveLocked writes the state durably: a 0600 temp file in the same
-// directory, fsynced, renamed over the path, directory fsynced — so a crash
-// leaves either the old file or the new one, never a torn or empty husk.
+// saveLocked writes the state durably: a 0600 temp file beside the path,
+// fsynced, renamed over the path, directory fsynced — so a crash leaves
+// either the old file or the new one, never a torn or empty husk. The temp
+// name is FIXED (<path>.tmp): writes are serialised by the mutex, so a unique
+// name would buy nothing, and a crash mid-write then leaves at most one
+// husk, which the next write truncates and replaces rather than adding a
+// second file of key material beside it.
 func (k *clearanceKeyring) saveLocked() error {
-	raw, err := json.MarshalIndent(clearanceState{Version: clearanceStateVersion, Masters: k.masters}, "", "  ")
+	raw, err := json.MarshalIndent(clearanceState{Kind: clearanceStateKind, Version: clearanceStateVersion, Masters: k.masters}, "", "  ")
 	if err != nil {
 		return err
 	}
 	dir := filepath.Dir(k.path)
-	f, err := os.CreateTemp(dir, filepath.Base(k.path)+".*.tmp")
+	tmp := k.path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	tmp := f.Name()
 	cleanup := func(err error) error {
 		_ = f.Close()
 		_ = os.Remove(tmp)

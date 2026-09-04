@@ -21,7 +21,13 @@ var clearanceNow = time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 
 func testKeyring(t *testing.T, path string) *clearanceKeyring {
 	t.Helper()
-	k := newClearanceKeyring(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return testKeyringLogging(t, path, io.Discard)
+}
+
+// testKeyringLogging is testKeyring with the keyring's log captured in w.
+func testKeyringLogging(t *testing.T, path string, w io.Writer) *clearanceKeyring {
+	t.Helper()
+	k := newClearanceKeyring(slog.New(slog.NewTextHandler(w, nil)))
 	k.setPath(path)
 	return k
 }
@@ -177,8 +183,12 @@ func TestClearanceStateFileRoundTrip(t *testing.T) {
 		t.Fatalf("state file mode %o, want 600", st.Mode().Perm())
 	}
 	raw, _ := os.ReadFile(path)
-	if !strings.Contains(string(raw), `"c20260904"`) || !strings.Contains(string(raw), `"version": 1`) || strings.Contains(string(raw), s1) {
+	if !strings.Contains(string(raw), `"c20260904"`) || !strings.Contains(string(raw), `"kind": "kapkan-edge-clearance"`) || strings.Contains(string(raw), s1) {
 		t.Fatalf("state file content: %s", raw)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("temp files left after a save: %v", entries)
 	}
 	k2 := testKeyring(t, path)
 	s2, d2 := zoneSecret(t, k2, clearanceNow.Add(time.Hour))
@@ -189,40 +199,45 @@ func TestClearanceStateFileRoundTrip(t *testing.T) {
 	}
 	k4 := testKeyring(t, "")
 	zoneSecret(t, k4, clearanceNow)
-	entries, _ := os.ReadDir(dir)
+	entries, _ = os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Fatalf("a keyring without a path wrote files: %v", entries)
 	}
 }
 
 // TestClearanceStateFileNeverClobbersAForeignFile pins the guard behind a
-// mistyped path: content that is not a clearance state (an operator's YAML,
-// say) is left untouched and the keyring runs in memory; the empty husk a
-// crash can leave behind is ours to overwrite.
+// mistyped path: content that is not a clearance state — an operator's YAML,
+// the ban state or a node's document cache (both JSON carrying a bare
+// "version": 1 of their own) — is left untouched and the keyring runs in
+// memory; the empty husk a crash can leave behind is ours to overwrite.
 func TestClearanceStateFileNeverClobbersAForeignFile(t *testing.T) {
 	dir := t.TempDir()
-	foreign := filepath.Join(dir, "zones.yaml")
-	if err := os.WriteFile(foreign, []byte("zones:\n  - name: a.example\n"), 0o600); err != nil {
-		t.Fatal(err)
+	foreign := map[string]string{
+		"zones.yaml":  "zones:\n  - name: a.example\n",
+		"bans.json":   `{"version": 1, "saved_at": "2026-09-04T00:00:00Z", "host_bans": [{"ip": "203.0.113.9"}]}`,
+		"zones.json":  `{"version":1,"zones":[{"name":"a.example"}],"acme_challenges":[],"issuance_grants":[]}`,
+		"noname.json": `{"version": 1, "masters": []}`,
 	}
-	k := testKeyring(t, foreign)
-	s, _ := zoneSecret(t, k, clearanceNow)
-	if s == "" {
-		t.Fatal("no keys in memory-only mode")
-	}
-	raw, _ := os.ReadFile(foreign)
-	if string(raw) != "zones:\n  - name: a.example\n" {
-		t.Fatalf("a foreign file was overwritten: %s", raw)
-	}
-	// Next day's rotation must not touch it either.
-	zoneSecret(t, k, clearanceNow.Add(24*time.Hour))
-	raw, _ = os.ReadFile(foreign)
-	if string(raw) != "zones:\n  - name: a.example\n" {
-		t.Fatalf("a foreign file was overwritten on rotation: %s", raw)
+	for name, body := range foreign {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		k := testKeyring(t, path)
+		s, _ := zoneSecret(t, k, clearanceNow)
+		if s == "" {
+			t.Fatalf("%s: no keys in memory-only mode", name)
+		}
+		// Next day's rotation must not touch it either.
+		zoneSecret(t, k, clearanceNow.Add(24*time.Hour))
+		raw, _ := os.ReadFile(path)
+		if string(raw) != body {
+			t.Fatalf("%s: a foreign file was overwritten: %s", name, raw)
+		}
 	}
 	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 {
-		t.Fatalf("temp files left beside a foreign file: %v", entries)
+	if len(entries) != len(foreign) {
+		t.Fatalf("temp files left beside foreign files: %v", entries)
 	}
 
 	husk := filepath.Join(dir, "edge-state.json")
@@ -231,7 +246,7 @@ func TestClearanceStateFileNeverClobbersAForeignFile(t *testing.T) {
 	}
 	k2 := testKeyring(t, husk)
 	zoneSecret(t, k2, clearanceNow)
-	raw, _ = os.ReadFile(husk)
+	raw, _ := os.ReadFile(husk)
 	if !json.Valid(raw) || !strings.Contains(string(raw), `"c20260904"`) {
 		t.Fatalf("an empty husk was not replaced by the state: %q", raw)
 	}
@@ -266,7 +281,7 @@ func TestClearanceSetPathPersistsAtOnceAndMerges(t *testing.T) {
 	stale := filepath.Join(dir, "stale.json")
 	old, _ := clearance.NewSecret()
 	other, _ := clearance.NewSecret()
-	st := clearanceState{Version: clearanceStateVersion, Masters: []clearanceMaster{
+	st := clearanceState{Kind: clearanceStateKind, Version: clearanceStateVersion, Masters: []clearanceMaster{
 		{ID: "c20260903", Master: old, NotBefore: clearanceNow.Add(-36 * time.Hour), NotAfter: clearanceNow.Add(12 * time.Hour)},
 		{ID: "c20260904", Master: other, NotBefore: clearanceNow.Add(-12 * time.Hour), NotAfter: clearanceNow.Add(36 * time.Hour)},
 	}}
@@ -301,23 +316,34 @@ func TestClearanceSetPathPersistsAtOnceAndMerges(t *testing.T) {
 
 // TestClearanceSaveFailureIsRetried pins the dirty flag: a save that fails
 // (the state directory does not exist yet) is retried on the next snapshot
-// and succeeds once the operator fixes the directory — no midnight needed.
+// — logged once for the streak, not once per poll — and succeeds once the
+// operator fixes the directory, no midnight needed; recovery is logged once.
 func TestClearanceSaveFailureIsRetried(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "missing")
 	path := filepath.Join(dir, "edge-state.json")
-	k := testKeyring(t, path)
+	var logs bytes.Buffer
+	k := testKeyringLogging(t, path, &logs)
 	s, _ := zoneSecret(t, k, clearanceNow)
+	zoneSecret(t, k, clearanceNow.Add(time.Minute))
+	zoneSecret(t, k, clearanceNow.Add(2*time.Minute))
 	if _, err := os.Stat(path); err == nil {
 		t.Fatal("a file appeared in a missing directory")
+	}
+	if n := strings.Count(logs.String(), "level=ERROR"); n != 1 {
+		t.Fatalf("errors logged for one failure streak = %d, want 1:\n%s", n, logs.String())
 	}
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	zoneSecret(t, k, clearanceNow.Add(time.Minute))
+	zoneSecret(t, k, clearanceNow.Add(3*time.Minute))
+	zoneSecret(t, k, clearanceNow.Add(4*time.Minute))
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("save not retried after the directory appeared: %v", err)
 	}
-	if got, _ := zoneSecret(t, testKeyring(t, path), clearanceNow.Add(2*time.Minute)); got != s {
+	if n := strings.Count(logs.String(), "clearance keys persisted"); n != 1 {
+		t.Fatalf("recovery logged %d times, want 1:\n%s", n, logs.String())
+	}
+	if got, _ := zoneSecret(t, testKeyring(t, path), clearanceNow.Add(5*time.Minute)); got != s {
 		t.Fatal("the retried save persisted a different master")
 	}
 }
@@ -390,7 +416,9 @@ func TestEdgeZonesCarriesClearanceKeys(t *testing.T) {
 		if len(doc.Zones[0].ClearanceKeys) != 2 {
 			t.Fatalf("keys after rotation: %+v", doc.Zones[0].ClearanceKeys)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(s.rulesHold + 2*time.Second):
+		// Longer than the hold, so a deadline-driven answer reaches the
+		// branch above and fails the `took` check instead of timing out here.
 		t.Fatal("parked poll did not wake on the rotation")
 	}
 }

@@ -148,7 +148,8 @@ security-relevant.
   zone's key from it (deterministic, so the ETag moves exactly at the boundary and a parked poll
   wakes for it), and persists the masters to the new optional `edge.state_file` (0600, fsynced,
   written as soon as memory is ahead of the file — never only at midnight — and never over a
-  file that is not its own) so a restart does not re-key the fleet; to re-key deliberately,
+  file that does not carry its own kind tag, so a mistyped path cannot destroy the zones file,
+  the ban state or a node's cache) so a restart does not re-key the fleet; to re-key deliberately,
   stop the brain, delete the file, start it. The document now carries secrets: a node caches it
   0600 already. No node-side behaviour changes yet — the decision service and the challenge
   page follow in E4.2–E4.4.

@@ -31,12 +31,13 @@
 // the server keeps NO per-client state: a solution is checked by recomputing
 // the nonce for the checker's bucket and its two neighbours — the previous
 // one because solving takes time, the next one because the node that checks
-// may not be the node that issued and fleet clocks differ by seconds. A
-// puzzle therefore lives between two and six minutes, and MaxDifficulty is
-// set so the slowest client the package is written for solves well inside
-// the shortest of those windows. The return path is signed into the nonce,
-// so the answer endpoint can only send a client where the terminator said it
-// came from (no open redirect).
+// may not be the node that issued and fleet clocks differ by seconds. On
+// synchronised clocks a client therefore has between two and four minutes
+// after issue to answer (the floor is one full bucket); the third bucket
+// only keeps a lagging checker honest and widens what a checker accepts to
+// six minutes in total, never what an honest client can count on. The
+// return path is signed into the nonce, so the answer endpoint can only send
+// a client where the terminator said it came from (no open redirect).
 package clearance
 
 import (
@@ -64,11 +65,14 @@ const (
 )
 
 // Puzzle bounds. Difficulty is the number of leading zero bits the SHA-256 of
-// nonce||solution must have: 2^d hashes on average; 18 is a fraction of a
-// second on a laptop, a few seconds on a low-end phone. 22 is sixteen times
-// that — around a minute on that phone, with the geometric tail still inside
-// the two-minute floor of the puzzle window below; anything harder would time
-// honest clients out, so it is the ceiling whatever an operator asks for.
+// nonce||solution must have: 2^d hashes on average, with a geometric tail
+// (one solve in e takes more than twice the mean). The invariant the page
+// (E4.3) must keep: the MEAN solve time at the configured difficulty on the
+// slowest client it serves stays a small fraction of the two-minute window
+// floor, or honest clients time out. 18 is a fraction of a second natively
+// and a few seconds in a browser Worker; 22 is sixteen times that and the
+// ceiling whatever an operator asks for — beyond it a slow phone would need
+// the whole floor for the mean alone.
 const (
 	MinDifficulty     = 12
 	MaxDifficulty     = 22
@@ -79,8 +83,9 @@ const (
 	// input on the request path.
 	maxToken = 512
 	// nonceBucket is the puzzle nonce's time granularity; a solution is
-	// accepted for the checker's bucket, the one before and the one after,
-	// so a puzzle is valid for at least two and at most six minutes.
+	// accepted for the checker's bucket, the one before and the one after:
+	// an honest client on a synchronised clock has two to four minutes, a
+	// checker accepts across six.
 	nonceBucket = 2 * time.Minute
 	// maxReturnPath bounds the path signed into a puzzle.
 	maxReturnPath = 2048
