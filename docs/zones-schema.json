@@ -46,6 +46,16 @@
               "challenge_options": {
                 "additionalProperties": false,
                 "properties": {
+                  "cookie_ttl_seconds": {
+                    "maximum": 86400,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "difficulty": {
+                    "maximum": 22,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
                   "dry_run": {
                     "type": "boolean",
                     "x-optional": true

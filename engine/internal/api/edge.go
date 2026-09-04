@@ -110,12 +110,19 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 // otherwise.
 func challengeOptions(o config.ZoneChallengeOptions) *edgedoc.ChallengeOptions {
 	dry := o.DryRun == nil || *o.DryRun
-	if dry && len(o.ExemptPaths) == 0 {
+	difficulty, ttl := o.Difficulty, o.CookieTTLSeconds
+	if difficulty == edgedoc.DefaultChallengeDifficulty {
+		difficulty = 0
+	}
+	if ttl == edgedoc.DefaultCookieTTLSeconds {
+		ttl = 0
+	}
+	if dry && len(o.ExemptPaths) == 0 && difficulty == 0 && ttl == 0 {
 		return nil
 	}
 	paths := make([]string, len(o.ExemptPaths))
 	copy(paths, o.ExemptPaths)
-	return &edgedoc.ChallengeOptions{DryRun: dry, ExemptPaths: paths}
+	return &edgedoc.ChallengeOptions{DryRun: dry, ExemptPaths: paths, Difficulty: difficulty, CookieTTLSeconds: ttl}
 }
 
 // edgeDocBytes encodes the document once and derives its ETag from those same

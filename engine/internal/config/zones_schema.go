@@ -12,6 +12,8 @@ package config
 import (
 	"encoding/json"
 	"reflect"
+
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
 
 // zoneEnumValues mirrors the literals validateZone accepts. Paths are rooted at
@@ -32,6 +34,10 @@ var zoneEnumValues = map[string][]string{
 var zoneNumericBounds = map[string]map[string]float64{
 	"zones.policy.rate.rps":         {"minimum": 0},
 	"zones.policy.rate.concurrency": {"minimum": 0},
+	// 0 means "the default" for both rung knobs; otherwise the validator's
+	// range.
+	"zones.policy.challenge_options.difficulty":         {"minimum": 0, "maximum": maxChallengeDifficulty},
+	"zones.policy.challenge_options.cookie_ttl_seconds": {"minimum": 0, "maximum": edgedoc.MaxCookieTTLSeconds},
 }
 
 // GenerateZonesSchema returns the canonical JSON Schema for the zones file.
