@@ -41,6 +41,38 @@ func TestDecodeToleratesUnknownKeysAndNullArrays(t *testing.T) {
 	}
 }
 
+// TestDecodeWithoutClearanceKeysLeavesNil pins the E4.1 extension rule: a
+// zone from an older brain simply has no clearance keys (nil slice, key
+// absent on re-encode), and a zone with keys decodes them in order.
+func TestDecodeWithoutClearanceKeysLeavesNil(t *testing.T) {
+	old := `{"version":1,"zones":[{"name":"a.example","origins":["10.0.0.1:443"],"tls":{"min_version":"1.2"},` +
+		`"policy":{"mode":"decide","failure_mode":"open","challenge":"off","rate":{}}}],"acme_challenges":[],"issuance_grants":[]}`
+	d, err := Decode([]byte(old))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Zones[0].ClearanceKeys != nil {
+		t.Fatalf("clearance keys from an old document: %+v", d.Zones[0].ClearanceKeys)
+	}
+	body, _ := json.Marshal(d)
+	if strings.Contains(string(body), "clearance_keys") {
+		t.Fatalf("empty clearance keys were encoded: %s", body)
+	}
+	withKeys := `{"version":1,"zones":[{"name":"a.example","origins":["10.0.0.1:443"],"tls":{"min_version":"1.2"},` +
+		`"policy":{"mode":"decide","failure_mode":"open","challenge":"manual","rate":{}},` +
+		`"clearance_keys":[{"id":"c20260101","secret":"YQ","not_before":"2026-01-01T00:00:00Z","not_after":"2026-01-03T00:00:00Z"},` +
+		`{"id":"c20260102","secret":"Yg","not_before":"2026-01-02T00:00:00Z","not_after":"2026-01-04T00:00:00Z"}]}],` +
+		`"acme_challenges":[],"issuance_grants":[]}`
+	d, err = Decode([]byte(withKeys))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := d.Zones[0].ClearanceKeys
+	if len(keys) != 2 || keys[0].ID != "c20260101" || keys[1].Secret != "Yg" || d.Zones[0].Policy.Challenge != ChallengeManual {
+		t.Fatalf("decoded keys: %+v policy %+v", keys, d.Zones[0].Policy)
+	}
+}
+
 func TestDecodeRejectsMalformedJSON(t *testing.T) {
 	if _, err := Decode([]byte(`{"version":1,`)); err == nil {
 		t.Fatal("malformed body accepted")
@@ -64,6 +96,7 @@ func TestFrozenKeyNames(t *testing.T) {
 		ACMEFallback:        "https://fallback-ca.example/directory",
 		Policy:              Policy{Mode: ModeDecide, FailureMode: FailOpen, Challenge: ChallengeOff, Rate: Rate{RPS: 5, Concurrency: 2}},
 		ExtraDirectivesFile: "/etc/kapkan/extra/example.com.conf",
+		ClearanceKeys:       []ClearanceKey{{ID: "c20260102", Secret: "c2VjcmV0", NotBefore: at, NotAfter: at.Add(48 * time.Hour)}},
 	})
 	d.ACMEChallenges = append(d.ACMEChallenges, Challenge{Zone: "example.com", Token: "tok", KeyAuthorization: "tok.thumb", ExpiresAt: at})
 	d.IssuanceGrants = append(d.IssuanceGrants, Grant{Zone: "example.com", Node: "e1", ExpiresAt: at})
@@ -74,7 +107,8 @@ func TestFrozenKeyNames(t *testing.T) {
 	want := `{"version":1,"zones":[{"name":"example.com","origins":["10.0.0.1:443"],"tls":{"min_version":"1.2","h3":true},` +
 		`"acme_directory":"https://ca.example/directory","acme_fallback":"https://fallback-ca.example/directory",` +
 		`"policy":{"mode":"decide","failure_mode":"open","challenge":"off",` +
-		`"rate":{"rps":5,"concurrency":2}},"extra_directives_file":"/etc/kapkan/extra/example.com.conf"}],` +
+		`"rate":{"rps":5,"concurrency":2}},"extra_directives_file":"/etc/kapkan/extra/example.com.conf",` +
+		`"clearance_keys":[{"id":"c20260102","secret":"c2VjcmV0","not_before":"2026-01-02T03:04:05Z","not_after":"2026-01-04T03:04:05Z"}]}],` +
 		`"acme_challenges":[{"zone":"example.com","token":"tok","key_authorization":"tok.thumb","expires_at":"2026-01-02T03:04:05Z"}],` +
 		`"issuance_grants":[{"zone":"example.com","node":"e1","expires_at":"2026-01-02T03:04:05Z"}]}`
 	if string(body) != want {

@@ -477,6 +477,9 @@
           "minimum": 0,
           "type": "integer"
         },
+        "state_file": {
+          "type": "string"
+        },
         "zones_file": {
           "type": "string"
         }
