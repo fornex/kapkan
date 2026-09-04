@@ -4,17 +4,37 @@
 //
 // THE CONTRACT is what the renderer emits (internal/edge/render): GET /decide
 // with X-Kapkan-Zone (the zone name, literal in the rendered config — trusted),
-// X-Kapkan-Client (the remote address), X-Kapkan-Method / -URI and the
-// original Host; the client's own headers are NOT forwarded
-// (proxy_pass_request_headers off), so nothing a client sends can push the
-// subrequest off the contract. The answer is 200 (allow, optionally an
-// X-Kapkan-Mark header the origin receives) or 403 (deny) with X-Kapkan-Reason
-// naming why — rate, concurrency, or table:<reason>. Nothing else, ever:
-// auth_request would turn anything else into a failed decision, which the
-// zone's failure_mode then handles in nginx. The renderer maps a rate or
-// concurrency denial to 429 (+ Retry-After) and keeps 403 for a table denial,
-// and logs the reason, so the rollup can tell a client that ran over its
-// ceiling from one already denied.
+// X-Kapkan-Client (the remote address), X-Kapkan-Method / -URI, the original
+// Host, and — the ONE client-controlled value, since E4.2 — X-Kapkan-Clearance,
+// the kapkan_clr cookie's value alone, bounded and verified here, never
+// trusted; the client's other headers are NOT forwarded
+// (proxy_pass_request_headers off), so nothing else a client sends can push
+// the subrequest off the contract. The answer is 200 (allow, optionally an
+// X-Kapkan-Mark header the origin receives), 403 (deny) or 401 (challenge:
+// the client must clear the proof-of-work rung first), the last two with
+// X-Kapkan-Reason naming why — rate, concurrency, table:<reason>,
+// challenge:<why>. Nothing else, ever: auth_request honours exactly 2xx, 401
+// and 403 from the subrequest and turns anything else into a failed
+// decision, which the zone's failure_mode then handles in nginx. The renderer
+// maps a rate or concurrency denial to 429 (+ Retry-After), keeps 403 for a
+// table denial, sends a 401 to the clearance page, and logs the reason, so
+// the rollup can tell a client that ran over its ceiling from one already
+// denied or one asked to clear.
+//
+// THE RUNG (edge-spec §5, E4). A zone with policy.challenge manual challenges
+// every request that carries no valid clearance; one with auto challenges a
+// source the verdict table says to (Challenge, fed by the rollup — E4.4) or
+// everyone while the zone is flipped (SetZoneChallenge — E4.4/E4.6). A valid
+// clearance (a cookie the node or any node of the fleet signed under the
+// zone's keys, bound to this zone and this source key) passes with the mark
+// "cleared" (or "cleared:nojs"); rate and concurrency still apply to cleared
+// clients. Paths under challenge_options.exempt_paths are never challenged —
+// the one place a request path is read, for an exemption only. The rung has
+// its own dry-run per zone (challenge_options.dry_run, default true): a
+// challenge is then answered as an allow marked "would-challenge:<why>", as
+// it is under the node's dry-run, so an operator sees who would have been
+// asked before any zone asks anyone. Precedence: a table deny beats a
+// challenge, which beats a mark.
 //
 // WHAT IT ENFORCES. First, the zone's policy.rate — the per-source ceiling
 // edge-spec §2.2 assigns to the decision service so that tightening it under
@@ -62,12 +82,14 @@
 package decide
 
 import (
+	"encoding/base64"
 	"log/slog"
 	"net/netip"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/kapkan-io/kapkan/internal/edge/clearance"
 	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 	"github.com/kapkan-io/kapkan/internal/metrics"
 )
@@ -116,25 +138,60 @@ const (
 	ReasonUnknownZone = "unknown-zone"
 	ReasonModeNone    = "mode-none"
 	ReasonUntracked   = "untracked"
+	// ReasonChallenge prefixes a challenge's why: "challenge:manual",
+	// "challenge:zone:<reason>" (the zone is flipped), "challenge:table:<reason>"
+	// (this source is under a challenge verdict).
+	ReasonChallenge = "challenge"
+
+	// MarkCleared is the mark a request with a valid clearance carries to the
+	// origin; a no-JS clearance carries MarkClearedNoJS.
+	MarkCleared     = "cleared"
+	MarkClearedNoJS = "cleared:nojs"
+
+	// maxClearance bounds the cookie value the service will look at; the
+	// clearance package refuses anything longer without work.
+	maxClearance = 512
 )
 
 // Verdict is one decision.
 type Verdict struct {
-	// Allow is the answer: 200 or 403.
+	// Allow is the answer: 200, or (Challenge) 401, or 403.
 	Allow bool
+	// Challenge is true when the client must clear the rung first: a 401 the
+	// renderer sends to the clearance page. In dry-run it is answered as an
+	// allow marked would-challenge:<why>, with DryRun set.
+	Challenge bool
 	// Mark is the X-Kapkan-Mark the origin receives ("" for none). In dry-run
-	// a would-deny mark replaces any reputation mark for that request.
+	// a would-deny or would-challenge mark replaces any reputation mark for
+	// that request; a valid clearance marks "cleared".
 	Mark string
-	// Reason says what decided it (a Reason* constant, or "table:<reason>").
+	// Reason says what decided it (a Reason* constant, "table:<reason>" or
+	// "challenge:<why>").
 	Reason string
-	// DryRun is true when a deny was answered as an allow because the service
-	// is in dry-run; Reason still names the deny.
+	// DryRun is true when a deny or a challenge was answered as an allow
+	// because the service — or, for a challenge, the zone — is in dry-run;
+	// Reason still names what would have happened.
 	DryRun bool
 }
 
-// Denied reports whether the verdict is a denial (enforced or dry-run).
+// Denied reports whether the verdict is a denial or a challenge (enforced or
+// dry-run): the cases that carry a reason.
 func (v Verdict) Denied() bool {
 	return !v.Allow || v.DryRun
+}
+
+// Request is what one decision is about.
+type Request struct {
+	Zone string
+	Src  netip.Addr
+	// Path is the request URI as the terminator forwarded it (X-Kapkan-URI);
+	// consulted ONLY against challenge_options.exempt_paths — its path part,
+	// no query — never for a verdict of its own.
+	Path string
+	// Clearance is the kapkan_clr cookie's value ("" for none): the one
+	// client-controlled value the subrequest carries. Verified against the
+	// zone's keys, never trusted.
+	Clearance string
 }
 
 // Options configures a Service.
@@ -184,10 +241,27 @@ func (f *inflight) count(now time.Time) int {
 	return len(f.opens)
 }
 
+// zoneState is what the service holds per zone: the policy, the clearance
+// keys it verifies with (the document's, or the node's own ephemeral key when
+// the document carries none), and the zone-wide challenge flip.
+type zoneState struct {
+	pol    edgedoc.Policy
+	keys   []clearance.Key
+	exempt []string
+	// dryRun is challenge_options.dry_run: the rung is watch-only for this
+	// zone whatever the node's own dry-run says.
+	dryRun bool
+	// flipOn until flipUntil challenges every source of an auto zone (E4.4's
+	// zone-rps trigger, E4.6's override); flipWhy names the reason.
+	flipOn    bool
+	flipUntil time.Time
+	flipWhy   string
+}
+
 // Service decides. Safe for concurrent use.
 type Service struct {
 	mu        sync.Mutex
-	zones     map[string]edgedoc.Policy
+	zones     map[string]*zoneState
 	buckets   map[key]*bucket
 	perZone   map[string]int
 	inflight  map[key]*inflight
@@ -197,6 +271,10 @@ type Service struct {
 	now       func() time.Time
 	log       *slog.Logger
 	lastSweep time.Time
+	// localMaster derives the ephemeral per-zone key a zone gets when its
+	// document carries no clearance keys (an older brain): valid on this node
+	// alone, for the life of the process.
+	localMaster []byte
 }
 
 // New returns a Service with no zones: every request is answered allow with
@@ -211,8 +289,8 @@ func New(opts Options) *Service {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	return &Service{
-		zones:    map[string]edgedoc.Policy{},
+	s := &Service{
+		zones:    map[string]*zoneState{},
 		buckets:  make(map[key]*bucket),
 		perZone:  make(map[string]int),
 		inflight: make(map[key]*inflight),
@@ -222,19 +300,66 @@ func New(opts Options) *Service {
 		now:      opts.Now,
 		log:      opts.Logger.With("component", "edge-decide"),
 	}
+	if m, err := clearance.NewSecret(); err == nil {
+		s.localMaster = m
+	} else {
+		s.log.Error("no entropy for a local clearance key; zones without keys from the brain cannot challenge", "err", err)
+	}
+	return s
 }
 
 // SetZones replaces the per-zone policies with the document's. Tables of
-// zones no longer present are dropped by the next sweep; a changed rate takes
-// effect on the next decision — no restart, no reload.
+// zones no longer present are dropped by the next sweep; a changed rate or
+// challenge mode takes effect on the next decision — no restart, no reload. A
+// zone-wide challenge flip survives the replacement while the zone does.
 func (s *Service) SetZones(doc *edgedoc.Doc) {
-	zones := make(map[string]edgedoc.Policy, len(doc.Zones))
-	for _, z := range doc.Zones {
-		zones[z.Name] = z.Policy
-	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	zones := make(map[string]*zoneState, len(doc.Zones))
+	for i := range doc.Zones {
+		z := &doc.Zones[i]
+		st := &zoneState{pol: z.Policy, keys: s.keysFor(z), exempt: z.Policy.ExemptPaths(), dryRun: z.Policy.ChallengeDryRun()}
+		if old := s.zones[z.Name]; old != nil {
+			st.flipOn, st.flipUntil, st.flipWhy = old.flipOn, old.flipUntil, old.flipWhy
+		}
+		zones[z.Name] = st
+	}
+	for name := range s.zones {
+		if _, still := zones[name]; !still {
+			metrics.EdgeChallengeActive.DeleteLabelValues(name)
+		}
+	}
 	s.zones = zones
-	s.mu.Unlock()
+}
+
+// keysFor decodes a zone's clearance keys from the document; a zone that has
+// none gets the node's ephemeral key so it can still challenge on its own.
+func (s *Service) keysFor(z *edgedoc.Zone) []clearance.Key {
+	keys := make([]clearance.Key, 0, len(z.ClearanceKeys)+1)
+	for _, ck := range z.ClearanceKeys {
+		secret, err := base64.RawURLEncoding.DecodeString(ck.Secret)
+		if err != nil || len(secret) != clearance.SecretLen || ck.ID == "" {
+			continue
+		}
+		keys = append(keys, clearance.Key{ID: ck.ID, Secret: secret, NotBefore: ck.NotBefore, NotAfter: ck.NotAfter})
+	}
+	if len(keys) == 0 && s.localMaster != nil {
+		if secret, err := clearance.DeriveZoneKey(s.localMaster, z.Name); err == nil {
+			keys = append(keys, clearance.Key{ID: "local", Secret: secret, NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<40, 0)})
+		}
+	}
+	return keys
+}
+
+// Keys returns the clearance keys the service verifies zone's cookies with —
+// what the clearance page signs with (E4.3). Nil for an unknown zone.
+func (s *Service) Keys(zone string) []clearance.Key {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if zs := s.zones[zone]; zs != nil {
+		return zs.keys
+	}
+	return nil
 }
 
 // SetDryRun switches watch-only mode.
@@ -244,33 +369,85 @@ func (s *Service) SetDryRun(on bool) {
 	s.mu.Unlock()
 }
 
-// Decide answers one request from src in zone.
+// Decide answers one request from src in zone that carries no clearance and
+// no path — the E3 shape, kept for callers that have nothing more to say.
 func (s *Service) Decide(zone string, src netip.Addr) Verdict {
-	now := s.now()
-	k := key{zone: zone, src: edgedoc.SourceKey(src)}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.maybeSweep(now)
+	return s.DecideRequest(Request{Zone: zone, Src: src})
+}
 
-	pol, ok := s.zones[zone]
+// DecideRequest answers one request.
+func (s *Service) DecideRequest(req Request) Verdict {
+	now := s.now()
+	zone := req.Zone
+	k := key{zone: zone, src: edgedoc.SourceKey(req.Src)}
+	s.mu.Lock()
+	s.maybeSweep(now)
+	zs, ok := s.zones[zone]
 	if !ok {
+		s.mu.Unlock()
 		metrics.EdgeDecisionsTotal.WithLabelValues("unknown", "unknown_zone").Inc()
 		return Verdict{Allow: true, Reason: ReasonUnknownZone}
 	}
-	if pol.Mode != edgedoc.ModeDecide {
+	if zs.pol.Mode != edgedoc.ModeDecide {
+		s.mu.Unlock()
 		metrics.EdgeDecisionsTotal.WithLabelValues(zone, "mode_none").Inc()
 		return Verdict{Allow: true, Reason: ReasonModeNone}
 	}
+	// The clearance is verified OUTSIDE the lock: an HMAC per request must
+	// not serialise every zone on the node. The key slice is never mutated
+	// once set, so the snapshot is safe to read unlocked.
+	keys, rung := zs.keys, zs.pol.Challenge != edgedoc.ChallengeOff
+	s.mu.Unlock()
+	cleared := ""
+	if rung && req.Clearance != "" && len(req.Clearance) <= maxClearance && len(keys) > 0 {
+		if kind, ok := clearance.Verify(keys, zone, k.src.String(), req.Clearance, now); ok {
+			cleared = kind
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// The zones may have been replaced meanwhile; a verdict on a token under
+	// the keys of a moment ago is what any node a moment ago would have given.
+	if zs, ok = s.zones[zone]; !ok || zs.pol.Mode != edgedoc.ModeDecide {
+		metrics.EdgeDecisionsTotal.WithLabelValues("unknown", "unknown_zone").Inc()
+		return Verdict{Allow: true, Reason: ReasonUnknownZone}
+	}
+	pol := zs.pol
 
 	v := Verdict{Allow: true, Reason: ReasonAllow}
 	result := "allow"
-	if e := s.table.lookup(k, now); e != nil {
-		if e.deny {
-			v = Verdict{Reason: ReasonTable + ":" + e.reason}
-			result = "deny_table"
-		} else {
+	e := s.table.lookup(k, now)
+	switch {
+	case e != nil && e.deny:
+		v = Verdict{Reason: ReasonTable + ":" + e.reason}
+		result = "deny_table"
+	default:
+		if e != nil && e.mark != "" {
 			v.Mark = e.mark
 			result = "allow_marked"
+		}
+		why := zs.challengeWhy(e, now)
+		if why != "" && pathExempt(zs.exempt, req.Path) {
+			why = ""
+		}
+		switch {
+		case cleared != "":
+			// A valid clearance passes the rung, whether or not one is in
+			// force right now, and tells the origin so.
+			v.Mark = MarkCleared
+			if cleared == clearance.KindNoJS {
+				v.Mark = MarkClearedNoJS
+			}
+			result = "allow_cleared"
+		case why != "" && (zs.dryRun || s.dryRun):
+			v.Challenge, v.DryRun = true, true
+			v.Reason = ReasonChallenge + ":" + why
+			v.Mark = clipMark("would-challenge:" + why)
+			result = "would_challenge"
+		case why != "":
+			v = Verdict{Challenge: true, Reason: ReasonChallenge + ":" + why}
+			result = "challenge"
 		}
 	}
 	if v.Allow && pol.Rate.RPS > 0 {
@@ -291,11 +468,11 @@ func (s *Service) Decide(zone string, src netip.Addr) Verdict {
 			result = "deny_concurrency"
 		}
 	}
-	// Every decision — allow or deny — becomes one request nginx will log, and
-	// that log line is what closes it (Complete).
+	// Every decision — allow, deny or challenge — becomes one request nginx
+	// will log, and that log line is what closes it (Complete).
 	s.open(k, now)
 
-	if !v.Allow && s.dryRun {
+	if !v.Allow && !v.Challenge && s.dryRun {
 		v.DryRun = true
 		v.Allow = true
 		v.Mark = clipMark("would-deny:" + v.Reason)
@@ -305,10 +482,111 @@ func (s *Service) Decide(zone string, src netip.Addr) Verdict {
 	return v
 }
 
+// challengeWhy says whether the rung is in force for this request and why:
+// "" (no), "manual", "zone:<reason>" (the zone is flipped) or
+// "table:<reason>" (a challenge verdict for this source). A zone with no keys
+// cannot verify a clearance, so it cannot challenge either.
+func (zs *zoneState) challengeWhy(e *entry, now time.Time) string {
+	if len(zs.keys) == 0 {
+		return ""
+	}
+	switch zs.pol.Challenge {
+	case edgedoc.ChallengeManual:
+		return "manual"
+	case edgedoc.ChallengeAuto:
+		if zs.flipOn && now.Before(zs.flipUntil) {
+			return "zone:" + zs.flipWhy
+		}
+		if e != nil && e.challenge {
+			return "table:" + e.reason
+		}
+	}
+	return ""
+}
+
+// pathExempt reports whether the request's path (uri up to any '?') starts
+// with one of the exempt prefixes.
+func pathExempt(exempt []string, uri string) bool {
+	if len(exempt) == 0 || uri == "" {
+		return false
+	}
+	path, _, _ := strings.Cut(uri, "?")
+	for _, p := range exempt {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// Challenge installs a challenge verdict for src in zone ("" = every zone)
+// until ttl passes: the source must clear the rung on its next request. A
+// live deny outranks it; it outranks a mark. In effect only for zones whose
+// policy.challenge is auto.
+func (s *Service) Challenge(zone string, src netip.Addr, ttl time.Duration, reason string) bool {
+	now := s.now()
+	k := key{zone: zone, src: edgedoc.SourceKey(src)}
+	s.mu.Lock()
+	ok := s.table.setChallenge(k, sanitizeMark(reason), now.Add(ttl), now)
+	s.mu.Unlock()
+	if ok {
+		s.log.Info("challenge installed", "zone", zone, "src", k.src.String(), "ttl", ttl.String(), "reason", reason)
+	} else {
+		s.log.Warn("verdict table full; challenge not installed", "zone", zone, "src", k.src.String(), "reason", reason)
+	}
+	return ok
+}
+
+// Challenged reports whether src is under a live challenge verdict in zone
+// (the every-zone wildcard included) — and not under a deny, which outranks it.
+func (s *Service) Challenged(zone string, src netip.Addr) bool {
+	now := s.now()
+	k := key{zone: zone, src: edgedoc.SourceKey(src)}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.table.lookup(k, now)
+	return e != nil && e.challenge
+}
+
+// SetZoneChallenge flips a zone-wide challenge on until `until` (or off) with
+// a reason for the log and the report: every request of an auto zone is then
+// challenged. It returns false for a zone the service does not know.
+func (s *Service) SetZoneChallenge(zone string, on bool, until time.Time, reason string) bool {
+	s.mu.Lock()
+	zs := s.zones[zone]
+	if zs == nil {
+		s.mu.Unlock()
+		return false
+	}
+	zs.flipOn, zs.flipUntil, zs.flipWhy = on, until, sanitizeMark(reason)
+	active := 0.0
+	if on {
+		active = 1
+	}
+	metrics.EdgeChallengeActive.WithLabelValues(zone).Set(active)
+	s.mu.Unlock()
+	if on {
+		s.log.Info("zone-wide challenge on", "zone", zone, "until", until.UTC().Format(time.RFC3339), "reason", reason)
+	} else {
+		s.log.Info("zone-wide challenge off", "zone", zone)
+	}
+	return true
+}
+
+// ZoneChallenge reports the zone-wide flip: on, until when, why.
+func (s *Service) ZoneChallenge(zone string) (on bool, until time.Time, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if zs := s.zones[zone]; zs != nil && zs.flipOn && s.now().Before(zs.flipUntil) {
+		return true, zs.flipUntil, zs.flipWhy
+	}
+	return false, time.Time{}, ""
+}
+
 // Complete records that a decided request for (zone, src) was logged by the
 // terminator, closing one in-flight slot. The rollup calls it for every
-// access-log line whose decision field says the decider answered (200 or
-// 403); undecided requests never opened a slot.
+// access-log line whose decision field says the decider answered (200, 401
+// or 403); undecided requests never opened a slot.
 func (s *Service) Complete(zone string, src netip.Addr) {
 	now := s.now()
 	s.mu.Lock()
@@ -486,10 +764,16 @@ func (s *Service) maybeSweep(now time.Time) {
 	}
 }
 
-// sweep drops idle buckets and counters, expired verdicts, and everything
-// belonging to a zone that is no longer configured.
+// sweep drops idle buckets and counters, expired verdicts and zone flips, and
+// everything belonging to a zone that is no longer configured.
 func (s *Service) sweep(now time.Time) {
 	s.lastSweep = now
+	for name, zs := range s.zones {
+		if zs.flipOn && !now.Before(zs.flipUntil) {
+			zs.flipOn = false
+			metrics.EdgeChallengeActive.WithLabelValues(name).Set(0)
+		}
+	}
 	for k, b := range s.buckets {
 		if _, ok := s.zones[k.zone]; !ok || now.Sub(b.last) > idleAfter {
 			delete(s.buckets, k)

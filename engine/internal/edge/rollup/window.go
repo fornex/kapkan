@@ -42,6 +42,13 @@ type SourceStats struct {
 	// WouldDenyRate counts dry-run denials for rate/concurrency: a 200 the
 	// decision service marked would-deny. Flood evidence in watch-only mode.
 	WouldDenyRate uint64
+	// Challenged counts requests sent to the clearance page (a 401 decision);
+	// Cleared those that passed the rung with a valid clearance;
+	// WouldChallenge the dry-run challenges (a 200 marked would-challenge) —
+	// the "who would be challenged" set.
+	Challenged     uint64
+	Cleared        uint64
+	WouldChallenge uint64
 	// Errors4xx/5xx are origin (or terminator) statuses of decided or
 	// non-deciding requests — the decider's own 403s and undecided requests
 	// excluded, since neither says anything about the source.
@@ -64,12 +71,16 @@ type WindowStats struct {
 	// Undecided counts requests the decision service could not answer (its
 	// socket down or slow), passed or refused by the zone's failure_mode.
 	Undecided uint64
-	Status2xx uint64
-	Status3xx uint64
-	Status4xx uint64
-	Status5xx uint64
-	Bytes     uint64
-	RPS       float64
+	// Challenged counts requests sent to the clearance page; WouldChallenge
+	// the dry-run ones (answered as allow, marked would-challenge).
+	Challenged     uint64
+	WouldChallenge uint64
+	Status2xx      uint64
+	Status3xx      uint64
+	Status4xx      uint64
+	Status5xx      uint64
+	Bytes          uint64
+	RPS            float64
 	// Sources is the top-N by requests for OnWindow (the report); OnWindowFull
 	// receives every source. SourcesTotal is how many there were.
 	Sources      []SourceStats
@@ -183,13 +194,21 @@ func (a *Aggregator) Observe(r Record) {
 	}
 	decided := r.Decided()
 	denied := r.Decision == "403"
+	challenged := r.Challenged()
 	rateReason := r.Reason == "rate" || r.Reason == "concurrency"
 	wouldDeny := r.WouldDenyReason()
+	wouldChallenge := r.WouldChallengeReason() != ""
 	if decided {
 		zs.Decided++
 	}
 	if denied {
 		zs.Denied++
+	}
+	if challenged {
+		zs.Challenged++
+	}
+	if wouldChallenge {
+		zs.WouldChallenge++
 	}
 	if r.Undecided() {
 		zs.Undecided++
@@ -213,6 +232,9 @@ func (a *Aggregator) Observe(r Record) {
 		if decided {
 			ss.Decided++
 		}
+		if r.Cleared() {
+			ss.Cleared++
+		}
 		switch {
 		case denied:
 			ss.Denied++
@@ -221,8 +243,12 @@ func (a *Aggregator) Observe(r Record) {
 			} else {
 				ss.DeniedTable++
 			}
+		case challenged:
+			ss.Challenged++
 		case wouldDeny == "rate" || wouldDeny == "concurrency":
 			ss.WouldDenyRate++
+		case wouldChallenge:
+			ss.WouldChallenge++
 		case r.Undecided():
 			// Says nothing about the source.
 		case r.Status >= 500:

@@ -37,9 +37,28 @@
             "properties": {
               "challenge": {
                 "enum": [
-                  "off"
+                  "off",
+                  "manual",
+                  "auto"
                 ],
                 "type": "string"
+              },
+              "challenge_options": {
+                "additionalProperties": false,
+                "properties": {
+                  "dry_run": {
+                    "type": "boolean",
+                    "x-optional": true
+                  },
+                  "exempt_paths": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array",
+                    "x-optional": true
+                  }
+                },
+                "type": "object"
               },
               "failure_mode": {
                 "enum": [

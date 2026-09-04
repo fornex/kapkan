@@ -26,9 +26,13 @@ const (
 
 	headerZone   = "X-Kapkan-Zone"
 	headerClient = "X-Kapkan-Client"
+	headerURI    = "X-Kapkan-URI"
 	headerMark   = "X-Kapkan-Mark"
 	headerReason = "X-Kapkan-Reason"
-	decidePath   = "/decide"
+	// headerClearance carries the kapkan_clr cookie's value — the ONE
+	// client-controlled value the renderer forwards ($cookie_kapkan_clr).
+	headerClearance = "X-Kapkan-Clearance"
+	decidePath      = "/decide"
 
 	// maxHeaderBytes is what one subrequest may carry. The renderer forwards
 	// only its own headers (proxy_pass_request_headers off), so this is
@@ -70,18 +74,28 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "X-Kapkan-Zone and X-Kapkan-Client are required", http.StatusBadRequest)
 		return
 	}
-	v := s.Service.Decide(zone, src.Unmap())
+	clr := r.Header.Get(headerClearance)
+	if len(clr) > maxClearance {
+		// Oversized is invalid, and not worth a byte of work.
+		clr = ""
+	}
+	v := s.Service.DecideRequest(Request{Zone: zone, Src: src.Unmap(), Path: r.Header.Get(headerURI), Clearance: clr})
 	if v.Mark != "" {
 		w.Header().Set(headerMark, v.Mark)
 	}
 	if v.Denied() {
 		w.Header().Set(headerReason, v.Reason)
 	}
-	if v.Allow {
+	switch {
+	case v.Allow:
 		w.WriteHeader(http.StatusOK)
-		return
+	case v.Challenge:
+		// The renderer's error_page 401 sends the request to the clearance
+		// page; the client sees that page's status, never this 401.
+		w.WriteHeader(http.StatusUnauthorized)
+	default:
+		w.WriteHeader(http.StatusForbidden)
 	}
-	w.WriteHeader(http.StatusForbidden)
 }
 
 // ListenAndServe serves on the unix socket until ctx is done, then removes

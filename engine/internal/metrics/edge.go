@@ -10,8 +10,10 @@ import (
 var (
 	// EdgeDecisionsTotal counts decision-service verdicts. The zone label is
 	// bounded by the zones document (an unknown zone is reported as "unknown",
-	// never by its claimed name). result: allow, allow_marked, deny_rate,
-	// deny_concurrency, deny_table, would_deny (a dry-run deny, answered as
+	// never by its claimed name). result: allow, allow_marked, allow_cleared
+	// (a valid clearance cookie passed the rung), deny_rate, deny_concurrency,
+	// deny_table, challenge (a 401: the client must clear the rung),
+	// would_deny / would_challenge (a dry-run deny or challenge, answered as
 	// allow), unknown_zone, untracked (the per-source tables were full and the
 	// request passed undecided), bad_request (a subrequest off the contract).
 	EdgeDecisionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -20,6 +22,16 @@ var (
 		Name:      "decisions_total",
 		Help:      "Decision-service verdicts, by zone and result.",
 	}, []string{"zone", "result"})
+
+	// EdgeChallengeActive is 1 while a zone-wide challenge is in force on this
+	// node (every request of the zone is challenged), 0 otherwise. The reason
+	// is a log line and a report field, not a label.
+	EdgeChallengeActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "challenge_active",
+		Help:      "1 while a zone-wide challenge is in force on this node, 0 otherwise.",
+	}, []string{"zone"})
 
 	// EdgeLogRecordsTotal counts access-log datagrams from the terminator by
 	// result: ok, malformed (no JSON, or fields the renderer never emits),
