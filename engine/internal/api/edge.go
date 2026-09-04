@@ -116,12 +116,20 @@ func edgeDocBytes(doc EdgeDoc) (body []byte, etag string, err error) {
 }
 
 // edgeSnapshot builds the current document: the zones from the config store,
-// plus the live issuance slots and fanned-out challenges (edge_acme.go).
-// buildEdgeDoc stays pure; the coordinator adds only entries whose times are
-// fixed for their lifetime, so the ETag moves exactly when there is news.
+// plus the live issuance slots and fanned-out challenges (edge_acme.go) and
+// each zone's clearance keys (edge_clearance.go). buildEdgeDoc stays pure; the
+// coordinator adds only entries whose times are fixed for their lifetime and
+// the keyring's keys change only at an epoch boundary, so the ETag moves
+// exactly when there is news.
 func (s *Server) edgeSnapshot() ([]byte, string, error) {
-	doc := buildEdgeDoc(s.store.Get().ZonesCfg)
-	s.edgeIssuance.fill(&doc, time.Now())
+	cfg := s.store.Get()
+	doc := buildEdgeDoc(cfg.ZonesCfg)
+	now := time.Now()
+	s.edgeIssuance.fill(&doc, now)
+	if cfg.Edge != nil {
+		s.edgeClearance.setPath(cfg.Edge.StateFile)
+	}
+	s.edgeClearance.fill(&doc, now)
 	return edgeDocBytes(doc)
 }
 
@@ -206,6 +214,7 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		// keeps holding when the document is unchanged.
 		changed := s.store.Changed()
 		acmeChanged := s.edgeIssuance.Changed()
+		keysChanged := s.edgeClearance.Changed()
 		body, cur, err := s.edgeSnapshot()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "encoding zones document failed")
@@ -215,22 +224,37 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 			writeRuleDoc(w, body, cur)
 			return
 		}
+		// A clearance epoch begins at a fixed instant (UTC midnight) and no
+		// goroutine owns the keyring, so a parked poll wakes itself for it:
+		// the snapshot it then takes is what rotates the keys and notifies
+		// every other holder.
+		rotate := time.NewTimer(s.edgeClearance.untilNextChange(time.Now()))
 		select {
 		case <-r.Context().Done():
+			rotate.Stop()
 			return
 		case <-s.quit:
 			// Shutting down: answer NOW so Shutdown is not stalled behind a
 			// parked poll. Verified, not assumed — a reload may have landed.
+			rotate.Stop()
 			s.endEdgeHold(w, etag)
 			return
 		case <-deadline.C:
+			rotate.Stop()
 			s.endEdgeHold(w, etag)
 			return
 		case <-changed:
 			// Woken by a reload; loop to rebuild and compare.
+			rotate.Stop()
 		case <-acmeChanged:
 			// Woken by a slot or challenge; a CA may be validating within
 			// seconds, so this must not wait for the deadline.
+			rotate.Stop()
+		case <-keysChanged:
+			// Woken by a clearance rotation another snapshot performed.
+			rotate.Stop()
+		case <-rotate.C:
+			// An epoch boundary; the next snapshot rotates the keys.
 		}
 	}
 }

@@ -37,7 +37,13 @@ const (
 	FailOpen   = "open"
 	FailClosed = "closed"
 
-	ChallengeOff = "off"
+	// policy.challenge: off (no proof-of-work rung), manual (every request
+	// without a clearance is challenged), auto (the node's rollups decide when
+	// a source or the whole zone is challenged). E4; the zones file accepts
+	// only off until the decision service can act on the others.
+	ChallengeOff    = "off"
+	ChallengeManual = "manual"
+	ChallengeAuto   = "auto"
 
 	TLS12 = "1.2"
 	TLS13 = "1.3"
@@ -77,6 +83,24 @@ type Zone struct {
 	ACMEFallback        string `json:"acme_fallback,omitempty"`
 	Policy              Policy `json:"policy"`
 	ExtraDirectivesFile string `json:"extra_directives_file,omitempty"`
+	// ClearanceKeys are the zone's live proof-of-work clearance keys (E4:
+	// edge-spec §5), the current epoch's and the previous one's, sorted by
+	// NotBefore. A node verifies a clearance cookie with any of them and
+	// issues under the newest; a node that receives none (an older brain)
+	// mints an ephemeral key valid on itself alone. Added in E4.1 — an
+	// omitempty extension; the secrets make the document sensitive, which is
+	// why a node caches it 0600.
+	ClearanceKeys []ClearanceKey `json:"clearance_keys,omitempty"`
+}
+
+// ClearanceKey is one clearance key: an opaque ID (the brain's epoch), the
+// 32-byte secret as base64url without padding, and the window in which
+// clearances signed with it are honoured.
+type ClearanceKey struct {
+	ID        string    `json:"id"`
+	Secret    string    `json:"secret"`
+	NotBefore time.Time `json:"not_before"`
+	NotAfter  time.Time `json:"not_after"`
 }
 
 // TLS mirrors config.ZoneTLS.
