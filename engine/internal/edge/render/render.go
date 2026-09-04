@@ -293,6 +293,11 @@ type commonData struct {
 	// HashBucketSize is server_names_hash_bucket_size, or 0 when every zone
 	// name fits nginx's default bucket.
 	HashBucketSize int
+	// HasDecide is true when at least one zone renders a deciding TLS server:
+	// the map that shapes the decision subrequest's path references
+	// $kapkan_path, which only such a server's location / declares (set), and
+	// nginx refuses a map over a variable nothing declares.
+	HasDecide bool
 }
 
 // zoneData is one zone with every decision already made. The template only
@@ -356,6 +361,11 @@ func Render(in Inputs) (Files, error) {
 	for i := range zones {
 		if zones[i].AllowsTLS12 {
 			common.NodeSSLProtocols = sslProtocolsTLS12
+		}
+		if zones[i].Decide && zones[i].HasCert {
+			// Only a zone with a certificate renders the TLS server whose
+			// location / declares $kapkan_path.
+			common.HasDecide = true
 		}
 		if l := len(zones[i].Name); l > longest {
 			longest = l
