@@ -65,6 +65,7 @@ func TestChallengeMachineryShape(t *testing.T) {
 		"error_page 401 = @kapkan_clearance;",
 		"location @kapkan_clearance {",
 		"rewrite ^ /_kapkan/clearance/challenge break;",
+		"recursive_error_pages on;",
 		"proxy_set_header X-Kapkan-Reason $kapkan_reason;",
 		"proxy_set_header Accept-Language $http_accept_language;",
 		"location ^~ /_kapkan/clearance/ {",
