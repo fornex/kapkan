@@ -184,10 +184,19 @@ type Node struct {
 	// renderMu serialises the whole slow path (read inputs, render, apply).
 	renderMu sync.Mutex
 
+	// wakeFn asks the ACME manager for a pass; nil when issuance is off. A
+	// field so tests can observe WHEN the node wakes it.
+	wakeFn func()
+
 	mu           sync.Mutex
 	poller       *poll.Poller
 	doc          *edgedoc.Doc
 	acceptedETag string
+	// renderedDoc/renderedETag are the document the terminator SERVES — the
+	// last one that rendered, passed its test and was installed. The ACME
+	// manager orders only for its zones: a zone the live generation does not
+	// answer on :80 cannot pass an HTTP-01 validation.
+	renderedDoc  *edgedoc.Doc
 	renderedETag string
 	last         apply.Result
 	lastErr      string
@@ -291,6 +300,7 @@ func New(opt Options) (*Node, error) {
 			return nil, err
 		}
 		n.certs = mgr
+		n.wakeFn = mgr.Wake
 	}
 	tester, reloader := opt.Tester, opt.Reloader
 	if tester == nil {
@@ -474,27 +484,50 @@ func (n *Node) acceptDocument(ctx context.Context, body []byte, etag string, per
 			n.log.Error("persisting the document failed; a restart with the brain gone would serve the previous one", "err", err)
 		}
 	}
-	if n.certs != nil {
-		// A fresh node's first document, or a zone added later, is issued
-		// now rather than at the manager's next hourly pass.
-		n.certs.Wake()
+	reloaded, err := n.renderAndApply(ctx)
+	if err == nil {
+		n.wakeCerts(reloaded)
 	}
-	return n.renderAndApply(ctx)
+	return err
+}
+
+// reloadSettle is how long a reloaded terminator gets to bring its new
+// workers up before the ACME manager is woken to order for a new zone. A
+// variable so tests can shrink it.
+var reloadSettle = 2 * time.Second
+
+// wakeCerts asks the ACME manager for a pass now that a document is rendered
+// and live: a fresh node's first document, or a zone added later, is issued
+// now rather than at the manager's next hourly pass — and only now, because
+// the :80 listener that answers the CA's HTTP-01 fetch is part of the render,
+// and an order placed before it is live fails its validation and backs off
+// for an hour. A reload is asynchronous — the old workers keep answering for
+// a moment, and they know nothing of a new zone — so a reloaded terminator
+// gets reloadSettle before a CA is asked to fetch from it.
+func (n *Node) wakeCerts(reloaded bool) {
+	if n.wakeFn == nil {
+		return
+	}
+	if reloaded {
+		time.AfterFunc(reloadSettle, n.wakeFn)
+		return
+	}
+	n.wakeFn()
 }
 
 // renderAndApply is the slow path: the terminator's configuration from the
 // document and the certificates this node holds, read INSIDE the
 // serialisation so two callers (the poller, the certificate hook) converge
 // on the newest state whatever their order. A failure schedules a local
-// retry.
-func (n *Node) renderAndApply(ctx context.Context) error {
+// retry. It reports whether the terminator was reloaded.
+func (n *Node) renderAndApply(ctx context.Context) (reloaded bool, err error) {
 	n.renderMu.Lock()
 	defer n.renderMu.Unlock()
 	n.mu.Lock()
 	doc, etag := n.doc, n.acceptedETag
 	n.mu.Unlock()
 	if doc == nil {
-		return nil
+		return false, nil
 	}
 	certs := map[string]render.Cert{}
 	if n.certs != nil {
@@ -512,7 +545,7 @@ func (n *Node) renderAndApply(ctx context.Context) error {
 		err = fmt.Errorf("render: %w", err)
 		n.record(apply.Result{}, err)
 		n.scheduleRetry()
-		return err
+		return false, err
 	}
 	res, err := n.applier.Apply(ctx, files)
 	n.record(res, err)
@@ -520,16 +553,16 @@ func (n *Node) renderAndApply(ctx context.Context) error {
 		if ctx.Err() == nil {
 			n.scheduleRetry()
 		}
-		return err
+		return false, err
 	}
 	n.mu.Lock()
-	n.renderedETag = etag
+	n.renderedDoc, n.renderedETag = doc, etag
 	n.retryAt, n.retryBackoff = time.Time{}, 0
 	n.mu.Unlock()
 	if res.Changed {
 		n.log.Info("configuration installed", "generation", res.Generation, "reloaded", res.Reloaded, "zones", len(doc.Zones), "etag", etag)
 	}
-	return nil
+	return res.Reloaded, nil
 }
 
 // scheduleRetry arms the local retry of a document that did not apply,
@@ -555,8 +588,13 @@ func (n *Node) retryIfDue(ctx context.Context) {
 	}
 	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	if err := n.renderAndApply(rctx); err != nil && ctx.Err() == nil {
+	reloaded, err := n.renderAndApply(rctx)
+	if err != nil && ctx.Err() == nil {
 		n.log.Warn("retrying the refused document failed; will retry again", "err", err)
+	}
+	if err == nil {
+		// The retried document may carry a new zone too.
+		n.wakeCerts(reloaded)
 	}
 }
 
@@ -564,20 +602,23 @@ func (n *Node) retryIfDue(ctx context.Context) {
 func (n *Node) onCertificate(zone string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := n.renderAndApply(ctx); err != nil {
+	if _, err := n.renderAndApply(ctx); err != nil {
 		n.log.Error("re-rendering after a certificate change failed", "zone", zone, "err", err)
 	}
 }
 
-// zones is what the ACME manager renews: the current document's zones.
+// zones is what the ACME manager issues and renews: the zones of the
+// RENDERED document — what the terminator serves, and therefore answers
+// HTTP-01 for. An accepted document that has not (yet) rendered adds nothing
+// here; its zones arrive through wakeCerts once it is live.
 func (n *Node) zones() []edgedoc.Zone {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.doc == nil {
+	if n.renderedDoc == nil {
 		return nil
 	}
-	out := make([]edgedoc.Zone, len(n.doc.Zones))
-	copy(out, n.doc.Zones)
+	out := make([]edgedoc.Zone, len(n.renderedDoc.Zones))
+	copy(out, n.renderedDoc.Zones)
 	return out
 }
 

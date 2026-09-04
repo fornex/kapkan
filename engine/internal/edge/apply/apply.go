@@ -494,14 +494,31 @@ func (a *Applier) removeTemporaries() {
 	}
 }
 
-// pointLive atomically retargets the `live` symlink.
+// pointLive atomically retargets the `live` symlink. An operator who created
+// `live` by hand as a DIRECTORY (to make nginx's wildcard include compile
+// before the first render) would otherwise wedge every install forever — a
+// rename cannot replace a directory with a symlink — so an empty directory is
+// removed and a populated one is refused with a message that says what to do.
 func (a *Applier) pointLive(target string) error {
+	live := filepath.Join(a.Root, liveLink)
+	if fi, err := os.Lstat(live); err == nil && fi.IsDir() {
+		entries, err := os.ReadDir(live)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return fmt.Errorf("%s is a directory with %d entries, not the symlink kapkan manages; move its contents away and remove it", live, len(entries))
+		}
+		if err := os.Remove(live); err != nil {
+			return err
+		}
+	}
 	tmp := filepath.Join(a.Root, liveLink+".tmp")
 	_ = os.Remove(tmp)
 	if err := os.Symlink(target, tmp); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, filepath.Join(a.Root, liveLink)); err != nil {
+	if err := os.Rename(tmp, live); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
