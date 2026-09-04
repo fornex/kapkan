@@ -46,6 +46,8 @@ type fakeOrder struct {
 	// finalizing: finalize answered "processing" once; the next order poll
 	// turns it valid (finalizeProcessing).
 	finalizing bool
+	// signFailed: the order went invalid after finalize (invalidAfterFinalize).
+	signFailed bool
 }
 
 type fakeCA struct {
@@ -81,6 +83,17 @@ type fakeCA struct {
 	finalizeProcessing bool
 	// misissue signs the certificate for a fresh key instead of the CSR's.
 	misissue bool
+	// lateFinalize omits the order's finalize URL while it is pending.
+	lateFinalize bool
+	// finalizeNoLocation answers finalize without the order's Location header
+	// (Pebble), so a "processing" answer leaves the client nothing to poll.
+	finalizeNoLocation bool
+	// failFinalize answers finalize with this ACME problem status (badCSR).
+	failFinalize int
+	// invalidAfterFinalize: a "processing" order turns invalid with a problem
+	// on the next poll instead of valid — the CA could not sign it.
+	invalidAfterFinalize bool
+	certFetches          int
 	// nonces issued and not yet used; badNonce for a reuse.
 	nonces map[string]bool
 }
@@ -263,6 +276,10 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		if f.failFinalize != 0 {
+			f.problem(w, f.failFinalize, "urn:ietf:params:acme:error:badCSR", "the CSR was refused by the fake")
+			return
+		}
 		var req struct {
 			CSR string `json:"csr"`
 		}
@@ -290,8 +307,11 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		o.certPEM = append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: f.caCert.Raw})...)
 		// RFC 8555 §7.4: the finalize response carries the order's URL, which
-		// the client polls when the answer is "processing".
-		w.Header().Set("Location", base+"/order/"+o.id)
+		// the client polls when the answer is "processing" — unless the CA
+		// forgets it (Pebble does).
+		if !f.finalizeNoLocation {
+			w.Header().Set("Location", base+"/order/"+o.id)
+		}
 		if f.finalizeProcessing && !o.finalizing {
 			o.finalizing = true
 			o.status = "processing"
@@ -309,8 +329,14 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if o.status == "processing" {
-			// The poll after a processing finalize finds the certificate.
-			o.status = "valid"
+			// The poll after a processing finalize finds the certificate — or
+			// the CA's refusal.
+			if f.invalidAfterFinalize {
+				o.status = "invalid"
+				o.signFailed = true
+			} else {
+				o.status = "valid"
+			}
 		}
 		f.writeJSON(w, 200, f.orderJSON(o))
 	case strings.HasPrefix(r.URL.Path, "/authz/"):
@@ -348,6 +374,7 @@ func (f *fakeCA) serve(w http.ResponseWriter, r *http.Request) {
 		f.writeJSON(w, 200, f.challengeJSON(o))
 	case strings.HasPrefix(r.URL.Path, "/cert/"):
 		o := f.orders[strings.TrimPrefix(r.URL.Path, "/cert/")]
+		f.certFetches++
 		if o == nil || o.status != "valid" {
 			f.problem(w, 404, "urn:ietf:params:acme:error:malformed", "no certificate")
 			return
@@ -375,10 +402,17 @@ func (f *fakeCA) orderJSON(o *fakeOrder) map[string]any {
 		"status": o.status, "expires": f.now().Add(time.Hour).Format(time.RFC3339),
 		"identifiers":    []map[string]string{{"type": "dns", "value": o.zone}},
 		"authorizations": []string{f.srv.URL + "/authz/" + o.authz},
-		"finalize":       f.srv.URL + "/order/" + o.id + "/finalize",
+	}
+	// RFC 8555 puts the finalize URL on every order; a CA that fills it only
+	// once the order is ready must still work. Model both.
+	if !f.lateFinalize || o.status == "ready" || o.status == "processing" || o.status == "valid" {
+		m["finalize"] = f.srv.URL + "/order/" + o.id + "/finalize"
 	}
 	if o.status == "valid" {
 		m["certificate"] = f.srv.URL + "/cert/" + o.id
+	}
+	if o.signFailed {
+		m["error"] = map[string]any{"type": "urn:ietf:params:acme:error:serverInternal", "detail": "the CA could not sign the order", "status": 500}
 	}
 	return m
 }
