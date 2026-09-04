@@ -127,6 +127,16 @@ type ZoneChallengeOptions struct {
 	// checks, API clients, webhooks): absolute paths, matched as prefixes of
 	// the request path without its query.
 	ExemptPaths []string `yaml:"exempt_paths"`
+	// Difficulty is the puzzle's leading zero bits, 12..22 (default 18: a
+	// fraction of a second natively, a few seconds in a browser Worker; each
+	// step doubles the work). Pricing a clearance in CPU is the point — but a
+	// slow phone must still finish inside the two-minute puzzle window.
+	Difficulty int `yaml:"difficulty"`
+	// CookieTTLSeconds is how long a solved puzzle's clearance lasts, 60..86400
+	// (default 1800). A cleared client re-solves when it expires or when its
+	// address (IPv6: /64) changes; the no-JS ticket's clearance is fixed at
+	// five minutes.
+	CookieTTLSeconds int `yaml:"cookie_ttl_seconds"`
 }
 
 // ZoneRate is a per-source ceiling; 0 leaves that dimension unlimited.
@@ -286,6 +296,18 @@ func (zone *Zone) validate() error {
 		dry := true
 		p.ChallengeOptions.DryRun = &dry
 	}
+	switch d := p.ChallengeOptions.Difficulty; {
+	case d == 0:
+		p.ChallengeOptions.Difficulty = edgedoc.DefaultChallengeDifficulty
+	case d < minChallengeDifficulty || d > maxChallengeDifficulty:
+		return fmt.Errorf("%s: policy.challenge_options.difficulty must be %d..%d, got %d", zone.Name, minChallengeDifficulty, maxChallengeDifficulty, d)
+	}
+	switch ttl := p.ChallengeOptions.CookieTTLSeconds; {
+	case ttl == 0:
+		p.ChallengeOptions.CookieTTLSeconds = edgedoc.DefaultCookieTTLSeconds
+	case ttl < edgedoc.MinCookieTTLSeconds || ttl > edgedoc.MaxCookieTTLSeconds:
+		return fmt.Errorf("%s: policy.challenge_options.cookie_ttl_seconds must be %d..%d, got %d", zone.Name, edgedoc.MinCookieTTLSeconds, edgedoc.MaxCookieTTLSeconds, ttl)
+	}
 	if n := len(p.ChallengeOptions.ExemptPaths); n > maxExemptPaths {
 		return fmt.Errorf("%s: policy.challenge_options.exempt_paths has %d entries; at most %d are accepted", zone.Name, n, maxExemptPaths)
 	}
@@ -346,6 +368,11 @@ const maxZoneNameLen = 238
 const (
 	maxExemptPaths   = 64
 	maxExemptPathLen = 256
+	// The puzzle's difficulty range: the clearance package's own bounds
+	// (12 is trivial, 22 is the ceiling a slow phone still finishes inside
+	// the puzzle window).
+	minChallengeDifficulty = 12
+	maxChallengeDifficulty = 22
 )
 
 // exemptPrefixByte reports whether every byte of an exempt prefix is one a

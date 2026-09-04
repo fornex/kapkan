@@ -34,6 +34,20 @@ var (
 		Help:      "1 while a zone-wide challenge is in force on this node, 0 otherwise.",
 	}, []string{"zone"})
 
+	// EdgeClearanceTotal counts what the clearance page did, by zone (bounded
+	// by the document; "unknown" for a zone it does not serve) and result:
+	// page (the challenge page was served), page_json (a non-GET original got
+	// the compact refusal), issued (a solved puzzle earned a clearance),
+	// issued_nojs (the timed no-JS ticket did), invalid (a wrong or stale
+	// answer or ticket), rate_limited (the issuance cap held), bad_request (a
+	// request off the renderer's contract).
+	EdgeClearanceTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "clearance_total",
+		Help:      "Clearance page requests, by zone and result.",
+	}, []string{"zone", "result"})
+
 	// EdgeLogRecordsTotal counts access-log datagrams from the terminator by
 	// result: ok, malformed (no JSON, or fields the renderer never emits),
 	// oversized (a datagram that did not fit the receive buffer), dropped (the

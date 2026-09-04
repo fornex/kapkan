@@ -1,0 +1,35 @@
+/* Kapkan clearance page. The console's palette, both schemes, system fonts,
+   nothing loaded from anywhere. Contrast: text on base is 13:1 (dark) and
+   15:1 (light); the accent is used for focus and links only. */
+:root {
+  color-scheme: light dark;
+  --bg: #0f1419;
+  --fg: #e6edf3;
+  --muted: #9aa7b5;
+  --accent: #4ea1ff;
+  --border: #2a323d;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f7f8fa; --fg: #14202b; --muted: #4b5a6a; --accent: #1462c8; --border: #d5dbe3; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 var(--font); }
+body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 1.5rem; }
+main { max-width: 34rem; width: 100%; }
+h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 .75rem; text-wrap: balance; }
+p { margin: 0 0 1rem; }
+#kapkan-status { min-height: 1.5rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+form { margin: 1rem 0; }
+button {
+  font: inherit; font-weight: 600; color: var(--bg); background: var(--fg);
+  border: 0; border-radius: .375rem; padding: .625rem 1.25rem; cursor: pointer;
+}
+button:focus-visible, a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+a { color: var(--accent); }
+footer { margin-top: 2rem; color: var(--muted); font-size: .875rem; border-top: 1px solid var(--border); padding-top: 1rem; max-width: 34rem; width: 100%; }
+footer p { margin: 0; }
+@media (prefers-reduced-motion: no-preference) {
+  #kapkan-status:not(:empty)::after { content: ""; display: inline-block; width: .5em; height: .5em; margin-left: .5em; border-radius: 50%; background: var(--muted); animation: kapkan-pulse 1.2s ease-in-out infinite; vertical-align: middle; }
+  @keyframes kapkan-pulse { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }
+}

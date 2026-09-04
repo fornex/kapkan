@@ -40,6 +40,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -47,9 +48,11 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -58,6 +61,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kapkan-io/kapkan/internal/edge/clearance"
+	"github.com/kapkan-io/kapkan/internal/edge/clearance/page"
+	"github.com/kapkan-io/kapkan/internal/edge/decide"
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 	"github.com/kapkan-io/kapkan/internal/edge/render"
 	"github.com/kapkan-io/kapkan/internal/edge/rollup"
 )
@@ -438,6 +445,96 @@ func TestRealTerminator(t *testing.T) {
 		res = s.get(t, "example.com", "/page-down")
 		res.expect(t, 200, "origin-ok mark=;zone=example.com;")
 		res.expect(t, 200, "uri=/page-down;")
+	})
+	t.Run("serve/decide-open/clearance-roundtrip", func(t *testing.T) {
+		// The REAL decision service and the REAL clearance page, on the
+		// sockets the container sees, sharing one Service — as a node runs
+		// them. This is the rung end to end through nginx: 401 → page → solve
+		// → answer → cookie → origin marked cleared; and the no-JS path.
+		s := h.serve(t, "decide-open", "clearance-roundtrip")
+		logs := h.startLogSink(t)
+		svc := decide.New(decide.Options{Now: time.Now})
+		zdoc := edgedoc.Empty()
+		zdoc.Zones = append(zdoc.Zones, edgedoc.Zone{
+			Name: "example.com", Origins: []string{"127.0.0.1:8080"}, TLS: edgedoc.TLS{MinVersion: edgedoc.TLS12},
+			Policy: edgedoc.Policy{Mode: edgedoc.ModeDecide, FailureMode: edgedoc.FailOpen, Challenge: edgedoc.ChallengeManual,
+				ChallengeOptions: &edgedoc.ChallengeOptions{DryRun: false, Difficulty: clearance.MinDifficulty, ExemptPaths: []string{"/healthz"}}},
+		})
+		svc.SetZones(&zdoc)
+		h.startReal(t, (&decide.Server{Service: svc, Path: filepath.Join(h.work, "run", "decide.sock"), Mode: 0o666}).ListenAndServe, "decide.sock")
+		h.startReal(t, (&page.Server{Zones: svc, Path: filepath.Join(h.work, "run", "clearance.sock"), Mode: 0o666}).ListenAndServe, "clearance.sock")
+
+		// 1. No cookie: 401 → the page, 403 no-store, puzzle bound to the
+		// request's path; the log says decision 401 with the reason.
+		res := s.get(t, "example.com", "/shop?item=1")
+		res.expect(t, 403, `id="kapkan-puzzle"`)
+		if cc := res.header.Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("page Cache-Control = %q", cc)
+		}
+		m := regexp.MustCompile(`(?s)id="kapkan-puzzle">(.*?)</script>`).FindStringSubmatch(res.body)
+		if m == nil {
+			t.Fatalf("no puzzle in the page:\n%s", res.body)
+		}
+		var p clearance.Puzzle
+		if err := json.Unmarshal([]byte(m[1]), &p); err != nil || p.Return != "/shop?item=1" || p.Difficulty != clearance.MinDifficulty {
+			t.Fatalf("puzzle %+v (%v)", p, err)
+		}
+		if rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/shop?item=1" }); rec.Decision != "401" || rec.Reason != "challenge:manual" || rec.Status != 403 {
+			t.Errorf("challenged request's record: %+v", rec)
+		}
+		// 2. Solve, post the form through the public prefix: 303 back with
+		// the cookie and its attributes.
+		form := url.Values{"nonce": {p.Nonce}, "solution": {clearance.Solve(p)}, "return": {p.Return}}.Encode()
+		ans := s.request(t, "POST", true, "example.com", "/_kapkan/clearance/answer", form, http.Header{"Content-Type": {"application/x-www-form-urlencoded"}})
+		ans.expect(t, 303, "")
+		if loc := ans.header.Get("Location"); loc != "/shop?item=1" {
+			t.Errorf("Location = %q", loc)
+		}
+		sc := ans.header.Get("Set-Cookie")
+		for _, want := range []string{"kapkan_clr=", "Path=/", "Secure", "HttpOnly", "SameSite=Lax", "Max-Age=1800"} {
+			if !strings.Contains(sc, want) {
+				t.Errorf("Set-Cookie %q lacks %q", sc, want)
+			}
+		}
+		cookie := strings.SplitN(strings.TrimPrefix(sc, "kapkan_clr="), ";", 2)[0]
+		// 3. With the cookie the origin is reached, marked cleared; the
+		// cookie is the ONE client value the decider saw.
+		s.request(t, "GET", true, "example.com", "/shop?item=1", "", http.Header{"Cookie": {"junk=1; kapkan_clr=" + cookie}}).expect(t, 200, "origin-ok mark=cleared;zone=example.com;")
+		if rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/shop?item=1" && r.Decision == "200" }); rec.Mark != "cleared" {
+			t.Errorf("cleared request's record: %+v", rec)
+		}
+		// A tampered cookie is no cookie.
+		s.request(t, "GET", true, "example.com", "/shop?item=2", "", http.Header{"Cookie": {"kapkan_clr=" + cookie[:len(cookie)-2] + "AA"}}).expect(t, 403, `id="kapkan-puzzle"`)
+		// 4. Exempt by prefix on the NORMALISED path; dot segments are not.
+		s.get(t, "example.com", "/healthz").expect(t, 200, "origin-ok mark=;zone=example.com;")
+		s.get(t, "example.com", "/healthz/../shop").expect(t, 403, `id="kapkan-puzzle"`)
+		// 5. A POST original gets the compact JSON, not HTML.
+		s.request(t, "POST", true, "example.com", "/api/submit", "x=1", nil).expect(t, 403, `{"error":"challenge_required"}`)
+		// 6. No JavaScript: the ticket is refused before four seconds, then
+		// grants the shorter clearance, marked cleared:nojs at the origin.
+		res = s.get(t, "example.com", "/nojs-path")
+		tm := regexp.MustCompile(`name="t" value="([^"]+)"`).FindStringSubmatch(res.body)
+		if tm == nil {
+			t.Fatalf("no ticket in the page:\n%s", res.body)
+		}
+		s.get(t, "example.com", "/_kapkan/clearance/nojs?t="+url.QueryEscape(tm[1])).expect(t, 403, "")
+		time.Sleep(clearance.TicketMinWait + 200*time.Millisecond)
+		red := s.get(t, "example.com", "/_kapkan/clearance/nojs?t="+url.QueryEscape(tm[1]))
+		red.expect(t, 303, "")
+		sc = red.header.Get("Set-Cookie")
+		if red.header.Get("Location") != "/nojs-path" || !strings.Contains(sc, "Max-Age=300") {
+			t.Errorf("nojs redeem: Location %q Set-Cookie %q", red.header.Get("Location"), sc)
+		}
+		cookie = strings.SplitN(strings.TrimPrefix(sc, "kapkan_clr="), ";", 2)[0]
+		s.request(t, "GET", true, "example.com", "/nojs-path", "", http.Header{"Cookie": {"kapkan_clr=" + cookie}}).expect(t, 200, "origin-ok mark=cleared:nojs;")
+		// 7. The page's assets, by content hash, cacheable for a year.
+		for _, a := range regexp.MustCompile(`(/_kapkan/clearance/a/[a-z]+\.[0-9a-f]{12}\.(?:js|css))`).FindAllString(res.body, -1) {
+			ar := s.get(t, "example.com", a)
+			ar.expect(t, 200, "")
+			if cc := ar.header.Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+				t.Errorf("asset %s Cache-Control = %q", a, cc)
+			}
+		}
 	})
 	t.Run("serve/decide-closed/challenge", func(t *testing.T) {
 		s := h.serve(t, "decide-closed", "challenge")
@@ -972,6 +1069,36 @@ func (h *harness) startDecider(t *testing.T) *decider {
 	d := &decider{status: 403}
 	h.serveUnix(t, "decide.sock", d)
 	return d
+}
+
+// startReal runs one of the node's real socket servers (the decision service,
+// the clearance page) on <work>/run/<name> for the length of the test, and
+// waits for the socket to appear.
+func (h *harness) startReal(t *testing.T, run func(context.Context) error, name string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+	})
+	path := filepath.Join(h.work, "run", name)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("%s exited before listening: %v", name, err)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatalf("%s did not appear", path)
 }
 
 // clearancePage is a stand-in clearance page server on the fourth socket. It

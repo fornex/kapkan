@@ -197,6 +197,29 @@ security-relevant.
   `kapkan_edge_challenge_active{zone}` says whether a zone-wide challenge is on. The node holds
   the fourth socket with a placeholder that answers 503 until E4.3 lands the page itself, so a
   zone switched to challenge on such a node degrades exactly as `failure_mode` says.
+- Edge track, E4.3 — the clearance page and the clearance flow (edge-spec §5). The node now
+  serves the proof-of-work rung's page itself on the fourth socket (`internal/edge/clearance/page`,
+  `go:embed`): on a 401 from the decision service the terminator serves, in place of the origin, a
+  **403** `Cache-Control: no-store` HTML page — the puzzle as a data block, one script and one
+  stylesheet by content hash, a strict CSP, no images and no third parties — in the visitor's
+  language (en/ru/de/fr/es from `Accept-Language`); a non-GET original gets the compact
+  `{"error":"challenge_required"}` instead. The browser solves the hashcash in short chunks on
+  the main thread (WebCrypto SHA-256, progress in an `aria-live` line) and posts the form to
+  `/_kapkan/clearance/answer`, which checks the solution and answers `303` back to the request's
+  own path with `Set-Cookie: kapkan_clr=…; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<ttl>`
+  — host-only, so a sibling zone can never read it, and bound to zone and source key, so it is
+  useless elsewhere. **No JavaScript** is a first-class path, not an afterthought: the page
+  carries a timed ticket (redeemable four seconds to two minutes after issue) both as a
+  `<noscript>` meta refresh and as a visible Continue button, and it earns the shorter five-minute
+  `nojs` clearance. The page signs with the decision service's own keys (the document's newest
+  live key, else the node's) and reads each zone's rung from it, so the two halves cannot
+  disagree; clearances are capped at 6 per source and 6000 per zone a minute (`429` beyond). Two
+  new zone knobs, `policy.challenge_options.difficulty` (12..22, default 18) and
+  `cookie_ttl_seconds` (60..86400, default 1800), reach the document only when set (schema
+  regenerated). `kapkan_edge_clearance_total{zone,result=page|page_json|issued|issued_nojs|
+  invalid|rate_limited|bad_request}` counts it. Accessibility as a review gate: semantic HTML,
+  status via `aria-live`, a non-timed alternative to every timer, both colour schemes at ≥13:1
+  text contrast, focus outlines, reduced-motion honoured.
 
 ## [1.7.0] - 2026-09-02
 

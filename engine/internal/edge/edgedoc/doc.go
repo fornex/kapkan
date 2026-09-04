@@ -143,12 +143,42 @@ type ChallengeOptions struct {
 	// one place the edge reads a request path — for an exemption, never for a
 	// verdict (edge-spec §7: not a WAF).
 	ExemptPaths []string `json:"exempt_paths,omitempty"`
+	// Difficulty is the puzzle's leading zero bits (0 = the default, 18);
+	// CookieTTLSeconds how long a solved puzzle's clearance lasts (0 = the
+	// default, 30 min). Both resolved by the zones file's validation; the
+	// node applies the same defaults for a document that omits them. E4.3.
+	Difficulty       int `json:"difficulty,omitempty"`
+	CookieTTLSeconds int `json:"cookie_ttl_seconds,omitempty"`
 }
+
+// Rung defaults, shared by the zones file's validation and the node.
+const (
+	DefaultChallengeDifficulty = 18
+	DefaultCookieTTLSeconds    = 30 * 60
+	MinCookieTTLSeconds        = 60
+	MaxCookieTTLSeconds        = 24 * 60 * 60
+)
 
 // ChallengeDryRun reports whether the rung is watch-only for this zone: true
 // unless the options say otherwise.
 func (p Policy) ChallengeDryRun() bool {
 	return p.ChallengeOptions == nil || p.ChallengeOptions.DryRun
+}
+
+// ChallengeDifficulty is the puzzle difficulty with the default applied.
+func (p Policy) ChallengeDifficulty() int {
+	if p.ChallengeOptions == nil || p.ChallengeOptions.Difficulty == 0 {
+		return DefaultChallengeDifficulty
+	}
+	return p.ChallengeOptions.Difficulty
+}
+
+// CookieTTLSeconds is the clearance lifetime with the default applied.
+func (p Policy) CookieTTLSeconds() int {
+	if p.ChallengeOptions == nil || p.ChallengeOptions.CookieTTLSeconds == 0 {
+		return DefaultCookieTTLSeconds
+	}
+	return p.ChallengeOptions.CookieTTLSeconds
 }
 
 // ExemptPaths returns the rung's exempt prefixes (nil for none).
