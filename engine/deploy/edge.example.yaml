@@ -29,10 +29,10 @@ controller:
 # on one host must not share systemd-managed directories.
 state_dir: /var/lib/kapkan-edge
 
-# The three unix sockets nginx talks to: edge-decide.sock and edge-log.sock
-# are 0660, owned by root and the group below; edge-challenge.sock is 0666
-# (it answers public ACME tokens). The directory must be traversable by the
-# worker (0755).
+# The four unix sockets nginx talks to: edge-decide.sock, edge-log.sock and
+# edge-clearance.sock (the proof-of-work rung's page) are 0660, owned by root
+# and the group below; edge-challenge.sock is 0666 (it answers public ACME
+# tokens). The directory must be traversable by the worker (0755).
 sockets_dir: /run/kapkan-edge
 # The terminator's worker group: nginx (Debian/Ubuntu nginx.org packages and
 # the docker image), www-data (Debian's own package), angie.

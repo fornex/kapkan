@@ -61,10 +61,10 @@ func TestChallengeMachineryShape(t *testing.T) {
 	}
 	zone := string(files[render.ZoneFile("example.com")])
 	for _, want := range []string{
-		"proxy_set_header X-Kapkan-Clearance $cookie_kapkan_clr;",
+		"proxy_set_header X-Kapkan-Clearance $kapkan_clr_safe;",
+		"proxy_set_header X-Kapkan-Path $uri;",
 		"error_page 401 = @kapkan_clearance;",
 		"location @kapkan_clearance {",
-		"rewrite ^ /_kapkan/clearance/challenge break;",
 		"recursive_error_pages on;",
 		"proxy_set_header X-Kapkan-Reason $kapkan_reason;",
 		"proxy_set_header Accept-Language $http_accept_language;",
@@ -77,16 +77,35 @@ func TestChallengeMachineryShape(t *testing.T) {
 			t.Errorf("decide-open zone lacks %q", want)
 		}
 	}
+	// Nothing rewrites the URI on the way to the page: a rewrite in the named
+	// location would follow a fallen-back request into @kapkan_pass and reach
+	// the origin as the page's path. The raw cookie never travels either.
+	for _, no := range []string{"rewrite ^", "$cookie_kapkan_clr;"} {
+		if strings.Contains(zone, no) {
+			t.Errorf("decide-open zone contains %q", no)
+		}
+	}
 	// The named location reaches the page through a 401 only: the public
 	// prefix never asks a decision (no auth_request inside it).
-	pub := zone[strings.Index(zone, "location ^~ /_kapkan/clearance/ {"):]
-	pub = pub[:strings.Index(pub, "\n    }\n")]
+	start := strings.Index(zone, "location ^~ /_kapkan/clearance/ {")
+	if start < 0 {
+		t.Fatal("no public clearance prefix")
+	}
+	pub := zone[start:]
+	if end := strings.Index(pub, "\n    }\n"); end >= 0 {
+		pub = pub[:end]
+	}
 	if strings.Contains(pub, "auth_request") {
 		t.Error("the public clearance prefix asks a decision")
 	}
 	common := string(files[render.CommonFile])
-	if !strings.Contains(common, "upstream kapkan_clearance {") || !strings.Contains(common, "server unix:/run/kapkan-edge/edge-clearance.sock;") {
-		t.Errorf("common file lacks the clearance upstream:\n%s", common)
+	for _, want := range []string{
+		"upstream kapkan_clearance {", "server unix:/run/kapkan-edge/edge-clearance.sock;",
+		"map $cookie_kapkan_clr $kapkan_clr_safe {", `"~^[A-Za-z0-9._-]{1,512}$" $cookie_kapkan_clr;`,
+	} {
+		if !strings.Contains(common, want) {
+			t.Errorf("common file lacks %q", want)
+		}
 	}
 	none, err := render.Render(loadFixture(t, "mode-none"))
 	if err != nil {

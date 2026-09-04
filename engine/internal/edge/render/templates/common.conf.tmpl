@@ -86,6 +86,17 @@ map $upstream_status $kapkan_decided_mark {
     default "";
     200     $upstream_http_x_kapkan_mark;
 }
+
+# The clearance cookie's value is the ONE client value the decision subrequest
+# carries (E4). It is forwarded only when it is shaped like a clearance token:
+# a control byte in it (nginx admits any but NUL in a cookie) would make the
+# decision service refuse the whole subrequest as malformed — a failed
+# decision, which failure_mode: open would pass. Anything else is forwarded as
+# empty, and empty removes the header.
+map $cookie_kapkan_clr $kapkan_clr_safe {
+    default "";
+    "~^[A-Za-z0-9._-]{1,512}$" $cookie_kapkan_clr;
+}
 {{- if .HashBucketSize}}
 
 # A zone name longer than 46 bytes does not fit nginx's default server-name

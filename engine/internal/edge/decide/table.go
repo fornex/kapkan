@@ -64,6 +64,20 @@ func (t *table) lookup(k key, now time.Time) *entry {
 	return nil
 }
 
+// lookupMark returns k's live mark (zone, then every-zone), or nil — for a
+// request whose stronger verdict turned out not to apply.
+func (t *table) lookupMark(k key, now time.Time) *entry {
+	if e, ok := live(t.marks, k, now); ok {
+		return &e
+	}
+	if k.zone != "" {
+		if e, ok := live(t.marks, key{src: k.src}, now); ok {
+			return &e
+		}
+	}
+	return nil
+}
+
 // setDeny installs or replaces k's deny.
 func (t *table) setDeny(k key, reason string, until, now time.Time) bool {
 	if !t.room(t.denies, k, now) {
