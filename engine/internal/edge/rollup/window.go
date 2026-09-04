@@ -71,9 +71,11 @@ type WindowStats struct {
 	// Undecided counts requests the decision service could not answer (its
 	// socket down or slow), passed or refused by the zone's failure_mode.
 	Undecided uint64
-	// Challenged counts requests sent to the clearance page; WouldChallenge
-	// the dry-run ones (answered as allow, marked would-challenge).
+	// Challenged counts requests sent to the clearance page; Cleared those
+	// that passed the rung with a valid clearance; WouldChallenge the dry-run
+	// ones (answered as allow, marked would-challenge).
 	Challenged     uint64
+	Cleared        uint64
 	WouldChallenge uint64
 	Status2xx      uint64
 	Status3xx      uint64
@@ -206,6 +208,9 @@ func (a *Aggregator) Observe(r Record) {
 	}
 	if challenged {
 		zs.Challenged++
+	}
+	if r.Cleared() {
+		zs.Cleared++
 	}
 	if wouldChallenge {
 		zs.WouldChallenge++

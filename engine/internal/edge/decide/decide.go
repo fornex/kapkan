@@ -184,9 +184,12 @@ func (v Verdict) Denied() bool {
 type Request struct {
 	Zone string
 	Src  netip.Addr
-	// Path is the request URI as the terminator forwarded it (X-Kapkan-URI);
-	// consulted ONLY against challenge_options.exempt_paths — its path part,
-	// no query — never for a verdict of its own.
+	// Path is the request path as the terminator NORMALISED it (X-Kapkan-Path
+	// = nginx's $uri: dot segments merged, percent-decoding done, no query) —
+	// consulted ONLY against challenge_options.exempt_paths, never for a
+	// verdict of its own. The raw request target is not used: an origin
+	// resolves "/healthz/../admin" to /admin, and a prefix test on the raw
+	// form would exempt it.
 	Path string
 	// Clearance is the kapkan_clr cookie's value ("" for none): the one
 	// client-controlled value the subrequest carries. Verified against the
@@ -245,6 +248,7 @@ func (f *inflight) count(now time.Time) int {
 // keys it verifies with (the document's, or the node's own ephemeral key when
 // the document carries none), and the zone-wide challenge flip.
 type zoneState struct {
+	name   string
 	pol    edgedoc.Policy
 	keys   []clearance.Key
 	exempt []string
@@ -311,16 +315,22 @@ func New(opts Options) *Service {
 // SetZones replaces the per-zone policies with the document's. Tables of
 // zones no longer present are dropped by the next sweep; a changed rate or
 // challenge mode takes effect on the next decision — no restart, no reload. A
-// zone-wide challenge flip survives the replacement while the zone does.
+// zone-wide challenge flip survives the replacement while the zone stays an
+// auto zone; any other mode makes it inert, so it is dropped and its gauge
+// cleared.
 func (s *Service) SetZones(doc *edgedoc.Doc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	zones := make(map[string]*zoneState, len(doc.Zones))
 	for i := range doc.Zones {
 		z := &doc.Zones[i]
-		st := &zoneState{pol: z.Policy, keys: s.keysFor(z), exempt: z.Policy.ExemptPaths(), dryRun: z.Policy.ChallengeDryRun()}
-		if old := s.zones[z.Name]; old != nil {
-			st.flipOn, st.flipUntil, st.flipWhy = old.flipOn, old.flipUntil, old.flipWhy
+		st := &zoneState{name: z.Name, pol: z.Policy, keys: s.keysFor(z), exempt: z.Policy.ExemptPaths(), dryRun: z.Policy.ChallengeDryRun()}
+		if old := s.zones[z.Name]; old != nil && old.flipOn {
+			if z.Policy.Challenge == edgedoc.ChallengeAuto {
+				st.flipOn, st.flipUntil, st.flipWhy = old.flipOn, old.flipUntil, old.flipWhy
+			} else {
+				metrics.EdgeChallengeActive.WithLabelValues(z.Name).Set(0)
+			}
 		}
 		zones[z.Name] = st
 	}
@@ -332,34 +342,59 @@ func (s *Service) SetZones(doc *edgedoc.Doc) {
 	s.zones = zones
 }
 
-// keysFor decodes a zone's clearance keys from the document; a zone that has
-// none gets the node's ephemeral key so it can still challenge on its own.
+// LocalKeyID names the key a node derives for itself: last in every zone's
+// key list, so a clearance the node issued under it (when the document's
+// keys were absent or dead) verifies on this node alone, and the page issues
+// under a document key whenever one is live.
+const LocalKeyID = "local"
+
+// keysFor decodes a zone's clearance keys from the document and appends the
+// node's own ephemeral key, so a zone whose document carries no keys — or
+// only keys that have since expired, with the brain gone (edge-spec §2.4) —
+// can still challenge and clear on its own instead of walling everyone out.
 func (s *Service) keysFor(z *edgedoc.Zone) []clearance.Key {
 	keys := make([]clearance.Key, 0, len(z.ClearanceKeys)+1)
 	for _, ck := range z.ClearanceKeys {
 		secret, err := base64.RawURLEncoding.DecodeString(ck.Secret)
-		if err != nil || len(secret) != clearance.SecretLen || ck.ID == "" {
+		if err != nil || len(secret) != clearance.SecretLen || ck.ID == "" || ck.ID == LocalKeyID {
 			continue
 		}
 		keys = append(keys, clearance.Key{ID: ck.ID, Secret: secret, NotBefore: ck.NotBefore, NotAfter: ck.NotAfter})
 	}
-	if len(keys) == 0 && s.localMaster != nil {
+	if s.localMaster != nil {
 		if secret, err := clearance.DeriveZoneKey(s.localMaster, z.Name); err == nil {
-			keys = append(keys, clearance.Key{ID: "local", Secret: secret, NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<40, 0)})
+			keys = append(keys, clearance.Key{ID: LocalKeyID, Secret: secret, NotBefore: time.Unix(0, 0), NotAfter: time.Unix(1<<40, 0)})
 		}
 	}
 	return keys
 }
 
-// Keys returns the clearance keys the service verifies zone's cookies with —
-// what the clearance page signs with (E4.3). Nil for an unknown zone.
+// anyLive reports whether one of the keys may verify at now.
+func anyLive(keys []clearance.Key, now time.Time) bool {
+	for _, k := range keys {
+		if len(k.Secret) == clearance.SecretLen && k.ID != "" && !now.Before(k.NotBefore) && now.Before(k.NotAfter) {
+			return true
+		}
+	}
+	return false
+}
+
+// Keys returns a copy of the clearance keys the service verifies zone's
+// cookies with — what the clearance page signs with (E4.3): the document's
+// keys first, the node's own last. Nil for an unknown zone.
 func (s *Service) Keys(zone string) []clearance.Key {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if zs := s.zones[zone]; zs != nil {
-		return zs.keys
+	zs := s.zones[zone]
+	if zs == nil {
+		return nil
 	}
-	return nil
+	out := make([]clearance.Key, len(zs.keys))
+	for i, k := range zs.keys {
+		out[i] = k
+		out[i].Secret = append([]byte(nil), k.Secret...)
+	}
+	return out
 }
 
 // SetDryRun switches watch-only mode.
@@ -431,6 +466,14 @@ func (s *Service) DecideRequest(req Request) Verdict {
 		if why != "" && pathExempt(zs.exempt, req.Path) {
 			why = ""
 		}
+		if why == "" && e != nil && e.challenge {
+			// A challenge verdict that is not in force (the rung off, the
+			// path exempt) must not swallow the mark beneath it.
+			if m := s.table.lookupMark(k, now); m != nil {
+				v.Mark = m.mark
+				result = "allow_marked"
+			}
+		}
 		switch {
 		case cleared != "":
 			// A valid clearance passes the rung, whether or not one is in
@@ -450,19 +493,24 @@ func (s *Service) DecideRequest(req Request) Verdict {
 			result = "challenge"
 		}
 	}
-	if v.Allow && pol.Rate.RPS > 0 {
+	// The ceiling applies to a challenged request too: a flood without
+	// cookies must not turn into a flood of challenge pages — the rate deny
+	// (a 429) is the cheaper answer and the one the flood rule counts.
+	if (v.Allow || v.Challenge) && pol.Rate.RPS > 0 {
 		switch s.take(k, pol.Rate.RPS, now) {
 		case takeDenied:
 			v = Verdict{Reason: ReasonRate}
 			result = "deny_rate"
 		case takeUntracked:
-			// Passing untracked keeps the reputation mark: the table was
-			// consulted, only the bucket could not be.
-			v.Reason = ReasonUntracked
-			result = "untracked"
+			if v.Allow && !v.Challenge {
+				// Passing untracked keeps the reputation mark: the table was
+				// consulted, only the bucket could not be.
+				v.Reason = ReasonUntracked
+				result = "untracked"
+			}
 		}
 	}
-	if v.Allow && pol.Rate.Concurrency > 0 {
+	if (v.Allow || v.Challenge) && pol.Rate.Concurrency > 0 {
 		if f := s.inflight[k]; f != nil && !f.dead && f.count(now) >= int(pol.Rate.Concurrency) {
 			v = Verdict{Reason: ReasonConcurrency}
 			result = "deny_concurrency"
@@ -484,17 +532,23 @@ func (s *Service) DecideRequest(req Request) Verdict {
 
 // challengeWhy says whether the rung is in force for this request and why:
 // "" (no), "manual", "zone:<reason>" (the zone is flipped) or
-// "table:<reason>" (a challenge verdict for this source). A zone with no keys
-// cannot verify a clearance, so it cannot challenge either.
+// "table:<reason>" (a challenge verdict for this source). A zone with no LIVE
+// key cannot verify a clearance, so it cannot challenge either — nobody would
+// ever get through. Caller holds the mutex; a lapsed flip is retired here,
+// so the gauge does not wait for a sweep on an idle zone.
 func (zs *zoneState) challengeWhy(e *entry, now time.Time) string {
-	if len(zs.keys) == 0 {
+	if zs.flipOn && !now.Before(zs.flipUntil) {
+		zs.flipOn = false
+		metrics.EdgeChallengeActive.WithLabelValues(zs.name).Set(0)
+	}
+	if !anyLive(zs.keys, now) {
 		return ""
 	}
 	switch zs.pol.Challenge {
 	case edgedoc.ChallengeManual:
 		return "manual"
 	case edgedoc.ChallengeAuto:
-		if zs.flipOn && now.Before(zs.flipUntil) {
+		if zs.flipOn {
 			return "zone:" + zs.flipWhy
 		}
 		if e != nil && e.challenge {
@@ -504,13 +558,19 @@ func (zs *zoneState) challengeWhy(e *entry, now time.Time) string {
 	return ""
 }
 
-// pathExempt reports whether the request's path (uri up to any '?') starts
-// with one of the exempt prefixes.
-func pathExempt(exempt []string, uri string) bool {
-	if len(exempt) == 0 || uri == "" {
+// pathExempt reports whether the request's normalised path starts with one
+// of the exempt prefixes. The path is nginx's $uri — dot segments already
+// merged — but a form that still carries one, a backslash or an encoded
+// byte is refused rather than trusted: the origin might read it differently.
+func pathExempt(exempt []string, path string) bool {
+	if len(exempt) == 0 || path == "" || path[0] != '/' {
 		return false
 	}
-	path, _, _ := strings.Cut(uri, "?")
+	path, _, _ = strings.Cut(path, "?")
+	if strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") || strings.Contains(path, "/./") ||
+		strings.HasSuffix(path, "/.") || strings.ContainsAny(path, "\\%") {
+		return false
+	}
 	for _, p := range exempt {
 		if strings.HasPrefix(path, p) {
 			return true
@@ -549,12 +609,15 @@ func (s *Service) Challenged(zone string, src netip.Addr) bool {
 }
 
 // SetZoneChallenge flips a zone-wide challenge on until `until` (or off) with
-// a reason for the log and the report: every request of an auto zone is then
-// challenged. It returns false for a zone the service does not know.
+// a reason for the log and the report: every request of the zone is then
+// challenged. Only an auto zone takes a flip — the rung is off or already
+// unconditional otherwise — and only an `until` still ahead; the call
+// returns false when nothing was flipped.
 func (s *Service) SetZoneChallenge(zone string, on bool, until time.Time, reason string) bool {
+	now := s.now()
 	s.mu.Lock()
 	zs := s.zones[zone]
-	if zs == nil {
+	if zs == nil || (on && (zs.pol.Challenge != edgedoc.ChallengeAuto || !until.After(now))) {
 		s.mu.Unlock()
 		return false
 	}
@@ -573,14 +636,22 @@ func (s *Service) SetZoneChallenge(zone string, on bool, until time.Time, reason
 	return true
 }
 
-// ZoneChallenge reports the zone-wide flip: on, until when, why.
+// ZoneChallenge reports the zone-wide flip: on, until when, why. A lapsed
+// flip is retired here too.
 func (s *Service) ZoneChallenge(zone string) (on bool, until time.Time, reason string) {
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if zs := s.zones[zone]; zs != nil && zs.flipOn && s.now().Before(zs.flipUntil) {
-		return true, zs.flipUntil, zs.flipWhy
+	zs := s.zones[zone]
+	if zs == nil || !zs.flipOn {
+		return false, time.Time{}, ""
 	}
-	return false, time.Time{}, ""
+	if !now.Before(zs.flipUntil) {
+		zs.flipOn = false
+		metrics.EdgeChallengeActive.WithLabelValues(zone).Set(0)
+		return false, time.Time{}, ""
+	}
+	return true, zs.flipUntil, zs.flipWhy
 }
 
 // Complete records that a decided request for (zone, src) was logged by the

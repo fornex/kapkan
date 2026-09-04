@@ -107,9 +107,9 @@ type Options struct {
 	// SocketsDir holds the four unix sockets (decide, challenge, log,
 	// clearance).
 	SocketsDir string
-	// SocketGroup is the terminator's worker group, chowned onto the decide
-	// and log sockets ("" leaves them as created). The challenge socket is
-	// world-connectable: it answers public tokens.
+	// SocketGroup is the terminator's worker group, chowned onto the decide,
+	// log and clearance sockets ("" leaves them as created). The challenge
+	// socket is world-connectable: it answers public tokens.
 	SocketGroup string
 	// Terminator names the binary ("" = nginx), its main configuration ("" =
 	// the binary's default), the reload method and its parameters.

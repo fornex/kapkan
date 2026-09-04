@@ -267,6 +267,8 @@ func TestOffIgnoresChallengeMachinery(t *testing.T) {
 // TestEphemeralKeyWhenTheDocumentHasNone pins the older-brain case: a zone
 // without clearance keys gets one of the node's own, so the node can still
 // verify what its own page (E4.3) signs — and nothing another node signed.
+// The node's key is always there, LAST, so the page prefers a document key
+// whenever one is live.
 func TestEphemeralKeyWhenTheDocumentHasNone(t *testing.T) {
 	c := newClock()
 	z := zone("shop.example", 0, 0)
@@ -274,7 +276,7 @@ func TestEphemeralKeyWhenTheDocumentHasNone(t *testing.T) {
 	z.Policy.ChallengeOptions = &edgedoc.ChallengeOptions{DryRun: false}
 	s := newService(t, c, z)
 	keys := s.Keys("shop.example")
-	if len(keys) != 1 || keys[0].ID != "local" || len(keys[0].Secret) != clearance.SecretLen {
+	if len(keys) != 1 || keys[0].ID != LocalKeyID || len(keys[0].Secret) != clearance.SecretLen {
 		t.Fatalf("keys: %+v", keys)
 	}
 	ip := src("198.51.100.50")
@@ -289,11 +291,160 @@ func TestEphemeralKeyWhenTheDocumentHasNone(t *testing.T) {
 	if s.Keys("nobody.example") != nil {
 		t.Fatal("keys for an unknown zone")
 	}
-	// A document that carries keys replaces the ephemeral one.
-	zk, _ := challengeZone(t, "shop.example", edgedoc.ChallengeManual, 0)
+	// A document that carries keys puts them first; the node's stays last.
+	zk, k := challengeZone(t, "shop.example", edgedoc.ChallengeManual, 0)
 	s.SetZones(doc(zk))
-	if keys := s.Keys("shop.example"); len(keys) != 1 || keys[0].ID != "c1" {
-		t.Fatalf("document keys not adopted: %+v", keys)
+	keys = s.Keys("shop.example")
+	if len(keys) != 2 || keys[0].ID != "c1" || keys[1].ID != LocalKeyID {
+		t.Fatalf("document keys not adopted first: %+v", keys)
+	}
+	// Keys returns a copy: a caller cannot reach into the service's slice.
+	keys[0].Secret[0] ^= 0xff
+	if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip, Clearance: cookieFor(t, k, "shop.example", edgedoc.SourceKey(ip).String(), c)}); !v.Allow {
+		t.Fatalf("Keys aliased the service's keys: %+v", v)
+	}
+}
+
+// TestExpiredDocumentKeysDoNotWallEveryoneOut pins edge-spec §2.4 for the
+// rung: with the brain gone, the document's keys age out after their 48 h.
+// The zone must not then challenge with nothing able to verify — the node's
+// own key keeps the rung workable on this node, and a cookie under the dead
+// document key is refused.
+func TestExpiredDocumentKeysDoNotWallEveryoneOut(t *testing.T) {
+	c := newClock()
+	z, k := challengeZone(t, "shop.example", edgedoc.ChallengeManual, 0)
+	s := newService(t, c, z)
+	ip := src("198.51.100.55")
+	tokDoc := cookieFor(t, k, "shop.example", edgedoc.SourceKey(ip).String(), c)
+	c.add(72 * time.Hour) // every document key is past NotAfter
+	if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip, Clearance: tokDoc}); v.Allow {
+		t.Fatalf("a cookie under an expired document key verified: %+v", v)
+	}
+	// The rung is still in force — there is a live key (the node's own)...
+	if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip}); v.Allow || !v.Challenge {
+		t.Fatalf("expired document keys switched the rung off: %+v", v)
+	}
+	// ...and a cookie under it clears, so the page can still let people in.
+	keys := s.Keys("shop.example")
+	local := keys[len(keys)-1]
+	if local.ID != LocalKeyID {
+		t.Fatalf("last key is %q", local.ID)
+	}
+	if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip, Clearance: cookieFor(t, local, "shop.example", edgedoc.SourceKey(ip).String(), c)}); !v.Allow || v.Mark != MarkCleared {
+		t.Fatalf("own key after the document's expired: %+v", v)
+	}
+	// With no live key at all (no entropy at start), the rung is off rather
+	// than a wall.
+	s2 := newService(t, c, z)
+	s2.mu.Lock()
+	for _, zs := range s2.zones {
+		zs.keys = nil
+	}
+	s2.mu.Unlock()
+	if v := s2.DecideRequest(Request{Zone: "shop.example", Src: ip}); !v.Allow || v.Challenge {
+		t.Fatalf("a zone with no live key challenged: %+v", v)
+	}
+}
+
+// TestChallengedRequestsStillMeetTheRate pins that switching the rung on
+// does not switch E3 off: a flood without cookies is rate-denied (a 429 the
+// flood rule counts), not answered with a challenge page per request.
+func TestChallengedRequestsStillMeetTheRate(t *testing.T) {
+	c := newClock()
+	z, _ := challengeZone(t, "shop.example", edgedoc.ChallengeManual, 2)
+	s := newService(t, c, z)
+	ip := src("198.51.100.56")
+	for i := 0; i < 2; i++ {
+		if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip}); v.Allow || !v.Challenge {
+			t.Fatalf("request %d: %+v", i, v)
+		}
+	}
+	if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip}); v.Allow || v.Challenge || v.Reason != ReasonRate {
+		t.Fatalf("third request should be a rate deny, not a challenge: %+v", v)
+	}
+	// Concurrency too.
+	zc, _ := challengeZone(t, "shop.example", edgedoc.ChallengeManual, 0)
+	zc.Policy.Rate.Concurrency = 1
+	s2 := newService(t, c, zc)
+	s2.DecideRequest(Request{Zone: "shop.example", Src: ip}) // opens a slot
+	if v := s2.DecideRequest(Request{Zone: "shop.example", Src: ip}); v.Allow || v.Challenge || v.Reason != ReasonConcurrency {
+		t.Fatalf("second in-flight request should be a concurrency deny: %+v", v)
+	}
+}
+
+// TestDormantChallengeEntryKeepsTheMark pins precedence when the stronger
+// verdict does not apply: a challenge entry for a source in an off zone (or
+// on an exempt path) must not swallow the mark the rollup also installed.
+func TestDormantChallengeEntryKeepsTheMark(t *testing.T) {
+	c := newClock()
+	z, _ := challengeZone(t, "shop.example", edgedoc.ChallengeOff, 0)
+	s := newService(t, c, z)
+	ip := src("198.51.100.57")
+	s.Mark("shop.example", ip, "errors", time.Hour)
+	s.Challenge("shop.example", ip, time.Hour, "flood")
+	if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip}); !v.Allow || v.Mark != "errors" {
+		t.Fatalf("mark lost behind a dormant challenge entry: %+v", v)
+	}
+	za, _ := challengeZone(t, "shop.example", edgedoc.ChallengeAuto, 0)
+	za.Policy.ChallengeOptions.ExemptPaths = []string{"/healthz"}
+	s2 := newService(t, c, za)
+	s2.Mark("shop.example", ip, "errors", time.Hour)
+	s2.Challenge("shop.example", ip, time.Hour, "flood")
+	if v := s2.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/healthz"}); !v.Allow || v.Mark != "errors" {
+		t.Fatalf("mark lost on an exempt path: %+v", v)
+	}
+	if v := s2.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/cart"}); v.Allow || v.Reason != "challenge:table:flood" {
+		t.Fatalf("challenge not in force off the exempt path: %+v", v)
+	}
+}
+
+// TestExemptPathsRefuseUnnormalisedForms pins the defence behind X-Kapkan-Path:
+// the terminator hands the decider a normalised path, and anything that still
+// looks unnormalised — a dot segment, a backslash, an encoded byte — is not
+// exempt, whatever prefix it starts with.
+func TestExemptPathsRefuseUnnormalisedForms(t *testing.T) {
+	c := newClock()
+	z, _ := challengeZone(t, "shop.example", edgedoc.ChallengeManual, 0)
+	z.Policy.ChallengeOptions.ExemptPaths = []string{"/healthz", "/api/"}
+	s := newService(t, c, z)
+	for _, p := range []string{"/healthz/../admin", "/healthz/..", "/healthz/./x", "/healthz/.", "/api/%2e%2e/admin", "/healthz\\..\\admin", "healthz", ""} {
+		if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.58"), Path: p}); v.Allow || !v.Challenge {
+			t.Fatalf("path %q was exempt: %+v", p, v)
+		}
+	}
+	if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.58"), Path: "/healthz.old"}); !v.Allow {
+		// A plain prefix match — the operator asked for a prefix.
+		t.Fatalf("prefix match refused: %+v", v)
+	}
+}
+
+// TestZoneFlipFollowsTheMode pins that a flip belongs to auto: a manual or
+// off zone refuses one, a mode change makes a standing flip go away, and an
+// `until` already past flips nothing.
+func TestZoneFlipFollowsTheMode(t *testing.T) {
+	c := newClock()
+	za, _ := challengeZone(t, "shop.example", edgedoc.ChallengeAuto, 0)
+	zm, _ := challengeZone(t, "shop.example", edgedoc.ChallengeManual, 0)
+	s := newService(t, c, zm)
+	if s.SetZoneChallenge("shop.example", true, c.t.Add(time.Hour), "x") {
+		t.Fatal("a manual zone took a flip")
+	}
+	s.SetZones(doc(za))
+	if s.SetZoneChallenge("shop.example", true, c.t, "x") {
+		t.Fatal("a flip with until == now was taken")
+	}
+	if !s.SetZoneChallenge("shop.example", true, c.t.Add(time.Hour), "zone-rps") {
+		t.Fatal("an auto zone refused a flip")
+	}
+	if on, _, _ := s.ZoneChallenge("shop.example"); !on {
+		t.Fatal("flip not reported")
+	}
+	s.SetZones(doc(zm))
+	if on, _, _ := s.ZoneChallenge("shop.example"); on {
+		t.Fatal("a flip survived a change to manual")
+	}
+	if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.59")}); v.Reason != "challenge:manual" {
+		t.Fatalf("manual zone after the flip: %+v", v)
 	}
 }
 
@@ -306,16 +457,18 @@ func TestHandlerContractChallenge(t *testing.T) {
 	z.Policy.ChallengeOptions.ExemptPaths = []string{"/healthz"}
 	s := newService(t, c, z)
 	h := (&Server{Service: s}).Handler()
-	do := func(clr, uri string) *httptest.ResponseRecorder {
+	do := func(clr, path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("GET", "/decide", nil)
 		req.Header.Set(headerZone, "shop.example")
 		req.Header.Set(headerClient, "198.51.100.60")
 		if clr != "" {
 			req.Header.Set(headerClearance, clr)
 		}
-		if uri != "" {
-			req.Header.Set(headerURI, uri)
+		if path != "" {
+			req.Header.Set(headerPath, path)
 		}
+		// The raw target is not what exemptions read.
+		req.Header.Set("X-Kapkan-URI", "/healthz?raw=1")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec
@@ -330,8 +483,11 @@ func TestHandlerContractChallenge(t *testing.T) {
 	if rec := do(strings.Repeat("a", 513), "/"); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("oversized clearance: %d", rec.Code)
 	}
-	if rec := do("", "/healthz?x=1"); rec.Code != 200 {
+	if rec := do("", "/healthz"); rec.Code != 200 {
 		t.Fatalf("exempt path: %d", rec.Code)
+	}
+	if rec := do("", "/cart"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a raw X-Kapkan-URI under an exempt prefix must not exempt: %d", rec.Code)
 	}
 	s.SetDryRun(true)
 	if rec := do("", "/"); rec.Code != 200 || rec.Header().Get(headerMark) != "would-challenge:manual" || rec.Header().Get(headerReason) != "challenge:manual" {

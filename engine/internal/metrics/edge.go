@@ -14,8 +14,9 @@ var (
 	// (a valid clearance cookie passed the rung), deny_rate, deny_concurrency,
 	// deny_table, challenge (a 401: the client must clear the rung),
 	// would_deny / would_challenge (a dry-run deny or challenge, answered as
-	// allow), unknown_zone, untracked (the per-source tables were full and the
-	// request passed undecided), bad_request (a subrequest off the contract).
+	// allow), unknown_zone, mode_none (a zone that does not decide), untracked
+	// (the per-source tables were full and the request passed undecided),
+	// bad_request (a subrequest off the contract).
 	EdgeDecisionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "edge",

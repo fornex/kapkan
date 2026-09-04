@@ -49,7 +49,7 @@ func TestAggregatorCountsTheRung(t *testing.T) {
 		t.Fatalf("windows: %d", len(full))
 	}
 	w := full[0]
-	if w.Requests != 16 || w.Decided != 16 || w.Denied != 0 || w.Challenged != 5 || w.WouldChallenge != 5 || w.Status4xx != 5 || w.Status2xx != 11 {
+	if w.Requests != 16 || w.Decided != 16 || w.Denied != 0 || w.Challenged != 5 || w.Cleared != 6 || w.WouldChallenge != 5 || w.Status4xx != 5 || w.Status2xx != 11 {
 		t.Fatalf("zone: %+v", w)
 	}
 	by := map[string]SourceStats{}

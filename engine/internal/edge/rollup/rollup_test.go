@@ -306,6 +306,14 @@ func TestRulesFloodAndErrors(t *testing.T) {
 	if len(sink.marks) != 0 {
 		t.Fatalf("marked during an origin outage: %v", sink.marks)
 	}
+	// A zone whose visitors are mostly being CHALLENGED (every challenge page
+	// is a 403 or, before E4.3, a 503) is not an erroring origin: the scanner
+	// among them is still marked.
+	sink.marks = nil
+	r.Apply(WindowStats{Zone: "example.com", Requests: 1000, Status4xx: 950, Challenged: 900, Sources: []SourceStats{{Src: netip.MustParseAddr("198.51.100.4"), Requests: 60, Decided: 60, Errors4xx: 58}}}, sink)
+	if strings.Join(sink.marks, ",") != "example.com/198.51.100.4/errors" {
+		t.Fatalf("challenged zone switched the errors rule off: marks = %v", sink.marks)
+	}
 }
 
 func TestListenerReceivesDatagrams(t *testing.T) {
