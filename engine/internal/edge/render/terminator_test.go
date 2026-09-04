@@ -365,7 +365,7 @@ func TestRealTerminator(t *testing.T) {
 		}
 		s.get(t, "example.com", "/_kapkan/decide").expect(t, 404, "")
 		s.get(t, "example.com", "/_kapkan/undecided").expect(t, 404, "")
-		if page.last().Header.Get("X-Kapkan-Uri") == "/_kapkan/decide" {
+		if last := page.last(); last != nil && last.Header.Get("X-Kapkan-Uri") == "/_kapkan/decide" {
 			t.Error("the decision endpoint reached the page")
 		}
 
@@ -511,6 +511,7 @@ func (h *harness) prepare(t *testing.T, name, arm string, mutate func(*render.In
 		DecideSocket:    containerWork + "/run/decide.sock",
 		ChallengeSocket: containerWork + "/run/challenge.sock",
 		LogSocket:       containerWork + "/run/log.sock",
+		ClearanceSocket: containerWork + "/run/clearance.sock",
 		EmptyRoot:       containerWork + "/empty",
 		// Containers commonly have no IPv6 stack; binding [::] would fail at
 		// start (not at -t) and hide what this test is after.
