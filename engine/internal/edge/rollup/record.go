@@ -53,22 +53,26 @@ type Record struct {
 	URT string
 	UA  string
 	// Decision is the decision service's answer for this request: "200"
-	// (allow), "403" (deny), a 5xx when the service could not be reached
+	// (allow), "403" (deny), "401" (challenge: the clearance page was served
+	// instead of the origin), a 5xx when the service could not be reached
 	// (undecided, passed or refused by failure_mode), "" when the zone does
 	// not decide or the request never reached the decision (e.g. :80).
 	Decision string
-	// Reason is the decision service's X-Kapkan-Reason for a denial: "rate",
-	// "concurrency" or "table:<reason>"; "" otherwise.
+	// Reason is the decision service's X-Kapkan-Reason for a denial or a
+	// challenge: "rate", "concurrency", "table:<reason>" or
+	// "challenge:<why>"; "" otherwise.
 	Reason string
 	// Mark is the X-Kapkan-Mark the origin received; in dry-run a denial is
-	// a 200 with "would-deny:<reason>".
+	// a 200 with "would-deny:<reason>", a challenge a 200 with
+	// "would-challenge:<why>"; a request that cleared the rung carries
+	// "cleared" or "cleared:nojs".
 	Mark string
 }
 
 // Decided reports whether the decision service answered this request (and so
 // opened an in-flight slot the decider must be told to close).
 func (r Record) Decided() bool {
-	return r.Decision == "200" || r.Decision == "403"
+	return r.Decision == "200" || r.Decision == "403" || r.Decision == "401"
 }
 
 // Undecided reports a request the decision service could not answer.
@@ -76,11 +80,31 @@ func (r Record) Undecided() bool {
 	return r.Decision != "" && !r.Decided()
 }
 
+// Challenged reports a request the decision service sent to the clearance
+// page (the rung in force, no valid clearance).
+func (r Record) Challenged() bool {
+	return r.Decision == "401"
+}
+
+// Cleared reports a request that passed the rung with a valid clearance.
+func (r Record) Cleared() bool {
+	return r.Mark == "cleared" || strings.HasPrefix(r.Mark, "cleared:")
+}
+
 // WouldDenyReason is the reason of a dry-run denial ("" when this request
 // was not one).
 func (r Record) WouldDenyReason() string {
 	if reason, ok := strings.CutPrefix(r.Mark, "would-deny:"); ok {
 		return reason
+	}
+	return ""
+}
+
+// WouldChallengeReason is the why of a dry-run challenge ("" when this
+// request was not one).
+func (r Record) WouldChallengeReason() string {
+	if why, ok := strings.CutPrefix(r.Mark, "would-challenge:"); ok {
+		return why
 	}
 	return ""
 }

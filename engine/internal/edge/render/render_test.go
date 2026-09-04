@@ -231,8 +231,10 @@ func TestPolicyShapes(t *testing.T) {
 				"error_page 500 502 503 504 = @kapkan_unavailable;",
 				"location @kapkan_unavailable {", "return 503;",
 				"ssl_protocols TLSv1.3;",
+				// The clearance page failing follows failure_mode too.
+				"location @kapkan_clearance {", "error_page 401 = @kapkan_clearance;",
 			},
-			wantNot: []string{"/_kapkan/undecided", "proxy_intercept_errors", "= @kapkan_pass;", "ssl_ciphers", "TLSv1.2", "limit_req", "limit_conn"},
+			wantNot: []string{"/_kapkan/undecided", "= @kapkan_pass;", "ssl_ciphers", "TLSv1.2", "limit_req", "limit_conn"},
 		},
 		{
 			// A single TLS 1.3-only zone: the node-wide floor is 1.3 too.
