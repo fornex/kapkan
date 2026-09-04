@@ -215,6 +215,22 @@ hostgroups:
 			wantErr: "edge.stale_after_seconds must be > 0",
 		},
 		{
+			// The clearance state file (E4.1) is key material the daemon writes
+			// itself; a relative path would land wherever the daemon happened to
+			// start, as for ban.state_file.
+			name:    "edge state_file with a relative path",
+			yaml:    validBase + "\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  state_file: edge-state.json\n",
+			wantErr: "edge.state_file must be an absolute path",
+		},
+		{
+			// Two writers of two shapes to one file would take turns clobbering
+			// each other.
+			name: "edge state_file shared with ban.state_file",
+			yaml: strings.Replace(validBase, "ban:\n", "ban:\n  state_file: /var/lib/kapkan/state.json\n", 1) +
+				"\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  state_file: /var/lib/kapkan/state.json\n",
+			wantErr: "must not be the same file as ban.state_file",
+		},
+		{
 			name:    "static rule ratelimit without a profile",
 			yaml:    validBase + "\ndataplane:\n  interfaces: [\"eth0\"]\n  static_rules:\n    - name: cap\n      match: {proto: icmp}\n      action: ratelimit\n",
 			wantErr: "requires profile",
