@@ -2454,11 +2454,20 @@ func (c *Config) validateEdge() error {
 	if e.StaleAfterSeconds < 1 {
 		return fmt.Errorf("edge.stale_after_seconds must be > 0, got %d", e.StaleAfterSeconds)
 	}
-	if e.StateFile != "" && !filepath.IsAbs(e.StateFile) {
-		return fmt.Errorf("edge.state_file must be an absolute path, got %q", e.StateFile)
-	}
-	if e.StateFile != "" && e.StateFile == c.Ban.StateFile {
-		return fmt.Errorf("edge.state_file %q must not be the same file as ban.state_file", e.StateFile)
+	if e.StateFile != "" {
+		if !filepath.IsAbs(e.StateFile) {
+			return fmt.Errorf("edge.state_file must be an absolute path, got %q", e.StateFile)
+		}
+		// The brain WRITES this file (rename over the path). Two writers of two
+		// shapes to one file would clobber each other, and pointing it at the
+		// zones file would destroy the tenants' zones on the first poll.
+		state := filepath.Clean(e.StateFile)
+		if state == filepath.Clean(e.ZonesFile) {
+			return fmt.Errorf("edge.state_file %q must not be the same file as edge.zones_file", e.StateFile)
+		}
+		if c.Ban.StateFile != "" && state == filepath.Clean(c.Ban.StateFile) {
+			return fmt.Errorf("edge.state_file %q must not be the same file as ban.state_file", e.StateFile)
+		}
 	}
 	return nil
 }

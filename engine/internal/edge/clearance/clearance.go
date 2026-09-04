@@ -27,11 +27,16 @@
 //
 // Puzzles. A puzzle is hashcash: find a solution such that SHA-256(nonce ||
 // solution) starts with Difficulty zero bits. The nonce is itself an HMAC of
-// (zone, source key, return path, minute bucket) under the zone's key, so the
-// server keeps NO per-client state: a solution is checked by recomputing the
-// nonce for the current and the previous minute. The return path is signed
-// into the nonce, so the answer endpoint can only send a client where the
-// terminator said it came from (no open redirect).
+// (zone, source key, return path, two-minute bucket) under the zone's key, so
+// the server keeps NO per-client state: a solution is checked by recomputing
+// the nonce for the checker's bucket and its two neighbours — the previous
+// one because solving takes time, the next one because the node that checks
+// may not be the node that issued and fleet clocks differ by seconds. A
+// puzzle therefore lives between two and six minutes, and MaxDifficulty is
+// set so the slowest client the package is written for solves well inside
+// the shortest of those windows. The return path is signed into the nonce,
+// so the answer endpoint can only send a client where the terminator said it
+// came from (no open redirect).
 package clearance
 
 import (
@@ -60,10 +65,13 @@ const (
 
 // Puzzle bounds. Difficulty is the number of leading zero bits the SHA-256 of
 // nonce||solution must have: 2^d hashes on average; 18 is a fraction of a
-// second on a laptop, a few seconds on a low-end phone.
+// second on a laptop, a few seconds on a low-end phone. 22 is sixteen times
+// that — around a minute on that phone, with the geometric tail still inside
+// the two-minute floor of the puzzle window below; anything harder would time
+// honest clients out, so it is the ceiling whatever an operator asks for.
 const (
 	MinDifficulty     = 12
-	MaxDifficulty     = 24
+	MaxDifficulty     = 22
 	DefaultDifficulty = 18
 	// SecretLen is the size of a key secret.
 	SecretLen = 32
@@ -71,8 +79,9 @@ const (
 	// input on the request path.
 	maxToken = 512
 	// nonceBucket is the puzzle nonce's time granularity; a solution is
-	// accepted for the bucket it was issued in and the one after.
-	nonceBucket = time.Minute
+	// accepted for the checker's bucket, the one before and the one after,
+	// so a puzzle is valid for at least two and at most six minutes.
+	nonceBucket = 2 * time.Minute
 	// maxReturnPath bounds the path signed into a puzzle.
 	maxReturnPath = 2048
 )
@@ -216,10 +225,10 @@ func NewPuzzle(key Key, zone, sourceKey, returnPath string, difficulty int, now 
 }
 
 // Check verifies a client's solution to the puzzle it was handed: the nonce
-// must be one this key would have issued for (zone, source key, return path)
-// in the current or the previous minute bucket, and SHA-256(nonce||solution)
-// must carry the difficulty. Difficulty comes from the server's own policy,
-// never from the client.
+// must be one a live key would have issued for (zone, source key, return
+// path) in the checker's bucket or either neighbour, and
+// SHA-256(nonce||solution) must carry the difficulty. Difficulty comes from
+// the server's own policy, never from the client.
 func Check(keys []Key, zone, sourceKey, returnPath string, difficulty int, nonce, solution string, now time.Time) bool {
 	if len(nonce) == 0 || len(nonce) > 128 || len(solution) == 0 || len(solution) > 64 {
 		return false
@@ -233,7 +242,7 @@ func Check(keys []Key, zone, sourceKey, returnPath string, difficulty int, nonce
 		if !k.live(now) {
 			continue
 		}
-		for _, b := range []int64{bucket, bucket - 1} {
+		for _, b := range []int64{bucket, bucket - 1, bucket + 1} {
 			want := nonceFor(k, zone, sourceKey, returnPath, b)
 			if subtle.ConstantTimeCompare([]byte(want), []byte(nonce)) == 1 {
 				matched = true
