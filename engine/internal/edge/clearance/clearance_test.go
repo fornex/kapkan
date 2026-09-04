@@ -95,8 +95,10 @@ func TestKeyWindowsAndRotation(t *testing.T) {
 		t.Fatal("issued under a key before its window")
 	}
 	// A token issued under the previous epoch verifies while that key is
-	// still live (the overlap), and not after.
-	tokPrev, err := Issue(prev, "shop.test", "s", KindNoJS, t0.Add(-90*time.Minute).Add(time.Hour), t0.Add(-2*time.Hour))
+	// still live (the overlap), and not after — even though the TOKEN itself
+	// has not expired: the key's window, not the token's, is what bounds a
+	// leaked key's usefulness.
+	tokPrev, err := Issue(prev, "shop.test", "s", KindNoJS, t0.Add(time.Hour), t0.Add(-2*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +106,33 @@ func TestKeyWindowsAndRotation(t *testing.T) {
 		t.Fatal("previous-epoch token refused inside the overlap")
 	}
 	if _, ok := Verify([]Key{prev, cur}, "shop.test", "s", tokPrev, t0); ok {
-		t.Fatal("token verified after its key's window ended")
+		t.Fatal("an unexpired token verified after its key's window ended")
+	}
+	// A key not yet live refuses too: a token minted tomorrow under the next
+	// epoch (live then) is worthless today.
+	tokNext, err := Issue(next, "shop.test", "s", KindPoW, t0.Add(25*time.Hour), t0.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := Verify([]Key{cur, next}, "shop.test", "s", tokNext, t0); ok {
+		t.Fatal("a token under a not-yet-live key verified")
+	}
+	if _, ok := Verify([]Key{cur, next}, "shop.test", "s", tokNext, t0.Add(24*time.Hour)); !ok {
+		t.Fatal("the same token refused once its key is live")
+	}
+	// Puzzles honour the window the same way: one issued under prev a minute
+	// before it died is refused a minute after, although its bucket is still
+	// within the checker's reach.
+	p, err := NewPuzzle(prev, "shop.test", "s", "/", MinDifficulty, t0.Add(-61*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sol := Solve(p)
+	if !Check([]Key{prev, cur}, "shop.test", "s", "/", MinDifficulty, p.Nonce, sol, t0.Add(-60*time.Minute-time.Second)) {
+		t.Fatal("a solution under a live key was refused")
+	}
+	if Check([]Key{prev, cur}, "shop.test", "s", "/", MinDifficulty, p.Nonce, sol, t0.Add(-59*time.Minute)) {
+		t.Fatal("a solution under a dead key was accepted")
 	}
 	// A key with a malformed secret or ID never verifies or issues.
 	bad := Key{ID: "e.1", Secret: cur.Secret, NotBefore: cur.NotBefore, NotAfter: cur.NotAfter}
@@ -131,12 +159,20 @@ func TestPuzzleIsStatelessAndBound(t *testing.T) {
 	if !Check(keys, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, p.Nonce, sol, t0.Add(10*time.Second)) {
 		t.Fatal("a correct solution was refused")
 	}
-	// Still accepted in the next minute bucket, not two buckets later.
-	if !Check(keys, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, p.Nonce, sol, t0.Add(90*time.Second)) {
+	// Still accepted in the next bucket (the client took its time) and in the
+	// previous one (the checking node's clock is behind the issuing node's),
+	// not two buckets away.
+	if !Check(keys, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, p.Nonce, sol, t0.Add(3*time.Minute)) {
 		t.Fatal("solution refused in the following bucket")
 	}
-	if Check(keys, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, p.Nonce, sol, t0.Add(3*time.Minute)) {
+	if !Check(keys, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, p.Nonce, sol, t0.Add(-90*time.Second)) {
+		t.Fatal("solution refused by a checker one bucket behind the issuer")
+	}
+	if Check(keys, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, p.Nonce, sol, t0.Add(4*time.Minute)) {
 		t.Fatal("stale nonce accepted")
+	}
+	if Check(keys, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, p.Nonce, sol, t0.Add(-4*time.Minute)) {
+		t.Fatal("a nonce from two buckets ahead was accepted")
 	}
 	// Bound to zone, source, return path and the server's difficulty.
 	if Check(keys, "other.test", "203.0.113.4", "/cart?x=1", MinDifficulty, p.Nonce, sol, t0) {
@@ -160,7 +196,7 @@ func TestPuzzleIsStatelessAndBound(t *testing.T) {
 		t.Fatal("a forged nonce was accepted")
 	}
 	// The nonce is stable within a bucket (no state needed) and changes across.
-	p2, _ := NewPuzzle(k, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, t0.Add(10*time.Second))
+	p2, _ := NewPuzzle(k, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, t0.Add(100*time.Second))
 	p3, _ := NewPuzzle(k, "shop.test", "203.0.113.4", "/cart?x=1", MinDifficulty, t0.Add(2*time.Minute))
 	if p2.Nonce != p.Nonce || p3.Nonce == p.Nonce {
 		t.Fatalf("nonce stability: %q %q %q", p.Nonce, p2.Nonce, p3.Nonce)

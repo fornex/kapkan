@@ -226,9 +226,16 @@ hostgroups:
 			// Two writers of two shapes to one file would take turns clobbering
 			// each other.
 			name: "edge state_file shared with ban.state_file",
-			yaml: strings.Replace(validBase, "ban:\n", "ban:\n  state_file: /var/lib/kapkan/state.json\n", 1) +
+			yaml: strings.Replace(validBase, "ban:\n", "ban:\n  state_file: /var/lib/kapkan/./state.json\n", 1) +
 				"\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  state_file: /var/lib/kapkan/state.json\n",
 			wantErr: "must not be the same file as ban.state_file",
+		},
+		{
+			// The brain renames the key file over this path: naming the zones
+			// file here would destroy the tenants' zones on the first poll.
+			name:    "edge state_file shared with edge.zones_file",
+			yaml:    validBase + "\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  state_file: /etc/kapkan/../kapkan/zones.yaml\n",
+			wantErr: "must not be the same file as edge.zones_file",
 		},
 		{
 			name:    "static rule ratelimit without a profile",

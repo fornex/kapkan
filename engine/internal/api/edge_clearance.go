@@ -12,17 +12,24 @@ package api
 // Epochs are UTC days: the key that starts at midnight is honoured for 48 h,
 // so a cookie issued just before a rotation still verifies on the day after
 // (two keys live per zone; nodes issue under the newest). The masters are
-// persisted to edge.state_file when one is configured (0600, written whole);
-// without it a brain restart re-keys the fleet and every cleared visitor
-// solves a puzzle once more — nodes keep verifying with the keys they cached
-// until the new document lands.
+// persisted to edge.state_file when one is configured (0600, fsynced, renamed
+// into place): without it a brain restart re-keys the fleet and every cleared
+// visitor solves a puzzle once more — nodes keep verifying with the keys they
+// cached until the new document lands. The file is written as soon as memory
+// holds a master the file lacks (a path adopted by a reload mid-day, a save
+// that failed), not only at midnight; a file that is not a clearance state
+// file is never overwritten, so a mistyped path cannot destroy an operator's
+// file.
 //
 // The document therefore carries SECRETS: an agent-token holder can mint
 // clearances for any zone (a bypass of the rung, never of the rate). The
-// node caches the document 0600 for that reason, and the runbook rotates the
-// state file's epoch together with the agent token.
+// node caches the document 0600 for that reason. Re-keying after a compromise
+// is manual until E4.2's operator endpoint: stop the brain, delete the state
+// file, start it — the next document carries fresh keys, and edge-spec §9
+// (risk 6) rotates the agent token in the same runbook.
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -45,6 +52,9 @@ const (
 	// live), so a cookie's TTL must stay well under the difference.
 	clearanceEpoch   = 24 * time.Hour
 	clearanceKeyLife = 2 * clearanceEpoch
+	// clearanceStateVersion marks the state file as ours: a file without it
+	// is somebody else's and is left alone.
+	clearanceStateVersion = 1
 )
 
 // clearanceMaster is one epoch's fleet master.
@@ -55,8 +65,13 @@ type clearanceMaster struct {
 	NotAfter  time.Time `json:"not_after"`
 }
 
+func (m clearanceMaster) valid() bool {
+	return len(m.Master) == clearance.SecretLen && m.ID != "" && m.NotAfter.After(m.NotBefore)
+}
+
 // clearanceState is the persisted shape.
 type clearanceState struct {
+	Version int               `json:"version"`
 	Masters []clearanceMaster `json:"masters"`
 }
 
@@ -64,20 +79,24 @@ type clearanceState struct {
 type clearanceKeyring struct {
 	mu      sync.Mutex
 	masters []clearanceMaster
-	path    string // "" = memory only
-	loaded  bool
-	log     *slog.Logger
-	changed atomic.Pointer[chan struct{}]
-	// newSecret and now are seams for tests.
-	newSecret func() ([]byte, error)
-	now       func() time.Time
+	// path is edge.state_file ("" = memory only); loaded says it was looked
+	// at; unusable says its content is not ours and must not be overwritten.
+	path     string
+	loaded   bool
+	unusable bool
+	// dirty: memory holds masters the file does not — retried on every
+	// snapshot until a save succeeds. saveFailed rate-limits the error log.
+	dirty      bool
+	saveFailed bool
+	log        *slog.Logger
+	changed    atomic.Pointer[chan struct{}]
 }
 
 func newClearanceKeyring(log *slog.Logger) *clearanceKeyring {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &clearanceKeyring{log: log.With("component", "edge-clearance"), newSecret: clearance.NewSecret, now: time.Now}
+	return &clearanceKeyring{log: log.With("component", "edge-clearance")}
 }
 
 // Changed returns a channel closed on the next rotation — the Store.Changed
@@ -100,39 +119,78 @@ func (k *clearanceKeyring) notify() {
 	}
 }
 
-// setPath points the keyring at edge.state_file; the file is read once, when
-// the path is first seen (a reload may set it), and written on every rotation.
+// setPath points the keyring at edge.state_file. The file is read once per
+// path (a reload may set or change it): its masters are MERGED with the ones
+// in memory — memory wins on a duplicate ID, those are the keys nodes already
+// hold — and whatever memory holds that the file lacks is written at once.
 func (k *clearanceKeyring) setPath(path string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if path == k.path && (k.loaded || path == "") {
+	if path == k.path && k.loaded {
 		return
 	}
-	k.path, k.loaded = path, true
+	k.path, k.loaded, k.unusable, k.dirty, k.saveFailed = path, true, false, false, false
 	if path == "" {
 		return
 	}
 	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	inFile := map[string]bool{}
+	switch {
+	case errors.Is(err, os.ErrNotExist), err == nil && len(bytes.TrimSpace(raw)) == 0:
+		// Absent, or the empty husk a crash between create and rename can
+		// leave behind: ours to write.
+	case err != nil:
+		k.unusable = true
+		k.log.Error("clearance state file unreadable; keys stay in memory (a restart re-keys the fleet) until the file is fixed and the brain restarted", "path", path, "err", err)
 		return
+	default:
+		var st clearanceState
+		if err := json.Unmarshal(raw, &st); err != nil || st.Version != clearanceStateVersion {
+			k.unusable = true
+			k.log.Error("edge.state_file is not a clearance state file; refusing to overwrite it, keys stay in memory (a restart re-keys the fleet) — fix the path or remove the file, then restart", "path", path)
+			return
+		}
+		for _, m := range st.Masters {
+			if !m.valid() {
+				continue
+			}
+			inFile[m.ID] = true
+			if have, ok := k.getLocked(m.ID); !ok {
+				k.masters = append(k.masters, m)
+			} else if !bytes.Equal(have.Master, m.Master) {
+				// The same epoch, a different master (an older install's
+				// file, a restored backup): memory's is the one nodes hold,
+				// so the file must be brought up to date.
+				k.dirty = true
+			}
+		}
+		k.log.Info("clearance keys loaded", "path", path, "epochs", len(st.Masters))
 	}
-	if err != nil {
-		k.log.Error("clearance state file unreadable; starting with fresh keys", "path", path, "err", err)
-		return
-	}
-	var st clearanceState
-	if err := json.Unmarshal(raw, &st); err != nil {
-		k.log.Error("clearance state file is not valid JSON; starting with fresh keys", "path", path, "err", err)
-		return
-	}
-	var kept []clearanceMaster
-	for _, m := range st.Masters {
-		if len(m.Master) == clearance.SecretLen && m.ID != "" && m.NotAfter.After(m.NotBefore) {
-			kept = append(kept, m)
+	for _, m := range k.masters {
+		if !inFile[m.ID] {
+			k.dirty = true
 		}
 	}
-	k.masters = kept
-	k.log.Info("clearance keys loaded", "path", path, "epochs", len(kept))
+	k.sortLocked()
+	k.flushLocked()
+}
+
+func (k *clearanceKeyring) hasLocked(id string) bool {
+	_, ok := k.getLocked(id)
+	return ok
+}
+
+func (k *clearanceKeyring) getLocked(id string) (clearanceMaster, bool) {
+	for _, m := range k.masters {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	return clearanceMaster{}, false
+}
+
+func (k *clearanceKeyring) sortLocked() {
+	sort.Slice(k.masters, func(i, j int) bool { return k.masters[i].NotBefore.Before(k.masters[j].NotBefore) })
 }
 
 // epochStart is the UTC midnight an instant belongs to.
@@ -144,7 +202,7 @@ func epochStart(now time.Time) time.Time {
 func epochID(start time.Time) string { return "c" + start.UTC().Format("20060102") }
 
 // ensureLocked makes the current epoch's master exist and drops masters past
-// their life. It reports whether anything changed.
+// their life. It reports whether the set changed.
 func (k *clearanceKeyring) ensureLocked(now time.Time) (bool, error) {
 	changed := false
 	live := k.masters[:0]
@@ -157,41 +215,70 @@ func (k *clearanceKeyring) ensureLocked(now time.Time) (bool, error) {
 	}
 	k.masters = live
 	start := epochStart(now)
-	id := epochID(start)
-	have := false
-	for _, m := range k.masters {
-		if m.ID == id {
-			have = true
-			break
-		}
-	}
-	if !have {
-		secret, err := k.newSecret()
+	if id := epochID(start); !k.hasLocked(id) {
+		secret, err := clearance.NewSecret()
 		if err != nil {
 			return changed, fmt.Errorf("drawing a clearance master: %w", err)
 		}
 		k.masters = append(k.masters, clearanceMaster{ID: id, Master: secret, NotBefore: start, NotAfter: start.Add(clearanceKeyLife)})
 		changed = true
 	}
-	sort.Slice(k.masters, func(i, j int) bool { return k.masters[i].NotBefore.Before(k.masters[j].NotBefore) })
-	if changed && k.path != "" {
-		if err := k.saveLocked(); err != nil {
-			k.log.Error("persisting clearance keys failed; a restart will re-key the fleet", "path", k.path, "err", err)
-		}
+	if changed {
+		k.sortLocked()
+		k.dirty = true
 	}
+	k.flushLocked()
 	return changed, nil
 }
 
+// flushLocked writes the masters when memory is ahead of the file. A failure
+// is logged once per streak and retried on every snapshot.
+func (k *clearanceKeyring) flushLocked() {
+	if !k.dirty || k.path == "" || k.unusable {
+		return
+	}
+	if err := k.saveLocked(); err != nil {
+		if !k.saveFailed {
+			k.log.Error("persisting clearance keys failed; retrying on every snapshot — until it succeeds a restart re-keys the fleet", "path", k.path, "err", err)
+			k.saveFailed = true
+		}
+		return
+	}
+	if k.saveFailed {
+		k.log.Info("clearance keys persisted", "path", k.path)
+	}
+	k.dirty, k.saveFailed = false, false
+}
+
+// saveLocked writes the state durably: a 0600 temp file in the same
+// directory, fsynced, renamed over the path, directory fsynced — so a crash
+// leaves either the old file or the new one, never a torn or empty husk.
 func (k *clearanceKeyring) saveLocked() error {
-	raw, err := json.MarshalIndent(clearanceState{Masters: k.masters}, "", "  ")
+	raw, err := json.MarshalIndent(clearanceState{Version: clearanceStateVersion, Masters: k.masters}, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := k.path + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+	dir := filepath.Dir(k.path)
+	f, err := os.CreateTemp(dir, filepath.Base(k.path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
+	tmp := f.Name()
+	cleanup := func(err error) error {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		return cleanup(err)
+	}
+	if _, err := f.Write(append(raw, '\n')); err != nil {
+		return cleanup(err)
+	}
+	if err := f.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -199,7 +286,7 @@ func (k *clearanceKeyring) saveLocked() error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if d, err := os.Open(filepath.Dir(k.path)); err == nil {
+	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
 	}

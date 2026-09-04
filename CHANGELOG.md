@@ -138,16 +138,20 @@ security-relevant.
   `internal/edge/clearance` holds the clearance token (`v1.<key>.<kind>.<exp>.<mac>`: an HMAC
   over zone, source key, kind and expiry — not a session, useless on another zone or from
   another source), the stateless hashcash puzzle (its nonce is an HMAC over zone, source key,
-  return path and the minute, so a node remembers nothing about a challenged client and the
-  answer page can only send a client back where the terminator said it came from) and HKDF
-  derivation of per-zone keys from one fleet master. The zone document gains
-  `zones[].clearance_keys` (the current and the previous UTC-day epoch, each honoured 48 h) and
-  `policy.challenge` learns the words `manual` and `auto`; the brain rotates the master at UTC
-  midnight, derives every zone's key from it (deterministic, so the ETag moves exactly at the
-  boundary and a parked poll wakes for it), and persists the masters to the new optional
-  `edge.state_file` (0600) so a restart does not re-key the fleet. The document now carries
-  secrets: a node caches it 0600 already. No node-side behaviour changes yet — the decision
-  service and the challenge page follow in E4.2–E4.4.
+  return path and a two-minute bucket — accepted one bucket either side, so fleet clocks may
+  differ by seconds — so a node remembers nothing about a challenged client and the answer page
+  can only send a client back where the terminator said it came from) and HKDF derivation of
+  per-zone keys from one fleet master. The zone document gains `zones[].clearance_keys` (the
+  current and the previous UTC-day epoch, each honoured 48 h) and the document's vocabulary
+  reserves `manual` and `auto` for `policy.challenge` (the zones file still accepts only `off`
+  until E4.2 can act on them); the brain rotates the master at UTC midnight, derives every
+  zone's key from it (deterministic, so the ETag moves exactly at the boundary and a parked poll
+  wakes for it), and persists the masters to the new optional `edge.state_file` (0600, fsynced,
+  written as soon as memory is ahead of the file — never only at midnight — and never over a
+  file that is not its own) so a restart does not re-key the fleet; to re-key deliberately,
+  stop the brain, delete the file, start it. The document now carries secrets: a node caches it
+  0600 already. No node-side behaviour changes yet — the decision service and the challenge
+  page follow in E4.2–E4.4.
 
 ## [1.7.0] - 2026-09-02
 

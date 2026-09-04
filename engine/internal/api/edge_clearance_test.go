@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,7 +21,7 @@ var clearanceNow = time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
 
 func testKeyring(t *testing.T, path string) *clearanceKeyring {
 	t.Helper()
-	k := newClearanceKeyring(nil)
+	k := newClearanceKeyring(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	k.setPath(path)
 	return k
 }
@@ -31,6 +33,18 @@ func twoZones() edgedoc.Doc {
 		edgedoc.Zone{Name: "b.example", Policy: edgedoc.Policy{Mode: edgedoc.ModeDecide, FailureMode: edgedoc.FailOpen, Challenge: edgedoc.ChallengeOff}},
 	)
 	return d
+}
+
+// zoneSecret is zone a's first key secret after a fill — the thing a restart
+// or a reload must never change by accident.
+func zoneSecret(t *testing.T, k *clearanceKeyring, now time.Time) (string, edgedoc.Doc) {
+	t.Helper()
+	d := twoZones()
+	k.fill(&d, now)
+	if len(d.Zones[0].ClearanceKeys) == 0 {
+		t.Fatal("no clearance keys after fill")
+	}
+	return d.Zones[0].ClearanceKeys[0].Secret, d
 }
 
 // TestClearanceFillIsDeterministicPerEpoch pins what makes the document's
@@ -147,15 +161,14 @@ func TestClearanceRotation(t *testing.T) {
 }
 
 // TestClearanceStateFileRoundTrip pins persistence: a keyring with a state
-// file writes it 0600 on rotation, a fresh keyring on the same path derives
-// the same secrets (a restart does not re-key the fleet), a corrupt file
-// yields fresh keys instead of a crash, and no path means no file.
+// file writes it 0600 at the first fill, a fresh keyring on the same path
+// derives the same secrets (a restart does not re-key the fleet), the file
+// holds masters and never a derived zone key, and no path means no file.
 func TestClearanceStateFileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "edge-state.json")
 	k1 := testKeyring(t, path)
-	d1 := twoZones()
-	k1.fill(&d1, clearanceNow)
+	s1, d1 := zoneSecret(t, k1, clearanceNow)
 	st, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -164,47 +177,159 @@ func TestClearanceStateFileRoundTrip(t *testing.T) {
 		t.Fatalf("state file mode %o, want 600", st.Mode().Perm())
 	}
 	raw, _ := os.ReadFile(path)
-	if !strings.Contains(string(raw), `"c20260904"`) || strings.Contains(string(raw), d1.Zones[0].ClearanceKeys[0].Secret) {
-		// The file holds masters, never a derived zone key.
+	if !strings.Contains(string(raw), `"c20260904"`) || !strings.Contains(string(raw), `"version": 1`) || strings.Contains(string(raw), s1) {
 		t.Fatalf("state file content: %s", raw)
 	}
 	k2 := testKeyring(t, path)
-	d2 := twoZones()
-	k2.fill(&d2, clearanceNow.Add(time.Hour))
+	s2, d2 := zoneSecret(t, k2, clearanceNow.Add(time.Hour))
 	b1, _ := json.Marshal(d1)
 	b2, _ := json.Marshal(d2)
-	if !bytes.Equal(b1, b2) {
+	if s1 != s2 || !bytes.Equal(b1, b2) {
 		t.Fatalf("keys differ after a restart:\n%s\n%s", b1, b2)
 	}
-	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	k3 := testKeyring(t, path)
-	d3 := twoZones()
-	k3.fill(&d3, clearanceNow)
-	if len(d3.Zones[0].ClearanceKeys) != 1 || d3.Zones[0].ClearanceKeys[0].Secret == d1.Zones[0].ClearanceKeys[0].Secret {
-		t.Fatalf("corrupt state file did not yield fresh keys: %+v", d3.Zones[0].ClearanceKeys)
-	}
-	raw, _ = os.ReadFile(path)
-	if !json.Valid(raw) {
-		t.Fatal("the corrupt file was not rewritten on the next rotation")
-	}
 	k4 := testKeyring(t, "")
-	d4 := twoZones()
-	k4.fill(&d4, clearanceNow)
+	zoneSecret(t, k4, clearanceNow)
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Fatalf("a keyring without a path wrote files: %v", entries)
 	}
 }
 
+// TestClearanceStateFileNeverClobbersAForeignFile pins the guard behind a
+// mistyped path: content that is not a clearance state (an operator's YAML,
+// say) is left untouched and the keyring runs in memory; the empty husk a
+// crash can leave behind is ours to overwrite.
+func TestClearanceStateFileNeverClobbersAForeignFile(t *testing.T) {
+	dir := t.TempDir()
+	foreign := filepath.Join(dir, "zones.yaml")
+	if err := os.WriteFile(foreign, []byte("zones:\n  - name: a.example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k := testKeyring(t, foreign)
+	s, _ := zoneSecret(t, k, clearanceNow)
+	if s == "" {
+		t.Fatal("no keys in memory-only mode")
+	}
+	raw, _ := os.ReadFile(foreign)
+	if string(raw) != "zones:\n  - name: a.example\n" {
+		t.Fatalf("a foreign file was overwritten: %s", raw)
+	}
+	// Next day's rotation must not touch it either.
+	zoneSecret(t, k, clearanceNow.Add(24*time.Hour))
+	raw, _ = os.ReadFile(foreign)
+	if string(raw) != "zones:\n  - name: a.example\n" {
+		t.Fatalf("a foreign file was overwritten on rotation: %s", raw)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("temp files left beside a foreign file: %v", entries)
+	}
+
+	husk := filepath.Join(dir, "edge-state.json")
+	if err := os.WriteFile(husk, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k2 := testKeyring(t, husk)
+	zoneSecret(t, k2, clearanceNow)
+	raw, _ = os.ReadFile(husk)
+	if !json.Valid(raw) || !strings.Contains(string(raw), `"c20260904"`) {
+		t.Fatalf("an empty husk was not replaced by the state: %q", raw)
+	}
+}
+
+// TestClearanceSetPathPersistsAtOnceAndMerges pins the reload cases: a path
+// adopted while memory already holds a master is written immediately, not at
+// the next midnight; a file holding an older master is merged, memory
+// winning on a duplicate ID (nodes hold those keys), and the file gains what
+// it lacked.
+func TestClearanceSetPathPersistsAtOnceAndMerges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "edge-state.json")
+	// Memory-only brain, then edge.state_file appears on a reload mid-day.
+	k := testKeyring(t, "")
+	before, _ := zoneSecret(t, k, clearanceNow)
+	k.setPath(path)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("state file not written when the path was adopted: %v", err)
+	}
+	after, _ := zoneSecret(t, k, clearanceNow.Add(time.Minute))
+	if after != before {
+		t.Fatal("adopting a path changed the live key")
+	}
+	restarted := testKeyring(t, path)
+	if s, _ := zoneSecret(t, restarted, clearanceNow.Add(2*time.Minute)); s != before {
+		t.Fatal("a restart after the reload re-keyed the fleet")
+	}
+
+	// A file from an earlier install holds yesterday's master and a
+	// different (stale) master under today's ID: memory keeps its own.
+	stale := filepath.Join(dir, "stale.json")
+	old, _ := clearance.NewSecret()
+	other, _ := clearance.NewSecret()
+	st := clearanceState{Version: clearanceStateVersion, Masters: []clearanceMaster{
+		{ID: "c20260903", Master: old, NotBefore: clearanceNow.Add(-36 * time.Hour), NotAfter: clearanceNow.Add(12 * time.Hour)},
+		{ID: "c20260904", Master: other, NotBefore: clearanceNow.Add(-12 * time.Hour), NotAfter: clearanceNow.Add(36 * time.Hour)},
+	}}
+	raw, _ := json.Marshal(st)
+	if err := os.WriteFile(stale, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k2 := testKeyring(t, "")
+	live, _ := zoneSecret(t, k2, clearanceNow)
+	k2.setPath(stale)
+	merged, d := zoneSecret(t, k2, clearanceNow)
+	ids := []string{}
+	for _, ck := range d.Zones[0].ClearanceKeys {
+		ids = append(ids, ck.ID)
+	}
+	if strings.Join(ids, ",") != "c20260903,c20260904" {
+		t.Fatalf("merged ids: %v", ids)
+	}
+	if merged == live {
+		// The first key is now yesterday's; today's must still be memory's.
+		t.Fatal("ordering: yesterday's key should come first")
+	}
+	if d.Zones[0].ClearanceKeys[1].Secret != live {
+		t.Fatal("the file's stale master replaced the live one nodes already hold")
+	}
+	var back clearanceState
+	raw, _ = os.ReadFile(stale)
+	if err := json.Unmarshal(raw, &back); err != nil || len(back.Masters) != 2 || bytes.Equal(back.Masters[1].Master, other) {
+		t.Fatalf("file after merge: %s (%v)", raw, err)
+	}
+}
+
+// TestClearanceSaveFailureIsRetried pins the dirty flag: a save that fails
+// (the state directory does not exist yet) is retried on the next snapshot
+// and succeeds once the operator fixes the directory — no midnight needed.
+func TestClearanceSaveFailureIsRetried(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	path := filepath.Join(dir, "edge-state.json")
+	k := testKeyring(t, path)
+	s, _ := zoneSecret(t, k, clearanceNow)
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("a file appeared in a missing directory")
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	zoneSecret(t, k, clearanceNow.Add(time.Minute))
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("save not retried after the directory appeared: %v", err)
+	}
+	if got, _ := zoneSecret(t, testKeyring(t, path), clearanceNow.Add(2*time.Minute)); got != s {
+		t.Fatal("the retried save persisted a different master")
+	}
+}
+
 // TestEdgeZonesCarriesClearanceKeys pins the wire: the served document has
-// one live key per zone, per-zone distinct, and a parked hold wakes when the
-// keyring rotates — the ETag moves once.
+// one live key per zone, per-zone distinct, and a poll PARKED on the current
+// ETag wakes when the keyring rotates — well before the hold deadline, so
+// the wake is the keyring's notification, not the timer.
 func TestEdgeZonesCarriesClearanceKeys(t *testing.T) {
 	store, _ := edgeStore(t, edgeZonesTwo)
 	s := testServer(t, store)
-	s.rulesHold = 5 * time.Second
+	s.rulesHold = 10 * time.Second
 	h := s.Handler()
 
 	rec := getZones(h, "", "agent-secret", "e1")
@@ -227,27 +352,36 @@ func TestEdgeZonesCarriesClearanceKeys(t *testing.T) {
 	if doc.Zones[0].ClearanceKeys[0].Secret == doc.Zones[1].ClearanceKeys[0].Secret {
 		t.Fatal("zones share a clearance secret on the wire")
 	}
-	// The same document again: a 304-style hold, not a new ETag.
+	// The same document again: the same ETag, not a new one.
 	rec = getZones(h, "", "agent-secret", "e1")
 	if rec.Header().Get("ETag") != etag {
 		t.Fatalf("ETag moved without news: %s -> %s", etag, rec.Header().Get("ETag"))
 	}
 
-	// Park a poll on the current ETag, then rotate the keyring from outside
-	// (as the day boundary would): the hold must wake with the new document.
-	done := make(chan *zonesResult, 1)
+	// Park a poll on the current ETag — provably parked, the hold gate counts
+	// it — then rotate the keyring from outside, as the day boundary would.
+	type result struct {
+		code int
+		etag string
+		body []byte
+		took time.Duration
+	}
+	done := make(chan result, 1)
+	start := time.Now()
 	go func() {
 		r := getZones(h, etag, "agent-secret", "e1")
-		done <- &zonesResult{code: r.Code, etag: r.Header().Get("ETag"), body: r.Body.Bytes()}
+		done <- result{code: r.Code, etag: r.Header().Get("ETag"), body: r.Body.Bytes(), took: time.Since(start)}
 	}()
-	time.Sleep(100 * time.Millisecond)
-	tomorrow := time.Now().Add(clearanceEpoch)
+	waitEdgeHolds(t, s, 1)
 	scratch := edgedoc.Empty()
-	s.edgeClearance.fill(&scratch, tomorrow)
+	s.edgeClearance.fill(&scratch, time.Now().Add(clearanceEpoch))
 	select {
 	case res := <-done:
 		if res.code != http.StatusOK || res.etag == etag {
 			t.Fatalf("woken poll: %d etag %s (was %s)", res.code, res.etag, etag)
+		}
+		if res.took > s.rulesHold/2 {
+			t.Fatalf("poll answered after %v: that is the deadline, not the rotation", res.took)
 		}
 		doc, err := edgedoc.Decode(res.body)
 		if err != nil {
@@ -256,13 +390,7 @@ func TestEdgeZonesCarriesClearanceKeys(t *testing.T) {
 		if len(doc.Zones[0].ClearanceKeys) != 2 {
 			t.Fatalf("keys after rotation: %+v", doc.Zones[0].ClearanceKeys)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("parked poll did not wake on the rotation")
 	}
-}
-
-type zonesResult struct {
-	code int
-	etag string
-	body []byte
 }
