@@ -98,16 +98,20 @@ map $cookie_kapkan_clr $kapkan_clr_safe {
     "~^[A-Za-z0-9._-]{1,512}$" $cookie_kapkan_clr;
 }
 
+{{- if .HasDecide}}
+
 # The request's normalised path ($uri, captured in location / as
 # $kapkan_path) is DECODED: "/x/%01" puts a raw control byte in it, which
 # would make the decision service refuse the subrequest as malformed — the
 # same failed decision as above, the same fail-open. Forwarded only when it
 # is printable ASCII; anything else is forwarded as nothing, so the request is
-# still decided and merely not exempt from the rung.
+# still decided and merely not exempt from the rung. (Only rendered when a
+# zone decides: nothing else declares $kapkan_path.)
 map $kapkan_path $kapkan_path_safe {
     default "";
     "~^/[\x21-\x7e]{0,2048}\z" $kapkan_path;
 }
+{{- end}}
 {{- if .HashBucketSize}}
 
 # A zone name longer than 46 bytes does not fit nginx's default server-name

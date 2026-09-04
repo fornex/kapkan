@@ -116,4 +116,9 @@ func TestChallengeMachineryShape(t *testing.T) {
 	if z := string(none[render.ZoneFile("static.example.org")]); strings.Contains(z, "kapkan_clearance") {
 		t.Error("a mode: none zone renders clearance machinery")
 	}
+	// Nothing declares $kapkan_path without a decide-mode zone, so the map
+	// over it must not be rendered either (nginx -t would refuse it).
+	if c := string(none[render.CommonFile]); strings.Contains(c, "$kapkan_path") {
+		t.Error("the path map is rendered for a node with no decide-mode zone")
+	}
 }

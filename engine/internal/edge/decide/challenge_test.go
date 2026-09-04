@@ -146,18 +146,20 @@ func TestExemptPathsSkipTheRungOnly(t *testing.T) {
 	// A fresh source per path: the zone's rate is 1 rps, and this loop is
 	// about the rung, not the ceiling.
 	for i, p := range []string{"/healthz", "/healthz?deep=1", "/api/v1/x"} {
-		if v := s.DecideRequest(Request{Zone: "shop.example", Src: src(fmt.Sprintf("203.0.113.%d", 20+i)), Path: p}); !v.Allow || v.Challenge {
+		path, _, _ := strings.Cut(p, "?")
+		if v := s.DecideRequest(Request{Zone: "shop.example", Src: src(fmt.Sprintf("203.0.113.%d", 20+i)), Path: path, RawURI: p}); !v.Allow || v.Challenge {
 			t.Fatalf("exempt %s: %+v", p, v)
 		}
 	}
 	for i, p := range []string{"/", "/apiary", "/x/healthz", "/cart?next=/api/"} {
-		if v := s.DecideRequest(Request{Zone: "shop.example", Src: src(fmt.Sprintf("203.0.113.%d", 40+i)), Path: p}); v.Allow {
+		path, _, _ := strings.Cut(p, "?")
+		if v := s.DecideRequest(Request{Zone: "shop.example", Src: src(fmt.Sprintf("203.0.113.%d", 40+i)), Path: path, RawURI: p}); v.Allow {
 			t.Fatalf("not exempt %s: %+v", p, v)
 		}
 	}
 	// Exempt from the rung, not from the ceiling.
-	s.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/healthz"})
-	if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/healthz"}); v.Allow || v.Reason != ReasonRate {
+	s.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/healthz", RawURI: "/healthz"})
+	if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/healthz", RawURI: "/healthz"}); v.Allow || v.Reason != ReasonRate {
 		t.Fatalf("exempt path over the rate: %+v", v)
 	}
 }
@@ -391,10 +393,10 @@ func TestDormantChallengeEntryKeepsTheMark(t *testing.T) {
 	s2 := newService(t, c, za)
 	s2.Mark("shop.example", ip, "errors", time.Hour)
 	s2.Challenge("shop.example", ip, time.Hour, "flood")
-	if v := s2.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/healthz"}); !v.Allow || v.Mark != "errors" {
+	if v := s2.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/healthz", RawURI: "/healthz"}); !v.Allow || v.Mark != "errors" {
 		t.Fatalf("mark lost on an exempt path: %+v", v)
 	}
-	if v := s2.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/cart"}); v.Allow || v.Reason != "challenge:table:flood" {
+	if v := s2.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: "/cart", RawURI: "/cart"}); v.Allow || v.Reason != "challenge:table:flood" {
 		t.Fatalf("challenge not in force off the exempt path: %+v", v)
 	}
 }
@@ -413,15 +415,15 @@ func TestExemptPathsRefuseUnnormalisedForms(t *testing.T) {
 	refused := []struct{ path, raw string }{
 		{"/healthz/../admin", "/healthz/../admin"}, {"/healthz/..", "/healthz/.."}, {"/healthz/./x", "/healthz/./x"},
 		{"/api/%2e%2e/admin", "/api/%2e%2e/admin"}, {"/healthz\\..\\admin", "/healthz\\..\\admin"},
-		{"/healthz/..;/admin", "/healthz/..;/admin"},   // a servlet container reads ..; as ..
-		{"/healthz", "/admin/..%2Fhealthz"},            // nginx collapsed it; an /admin route elsewhere
-		{"/healthz", "/admin/..%2fhealthz?x=1"},        // lower-case escape, query
-		{"/healthz/x", "/healthz%2Fx"},                 // an encoded slash: one segment to some routers
-		{"/healthz", "/he%61lthz"},                     // an encoded letter is fine on its own, but...
-		{"/healthz", ""},                               // ...a missing raw target is not exempt
-		{"", "/healthz"},                               // nor a missing (unshaped) normalised path
+		{"/healthz/..;/admin", "/healthz/..;/admin"}, // a servlet container reads ..; as ..
+		{"/healthz", "/admin/..%2Fhealthz"},          // nginx collapsed it; an /admin route elsewhere
+		{"/healthz", "/admin/..%2fhealthz?x=1"},      // lower-case escape, query
+		{"/healthz/x", "/healthz%2Fx"},               // an encoded slash: one segment to some routers
+		{"/healthz", "/he%61lthz"},                   // an encoded letter is fine on its own, but...
+		{"/healthz", ""},                             // ...a missing raw target is not exempt
+		{"", "/healthz"},                             // nor a missing (unshaped) normalised path
 		{"healthz", "healthz"}, {"/healthz\x01", "/healthz%01"}, {"/héalthz", "/h%C3%A9althz"},
-		{"/api/x", "/API/x"},                           // prefixes are case-sensitive on both sides
+		{"/api/x", "/API/x"}, // prefixes are case-sensitive on both sides
 	}
 	for _, r := range refused {
 		if r.path == "/healthz" && r.raw == "/he%61lthz" {
