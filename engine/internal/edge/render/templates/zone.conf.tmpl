@@ -182,12 +182,10 @@ server {
         proxy_connect_timeout 50ms;
         proxy_send_timeout 1s;
         proxy_read_timeout 2s;
-        # This location is itself reached through error_page (the 401), so a
-        # second error_page here is a RECURSIVE one: nginx ignores it unless
-        # told otherwise, and the page's 5xx would reach the client instead
-        # of following failure_mode. Neither target has an error_page of its
-        # own, so this cannot loop.
-        recursive_error_pages on;
+        # A second error_page on a request that already took one (the 401 in
+        # location /): honoured because location / sets recursive_error_pages
+        # — see there. Neither target has an error_page of its own, so this
+        # cannot loop.
         proxy_intercept_errors on;
 {{- if .FailOpen}}
         error_page 500 502 503 504 = @kapkan_pass;
@@ -244,6 +242,13 @@ server {
         auth_request_set $kapkan_mark $kapkan_decided_mark;
         auth_request_set $kapkan_decision $upstream_status;
         auth_request_set $kapkan_reason $upstream_http_x_kapkan_reason;
+        # The 401 goes to the clearance page, whose own failure must then be
+        # allowed a SECOND error_page (to the origin or a 503, per
+        # failure_mode). nginx marks a request at its first error_page and
+        # ignores later ones unless this is on HERE, where the first one is
+        # taken; the targets below have no error_page of their own, so the
+        # recursion is one level deep and cannot loop.
+        recursive_error_pages on;
         error_page 401 = @kapkan_clearance;
         error_page 403 = @kapkan_denied;
 {{- if .FailOpen}}
