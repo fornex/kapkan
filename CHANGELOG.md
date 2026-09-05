@@ -176,10 +176,12 @@ security-relevant.
   prefixes never challenged — the one place the edge reads a request path, for an exemption only,
   and it needs nginx's normalised path (`X-Kapkan-Path`, dot segments merged, forwarded only when
   free of control bytes — a decoded one would otherwise make the subrequest malformed) AND the raw
-  target to agree, with no dot segment, path parameter or control byte in either and no encoding
-  left in the normalised form, so `/healthz/../admin`, `/healthz/..;/admin`, `/admin/..%2Fhealthz`
-  and the double-encoded `/api/%252e%252e/admin` are all challenged while `/api/items/café` stays
-  exempt under `/api/`; the zones file refuses an exempt prefix that could never match. The zones
+  target to agree, with no dot segment, path parameter, control byte or invalid UTF-8 in either
+  and no escape surviving in the normalised form, so `/healthz/../admin`, `/healthz/..;/admin`,
+  `/admin/..%2Fhealthz`, the double-encoded `/api/%252e%252e/admin` and the overlong
+  `/api/%C0%AE%C0%AE/admin` are all challenged while `/api/items/café` and `/api/coupons/50%25-off`
+  stay exempt under `/api/`; the zones file refuses an exempt prefix that no client's request
+  could ever match (non-ASCII, spaces, braces, quotes, a path parameter, an escape). The zones
   file accepts the three words and the
   options (schema regenerated). The renderer emits the machinery for EVERY decide-mode zone —
   the cookie and path headers on the subrequest, `error_page 401 = @kapkan_clearance` to a

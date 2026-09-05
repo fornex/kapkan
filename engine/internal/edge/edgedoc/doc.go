@@ -137,8 +137,9 @@ type ChallengeOptions struct {
 	// checks, API clients, webhooks. The decision service exempts a request
 	// only when BOTH the terminator's normalised path (X-Kapkan-Path) and the
 	// raw target (X-Kapkan-URI) start with the prefix and neither carries a
-	// dot segment, ';', a backslash, a control byte or (in the normalised
-	// form) a surviving '%' — origins normalise differently from nginx. The
+	// dot segment, ';', a backslash, a control byte, invalid UTF-8 or (in the
+	// normalised form) a surviving escape — origins normalise differently
+	// from nginx. The
 	// one place the edge reads a request path — for an exemption, never for a
 	// verdict (edge-spec §7: not a WAF).
 	ExemptPaths []string `json:"exempt_paths,omitempty"`

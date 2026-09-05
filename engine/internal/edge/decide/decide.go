@@ -93,6 +93,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kapkan-io/kapkan/internal/edge/clearance"
 	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
@@ -573,18 +574,22 @@ func (zs *zoneState) challengeWhy(e *entry, now time.Time) string {
 // RAW target (as the client sent it, still percent-encoded, query cut off)
 // must BOTH start with one exempt prefix, and neither may carry anything an
 // origin could read as a different path than nginx did — a dot segment, a
-// path parameter (';'), a backslash, a control byte. A '%' surviving in the
-// normalised path can only be a double encoding ("%252e" → "%2e"), which an
-// origin decoding twice reads as a dot: refused. An encoded byte in the raw
-// target beyond the prefix is fine — nginx decoded it, the normalised form
-// shows what it meant, and both forms still had to start with the prefix. A
-// path that fails the test is simply not exempt: the rung applies.
+// path parameter (';'), a backslash, a control byte, an invalid UTF-8
+// sequence (an overlong "%C0%AE" is a dot to some decoders). An ESCAPE
+// surviving in the normalised path ("%2e" from "%252e", or "%u002e") is what
+// an origin decoding twice would consume: refused; a bare '%' from "%25"
+// ("50%-off") is a literal no decoder touches and stays exempt. An encoded
+// byte in the raw target beyond the prefix is fine — nginx decoded it, the
+// normalised form shows what it meant, and both forms still had to start
+// with the prefix. Out of scope, by design: an origin that applies Unicode
+// normalisation (a fullwidth dot) to its paths. A path that fails the test is
+// simply not exempt: the rung applies.
 func pathExempt(exempt []string, path, rawURI string) bool {
 	if len(exempt) == 0 {
 		return false
 	}
 	raw, _, _ := strings.Cut(rawURI, "?")
-	if !plainPath(path) || !plainPath(raw) || strings.IndexByte(path, '%') >= 0 {
+	if !plainPath(path) || !plainPath(raw) || survivingEscape(path) {
 		return false
 	}
 	for _, p := range exempt {
@@ -595,14 +600,40 @@ func pathExempt(exempt []string, path, rawURI string) bool {
 	return false
 }
 
+// survivingEscape reports whether a once-decoded path still carries an
+// escape a second decoder would consume: "%XX" (two hex digits) or the
+// non-standard "%uXXXX".
+func survivingEscape(p string) bool {
+	for i := strings.IndexByte(p, '%'); i >= 0 && i < len(p); {
+		rest := p[i+1:]
+		if len(rest) >= 2 && isHex(rest[0]) && isHex(rest[1]) {
+			return true
+		}
+		if len(rest) >= 5 && (rest[0] == 'u' || rest[0] == 'U') && isHex(rest[1]) && isHex(rest[2]) && isHex(rest[3]) && isHex(rest[4]) {
+			return true
+		}
+		j := strings.IndexByte(rest, '%')
+		if j < 0 {
+			return false
+		}
+		i += 1 + j
+	}
+	return false
+}
+
+func isHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
 // plainPath admits an absolute path whose bytes Go's header parser accepts
-// (no control byte, no DEL — bytes above 0x7f are fine: a decoded UTF-8
-// name) and whose segments are ordinary names: no "." or ".." (or a segment
-// beginning with ".."), no ';', no backslash. The zones file holds exempt
-// prefixes to the same rule (config.ZoneChallengeOptions), so a prefix that
-// could never match is refused when written, not silently ignored.
+// (no control byte, no DEL) and that is valid UTF-8 — a decoded name such as
+// /café is, an overlong or stray byte sequence is not — and whose segments
+// are ordinary names: no "." or ".." (or a segment beginning with ".."), no
+// ';', no backslash. The zones file holds exempt prefixes to a stricter
+// version of the rule (config.ZoneChallengeOptions), so a prefix that could
+// never match is refused when written, not silently ignored.
 func plainPath(p string) bool {
-	if p == "" || p[0] != '/' || len(p) > 4096 {
+	if p == "" || p[0] != '/' || len(p) > 4096 || !utf8.ValidString(p) {
 		return false
 	}
 	for i := 0; i < len(p); i++ {

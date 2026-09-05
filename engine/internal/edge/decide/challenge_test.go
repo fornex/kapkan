@@ -417,15 +417,20 @@ func TestExemptPathsRefuseUnnormalisedForms(t *testing.T) {
 	refused := []struct{ path, raw string }{
 		{"/healthz/../admin", "/healthz/../admin"}, {"/healthz/..", "/healthz/.."}, {"/healthz/./x", "/healthz/./x"},
 		{"/healthz\\..\\admin", "/healthz\\..\\admin"},
-		{"/healthz/..;/admin", "/healthz/..;/admin"},   // a servlet container reads ..; as ..
-		{"/healthz", "/admin/..%2Fhealthz"},            // nginx collapsed it; an /admin route elsewhere
-		{"/healthz", "/admin/..%2fhealthz?x=1"},        // lower-case escape, query
-		{"/admin", "/api/%2e%2e/admin"},                // nginx decoded and collapsed: the normalised form left the prefix
-		{"/api/%2e%2e/admin", "/api/%252e%252e/admin"}, // double-encoded: a '%' survives nginx's decode; an origin decoding twice reads /admin
-		{"/api/%2Fx", "/api/%252Fx"},                   // double-encoded slash, same reason
-		{"/healthz", "/he%61lthz"},                     // an encoded letter inside the PREFIX: the raw form no longer starts with it
-		{"/healthz", ""},                               // a missing raw target is not exempt
-		{"", "/healthz"},                               // nor a missing (unshaped) normalised path
+		{"/healthz/..;/admin", "/healthz/..;/admin"},               // a servlet container reads ..; as ..
+		{"/healthz", "/admin/..%2Fhealthz"},                        // nginx collapsed it; an /admin route elsewhere
+		{"/healthz", "/admin/..%2fhealthz?x=1"},                    // lower-case escape, query
+		{"/admin", "/api/%2e%2e/admin"},                            // nginx decoded and collapsed: the normalised form left the prefix
+		{"/api/%2e%2e/admin", "/api/%252e%252e/admin"},             // double-encoded: an escape survives nginx's decode; an origin decoding twice reads /admin
+		{"/api/%2Fx", "/api/%252Fx"},                               // double-encoded slash, same reason
+		{"/api/%u002e%u002e/admin", "/api/%25u002e%25u002e/admin"}, // the non-standard %u escape some decoders honour
+		{"/api/\xc0\xae\xc0\xae/admin", "/api/%C0%AE%C0%AE/admin"}, // overlong UTF-8 for "..": invalid UTF-8, a dot to lenient decoders
+		{"/api/y", "/api/x/../y"},                                  // nginx merged the dot segment; the raw target still carries it
+		{"/api/y", "/api/x/./y"},                                   // likewise
+		{"/api/y", "/api/" + strings.Repeat("%41", 1400)},          // an over-long raw target (nginx's is fine, ours is bounded)
+		{"/healthz", "/he%61lthz"},                                 // an encoded letter inside the PREFIX: the raw form no longer starts with it
+		{"/healthz", ""},                                           // a missing raw target is not exempt
+		{"", "/healthz"},                                           // nor a missing (unshaped) normalised path
 		{"healthz", "healthz"}, {"/healthz\x01", "/healthz%01"}, {"/héalthz", "/h%C3%A9althz"},
 		{"/api/x", "/API/x"}, // prefixes are case-sensitive on both sides
 	}
@@ -439,6 +444,9 @@ func TestExemptPathsRefuseUnnormalisedForms(t *testing.T) {
 		{"/api/items/café", "/api/items/caf%C3%A9"}, // a decoded UTF-8 name beyond the prefix is still under /api/
 		{"/api/a/b", "/api/a%2Fb"},                  // an encoded slash beyond the prefix: /api/ on any origin
 		{"/healthz/x", "/healthz%2Fx"},              // likewise under the prefix
+		{"/api/50%", "/api/50%25"},                  // a literal percent: no decoder touches a bare '%'
+		{"/api/coupons/50%-off", "/api/coupons/50%25-off"},
+		{"/api/x%zz", "/api/x%25zz"}, // '%' before non-hex is a literal too
 	} {
 		if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.61"), Path: ok.path, RawURI: ok.raw}); !v.Allow || v.Challenge {
 			t.Fatalf("plain exempt path %q raw %q refused: %+v", ok.path, ok.raw, v)

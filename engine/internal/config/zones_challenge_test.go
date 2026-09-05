@@ -40,6 +40,10 @@ zones:
 	if c.Challenge != ZoneChallengeAuto || c.ChallengeOptions.DryRun == nil || *c.ChallengeOptions.DryRun || len(c.ChallengeOptions.ExemptPaths) != 2 {
 		t.Fatalf("zone c: %+v", c)
 	}
+	// Prefixes made of what a client sends unencoded are accepted as written.
+	if _, err := ParseZones([]byte("zones:\n  - name: a.example\n    origins: [\"10.0.0.1:8080\"]\n    policy:\n      challenge_options:\n        exempt_paths: [\"/~user/\", \"/api/v1.2/items:list\", \"/a$b&c+d,e=f@g/\"]\n")); err != nil {
+		t.Fatalf("plain prefixes refused: %v", err)
+	}
 
 	many := "zones:\n  - name: a.example\n    origins: [\"10.0.0.1:8080\"]\n    policy:\n      challenge_options:\n        exempt_paths: ["
 	for i := 0; i <= maxExemptPaths; i++ {
