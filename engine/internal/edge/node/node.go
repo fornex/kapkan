@@ -473,6 +473,7 @@ func (n *Node) acceptDocument(ctx context.Context, body []byte, etag string, per
 	}
 	// Fast path: no file is touched.
 	n.svc.SetZones(doc)
+	n.rules.SetZones(rollup.ZoneRulesFromDoc(doc))
 	names := make([]string, 0, len(doc.Zones))
 	for _, z := range doc.Zones {
 		names = append(names, z.Name)

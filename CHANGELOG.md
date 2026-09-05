@@ -231,6 +231,19 @@ security-relevant.
   gate: semantic HTML, a status line announced once (the moving counter is not a live region), a
   non-timed alternative to every timer, both colour schemes at ≥13:1 text contrast, focus
   outlines, reduced-motion honoured.
+- Edge track, E4.4 — the local ladder (edge-spec §5: the rung between the ceiling and the block).
+  In a zone with `policy.challenge: auto` the rollup's flood rule now **challenges before it
+  denies**: a source pushing through its rate ceiling for a window is sent to the rung for five
+  minutes (a browser clears it and is rate-limited like anyone; a bot cannot), and only a source
+  that floods on while challenged — or that had already cleared the rung and floods anyway — is
+  denied, with the doubling TTL as before. The **zone-wide trigger** for the flood no single
+  source trips (residential proxies): `challenge_options.auto.zone_rps` (0 = off) flips the
+  whole zone to challenge for `auto.hold_seconds` (30..3600, default 300) when the node's window
+  runs at or over that rate; each window still over it extends the hold; the flip lapses on its
+  own. Node-local by design (the fleet-wide view is the brain's). The rules take the per-zone
+  rung settings from the document on every new one; dry-run at any layer previews the whole
+  ladder as `would-challenge` / `would-deny` marks without the rules knowing. Zones schema
+  regenerated.
 
 ## [1.7.0] - 2026-09-02
 
