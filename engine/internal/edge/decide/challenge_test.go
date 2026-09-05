@@ -412,41 +412,36 @@ func TestExemptPathsRefuseUnnormalisedForms(t *testing.T) {
 	z.Policy.ChallengeOptions.ExemptPaths = []string{"/healthz", "/api/"}
 	s := newService(t, c, z)
 	ip := src("198.51.100.58")
+	// Each row is (nginx's normalised path, the raw target) as the terminator
+	// forwards them.
 	refused := []struct{ path, raw string }{
 		{"/healthz/../admin", "/healthz/../admin"}, {"/healthz/..", "/healthz/.."}, {"/healthz/./x", "/healthz/./x"},
-		{"/api/%2e%2e/admin", "/api/%2e%2e/admin"}, {"/healthz\\..\\admin", "/healthz\\..\\admin"},
-		{"/healthz/..;/admin", "/healthz/..;/admin"}, // a servlet container reads ..; as ..
-		{"/healthz", "/admin/..%2Fhealthz"},          // nginx collapsed it; an /admin route elsewhere
-		{"/healthz", "/admin/..%2fhealthz?x=1"},      // lower-case escape, query
-		{"/healthz/x", "/healthz%2Fx"},               // an encoded slash: one segment to some routers
-		{"/healthz", "/he%61lthz"},                   // an encoded letter is fine on its own, but...
-		{"/healthz", ""},                             // ...a missing raw target is not exempt
-		{"", "/healthz"},                             // nor a missing (unshaped) normalised path
+		{"/healthz\\..\\admin", "/healthz\\..\\admin"},
+		{"/healthz/..;/admin", "/healthz/..;/admin"},   // a servlet container reads ..; as ..
+		{"/healthz", "/admin/..%2Fhealthz"},            // nginx collapsed it; an /admin route elsewhere
+		{"/healthz", "/admin/..%2fhealthz?x=1"},        // lower-case escape, query
+		{"/admin", "/api/%2e%2e/admin"},                // nginx decoded and collapsed: the normalised form left the prefix
+		{"/api/%2e%2e/admin", "/api/%252e%252e/admin"}, // double-encoded: a '%' survives nginx's decode; an origin decoding twice reads /admin
+		{"/api/%2Fx", "/api/%252Fx"},                   // double-encoded slash, same reason
+		{"/healthz", "/he%61lthz"},                     // an encoded letter inside the PREFIX: the raw form no longer starts with it
+		{"/healthz", ""},                               // a missing raw target is not exempt
+		{"", "/healthz"},                               // nor a missing (unshaped) normalised path
 		{"healthz", "healthz"}, {"/healthz\x01", "/healthz%01"}, {"/héalthz", "/h%C3%A9althz"},
 		{"/api/x", "/API/x"}, // prefixes are case-sensitive on both sides
 	}
 	for _, r := range refused {
-		if r.path == "/healthz" && r.raw == "/he%61lthz" {
-			continue // the one row that IS exempt, asserted below
-		}
 		if v := s.DecideRequest(Request{Zone: "shop.example", Src: ip, Path: r.path, RawURI: r.raw}); v.Allow || !v.Challenge {
 			t.Fatalf("path %q raw %q was exempt: %+v", r.path, r.raw, v)
 		}
 	}
 	for _, ok := range []struct{ path, raw string }{
-		{"/healthz", "/healthz"}, {"/healthz.old", "/healthz.old?deep=1"}, {"/api/v1/x", "/api/v1/x"}, {"/healthz", "/he%61lthz"},
+		{"/healthz", "/healthz"}, {"/healthz.old", "/healthz.old?deep=1"}, {"/api/v1/x", "/api/v1/x"},
+		{"/api/items/café", "/api/items/caf%C3%A9"}, // a decoded UTF-8 name beyond the prefix is still under /api/
+		{"/api/a/b", "/api/a%2Fb"},                  // an encoded slash beyond the prefix: /api/ on any origin
+		{"/healthz/x", "/healthz%2Fx"},              // likewise under the prefix
 	} {
-		if ok.raw == "/he%61lthz" {
-			// An encoded letter inside the prefix: the raw form no longer starts
-			// with the prefix, so it is NOT exempt — the operator's prefix is
-			// matched literally on both forms.
-			if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.60"), Path: ok.path, RawURI: ok.raw}); v.Allow {
-				t.Fatalf("encoded prefix letter exempted: %+v", v)
-			}
-			continue
-		}
 		if v := s.DecideRequest(Request{Zone: "shop.example", Src: src("198.51.100.61"), Path: ok.path, RawURI: ok.raw}); !v.Allow || v.Challenge {
-			t.Fatalf("plain exempt path %q refused: %+v", ok.path, v)
+			t.Fatalf("plain exempt path %q raw %q refused: %+v", ok.path, ok.raw, v)
 		}
 	}
 }

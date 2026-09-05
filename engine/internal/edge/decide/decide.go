@@ -191,14 +191,14 @@ type Request struct {
 	Src  netip.Addr
 	// Path is the request path as the terminator NORMALISED it (X-Kapkan-Path
 	// = nginx's $uri: dot segments merged, percent-decoding done, no query;
-	// absent when it was not printable ASCII) and RawURI the request target
+	// absent when it carried a control byte) and RawURI the request target
 	// as the client sent it (X-Kapkan-URI). Both are consulted ONLY against
 	// challenge_options.exempt_paths, never for a verdict of their own — and
 	// an exemption needs BOTH to say so: an origin may normalise less than
 	// nginx ("/admin/..%2Fhealthz" is /healthz to nginx and an /admin route
 	// to many frameworks) or more ("/healthz/..;/admin" is /admin to a servlet
-	// container), so a path that reads differently in the two forms is not
-	// exempt.
+	// container, "/api/%252e%252e/x" is /x to one that decodes twice), so a
+	// path that reads differently in the two forms is not exempt.
 	Path   string
 	RawURI string
 	// Clearance is the kapkan_clr cookie's value ("" for none): the one
@@ -569,22 +569,22 @@ func (zs *zoneState) challengeWhy(e *entry, now time.Time) string {
 }
 
 // pathExempt reports whether the request is exempt from the rung: its
-// NORMALISED path (nginx's $uri) and its RAW target (as the client sent it,
-// still percent-encoded, query cut off) must BOTH start with one exempt
-// prefix, and neither may carry anything an origin could read as a different
-// path than nginx did — a dot segment, a path parameter (';'), a backslash,
-// an encoded slash, dot or backslash, a byte outside printable ASCII. A path
-// that fails the test is simply not exempt: the rung applies.
+// NORMALISED path (nginx's $uri: decoded once, dot segments merged) and its
+// RAW target (as the client sent it, still percent-encoded, query cut off)
+// must BOTH start with one exempt prefix, and neither may carry anything an
+// origin could read as a different path than nginx did — a dot segment, a
+// path parameter (';'), a backslash, a control byte. A '%' surviving in the
+// normalised path can only be a double encoding ("%252e" → "%2e"), which an
+// origin decoding twice reads as a dot: refused. An encoded byte in the raw
+// target beyond the prefix is fine — nginx decoded it, the normalised form
+// shows what it meant, and both forms still had to start with the prefix. A
+// path that fails the test is simply not exempt: the rung applies.
 func pathExempt(exempt []string, path, rawURI string) bool {
 	if len(exempt) == 0 {
 		return false
 	}
 	raw, _, _ := strings.Cut(rawURI, "?")
-	if !plainPath(path) || !plainPath(raw) {
-		return false
-	}
-	lower := strings.ToLower(raw)
-	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%2e") {
+	if !plainPath(path) || !plainPath(raw) || strings.IndexByte(path, '%') >= 0 {
 		return false
 	}
 	for _, p := range exempt {
@@ -595,15 +595,18 @@ func pathExempt(exempt []string, path, rawURI string) bool {
 	return false
 }
 
-// plainPath admits an absolute path of printable ASCII whose segments are
-// ordinary names: no "." or ".." (or a segment beginning with ".."), no ';',
-// no backslash.
+// plainPath admits an absolute path whose bytes Go's header parser accepts
+// (no control byte, no DEL — bytes above 0x7f are fine: a decoded UTF-8
+// name) and whose segments are ordinary names: no "." or ".." (or a segment
+// beginning with ".."), no ';', no backslash. The zones file holds exempt
+// prefixes to the same rule (config.ZoneChallengeOptions), so a prefix that
+// could never match is refused when written, not silently ignored.
 func plainPath(p string) bool {
 	if p == "" || p[0] != '/' || len(p) > 4096 {
 		return false
 	}
 	for i := 0; i < len(p); i++ {
-		if c := p[i]; c < 0x21 || c > 0x7e || c == ';' || c == '\\' {
+		if c := p[i]; c < 0x20 || c == 0x7f || c == ';' || c == '\\' {
 			return false
 		}
 	}

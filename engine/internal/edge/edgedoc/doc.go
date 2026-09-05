@@ -133,10 +133,14 @@ type ChallengeOptions struct {
 	// defaults it to true; the brain resolves the default, so when the object
 	// is present this field says what the file meant.
 	DryRun bool `json:"dry_run"`
-	// ExemptPaths are request-path prefixes (the path of X-Kapkan-URI, no
-	// query) the rung never challenges: health checks, API clients, webhooks.
-	// The one place the edge reads a request path — for an exemption, never
-	// for a verdict (edge-spec §7: not a WAF).
+	// ExemptPaths are request-path prefixes the rung never challenges: health
+	// checks, API clients, webhooks. The decision service exempts a request
+	// only when BOTH the terminator's normalised path (X-Kapkan-Path) and the
+	// raw target (X-Kapkan-URI) start with the prefix and neither carries a
+	// dot segment, ';', a backslash, a control byte or (in the normalised
+	// form) a surviving '%' — origins normalise differently from nginx. The
+	// one place the edge reads a request path — for an exemption, never for a
+	// verdict (edge-spec §7: not a WAF).
 	ExemptPaths []string `json:"exempt_paths,omitempty"`
 }
 

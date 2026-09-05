@@ -296,8 +296,18 @@ func (zone *Zone) validate() error {
 		if len(ep) > maxExemptPathLen {
 			return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] is %d bytes; at most %d are accepted", zone.Name, i, len(ep), maxExemptPathLen)
 		}
-		if strings.ContainsAny(ep, "?# \t") || strings.ContainsFunc(ep, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-			return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] %q must be a path prefix: no query, fragment, spaces or control characters", zone.Name, i, ep)
+		// The decision service exempts a request only when its normalised
+		// path and its raw target both start with the prefix and neither
+		// carries a dot segment, ';', a backslash, an encoding or a control
+		// byte (decide.plainPath) — so a prefix carrying one of those could
+		// never match, and is refused here rather than ignored in silence.
+		if strings.ContainsAny(ep, "?# \t;\\%") || strings.ContainsFunc(ep, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] %q must be a plain path prefix: no query, fragment, space, ';', backslash, percent-encoding or control character", zone.Name, i, ep)
+		}
+		for _, seg := range strings.Split(ep[1:], "/") {
+			if seg == "." || seg == ".." || strings.HasPrefix(seg, "..") {
+				return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] %q must not contain a dot segment", zone.Name, i, ep)
+			}
 		}
 	}
 
