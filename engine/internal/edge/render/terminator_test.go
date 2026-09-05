@@ -40,6 +40,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -47,9 +48,11 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -58,6 +61,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kapkan-io/kapkan/internal/edge/clearance"
+	"github.com/kapkan-io/kapkan/internal/edge/clearance/page"
+	"github.com/kapkan-io/kapkan/internal/edge/decide"
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 	"github.com/kapkan-io/kapkan/internal/edge/render"
 	"github.com/kapkan-io/kapkan/internal/edge/rollup"
 )
@@ -78,7 +85,7 @@ const (
 
 	// originBody is what the stand-in origin answers: every header the edge
 	// owns or relays, echoed, so the test sees exactly what arrived.
-	originBody = `origin-ok mark=$http_x_kapkan_mark;zone=$http_x_kapkan_zone;conn=$http_connection;upg=$http_upgrade;len=$content_length;`
+	originBody = `origin-ok mark=$http_x_kapkan_mark;zone=$http_x_kapkan_zone;conn=$http_connection;upg=$http_upgrade;len=$content_length;uri=$request_uri;`
 )
 
 func TestRealTerminator(t *testing.T) {
@@ -311,6 +318,238 @@ func TestRealTerminator(t *testing.T) {
 		n50, n99 := none.timeGets(t, "static.example.org", 200)
 		t.Logf("auth_request overhead through %s: decide p50 %v / p99 %v, none p50 %v / p99 %v, added p50 %v", image, p50, p99, n50, n99, p50-n50)
 	})
+	t.Run("serve/decide-open/challenge", func(t *testing.T) {
+		s := h.serve(t, "decide-open", "challenge")
+		d := h.startDecider(t)
+		logs := h.startLogSink(t)
+		page := h.startClearancePage(t)
+
+		// A 401 from the decider lands on the clearance page: the client gets
+		// the page's status and body, never the 401; the log carries the
+		// decision and the reason.
+		d.setReason(401, "challenge:manual")
+		res := s.get(t, "example.com", "/cart?x=1")
+		res.expect(t, 403, "clearance-page zone=example.com uri=/cart?x=1 reason=challenge:manual path=/cart?x=1")
+		if cc := res.header.Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("Cache-Control = %q on the challenge page", cc)
+		}
+		if rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/cart?x=1" }); rec.Status != 403 || rec.Decision != "401" || rec.Reason != "challenge:manual" || !rec.Decided() || !rec.Challenged() {
+			t.Errorf("challenge's record: %+v", rec)
+		}
+		// Only the clearance cookie's VALUE reaches the decider, in its own
+		// header; the Cookie header itself and everything else stay behind.
+		d.set(200, "cleared")
+		hdr := http.Header{"Cookie": {"junk=1; kapkan_clr=v1.c1.pow.1.abc; other=" + strings.Repeat("o", 500)}}
+		s.request(t, "GET", true, "example.com", "/with-cookie", "", hdr).expect(t, 200, "origin-ok mark=cleared;")
+		seen := d.last()
+		if seen.req.Header.Get("X-Kapkan-Clearance") != "v1.c1.pow.1.abc" || seen.req.Header.Get("Cookie") != "" {
+			t.Errorf("clearance forwarding: %v", seen.req.Header)
+		}
+		// Without the cookie the header is absent (an empty proxy_set_header
+		// value removes it), never something else.
+		d.set(200, "")
+		s.get(t, "example.com", "/no-cookie").expect(t, 200, "")
+		if got := d.last().req.Header.Get("X-Kapkan-Clearance"); got != "" {
+			t.Errorf("X-Kapkan-Clearance without a cookie = %q", got)
+		}
+		// A cookie that is not shaped like a token — a control byte, a space,
+		// a quote — is forwarded as NOTHING: Go's server would refuse a header
+		// carrying it as malformed, and that failed decision would pass the
+		// request under failure_mode: open. The request must still be DECIDED.
+		d.set(200, "")
+		if line := s.rawRequest(t, "example.com", "GET /ctl-cookie HTTP/1.1\r\nHost: example.com\r\nCookie: kapkan_clr=a\x01b\r\nConnection: close\r\n\r\n"); !strings.Contains(line, " 200 ") {
+			t.Errorf("control byte in the cookie: status line %q", line)
+		}
+		if seen := d.last(); seen == nil || seen.req.Header.Get("X-Kapkan-Uri") != "/ctl-cookie" || seen.req.Header.Get("X-Kapkan-Clearance") != "" {
+			t.Errorf("control-byte cookie: decider saw %v", seen)
+		}
+		hdr = http.Header{"Cookie": {`kapkan_clr="quoted value"`}}
+		s.request(t, "GET", true, "example.com", "/odd-cookie", "", hdr).expect(t, 200, "")
+		if got := d.last().req.Header.Get("X-Kapkan-Clearance"); got != "" {
+			t.Errorf("an unshaped cookie was forwarded: %q", got)
+		}
+		// Exemptions are matched on nginx's NORMALISED path beside the raw
+		// target: the decider sees /admin for a dot-segment request.
+		s.get(t, "example.com", "/healthz/../admin?x=1").expect(t, 200, "")
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/admin" || seen.req.Header.Get("X-Kapkan-Uri") != "/healthz/../admin?x=1" {
+			t.Errorf("path normalisation: %v", seen.req.Header)
+		}
+		// A percent-encoded control byte decodes into $uri; it must NOT reach
+		// the decider as a header byte (Go would refuse the subrequest — a
+		// failed decision, which fail-open would pass). The request is still
+		// DECIDED, with the path header simply absent.
+		d.set(403, "")
+		s.get(t, "example.com", "/x/%01?y=1").expect(t, 403, "")
+		if seen := d.last(); seen == nil || seen.req.Header.Get("X-Kapkan-Uri") != "/x/%01?y=1" || seen.req.Header.Get("X-Kapkan-Path") != "" {
+			t.Errorf("control byte in the decoded path: decider saw %v", seen)
+		}
+		s.get(t, "example.com", "/x/%7f").expect(t, 403, "")
+		if seen := d.last(); seen == nil || seen.req.Header.Get("X-Kapkan-Path") != "" {
+			t.Errorf("DEL in the decoded path: decider saw %v", seen)
+		}
+		// Non-ASCII decodes to bytes Go accepts and IS forwarded (an /api/
+		// exemption must cover /api/items/café); a double-encoded dot stays
+		// encoded in nginx's decoded form, so the decider sees the '%' and
+		// can refuse the exemption; ordinary paths are forwarded as they are.
+		s.get(t, "example.com", "/caf%C3%A9").expect(t, 403, "")
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/café" {
+			t.Errorf("non-ASCII path: %q", seen.req.Header.Get("X-Kapkan-Path"))
+		}
+		s.get(t, "example.com", "/api/%252e%252e/admin").expect(t, 403, "")
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/api/%2e%2e/admin" || seen.req.Header.Get("X-Kapkan-Uri") != "/api/%252e%252e/admin" {
+			t.Errorf("double-encoded path: %v", seen.req.Header)
+		}
+		// A single %25 decodes to a bare '%' — a literal, forwarded as such.
+		s.get(t, "example.com", "/api/coupons/50%25-off").expect(t, 403, "")
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/api/coupons/50%-off" {
+			t.Errorf("literal percent: %q", seen.req.Header.Get("X-Kapkan-Path"))
+		}
+		s.get(t, "example.com", "/plain/path.txt?q=1").expect(t, 403, "")
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/plain/path.txt" {
+			t.Errorf("plain path not forwarded: %q", seen.req.Header.Get("X-Kapkan-Path"))
+		}
+		d.set(200, "")
+
+		// The page's public endpoints are reachable from outside without a
+		// decision, GET/HEAD/POST with a small body, kapkan's headers only;
+		// the decision endpoints are not.
+		d.set(403, "")
+		s.get(t, "example.com", "/_kapkan/clearance/answer").expect(t, 200, "clearance-public path=/_kapkan/clearance/answer zone=example.com")
+		body := `{"nonce":"n","solution":"s"}`
+		res = s.request(t, "POST", true, "example.com", "/_kapkan/clearance/answer", body, http.Header{"Cookie": {"kapkan_clr=old"}, "Content-Type": {"application/json"}})
+		res.expect(t, 200, "body="+body)
+		res.expect(t, 200, "ctype=application/json")
+		res.expect(t, 200, "clr=old")
+		if last := page.last(); last == nil || last.Header.Get("Cookie") != "" || last.Header.Get("X-Kapkan-Client") == "" {
+			t.Errorf("public endpoint's headers: %v", last)
+		}
+		s.request(t, "PUT", true, "example.com", "/_kapkan/clearance/answer", "x", nil).expect(t, 403, "")
+		if r, err := s.try("POST", true, "example.com", "/_kapkan/clearance/answer", strings.Repeat("b", 5000), nil, 0); err == nil && r.status != 413 {
+			t.Errorf("5 KB answer body: status %d, want 413", r.status)
+		}
+		s.get(t, "example.com", "/_kapkan/decide").expect(t, 404, "")
+		s.get(t, "example.com", "/_kapkan/undecided").expect(t, 404, "")
+		if last := page.last(); last != nil && last.Header.Get("X-Kapkan-Uri") == "/_kapkan/decide" {
+			t.Error("the decision endpoint reached the page")
+		}
+
+		// The page answering 5xx (the node's placeholder before E4.3, or a
+		// broken page) and the page server gone: failure_mode open passes the
+		// challenged request to the origin, undecided-style, with no mark —
+		// and with the CLIENT's URI, not the page's.
+		d.setReason(401, "challenge:manual")
+		page.fail(true)
+		s.get(t, "example.com", "/page-503?y=2").expect(t, 200, "origin-ok mark=;zone=example.com;")
+		s.get(t, "example.com", "/page-503?y=2").expect(t, 200, "uri=/page-503?y=2;")
+		page.stop()
+		res = s.get(t, "example.com", "/page-down")
+		res.expect(t, 200, "origin-ok mark=;zone=example.com;")
+		res.expect(t, 200, "uri=/page-down;")
+	})
+	t.Run("serve/decide-open/clearance-roundtrip", func(t *testing.T) {
+		// The REAL decision service and the REAL clearance page, on the
+		// sockets the container sees, sharing one Service — as a node runs
+		// them. This is the rung end to end through nginx: 401 → page → solve
+		// → answer → cookie → origin marked cleared; and the no-JS path.
+		s := h.serve(t, "decide-open", "clearance-roundtrip")
+		logs := h.startLogSink(t)
+		svc := decide.New(decide.Options{Now: time.Now})
+		zdoc := edgedoc.Empty()
+		zdoc.Zones = append(zdoc.Zones, edgedoc.Zone{
+			Name: "example.com", Origins: []string{"127.0.0.1:8080"}, TLS: edgedoc.TLS{MinVersion: edgedoc.TLS12},
+			Policy: edgedoc.Policy{Mode: edgedoc.ModeDecide, FailureMode: edgedoc.FailOpen, Challenge: edgedoc.ChallengeManual,
+				ChallengeOptions: &edgedoc.ChallengeOptions{DryRun: false, Difficulty: clearance.MinDifficulty, ExemptPaths: []string{"/healthz"}}},
+		})
+		svc.SetZones(&zdoc)
+		h.startReal(t, (&decide.Server{Service: svc, Path: filepath.Join(h.work, "run", "decide.sock"), Mode: 0o666}).ListenAndServe, "decide.sock")
+		h.startReal(t, (&page.Server{Zones: svc, Path: filepath.Join(h.work, "run", "clearance.sock"), Mode: 0o666}).ListenAndServe, "clearance.sock")
+
+		// 1. No cookie: 401 → the page, 403 no-store, puzzle bound to the
+		// request's path; the log says decision 401 with the reason.
+		res := s.get(t, "example.com", "/shop?item=1")
+		res.expect(t, 403, `id="kapkan-puzzle"`)
+		if cc := res.header.Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("page Cache-Control = %q", cc)
+		}
+		m := regexp.MustCompile(`(?s)id="kapkan-puzzle">(.*?)</script>`).FindStringSubmatch(res.body)
+		if m == nil {
+			t.Fatalf("no puzzle in the page:\n%s", res.body)
+		}
+		var p clearance.Puzzle
+		if err := json.Unmarshal([]byte(m[1]), &p); err != nil || p.Return != "/shop?item=1" || p.Difficulty != clearance.MinDifficulty {
+			t.Fatalf("puzzle %+v (%v)", p, err)
+		}
+		if rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/shop?item=1" }); rec.Decision != "401" || rec.Reason != "challenge:manual" || rec.Status != 403 {
+			t.Errorf("challenged request's record: %+v", rec)
+		}
+		// 2. Solve, post the form through the public prefix: 303 back with
+		// the cookie and its attributes.
+		form := url.Values{"nonce": {p.Nonce}, "solution": {clearance.Solve(p)}, "return": {p.Return}}.Encode()
+		ans := s.request(t, "POST", true, "example.com", "/_kapkan/clearance/answer", form, http.Header{"Content-Type": {"application/x-www-form-urlencoded"}})
+		ans.expect(t, 303, "")
+		if loc := ans.header.Get("Location"); loc != "/shop?item=1" {
+			t.Errorf("Location = %q", loc)
+		}
+		sc := ans.header.Get("Set-Cookie")
+		for _, want := range []string{"kapkan_clr=", "Path=/", "Secure", "HttpOnly", "SameSite=Lax", "Max-Age=1800"} {
+			if !strings.Contains(sc, want) {
+				t.Errorf("Set-Cookie %q lacks %q", sc, want)
+			}
+		}
+		cookie := strings.SplitN(strings.TrimPrefix(sc, "kapkan_clr="), ";", 2)[0]
+		// 3. With the cookie the origin is reached, marked cleared; the
+		// cookie is the ONE client value the decider saw.
+		s.request(t, "GET", true, "example.com", "/shop?item=1", "", http.Header{"Cookie": {"junk=1; kapkan_clr=" + cookie}}).expect(t, 200, "origin-ok mark=cleared;zone=example.com;")
+		if rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/shop?item=1" && r.Decision == "200" }); rec.Mark != "cleared" {
+			t.Errorf("cleared request's record: %+v", rec)
+		}
+		// A tampered cookie is no cookie.
+		s.request(t, "GET", true, "example.com", "/shop?item=2", "", http.Header{"Cookie": {"kapkan_clr=" + cookie[:len(cookie)-2] + "AA"}}).expect(t, 403, `id="kapkan-puzzle"`)
+		// 4. Exempt by prefix on the NORMALISED path; dot segments are not.
+		s.get(t, "example.com", "/healthz").expect(t, 200, "origin-ok mark=;zone=example.com;")
+		s.get(t, "example.com", "/healthz/../shop").expect(t, 403, `id="kapkan-puzzle"`)
+		// 5. A POST original gets the compact JSON, not HTML.
+		s.request(t, "POST", true, "example.com", "/api/submit", "x=1", nil).expect(t, 403, `{"error":"challenge_required"}`)
+		// 6. No JavaScript: the ticket is refused before four seconds, then
+		// grants the shorter clearance, marked cleared:nojs at the origin.
+		res = s.get(t, "example.com", "/nojs-path")
+		tm := regexp.MustCompile(`name="t" value="([^"]+)"`).FindStringSubmatch(res.body)
+		if tm == nil {
+			t.Fatalf("no ticket in the page:\n%s", res.body)
+		}
+		s.get(t, "example.com", "/_kapkan/clearance/nojs?t="+url.QueryEscape(tm[1])).expect(t, 403, "")
+		time.Sleep(clearance.TicketMinWait + 200*time.Millisecond)
+		red := s.get(t, "example.com", "/_kapkan/clearance/nojs?t="+url.QueryEscape(tm[1]))
+		red.expect(t, 303, "")
+		sc = red.header.Get("Set-Cookie")
+		if red.header.Get("Location") != "/nojs-path" || !strings.Contains(sc, "Max-Age=300") {
+			t.Errorf("nojs redeem: Location %q Set-Cookie %q", red.header.Get("Location"), sc)
+		}
+		cookie = strings.SplitN(strings.TrimPrefix(sc, "kapkan_clr="), ";", 2)[0]
+		s.request(t, "GET", true, "example.com", "/nojs-path", "", http.Header{"Cookie": {"kapkan_clr=" + cookie}}).expect(t, 200, "origin-ok mark=cleared:nojs;")
+		// 7. The page's assets, by content hash, cacheable for a year.
+		for _, a := range regexp.MustCompile(`(/_kapkan/clearance/a/[a-z]+\.[0-9a-f]{12}\.(?:js|css))`).FindAllString(res.body, -1) {
+			ar := s.get(t, "example.com", a)
+			ar.expect(t, 200, "")
+			if cc := ar.header.Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+				t.Errorf("asset %s Cache-Control = %q", a, cc)
+			}
+		}
+	})
+	t.Run("serve/decide-closed/challenge", func(t *testing.T) {
+		s := h.serve(t, "decide-closed", "challenge")
+		d := h.startDecider(t)
+		page := h.startClearancePage(t)
+		// The page up: served. Answering 5xx, or gone: failure_mode closed
+		// answers the challenged request with 503, as it would a failed
+		// decision.
+		d.setReason(401, "challenge:manual")
+		s.get(t, "closed.example.net", "/").expect(t, 403, "clearance-page zone=closed.example.net")
+		page.fail(true)
+		s.get(t, "closed.example.net", "/").expect(t, 503, "")
+		page.stop()
+		s.get(t, "closed.example.net", "/").expect(t, 503, "")
+	})
 	t.Run("serve/decide-closed/decider", func(t *testing.T) {
 		s := h.serve(t, "decide-closed", "decider")
 		d := h.startDecider(t)
@@ -439,6 +678,7 @@ func (h *harness) prepare(t *testing.T, name, arm string, mutate func(*render.In
 		DecideSocket:    containerWork + "/run/decide.sock",
 		ChallengeSocket: containerWork + "/run/challenge.sock",
 		LogSocket:       containerWork + "/run/log.sock",
+		ClearanceSocket: containerWork + "/run/clearance.sock",
 		EmptyRoot:       containerWork + "/empty",
 		// Containers commonly have no IPv6 stack; binding [::] would fail at
 		// start (not at -t) and hide what this test is after.
@@ -538,7 +778,7 @@ func (h *harness) serve(t *testing.T, name, arm string) *served {
 		}
 	})
 	// No decider or challenge socket unless a subtest starts one.
-	for _, sock := range []string{"decide.sock", "challenge.sock"} {
+	for _, sock := range []string{"decide.sock", "challenge.sock", "clearance.sock"} {
 		_ = os.Remove(filepath.Join(h.work, "run", sock))
 	}
 	script := termBinary + " -c " + containerWork + "/" + name + "/" + arm + "/main.conf -g 'daemon off;'"
@@ -831,6 +1071,89 @@ func (h *harness) startDecider(t *testing.T) *decider {
 	return d
 }
 
+// startReal runs one of the node's real socket servers (the decision service,
+// the clearance page) on <work>/run/<name> for the length of the test, and
+// waits for the socket to appear.
+func (h *harness) startReal(t *testing.T, run func(context.Context) error, name string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+	})
+	path := filepath.Join(h.work, "run", name)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("%s exited before listening: %v", name, err)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatalf("%s did not appear", path)
+}
+
+// clearancePage is a stand-in clearance page server on the fourth socket. It
+// echoes what it was given so the test can see the contract: the challenge
+// endpoint answers 403 no-store (the page's real status, D5), the public
+// endpoints echo path, body, content type and the forwarded clearance value.
+type clearancePage struct {
+	mu      sync.Mutex
+	seen    *http.Request
+	failing bool
+	stop    func()
+}
+
+func (p *clearancePage) last() *http.Request {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.seen
+}
+
+// fail makes the page answer 503 to everything, as the node's placeholder
+// does before E4.3 (and a broken page would).
+func (p *clearancePage) fail(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failing = on
+}
+
+func (p *clearancePage) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	p.mu.Lock()
+	p.seen = r.Clone(r.Context())
+	failing := p.failing
+	p.mu.Unlock()
+	w.Header().Set("Cache-Control", "no-store")
+	if failing {
+		http.Error(w, "page down", http.StatusServiceUnavailable)
+		return
+	}
+	// The challenge entry point is known by X-Kapkan-Reason, which only the
+	// named location sets; the URI is the client's own.
+	if r.Header.Get("X-Kapkan-Reason") != "" {
+		w.WriteHeader(403)
+		_, _ = fmt.Fprintf(w, "clearance-page zone=%s uri=%s reason=%s path=%s", r.Header.Get("X-Kapkan-Zone"), r.Header.Get("X-Kapkan-URI"), r.Header.Get("X-Kapkan-Reason"), r.URL.RequestURI())
+		return
+	}
+	_, _ = fmt.Fprintf(w, "clearance-public path=%s zone=%s body=%s ctype=%s clr=%s", r.URL.Path, r.Header.Get("X-Kapkan-Zone"), body, r.Header.Get("Content-Type"), r.Header.Get("X-Kapkan-Clearance"))
+}
+
+func (h *harness) startClearancePage(t *testing.T) *clearancePage {
+	t.Helper()
+	p := &clearancePage{}
+	p.stop = h.serveUnix(t, "clearance.sock", p)
+	return p
+}
+
 func (h *harness) startChallenge(t *testing.T) {
 	t.Helper()
 	h.serveUnix(t, "challenge.sock", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -890,7 +1213,7 @@ func (s *logSink) wait(t *testing.T, match func(rollup.Record) bool) rollup.Reco
 // /w/run/<name> — world-connectable so the terminator's worker user may use it
 // (a deployment uses 0660 and the worker's group; the container's uid is not
 // in any group of ours).
-func (h *harness) serveUnix(t *testing.T, name string, handler http.Handler) {
+func (h *harness) serveUnix(t *testing.T, name string, handler http.Handler) (stop func()) {
 	t.Helper()
 	path := filepath.Join(h.work, "run", name)
 	_ = os.Remove(path)
@@ -903,10 +1226,12 @@ func (h *harness) serveUnix(t *testing.T, name string, handler http.Handler) {
 	}
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() {
+	stop = func() {
 		_ = srv.Close()
 		_ = os.Remove(path)
-	})
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 // selfSignedCert writes a throwaway ECDSA certificate for zone under

@@ -38,9 +38,9 @@ const (
 	FailClosed = "closed"
 
 	// policy.challenge: off (no proof-of-work rung), manual (every request
-	// without a clearance is challenged), auto (the node's rollups decide when
-	// a source or the whole zone is challenged). E4; the zones file accepts
-	// only off until the decision service can act on the others.
+	// without a clearance is challenged), auto (a source or the whole zone is
+	// challenged when the node's rollups — E4.4 — or the brain — E4.6 — say
+	// so; until then auto challenges nobody). E4.2 wires the decision service.
 	ChallengeOff    = "off"
 	ChallengeManual = "manual"
 	ChallengeAuto   = "auto"
@@ -116,6 +116,112 @@ type Policy struct {
 	FailureMode string `json:"failure_mode"`
 	Challenge   string `json:"challenge"`
 	Rate        Rate   `json:"rate"`
+	// ChallengeOptions tunes the proof-of-work rung (E4.2, edge-spec §5).
+	// Nil means the defaults — the rung watch-only, nothing exempt — and is
+	// what the brain sends for a zones file that set none, so a document
+	// written before E4 encodes to the same bytes after it (the ETag does
+	// not move on an upgrade). Added as an omitempty extension.
+	ChallengeOptions *ChallengeOptions `json:"challenge_options,omitempty"`
+}
+
+// ChallengeOptions is the rung's per-zone tuning (config.ZoneChallengeOptions
+// resolved).
+type ChallengeOptions struct {
+	// DryRun is the ZONE's watch-only switch for the rung, separate from the
+	// node's: a challenge is answered as an allow marked would-challenge:<why>
+	// so an operator sees who would have been challenged. The zones file
+	// defaults it to true; the brain resolves the default, so when the object
+	// is present this field says what the file meant.
+	DryRun bool `json:"dry_run"`
+	// ExemptPaths are request-path prefixes the rung never challenges: health
+	// checks, API clients, webhooks. The decision service exempts a request
+	// only when BOTH the terminator's normalised path (X-Kapkan-Path) and the
+	// raw target (X-Kapkan-URI) start with the prefix and neither carries a
+	// dot segment, ';', a backslash, a control byte, invalid UTF-8 or (in the
+	// normalised form) a surviving escape — origins normalise differently
+	// from nginx. The
+	// one place the edge reads a request path — for an exemption, never for a
+	// verdict (edge-spec §7: not a WAF).
+	ExemptPaths []string `json:"exempt_paths,omitempty"`
+	// Difficulty is the puzzle's leading zero bits (0 = the default, 18);
+	// CookieTTLSeconds how long a solved puzzle's clearance lasts (0 = the
+	// default, 30 min). Both resolved by the zones file's validation; the
+	// node applies the same defaults for a document that omits them. E4.3.
+	Difficulty       int `json:"difficulty,omitempty"`
+	CookieTTLSeconds int `json:"cookie_ttl_seconds,omitempty"`
+	// Auto tunes the automatic rung (policy.challenge: auto) — E4.4. Nil means
+	// the defaults: no zone-wide trigger, the default hold.
+	Auto *AutoChallenge `json:"auto,omitempty"`
+}
+
+// AutoChallenge is when an auto zone challenges on its own (edge-spec §5, the
+// "new rung between rate-limit and block").
+type AutoChallenge struct {
+	// ZoneRPS is the zone-wide request rate at which EVERY source is
+	// challenged — the residential-proxy flood, where no single source
+	// trips its ceiling. 0 = no zone-wide trigger.
+	ZoneRPS uint64 `json:"zone_rps,omitempty"`
+	// HoldSeconds is how long a zone-wide challenge stays on after the
+	// window that tripped it; each window still over the rate extends it.
+	// 0 = the default (300).
+	HoldSeconds int `json:"hold_seconds,omitempty"`
+}
+
+// Rung defaults, shared by the zones file's validation and the node.
+const (
+	DefaultChallengeDifficulty  = 18
+	DefaultCookieTTLSeconds     = 30 * 60
+	MinCookieTTLSeconds         = 60
+	MaxCookieTTLSeconds         = 24 * 60 * 60
+	DefaultChallengeHoldSeconds = 300
+	MinChallengeHoldSeconds     = 30
+	MaxChallengeHoldSeconds     = 3600
+)
+
+// AutoZoneRPS is the zone-wide trigger (0 = off).
+func (p Policy) AutoZoneRPS() uint64 {
+	if p.ChallengeOptions == nil || p.ChallengeOptions.Auto == nil {
+		return 0
+	}
+	return p.ChallengeOptions.Auto.ZoneRPS
+}
+
+// AutoHold is the zone-wide challenge's hold with the default applied.
+func (p Policy) AutoHold() time.Duration {
+	if p.ChallengeOptions == nil || p.ChallengeOptions.Auto == nil || p.ChallengeOptions.Auto.HoldSeconds == 0 {
+		return DefaultChallengeHoldSeconds * time.Second
+	}
+	return time.Duration(p.ChallengeOptions.Auto.HoldSeconds) * time.Second
+}
+
+// ChallengeDryRun reports whether the rung is watch-only for this zone: true
+// unless the options say otherwise.
+func (p Policy) ChallengeDryRun() bool {
+	return p.ChallengeOptions == nil || p.ChallengeOptions.DryRun
+}
+
+// ChallengeDifficulty is the puzzle difficulty with the default applied.
+func (p Policy) ChallengeDifficulty() int {
+	if p.ChallengeOptions == nil || p.ChallengeOptions.Difficulty == 0 {
+		return DefaultChallengeDifficulty
+	}
+	return p.ChallengeOptions.Difficulty
+}
+
+// CookieTTLSeconds is the clearance lifetime with the default applied.
+func (p Policy) CookieTTLSeconds() int {
+	if p.ChallengeOptions == nil || p.ChallengeOptions.CookieTTLSeconds == 0 {
+		return DefaultCookieTTLSeconds
+	}
+	return p.ChallengeOptions.CookieTTLSeconds
+}
+
+// ExemptPaths returns the rung's exempt prefixes (nil for none).
+func (p Policy) ExemptPaths() []string {
+	if p.ChallengeOptions == nil {
+		return nil
+	}
+	return p.ChallengeOptions.ExemptPaths
 }
 
 // Rate mirrors config.ZoneRate; 0 (omitted) means unlimited.

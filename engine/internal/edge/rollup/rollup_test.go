@@ -235,10 +235,13 @@ func TestAggregatorCapsPairsPerZone(t *testing.T) {
 }
 
 type fakeSink struct {
-	denies []string
-	marks  []string
-	ttls   []time.Duration
-	denied map[string]bool
+	denies     []string
+	marks      []string
+	challenges []string
+	flips      []string
+	ttls       []time.Duration
+	denied     map[string]bool
+	challenged map[string]bool
 }
 
 func (f *fakeSink) Deny(zone string, src netip.Addr, ttl time.Duration, reason string) bool {
@@ -254,6 +257,20 @@ func (f *fakeSink) Mark(zone string, src netip.Addr, mark string, ttl time.Durat
 
 func (f *fakeSink) Denied(zone string, src netip.Addr) bool {
 	return f.denied[zone+"/"+src.String()]
+}
+
+func (f *fakeSink) Challenge(zone string, src netip.Addr, ttl time.Duration, reason string) bool {
+	f.challenges = append(f.challenges, zone+"/"+src.String()+"/"+reason+"/"+ttl.String())
+	return true
+}
+
+func (f *fakeSink) Challenged(zone string, src netip.Addr) bool {
+	return f.challenged[zone+"/"+src.String()]
+}
+
+func (f *fakeSink) SetZoneChallenge(zone string, on bool, until time.Time, reason string) bool {
+	f.flips = append(f.flips, zone+"/"+reason+"/"+until.UTC().Format(time.RFC3339))
+	return true
 }
 
 func TestRulesFloodAndErrors(t *testing.T) {
@@ -305,6 +322,14 @@ func TestRulesFloodAndErrors(t *testing.T) {
 	r.Apply(WindowStats{Zone: "example.com", Requests: 100, Status5xx: 95, Sources: []SourceStats{{Src: netip.MustParseAddr("198.51.100.4"), Requests: 60, Decided: 60, Errors5xx: 58}}}, sink)
 	if len(sink.marks) != 0 {
 		t.Fatalf("marked during an origin outage: %v", sink.marks)
+	}
+	// A zone whose visitors are mostly being CHALLENGED (every challenge page
+	// is a 403 or, before E4.3, a 503) is not an erroring origin: the scanner
+	// among them is still marked.
+	sink.marks = nil
+	r.Apply(WindowStats{Zone: "example.com", Requests: 1000, Status4xx: 950, Challenged: 900, Sources: []SourceStats{{Src: netip.MustParseAddr("198.51.100.4"), Requests: 60, Decided: 60, Errors4xx: 58}}}, sink)
+	if strings.Join(sink.marks, ",") != "example.com/198.51.100.4/errors" {
+		t.Fatalf("challenged zone switched the errors rule off: marks = %v", sink.marks)
 	}
 }
 

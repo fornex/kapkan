@@ -10,15 +10,42 @@ import (
 var (
 	// EdgeDecisionsTotal counts decision-service verdicts. The zone label is
 	// bounded by the zones document (an unknown zone is reported as "unknown",
-	// never by its claimed name). result: allow, allow_marked, deny_rate,
-	// deny_concurrency, deny_table, would_deny (a dry-run deny, answered as
-	// allow), unknown_zone, untracked (the per-source tables were full and the
-	// request passed undecided), bad_request (a subrequest off the contract).
+	// never by its claimed name). result: allow, allow_marked, allow_cleared
+	// (a valid clearance cookie passed the rung), deny_rate, deny_concurrency,
+	// deny_table, challenge (a 401: the client must clear the rung),
+	// would_deny / would_challenge (a dry-run deny or challenge, answered as
+	// allow), unknown_zone, mode_none (a zone that does not decide), untracked
+	// (the per-source tables were full and the request passed undecided),
+	// bad_request (a subrequest off the contract).
 	EdgeDecisionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "edge",
 		Name:      "decisions_total",
 		Help:      "Decision-service verdicts, by zone and result.",
+	}, []string{"zone", "result"})
+
+	// EdgeChallengeActive is 1 while a zone-wide challenge is in force on this
+	// node (every request of the zone is challenged), 0 otherwise. The reason
+	// is a log line and a report field, not a label.
+	EdgeChallengeActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "challenge_active",
+		Help:      "1 while a zone-wide challenge is in force on this node, 0 otherwise.",
+	}, []string{"zone"})
+
+	// EdgeClearanceTotal counts what the clearance page did, by zone (bounded
+	// by the document; "unknown" for a zone it does not serve) and result:
+	// page (the challenge page was served), page_json (a non-GET original got
+	// the compact refusal), issued (a solved puzzle earned a clearance),
+	// issued_nojs (the timed no-JS ticket did), invalid (a wrong or stale
+	// answer or ticket), rate_limited (the issuance cap held), bad_request (a
+	// request off the renderer's contract).
+	EdgeClearanceTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "clearance_total",
+		Help:      "Clearance page requests, by zone and result.",
 	}, []string{"zone", "result"})
 
 	// EdgeLogRecordsTotal counts access-log datagrams from the terminator by

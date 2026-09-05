@@ -12,6 +12,8 @@ package config
 import (
 	"encoding/json"
 	"reflect"
+
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
 
 // zoneEnumValues mirrors the literals validateZone accepts. Paths are rooted at
@@ -21,7 +23,7 @@ var zoneEnumValues = map[string][]string{
 	"zones.tls.min_version":       {ZoneTLS12, ZoneTLS13},
 	"zones.policy.mode":           {ZonePolicyDecide, ZonePolicyNone},
 	"zones.policy.failure_mode":   {ZoneFailOpen, ZoneFailClosed},
-	"zones.policy.challenge":      {ZoneChallengeOff},
+	"zones.policy.challenge":      {ZoneChallengeOff, ZoneChallengeManual, ZoneChallengeAuto},
 	"zones.acme.directory":        nil, // free-form URL; imperative check
 	"zones.acme.fallback":         nil,
 	"zones.extra_directives_file": nil,
@@ -32,6 +34,12 @@ var zoneEnumValues = map[string][]string{
 var zoneNumericBounds = map[string]map[string]float64{
 	"zones.policy.rate.rps":         {"minimum": 0},
 	"zones.policy.rate.concurrency": {"minimum": 0},
+	// 0 means "the default" for both rung knobs; otherwise the validator's
+	// range.
+	"zones.policy.challenge_options.difficulty":         {"minimum": 0, "maximum": maxChallengeDifficulty},
+	"zones.policy.challenge_options.cookie_ttl_seconds": {"minimum": 0, "maximum": edgedoc.MaxCookieTTLSeconds},
+	"zones.policy.challenge_options.auto.zone_rps":      {"minimum": 0},
+	"zones.policy.challenge_options.auto.hold_seconds":  {"minimum": 0, "maximum": edgedoc.MaxChallengeHoldSeconds},
 }
 
 // GenerateZonesSchema returns the canonical JSON Schema for the zones file.

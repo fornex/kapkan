@@ -37,9 +37,53 @@
             "properties": {
               "challenge": {
                 "enum": [
-                  "off"
+                  "off",
+                  "manual",
+                  "auto"
                 ],
                 "type": "string"
+              },
+              "challenge_options": {
+                "additionalProperties": false,
+                "properties": {
+                  "auto": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "hold_seconds": {
+                        "maximum": 3600,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "zone_rps": {
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "cookie_ttl_seconds": {
+                    "maximum": 86400,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "difficulty": {
+                    "maximum": 22,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "x-optional": true
+                  },
+                  "exempt_paths": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array",
+                    "x-optional": true
+                  }
+                },
+                "type": "object"
               },
               "failure_mode": {
                 "enum": [

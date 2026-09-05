@@ -90,10 +90,11 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 			ACMEDirectory: zn.ACME.Directory,
 			ACMEFallback:  zn.ACME.Fallback,
 			Policy: EdgeDocPolicy{
-				Mode:        zn.Policy.Mode,
-				FailureMode: zn.Policy.FailureMode,
-				Challenge:   zn.Policy.Challenge,
-				Rate:        EdgeDocRate{RPS: zn.Policy.Rate.RPS, Concurrency: zn.Policy.Rate.Concurrency},
+				Mode:             zn.Policy.Mode,
+				FailureMode:      zn.Policy.FailureMode,
+				Challenge:        zn.Policy.Challenge,
+				Rate:             EdgeDocRate{RPS: zn.Policy.Rate.RPS, Concurrency: zn.Policy.Rate.Concurrency},
+				ChallengeOptions: challengeOptions(zn.Policy.ChallengeOptions),
 			},
 			ExtraDirectivesFile: zn.ExtraDirectivesFile,
 		})
@@ -101,6 +102,34 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 	// Names are unique (the zones file rejects duplicates), so this order is total.
 	sort.Slice(doc.Zones, func(i, j int) bool { return doc.Zones[i].Name < doc.Zones[j].Name })
 	return doc
+}
+
+// challengeOptions resolves the zones file's rung options for the document:
+// nil for the defaults (watch-only, nothing exempt) — so a zones file written
+// before E4 yields the bytes it always did — and the resolved object
+// otherwise.
+func challengeOptions(o config.ZoneChallengeOptions) *edgedoc.ChallengeOptions {
+	dry := o.DryRun == nil || *o.DryRun
+	difficulty, ttl := o.Difficulty, o.CookieTTLSeconds
+	if difficulty == edgedoc.DefaultChallengeDifficulty {
+		difficulty = 0
+	}
+	if ttl == edgedoc.DefaultCookieTTLSeconds {
+		ttl = 0
+	}
+	var auto *edgedoc.AutoChallenge
+	if hold := o.Auto.HoldSeconds; o.Auto.ZoneRPS != 0 || (hold != 0 && hold != edgedoc.DefaultChallengeHoldSeconds) {
+		if hold == edgedoc.DefaultChallengeHoldSeconds {
+			hold = 0
+		}
+		auto = &edgedoc.AutoChallenge{ZoneRPS: o.Auto.ZoneRPS, HoldSeconds: hold}
+	}
+	if dry && len(o.ExemptPaths) == 0 && difficulty == 0 && ttl == 0 && auto == nil {
+		return nil
+	}
+	paths := make([]string, len(o.ExemptPaths))
+	copy(paths, o.ExemptPaths)
+	return &edgedoc.ChallengeOptions{DryRun: dry, ExemptPaths: paths, Difficulty: difficulty, CookieTTLSeconds: ttl, Auto: auto}
 }
 
 // edgeDocBytes encodes the document once and derives its ETag from those same
