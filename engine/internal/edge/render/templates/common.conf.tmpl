@@ -104,12 +104,14 @@ map $cookie_kapkan_clr $kapkan_clr_safe {
 # $kapkan_path) is DECODED: "/x/%01" puts a raw control byte in it, which
 # would make the decision service refuse the subrequest as malformed — the
 # same failed decision as above, the same fail-open. Forwarded only when it
-# is printable ASCII; anything else is forwarded as nothing, so the request is
-# still decided and merely not exempt from the rung. (Only rendered when a
-# zone decides: nothing else declares $kapkan_path.)
+# carries no control byte (a decoded UTF-8 name is fine: the decision service
+# accepts it, and an exemption for /api/ must still cover /api/items/café);
+# anything else is forwarded as nothing, so the request is still decided and
+# merely not exempt from the rung. (Only rendered when a zone decides:
+# nothing else declares $kapkan_path.)
 map $kapkan_path $kapkan_path_safe {
     default "";
-    "~^/[\x21-\x7e]{0,2048}\z" $kapkan_path;
+    "~^/[^\x00-\x1f\x7f]{0,4096}\z" $kapkan_path;
 }
 {{- end}}
 {{- if .HashBucketSize}}

@@ -103,7 +103,7 @@ func TestChallengeMachineryShape(t *testing.T) {
 	for _, want := range []string{
 		"upstream kapkan_clearance {", "server unix:/run/kapkan-edge/edge-clearance.sock;",
 		"map $cookie_kapkan_clr $kapkan_clr_safe {", `"~^[A-Za-z0-9._-]{1,512}$" $cookie_kapkan_clr;`,
-		"map $kapkan_path $kapkan_path_safe {", `"~^/[\x21-\x7e]{0,2048}\z" $kapkan_path;`,
+		"map $kapkan_path $kapkan_path_safe {", `"~^/[^\x00-\x1f\x7f]{0,4096}\z" $kapkan_path;`,
 	} {
 		if !strings.Contains(common, want) {
 			t.Errorf("common file lacks %q", want)

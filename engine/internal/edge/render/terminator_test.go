@@ -380,11 +380,17 @@ func TestRealTerminator(t *testing.T) {
 		if seen := d.last(); seen == nil || seen.req.Header.Get("X-Kapkan-Path") != "" {
 			t.Errorf("DEL in the decoded path: decider saw %v", seen)
 		}
-		// Non-ASCII decodes too, and is likewise not forwarded; ordinary
-		// paths are.
+		// Non-ASCII decodes to bytes Go accepts and IS forwarded (an /api/
+		// exemption must cover /api/items/café); a double-encoded dot stays
+		// encoded in nginx's decoded form, so the decider sees the '%' and
+		// can refuse the exemption; ordinary paths are forwarded as they are.
 		s.get(t, "example.com", "/caf%C3%A9").expect(t, 403, "")
-		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "" {
-			t.Errorf("non-ASCII path forwarded: %q", seen.req.Header.Get("X-Kapkan-Path"))
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/café" {
+			t.Errorf("non-ASCII path: %q", seen.req.Header.Get("X-Kapkan-Path"))
+		}
+		s.get(t, "example.com", "/api/%252e%252e/admin").expect(t, 403, "")
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/api/%2e%2e/admin" || seen.req.Header.Get("X-Kapkan-Uri") != "/api/%252e%252e/admin" {
+			t.Errorf("double-encoded path: %v", seen.req.Header)
 		}
 		s.get(t, "example.com", "/plain/path.txt?q=1").expect(t, 403, "")
 		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/plain/path.txt" {
