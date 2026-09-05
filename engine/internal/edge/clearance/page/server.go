@@ -7,7 +7,8 @@
 //   - The named location @kapkan_clearance, entered when the decision service
 //     answered 401. It forwards the request's own URI unchanged, plus
 //     X-Kapkan-Zone, -Client, -Method, -URI, -Reason (only this entry sets
-//     it), Accept-Language. The page answers the CHALLENGE: an HTML page with
+//     it — the header, not a path, is how the page knows the entry),
+//     Accept-Language. The page answers the CHALLENGE: an HTML page with
 //     the puzzle for a GET or HEAD, a compact JSON refusal for anything else
 //     (a browser form or an API client has nothing to solve a puzzle with).
 //     Status 403 with Cache-Control: no-store (D5): to a cache it is a
@@ -69,11 +70,12 @@ const (
 	DefaultSocketMode = 0o660
 
 	// Prefix is the kapkan-reserved public prefix the renderer routes here.
-	Prefix        = "/_kapkan/clearance/"
-	challengePath = Prefix + "challenge"
-	answerPath    = Prefix + "answer"
-	nojsPath      = Prefix + "nojs"
-	assetPrefix   = Prefix + "a/"
+	// The challenge entry has no path of its own: it is any request that
+	// arrives with X-Kapkan-Reason (set only by the named location).
+	Prefix      = "/_kapkan/clearance/"
+	answerPath  = Prefix + "answer"
+	nojsPath    = Prefix + "nojs"
+	assetPrefix = Prefix + "a/"
 
 	// CookieName is the clearance cookie (D2): host-only, Path=/, Secure,
 	// HttpOnly, SameSite=Lax.
@@ -271,9 +273,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	req.sourceKey = edgedoc.SourceKey(req.src).String()
 	req.keys = s.Zones.Keys(zone)
-	switch r.URL.Path {
-	case challengePath:
+	if req.reason != "" {
+		// The challenge entry: @kapkan_clearance proxies the request with its
+		// OWN URI (a rewrite there would follow a fallen-back request to the
+		// origin) and is the only location that sets X-Kapkan-Reason, so the
+		// header, not the path, names this entry.
 		s.serveChallenge(w, r, req)
+		return
+	}
+	switch r.URL.Path {
 	case answerPath:
 		s.serveAnswer(w, r, req)
 	case nojsPath:
@@ -330,13 +338,10 @@ func noStore(w http.ResponseWriter) {
 }
 
 // serveChallenge is the entry from @kapkan_clearance: the decision service
-// said 401. Only that location sets X-Kapkan-Reason; without it this is a
-// client walking the public prefix, and there is nothing here for it.
+// said 401 and nginx proxied the request here with its own method and URI.
+// The ORIGINAL method (X-Kapkan-Method) decides the shape of the answer; the
+// proxied request itself is whatever nginx made of it.
 func (s *Server) serveChallenge(w http.ResponseWriter, r *http.Request, req *request) {
-	if req.reason == "" || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
-		http.NotFound(w, r)
-		return
-	}
 	noStore(w)
 	if req.method != http.MethodGet && req.method != http.MethodHead {
 		// A form post, an XHR, an API call: nothing on that side can solve

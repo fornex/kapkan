@@ -81,7 +81,9 @@ func challengePage(t *testing.T, h http.Handler, hdr map[string]string) (rec *ht
 	if _, ok := hdr["X-Kapkan-Reason"]; !ok {
 		hdr["X-Kapkan-Reason"] = "challenge:manual"
 	}
-	rec = do(h, http.MethodGet, "/_kapkan/clearance/challenge", hdr, "")
+	// The named location proxies the request with its OWN URI; the reason
+	// header names the entry.
+	rec = do(h, http.MethodGet, "/cart?x=1", hdr, "")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("challenge page = %d: %s", rec.Code, rec.Body)
 	}
@@ -156,8 +158,13 @@ func TestChallengePageShape(t *testing.T) {
 		t.Errorf("unknown asset = %d", r.Code)
 	}
 	// HEAD: headers, no body. Default locale: English.
-	if r := do(h, http.MethodHead, "/_kapkan/clearance/challenge", map[string]string{"X-Kapkan-Reason": "challenge:manual", "Accept-Language": "xx"}, ""); r.Code != 403 || r.Body.Len() != 0 || r.Header().Get("Content-Language") != "en" {
+	if r := do(h, http.MethodHead, "/cart", map[string]string{"X-Kapkan-Reason": "challenge:manual", "Accept-Language": "xx", "X-Kapkan-Method": "HEAD"}, ""); r.Code != 403 || r.Body.Len() != 0 || r.Header().Get("Content-Language") != "en" {
 		t.Errorf("HEAD: %d body=%d lang=%q", r.Code, r.Body.Len(), r.Header().Get("Content-Language"))
+	}
+	// The entry is the header, whatever the path — even one under the public
+	// prefix, since nginx never sets the header there.
+	if r := do(h, http.MethodGet, "/_kapkan/clearance/answer", map[string]string{"X-Kapkan-Reason": "challenge:manual"}, ""); r.Code != 403 || !strings.Contains(r.Body.String(), `id="kapkan-puzzle"`) {
+		t.Errorf("challenge entry by header under the public prefix: %d", r.Code)
 	}
 }
 
@@ -167,17 +174,19 @@ func TestChallengePageShape(t *testing.T) {
 func TestChallengeRefusals(t *testing.T) {
 	s, _, _ := newFixture(t)
 	h := s.Handler()
-	r := do(h, http.MethodGet, "/_kapkan/clearance/challenge", map[string]string{"X-Kapkan-Reason": "challenge:manual", "X-Kapkan-Method": "POST"}, "")
+	r := do(h, http.MethodPost, "/api/submit", map[string]string{"X-Kapkan-Reason": "challenge:manual", "X-Kapkan-Method": "POST"}, "x=1")
 	if r.Code != 403 || r.Header().Get("Content-Type") != "application/json" || strings.TrimSpace(r.Body.String()) != `{"error":"challenge_required"}` || r.Header().Get("Cache-Control") != "no-store" {
 		t.Errorf("POST original: %d %s %q", r.Code, r.Header().Get("Content-Type"), r.Body)
 	}
+	// A walk-in under the public prefix without the reason header is not a
+	// challenge — and the old fixed entry path is nothing special either.
 	if r := do(h, http.MethodGet, "/_kapkan/clearance/challenge", map[string]string{"X-Kapkan-Reason": ""}, ""); r.Code != 404 {
 		t.Errorf("walk-in without a reason = %d", r.Code)
 	}
-	if r := do(h, http.MethodGet, "/_kapkan/clearance/challenge", map[string]string{"X-Kapkan-Reason": "challenge:manual", "X-Kapkan-Zone": "nobody.example"}, ""); r.Code != 404 {
+	if r := do(h, http.MethodGet, "/cart", map[string]string{"X-Kapkan-Reason": "challenge:manual", "X-Kapkan-Zone": "nobody.example"}, ""); r.Code != 404 {
 		t.Errorf("unknown zone = %d", r.Code)
 	}
-	if r := do(h, http.MethodGet, "/_kapkan/clearance/challenge", map[string]string{"X-Kapkan-Reason": "challenge:manual", "X-Kapkan-Client": "not-an-ip"}, ""); r.Code != 400 {
+	if r := do(h, http.MethodGet, "/cart", map[string]string{"X-Kapkan-Reason": "challenge:manual", "X-Kapkan-Client": "not-an-ip"}, ""); r.Code != 400 {
 		t.Errorf("bad client = %d", r.Code)
 	}
 	if r := do(h, http.MethodGet, "/_kapkan/clearance/other", nil, ""); r.Code != 404 {
