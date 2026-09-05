@@ -392,6 +392,11 @@ func TestRealTerminator(t *testing.T) {
 		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/api/%2e%2e/admin" || seen.req.Header.Get("X-Kapkan-Uri") != "/api/%252e%252e/admin" {
 			t.Errorf("double-encoded path: %v", seen.req.Header)
 		}
+		// A single %25 decodes to a bare '%' — a literal, forwarded as such.
+		s.get(t, "example.com", "/api/coupons/50%25-off").expect(t, 403, "")
+		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/api/coupons/50%-off" {
+			t.Errorf("literal percent: %q", seen.req.Header.Get("X-Kapkan-Path"))
+		}
 		s.get(t, "example.com", "/plain/path.txt?q=1").expect(t, 403, "")
 		if seen := d.last(); seen.req.Header.Get("X-Kapkan-Path") != "/plain/path.txt" {
 			t.Errorf("plain path not forwarded: %q", seen.req.Header.Get("X-Kapkan-Path"))

@@ -297,12 +297,15 @@ func (zone *Zone) validate() error {
 			return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] is %d bytes; at most %d are accepted", zone.Name, i, len(ep), maxExemptPathLen)
 		}
 		// The decision service exempts a request only when its normalised
-		// path and its raw target both start with the prefix and neither
-		// carries a dot segment, ';', a backslash, an encoding or a control
-		// byte (decide.plainPath) — so a prefix carrying one of those could
-		// never match, and is refused here rather than ignored in silence.
-		if strings.ContainsAny(ep, "?# \t;\\%") || strings.ContainsFunc(ep, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-			return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] %q must be a plain path prefix: no query, fragment, space, ';', backslash, percent-encoding or control character", zone.Name, i, ep)
+		// path AND its raw target — as the client sent it, percent-encoded —
+		// both start with the prefix (decide.pathExempt). A compliant client
+		// encodes everything outside RFC 3986's path characters, so a prefix
+		// carrying a non-ASCII letter, a space, a brace or a quote could never
+		// match a raw target; nor could one with a dot segment, ';', a
+		// backslash or an escape. Such a prefix is refused here rather than
+		// ignored in silence.
+		if !exemptPrefixByte(ep) {
+			return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] %q must be a plain path prefix: letters, digits, - _ . ~ / and $ & + , : = @ only — no space, ';', backslash, percent-encoding, quotes, brackets or non-ASCII (clients send those encoded, so the prefix would never match)", zone.Name, i, ep)
 		}
 		for _, seg := range strings.Split(ep[1:], "/") {
 			if seg == "." || seg == ".." || strings.HasPrefix(seg, "..") {
@@ -344,6 +347,27 @@ const (
 	maxExemptPaths   = 64
 	maxExemptPathLen = 256
 )
+
+// exemptPrefixByte reports whether every byte of an exempt prefix is one a
+// compliant client sends unencoded in a request target: RFC 3986 unreserved
+// (letters, digits, - _ . ~), '/', and the sub-delimiters browsers and HTTP
+// libraries leave alone ($ & + , : = @). Everything else — space, ';', '\',
+// '%', quotes, brackets, braces, '!', '*', ”', '(', ')' (Go's net/http
+// escapes those), bytes outside ASCII — would arrive percent-encoded and the
+// prefix would never match the raw target.
+func exemptPrefixByte(p string) bool {
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.' || c == '~' || c == '/':
+		case c == '$' || c == '&' || c == '+' || c == ',' || c == ':' || c == '=' || c == '@':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // normalizeHostname lowercases and validates an explicit DNS hostname: RFC 1123
 // labels joined by dots, at most 253 characters, no wildcard, no trailing dot,
