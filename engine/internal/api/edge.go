@@ -90,10 +90,11 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 			ACMEDirectory: zn.ACME.Directory,
 			ACMEFallback:  zn.ACME.Fallback,
 			Policy: EdgeDocPolicy{
-				Mode:        zn.Policy.Mode,
-				FailureMode: zn.Policy.FailureMode,
-				Challenge:   zn.Policy.Challenge,
-				Rate:        EdgeDocRate{RPS: zn.Policy.Rate.RPS, Concurrency: zn.Policy.Rate.Concurrency},
+				Mode:             zn.Policy.Mode,
+				FailureMode:      zn.Policy.FailureMode,
+				Challenge:        zn.Policy.Challenge,
+				Rate:             EdgeDocRate{RPS: zn.Policy.Rate.RPS, Concurrency: zn.Policy.Rate.Concurrency},
+				ChallengeOptions: challengeOptions(zn.Policy.ChallengeOptions),
 			},
 			ExtraDirectivesFile: zn.ExtraDirectivesFile,
 		})
@@ -101,6 +102,20 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 	// Names are unique (the zones file rejects duplicates), so this order is total.
 	sort.Slice(doc.Zones, func(i, j int) bool { return doc.Zones[i].Name < doc.Zones[j].Name })
 	return doc
+}
+
+// challengeOptions resolves the zones file's rung options for the document:
+// nil for the defaults (watch-only, nothing exempt) — so a zones file written
+// before E4 yields the bytes it always did — and the resolved object
+// otherwise.
+func challengeOptions(o config.ZoneChallengeOptions) *edgedoc.ChallengeOptions {
+	dry := o.DryRun == nil || *o.DryRun
+	if dry && len(o.ExemptPaths) == 0 {
+		return nil
+	}
+	paths := make([]string, len(o.ExemptPaths))
+	copy(paths, o.ExemptPaths)
+	return &edgedoc.ChallengeOptions{DryRun: dry, ExemptPaths: paths}
 }
 
 // edgeDocBytes encodes the document once and derives its ETag from those same

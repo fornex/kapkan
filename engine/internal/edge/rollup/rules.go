@@ -136,8 +136,12 @@ func (r *Rules) Apply(w WindowStats, sink Sink) Applied {
 	// again at the base TTL rather than at its old level.
 	r.forget(now)
 	// Origin-side errors across the zone: when the zone itself is failing at
-	// the error share, no source is to blame.
-	zoneErrors := w.Status4xx + w.Status5xx - w.Denied
+	// the error share, no source is to blame. The decider's own answers — a
+	// denial's 403/429, a challenge page's status — are not the origin's.
+	zoneErrors := int64(w.Status4xx+w.Status5xx) - int64(w.Denied+w.Challenged)
+	if zoneErrors < 0 {
+		zoneErrors = 0
+	}
 	zoneErroring := w.Requests >= r.ErrorMinRequests && float64(zoneErrors)/float64(w.Requests) >= r.ErrorShare
 	var out Applied
 	for _, s := range w.Sources {

@@ -92,7 +92,16 @@ server {
     # The decision subrequest (edge-spec §5): kapkan's headers only — never
     # the body, and never the client's own headers, which could otherwise
     # push the subrequest off the contract (a 40 KiB cookie, a control byte);
-    # tight timeouts so a stalled decider cannot hold requests hostage.
+    # tight timeouts so a stalled decider cannot hold requests hostage. The
+    # one client value that travels is the clearance cookie's VALUE, alone,
+    # in its own header (E4), already shaped like a token (see the map in
+    # {{.CommonFile}}): the decider bounds and verifies it. X-Kapkan-Path is
+    # nginx's normalised, decoded path of the REQUEST ($uri: dot segments
+    # merged, no query) — captured in location / before the subrequest,
+    # because $uri inside the subrequest is the subrequest's own, and shaped
+    # by the map in {{.CommonFile}}, because decoding can put a control byte
+    # in it. The rung's exempt_paths are matched against it AND against the
+    # raw target (X-Kapkan-URI): an exemption needs both to agree.
     location = /_kapkan/decide {
         internal;
         proxy_pass http://kapkan_decide/decide;
@@ -106,6 +115,8 @@ server {
         proxy_set_header X-Kapkan-Client $remote_addr;
         proxy_set_header X-Kapkan-Method $request_method;
         proxy_set_header X-Kapkan-URI $request_uri;
+        proxy_set_header X-Kapkan-Path $kapkan_path_safe;
+        proxy_set_header X-Kapkan-Clearance $kapkan_clr_safe;
         proxy_connect_timeout 50ms;
         proxy_send_timeout 100ms;
         proxy_read_timeout 200ms;
@@ -126,6 +137,72 @@ server {
         return 200;
     }
 {{- end}}
+
+    # The clearance page's public endpoints (edge-spec §5, E4): the puzzle and
+    # its answer, under the kapkan-reserved /_kapkan/ prefix of every zone.
+    # No decision is asked here — a challenged client must be able to reach
+    # the page — and nearly the subrequest's contract: kapkan's headers, the
+    # cookie value (shaped, see {{.CommonFile}}), and of the client's own
+    # headers only Content-Type and Accept-Language, plus a small body for the
+    # answer.
+    location ^~ /_kapkan/clearance/ {
+        limit_except GET HEAD POST { deny all; }
+        client_max_body_size 4k;
+        proxy_pass http://kapkan_clearance;
+        proxy_http_version 1.1;
+        proxy_pass_request_headers off;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        # The body's own Content-Length is nginx's default header for a
+        # proxied body; the client's Content-Type is needed because the answer
+        # is JSON or a form, Accept-Language because the page is localised.
+        proxy_set_header Content-Type $content_type;
+        proxy_set_header Accept-Language $http_accept_language;
+        proxy_set_header X-Kapkan-Zone {{.Name}};
+        proxy_set_header X-Kapkan-Client $remote_addr;
+        proxy_set_header X-Kapkan-Method $request_method;
+        proxy_set_header X-Kapkan-URI $request_uri;
+        proxy_set_header X-Kapkan-Clearance $kapkan_clr_safe;
+        proxy_connect_timeout 50ms;
+        proxy_send_timeout 1s;
+        proxy_read_timeout 2s;
+    }
+
+    # A 401 from the decision service lands here: the clearance page is served
+    # in place of the origin, with the same reasons the log carries. The page
+    # server failing follows the zone's failure_mode exactly as a failed
+    # decision would. The request's URI is passed UNCHANGED (a rewrite here
+    # would follow the request into @kapkan_pass and reach the origin as the
+    # page's path); the page knows this entry point by X-Kapkan-Reason, which
+    # only this location sets.
+    location @kapkan_clearance {
+        proxy_pass http://kapkan_clearance;
+        proxy_http_version 1.1;
+        proxy_pass_request_headers off;
+        proxy_pass_request_body off;
+        proxy_set_header Connection "";
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header Accept-Language $http_accept_language;
+        proxy_set_header X-Kapkan-Zone {{.Name}};
+        proxy_set_header X-Kapkan-Client $remote_addr;
+        proxy_set_header X-Kapkan-Method $request_method;
+        proxy_set_header X-Kapkan-URI $request_uri;
+        proxy_set_header X-Kapkan-Reason $kapkan_reason;
+        proxy_connect_timeout 50ms;
+        proxy_send_timeout 1s;
+        proxy_read_timeout 2s;
+        # A second error_page on a request that already took one (the 401 in
+        # location /): honoured because location / sets recursive_error_pages
+        # — see there. Neither target has an error_page of its own, so this
+        # cannot loop.
+        proxy_intercept_errors on;
+{{- if .FailOpen}}
+        error_page 500 502 503 504 = @kapkan_pass;
+{{- else}}
+        error_page 500 502 503 504 = @kapkan_unavailable;
+{{- end}}
+    }
 {{- end}}
 
     # Every allowed request ends here, whether it came through the decision or
@@ -171,10 +248,22 @@ server {
 
     location / {
 {{- if .Decide}}
+        # The request's own normalised path, for the subrequest to forward:
+        # a subrequest's $uri is its own (/_kapkan/decide), a variable set here
+        # is shared with it.
+        set $kapkan_path $uri;
         auth_request /_kapkan/decide;
         auth_request_set $kapkan_mark $kapkan_decided_mark;
         auth_request_set $kapkan_decision $upstream_status;
         auth_request_set $kapkan_reason $upstream_http_x_kapkan_reason;
+        # The 401 goes to the clearance page, whose own failure must then be
+        # allowed a SECOND error_page (to the origin or a 503, per
+        # failure_mode). nginx marks a request at its first error_page and
+        # ignores later ones unless this is on HERE, where the first one is
+        # taken; the targets below have no error_page of their own, so the
+        # recursion is one level deep and cannot loop.
+        recursive_error_pages on;
+        error_page 401 = @kapkan_clearance;
         error_page 403 = @kapkan_denied;
 {{- if .FailOpen}}
         # Second net for failure_mode: open — anything the subrequest could
