@@ -153,6 +153,50 @@ security-relevant.
   stop the brain, delete the file, start it. The document now carries secrets: a node caches it
   0600 already. No node-side behaviour changes yet — the decision service and the challenge
   page follow in E4.2–E4.4.
+- Edge track, E4.2 — the `challenge` verdict and the rendered machinery (edge-spec §5). The
+  decision service now answers a third word: **401**, "clear the rung first", with
+  `X-Kapkan-Reason: challenge:<why>` (`manual`, `zone:<reason>` while a zone is flipped,
+  `table:<reason>` for a source under a challenge verdict). A zone with `policy.challenge:
+  manual` challenges every request without a valid clearance; `auto` challenges nobody until the
+  node's rollups (E4.4) or the brain (E4.6) name a source or flip the zone — the verdict table
+  gained a third kind, deny > challenge > mark, and a challenge that is not in force leaves the
+  mark beneath it visible. The clearance cookie `kapkan_clr` is the one client value the
+  subrequest carries, alone, in `X-Kapkan-Clearance` — and only when it is shaped like a token
+  (a map in the rendered config forwards anything else as nothing: a control byte in a cookie
+  would otherwise make the subrequest malformed, a failed decision, and `failure_mode: open`
+  would pass the request undecided). It is verified outside the decider's lock against the
+  document's keys; every zone also holds a key of the node's own, last, so a zone the brain sent
+  no keys for — or whose keys aged out with the brain gone — can still challenge and clear on
+  that node instead of walling everyone out. A valid cookie passes with the mark `cleared` /
+  `cleared:nojs`; the rate and concurrency ceilings apply to cleared and to challenged requests
+  alike, so a flood without cookies is answered with 429s, not with a page per request. The rung
+  has its own watch-only switch per zone, `policy.challenge_options.dry_run`, **default true**: a
+  challenge is then a 200 marked `would-challenge:<why>`, as it is under the node's dry-run, so a
+  zone shows who it would ask before it asks anyone; `challenge_options.exempt_paths` names path
+  prefixes never challenged — the one place the edge reads a request path, for an exemption only,
+  and it needs nginx's normalised path (`X-Kapkan-Path`, dot segments merged, forwarded only when
+  free of control bytes — a decoded one would otherwise make the subrequest malformed) AND the raw
+  target to agree, with no dot segment, path parameter, control byte or invalid UTF-8 in either
+  and no escape surviving in the normalised form, so `/healthz/../admin`, `/healthz/..;/admin`,
+  `/admin/..%2Fhealthz`, the double-encoded `/api/%252e%252e/admin` and the overlong
+  `/api/%C0%AE%C0%AE/admin` are all challenged while `/api/items/café` and `/api/coupons/50%25-off`
+  stay exempt under `/api/`; the zones file refuses an exempt prefix that no client's request
+  could ever match (non-ASCII, spaces, braces, quotes, a path parameter, an escape). The zones
+  file accepts the three words and the
+  options (schema regenerated). The renderer emits the machinery for EVERY decide-mode zone —
+  the cookie and path headers on the subrequest, `error_page 401 = @kapkan_clearance` to a
+  named location that proxies the fourth socket (`edge-clearance.sock`, `upstream
+  kapkan_clearance`) with the request's own URI and follows `failure_mode` when the page is down
+  (nginx needs `recursive_error_pages on` for that second error_page, and it is there), and the
+  public `/_kapkan/clearance/` prefix (GET/HEAD/POST, 4 KiB bodies, kapkan's headers plus the
+  client's Content-Type and Accept-Language) — so the bytes are the same for `off`, `manual` and
+  `auto` and switching the rung is never a reload; a test pins it. The rollup counts
+  challenged, cleared and would-challenge per zone and source, and challenge pages do not count
+  as origin errors;
+  `kapkan_edge_decisions_total` gains `challenge`, `would_challenge`, `allow_cleared`;
+  `kapkan_edge_challenge_active{zone}` says whether a zone-wide challenge is on. The node holds
+  the fourth socket with a placeholder that answers 503 until E4.3 lands the page itself, so a
+  zone switched to challenge on such a node degrades exactly as `failure_mode` says.
 
 ## [1.7.0] - 2026-09-02
 

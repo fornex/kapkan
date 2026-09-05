@@ -104,11 +104,12 @@ type Options struct {
 	// StateDir holds the document cache, the rendered generations, the ACME
 	// account keys and certificates, and the empty root.
 	StateDir string
-	// SocketsDir holds the three unix sockets.
+	// SocketsDir holds the four unix sockets (decide, challenge, log,
+	// clearance).
 	SocketsDir string
-	// SocketGroup is the terminator's worker group, chowned onto the decide
-	// and log sockets ("" leaves them as created). The challenge socket is
-	// world-connectable: it answers public tokens.
+	// SocketGroup is the terminator's worker group, chowned onto the decide,
+	// log and clearance sockets ("" leaves them as created). The challenge
+	// socket is world-connectable: it answers public tokens.
 	SocketGroup string
 	// Terminator names the binary ("" = nginx), its main configuration ("" =
 	// the binary's default), the reload method and its parameters.
@@ -209,8 +210,8 @@ type Node struct {
 }
 
 type nodeFiles struct {
-	docPath, etagPath, confRoot, emptyRoot string
-	decideSock, challengeSock, logSock     string
+	docPath, etagPath, confRoot, emptyRoot            string
+	decideSock, challengeSock, logSock, clearanceSock string
 }
 
 // New prepares a Node; nothing runs until Run.
@@ -260,6 +261,7 @@ func New(opt Options) (*Node, error) {
 		decideSock:    filepath.Join(opt.SocketsDir, "edge-decide.sock"),
 		challengeSock: filepath.Join(opt.SocketsDir, "edge-challenge.sock"),
 		logSock:       filepath.Join(opt.SocketsDir, "edge-log.sock"),
+		clearanceSock: filepath.Join(opt.SocketsDir, "edge-clearance.sock"),
 	}
 	for _, d := range []string{opt.StateDir, opt.SocketsDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -365,6 +367,7 @@ func (n *Node) Run(ctx context.Context) error {
 	// 1. Sockets first: nginx may already be running and probing them.
 	spawn("decision service", (&decide.Server{Service: n.svc, Path: n.files.decideSock, SocketGroup: n.opt.SocketGroup, Logger: n.opt.Logger}).ListenAndServe)
 	spawn("challenge answerer", (&acme.ChallengeServer{Table: n.challenges, Path: n.files.challengeSock, SocketGroup: n.opt.SocketGroup, Logger: n.opt.Logger}).ListenAndServe)
+	spawn("clearance page", n.serveClearance)
 	spawn("access-log listener", (&rollup.Listener{Path: n.files.logSock, SocketGroup: n.opt.SocketGroup, Handle: n.agg.Observe, Logger: n.opt.Logger}).Run)
 	spawn("window ticker", func(ctx context.Context) error {
 		t := time.NewTicker(time.Second)
@@ -539,7 +542,8 @@ func (n *Node) renderAndApply(ctx context.Context) (reloaded bool, err error) {
 	}
 	files, err := render.Render(render.Inputs{Doc: doc, Certs: certs, Node: render.Node{
 		DecideSocket: n.files.decideSock, ChallengeSocket: n.files.challengeSock, LogSocket: n.files.logSock,
-		EmptyRoot: n.files.emptyRoot, DisableIPv6: n.opt.DisableIPv6, OmitCatchAll: n.opt.OmitCatchAll,
+		ClearanceSocket: n.files.clearanceSock,
+		EmptyRoot:       n.files.emptyRoot, DisableIPv6: n.opt.DisableIPv6, OmitCatchAll: n.opt.OmitCatchAll,
 	}})
 	if err != nil {
 		err = fmt.Errorf("render: %w", err)

@@ -21,7 +21,7 @@ var zoneEnumValues = map[string][]string{
 	"zones.tls.min_version":       {ZoneTLS12, ZoneTLS13},
 	"zones.policy.mode":           {ZonePolicyDecide, ZonePolicyNone},
 	"zones.policy.failure_mode":   {ZoneFailOpen, ZoneFailClosed},
-	"zones.policy.challenge":      {ZoneChallengeOff},
+	"zones.policy.challenge":      {ZoneChallengeOff, ZoneChallengeManual, ZoneChallengeAuto},
 	"zones.acme.directory":        nil, // free-form URL; imperative check
 	"zones.acme.fallback":         nil,
 	"zones.extra_directives_file": nil,
