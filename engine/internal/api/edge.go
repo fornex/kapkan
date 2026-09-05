@@ -117,12 +117,19 @@ func challengeOptions(o config.ZoneChallengeOptions) *edgedoc.ChallengeOptions {
 	if ttl == edgedoc.DefaultCookieTTLSeconds {
 		ttl = 0
 	}
-	if dry && len(o.ExemptPaths) == 0 && difficulty == 0 && ttl == 0 {
+	var auto *edgedoc.AutoChallenge
+	if hold := o.Auto.HoldSeconds; o.Auto.ZoneRPS != 0 || (hold != 0 && hold != edgedoc.DefaultChallengeHoldSeconds) {
+		if hold == edgedoc.DefaultChallengeHoldSeconds {
+			hold = 0
+		}
+		auto = &edgedoc.AutoChallenge{ZoneRPS: o.Auto.ZoneRPS, HoldSeconds: hold}
+	}
+	if dry && len(o.ExemptPaths) == 0 && difficulty == 0 && ttl == 0 && auto == nil {
 		return nil
 	}
 	paths := make([]string, len(o.ExemptPaths))
 	copy(paths, o.ExemptPaths)
-	return &edgedoc.ChallengeOptions{DryRun: dry, ExemptPaths: paths, Difficulty: difficulty, CookieTTLSeconds: ttl}
+	return &edgedoc.ChallengeOptions{DryRun: dry, ExemptPaths: paths, Difficulty: difficulty, CookieTTLSeconds: ttl, Auto: auto}
 }
 
 // edgeDocBytes encodes the document once and derives its ETag from those same

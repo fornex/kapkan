@@ -38,6 +38,8 @@ var zoneNumericBounds = map[string]map[string]float64{
 	// range.
 	"zones.policy.challenge_options.difficulty":         {"minimum": 0, "maximum": maxChallengeDifficulty},
 	"zones.policy.challenge_options.cookie_ttl_seconds": {"minimum": 0, "maximum": edgedoc.MaxCookieTTLSeconds},
+	"zones.policy.challenge_options.auto.zone_rps":      {"minimum": 0},
+	"zones.policy.challenge_options.auto.hold_seconds":  {"minimum": 0, "maximum": edgedoc.MaxChallengeHoldSeconds},
 }
 
 // GenerateZonesSchema returns the canonical JSON Schema for the zones file.

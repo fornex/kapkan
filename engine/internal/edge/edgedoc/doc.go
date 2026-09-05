@@ -149,15 +149,50 @@ type ChallengeOptions struct {
 	// node applies the same defaults for a document that omits them. E4.3.
 	Difficulty       int `json:"difficulty,omitempty"`
 	CookieTTLSeconds int `json:"cookie_ttl_seconds,omitempty"`
+	// Auto tunes the automatic rung (policy.challenge: auto) — E4.4. Nil means
+	// the defaults: no zone-wide trigger, the default hold.
+	Auto *AutoChallenge `json:"auto,omitempty"`
+}
+
+// AutoChallenge is when an auto zone challenges on its own (edge-spec §5, the
+// "new rung between rate-limit and block").
+type AutoChallenge struct {
+	// ZoneRPS is the zone-wide request rate at which EVERY source is
+	// challenged — the residential-proxy flood, where no single source
+	// trips its ceiling. 0 = no zone-wide trigger.
+	ZoneRPS uint64 `json:"zone_rps,omitempty"`
+	// HoldSeconds is how long a zone-wide challenge stays on after the
+	// window that tripped it; each window still over the rate extends it.
+	// 0 = the default (300).
+	HoldSeconds int `json:"hold_seconds,omitempty"`
 }
 
 // Rung defaults, shared by the zones file's validation and the node.
 const (
-	DefaultChallengeDifficulty = 18
-	DefaultCookieTTLSeconds    = 30 * 60
-	MinCookieTTLSeconds        = 60
-	MaxCookieTTLSeconds        = 24 * 60 * 60
+	DefaultChallengeDifficulty  = 18
+	DefaultCookieTTLSeconds     = 30 * 60
+	MinCookieTTLSeconds         = 60
+	MaxCookieTTLSeconds         = 24 * 60 * 60
+	DefaultChallengeHoldSeconds = 300
+	MinChallengeHoldSeconds     = 30
+	MaxChallengeHoldSeconds     = 3600
 )
+
+// AutoZoneRPS is the zone-wide trigger (0 = off).
+func (p Policy) AutoZoneRPS() uint64 {
+	if p.ChallengeOptions == nil || p.ChallengeOptions.Auto == nil {
+		return 0
+	}
+	return p.ChallengeOptions.Auto.ZoneRPS
+}
+
+// AutoHold is the zone-wide challenge's hold with the default applied.
+func (p Policy) AutoHold() time.Duration {
+	if p.ChallengeOptions == nil || p.ChallengeOptions.Auto == nil || p.ChallengeOptions.Auto.HoldSeconds == 0 {
+		return DefaultChallengeHoldSeconds * time.Second
+	}
+	return time.Duration(p.ChallengeOptions.Auto.HoldSeconds) * time.Second
+}
 
 // ChallengeDryRun reports whether the rung is watch-only for this zone: true
 // unless the options say otherwise.

@@ -137,6 +137,22 @@ type ZoneChallengeOptions struct {
 	// address (IPv6: /64) changes; the no-JS ticket's clearance is fixed at
 	// five minutes.
 	CookieTTLSeconds int `yaml:"cookie_ttl_seconds"`
+	// Auto tunes policy.challenge: auto — when the node challenges on its own.
+	Auto ZoneAutoChallenge `yaml:"auto"`
+}
+
+// ZoneAutoChallenge is the automatic rung's triggers. A flooding source in an
+// auto zone is challenged before it is denied whatever these say; these add
+// the zone-wide trigger.
+type ZoneAutoChallenge struct {
+	// ZoneRPS is the zone-wide request rate (per node) at which every source
+	// is challenged — the residential-proxy flood, where no single source
+	// trips its ceiling. 0 (default) = off.
+	ZoneRPS uint64 `yaml:"zone_rps"`
+	// HoldSeconds is how long the zone-wide challenge stays on after the
+	// window that tripped it, 30..3600 (default 300); each window still over
+	// the rate extends it.
+	HoldSeconds int `yaml:"hold_seconds"`
 }
 
 // ZoneRate is a per-source ceiling; 0 leaves that dimension unlimited.
@@ -307,6 +323,12 @@ func (zone *Zone) validate() error {
 		p.ChallengeOptions.CookieTTLSeconds = edgedoc.DefaultCookieTTLSeconds
 	case ttl < edgedoc.MinCookieTTLSeconds || ttl > edgedoc.MaxCookieTTLSeconds:
 		return fmt.Errorf("%s: policy.challenge_options.cookie_ttl_seconds must be %d..%d, got %d", zone.Name, edgedoc.MinCookieTTLSeconds, edgedoc.MaxCookieTTLSeconds, ttl)
+	}
+	switch hold := p.ChallengeOptions.Auto.HoldSeconds; {
+	case hold == 0:
+		p.ChallengeOptions.Auto.HoldSeconds = edgedoc.DefaultChallengeHoldSeconds
+	case hold < edgedoc.MinChallengeHoldSeconds || hold > edgedoc.MaxChallengeHoldSeconds:
+		return fmt.Errorf("%s: policy.challenge_options.auto.hold_seconds must be %d..%d, got %d", zone.Name, edgedoc.MinChallengeHoldSeconds, edgedoc.MaxChallengeHoldSeconds, hold)
 	}
 	if n := len(p.ChallengeOptions.ExemptPaths); n > maxExemptPaths {
 		return fmt.Errorf("%s: policy.challenge_options.exempt_paths has %d entries; at most %d are accepted", zone.Name, n, maxExemptPaths)
