@@ -235,10 +235,13 @@ func TestAggregatorCapsPairsPerZone(t *testing.T) {
 }
 
 type fakeSink struct {
-	denies []string
-	marks  []string
-	ttls   []time.Duration
-	denied map[string]bool
+	denies     []string
+	marks      []string
+	challenges []string
+	flips      []string
+	ttls       []time.Duration
+	denied     map[string]bool
+	challenged map[string]bool
 }
 
 func (f *fakeSink) Deny(zone string, src netip.Addr, ttl time.Duration, reason string) bool {
@@ -254,6 +257,20 @@ func (f *fakeSink) Mark(zone string, src netip.Addr, mark string, ttl time.Durat
 
 func (f *fakeSink) Denied(zone string, src netip.Addr) bool {
 	return f.denied[zone+"/"+src.String()]
+}
+
+func (f *fakeSink) Challenge(zone string, src netip.Addr, ttl time.Duration, reason string) bool {
+	f.challenges = append(f.challenges, zone+"/"+src.String()+"/"+reason+"/"+ttl.String())
+	return true
+}
+
+func (f *fakeSink) Challenged(zone string, src netip.Addr) bool {
+	return f.challenged[zone+"/"+src.String()]
+}
+
+func (f *fakeSink) SetZoneChallenge(zone string, on bool, until time.Time, reason string) bool {
+	f.flips = append(f.flips, zone+"/"+reason+"/"+until.UTC().Format(time.RFC3339))
+	return true
 }
 
 func TestRulesFloodAndErrors(t *testing.T) {
