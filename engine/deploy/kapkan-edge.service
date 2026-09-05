@@ -28,10 +28,10 @@ RestartSec=5s
 # user on every start and removes a shared RuntimeDirectory on stop, so a
 # brain and an edge on one host would wreck each other's trees.
 #
-# /run/kapkan-edge: the three unix sockets nginx talks to — edge-decide.sock
-# and edge-log.sock 0660 with group = edge.yaml's socket_group (the
-# terminator's worker group), edge-challenge.sock 0666 (it answers public
-# tokens). 0755 so the worker can traverse it.
+# /run/kapkan-edge: the four unix sockets nginx talks to — edge-decide.sock,
+# edge-log.sock and edge-clearance.sock 0660 with group = edge.yaml's
+# socket_group (the terminator's worker group), edge-challenge.sock 0666 (it
+# answers public tokens). 0755 so the worker can traverse it.
 RuntimeDirectory=kapkan-edge
 RuntimeDirectoryMode=0755
 # /var/lib/kapkan-edge: edge.yaml's state_dir. 0711 — not 0700 — so nginx's

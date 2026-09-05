@@ -105,11 +105,38 @@ type ZonePolicy struct {
 	// unreachable: "open" (default — pass, the edge fails open like every other
 	// kapkan layer) or "closed" (refuse).
 	FailureMode string `yaml:"failure_mode"`
-	// Challenge is the client-challenge rung. NOT YET SUPPORTED: challenges are
-	// milestone E4, so E3 accepts only "off" (the default).
+	// Challenge is the proof-of-work rung (E4): "off" (default), "manual"
+	// (every request without a valid clearance is challenged) or "auto" (a
+	// source or the whole zone is challenged when the node's rollups or the
+	// brain say so). Watch-only by default — see ChallengeOptions.DryRun.
 	Challenge string `yaml:"challenge"`
+	// ChallengeOptions tunes the rung.
+	ChallengeOptions ZoneChallengeOptions `yaml:"challenge_options"`
 	// Rate is the per-source ceiling the decision service enforces.
 	Rate ZoneRate `yaml:"rate"`
+}
+
+// ZoneChallengeOptions tunes the proof-of-work rung of one zone.
+type ZoneChallengeOptions struct {
+	// DryRun keeps the rung watch-only: a challenge is answered as an allow
+	// marked would-challenge:<why>, so an operator sees who WOULD have been
+	// challenged. Default TRUE — a zone cannot challenge anyone until this is
+	// written false, whatever policy.challenge says.
+	DryRun *bool `yaml:"dry_run"`
+	// ExemptPaths are request-path prefixes the rung never challenges (health
+	// checks, API clients, webhooks): absolute paths, matched as prefixes of
+	// the request path without its query.
+	ExemptPaths []string `yaml:"exempt_paths"`
+	// Difficulty is the puzzle's leading zero bits, 12..22 (default 18: a
+	// fraction of a second natively, a few seconds in a browser Worker; each
+	// step doubles the work). Pricing a clearance in CPU is the point — but a
+	// slow phone must still finish inside the two-minute puzzle window.
+	Difficulty int `yaml:"difficulty"`
+	// CookieTTLSeconds is how long a solved puzzle's clearance lasts, 60..86400
+	// (default 1800). A cleared client re-solves when it expires or when its
+	// address (IPv6: /64) changes; the no-JS ticket's clearance is fixed at
+	// five minutes.
+	CookieTTLSeconds int `yaml:"cookie_ttl_seconds"`
 }
 
 // ZoneRate is a per-source ceiling; 0 leaves that dimension unlimited.
@@ -128,7 +155,9 @@ const (
 	ZoneFailOpen   = edgedoc.FailOpen
 	ZoneFailClosed = edgedoc.FailClosed
 
-	ZoneChallengeOff = edgedoc.ChallengeOff
+	ZoneChallengeOff    = edgedoc.ChallengeOff
+	ZoneChallengeManual = edgedoc.ChallengeManual
+	ZoneChallengeAuto   = edgedoc.ChallengeAuto
 
 	ZoneTLS12 = edgedoc.TLS12
 	ZoneTLS13 = edgedoc.TLS13
@@ -257,9 +286,54 @@ func (zone *Zone) validate() error {
 	switch p.Challenge {
 	case "":
 		p.Challenge = ZoneChallengeOff
-	case ZoneChallengeOff:
+	case ZoneChallengeOff, ZoneChallengeManual, ZoneChallengeAuto:
 	default:
-		return fmt.Errorf("%s: policy.challenge %q is not supported yet (challenges are a later milestone); only %q is accepted", zone.Name, p.Challenge, ZoneChallengeOff)
+		return fmt.Errorf("%s: policy.challenge must be %q, %q or %q, got %q", zone.Name, ZoneChallengeOff, ZoneChallengeManual, ZoneChallengeAuto, p.Challenge)
+	}
+	if p.ChallengeOptions.DryRun == nil {
+		// Watch-only until an operator writes false: the rung must show who it
+		// would challenge before it challenges anyone (edge-spec §5).
+		dry := true
+		p.ChallengeOptions.DryRun = &dry
+	}
+	switch d := p.ChallengeOptions.Difficulty; {
+	case d == 0:
+		p.ChallengeOptions.Difficulty = edgedoc.DefaultChallengeDifficulty
+	case d < minChallengeDifficulty || d > maxChallengeDifficulty:
+		return fmt.Errorf("%s: policy.challenge_options.difficulty must be %d..%d, got %d", zone.Name, minChallengeDifficulty, maxChallengeDifficulty, d)
+	}
+	switch ttl := p.ChallengeOptions.CookieTTLSeconds; {
+	case ttl == 0:
+		p.ChallengeOptions.CookieTTLSeconds = edgedoc.DefaultCookieTTLSeconds
+	case ttl < edgedoc.MinCookieTTLSeconds || ttl > edgedoc.MaxCookieTTLSeconds:
+		return fmt.Errorf("%s: policy.challenge_options.cookie_ttl_seconds must be %d..%d, got %d", zone.Name, edgedoc.MinCookieTTLSeconds, edgedoc.MaxCookieTTLSeconds, ttl)
+	}
+	if n := len(p.ChallengeOptions.ExemptPaths); n > maxExemptPaths {
+		return fmt.Errorf("%s: policy.challenge_options.exempt_paths has %d entries; at most %d are accepted", zone.Name, n, maxExemptPaths)
+	}
+	for i, ep := range p.ChallengeOptions.ExemptPaths {
+		if ep == "" || ep[0] != '/' {
+			return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] %q must be an absolute path prefix", zone.Name, i, ep)
+		}
+		if len(ep) > maxExemptPathLen {
+			return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] is %d bytes; at most %d are accepted", zone.Name, i, len(ep), maxExemptPathLen)
+		}
+		// The decision service exempts a request only when its normalised
+		// path AND its raw target — as the client sent it, percent-encoded —
+		// both start with the prefix (decide.pathExempt). A compliant client
+		// encodes everything outside RFC 3986's path characters, so a prefix
+		// carrying a non-ASCII letter, a space, a brace or a quote could never
+		// match a raw target; nor could one with a dot segment, ';', a
+		// backslash or an escape. Such a prefix is refused here rather than
+		// ignored in silence.
+		if !exemptPrefixByte(ep) {
+			return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] %q must be a plain path prefix: letters, digits, - _ . ~ / and $ & + , : = @ only — no space, ';', backslash, percent-encoding, quotes, brackets or non-ASCII (clients send those encoded, so the prefix would never match)", zone.Name, i, ep)
+		}
+		for _, seg := range strings.Split(ep[1:], "/") {
+			if seg == "." || seg == ".." || strings.HasPrefix(seg, "..") {
+				return fmt.Errorf("%s: policy.challenge_options.exempt_paths[%d] %q must not contain a dot segment", zone.Name, i, ep)
+			}
+		}
 	}
 
 	if len(zone.Name) > maxZoneNameLen {
@@ -288,6 +362,39 @@ func (zone *Zone) validate() error {
 // maxZoneNameLen bounds a zone name so that the node's per-zone file name
 // (kapkan_zone_<name>.conf) stays within NAME_MAX. Mirrored by the renderer.
 const maxZoneNameLen = 238
+
+// Bounds on the rung's exempt-path list: the decision service compares every
+// challenged request's path against each prefix.
+const (
+	maxExemptPaths   = 64
+	maxExemptPathLen = 256
+	// The puzzle's difficulty range: the clearance package's own bounds
+	// (12 is trivial, 22 is the ceiling a slow phone still finishes inside
+	// the puzzle window).
+	minChallengeDifficulty = 12
+	maxChallengeDifficulty = 22
+)
+
+// exemptPrefixByte reports whether every byte of an exempt prefix is one a
+// compliant client sends unencoded in a request target: RFC 3986 unreserved
+// (letters, digits, - _ . ~), '/', and the sub-delimiters browsers and HTTP
+// libraries leave alone ($ & + , : = @). Everything else — space, ';', '\',
+// '%', quotes, brackets, braces, '!', '*', ”', '(', ')' (Go's net/http
+// escapes those), bytes outside ASCII — would arrive percent-encoded and the
+// prefix would never match the raw target.
+func exemptPrefixByte(p string) bool {
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.' || c == '~' || c == '/':
+		case c == '$' || c == '&' || c == '+' || c == ',' || c == ':' || c == '=' || c == '@':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // normalizeHostname lowercases and validates an explicit DNS hostname: RFC 1123
 // labels joined by dots, at most 253 characters, no wildcard, no trailing dot,

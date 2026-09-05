@@ -109,6 +109,7 @@ const (
 	DefaultDecideSocket    = "/run/kapkan-edge/edge-decide.sock"
 	DefaultChallengeSocket = "/run/kapkan-edge/edge-challenge.sock"
 	DefaultLogSocket       = "/run/kapkan-edge/edge-log.sock"
+	DefaultClearanceSocket = "/run/kapkan-edge/edge-clearance.sock"
 	DefaultEmptyRoot       = "/var/lib/kapkan-edge/empty"
 
 	// sslCiphersTLS12 is the ECDHE subset of Mozilla's "intermediate" list: no
@@ -181,6 +182,9 @@ type Node struct {
 	ChallengeSocket string `json:"challenge_socket,omitempty"`
 	// LogSocket is the unix datagram socket the access log is shipped to.
 	LogSocket string `json:"log_socket,omitempty"`
+	// ClearanceSocket is the unix socket of the clearance page — the
+	// proof-of-work rung's challenge and answer endpoints (edge-spec §5, E4).
+	ClearanceSocket string `json:"clearance_socket,omitempty"`
 	// EmptyRoot is a directory that contains nothing; try_files stats a path
 	// under it so that it always falls through to the pass-through location.
 	EmptyRoot string `json:"empty_root,omitempty"`
@@ -204,6 +208,9 @@ func (n Node) withDefaults() Node {
 	if n.LogSocket == "" {
 		n.LogSocket = DefaultLogSocket
 	}
+	if n.ClearanceSocket == "" {
+		n.ClearanceSocket = DefaultClearanceSocket
+	}
 	if n.EmptyRoot == "" {
 		n.EmptyRoot = DefaultEmptyRoot
 	}
@@ -215,6 +222,7 @@ func (n Node) validate() error {
 		{"decide_socket", n.DecideSocket},
 		{"challenge_socket", n.ChallengeSocket},
 		{"log_socket", n.LogSocket},
+		{"clearance_socket", n.ClearanceSocket},
 		{"empty_root", n.EmptyRoot},
 	} {
 		if err := safeAbsPath(p.path); err != nil {
@@ -285,6 +293,11 @@ type commonData struct {
 	// HashBucketSize is server_names_hash_bucket_size, or 0 when every zone
 	// name fits nginx's default bucket.
 	HashBucketSize int
+	// HasDecide is true when at least one zone renders a deciding TLS server:
+	// the map that shapes the decision subrequest's path references
+	// $kapkan_path, which only such a server's location / declares (set), and
+	// nginx refuses a map over a variable nothing declares.
+	HasDecide bool
 }
 
 // zoneData is one zone with every decision already made. The template only
@@ -348,6 +361,11 @@ func Render(in Inputs) (Files, error) {
 	for i := range zones {
 		if zones[i].AllowsTLS12 {
 			common.NodeSSLProtocols = sslProtocolsTLS12
+		}
+		if zones[i].Decide && zones[i].HasCert {
+			// Only a zone with a certificate renders the TLS server whose
+			// location / declares $kapkan_path.
+			common.HasDecide = true
 		}
 		if l := len(zones[i].Name); l > longest {
 			longest = l
@@ -432,8 +450,15 @@ func prepareZone(z *edgedoc.Zone, cert Cert, node Node) (zoneData, error) {
 	default:
 		return zoneData{}, fmt.Errorf("policy.failure_mode %q is not %q or %q", z.Policy.FailureMode, edgedoc.FailOpen, edgedoc.FailClosed)
 	}
-	if z.Policy.Challenge != edgedoc.ChallengeOff {
-		return zoneData{}, fmt.Errorf("policy.challenge %q is not supported by this renderer (only %q)", z.Policy.Challenge, edgedoc.ChallengeOff)
+	switch z.Policy.Challenge {
+	case edgedoc.ChallengeOff, edgedoc.ChallengeManual, edgedoc.ChallengeAuto:
+		// Checked as a word, like every other interpolated vocabulary, and
+		// NOT branched on: the clearance machinery is rendered for every
+		// decide-mode zone, so turning the rung on or off is a decision-service
+		// change and never a reload (edge-spec §2.2). The same goes for
+		// challenge_options.
+	default:
+		return zoneData{}, fmt.Errorf("policy.challenge %q is not %q, %q or %q", z.Policy.Challenge, edgedoc.ChallengeOff, edgedoc.ChallengeManual, edgedoc.ChallengeAuto)
 	}
 	// z.Policy.Rate is not consulted: a fast-path field never reaches the
 	// terminator's configuration (package doc).

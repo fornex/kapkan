@@ -100,10 +100,12 @@ type Key struct {
 	NotAfter  time.Time
 }
 
-// live reports whether the key may verify (or issue) at now.
-func (k Key) live(now time.Time) bool {
+// Live reports whether the key may verify (or issue) at now.
+func (k Key) Live(now time.Time) bool {
 	return len(k.Secret) == SecretLen && k.ID != "" && !now.Before(k.NotBefore) && now.Before(k.NotAfter)
 }
+
+func (k Key) live(now time.Time) bool { return k.Live(now) }
 
 // NewSecret draws a fresh key secret.
 func NewSecret() ([]byte, error) {
@@ -298,6 +300,108 @@ func checkReturnPath(p string) error {
 	}
 	return nil
 }
+
+// Policy is what the challenge page needs to know about a zone's rung, as
+// the decision service resolved it from the document (edgedoc
+// ChallengeOptions with defaults applied). It lives here so the page and the
+// decider share the type without depending on each other.
+type Policy struct {
+	// Difficulty is the puzzle's leading zero bits (MinDifficulty..
+	// MaxDifficulty).
+	Difficulty int
+	// CookieTTL is how long a solved puzzle's clearance lasts; NoJSTTL how
+	// long the timed no-JS ticket's clearance lasts (shorter: it cost
+	// nothing but patience).
+	CookieTTL time.Duration
+	NoJSTTL   time.Duration
+}
+
+// The no-JS fallback (edge-spec §5: "a no-JS fallback path is required").
+// The page carries a TICKET a client without JavaScript redeems by waiting:
+// an HMAC over (zone, source key, return path, issue time) under the zone's
+// key, redeemable no earlier than TicketMinWait after issue and no later than
+// TicketMaxAge. It is stateless like the puzzle, costs the client nothing but
+// the wait, and so buys the shorter NoJSTTL clearance.
+const (
+	TicketMinWait = 4 * time.Second
+	TicketMaxAge  = 120 * time.Second
+	maxTicket     = 512
+)
+
+// NewTicket issues the no-JS ticket for (zone, source key, return path) at
+// now: "<keyid>.<issued unix>.<base64url return>.<base64url mac>".
+func NewTicket(key Key, zone, sourceKey, returnPath string, now time.Time) (string, error) {
+	if !key.live(now) {
+		return "", errors.New("clearance: key is not live")
+	}
+	if zone == "" || sourceKey == "" {
+		return "", errors.New("clearance: zone and source key are required")
+	}
+	if err := checkReturnPath(returnPath); err != nil {
+		return "", err
+	}
+	if strings.ContainsAny(key.ID, ".| ") {
+		return "", errors.New("clearance: key id must not contain '.', '|' or spaces")
+	}
+	issued := strconv.FormatInt(now.Unix(), 10)
+	mac := ticketMAC(key.Secret, zone, sourceKey, returnPath, issued)
+	return key.ID + "." + issued + "." + base64.RawURLEncoding.EncodeToString([]byte(returnPath)) + "." + base64.RawURLEncoding.EncodeToString(mac), nil
+}
+
+// CheckTicket verifies a no-JS ticket presented by sourceKey for zone at now
+// and returns the return path it was issued for. It fails before
+// TicketMinWait has passed (the client did not wait), after TicketMaxAge, and
+// for any tampering.
+func CheckTicket(keys []Key, zone, sourceKey, ticket string, now time.Time) (returnPath string, ok bool) {
+	if len(ticket) == 0 || len(ticket) > maxTicket {
+		return "", false
+	}
+	parts := strings.Split(ticket, ".")
+	if len(parts) != 4 {
+		return "", false
+	}
+	keyID, issuedStr, retB64, macB64 := parts[0], parts[1], parts[2], parts[3]
+	issued, err := strconv.ParseInt(issuedStr, 10, 64)
+	if err != nil || issued <= 0 {
+		return "", false
+	}
+	age := now.Sub(time.Unix(issued, 0))
+	if age < TicketMinWait || age > TicketMaxAge {
+		return "", false
+	}
+	ret, err := base64.RawURLEncoding.DecodeString(retB64)
+	if err != nil || checkReturnPath(string(ret)) != nil {
+		return "", false
+	}
+	mac, err := base64.RawURLEncoding.DecodeString(macB64)
+	if err != nil || len(mac) != sha256.Size {
+		return "", false
+	}
+	for _, k := range keys {
+		if k.ID != keyID || !k.live(now) {
+			continue
+		}
+		if subtle.ConstantTimeCompare(mac, ticketMAC(k.Secret, zone, sourceKey, string(ret), issuedStr)) == 1 {
+			return string(ret), true
+		}
+	}
+	return "", false
+}
+
+func ticketMAC(secret []byte, zone, sourceKey, returnPath, issued string) []byte {
+	h := hmac.New(sha256.New, secret)
+	for _, f := range []string{"ticket", zone, sourceKey, returnPath, issued} {
+		var n [4]byte
+		binary.BigEndian.PutUint32(n[:], uint32(len(f)))
+		h.Write(n[:])
+		h.Write([]byte(f))
+	}
+	return h.Sum(nil)
+}
+
+// ValidReturnPath reports whether p is a path the answer endpoint may send a
+// client to: absolute, on this host, no control bytes (checkReturnPath).
+func ValidReturnPath(p string) bool { return checkReturnPath(p) == nil }
 
 func leadingZeroBits(sum [sha256.Size]byte) int {
 	n := 0
