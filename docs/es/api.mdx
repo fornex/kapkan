@@ -339,8 +339,7 @@ ciclo de vida.
 
 ### GET /api/v1/audit
 
-Devuelve el registro de auditoría atribuido al operador: quién emitió cada `ban`, `unban` o
-`config_reload`, cuándo, y el resultado (incluidas las acciones **rechazadas**). Los registros van
+Devuelve el registro de auditoría atribuido al operador: quién emitió cada `ban`, `unban`, `config_reload`, `source_block` o `source_unblock`, cuándo, y el resultado (incluidas las acciones **rechazadas**). Los registros van
 de más reciente a más antiguo y el endpoint está acotado al tenant en el servidor. Acepta los parámetros de
 consulta opcionales `from`/`to` (RFC 3339), `action`
 (`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`) y `target` (una IP), y
@@ -580,6 +579,8 @@ Estos endpoints existen para los [nodos edge](/docs/edge) — máquinas que ejec
 token `operator` sin acotar, nunca un `viewer` ni un token acotado a un tenant: el documento de zonas
 abarca todos los tenants. **El cerebro distribuye política, nunca veredictos** — no existe ninguna
 llamada por petición, ni aquí ni en ningún otro sitio; un nodo responde a las peticiones por sí solo.
+El recuento de nodos edge configurados (`edge_nodes_total`) viaja en `/api/v1/status` para todos los
+roles, así que una consola puede decidir si mostrar la vista Edge sin ninguna de estas llamadas.
 
 #### GET /api/v1/edge/zones
 
@@ -604,7 +605,7 @@ que el nodo trata como un fallo y ante el que espera antes de reintentar (1 s, d
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
   "acme_challenges": [],
@@ -614,7 +615,14 @@ que el nodo trata como un fallo y ante el que espera antes de reintentar (1 s, d
 
 `acme_directory`, `acme_fallback`, `extra_directives_file` y `tls.h3` se omiten cuando no están
 definidos; un `acme_directory` ausente significa que el nodo pide a su propia CA por defecto (Let's
-Encrypt salvo que su `edge.yaml` diga otra cosa).
+Encrypt salvo que su `edge.yaml` diga otra cosa). La política lleva `dry_run` y las
+`challenge_options` que una zona fija; `clearance_keys` (no se muestran) son las claves de firma por
+zona del peldaño (la del día UTC actual y la del anterior, cada una honrada durante 48 h — el
+documento lleva secretos, y un nodo lo cachea en `0600`); una zona sobre la que un operador ha
+accionado
+[la palanca](/docs/edge#la-palanca) lleva `challenge_override` `{mode, until, reason}` con un `until`
+fijo, de modo que los bytes y el ETag del documento cambian exactamente cuando el operador actúa y
+una vez más cuando caduca.
 
 #### POST /api/v1/edge/nodes/\{name\}/report
 
@@ -622,7 +630,23 @@ El autoinforme orientativo de un nodo — versión, dry-run del lado del nodo, e
 que ha **renderizado** (para que un operador pueda ver un nodo rezagado o que se niega), el tipo, la
 versión y la vitalidad del terminador, la generación activa y su resultado de `nginx -t`, y los
 certificados que posee (solo metadatos públicos, nunca una clave; una lista larga se recorta al
-límite de 64 KiB del cuerpo con un recuento `certs_truncated`) — almacenado y devuelto por
+límite de 64 KiB del cuerpo con un recuento `certs_truncated`), y una **sección de zonas**: para
+cada zona que decide y que la generación activa sirve, la última ventana cerrada de diez segundos
+(`at`, `window_seconds`, `rps`, `requests`, `decided`, `denied`, `challenged`, `cleared`,
+`would_deny`, `would_challenge`, `status_2xx..5xx`), el modo de desafío de la zona tal como el nodo
+lo aplica, si la zona está en solo observación en este nodo (`dry_run`) y si su peldaño ahí solo
+previsualiza (`rung_dry_run`: por el `dry_run` del nodo, el de la zona o el
+`challenge_options.dry_run` propio del peldaño), un desafío de zona completa en vigor
+(`challenge_active {reason, until, dry_run}` — `dry_run` indica que ahí el cambio solo
+previsualiza), y las fuentes de la ventana — primero las candidatas (un desafío o una denegación
+previsualizados), después las rechazadas y las desafiadas, después las más activas del resto — cada
+una con lo más fuerte que el nodo hizo con ella (`state`: `denied`, `challenged`, `would-deny`,
+`would-challenge`, `cleared`, `marked`, `allow`). Un reporte demasiado grande para el límite recorta
+detalle poco a poco — primero las fuentes que no dicen nada (sin contarlas: no están en el conjunto
+de candidatos), luego la lista de cada zona a la mitad, luego los certificados, luego las zonas — y
+cada recorte se cuenta: `sources_truncated` son las fuentes candidatas que faltan en la lista (las
+que el límite por ventana del nodo, 20, dejó fuera, y las que recortó un reporte que tuvo que
+encogerse), `certs_truncated` y `zones_truncated` las entradas eliminadas. Almacenado y devuelto por
 `GET /api/v1/edge/nodes`. Nunca es una señal de vitalidad (el sondeo lo es). Un `{name}`
 desconocido es `404`; el éxito es `204 No Content`.
 
@@ -630,6 +654,54 @@ desconocido es `404`; el éxito es `204 No Content`.
 
 El inventario de nodos: cada nodo edge configurado con la vitalidad de su sondeo unida a su último
 reporte. Una lectura de rango `viewer`, solo tokens sin acotar.
+
+#### GET /api/v1/edge/zones/status
+
+Las zonas de toda la flota: las secciones de zonas de los nodos **vivos** fusionadas — por zona, las
+cifras de la ventana sumadas (las ventanas no están alineadas, así que es una tasa de toda la flota
+con la precisión de una ventana), el modo de desafío de la zona, los nodos en los que está en solo
+observación (`watch_only`) y aquellos en los que su peldaño solo previsualiza (`rung_watch_only` —
+una zona `manual` o `auto` desafía de verdad en los nodos que no aparecen ahí), los nodos con un
+desafío de zona completa en vigor y si en cada uno actúa o previsualiza, la palanca en vigor
+(`override`), y el **conjunto de candidatos**: la unión de las fuentes para las que los nodos
+previsualizaron un desafío o una denegación, conservando el estado más fuerte, las más activas
+primero, acotada a 20 por nodo que reporta (`would_be_truncated` cuenta el resto). `partial` indica
+que no todas las fuentes candidatas de un nodo cupieron — por su límite por ventana, o por un
+reporte que tuvo que encogerse — así que el conjunto es lo que sobrevivió, no todo el mundo;
+`zones_truncated` en el documento suma las entradas de zona que los nodos vivos recortaron de sus
+reportes: zonas que aquí faltan o están infracontadas. Una lectura de rango `viewer`, solo tokens
+sin acotar, como el inventario. Este es el *a quién se habría desafiado* de la especificación del
+edge: léelo antes de que el peldaño de una zona pase a producción.
+
+```json
+{
+  "nodes_alive": 2,
+  "nodes_reporting": 2,
+  "zones": [
+    {
+      "zone": "shop.example.com",
+      "nodes": 2,
+      "challenge": "auto",
+      "rps": 812.4,
+      "requests": 8124, "decided": 8124, "would_deny": 37, "would_challenge": 1240,
+      "watch_only": ["edge-2"],
+      "rung_watch_only": ["edge-2"],
+      "challenge_active": [
+        { "node": "edge-1", "reason": "zone-rps", "until": "2026-09-06T12:05:00Z", "dry_run": true }
+      ],
+      "would_be": [
+        { "source": "203.0.113.7", "state": "would-deny", "requests": 1210, "nodes": ["edge-1", "edge-2"] },
+        { "source": "198.51.100.23", "state": "would-challenge", "requests": 640, "nodes": ["edge-1"] }
+      ]
+    }
+  ]
+}
+```
+
+Una zona que ningún nodo vivo ha reportado aún aparece igualmente cuando tiene una palanca fijada:
+`nodes: 0`, `rps: 0` y `override`, sin modo. Los contadores de peticiones (`requests`, `decided`,
+`denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`) se omiten cuando valen cero;
+`nodes` y `rps` están siempre presentes.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot y …/acme/challenges
 
@@ -644,6 +716,53 @@ caer en cualquier nodo detrás de una dirección compartida. Un challenge vivo n
 una autorización de clave distinta (`409`), un nodo puede tener 16 challenges vivos, y cada llamada
 se registra con el nodo, la zona y el prefijo del token: un token agent es una credencial que emite
 certificados; rótalo ante cualquier compromiso de un nodo.
+
+#### POST /api/v1/edge/zones/\{name\}/challenge y DELETE
+
+[La palanca](/docs/edge#la-palanca): fija el modo de desafío de una zona durante un tiempo acotado,
+diga lo que diga el archivo de zonas. Rango `operator`, solo tokens sin acotar.
+
+```json
+{ "mode": "manual", "ttl_seconds": 1800, "reason": "credential stuffing from residential proxies" }
+```
+
+`mode` es `manual`, `auto` u `off` (`off` retira la anulación, igual que `DELETE`); `ttl_seconds` es
+`60..86400` y obligatorio salvo que `mode` sea `off`; `reason` es para el log, la fila de auditoría y
+las respuestas de la API — `override.reason` en `GET /api/v1/edge/zones/status` y la respuesta
+propia de este endpoint (como máximo 200 caracteres). Una zona desconocida es `404`; una zona en
+`policy.mode: none` es `409` — ahí nada desafía. La anulación viaja en el documento de zonas como
+`challenge_override` (los sondeos retenidos se despiertan de inmediato) y cada nodo aplica el modo
+efectivo en su ruta rápida, de modo que termina en `until` con o sin cerebro. Se audita como
+`edge_challenge` `set` / `cleared`. Ambos métodos responden `200` con el peldaño tal como queda y
+dónde actúa la palanca:
+
+```json
+{
+  "zone": "shop.example.com",
+  "mode": "manual",
+  "until": "2026-09-06T12:30:00Z",
+  "reason": "credential stuffing from residential proxies",
+  "file_mode": "auto",
+  "zone_watch_only": false,
+  "rung_watch_only": false,
+  "nodes": [
+    { "name": "edge-1", "alive": true, "dry_run": false },
+    { "name": "edge-2", "alive": false }
+  ]
+}
+```
+
+`file_mode` es `policy.challenge` tal como lo tiene el archivo; `zone_watch_only` y
+`rung_watch_only` son el `policy.dry_run` y el `challenge_options.dry_run` de la zona — con
+cualquiera de los dos la palanca previsualiza en lugar de actuar, en todos los nodos; `nodes[]`
+lista cada nodo configurado con su vitalidad y su `dry_run` reportado (ausente hasta que haya
+reportado) — un nodo que solo cuenta debe verse antes de confiar en la palanca. `mode`, `until` y
+`reason` están ausentes cuando la zona sigue su archivo, y `file_mode` está vacío para una zona que
+una recarga ha eliminado desde entonces del archivo — esa palanca aún puede retirarse, nunca
+fijarse. La palanca se guarda en la memoria del cerebro, como el coordinador de emisión; no la
+condiciona el `dry_run` propio del cerebro. Un nodo que ejecuta una versión anterior a la palanca no
+conoce `challenge_override` y sigue su archivo mientras `nodes[]` lo sigue listando: actualiza
+primero los nodos.
 
 ### GET /metrics
 

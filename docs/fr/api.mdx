@@ -592,7 +592,9 @@ Ces points de terminaison existent pour les [nœuds edge](/docs/edge) — des ma
 `agent` ou un jeton `operator` non rattaché, jamais un `viewer` ni un jeton rattaché à un tenant :
 le document de zones couvre tous les tenants. **Le cerveau distribue la politique, jamais les
 verdicts** — il n'existe aucun appel par requête, ni ici ni ailleurs ; un nœud répond seul aux
-requêtes.
+requêtes. Le nombre de nœuds edge configurés (`edge_nodes_total`) circule sur `/api/v1/status` pour
+tous les rôles, de sorte qu'une console peut décider d'afficher ou non la vue Edge sans aucun de ces
+appels.
 
 #### GET /api/v1/edge/zones
 
@@ -618,7 +620,7 @@ jeton agent.
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
   "acme_challenges": [],
@@ -628,22 +630,94 @@ jeton agent.
 
 `acme_directory`, `acme_fallback`, `extra_directives_file` et `tls.h3` sont omis lorsqu'ils ne sont
 pas définis ; un `acme_directory` absent signifie que le nœud commande auprès de sa propre CA par
-défaut (Let's Encrypt sauf si son `edge.yaml` en dit autrement).
+défaut (Let's Encrypt sauf si son `edge.yaml` en dit autrement). La politique porte `dry_run` et les
+`challenge_options` qu'une zone définit ; `clearance_keys` (non montrées) sont les clés de signature
+par zone du palier (celle du jour UTC courant et celle de la veille, chacune honorée 48 h — le
+document porte des secrets, et un nœud le met en cache en `0600`) ; une zone sur laquelle un
+opérateur a actionné
+[le levier](/docs/edge#le-levier) porte `challenge_override` `{mode, until, reason}` avec un `until`
+fixe, de sorte que les octets et l'ETag du document ne bougent qu'au moment où l'opérateur agit et
+une fois de plus quand il expire.
 
 #### POST /api/v1/edge/nodes/\{name\}/report
 
 Le rapport consultatif d'un nœud sur lui-même — version, dry-run côté nœud, l'ETag du document
 qu'il a **rendu** (afin qu'un opérateur puisse repérer un nœud en retard ou qui refuse), le type,
-la version et la vivacité du terminateur, la génération active et son résultat `nginx -t`, et les
+la version et la vivacité du terminateur, la génération active et son résultat `nginx -t`, les
 certificats qu'il détient (métadonnées publiques uniquement, jamais une clé ; une longue liste est
-tronquée à la limite de 64 KiB du corps, avec un compteur `certs_truncated`) — stocké et renvoyé
-par `GET /api/v1/edge/nodes`. Jamais un signal de vivacité (l'interrogation l'est). Un `{name}`
-inconnu renvoie `404` ; le succès est `204 No Content`.
+tronquée à la limite de 64 KiB du corps, avec un compteur `certs_truncated`), et une **section
+zones** : pour chaque zone qui décide et que la génération active sert, la dernière fenêtre de dix
+secondes close (`at`, `window_seconds`, `rps`, `requests`, `decided`, `denied`, `challenged`,
+`cleared`, `would_deny`, `would_challenge`, `status_2xx..5xx`), le mode de défi de la zone tel que
+le nœud l'applique, si la zone est en observation seule sur ce nœud (`dry_run`) et si son palier n'y
+fait que prévisualiser (`rung_dry_run` : le `dry_run` du nœud, celui de la zone ou le
+`challenge_options.dry_run` propre au palier), un défi global de zone en vigueur
+(`challenge_active {reason, until, dry_run}` — `dry_run` indique que la bascule n'y est qu'un
+aperçu), et les sources de la fenêtre — d'abord les candidates (un défi ou un refus prévisualisé),
+puis les refusées et les mises au défi, puis les plus actives du reste — chacune avec la chose la
+plus forte que le nœud lui a faite (`state` : `denied`, `challenged`, `would-deny`,
+`would-challenge`, `cleared`, `marked`, `allow`). Un rapport trop gros pour la limite se déleste du
+détail petit à petit — d'abord les sources qui ne disent rien (sans les compter : elles ne font pas
+partie de l'ensemble des candidats), puis la liste de chaque zone réduite de moitié, puis les
+certificats, puis les zones — chaque coupe étant comptée : `sources_truncated` est le nombre de
+sources candidates manquantes dans la liste (celles que la borne propre au nœud de 20 par fenêtre a
+laissées de côté, et celles qu'un rapport en train de rétrécir a délestées), `certs_truncated` et
+`zones_truncated` les entrées supprimées. Stocké et renvoyé par `GET /api/v1/edge/nodes`. Jamais un
+signal de vivacité (l'interrogation l'est). Un `{name}` inconnu renvoie `404` ; le succès est
+`204 No Content`.
 
 #### GET /api/v1/edge/nodes
 
 L'inventaire des nœuds : chaque nœud edge configuré avec la vivacité de son interrogation, joint à
 son dernier rapport. Une lecture de rang `viewer`, jetons non rattachés uniquement.
+
+#### GET /api/v1/edge/zones/status
+
+Les zones sur toute la flotte : les sections zones des nœuds **vivants** fusionnées — par zone, les
+chiffres de fenêtre sommés (les fenêtres ne sont pas alignées ; c'est donc un débit de toute la
+flotte à la fenêtre près), le mode de défi de la zone, les nœuds sur lesquels elle est en
+observation seule (`watch_only`) et ceux sur lesquels son palier ne fait que prévisualiser
+(`rung_watch_only` — une zone `manual` ou `auto` met réellement au défi sur les nœuds qui n'y sont
+pas nommés), les nœuds où un défi global de zone est en vigueur et si chacun s'applique ou n'est
+qu'un aperçu, le levier en vigueur (`override`), et **l'ensemble des candidats** : l'union des
+sources pour lesquelles les nœuds ont prévisualisé un défi ou un refus, l'état le plus fort
+conservé, les plus actives d'abord, bornée à 20 par nœud rapporteur (`would_be_truncated` compte le
+reste). `partial` indique que les sources candidates d'un nœud n'ont pas toutes tenu — sa borne par
+fenêtre, ou un rapport qui a dû rétrécir — de sorte que l'ensemble est ce qui a survécu, pas tout le
+monde ; `zones_truncated` sur le document somme les entrées de zone que les nœuds vivants ont
+coupées de leurs rapports, des zones absentes ou sous-comptées ici. Une lecture de rang `viewer`,
+jetons non rattachés uniquement, comme l'inventaire. C'est le *qui aurait été mis au défi* de la
+spécification edge : lisez-le avant que le palier d'une zone ne passe en production.
+
+```json
+{
+  "nodes_alive": 2,
+  "nodes_reporting": 2,
+  "zones": [
+    {
+      "zone": "shop.example.com",
+      "nodes": 2,
+      "challenge": "auto",
+      "rps": 812.4,
+      "requests": 8124, "decided": 8124, "would_deny": 37, "would_challenge": 1240,
+      "watch_only": ["edge-2"],
+      "rung_watch_only": ["edge-2"],
+      "challenge_active": [
+        { "node": "edge-1", "reason": "zone-rps", "until": "2026-09-06T12:05:00Z", "dry_run": true }
+      ],
+      "would_be": [
+        { "source": "203.0.113.7", "state": "would-deny", "requests": 1210, "nodes": ["edge-1", "edge-2"] },
+        { "source": "198.51.100.23", "state": "would-challenge", "requests": 640, "nodes": ["edge-1"] }
+      ]
+    }
+  ]
+}
+```
+
+Une zone qu'aucun nœud vivant n'a encore rapportée apparaît tout de même lorsqu'un levier est posé
+sur elle : `nodes: 0`, `rps: 0` et `override`, sans mode. Les compteurs de requêtes (`requests`,
+`decided`, `denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`) sont omis quand ils
+valent zéro ; `nodes` et `rps` sont toujours présents.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot et …/acme/challenges
 
@@ -659,6 +733,54 @@ jamais écrasé par une key authorization différente (`409`), un nœud peut dé
 actifs, et chaque appel est journalisé avec le nœud, la zone et le préfixe du token : un jeton
 agent est un identifiant qui émet des certificats, effectuez-en la rotation dès qu'un nœud est
 compromis.
+
+#### POST /api/v1/edge/zones/\{name\}/challenge et DELETE
+
+[Le levier](/docs/edge#le-levier) : fixer le mode de défi d'une zone pour une durée bornée, quoi que
+dise le fichier de zones. Rang `operator`, jetons non rattachés uniquement.
+
+```json
+{ "mode": "manual", "ttl_seconds": 1800, "reason": "credential stuffing from residential proxies" }
+```
+
+`mode` vaut `manual`, `auto` ou `off` (`off` lève la surcharge, comme le fait `DELETE`) ;
+`ttl_seconds` est dans `60..86400` et requis sauf si `mode` vaut `off` ; `reason` est destiné au
+journal, à la ligne d'audit et aux réponses de l'API — `override.reason` dans
+`GET /api/v1/edge/zones/status` et la propre réponse de ce point de terminaison (au plus
+200 caractères). Une zone inconnue renvoie
+`404` ; une zone en `policy.mode: none` renvoie `409` — rien n'y met au défi. La surcharge voyage
+dans le document de zones sous `challenge_override` (les interrogations retenues sont réveillées
+aussitôt) et chaque nœud applique le mode effectif sur son chemin rapide, de sorte qu'elle prend
+fin à `until` avec ou sans cerveau. Auditée comme `edge_challenge` `set` / `cleared`. Les deux
+méthodes répondent `200` avec le palier tel qu'il est désormais et où le levier agit :
+
+```json
+{
+  "zone": "shop.example.com",
+  "mode": "manual",
+  "until": "2026-09-06T12:30:00Z",
+  "reason": "credential stuffing from residential proxies",
+  "file_mode": "auto",
+  "zone_watch_only": false,
+  "rung_watch_only": false,
+  "nodes": [
+    { "name": "edge-1", "alive": true, "dry_run": false },
+    { "name": "edge-2", "alive": false }
+  ]
+}
+```
+
+`file_mode` est le `policy.challenge` tel que le fichier le porte ; `zone_watch_only` et
+`rung_watch_only` sont les `policy.dry_run` et `challenge_options.dry_run` de la zone — avec l'un
+ou l'autre, le levier prévisualise au lieu d'agir, sur chaque nœud ; `nodes[]` liste chaque nœud
+configuré avec sa vivacité et le `dry_run` qu'il rapporte (absent tant qu'il n'a pas rapporté) — un
+nœud qui ne fait que compter doit être repéré avant de faire confiance au levier. `mode`, `until`
+et `reason` sont absents quand la zone suit son fichier, et `file_mode` est vide pour une zone
+qu'un rechargement a depuis retirée du fichier — un tel levier peut encore être levé, jamais posé.
+Le levier est tenu dans la mémoire du cerveau, comme le coordinateur d'émission ; il n'est pas
+conditionné par le `dry_run` propre au cerveau. Un nœud qui exécute une version antérieure au
+levier ne connaît pas `challenge_override` et suit son fichier alors que `nodes[]` le liste tout de
+même : mettez d'abord les nœuds à niveau.
 
 ### GET /metrics
 

@@ -334,7 +334,7 @@ controller:
   name: edge-1                         # must equal an edge.nodes[] name on the brain
   report_interval_seconds: 10          # self-report cadence
 state_dir: /var/lib/kapkan-edge        # document cache, generations, ACME keys and certificates
-sockets_dir: /run/kapkan-edge          # edge-decide.sock, edge-challenge.sock, edge-log.sock
+sockets_dir: /run/kapkan-edge          # edge-decide.sock, edge-clearance.sock, edge-log.sock, edge-challenge.sock
 socket_group: nginx                    # the terminator's worker group (nginx | www-data | angie)
 terminator:
   binary: nginx                        # nginx (default) | angie
@@ -361,7 +361,7 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `dry_run` | Fehlt oder `true`: Entscheidungen werden gezählt und markiert (`X-Kapkan-Mark: would-deny:<reason>` erreicht den Origin), keine wird durchgesetzt. Setzen Sie `false`, um abzulehnen. |
 | `controller.url` / `token_env` / `name` | Die API-Basis des Gehirns (kein Pfad, keine Anmeldedaten in der URL), die Umgebungsvariable mit dem **agent**-Token und der Name dieses Knotens — er muss einem `edge.nodes[]`-Eintrag auf dem Gehirn entsprechen, sonst ist jeder Poll ein lautstarker `404`. |
 | `state_dir` / `sockets_dir` | Die eigenen Verzeichnisse der Rolle (Standard `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — niemals `/var/lib/kapkan` und `/run/kapkan` des Gehirns, die systemd auf einem gemeinsam genutzten Host unter ihr weg-chownen und entfernen würde. Absolut, ohne Zeichen, die nginx falsch lesen würde. |
-| `socket_group` | Die Worker-Gruppe des Terminators. Der Entscheidungs- und der Log-Socket sind für sie `0660`; der Challenge-Socket ist `0666` (er beantwortet öffentliche Tokens). Leer lässt die beiden gruppenbeschränkten Sockets nur für den Eigentümer zugänglich. |
+| `socket_group` | Die Worker-Gruppe des Terminators. Der Entscheidungs-, der Log- und der Freigabeseiten-Socket sind für sie `0660`; der ACME-Challenge-Socket ist `0666` (er beantwortet öffentliche Tokens). Leer lässt die drei gruppenbeschränkten Sockets nur für den Eigentümer zugänglich. |
 | `terminator.binary` / `main_conf` | Was für `-t` und Reloads ausgeführt wird, und die Hauptkonfiguration, die als `-c` übergeben wird. Diese Datei muss einmal, innerhalb von `http {}`, `include /var/lib/kapkan-edge/conf/live/*.conf;` enthalten. |
 | `terminator.reload` | `exec` führt `<binary> -s reload` aus (muss den nginx-Master signalisieren — die Unit läuft als root); `signal` sendet `HUP` an die PID in `pid_file`; `command` führt `terminator.command` aus, z. B. `[systemctl, reload, nginx]`. |
 | `terminator.pid_file` | Wenn gesetzt, wird sie bei jedem Report-Tick gelesen und mit `0` signalisiert: `/healthz` antwortet `503` und der Report meldet `alive: false`, solange kein Prozess diese PID hat. |

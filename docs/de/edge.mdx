@@ -1,7 +1,7 @@
 export const metadata = {
   title: "Edge-Knoten (verwaltetes HTTPS-Frontend)",
   description:
-    "Machen Sie aus einer Linux-Box mit nginx oder Angie ein verwaltetes HTTPS-Frontend für Ihre Zonen: Zertifikate werden auf dem Knoten ausgestellt, die Konfiguration erzeugt Kapkan, jede Anfrage wird lokal entschieden, und Kapkan selbst leitet nichts weiter.",
+    "Machen Sie aus einer Linux-Box mit nginx oder Angie ein verwaltetes HTTPS-Frontend für Ihre Zonen: Zertifikate werden auf dem Knoten ausgestellt, die Konfiguration erzeugt Kapkan, jede Anfrage wird lokal entschieden — eine Ratenobergrenze, eine Proof-of-Work-Stufe, eine Sperre —, und Kapkan selbst leitet nichts weiter.",
 };
 
 # Edge-Knoten (verwaltetes HTTPS-Frontend)
@@ -9,17 +9,18 @@ export const metadata = {
 <Callout type="info" title="Was das ist — und was nicht">
 Ein **Edge-Knoten** ist eine Linux-Box mit **nginx oder Angie**, die Kapkan verwaltet: Es stellt
 die Zertifikate der Zonen auf der Box aus, erzeugt die Konfiguration des Terminators, entscheidet
-pro Anfrage, ob ein Client durchgelassen wird, und meldet zurück. Kapkan **leitet niemals die
-Bytes eines Clients weiter** — nginx terminiert TLS und reicht die Anfragen per Proxy an Ihre
-Origins weiter; Kapkan sagt ihm, was es ausliefern soll und, für jede Anfrage, ob es sie
-ausliefern soll. Sie bringen das Netzwerk (Anycast, Transit, DNS) und die Boxen mit; Kapkan bringt
-die Schutzschleife mit.
+pro Anfrage, ob ein Client durchgelassen wird — oder ob er zuerst beweisen muss, dass er ein
+Browser ist — und meldet zurück. Kapkan **leitet niemals die Bytes eines Clients weiter** — nginx
+terminiert TLS und reicht die Anfragen per Proxy an Ihre Origins weiter; Kapkan sagt ihm, was es
+ausliefern soll und, für jede Anfrage, ob es sie ausliefern soll. Sie bringen das Netzwerk
+(Anycast, Transit, DNS) und die Boxen mit; Kapkan bringt die Schutzschleife mit.
 </Callout>
 
 Einfach gesagt: Sie führen Ihre Websites (Zonen) in einer Datei auf dem Gehirn auf, richten deren
 DNS auf Ihre Edge-Boxen, und jede Box erhält ein Zertifikat, eine erzeugte nginx-Konfiguration und
-einen lokalen Entscheidungsdienst, der jeden Client zählt und diejenigen abweist, die die
-Richtlinie der Zone überschreiten — ohne einen Round-Trip zu irgendetwas anderem.
+einen lokalen Entscheidungsdienst, der jeden Client zählt, diejenigen abweist, die die Richtlinie
+der Zone überschreiten, und — wo Sie es erlauben — einen verdächtigen Client ein kleines Rätsel
+lösen lässt, bevor er gesperrt wird — ohne einen Round-Trip zu irgendetwas anderem.
 
 ```yaml
 # zones.yaml on the brain (edge.zones_file) — see the zones reference
@@ -31,6 +32,9 @@ zones:
       mode: decide            # every request asks the local decision service
       failure_mode: open      # decider down → requests pass, undecided
       rate: { rps: 50, concurrency: 20 }
+      challenge: auto         # a flooder is asked to prove it is a browser before it is blocked
+      challenge_options:
+        dry_run: true         # watch-only: shows who WOULD be challenged, challenges nobody
 ```
 
 Die Rolle ist die dritte desselben Binarys: `kapkan` (das Gehirn), [`kapkan scrub`](/docs/scrubbing#verwaltete-scrubbing-knoten)
@@ -43,36 +47,43 @@ und nun [`kapkan edge`](/docs/cli#edge). Die Installation von Anfang bis Ende be
  client ──TLS──▶ nginx / Angie  (terminates, proxies to your origins)
                     │ auth_request        │ access log (JSON, unix socket)
                     ▼                     ▼
-               kapkan edge  ── decision service · rollups · ACME · renderer
+               kapkan edge  ── decision service · clearance page · rollups · ACME · renderer
                     ▲ long-poll of the zone document, self-reports
-               kapkan (brain) — zones.yaml, issuance coordinator, console
+               kapkan (brain) — zones.yaml, the lever, issuance coordinator, console
 ```
 
 - **Das Gehirn verteilt Richtlinien, niemals Verdikte.** `kapkan edge` pollt per Long-Poll ein
   einziges Dokument — die Zonen mit ihren Origins, der TLS-Untergrenze, den ACME-Verzeichnissen
-  und der Richtlinie pro Anfrage — und hält eine Kopie auf der Platte. Jede Entscheidung pro
-  Anfrage wird **auf dem Knoten** getroffen; ein Gehirn, das ausgefallen oder nicht erreichbar
-  ist, ändert nichts daran, wie Anfragen beantwortet werden.
+  und der Richtlinie pro Anfrage, die Signaturschlüssel der Stufe und jeden Hebel, den ein
+  Betreiber gezogen hat — und hält eine Kopie auf der Platte. Jede Entscheidung pro Anfrage wird
+  **auf dem Knoten** getroffen; ein Gehirn, das ausgefallen oder nicht erreichbar ist, ändert
+  nichts daran, wie Anfragen beantwortet werden.
 - **Der Renderer** verwandelt das Dokument in nginx-Konfiguration unterhalb des
   Zustandsverzeichnisses des Knotens: eine gemeinsame Datei (ein JSON-`log_format`, die Upstreams
   für Kapkans Unix-Sockets, ein Catch-all, das unbekannte Hosts abweist) und eine Datei pro Zone
   (der `:80`-Listener, der ACME-Challenges beantwortet und umleitet, der `:443`-Server, der hinter
-  einem `auth_request` an den Entscheidungsdienst per Proxy an die Origins weiterreicht). Jede
-  Generation wird mit `nginx -t` getestet, **bevor** sie installiert und neu geladen wird; ein
-  fehlschlagender Kandidat wird niemals installiert — die vorherige Konfiguration bedient weiter,
-  und der Fehler wird gemeldet.
+  einem `auth_request` an den Entscheidungsdienst per Proxy an die Origins weiterreicht, und die
+  Endpunkte der Freigabeseite). Jede Generation wird mit `nginx -t` getestet, **bevor** sie
+  installiert und neu geladen wird; ein fehlschlagender Kandidat wird niemals installiert — die
+  vorherige Konfiguration bedient weiter, und der Fehler wird gemeldet.
 - **Der Entscheidungsdienst** beantwortet den `auth_request` von nginx über einen Unix-Socket in
-  Mikrosekunden: `200` (mit einem optionalen `X-Kapkan-Mark`-Header, den der Origin erhält) oder
-  `403`. Er setzt die `policy.rate` der Zone pro **Quelle** durch — eine IPv4-Adresse oder ein
-  IPv6-`/64` — mit einem Token-Bucket für Anfragen pro Sekunde und einer näherungsweisen Zählung
-  gleichzeitig laufender Anfragen für die Concurrency, und hält eine begrenzte Tabelle von
-  Verdikten (Sperre oder Markierung, mit TTL). Ein Client über seiner Obergrenze erhält `429` mit
-  `Retry-After`; ein Client, den die Tabelle abweist, erhält `403`.
+  Mikrosekunden mit einem von drei Worten: `200` (mit einem optionalen `X-Kapkan-Mark`-Header, den
+  der Origin erhält), `401` — *erst die Stufe überwinden*, sodass nginx anstelle des Origins
+  [die Freigabeseite](#die-freigabeseite) ausliefert — oder `403`. Er setzt die `policy.rate` der
+  Zone pro **Quelle** durch — eine IPv4-Adresse oder ein IPv6-`/64` — mit einem Token-Bucket für
+  Anfragen pro Sekunde und einer näherungsweisen Zählung gleichzeitig laufender Anfragen für die
+  Concurrency, und hält eine begrenzte Tabelle von Verdikten (Sperre, Challenge oder Markierung,
+  jeweils mit TTL; eine Sperre hat Vorrang vor einer Challenge, eine Challenge vor einer
+  Markierung). Ein Client über seiner Obergrenze erhält `429` mit `Retry-After`; ein Client, den
+  die Tabelle abweist, erhält `403`; ein Client, den die Tabelle herausfordert, erhält die Seite.
 - **Die Rollups** lesen das Zugriffsprotokoll des Terminators (JSON über einen
-  Unix-Datagramm-Socket) in Fenster pro Zone und Quelle ein. Eine Quelle, die weiter gegen ihre
-  Ratenobergrenze drückt, wird zu einer Sperre hochgestuft (eine Minute, bei Wiederholung
-  verdoppelt bis auf zehn); eine Quelle, deren Anfragen fast ausschließlich Fehler sind, wird für
-  den Origin sichtbar mit `errors` markiert. Verdikte bleiben auf dem Knoten.
+  Unix-Datagramm-Socket) in Zehn-Sekunden-Fenster pro Zone und Quelle ein. Eine Quelle, die weiter
+  gegen ihre Ratenobergrenze drückt, wird hochgestuft: in einer Zone, deren Stufe `off` ist,
+  direkt zu einer Sperre (eine Minute, bei Wiederholung verdoppelt bis auf zehn); in einer
+  `auto`-Zone zuerst zur Stufe — [die Leiter](#die-leiter). Eine Quelle, deren Anfragen fast
+  ausschließlich Fehler sind, wird für den Origin sichtbar mit `errors` markiert. Verdikte bleiben
+  auf dem Knoten; die Rollups speisen außerdem den Report des Knotens, sodass Gehirn und Konsole
+  sehen, wer abgewiesen oder herausgefordert wurde — und wer es *geworden wäre*.
 - **ACME** läuft auf jedem Knoten: Account-Schlüssel und Zertifikate werden auf der Box erzeugt
   und verlassen sie nie. Das Gehirn serialisiert lediglich die Ausstellung pro Zone (ein Knoten
   bestellt zu einem Zeitpunkt) und verteilt eine ausstehende HTTP-01-Challenge an jeden Knoten,
@@ -81,30 +92,175 @@ und nun [`kapkan edge`](/docs/cli#edge). Die Installation von Anfang bis Ende be
 
 ### Die Fast/Slow-Trennung
 
-Das Ändern der **Rate** einer Zone oder eines **Verdikts** lädt nginx niemals neu; diese fließen
-zum Entscheidungsdienst und wirken bei der nächsten Anfrage. Nur **langsame** Änderungen — eine
+Das Ändern der **Rate** einer Zone, ihrer **Stufe** (`policy.challenge` und dessen Optionen), eines
+**Verdikts** oder das Ziehen des Hebels lädt nginx niemals neu; diese fließen zum
+Entscheidungsdienst und wirken bei der nächsten Anfrage. Nur **langsame** Änderungen — eine
 hinzugefügte oder entfernte Zone, ein geänderter Origin, die TLS-Untergrenze, ein ausgestelltes
 oder erneuertes Zertifikat — erzeugen eine neue Konfigurationsgeneration, die getestet und neu
-geladen wird. Genau das erlaubt es, eine Rate unter Angriff zu verschärfen, ohne den Terminator
-anzufassen.
+geladen wird. Genau das erlaubt es, mitten im Angriff eine Rate zu verschärfen oder eine Zone unter
+Challenge zu stellen, ohne den Terminator anzufassen: Die Freigabe-Maschinerie wird für jede
+entscheidende Zone gerendert, was auch immer ihre Stufe sagt, sodass die Bytes für `off`, `manual`
+und `auto` dieselben sind.
 
-### Dry-Run: erst beobachten
+## Die Proof-of-Work-Stufe
 
-Wie jede entfernte Rolle läuft ein Edge-Knoten **standardmäßig im Dry-Run**: Entscheidungen werden
-gezählt und markiert, keine wird durchgesetzt. Eine Anfrage, die die Richtlinie abweisen würde,
-erreicht den Origin trotzdem, mit dem Header `X-Kapkan-Mark: would-deny:rate` (oder
-`would-deny:concurrency`, `would-deny:table:<reason>` — heute `would-deny:table:flood`, die
-Rollup-Regel, die die Quelle hochgestuft hat), sodass Sie die Logs Ihres Origins durchsuchen und
-die Metriken ansehen können, bevor ein einziger Client abgewiesen wird. Setzen Sie
-`dry_run: false` in der `edge.yaml` des Knotens, wenn die Zahlen stimmen.
+Zwischen *durchlassen* und *sperren* kennt der Edge ein mittleres Wort: **Beweise, dass du ein
+Browser bist**. Ein herausgeforderter Client erhält anstelle des Origins eine kleine Seite; deren
+Skript löst ein Hashcash-Rätsel (bei der Standardschwierigkeit ein paar Sekunden CPU) und schickt
+die Antwort ab, was eine **Freigabe** einbringt — ein signiertes Cookie, gebunden an diese Zone und
+die Quelle dieses Clients —, die seine Anfragen eine halbe Stunde lang durch die Stufe lässt. Ein
+Browser merkt kaum etwas; ein Skript, das kein JavaScript ausführen kann, nimmt den zeitgesteuerten
+Pfad (unten); ein Bot, der nur Anfragen abfeuert, kommt nie daran vorbei. Die Stufe ist **keine
+WAF** und kein Bot-Detektor: Sie liest von der Anfrage nichts außer dem Pfadpräfix, und das nur,
+um ihn auszunehmen; sie lässt eine Anfrage etwas *kosten*, und ein Client, der CPU zu verschenken
+hat, kann sie überwinden — und wird dann wie alle anderen ratenbegrenzt.
+
+Die Stufe einer Zone setzt `policy.challenge` in der [Zonen-Datei](/docs/zones): `off` (der
+Standard), **`manual`** — jede Anfrage ohne gültige Freigabe wird herausgefordert, der Schalter für
+eine Site unter Angriff — oder **`auto`** — niemand wird herausgefordert, bis die Rollups des
+Knotens oder ein Betreiber eine Quelle oder die ganze Zone benennen. Beide Worte sind **nur
+beobachtend, bis Sie etwas anderes sagen**: `challenge_options.dry_run` ist standardmäßig `true`,
+sodass die Stufe zunächst zeigt, wen sie fragen *würde* (die Markierung `would-challenge:<why>`,
+die Kandidatenmenge im Report, die Konsole), und niemanden fragt.
+
+### Die Leiter
+
+In einer `auto`-Zone **fordert die Flut-Regel der Rollups heraus, bevor sie sperrt**. Eine Quelle,
+die ein Fenster lang gegen ihre Ratenobergrenze drückt, wird für fünf Minuten auf die Stufe
+geschickt (`table:flood`) — ein Browser überwindet sie und wird wie jeder andere ratenbegrenzt; ein
+Bot kann das nicht. Eine Quelle, die ihre Chance auf der Stufe bereits hatte — die weiter flutet,
+während sie herausgefordert ist (namentlich oder mit der ganzen Zone), die die Stufe überwunden hat
+und trotzdem flutet, oder die von einer früheren Hochstufung her bekannt ist — wird **gesperrt**,
+eine Minute, bei Wiederholung verdoppelt bis auf zehn. In der Verdikt-Tabelle dürfen Challenges
+höchstens die Hälfte des Platzes belegen, damit die Challenges eines rotierenden Botnetzes die
+Sperren, die folgen müssen, nie verdrängen können; ein Flooder, dessen Challenge keinen Platz
+findet, wird stattdessen gesperrt.
+
+Der **zonenweite Auslöser** ist für die Flut, die keine einzelne Quelle auslöst — Residential
+Proxies, ein dünn verteiltes Botnetz: `challenge_options.auto.zone_rps` (pro Knoten; `0` = aus)
+stellt die ganze Zone für `auto.hold_seconds` (Standard fünf Minuten) auf Challenge um, wenn die
+**zugelassene** Rate der Zone auf dem Knoten — entschiedene Anfragen, die der Knoten nicht
+abgewiesen hat — auf oder über diesem Wert liegt; jedes weitere Fenster darüber verlängert die
+Haltezeit, und sie läuft von selbst ab. Abgewiesener Verkehr ist keine Last: Die `403` eines
+gesperrten Bots oder die `429` eines einzelnen Flooders stellen eine Zone niemals um und halten sie
+nicht umgestellt. Der Auslöser ist bewusst knotenlokal — jeder Knoten misst sein eigenes Fenster;
+die flottenweite Sicht ist der Report des Gehirns.
+
+### Die Freigabeseite
+
+Auf ein `401` des Entscheidungsdienstes liefert der Terminator anstelle des Origins eine
+**`403`**-HTML-Seite mit `Cache-Control: no-store` aus dem eigenen Freigabedienst des Knotens (der
+vierte Unix-Socket, `edge-clearance.sock`): das Rätsel als Datenblock, ein Skript und ein
+Stylesheet per Content-Hash, eine strikte CSP, keine Bilder, keine Drittparteien, in der Sprache
+des Besuchers (`en`, `ru`, `de`, `fr`, `es` aus `Accept-Language`). Eine ursprüngliche Anfrage, die
+kein `GET` ist — ein API-Aufruf, ein Formular-Post — erhält stattdessen das kompakte
+`{"error":"challenge_required"}`. Das Skript löst das Rätsel in Bahnen (ein paar Worker plus eine
+zeitgeschnittene Bahn auf dem Haupt-Thread, damit die Timer-Drosselung eines Hintergrund-Tabs es
+nicht aufhalten kann) und schickt die Antwort an `/_kapkan/clearance/answer`; eine richtige wird
+mit `303` zurück auf den eigenen Pfad der Anfrage beantwortet, mit
+
+```
+Set-Cookie: kapkan_clr=…; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=1800
+```
+
+— host-only, sodass eine Schwesterzone es nie lesen kann, und gebunden an die Zone und den
+Quellschlüssel des Clients, sodass es von einer anderen Adresse oder auf einer anderen Zone nutzlos
+ist. Der Wert des Cookies ist der **einzige** Client-Wert, den die Entscheidungs-Subrequest trägt;
+er wird gegen die Zonenschlüssel des Dokuments geprüft (abgeleitet aus einem Flotten-Master, den
+das Gehirn um Mitternacht UTC rotiert, wobei der des Vortags 48 Stunden lang anerkannt bleibt,
+persistiert mit `edge.state_file`, damit ein Neustart des Gehirns nicht jeden freigegebenen
+Besucher erneut lösen lässt) — und zuletzt gegen einen eigenen Schlüssel des Knotens, sodass ein
+vom Gehirn abgeschnittener Knoten weiterhin herausfordert und freigibt, statt alle auszusperren.
+Eine freigegebene Anfrage erreicht den Origin mit der Markierung `cleared`; die Raten- und
+Concurrency-Obergrenzen gelten für sie weiterhin, sodass eine Flut ohne Cookies mit `429`
+beantwortet wird, nicht mit einer Seite pro Anfrage.
+
+**Kein JavaScript ist ein vollwertiger Pfad.** Die Seite trägt ein zeitgesteuertes Ticket, einlösbar
+vier Sekunden bis zwei Minuten nach der Ausgabe, sowohl als `<noscript>`-Meta-Refresh als auch als
+**Weiter**-Schaltfläche, die an ihrem Platz bleibt, sofern das Skript sie nicht als erste Handlung
+ausblendet — JavaScript aus, ein blockiertes oder defektes Skript und eine Engine, die den
+Selbsttest des Lösers nicht besteht, lassen die Schaltfläche alle stehen, und sie kehrt neben einem
+Lösen zurück, das lange dauert. Das Ticket bringt die kürzere **Fünf-Minuten**-Freigabe ein
+(`cleared:nojs`). Jede Ablehnung, auf die ein Browser treffen kann, ist eine Seite mit dem Weg nach
+vorn: Ein zu frühes Ticket versucht es von selbst erneut, ein abgelaufenes sowie eine veraltete oder
+falsche Antwort führen zurück auf die Seite, von der der Besucher kam, die Ausgabe-Obergrenze sagt,
+eine Minute zu warten. Freigaben sind auf 6 pro Quelle und 6 000 pro Zone und Minute begrenzt
+(darüber `429`). Barrierefreiheit ist ein Review-Gate für die Seite: semantisches HTML, eine
+Statuszeile, die einmal angesagt wird, eine nicht zeitgebundene Alternative zu jedem Timer, beide
+Farbschemata mit ≥ 13:1 Textkontrast, Fokusrahmen, reduzierte Bewegung wird respektiert.
+
+Zwei Stellschrauben pro Zone: `challenge_options.difficulty` (`12..22`, Standard `18`; jeder
+Schritt verdoppelt die Arbeit, und ein langsames Telefon muss trotzdem innerhalb des
+Zwei-Minuten-Fensters des Rätsels fertig werden) und `cookie_ttl_seconds` (`60..86400`, Standard
+`1800`). `challenge_options.exempt_paths` benennt Pfadpräfixe, die die Stufe niemals herausfordert
+— Health-Checks, API-Clients, Webhooks. Sollte der Freigabedienst selbst ausgefallen sein, folgt
+das `401` wie jeder andere Entscheidungsfehler dem `failure_mode` der Zone: `open` lässt die
+Anfrage unentschieden durch, `closed` antwortet `503`.
+
+### Der Hebel
+
+Ein Betreiber kann die Stufe einer Zone **für eine begrenzte Zeit setzen, was auch immer die
+Zonen-Datei sagt**:
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  https://kapkan.example.net:8443/api/v1/edge/zones/shop.example.com/challenge \
+  -d '{"mode":"manual","ttl_seconds":1800,"reason":"credential stuffing from residential proxies"}'
+```
+
+`mode` ist `manual`, `auto` oder `off` (was ihn löscht, wie `DELETE`); `ttl_seconds` ist
+`60..86400`. Die Übersteuerung reist im Zonendokument — geparkte Polls werden sofort geweckt — und
+jeder Knoten wendet den effektiven Modus auf seinem schnellen Pfad an und liest ihn pro
+Entscheidung, sodass sie **pünktlich endet, mit oder ohne Gehirn**, und eine zonenweite Umstellung,
+die sie wirkungslos gemacht hat, mit ihr zurückgezogen wird. Die Antwort sagt, wo der Hebel greift:
+den eigenen Modus der Datei, die Nur-beobachten-Flags der Zone (`policy.dry_run` und
+`challenge_options.dry_run` — bei einem von beiden zeigt der Hebel nur eine *Vorschau*, statt zu
+greifen) und jeden konfigurierten Knoten mit seiner Lebendigkeit und seinem gemeldeten `dry_run` —
+ein Knoten, der nur zählt, muss gesehen werden, bevor man dem Hebel vertraut. Er ist eine Aktion
+des Betreibers (`operator`-Rang, ungebundene Tokens), auditiert als `edge_challenge`, von
+[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) als `override` benannt —
+die Edge-Ansicht der Konsole zeigt den Modus, den die Knoten unter ihm anwenden (`manual`, `auto`),
+nicht den Hebel selbst — und wird wie der Ausstellungskoordinator im Speicher des Gehirns
+gehalten: das Werkzeug für einen Vorfall, nach einem Neustart des Gehirns verschwunden (die Knoten
+lassen ihn mit dem ersten Dokument fallen, das das neu gestartete Gehirn ausliefert; ziehen Sie
+ihn erneut). Der eigene `dry_run` des Gehirns hält ihn nicht zurück: Den Hebel zu ziehen ist eine
+Richtlinienänderung; nur beobachten lebt auf dem Knoten und in der Zone. Ein Knoten mit einer Version von vor dem Hebel kennt die
+Übersteuerung nicht und folgt seiner Datei, während die Antwort ihn trotzdem aufführt —
+aktualisieren Sie die Knoten, bevor Sie sich darauf verlassen (das Inventar zeigt die Version jedes
+Knotens).
+
+### Beobachten, bevor sie greift
+
+Wie jede entfernte Rolle läuft ein Edge-Knoten **standardmäßig im Dry-Run**, und der Edge hat drei
+Schichten davon, jede ein Boden, den die Schicht darunter nicht aufheben kann:
+
+| Schicht | Wo | Erfasst |
+| --- | --- | --- |
+| Der `dry_run` des Knotens (`edge.yaml`, Standard `true`) | der Besitzer der Box | jede Entscheidung jeder Zone auf diesem Knoten |
+| Der `policy.dry_run` der Zone (Standard `false`) | die Zonen-Datei | jede Entscheidung dieser Zone, auf jedem Knoten — eine Zone kann gegenüber ihrem Knoten nur *mehr* beobachten, nie weniger |
+| Der `challenge_options.dry_run` der Stufe (Standard **`true`**) | die Zonen-Datei | die Stufe allein: Challenges werden als Vorschau gezeigt, Obergrenze und Sperre greifen so, wie die Schichten darüber es sagen |
+
+Unter den ersten beiden erreicht eine eigentlich fällige Sperre den Origin als Allow mit der
+Markierung `X-Kapkan-Mark: would-deny:rate` (oder `would-deny:concurrency`,
+`would-deny:table:flood`); unter jeder der drei erreicht ihn eine eigentlich fällige Challenge als
+`would-challenge:manual`, `would-challenge:zone:<reason>` oder `would-challenge:table:flood` —
+sodass Sie die Logs Ihres Origins durchsuchen, `kapkan_edge_decisions_total{result="would_deny"|"would_challenge"}`
+beobachten und lesen können, **wer herausgefordert worden wäre**, bevor ein einziger Client gefragt
+wird: Jeder Knoten meldet das letzte Fenster seiner Zonen mit den aktivsten Quellen und dem
+Stärksten, was er jeder angetan hat — oder angetan hätte —, das Gehirn führt sie in
+`GET /api/v1/edge/zones/status` zusammen, und die **Edge**-Ansicht der Konsole zeigt die
+Kandidatenmenge pro Zone. Gehen Sie Schicht für Schicht in den Echtbetrieb: `dry_run: false` auf
+dem Knoten, wenn die would-deny-Zahlen stimmen, `challenge_options.dry_run: false` auf einer Zone,
+wenn ihre Kandidatenmenge die richtigen Clients benennt.
 
 ## Was der Knoten bei Ausfällen tut
 
 | Ausfall | Verhalten |
 | --- | --- |
-| Gehirn ausgefallen oder nicht erreichbar | Der Knoten bedient weiter mit dem letzten Dokument und den Zertifikaten von der Platte; Erneuerungen laufen weiter; ein Neustart kommt ohne Gehirn zurück in Betrieb (fail-static). Unter einer gemeinsamen oder Anycast-Adresse kann die HTTP-01-Validierung einer Erneuerung auf einem anderen Knoten landen, während das Gehirn ausgefallen ist; solche Versuche werden stündlich wiederholt und zählen niemals für die Fallback-CA. |
+| Gehirn ausgefallen oder nicht erreichbar | Der Knoten bedient weiter mit dem letzten Dokument und den Zertifikaten von der Platte; Erneuerungen laufen weiter; ein Neustart kommt ohne Gehirn zurück in Betrieb (fail-static). Ein Hebel im zwischengespeicherten Dokument endet weiterhin zu seinem `until`; die Schlüssel der Stufe bleiben 48 Stunden gültig, und danach übernimmt der eigene Schlüssel des Knotens. Unter einer gemeinsamen oder Anycast-Adresse kann die HTTP-01-Validierung einer Erneuerung auf einem anderen Knoten landen, während das Gehirn ausgefallen ist; solche Versuche werden stündlich wiederholt und zählen niemals für die Fallback-CA. |
 | Entscheidungsdienst ausgefallen oder langsam | Pro Zone: `failure_mode: open` (der Standard) lässt die Anfrage unentschieden durch und zählt sie; `closed` antwortet `503`. |
-| Dokument abgelehnt (Renderer, oder `nginx -t` schlägt fehl) | Die vorherige Generation bedient weiter; der Knoten bleibt gesund, aber `converged: false`, meldet den ETag des **gerenderten** Dokuments (nicht des akzeptierten) und versucht es lokal alle 1 → 10 Minuten erneut, bis es angewendet wird oder ein neueres Dokument eintrifft. |
+| Freigabeseite ausgefallen | Ein `401`, das nicht in die Seite verwandelt werden kann, folgt auf dieselbe Weise dem `failure_mode` der Zone: `open` lässt die Anfrage durch, `closed` antwortet `503`. |
+| Dokument abgelehnt (Renderer, oder `nginx -t` schlägt fehl) | Die vorherige Generation bedient weiter; der Knoten bleibt gesund, aber `converged: false`, meldet den ETag des **gerenderten** Dokuments (nicht des akzeptierten) und versucht es lokal alle 1 → 10 Minuten erneut, bis es angewendet wird oder ein neueres Dokument eintrifft. Der schnelle Pfad — Raten, Stufen, der Hebel — wird unterdessen aus dem **akzeptierten** Dokument angewendet. |
 | nginx stirbt | systemd startet es neu; mit gesetztem `terminator.pid_file` meldet der Knoten `alive: false` und antwortet unterdessen mit `503` auf seinem `/healthz`. Kapkan überwacht den Terminator selbst niemals. |
 | Zertifikat nicht erneuerbar | Das aktuelle Zertifikat bedient, bis es abläuft; `kapkan_edge_cert_not_after_seconds` ist der T−30-d-Alarm; nach drei Fehlschlägen versucht der Knoten die Fallback-CA. |
 | Knoten stirbt | Das Gehirn sieht den Poll ausbleiben (`edge.stale_after_seconds`) und zeigt es im Inventar; den Verkehr wegzulenken ist Aufgabe Ihres Netzwerks (Anycast-Withdraw, DNS). |
@@ -116,12 +272,21 @@ die Metriken ansehen können, bevor ein einziger Client abgewiesen wird. Setzen 
   `503`. Der Body trägt `converged`, den gerenderten und den akzeptierten ETag, die aktive
   Generation und ihr Testergebnis, den letzten Fehler, den nächsten Wiederholungsversuch, wann
   das Gehirn zuletzt gesehen wurde, und `dry_run`.
-- **`/metrics`** auf derselben Adresse stellt die Prometheus-Reihen des Knotens bereit — siehe
+- **`/metrics`** auf derselben Adresse stellt die Prometheus-Reihen des Knotens bereit —
+  Entscheidungen nach Ergebnis (darunter `challenge`, `would_challenge`, `allow_cleared`), die
+  Ergebnisse der Freigabeseite, ob eine zonenweite Challenge aktiv ist — siehe
   [Metriken](/docs/metrics#edge-knoten).
 - **Das Inventar des Gehirns**, `GET /api/v1/edge/nodes`, verbindet die Lebendigkeit jedes
   konfigurierten Knotens mit seinem letzten Selbstreport: Version, Dry-Run, gerenderter ETag, Art
-  und Version des Terminators, Generation und Testergebnis, Zertifikate (niemals ein Schlüssel).
-  Siehe [die API](/docs/api#der-edge-kanal).
+  und Version des Terminators, Generation und Testergebnis, Zertifikate (niemals ein Schlüssel)
+  und den **Zonenabschnitt** — das letzte Zehn-Sekunden-Fenster jeder Zone, die Quellen, die sie
+  abgewiesen oder herausgefordert hat oder hätte, und ob ihre Stufe dort greift oder nur eine
+  Vorschau zeigt. Siehe [die API](/docs/api#der-edge-kanal).
+- **Die Zonen über die Flotte hinweg**, `GET /api/v1/edge/zones/status`, führt die Zonen der
+  lebendigen Knoten zusammen: Raten summiert, die Knoten, auf denen eine Zone nur beobachtend ist
+  oder unter einer zonenweiten Challenge steht (greifend oder als Vorschau), der wirksame Hebel
+  und die Kandidatenmenge. Die **Edge**-Ansicht der Konsole — angezeigt, sobald `edge.nodes[]`
+  konfiguriert ist — stellt sie dar; siehe [das Dashboard](/docs/dashboard).
 
 ## Grenzen, die Sie kennen sollten
 
@@ -137,8 +302,19 @@ die Metriken ansehen können, bevor ein einziger Client abgewiesen wird. Setzen 
 - **Origins werden zur Testzeit aufgelöst.** Ein Hostnamen-Origin wird einmal aufgelöst, wenn
   nginx die Konfiguration lädt; einer, der sich nicht auflösen lässt, lässt `nginx -t` für die
   gesamte Generation fehlschlagen (und wird erneut versucht). Bevorzugen Sie Adressen.
-- **Wildcards, HTTP/3 und Challenges sind spätere Meilensteine.** `tls.h3` und eine
-  `policy.challenge` außer `off` werden heute abgelehnt; jeder Name wird explizit aufgeführt.
+- **Die Stufe ist ein Preis, kein Verdikt.** Ein Client, der CPU zu verschenken hat, überwindet
+  sie (und wird dann wie jeder andere ratenbegrenzt); ein Client hinter einer gemeinsamen Adresse
+  — ein Büro, ein Carrier-NAT — teilt seinen Quellschlüssel mit seinen Nachbarn, und die
+  Obergrenze von sechs Freigaben pro Minute und Quelle gilt für sie gemeinsam. Die Stufe liest von
+  einer Anfrage nie mehr als das Pfadpräfix, das sie ausnehmen darf: Sie ist keine WAF und
+  versucht nicht, eine zu sein.
+- **Der zonenweite Auslöser gilt pro Knoten**, und der Hebel lebt im Speicher des Gehirns: Ein
+  Neustart des Gehirns vergisst ihn, und die Knoten lassen ihn mit dem ersten Dokument fallen, das
+  das neu gestartete Gehirn ausliefert — ziehen Sie ihn erneut. Ein Gehirn, das ausgefallen
+  bleibt, ist etwas anderes: Der Hebel im zwischengespeicherten Dokument endet zu seinem `until`
+  (siehe die Ausfalltabelle).
+- **Wildcards und HTTP/3 sind spätere Meilensteine.** `tls.h3` wird heute abgelehnt; jeder Name
+  wird explizit aufgeführt.
 - **Obergrenzen für Duplikat-Zertifikate.** Zertifikate pro Knoten bedeuten, dass N Knoten auf
   einer Zone N Bestellungen sind; Let's Encrypt begrenzt einen Namen auf etwa fünf pro Woche. Der
   Ausstellungs-Slot des Gehirns und der Erneuerungs-Jitter verteilen sie; `acme.fallback` (ZeroSSL,
@@ -152,8 +328,9 @@ die Metriken ansehen können, bevor ein einziger Client abgewiesen wird. Setzen 
 ## Verwandte Themen
 
 - [Einen Edge-Knoten installieren](/docs/edge-install) — Gehirn-Seite, nginx-Seite, die Unit, Echtbetrieb
-- [Zonen-Referenz](/docs/zones) — jeder Schlüssel der `zones.yaml`
+- [Zonen-Referenz](/docs/zones) — jeder Schlüssel der `zones.yaml`, und was eine Richtlinie mit einer Anfrage macht
 - [`kapkan edge`](/docs/cli#edge) — der Befehl, seine Flags und die `edge.yaml`
-- [Der Edge-Kanal](/docs/api#der-edge-kanal) — die Routen des Gehirns
+- [Der Edge-Kanal](/docs/api#der-edge-kanal) — die Routen des Gehirns, der Zonenstatus und der Hebel
 - [Metriken](/docs/metrics#edge-knoten) — die `kapkan_edge_*`-Reihen
+- [Dashboard](/docs/dashboard) — die Edge-Ansicht der Konsole
 - [Fingerprint-Ebene](/docs/fingerprinting) — Clients off-path per JA4 blockieren, vor dem Terminator

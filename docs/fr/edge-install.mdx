@@ -104,7 +104,7 @@ controller:
   name: edge-1                         # must equal an edge.nodes[] entry on the brain
   report_interval_seconds: 10
 state_dir: /var/lib/kapkan-edge        # cached document, generations, keys, certificates
-sockets_dir: /run/kapkan-edge          # the three unix sockets nginx talks to
+sockets_dir: /run/kapkan-edge          # the four unix sockets nginx talks to
 socket_group: nginx                    # the terminator's worker group
 terminator:
   binary: nginx                        # or angie
@@ -148,7 +148,7 @@ Les répertoires du rôle lui appartiennent — jamais les `/var/lib/kapkan` et 
 cerveau — de sorte qu'un cerveau et un edge peuvent partager un hôte.
 
 <Callout type="warning" title="L'ordre de démarrage n'a pas d'importance, mais les sockets si">
-Le nœud ouvre ses trois sockets unix **en premier**, de sorte que nginx peut déjà tourner et les
+Le nœud ouvre ses quatre sockets unix **en premier**, de sorte que nginx peut déjà tourner et les
 sonder ; il sonde ensuite le terminateur, récupère une génération qu'un prédécesseur planté a
 laissée non testée, génère le dernier document qu'il avait sur disque, et interroge seulement alors
 le cerveau. Un composant qui ne peut pas démarrer — un socket qu'un autre processus sert déjà, un
@@ -162,8 +162,8 @@ groupe qui n'existe pas — termine le processus avec cette erreur et systemd le
 - `curl -s 127.0.0.1:9102/healthz` répond `200` avec `"healthy":true`, `"converged":true` et
   l'ETag généré ; `ls /var/lib/kapkan-edge/conf/live/` liste `kapkan_00_common.conf` et un
   `kapkan_zone_<name>.conf` par zone.
-- L'inventaire du cerveau, `GET /api/v1/edge/nodes`, liste le nœud vivant avec son rapport (une vue
-  dans la console viendra dans un jalon ultérieur).
+- L'inventaire du cerveau, `GET /api/v1/edge/nodes`, liste le nœud vivant avec son rapport, et la
+  vue **Edge** de la console apparaît dans la navigation dès qu'un nœud est configuré.
 - Certificats : la première commande a besoin que le port 80 soit joignable depuis la CA pour
   chaque nom de zone. Guettez `certificate issued` dans le journal, puis
   `ls /var/lib/kapkan-edge/certs/<zone>/current/`. Tant qu'une zone n'a pas de certificat, son
@@ -173,6 +173,12 @@ groupe qui n'existe pas — termine le processus avec cette erreur et systemd le
   l'origine, avec `X-Kapkan-Mark: would-deny:rate`. Surveillez
   `kapkan_edge_decisions_total{result="would_deny"}` sur `/metrics` et les journaux de votre
   origine.
+- Le palier : donnez à une zone `policy.challenge: auto` (son `challenge_options.dry_run` vaut
+  `true` par défaut, donc personne n'est encore mis au défi) et lisez **qui serait mis au défi** —
+  `GET /api/v1/edge/zones/status` sur le cerveau, ou la vue Edge de la console — pendant qu'un défi
+  qui aurait eu lieu atteint l'origine marqué `X-Kapkan-Mark: would-challenge:table:flood`. Placez
+  vos vérifications de santé, vos clients d'API et vos webhooks sous
+  `challenge_options.exempt_paths` avant que le palier ne passe en production.
 
 ## 5. Mise en production
 
@@ -181,6 +187,22 @@ de son plafond reçoit `429` avec `Retry-After: 1`, et une source que les rollup
 refus reçoit `403`. Resserrez le `policy.rate` d'une zone sur le cerveau quand vous êtes attaqué —
 ce changement atteint le service de décision à l'interrogation suivante et **ne recharge jamais
 nginx**.
+
+Le palier passe en production par zone, dans le fichier de zones : `challenge_options.dry_run: false`
+une fois que l'ensemble des candidats nomme les bons clients. Dès lors, une source qui inonde une
+zone `auto` reçoit [la page de laissez-passer](/docs/edge#la-page-de-laissez-passer) avant d'être
+bloquée, et une zone sous attaque peut être mise sous défi immédiatement — `policy.challenge: manual`
+dans le fichier, ou, pour une durée bornée et sans modifier le fichier,
+[le levier](/docs/edge#le-levier) :
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  https://kapkan.example.net:8443/api/v1/edge/zones/shop.example.com/challenge \
+  -d '{"mode":"manual","ttl_seconds":1800,"reason":"login flood"}'
+```
+
+Pour mettre les zones en service une à la fois, `policy.dry_run: true` garde une zone en
+observation seule sur chaque nœud pendant que ses voisines appliquent.
 
 ## Plusieurs nœuds et une adresse partagée
 
@@ -204,6 +226,9 @@ Tout cela est consultatif : sans cerveau, chaque nœud renouvelle encore de lui-
 | `converged: false` avec `test_error` | Le dernier document a été refusé ; le précédent sert. Corrigez la cause (une origine qui ne se résout pas, une directive dans `extra_directives_file`) et le nœud réessaie de lui-même. |
 | La zone reste sur `:80` en `503` | Pas encore de certificat. Vérifiez la joignabilité du port 80 depuis Internet pour ce nom, `kapkan_edge_acme_attempts_total`, et la ligne `certificate order failed` du journal. |
 | Nœud affiché perdu sur le cerveau alors qu'il tourne | L'interrogation est le signal de vivacité et une interrogation retenue par le cerveau compte comme vivante ; un nœud affiché perdu a donc réellement cessé de joindre le cerveau. Vérifiez `controller.url`, le token (`401`/`403` dans le journal), que `controller.name` est déclaré sous `edge.nodes[]` (`404`), et que le nœud ne partage pas un token avec plus de quatre autres (`429`). |
+| Des marques `would-challenge`, mais personne n'est jamais mis au défi | L'une des trois couches d'observation seule est active : le `dry_run` du nœud (`edge.yaml`), le `policy.dry_run` de la zone, ou le `challenge_options.dry_run` propre au palier — `true` par défaut. `GET /api/v1/edge/zones/status` nomme les nœuds sur lesquels une zone est en observation seule et indique si un défi global de zone n'est qu'un aperçu (`dry_run: true`). |
+| Chaque requête vers une zone reçoit la page de laissez-passer | La zone est sous défi : `policy.challenge: manual` dans le fichier, un levier (`override` dans `GET /api/v1/edge/zones/status`), ou le déclencheur global de la zone (`challenge_active` avec `reason: zone-rps`). Un client qui la franchit n'est plus sollicité pendant `cookie_ttl_seconds` ; les clients qui ne peuvent pas conserver de cookies la voient à chaque fois. |
+| Les clients voient `503` (ou passent sans défi) sur une zone dont le palier est actif | nginx n'a pas pu joindre la page de laissez-passer et a suivi `failure_mode`. Cherchez `connect() to unix:/run/kapkan-edge/edge-clearance.sock failed` dans le journal d'erreurs de nginx : le socket est en `0660` pour `socket_group`, comme le socket de décision, et le nœud journalise `clearance page listening` quand elle est prête. |
 
 ## Voir aussi
 

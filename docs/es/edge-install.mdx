@@ -104,7 +104,7 @@ controller:
   name: edge-1                         # must equal an edge.nodes[] entry on the brain
   report_interval_seconds: 10
 state_dir: /var/lib/kapkan-edge        # cached document, generations, keys, certificates
-sockets_dir: /run/kapkan-edge          # the three unix sockets nginx talks to
+sockets_dir: /run/kapkan-edge          # the four unix sockets nginx talks to
 socket_group: nginx                    # the terminator's worker group
 terminator:
   binary: nginx                        # or angie
@@ -148,8 +148,8 @@ propios. Los directorios del rol son suyos — nunca los `/var/lib/kapkan` y `/r
 cerebro — así que un cerebro y un edge pueden compartir host.
 
 <Callout type="warning" title="El orden de arranque no importa, pero los sockets sí">
-El nodo levanta **primero** sus tres sockets unix, de modo que nginx puede estar ya en ejecución y
-sondeándolos; después comprueba el terminador, recupera una generación que un predecesor caído
+El nodo levanta **primero** sus cuatro sockets unix, de modo que nginx puede estar ya en ejecución
+y sondeándolos; después comprueba el terminador, recupera una generación que un predecesor caído
 dejó sin probar, renderiza el último documento que tenía en disco y solo entonces sondea al
 cerebro. Un componente que no puede arrancar — un socket que otro proceso ya sirve, un grupo que
 no existe — termina el proceso con ese error y systemd lo reinicia.
@@ -162,8 +162,8 @@ no existe — termina el proceso con ese error y systemd lo reinicia.
 - `curl -s 127.0.0.1:9102/healthz` responde `200` con `"healthy":true`, `"converged":true` y el
   ETag renderizado; `ls /var/lib/kapkan-edge/conf/live/` lista `kapkan_00_common.conf` y un
   `kapkan_zone_<name>.conf` por zona.
-- El inventario del cerebro, `GET /api/v1/edge/nodes`, lista el nodo vivo con su reporte (una
-  vista en la consola es un hito posterior).
+- El inventario del cerebro, `GET /api/v1/edge/nodes`, lista el nodo vivo con su reporte, y la
+  vista **Edge** de la consola aparece en la navegación una vez configurado un nodo.
 - Certificados: el primer pedido necesita el puerto 80 alcanzable desde la CA para cada nombre de
   zona. Espera a ver `certificate issued` en el journal y luego
   `ls /var/lib/kapkan-edge/certs/<zone>/current/`. Hasta que una zona tiene certificado, su
@@ -172,6 +172,12 @@ no existe — termina el proceso con ese error y systemd lo reinicia.
 - Peticiones: con `dry_run: true` un cliente que supera la tasa de la zona sigue llegando al
   origen, con `X-Kapkan-Mark: would-deny:rate`. Observa
   `kapkan_edge_decisions_total{result="would_deny"}` en `/metrics` y los logs de tu origen.
+- El peldaño: da a una zona `policy.challenge: auto` (su `challenge_options.dry_run` es `true` por
+  defecto, así que todavía no se desafía a nadie) y lee **a quién se desafiaría** —
+  `GET /api/v1/edge/zones/status` en el cerebro, o la vista Edge de la consola — mientras un
+  desafío que se habría producido llega al origen marcado
+  `X-Kapkan-Mark: would-challenge:table:flood`. Pon tus comprobaciones de salud, clientes de API y
+  webhooks bajo `challenge_options.exempt_paths` antes de que el peldaño pase a producción.
 
 ## 5. Pasar a producción
 
@@ -179,6 +185,22 @@ Pon `dry_run: false` en `edge.yaml` y reinicia la unidad. A partir de entonces, 
 supera su techo recibe `429` con `Retry-After: 1`, y una fuente que los rollups promovieron a una
 denegación recibe `403`. Endurece el `policy.rate` de una zona en el cerebro cuando estés bajo
 ataque — ese cambio llega al servicio de decisión en el siguiente sondeo y **nunca recarga nginx**.
+
+El peldaño pasa a producción por zona, en el archivo de zonas: `challenge_options.dry_run: false`
+una vez que el conjunto de candidatos nombra a los clientes correctos. A partir de entonces, a una
+fuente que inunda una zona `auto` se le sirve [la página de pase](/docs/edge#la-página-de-pase)
+antes de bloquearla, y una zona bajo ataque puede ponerse en desafío de inmediato —
+`policy.challenge: manual` en el archivo o, durante un tiempo acotado y sin editar nada,
+[la palanca](/docs/edge#la-palanca):
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  https://kapkan.example.net:8443/api/v1/edge/zones/shop.example.com/challenge \
+  -d '{"mode":"manual","ttl_seconds":1800,"reason":"login flood"}'
+```
+
+Para escalonar las zonas una a una, `policy.dry_run: true` mantiene una zona en solo observación en
+todos los nodos mientras sus hermanas aplican.
 
 ## Varios nodos y una dirección compartida
 
@@ -202,6 +224,9 @@ ello es orientativo: con el cerebro ausente, cada nodo sigue renovando por su cu
 | `converged: false` con `test_error` | El último documento fue rechazado; el anterior sirve. Corrige la causa (un origen que no resuelve, una directiva en `extra_directives_file`) y el nodo reintenta por su cuenta. |
 | La zona se queda en `:80` con `503` | Aún no hay certificado. Comprueba que el puerto 80 sea alcanzable desde internet para ese nombre, `kapkan_edge_acme_attempts_total` y la línea `certificate order failed` del journal. |
 | El nodo aparece como perdido en el cerebro mientras se ejecuta | El sondeo es la señal de vitalidad, y un sondeo retenido en la espera del cerebro cuenta como vivo, así que un nodo que aparece perdido ha dejado realmente de alcanzar al cerebro. Comprueba `controller.url`, el token (`401`/`403` en el journal), que `controller.name` esté declarado bajo `edge.nodes[]` (`404`) y que el nodo no comparta token con más de otros cuatro (`429`). |
+| Marcas `would-challenge`, pero nunca se desafía a nadie | Una de las tres capas de solo observación está activa: el `dry_run` del nodo (`edge.yaml`), el `policy.dry_run` de la zona o el `challenge_options.dry_run` propio del peldaño — `true` por defecto. `GET /api/v1/edge/zones/status` nombra los nodos en los que una zona está en solo observación y si un desafío de zona completa está previsualizando (`dry_run: true`). |
+| Toda petición a una zona recibe la página de pase | La zona está en desafío: `policy.challenge: manual` en el archivo, una palanca (`override` en `GET /api/v1/edge/zones/status`) o el disparador de zona completa (`challenge_active` con `reason: zone-rps`). A un cliente que lo supera no se le vuelve a pedir durante `cookie_ttl_seconds`; los clientes que no pueden conservar cookies la ven cada vez. |
+| Los clientes ven `503` (o pasan sin desafío) en una zona cuyo peldaño está activo | nginx no pudo alcanzar la página de pase y siguió el `failure_mode`. Busca `connect() to unix:/run/kapkan-edge/edge-clearance.sock failed` en el error log de nginx: el socket es `0660` para `socket_group`, como el socket de decisión, y el nodo registra `clearance page listening` cuando está levantado. |
 
 ## Relacionado
 

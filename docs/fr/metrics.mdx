@@ -240,15 +240,19 @@ celles du runtime Go :
 
 | Métrique | Type | Labels | Signification |
 | --- | --- | --- | --- |
-| `kapkan_edge_decisions_total` | compteur | `zone`, `result` | Verdicts du service de décision : `allow`, `allow_marked` (autorisée avec une marque), `deny_rate`, `deny_concurrency`, `deny_table`, `would_deny` (un refus en dry-run, répondu comme une autorisation), `untracked` (les tables par source étaient pleines, la requête est passée sans décision), `mode_none` (une zone sans décisions), `unknown_zone`, `bad_request` (une sous-requête hors contrat). |
+| `kapkan_edge_decisions_total` | compteur | `zone`, `result` | Verdicts du service de décision : `allow`, `allow_marked` (autorisée avec une marque), `allow_cleared` (un cookie de laissez-passer valide a franchi le palier), `deny_rate`, `deny_concurrency`, `deny_table`, `challenge` (un `401` : le client doit franchir le palier — nginx sert la page de laissez-passer), `would_deny` / `would_challenge` (un refus ou un défi en dry-run, répondu comme une autorisation), `untracked` (les tables par source étaient pleines, la requête est passée sans décision), `mode_none` (une zone sans décisions), `unknown_zone`, `bad_request` (une sous-requête hors contrat). |
+| `kapkan_edge_challenge_active` | jauge | `zone` | `1` tant que le défi global de zone du déclencheur `auto.zone_rps` du nœud est en vigueur sur ce nœud, `0` sinon (une zone `manual` ou le levier d'un opérateur met aussi tout le monde au défi, mais en tant que *mode* de la zone, que le rapport et `GET /api/v1/edge/zones/status` montrent). Si la bascule s'applique ou n'est qu'un aperçu, et son motif, sont dans le rapport du nœud, pas dans un label. |
+| `kapkan_edge_clearance_total` | compteur | `zone`, `result` | Ce que la page de laissez-passer a fait : `page` (la page de défi a été servie), `page_json` (une requête d'origine autre que GET a reçu le refus compact), `issued` (une énigme résolue a valu un laissez-passer), `issued_nojs` (le ticket temporisé sans JS l'a fait), `invalid` (une réponse ou un ticket faux, périmé ou pas encore valide), `rate_limited` (le plafond d'émission a tenu : 6 par source, 6 000 par zone et par minute), `unknown_zone` (une zone que ce nœud ne sert pas, ou dont le palier est désactivé), `bad_request`, `error` (la page n'a pas pu répondre — un `5xx`). |
 | `kapkan_edge_log_records_total` | compteur | `result` | Datagrammes du journal d'accès envoyés par le terminateur : `ok`, `malformed`, `oversized`, `dropped` (le gestionnaire propre au nœud n'a pas suivi — sa file de 8192 enregistrements était pleine), `unknown_zone`. Les datagrammes que le noyau rejette n'atteignent jamais le nœud et ne sont pas comptés ici. |
 | `kapkan_edge_inflight_resets_total` | compteur | — | Compteurs de requêtes en cours que le service de décision a réinitialisés parce qu'une source active n'a vu aucune complétion pendant toute une période d'inactivité — son flux de journal était lacunaire ou mort. Un taux constant signifie que des datagrammes du journal d'accès se perdent avant d'atteindre le nœud : augmentez `net.unix.max_dgram_qlen` (le nœud avertit au démarrage lorsqu'il est inférieur à 512). |
-| `kapkan_edge_verdict_table_entries` | jauge | — | Entrées deny/mark actives dans la table de verdicts du nœud. |
+| `kapkan_edge_verdict_table_entries` | jauge | — | Entrées de refus, de défi et de marque actives dans la table de verdicts du nœud (un défi ou une marque masqué sous un refus actif compte, un expiré non). |
 | `kapkan_edge_cert_not_after_seconds` | jauge | `zone` | Expiration du certificat de la zone sous forme d'horodatage Unix — l'**alarme T−30 j** : alertez lorsqu'elle est à moins de 30 jours. Supprimée lorsqu'une zone quitte le document. |
 | `kapkan_edge_acme_attempts_total` | compteur | `zone`, `result` | Commandes de certificats : `issued`, `renewed`, `failed` (sur l'une ou l'autre CA), et `fallback` — un certificat obtenu auprès de la CA de repli, compté en plus de son entrée `issued`/`renewed` ; sommez donc `issued+renewed+failed` pour les tentatives. |
 
 Le cerveau n'ajoute rien par nœud edge à son propre `/metrics` ; la vivacité et le dernier rapport
-d'un nœud se lisent via [`GET /api/v1/edge/nodes`](/docs/api#le-canal-edge).
+d'un nœud se lisent via [`GET /api/v1/edge/nodes`](/docs/api#le-canal-edge), et les débits des
+zones et leurs ensembles de candidats sur toute la flotte via
+[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus).
 
 ## Collecte (scraping)
 

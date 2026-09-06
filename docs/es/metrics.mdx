@@ -239,15 +239,19 @@ del runtime de Go:
 
 | Métrica | Tipo | Etiquetas | Significado |
 | --- | --- | --- | --- |
-| `kapkan_edge_decisions_total` | contador | `zone`, `result` | Veredictos del servicio de decisión: `allow`, `allow_marked` (permitida con una marca), `deny_rate`, `deny_concurrency`, `deny_table`, `would_deny` (una denegación en dry-run, respondida como permiso), `untracked` (las tablas por fuente estaban llenas, la petición pasó sin decidir), `mode_none` (una zona sin decisiones), `unknown_zone`, `bad_request` (una subpetición fuera del contrato). |
+| `kapkan_edge_decisions_total` | contador | `zone`, `result` | Veredictos del servicio de decisión: `allow`, `allow_marked` (permitida con una marca), `allow_cleared` (una cookie de pase válida superó el peldaño), `deny_rate`, `deny_concurrency`, `deny_table`, `challenge` (un `401`: el cliente debe superar el peldaño — nginx sirve la página de pase), `would_deny` / `would_challenge` (una denegación o un desafío en dry-run, respondidos como permiso), `untracked` (las tablas por fuente estaban llenas, la petición pasó sin decidir), `mode_none` (una zona sin decisiones), `unknown_zone`, `bad_request` (una subpetición fuera del contrato). |
+| `kapkan_edge_challenge_active` | gauge | `zone` | `1` mientras el desafío de zona completa del disparador `auto.zone_rps` del nodo está en vigor en este nodo, `0` en caso contrario (una zona `manual` o la palanca de un operador también desafían a todo el mundo, pero como *modo* de la zona, que muestran el reporte y `GET /api/v1/edge/zones/status`). Si el cambio actúa o previsualiza, y su motivo, están en el reporte del nodo, no en una etiqueta. |
+| `kapkan_edge_clearance_total` | contador | `zone`, `result` | Qué hizo la página de pase: `page` (se sirvió la página de desafío), `page_json` (una petición original no GET recibió el rechazo compacto), `issued` (un acertijo resuelto obtuvo un pase), `issued_nojs` (lo obtuvo el tique temporizado sin JS), `invalid` (una respuesta o un tique erróneos, obsoletos o aún no válidos), `rate_limited` (el tope de emisión actuó: 6 por fuente, 6 000 por zona y minuto), `unknown_zone` (una zona que este nodo no sirve, o cuyo peldaño está desactivado), `bad_request`, `error` (la página no pudo responder — un `5xx`). |
 | `kapkan_edge_log_records_total` | contador | `result` | Datagramas de access log procedentes del terminador: `ok`, `malformed`, `oversized`, `dropped` (el propio manejador del nodo no pudo seguir el ritmo — su cola de 8192 registros estaba llena), `unknown_zone`. Los datagramas que el kernel descarta nunca llegan al nodo y no se cuentan aquí. |
 | `kapkan_edge_inflight_resets_total` | contador | — | Contadores de peticiones en curso que el servicio de decisión reinició porque una fuente ocupada no vio ninguna finalización durante todo un periodo de inactividad — su flujo de log tenía pérdidas o estaba muerto. Una tasa constante significa que se están perdiendo datagramas de access log antes de llegar al nodo: sube `net.unix.max_dgram_qlen` (el nodo avisa al arrancar cuando está por debajo de 512). |
-| `kapkan_edge_verdict_table_entries` | gauge | — | Entradas vivas de denegación/marca en la tabla de veredictos del nodo. |
+| `kapkan_edge_verdict_table_entries` | gauge | — | Entradas vivas de denegación, desafío y marca en la tabla de veredictos del nodo (un desafío o una marca ocultos bajo una denegación viva cuentan; uno caducado no). |
 | `kapkan_edge_cert_not_after_seconds` | gauge | `zone` | Caducidad del certificado de la zona como marca de tiempo Unix — la **alarma T−30 d**: alerta cuando queden menos de 30 días. Se elimina cuando una zona abandona el documento. |
 | `kapkan_edge_acme_attempts_total` | contador | `zone`, `result` | Solicitudes de certificado: `issued`, `renewed`, `failed` (con cualquiera de las dos CA) y `fallback` — un certificado obtenido de la CA de respaldo, contado junto a su entrada `issued`/`renewed`, así que suma `issued+renewed+failed` para obtener los intentos. |
 
 El cerebro no añade nada por nodo edge a su propio `/metrics`; la vitalidad y el último reporte de
-un nodo se leen de [`GET /api/v1/edge/nodes`](/docs/api#el-canal-edge).
+un nodo se leen de [`GET /api/v1/edge/nodes`](/docs/api#el-canal-edge), y las tasas y los conjuntos
+de candidatos de las zonas de toda la flota de
+[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus).
 
 ## Scraping
 

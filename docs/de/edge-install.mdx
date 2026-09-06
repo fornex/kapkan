@@ -106,7 +106,7 @@ controller:
   name: edge-1                         # must equal an edge.nodes[] entry on the brain
   report_interval_seconds: 10
 state_dir: /var/lib/kapkan-edge        # cached document, generations, keys, certificates
-sockets_dir: /run/kapkan-edge          # the three unix sockets nginx talks to
+sockets_dir: /run/kapkan-edge          # the four unix sockets nginx talks to
 socket_group: nginx                    # the terminator's worker group
 terminator:
   binary: nginx                        # or angie
@@ -150,7 +150,7 @@ Verzeichnisse der Rolle gehören ihr allein — niemals die `/var/lib/kapkan` un
 Gehirns — sodass sich ein Gehirn und ein Edge einen Host teilen können.
 
 <Callout type="warning" title="Die Startreihenfolge spielt keine Rolle, die Sockets schon">
-Der Knoten bringt seine drei Unix-Sockets **zuerst** hoch, sodass nginx bereits laufen und sie
+Der Knoten bringt seine vier Unix-Sockets **zuerst** hoch, sodass nginx bereits laufen und sie
 abfragen darf; dann prüft er den Terminator, stellt eine Generation wieder her, die ein
 abgestürzter Vorgänger ungetestet hinterlassen hat, rendert das letzte Dokument, das er auf der
 Platte hatte, und pollt erst dann das Gehirn. Eine Komponente, die nicht starten kann — ein
@@ -166,7 +166,8 @@ Prozess mit diesem Fehler, und systemd startet ihn neu.
   dem gerenderten ETag; `ls /var/lib/kapkan-edge/conf/live/` listet `kapkan_00_common.conf` und
   eine `kapkan_zone_<name>.conf` pro Zone.
 - Das Inventar des Gehirns, `GET /api/v1/edge/nodes`, führt den Knoten als lebendig mit seinem
-  Report auf (eine Konsolenansicht ist ein späterer Meilenstein).
+  Report auf, und die **Edge**-Ansicht der Konsole erscheint in der Navigation, sobald ein Knoten
+  konfiguriert ist.
 - Zertifikate: Die erste Bestellung braucht für jeden Zonennamen einen von der CA aus erreichbaren
   Port 80. Achten Sie im Journal auf `certificate issued`, dann
   `ls /var/lib/kapkan-edge/certs/<zone>/current/`. Bis eine Zone ein Zertifikat hat, antwortet ihr
@@ -175,6 +176,13 @@ Prozess mit diesem Fehler, und systemd startet ihn neu.
 - Anfragen: Mit `dry_run: true` erreicht ein Client über der Rate der Zone den Origin weiterhin,
   mit `X-Kapkan-Mark: would-deny:rate`. Beobachten Sie
   `kapkan_edge_decisions_total{result="would_deny"}` auf `/metrics` und die Logs Ihres Origins.
+- Die Stufe: Geben Sie einer Zone `policy.challenge: auto` (ihr `challenge_options.dry_run` ist
+  standardmäßig `true`, sodass noch niemand herausgefordert wird) und lesen Sie, **wer
+  herausgefordert würde** — `GET /api/v1/edge/zones/status` auf dem Gehirn oder die Edge-Ansicht
+  der Konsole —, während eine eigentlich fällige Challenge den Origin mit der Markierung
+  `X-Kapkan-Mark: would-challenge:table:flood` erreicht. Nehmen Sie Ihre Health-Checks,
+  API-Clients und Webhooks unter `challenge_options.exempt_paths` auf, bevor die Stufe in den
+  Echtbetrieb geht.
 
 ## 5. Echtbetrieb
 
@@ -183,6 +191,21 @@ Client über seiner Obergrenze `429` mit `Retry-After: 1`, und eine Quelle, die 
 Sperre hochgestuft haben, erhält `403`. Verschärfen Sie unter Angriff die `policy.rate` einer Zone
 auf dem Gehirn — diese Änderung erreicht den Entscheidungsdienst beim nächsten Poll und **lädt
 nginx niemals neu**.
+
+Die Stufe geht pro Zone in den Echtbetrieb, in der Zonen-Datei: `challenge_options.dry_run: false`,
+sobald die Kandidatenmenge die richtigen Clients benennt. Von da an erhält ein Flooder in einer
+`auto`-Zone [die Freigabeseite](/docs/edge#die-freigabeseite), bevor er gesperrt wird, und eine
+Zone unter Angriff kann sofort unter Challenge gestellt werden — `policy.challenge: manual` in der
+Datei oder, für eine begrenzte Zeit und ohne Bearbeitung der Datei, [der Hebel](/docs/edge#der-hebel):
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  https://kapkan.example.net:8443/api/v1/edge/zones/shop.example.com/challenge \
+  -d '{"mode":"manual","ttl_seconds":1800,"reason":"login flood"}'
+```
+
+Um Zonen eine nach der anderen zu staffeln, hält `policy.dry_run: true` eine Zone auf jedem Knoten
+nur beobachtend, während ihre Schwesterzonen durchsetzen.
 
 ## Mehrere Knoten und eine gemeinsame Adresse
 
@@ -207,6 +230,9 @@ selbstständig.
 | `converged: false` mit `test_error` | Das neueste Dokument wurde abgelehnt; das vorherige bedient. Beheben Sie die Ursache (ein Origin, der sich nicht auflösen lässt, eine Direktive in `extra_directives_file`), und der Knoten versucht es selbstständig erneut. |
 | Zone bleibt auf `:80` mit `503` | Noch kein Zertifikat. Prüfen Sie die Erreichbarkeit von Port 80 aus dem Internet für diesen Namen, `kapkan_edge_acme_attempts_total` und die Zeile `certificate order failed` im Journal. |
 | Knoten wird auf dem Gehirn als verloren angezeigt, obwohl er läuft | Der Poll ist das Lebendigkeitssignal, und ein im Hold des Gehirns geparkter Poll zählt als lebendig — ein als verloren angezeigter Knoten erreicht das Gehirn also wirklich nicht mehr. Prüfen Sie `controller.url`, das Token (`401`/`403` im Journal), dass `controller.name` unter `edge.nodes[]` deklariert ist (`404`), und dass sich der Knoten kein Token mit mehr als vier anderen teilt (`429`). |
+| `would-challenge`-Markierungen, aber niemand wird je herausgefordert | Eine der drei Nur-beobachten-Schichten ist aktiv: der `dry_run` des Knotens (`edge.yaml`), der `policy.dry_run` der Zone oder der eigene `challenge_options.dry_run` der Stufe — standardmäßig `true`. `GET /api/v1/edge/zones/status` nennt die Knoten, auf denen eine Zone nur beobachtend ist, und ob eine zonenweite Challenge nur eine Vorschau ist (`dry_run: true`). |
+| Jede Anfrage an eine Zone erhält die Freigabeseite | Die Zone steht unter Challenge: `policy.challenge: manual` in der Datei, ein Hebel (`override` in `GET /api/v1/edge/zones/status`) oder der zonenweite Auslöser (`challenge_active` mit `reason: zone-rps`). Ein Client, der sie überwindet, wird für `cookie_ttl_seconds` nicht erneut gefragt; Clients, die keine Cookies behalten können, sehen sie jedes Mal. |
+| Clients sehen `503` (oder passieren unherausgefordert) auf einer Zone, deren Stufe aktiv ist | nginx konnte die Freigabeseite nicht erreichen und ist dem `failure_mode` gefolgt. Suchen Sie im Error-Log von nginx nach `connect() to unix:/run/kapkan-edge/edge-clearance.sock failed`: Der Socket ist wie der Entscheidungs-Socket `0660` für `socket_group`, und der Knoten protokolliert `clearance page listening`, wenn er bereit ist. |
 
 ## Verwandte Themen
 

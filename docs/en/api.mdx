@@ -574,7 +574,9 @@ These endpoints exist for [edge nodes](/docs/edge) — boxes running [`kapkan ed
 Like the scrub-node channel they take the `agent` role or an unscoped `operator` token, never a
 `viewer` or a tenant-scoped token: the zones document spans every tenant. **The brain
 distributes policy, never verdicts** — no per-request call exists here or anywhere; a node
-answers requests alone.
+answers requests alone. The count of configured edge nodes (`edge_nodes_total`) rides on
+`/api/v1/status` for every role, so a console can decide whether to show the Edge view without
+any of these calls.
 
 #### GET /api/v1/edge/zones
 
@@ -598,7 +600,7 @@ doubling to 30 s) — give each node its own agent token.
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "off", "rate": { "rps": 50, "concurrency": 20 } }
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
   "acme_challenges": [],
@@ -608,7 +610,13 @@ doubling to 30 s) — give each node its own agent token.
 
 `acme_directory`, `acme_fallback`, `extra_directives_file` and `tls.h3` are omitted when unset;
 an absent `acme_directory` means the node orders from its own default CA (Let's Encrypt unless
-its `edge.yaml` says otherwise).
+its `edge.yaml` says otherwise). The policy carries `dry_run` and the `challenge_options` a zone
+sets; `clearance_keys` (not shown) are the rung's per-zone signing keys (the current and the
+previous UTC day's, each honoured 48 h — the document carries secrets, and a node caches it
+`0600`); a zone
+an operator has pulled [the lever](/docs/edge#the-lever) on carries `challenge_override`
+`{mode, until, reason}` with a fixed `until`, so the document's bytes and ETag move exactly when
+the operator acts and once more when it lapses.
 
 #### POST /api/v1/edge/nodes/\{name\}/report
 
@@ -616,13 +624,73 @@ A node's advisory self-report — version, node-side dry-run, the ETag of the do
 **rendered** (so an operator can see a node lagging or refusing), the terminator's kind,
 version and liveness, the live generation and its `nginx -t` result, and the certificates it
 holds (public metadata only, never a key; a long list is cut to the 64 KiB body limit with a
-`certs_truncated` count) — stored and returned by `GET /api/v1/edge/nodes`. Never a liveness
-signal (the poll is). An unknown `{name}` is `404`; success is `204 No Content`.
+`certs_truncated` count), and a **zones section**: for every deciding zone the live generation
+serves, the last closed ten-second window (`at`, `window_seconds`, `rps`, `requests`, `decided`,
+`denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`, `status_2xx..5xx`), the zone's
+challenge mode as the node applies it, whether the zone is watch-only on this node (`dry_run`) and
+whether its rung only previews there (`rung_dry_run`: the node's, the zone's or the rung's own
+`challenge_options.dry_run`), a zone-wide challenge in force (`challenge_active {reason, until,
+dry_run}` — `dry_run` says the flip previews there), and the window's sources — the would-be ones
+first (a challenge or a deny previewed), then the refused and challenged, then the busiest of the
+rest — each with the strongest thing the node did to it (`state`: `denied`, `challenged`,
+`would-deny`, `would-challenge`, `cleared`, `marked`, `allow`). A report too big for the limit
+sheds detail a little at a time — the sources that tell nothing first (uncounted: they are not in
+the would-be set), then every zone's list halved, then certificates, then zones — each cut
+counted: `sources_truncated` is the would-be sources missing from the list (the ones the node's
+per-window bound of 20 left out, and the ones a shrinking report shed), `certs_truncated` and
+`zones_truncated` the entries dropped. Stored and returned by `GET /api/v1/edge/nodes`. Never a
+liveness signal (the poll is). An unknown `{name}` is `404`; success is `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 
 The node inventory: each configured edge node with its poll liveness joined with its last
 report. A `viewer`-rank read, unscoped tokens only.
+
+#### GET /api/v1/edge/zones/status
+
+The zones across the fleet: the **alive** nodes' zones sections merged — per zone, the window
+figures summed (the windows are not aligned, so this is a fleet-wide rate to the nearest window),
+the zone's challenge mode, the nodes on which it is watch-only (`watch_only`) and those on which
+its rung only previews (`rung_watch_only` — a `manual` or `auto` zone challenges for real on the
+nodes not named there), the nodes with a zone-wide challenge in force and whether each bites or
+previews, the lever in force (`override`), and the **would-be set**: the union of the sources the
+nodes previewed a challenge or a deny for, the stronger state kept, the busiest first, bounded to
+20 per reporting node (`would_be_truncated` counts the rest). `partial` says a node's would-be
+sources did not all fit — its per-window bound, or a report that had to shrink — so the set is
+what survived, not everyone; `zones_truncated` on the document sums the zone entries the alive nodes
+cut from their reports, zones that are missing or undercounted here. A `viewer`-rank read,
+unscoped tokens only, like the inventory. This is edge-spec's *who would have been challenged*:
+read it before a zone's rung goes live.
+
+```json
+{
+  "nodes_alive": 2,
+  "nodes_reporting": 2,
+  "zones": [
+    {
+      "zone": "shop.example.com",
+      "nodes": 2,
+      "challenge": "auto",
+      "rps": 812.4,
+      "requests": 8124, "decided": 8124, "would_deny": 37, "would_challenge": 1240,
+      "watch_only": ["edge-2"],
+      "rung_watch_only": ["edge-2"],
+      "challenge_active": [
+        { "node": "edge-1", "reason": "zone-rps", "until": "2026-09-06T12:05:00Z", "dry_run": true }
+      ],
+      "would_be": [
+        { "source": "203.0.113.7", "state": "would-deny", "requests": 1210, "nodes": ["edge-1", "edge-2"] },
+        { "source": "198.51.100.23", "state": "would-challenge", "requests": 640, "nodes": ["edge-1"] }
+      ]
+    }
+  ]
+}
+```
+
+A zone no alive node has reported yet still appears when a lever is set on it: `nodes: 0`,
+`rps: 0` and `override`, no mode. The request counters (`requests`, `decided`, `denied`,
+`challenged`, `cleared`, `would_deny`, `would_challenge`) are omitted when zero; `nodes` and
+`rps` are always present.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot and …/acme/challenges
 
@@ -637,6 +705,51 @@ behind a shared address. A live challenge is never overwritten by a different ke
 (`409`), a node may hold 16 live challenges, and every call is logged with the node, the zone
 and the token's prefix: an agent token is a certificate-issuing credential, rotate it on any
 node compromise.
+
+#### POST /api/v1/edge/zones/\{name\}/challenge and DELETE
+
+[The lever](/docs/edge#the-lever): set a zone's challenge mode for a bounded time, whatever the
+zones file says. `operator` rank, unscoped tokens only.
+
+```json
+{ "mode": "manual", "ttl_seconds": 1800, "reason": "credential stuffing from residential proxies" }
+```
+
+`mode` is `manual`, `auto` or `off` (`off` clears the override, as `DELETE` does); `ttl_seconds`
+is `60..86400` and required unless `mode` is `off`; `reason` is for the log, the audit row and
+the API's answers — `override.reason` in `GET /api/v1/edge/zones/status` and this endpoint's
+own response (at most 200 characters). An unknown zone is `404`; a zone in `policy.mode: none` is
+`409` — nothing challenges there. The override travels in the zones document as
+`challenge_override` (parked polls are woken at once) and every node applies the effective mode
+on its fast path, so it ends at `until` brain or no brain. Audited as `edge_challenge` `set` /
+`cleared`. Both methods answer `200` with the rung as it now stands and where the lever bites:
+
+```json
+{
+  "zone": "shop.example.com",
+  "mode": "manual",
+  "until": "2026-09-06T12:30:00Z",
+  "reason": "credential stuffing from residential proxies",
+  "file_mode": "auto",
+  "zone_watch_only": false,
+  "rung_watch_only": false,
+  "nodes": [
+    { "name": "edge-1", "alive": true, "dry_run": false },
+    { "name": "edge-2", "alive": false }
+  ]
+}
+```
+
+`file_mode` is `policy.challenge` as the file has it; `zone_watch_only` and `rung_watch_only`
+are the zone's `policy.dry_run` and `challenge_options.dry_run` — on either the lever previews
+rather than bites, on every node; `nodes[]` lists every configured node with its liveness and
+its reported `dry_run` (absent until it has reported) — a node that only counts must be seen
+before the lever is trusted. `mode`, `until` and `reason` are absent when the zone follows its
+file, and `file_mode` is empty for a zone a reload has since removed from the file — such a
+lever can still be cleared, never set. The lever is held in the brain's memory, like the
+issuance coordinator; it is not gated by the brain's own `dry_run`. A node running a version
+from before the lever does not know `challenge_override` and follows its file while `nodes[]`
+still lists it: upgrade the nodes first.
 
 ### GET /metrics
 
