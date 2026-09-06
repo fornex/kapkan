@@ -318,7 +318,12 @@ security-relevant.
   in `mode: none` is refused (409); the reason is at most 200 characters. Audited (`edge_challenge` set / cleared); shown by
   `GET /api/v1/edge/zones/status` as `override`. The brain's own `dry_run` does not gate the lever:
   it is a policy edit; enforcement watch-only lives on the node and the zone. In memory, like the
-  ACME coordinator — an incident's tool, re-pulled after a brain restart.
+  ACME coordinator — an incident's tool, re-pulled after a brain restart. A lever on a zone a
+  reload has since removed can still be cleared. The node's report carries the mode it APPLIES
+  — the lever's, while one is live — so `zones/status` and the console read a zone under a manual
+  lever as challenging, not as the file's `off`. **Upgrade the nodes first**: a node older than
+  this release does not know `challenge_override`, follows its file, and is still listed by the
+  response as a node the lever would bite; `GET /api/v1/edge/nodes` shows each node's version.
 
 ## [1.7.0] - 2026-09-02
 

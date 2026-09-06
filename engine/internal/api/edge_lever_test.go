@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -60,18 +61,31 @@ func TestEdgeChallengeLever(t *testing.T) {
 		t.Fatalf("unknown zone = %d, want 404", rec.Code)
 	}
 	for name, body := range map[string]string{
-		"bad mode":      `{"mode":"sometimes","ttl_seconds":600}`,
-		"ttl too short": `{"mode":"manual","ttl_seconds":30}`,
-		"ttl too long":  `{"mode":"auto","ttl_seconds":90000}`,
-		"no ttl":        `{"mode":"manual"}`,
-		"control char":  `{"mode":"manual","ttl_seconds":600,"reason":"a\u0007b"}`,
-		"unknown key":   `{"mode":"manual","ttl_seconds":600,"until":"never"}`,
-		"not json":      `{mode`,
+		"bad mode":        `{"mode":"sometimes","ttl_seconds":600}`,
+		"ttl too short":   `{"mode":"manual","ttl_seconds":30}`,
+		"ttl too long":    `{"mode":"auto","ttl_seconds":90000}`,
+		"ttl 59":          `{"mode":"manual","ttl_seconds":59}`,
+		"ttl 86401":       `{"mode":"auto","ttl_seconds":86401}`,
+		"reason too long": `{"mode":"manual","ttl_seconds":600,"reason":"` + strings.Repeat("д", 201) + `"}`,
+		"no ttl":          `{"mode":"manual"}`,
+		"control char":    `{"mode":"manual","ttl_seconds":600,"reason":"a\u0007b"}`,
+		"unknown key":     `{"mode":"manual","ttl_seconds":600,"until":"never"}`,
+		"not json":        `{mode`,
 	} {
 		if rec := lever(h, http.MethodPost, "a.example", body, "op-secret"); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s = %d, want 400: %s", name, rec.Code, rec.Body)
 		}
 	}
+	// The TTL's edges are in.
+	for _, body := range []string{`{"mode":"manual","ttl_seconds":60}`, `{"mode":"auto","ttl_seconds":86400}`} {
+		if rec := lever(h, http.MethodPost, "a.example", body, "op-secret"); rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d, want 200: %s", body, rec.Code, rec.Body)
+		}
+	}
+	if rec := lever(h, http.MethodDelete, "a.example", "", "op-secret"); rec.Code != http.StatusOK {
+		t.Fatalf("clear after the edges = %d", rec.Code)
+	}
+	aw.rows = nil
 	// A reason is 200 CHARACTERS, not bytes.
 	if rec := lever(h, http.MethodPost, "a.example", `{"mode":"manual","ttl_seconds":600,"reason":"`+strings.Repeat("д", 150)+`"}`, "op-secret"); rec.Code != http.StatusOK {
 		t.Fatalf("a 150-character Cyrillic reason = %d: %s", rec.Code, rec.Body)
@@ -211,5 +225,53 @@ func TestChallengeLeverLapses(t *testing.T) {
 	}
 	if d := l.untilNextChange(now); d != maxLeverTTL {
 		t.Fatalf("untilNextChange with nothing set = %v, want a day", d)
+	}
+}
+
+// TestEdgeChallengeLeverOnARemovedZone pins that a lever set on a zone a
+// reload has since removed from the file can still be cleared — by DELETE or
+// mode off — while nothing can be set on it: the operator is never left with
+// a zones/status row nothing can retire.
+func TestEdgeChallengeLeverOnARemovedZone(t *testing.T) {
+	store, zonesPath := edgeStore(t, edgeZonesOne)
+	s := testServer(t, store)
+	h := s.Handler()
+	if rec := lever(h, http.MethodPost, "a.example", `{"mode":"manual","ttl_seconds":86400,"reason":"incident"}`, "op-secret"); rec.Code != http.StatusOK {
+		t.Fatalf("set = %d: %s", rec.Code, rec.Body)
+	}
+	if err := os.WriteFile(zonesPath, []byte(strings.ReplaceAll(edgeZonesOne, "a.example", "b.example")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	// The lever is still brain state and still shown.
+	if st, code := getEdgeZonesStatus(h, "op-secret"); code != http.StatusOK || len(st.Zones) != 1 || st.Zones[0].Zone != "a.example" || st.Zones[0].Override == nil {
+		t.Fatalf("zone status after the zone left the file: %d %+v", code, st)
+	}
+	// Setting needs the zone; clearing does not.
+	if rec := lever(h, http.MethodPost, "a.example", `{"mode":"auto","ttl_seconds":600}`, "op-secret"); rec.Code != http.StatusNotFound {
+		t.Fatalf("set on a removed zone = %d, want 404", rec.Code)
+	}
+	rec := lever(h, http.MethodDelete, "a.example", "", "op-secret")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear on a removed zone = %d: %s", rec.Code, rec.Body)
+	}
+	var resp EdgeChallengeLeverResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Zone != "a.example" || resp.Mode != "" || resp.FileMode != "" {
+		t.Fatalf("clear response on a removed zone: %+v", resp)
+	}
+	if st, _ := getEdgeZonesStatus(h, "op-secret"); len(st.Zones) != 0 {
+		t.Fatalf("zone status after the clear: %+v", st)
+	}
+	// Nothing left to clear: unknown zone.
+	if rec := lever(h, http.MethodDelete, "a.example", "", "op-secret"); rec.Code != http.StatusNotFound {
+		t.Fatalf("second clear on a removed zone = %d, want 404", rec.Code)
+	}
+	if rec := lever(h, http.MethodPost, "a.example", `{"mode":"off"}`, "op-secret"); rec.Code != http.StatusNotFound {
+		t.Fatalf("mode off on a removed zone with nothing set = %d, want 404", rec.Code)
 	}
 }

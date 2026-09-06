@@ -45,6 +45,14 @@ func TestNodeAppliesChallengeOverrideOnTheFastPath(t *testing.T) {
 	if v := n.svc.DecideRequest(decide.Request{Zone: "example.com", Src: ip}); v.Allow || !v.Challenge || v.Reason != "challenge:manual" {
 		t.Fatalf("under the lever: %+v", v)
 	}
+	// The report says what the node APPLIES — the lever's mode, not the
+	// file's — so the brain and the console read the zone as challenging.
+	n.mu.Lock()
+	rz := n.reportZones(time.Now())
+	n.mu.Unlock()
+	if len(rz) != 1 || rz[0].Challenge != edgedoc.ChallengeManual {
+		t.Fatalf("the report under the lever: %+v", rz)
+	}
 	time.Sleep(100 * time.Millisecond)
 	if n.Status().Generation != 1 || tester.calls.Load() != 1 || reloader.calls.Load() != 1 {
 		t.Fatalf("a challenge override reloaded the terminator: gen=%d tester=%d reloader=%d", n.Status().Generation, tester.calls.Load(), reloader.calls.Load())
@@ -67,6 +75,12 @@ func TestNodeAppliesChallengeOverrideOnTheFastPath(t *testing.T) {
 	waitFor(t, "the cleared document", func() bool { return n.Status().ZonesETag == `"v3"` })
 	if v := n.svc.DecideRequest(decide.Request{Zone: "example.com", Src: ip}); !v.Allow || v.Challenge {
 		t.Fatalf("after the lever was cleared: %+v", v)
+	}
+	n.mu.Lock()
+	rz = n.reportZones(time.Now())
+	n.mu.Unlock()
+	if len(rz) != 1 || rz[0].Challenge == edgedoc.ChallengeManual || rz[0].Challenge == edgedoc.ChallengeAuto {
+		t.Fatalf("the report after the lever was cleared: %+v", rz)
 	}
 	if n.Status().Generation != 1 {
 		t.Fatalf("clearing the override reloaded the terminator: gen=%d", n.Status().Generation)

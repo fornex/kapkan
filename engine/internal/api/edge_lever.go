@@ -214,18 +214,9 @@ func (s *Server) handleEdgeChallengeLever(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
-	if fileZone == nil {
-		writeError(w, http.StatusNotFound, "unknown zone")
-		return
-	}
 	now := time.Now()
-	switch r.Method {
-	case http.MethodDelete:
-		was := s.edgeLever.clear(zone, now)
-		s.log.Info("edge challenge override cleared", "zone", zone, "was_live", was, "operator", c.token)
-		s.writeAudit(auditRow(c, "edge_challenge", "cleared", zone, "zone", "", "", false))
-	default:
-		var req EdgeChallengeLeverRequest
+	var req EdgeChallengeLeverRequest
+	if r.Method != http.MethodDelete {
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&req); err != nil {
@@ -237,6 +228,25 @@ func (s *Server) handleEdgeChallengeLever(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "reason must be at most 200 characters without control characters")
 			return
 		}
+	}
+	clearing := r.Method == http.MethodDelete || req.Mode == edgedoc.ChallengeOff
+	if fileZone == nil {
+		// A zone gone from the file (removed or renamed by a reload) may still
+		// carry a lever set before that: clearing it needs no file entry, so
+		// the operator is never left with a row nothing can retire. Setting
+		// one does need the zone.
+		if _, live := s.edgeLever.get(zone, now); !clearing || !live {
+			writeError(w, http.StatusNotFound, "unknown zone")
+			return
+		}
+		fileZone = &edgedocZoneView{}
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		was := s.edgeLever.clear(zone, now)
+		s.log.Info("edge challenge override cleared", "zone", zone, "was_live", was, "operator", c.token)
+		s.writeAudit(auditRow(c, "edge_challenge", "cleared", zone, "zone", "", "", false))
+	default:
 		switch req.Mode {
 		case edgedoc.ChallengeOff:
 			was := s.edgeLever.clear(zone, now)
