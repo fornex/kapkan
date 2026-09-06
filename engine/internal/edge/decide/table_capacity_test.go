@@ -46,13 +46,12 @@ func TestDenyDisplacesChallengeAndChallengesAreCapped(t *testing.T) {
 		t.Fatal("a full table took a deny for a new source by evicting a live challenge")
 	}
 	// But a challenge hidden beneath a live deny is not a verdict anyone can
-	// see: when a new block needs the room, it makes way. Six slots: two
+	// see: when a new block needs the room, it makes way. Seven slots: two
 	// bots challenged (5m) then denied (1m) with room to spare keep their
-	// challenges beneath — six entries, full — and a new flooder's block
-	// lands by dropping what is beneath, not by refusing.
-	// Seven slots: two bots challenged then denied keep their challenges
-	// beneath, a third source (.3) is challenged and NOT denied — a live,
-	// visible verdict that must survive the room-making.
+	// challenges beneath, a third source (.3) is challenged and NOT denied —
+	// a live, visible verdict that must survive the room-making — and two
+	// more denies fill the table; a new flooder's block then lands by
+	// dropping what is beneath, not by refusing.
 	c3 := newClock()
 	s3 := New(Options{Now: c3.now, MaxSources: 7})
 	s3.SetZones(doc(zone("example.com", 0, 0)))

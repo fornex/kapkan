@@ -157,9 +157,10 @@ type ChallengeOptions struct {
 // AutoChallenge is when an auto zone challenges on its own (edge-spec §5, the
 // "new rung between rate-limit and block").
 type AutoChallenge struct {
-	// ZoneRPS is the zone-wide request rate at which EVERY source is
-	// challenged — the residential-proxy flood, where no single source
-	// trips its ceiling. 0 = no zone-wide trigger.
+	// ZoneRPS is the zone-wide ADMITTED request rate — decided requests the
+	// node did not refuse — at which EVERY source is challenged: the
+	// residential-proxy flood, where no single source trips its ceiling.
+	// Refused traffic is not load. 0 = no zone-wide trigger.
 	ZoneRPS uint64 `json:"zone_rps,omitempty"`
 	// HoldSeconds is how long a zone-wide challenge stays on after the
 	// window that tripped it; each window still over the rate extends it.

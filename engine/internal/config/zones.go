@@ -145,9 +145,10 @@ type ZoneChallengeOptions struct {
 // auto zone is challenged before it is denied whatever these say; these add
 // the zone-wide trigger.
 type ZoneAutoChallenge struct {
-	// ZoneRPS is the zone-wide request rate (per node) at which every source
-	// is challenged — the residential-proxy flood, where no single source
-	// trips its ceiling. 0 (default) = off.
+	// ZoneRPS is the zone-wide ADMITTED request rate (per node) — decided
+	// requests the node did not refuse — at which every source is challenged:
+	// the residential-proxy flood, where no single source trips its ceiling.
+	// Refused traffic is not load. 0 (default) = off.
 	ZoneRPS uint64 `yaml:"zone_rps"`
 	// HoldSeconds is how long the zone-wide challenge stays on after the
 	// window that tripped it, 30..3600 (default 300); each window still over
