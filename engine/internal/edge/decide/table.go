@@ -30,6 +30,28 @@ type table struct {
 	marks      map[key]entry
 	max        int
 	lastSweep  time.Time
+	// lastBeneath paces dropBeneath, like lastSweep paces the on-full sweep.
+	lastBeneath time.Time
+}
+
+// dropBeneath frees the challenges and marks that sit beneath a LIVE deny of
+// the same key: lookup never sees them while the deny stands, so when the
+// table is full — or the challenges' share is — they are the entries that
+// cost nothing to lose (the source is blocked anyway, and the rules' memory
+// carries its history past the block). Paced: a rotating flood must not make
+// every refused insert walk the tables.
+func (t *table) dropBeneath(now time.Time) {
+	if now.Sub(t.lastBeneath) < fullSweepEvery {
+		return
+	}
+	t.lastBeneath = now
+	for k, d := range t.denies {
+		if !now.Before(d.until) {
+			continue
+		}
+		delete(t.challenges, k)
+		delete(t.marks, k)
+	}
 }
 
 func newTable(max int) *table {
@@ -96,7 +118,12 @@ func (t *table) setDeny(k key, reason string, until, now time.Time) bool {
 		delete(t.challenges, k)
 		delete(t.marks, k)
 		if !t.room(t.denies, k, now) {
-			return false
+			// Still full: the challenges hidden beneath OTHER live denies
+			// make way before a new block is refused.
+			t.dropBeneath(now)
+			if !t.room(t.denies, k, now) {
+				return false
+			}
 		}
 	}
 	t.denies[k] = entry{deny: true, reason: reason, until: until}
@@ -116,6 +143,9 @@ func (t *table) setChallenge(k key, reason string, until, now time.Time) bool {
 		if now.Sub(t.lastSweep) >= fullSweepEvery {
 			t.sweep(now, nil)
 		}
+		// The share may be held by challenges beneath live denies — blocked
+		// sources that no longer need a rung: those make way first.
+		t.dropBeneath(now)
 		if len(t.challenges) >= t.max/challengeShare {
 			return false
 		}

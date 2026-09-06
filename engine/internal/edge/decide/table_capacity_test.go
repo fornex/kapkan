@@ -14,8 +14,9 @@ func TestDenyDisplacesChallengeAndChallengesAreCapped(t *testing.T) {
 	s := New(Options{Now: c.now, MaxSources: 4})
 	s.SetZones(doc(zone("example.com", 0, 0)))
 	// Challenges fill their half; the third is refused while a deny still
-	// finds room.
-	if !s.Challenge("example.com", src("198.51.100.1"), time.Minute, "flood") || !s.Challenge("example.com", src("198.51.100.2"), time.Minute, "flood") {
+	// finds room. The challenges are LONGER than the denies below, so a deny
+	// for a challenged source can land only by displacing its challenge.
+	if !s.Challenge("example.com", src("198.51.100.1"), 5*time.Minute, "flood") || !s.Challenge("example.com", src("198.51.100.2"), 5*time.Minute, "flood") {
 		t.Fatal("the first two challenges were refused")
 	}
 	if s.Challenge("example.com", src("198.51.100.3"), time.Minute, "flood") {
@@ -24,12 +25,8 @@ func TestDenyDisplacesChallengeAndChallengesAreCapped(t *testing.T) {
 	if !s.Deny("example.com", src("198.51.100.8"), time.Minute, "a") || !s.Deny("example.com", src("198.51.100.9"), time.Minute, "b") {
 		t.Fatal("denies refused while the table had room")
 	}
-	// Full: a deny for a NEW source is refused, not evicting a live verdict —
-	// but the deny a challenged source earned by flooding on displaces its
-	// own challenge and lands.
-	if s.Deny("example.com", src("198.51.100.7"), time.Minute, "c") {
-		t.Fatal("a full table took a deny for a new source")
-	}
+	// Full: the deny a challenged source earned by flooding on displaces its
+	// own (longer) challenge and lands — the on-full path.
 	if !s.Deny("example.com", src("198.51.100.1"), time.Minute, "flood") {
 		t.Fatal("the deny for a challenged source was refused by a full table")
 	}
@@ -42,6 +39,54 @@ func TestDenyDisplacesChallengeAndChallengesAreCapped(t *testing.T) {
 	// The same key's challenge is not double-counted once denied.
 	if n := len(s.Verdicts()); n != 4 {
 		t.Fatalf("verdicts = %d, want 4 (three denies, one challenge)", n)
+	}
+	// Full again with .2's challenge live and NOT beneath a deny: a deny for
+	// a new source is refused — a live verdict is never evicted at random.
+	if s.Deny("example.com", src("198.51.100.7"), time.Minute, "c") {
+		t.Fatal("a full table took a deny for a new source by evicting a live challenge")
+	}
+	// But a challenge hidden beneath a live deny is not a verdict anyone can
+	// see: when a new block needs the room, it makes way. Six slots: two
+	// bots challenged (5m) then denied (1m) with room to spare keep their
+	// challenges beneath — six entries, full — and a new flooder's block
+	// lands by dropping what is beneath, not by refusing.
+	c3 := newClock()
+	s3 := New(Options{Now: c3.now, MaxSources: 6})
+	s3.SetZones(doc(zone("example.com", 0, 0)))
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
+		if !s3.Challenge("example.com", src(ip), 5*time.Minute, "flood") {
+			t.Fatalf("challenge %s refused", ip)
+		}
+	}
+	s3.Deny("example.com", src("198.51.100.8"), time.Minute, "a")
+	s3.Deny("example.com", src("198.51.100.9"), time.Minute, "b")
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
+		if !s3.Deny("example.com", src(ip), time.Minute, "flood") {
+			t.Fatalf("deny %s refused with room to spare", ip)
+		}
+	}
+	if n := len(s3.Verdicts()); n != 6 {
+		t.Fatalf("verdicts with two challenges beneath their denies = %d, want 6", n)
+	}
+	c3.add(2 * time.Second)
+	if !s3.Deny("example.com", src("198.51.100.7"), time.Minute, "c") {
+		t.Fatal("a full table refused a new block while challenges sat beneath live denies")
+	}
+	if n := len(s3.Verdicts()); n != 5 || s3.Challenged("example.com", src("198.51.100.1")) || !s3.Denied("example.com", src("198.51.100.1")) || !s3.Denied("example.com", src("198.51.100.7")) {
+		t.Fatalf("the beneath-challenges did not make way for the new block: verdicts=%d", n)
+	}
+	// The same room-making serves a challenge refused by its share: with the
+	// share held only by hidden challenges, a new flooder still gets the rung.
+	c4 := newClock()
+	s4 := New(Options{Now: c4.now, MaxSources: 8})
+	s4.SetZones(doc(zone("example.com", 0, 0)))
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4"} {
+		s4.Challenge("example.com", src(ip), 5*time.Minute, "flood")
+		s4.Deny("example.com", src(ip), time.Minute, "flood")
+	}
+	c4.add(2 * time.Second)
+	if !s4.Challenge("example.com", src("198.51.100.5"), 5*time.Minute, "flood") {
+		t.Fatal("hidden challenges kept the share from a new flooder")
 	}
 
 	// With room to spare, a challenge that OUTLIVES the deny stays beneath
