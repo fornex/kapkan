@@ -717,7 +717,8 @@ zones file says. `operator` rank, unscoped tokens only.
 
 `mode` is `manual`, `auto` or `off` (`off` clears the override, as `DELETE` does); `ttl_seconds`
 is `60..86400` and required unless `mode` is `off`; `reason` is for the log, the audit row and
-the console (at most 200 characters). An unknown zone is `404`; a zone in `policy.mode: none` is
+the API's answers — `override.reason` in `GET /api/v1/edge/zones/status` and this endpoint's
+own response (at most 200 characters). An unknown zone is `404`; a zone in `policy.mode: none` is
 `409` — nothing challenges there. The override travels in the zones document as
 `challenge_override` (parked polls are woken at once) and every node applies the effective mode
 on its fast path, so it ends at `until` brain or no brain. Audited as `edge_challenge` `set` /

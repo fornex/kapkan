@@ -95,10 +95,12 @@ challenged, or that had cleared the rung and floods anyway, is denied.
 Two headers are under Kapkan's control and can never be forged by a client: `X-Kapkan-Zone`
 (the zone name) always reaches the origin; `X-Kapkan-Mark` is present only when the source
 carries a mark and absent otherwise — a client-sent value of either is dropped. A source whose
-requests are almost all `4xx`/`5xx` is marked `errors`; in **dry-run** — the node's, the
-zone's `policy.dry_run`, or the rung's `challenge_options.dry_run` — every would-be denial
-becomes an allow marked `would-deny:<reason>` and every would-be challenge one marked
-`would-challenge:<why>`, so the origin sees exactly what live mode would have refused or asked.
+requests are almost all `4xx`/`5xx` is marked `errors`. In **dry-run** the origin sees exactly
+what live mode would have refused or asked: under the node's `dry_run` or the zone's
+`policy.dry_run` every would-be denial becomes an allow marked `would-deny:<reason>` and every
+would-be challenge one marked `would-challenge:<why>`; under the rung's own
+`challenge_options.dry_run` only the challenge is previewed (`would-challenge:<why>`) while the
+ceiling and the block enforce as before.
 
 The node keeps a bounded number of sources per zone; when the table is full a new source is
 passed **untracked** (default-pass) and counted, never refused for lack of room.

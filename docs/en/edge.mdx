@@ -217,10 +217,10 @@ it, each a floor the layer below cannot undo:
 | The zone's `policy.dry_run` (default `false`) | the zones file | every decision of this zone, on every node — a zone can only be *more* watch-only than its node |
 | The rung's `challenge_options.dry_run` (default **`true`**) | the zones file | the rung alone: challenges are previewed, the ceiling and the block enforce as the layers above say |
 
-Under any of them a would-be denial reaches the origin as an allow marked
-`X-Kapkan-Mark: would-deny:rate` (or `would-deny:concurrency`, `would-deny:table:flood`), and a
-would-be challenge as `would-challenge:manual`, `would-challenge:zone:<reason>` or
-`would-challenge:table:flood` — so you can grep your origin's logs, watch
+Under the first two a would-be denial reaches the origin as an allow marked
+`X-Kapkan-Mark: would-deny:rate` (or `would-deny:concurrency`, `would-deny:table:flood`); under
+any of the three a would-be challenge reaches it as `would-challenge:manual`,
+`would-challenge:zone:<reason>` or `would-challenge:table:flood` — so you can grep your origin's logs, watch
 `kapkan_edge_decisions_total{result="would_deny"|"would_challenge"}` and read **who would have
 been challenged** before a single client is asked: every node reports its zones' last window
 with the busiest sources and the strongest thing it did — or would have done — to each, the brain
