@@ -130,8 +130,8 @@ func TestChallengePageShape(t *testing.T) {
 	// carries the timer and the stylesheet that shows the fallback at once.
 	for _, want := range []string{
 		`<html lang="ru">`, "Проверяем браузер", `<p id="kapkan-status" role="status"></p>`, `<p id="kapkan-count" aria-hidden="true"></p>`,
-		`<noscript><meta http-equiv="refresh" content="7;url=/_kapkan/clearance/nojs?t=` + ticket + `"><link rel="stylesheet" href="/_kapkan/clearance/a/nojs.`,
-		`<div id="kapkan-fallback">`, "Если страница не продолжится сама",
+		`<noscript><meta http-equiv="refresh" content="7;url=/_kapkan/clearance/nojs?t=` + ticket + `"></noscript>`,
+		`<div id="kapkan-fallback" role="status">`, `<script src="/_kapkan/clearance/a/app.`, "Если страница не продолжится сама",
 		`<form method="get" action="/_kapkan/clearance/nojs">`, `<form id="kapkan-answer" method="post" action="/_kapkan/clearance/answer" hidden>`,
 		`name="return" value="/cart?x=1"`, `<button type="submit">Продолжить</button>`,
 	} {
@@ -145,10 +145,9 @@ func TestChallengePageShape(t *testing.T) {
 	if strings.Contains(body, "http://") || strings.Contains(body, "https://") {
 		t.Error("the page references an external resource")
 	}
-	// The three assets by content hash, immutable, right types; nothing else
-	// there.
+	// Both assets by content hash, immutable, right types; nothing else there.
 	assets := assetRe.FindAllString(body, -1)
-	if len(assets) != 3 {
+	if len(assets) != 2 {
 		t.Fatalf("assets in page: %v", assets)
 	}
 	for _, a := range assets {
@@ -218,6 +217,28 @@ func TestChallengeRefusals(t *testing.T) {
 	s.Now = func() time.Time { return t0.Add(5 * time.Second) }
 	if r := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket), nil, ""); r.Code != http.StatusSeeOther || r.Header().Get("Location") != long {
 		t.Fatalf("long ticket: %d %q", r.Code, r.Header().Get("Location"))
+	}
+}
+
+// TestTooEarlyRetriesALongTicket pins that the too-early notice retries the
+// ticket itself even when the ticket — carrying a long return path — is
+// longer than a return path may be: the link and the refresh name the ticket
+// URL, never "/".
+func TestTooEarlyRetriesALongTicket(t *testing.T) {
+	s, _, _ := newFixture(t)
+	h := s.Handler()
+	long := "/search?" + strings.Repeat("filter=value&", 120)
+	_, _, ticket := challengePage(t, h, map[string]string{"X-Kapkan-URI": long})
+	nojs := "/_kapkan/clearance/nojs?t=" + url.QueryEscape(ticket)
+	if len(nojs) <= 2048 {
+		t.Fatalf("the ticket URL is %d bytes; the case wants one over the return-path bound", len(nojs))
+	}
+	early := do(h, http.MethodGet, nojs, nil, "")
+	if b := early.Body.String(); early.Code != 403 || !strings.Contains(b, `<a href="`+nojs+`">Try again</a>`) || !strings.Contains(b, `content="5;url=`+nojs+`"`) || strings.Contains(b, `<a href="/">`) {
+		t.Fatalf("too early with a long ticket: %d %s", early.Code, b)
+	}
+	if selfLink("/cart?x=1") || selfLink(nojs+"<") || !selfLink(nojs) {
+		t.Fatal("selfLink shape")
 	}
 }
 

@@ -136,18 +136,21 @@
   var fallback = document.getElementById("kapkan-fallback");
   var block = document.getElementById("kapkan-puzzle");
   if (!status || !form || !block) { return; }
+  // The Continue form is there for anyone the script does not serve, so it
+  // is VISIBLE until this script — as its first act, before it can fail —
+  // hides it; every bail-out below puts it back.
+  if (fallback) { fallback.hidden = true; }
 
-  // showFallback puts the timed ticket's Continue in front of the visitor
-  // now (the stylesheet would reveal it by itself after a while) and says so
-  // in the status line, which assistive technology announces. With keep, the
-  // solver goes on beside it — a slow client gets the timed path without
-  // losing the puzzle.
+  // showFallback puts the timed ticket's Continue back in front of the
+  // visitor; the block is a live region, so its sentence is announced. Without
+  // keep the solving status is cleared (its pulse with it): the solver is
+  // done for. With keep the solver goes on beside it — a slow client gets the
+  // timed path without losing the puzzle.
   function showFallback(keep) {
-    if (fallback) { fallback.hidden = false; fallback.className = "kapkan-now"; }
+    if (fallback) { fallback.hidden = false; }
     if (!keep) {
       if (count) { count.textContent = ""; }
-      var said = fallback && fallback.querySelector("p");
-      if (status && said) { status.textContent = said.textContent; }
+      if (status) { status.textContent = ""; }
     }
   }
 
@@ -170,7 +173,6 @@
   var workers = [];
   var attempts = {}; // per lane
 
-  if (fallback) { fallback.hidden = true; }
   // Announced once by assistive technology (role=status); the moving counter
   // is a separate element it does not read.
   status.textContent = w[0];
@@ -205,6 +207,13 @@
     if (count) { count.textContent = ""; }
     form.elements.solution.value = solution;
     form.submit();
+  }
+  // failed ends the search — the main lane died — and gives the visitor the
+  // sure way through now, whatever the Workers were doing.
+  function failed() {
+    over = true;
+    stopWorkers();
+    showFallback(false);
   }
   document.addEventListener("visibilitychange", function () {
     // Back from a long stretch in the background: whatever the lanes did,
@@ -249,19 +258,19 @@
   var lastReport = Date.now();
   function slice() {
     if (over) { return; }
+    var found = null;
     try {
       var t0 = Date.now();
       do {
-        var found = main.step(256);
-        if (found !== null) { finish(found); return; }
-      } while (Date.now() - t0 < SLICE_MS);
-      if (t0 - lastReport > 900) { lastReport = t0; progress("m", main.attempts()); }
+        found = main.step(256);
+      } while (found === null && Date.now() - t0 < SLICE_MS);
+      if (found === null && t0 - lastReport > 900) { lastReport = t0; progress("m", main.attempts()); }
     } catch (e) {
-      // The main lane died: whatever the Workers do, the visitor gets the
-      // sure way through now.
+      // The main lane died: the visitor gets the sure way through now.
       failed();
       return;
     }
+    if (found !== null) { finish(found); return; }
     yieldTo(slice);
   }
   slice();

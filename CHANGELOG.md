@@ -214,9 +214,10 @@ security-relevant.
   — host-only, so a sibling zone can never read it, and bound to zone and source key, so it is
   useless elsewhere. **No JavaScript** is a first-class path, not an afterthought: the page
   carries a timed ticket (redeemable four seconds to two minutes after issue) both as a
-  `<noscript>` meta refresh and as a Continue button that shows itself when the script does not
-  take over (JavaScript off, a browser without WebCrypto, the script blocked), and it earns the
-  shorter five-minute `nojs` clearance. Every refusal a browser can meet is a page with the way
+  `<noscript>` meta refresh and as a Continue button that stays in place unless the script hides it
+  as its first act — JavaScript off, a blocked or broken script and an engine that fails the
+  solver's self-check all leave it there, and it comes back beside a solve that runs long —
+  and it earns the shorter five-minute `nojs` clearance. Every refusal a browser can meet is a page with the way
   forward — a too-early ticket retries itself, an expired one and a stale or wrong answer lead
   back to the page the visitor came from, the issuance cap says to wait a minute — and the compact
   JSON is kept for clients that post JSON. The page signs with the decision service's own keys

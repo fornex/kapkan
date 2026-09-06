@@ -117,11 +117,15 @@ const (
 // needs no CSP allowance), one script and one stylesheet by content hash,
 // a status line announced once and a counter assistive technology does not
 // read, and a FALLBACK that does not depend on the script: the timed ticket
-// (meta refresh, JavaScript off) and its Continue form, which shows itself
-// after a while if the script never took over — blocked, or a browser
-// without WebCrypto — at once when the script asks for it, and at once when
-// JavaScript is off (the <noscript> stylesheet). Nobody depends on the
-// timer, the script or the button alone (§5: accessibility is a review gate).
+// (a <noscript> meta refresh for JavaScript off) and its Continue form, which
+// is VISIBLE unless the script hides it — its first act, before anything can
+// fail — so JavaScript off, a blocked or broken script, and an engine that
+// fails the solver's self-check all leave the button in place; the script
+// puts it back on every bail-out and beside a solve that runs long. The
+// block is a live region, so its appearance is announced. The script is not
+// deferred: it sits after the form and runs while the page parses, so the
+// button is hidden before the first paint. Nobody depends on the timer, the
+// script or the button alone (§5: accessibility is a review gate).
 var challengeTmpl = template.Must(template.New("challenge").Parse(`<!DOCTYPE html>
 <html lang="{{.L.Tag}}">
 <head>
@@ -130,7 +134,7 @@ var challengeTmpl = template.Must(template.New("challenge").Parse(`<!DOCTYPE htm
 <meta name="robots" content="noindex, nofollow">
 <title>{{.L.Title}}</title>
 <link rel="stylesheet" href="{{.CSS}}">
-<noscript><meta http-equiv="refresh" content="{{.Refresh}};url={{.NoJSURL}}"><link rel="stylesheet" href="{{.NoJSCSS}}"></noscript>
+<noscript><meta http-equiv="refresh" content="{{.Refresh}};url={{.NoJSURL}}"></noscript>
 </head>
 <body>
 <main>
@@ -138,7 +142,7 @@ var challengeTmpl = template.Must(template.New("challenge").Parse(`<!DOCTYPE htm
 <p>{{.L.Lead}}</p>
 <p id="kapkan-status" role="status"></p>
 <p id="kapkan-count" aria-hidden="true"></p>
-<div id="kapkan-fallback">
+<div id="kapkan-fallback" role="status">
 <p>{{.L.Fallback}}</p>
 <form method="get" action="{{.NoJSPath}}">
 <input type="hidden" name="t" value="{{.Ticket}}">
@@ -151,7 +155,7 @@ var challengeTmpl = template.Must(template.New("challenge").Parse(`<!DOCTYPE htm
 <input type="hidden" name="return" value="{{.Puzzle.Return}}">
 </form>
 <script type="application/json" id="kapkan-puzzle">{{.PuzzleJSON}}</script>
-<script src="{{.JS}}" defer></script>
+<script src="{{.JS}}"></script>
 </main>
 <footer><p>{{.L.Footer}}</p></footer>
 </body>
@@ -206,6 +210,34 @@ type noticeData struct {
 	RefreshURL template.URL
 }
 
+// selfLink reports whether link is the page's own no-JS ticket URL — the
+// public path, a query of one ticket in the characters a ticket is made of,
+// no longer than a ticket may be. Only such a link skips the return-path
+// check (a ticket carries a return path of up to 2048 bytes and so outgrows
+// that bound).
+func selfLink(link string) bool {
+	rest, ok := strings.CutPrefix(link, nojsPath+"?t=")
+	if !ok || rest == "" || len(rest) > 4096 {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		if !ticketByte(rest[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// ticketByte reports whether c may appear in a ticket as it travels in a URL:
+// base64url, dots, and the percent an escaper may add.
+func ticketByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return c == '.' || c == '_' || c == '-' || c == '%'
+}
+
 // csp is the page's own policy: its script and stylesheet by hash-named
 // URL on this host, a form to this host, nothing else — no frames, no
 // images, no third parties. The script starts a Worker from its own URL,
@@ -217,7 +249,7 @@ func (s *Server) renderChallenge(w http.ResponseWriter, r *http.Request, req *re
 	// A data block is not executed, but "</script>" inside it would end it:
 	// json.Marshal escapes '<' and '>' as < / >, so it cannot.
 	data := challengeData{
-		L: req.lang, CSS: s.cssURL, JS: s.appURL, NoJSCSS: s.nojsURL, Puzzle: p, PuzzleJSON: template.JS(raw), Ticket: ticket,
+		L: req.lang, CSS: s.cssURL, JS: s.appURL, Puzzle: p, PuzzleJSON: template.JS(raw), Ticket: ticket,
 		NoJSPath: nojsPath, NoJSURL: template.URL(nojsPath + "?t=" + ticket), Refresh: nojsRefreshSeconds, AnswerPath: answerPath,
 	}
 	h := w.Header()
@@ -239,7 +271,10 @@ func (s *Server) renderChallenge(w http.ResponseWriter, r *http.Request, req *re
 // that ENDS the attempt (stopped: expired, wrong, the cap) says so in its
 // title and heading; one that only asks to wait keeps the challenge's.
 func (s *Server) renderNotice(w http.ResponseWriter, req *request, status int, stopped bool, message, linkText, link string, refresh int) {
-	if !clearance.ValidReturnPath(link) {
+	// A link the page composed itself — the ticket's own URL, longer than a
+	// return path may be — is trusted as such; anything else must be a
+	// same-host return path.
+	if !selfLink(link) && !clearance.ValidReturnPath(link) {
 		link = "/"
 	}
 	title, heading := req.lang.Title, req.lang.Heading
