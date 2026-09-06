@@ -30,6 +30,12 @@ p { margin: 0 0 1rem; }
 #kapkan-fallback.kapkan-now { visibility: visible; animation: none; }
 #kapkan-fallback[hidden] { display: none; }
 @keyframes kapkan-reveal { to { visibility: visible; } }
+/* A visitor who turned animations off would never see the timed reveal: for
+   them the fallback is there from the start (the script hides it at once
+   when it runs). */
+@media (prefers-reduced-motion: reduce) {
+  #kapkan-fallback { visibility: visible; animation: none; }
+}
 form { margin: 1rem 0; }
 button {
   font: inherit; font-weight: 600; color: var(--bg); background: var(--fg);

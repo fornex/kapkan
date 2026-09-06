@@ -26,6 +26,7 @@ type locale struct {
 	Busy     string // the issuance cap held: wait a minute
 	Again    string // the link that retries the ticket
 	Retry    string // the link back to the page the client came from
+	Stopped  string // the title and heading of a notice that ends the attempt (expired, busy)
 	Footer   string
 }
 
@@ -38,7 +39,8 @@ var locales = map[string]*locale{
 		Expired: "This took too long. Go back to the page and start over.",
 		Busy:    "Too many attempts from your network right now. Wait a minute and try again.",
 		Again:   "Try again", Retry: "Start over",
-		Footer: "Protected by Kapkan. No cookies other than the one that lets you through, no tracking."},
+		Stopped: "Could not continue",
+		Footer:  "Protected by Kapkan. No cookies other than the one that lets you through, no tracking."},
 	"ru": {Tag: "ru", Title: "Одну секунду", Heading: "Проверяем браузер",
 		Lead:    "На сайт сейчас повышенная нагрузка. Ваш браузер выполняет короткое вычисление, чтобы показать, что это браузер; страница продолжится сама.",
 		Working: "Считаем…", Done: "Готово, продолжаем…",
@@ -47,7 +49,8 @@ var locales = map[string]*locale{
 		Expired: "Прошло слишком много времени. Вернитесь на страницу и начните заново.",
 		Busy:    "Слишком много попыток из вашей сети. Подождите минуту и попробуйте ещё раз.",
 		Again:   "Попробовать ещё раз", Retry: "Начать заново",
-		Footer: "Под защитой Kapkan. Никаких cookie, кроме пропуска, никакого отслеживания."},
+		Stopped: "Не удалось продолжить",
+		Footer:  "Под защитой Kapkan. Никаких cookie, кроме пропуска, никакого отслеживания."},
 	"de": {Tag: "de", Title: "Einen Moment", Heading: "Ihr Browser wird geprüft",
 		Lead:    "Diese Website ist stärker belastet als sonst. Ihr Browser führt eine kurze Berechnung aus, um zu zeigen, dass er ein Browser ist; die Seite geht von selbst weiter.",
 		Working: "Wird berechnet…", Done: "Fertig, weiter geht es…",
@@ -56,7 +59,8 @@ var locales = map[string]*locale{
 		Expired: "Das hat zu lange gedauert. Gehen Sie zur Seite zurück und beginnen Sie von vorn.",
 		Busy:    "Zu viele Versuche aus Ihrem Netz. Warten Sie eine Minute und versuchen Sie es erneut.",
 		Again:   "Erneut versuchen", Retry: "Von vorn beginnen",
-		Footer: "Geschützt von Kapkan. Kein Cookie außer dem Passierschein, kein Tracking."},
+		Stopped: "Es ging nicht weiter",
+		Footer:  "Geschützt von Kapkan. Kein Cookie außer dem Passierschein, kein Tracking."},
 	"fr": {Tag: "fr", Title: "Un instant", Heading: "Vérification de votre navigateur",
 		Lead:    "Ce site est plus sollicité que d'habitude. Votre navigateur effectue un court calcul pour montrer qu'il est un navigateur ; la page continue toute seule.",
 		Working: "Calcul en cours…", Done: "Terminé, on continue…",
@@ -65,7 +69,8 @@ var locales = map[string]*locale{
 		Expired: "Cela a pris trop de temps. Revenez à la page et recommencez.",
 		Busy:    "Trop de tentatives depuis votre réseau. Attendez une minute et réessayez.",
 		Again:   "Réessayer", Retry: "Recommencer",
-		Footer: "Protégé par Kapkan. Aucun cookie autre que le laissez-passer, aucun pistage."},
+		Stopped: "Impossible de continuer",
+		Footer:  "Protégé par Kapkan. Aucun cookie autre que le laissez-passer, aucun pistage."},
 	"es": {Tag: "es", Title: "Un instante", Heading: "Comprobando su navegador",
 		Lead:    "Este sitio tiene más carga de lo habitual. Su navegador hace un breve cálculo para demostrar que es un navegador; la página continúa por sí sola.",
 		Working: "Calculando…", Done: "Listo, continuamos…",
@@ -74,7 +79,8 @@ var locales = map[string]*locale{
 		Expired: "Ha tardado demasiado. Vuelva a la página y empiece de nuevo.",
 		Busy:    "Demasiados intentos desde su red. Espere un minuto y vuelva a intentarlo.",
 		Again:   "Intentar de nuevo", Retry: "Empezar de nuevo",
-		Footer: "Protegido por Kapkan. Ninguna cookie salvo el pase, ningún rastreo."},
+		Stopped: "No se pudo continuar",
+		Footer:  "Protegido por Kapkan. Ninguna cookie salvo el pase, ningún rastreo."},
 }
 
 // pickLocale reads Accept-Language (a bounded, client-controlled header) and
@@ -160,13 +166,13 @@ var noticeTmpl = template.Must(template.New("notice").Parse(`<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>{{.L.Title}}</title>
+<title>{{.Title}}</title>
 <link rel="stylesheet" href="{{.CSS}}">
 {{if .Refresh}}<meta http-equiv="refresh" content="{{.Refresh}};url={{.RefreshURL}}">
 {{end}}</head>
 <body>
 <main>
-<h1>{{.L.Heading}}</h1>
+<h1>{{.Heading}}</h1>
 <p>{{.Message}}</p>
 <p><a href="{{.Link}}">{{.LinkText}}</a></p>
 </main>
@@ -191,6 +197,8 @@ type challengeData struct {
 type noticeData struct {
 	L          *locale
 	CSS        string
+	Title      string
+	Heading    string
 	Message    string
 	Link       string
 	LinkText   string
@@ -227,10 +235,16 @@ func (s *Server) renderChallenge(w http.ResponseWriter, r *http.Request, req *re
 }
 
 // renderNotice answers status with a sentence and a link; a refresh of n
-// seconds to the link retries it by itself (the too-early ticket).
-func (s *Server) renderNotice(w http.ResponseWriter, req *request, status int, message, linkText, link string, refresh int) {
+// seconds to the link retries it by itself (the too-early ticket). A notice
+// that ENDS the attempt (stopped: expired, wrong, the cap) says so in its
+// title and heading; one that only asks to wait keeps the challenge's.
+func (s *Server) renderNotice(w http.ResponseWriter, req *request, status int, stopped bool, message, linkText, link string, refresh int) {
 	if !clearance.ValidReturnPath(link) {
 		link = "/"
+	}
+	title, heading := req.lang.Title, req.lang.Heading
+	if stopped {
+		title, heading = req.lang.Stopped, req.lang.Stopped
 	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
@@ -238,7 +252,7 @@ func (s *Server) renderNotice(w http.ResponseWriter, req *request, status int, m
 	h.Set("Content-Language", req.lang.Tag)
 	w.WriteHeader(status)
 	_ = noticeTmpl.Execute(w, noticeData{
-		L: req.lang, CSS: s.cssURL, Message: message, Link: link, LinkText: linkText,
+		L: req.lang, CSS: s.cssURL, Title: title, Heading: heading, Message: message, Link: link, LinkText: linkText,
 		Refresh: refresh, RefreshURL: template.URL(link),
 	})
 }

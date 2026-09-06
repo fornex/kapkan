@@ -288,7 +288,10 @@ func nonceFor(key Key, zone, sourceKey, returnPath string, bucket int64) string 
 }
 
 // checkReturnPath admits only an absolute path on this host: no scheme, no
-// authority, no control bytes — the answer endpoint redirects here.
+// authority, no control bytes, no backslash — the answer endpoint redirects
+// here, and a browser reads "/\host" as "//host" (a backslash is a slash in
+// an http URL's special-scheme parsing), which would make the signed path an
+// off-host redirect.
 func checkReturnPath(p string) error {
 	if p == "" || p[0] != '/' || strings.HasPrefix(p, "//") || len(p) > maxReturnPath {
 		return errors.New("clearance: return path must be an absolute path on this host")
@@ -296,6 +299,9 @@ func checkReturnPath(p string) error {
 	for i := 0; i < len(p); i++ {
 		if p[i] < 0x20 || p[i] == 0x7f {
 			return errors.New("clearance: return path carries a control byte")
+		}
+		if p[i] == '\\' {
+			return errors.New("clearance: return path carries a backslash")
 		}
 	}
 	return nil
@@ -325,7 +331,11 @@ type Policy struct {
 const (
 	TicketMinWait = 4 * time.Second
 	TicketMaxAge  = 120 * time.Second
-	maxTicket     = 512
+	// maxTicket bounds a presented ticket. Every ticket NewTicket mints must
+	// fit: the return path travels inside it base64-encoded (a 2048-byte
+	// path is 2731 characters), plus the key id, the issue time and the MAC —
+	// and it rides in a URL query, far under a terminator's header buffer.
+	maxTicket = 4096
 )
 
 // NewTicket issues the no-JS ticket for (zone, source key, return path) at

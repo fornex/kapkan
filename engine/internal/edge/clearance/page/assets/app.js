@@ -68,11 +68,18 @@
     return h0;
   }
 
-  // selfCheck: SHA-256("abc") begins with ba7816bf.
+  // selfCheck: SHA-256("abc") begins with ba7816bf — and the search step
+  // itself runs (typed-array fill, clz32, the padding path), so an engine
+  // that would throw in the loop is found out before the fallback is hidden.
   function selfCheck() {
-    var m = new Uint8Array(64);
-    m[0] = 0x61; m[1] = 0x62; m[2] = 0x63; m[3] = 0x80; m[63] = 24;
-    return sha256First(m, 64) === (0xba7816bf | 0);
+    try {
+      var m = new Uint8Array(64);
+      m[0] = 0x61; m[1] = 0x62; m[2] = 0x63; m[3] = 0x80; m[63] = 24;
+      if (sha256First(m, 64) !== (0xba7816bf | 0)) { return false; }
+      return lane("ab", "c", 0).step(1) !== null;
+    } catch (e) {
+      return false;
+    }
   }
 
   // lane searches candidates "<tag><n>" (n in base 36) appended to the
@@ -131,10 +138,17 @@
   if (!status || !form || !block) { return; }
 
   // showFallback puts the timed ticket's Continue in front of the visitor
-  // now (the stylesheet would reveal it by itself after a while).
-  function showFallback() {
+  // now (the stylesheet would reveal it by itself after a while) and says so
+  // in the status line, which assistive technology announces. With keep, the
+  // solver goes on beside it — a slow client gets the timed path without
+  // losing the puzzle.
+  function showFallback(keep) {
     if (fallback) { fallback.hidden = false; fallback.className = "kapkan-now"; }
-    if (count) { count.textContent = ""; }
+    if (!keep) {
+      if (count) { count.textContent = ""; }
+      var said = fallback && fallback.querySelector("p");
+      if (status && said) { status.textContent = said.textContent; }
+    }
   }
 
   var puzzle;
@@ -160,6 +174,10 @@
   // Announced once by assistive technology (role=status); the moving counter
   // is a separate element it does not read.
   status.textContent = w[0];
+  // A solve that is taking long — a slow device, a high difficulty — gets the
+  // timed path offered beside it: the ticket is redeemable from 4 s to 120 s
+  // after issue, so from here on Continue is the sure way through.
+  setTimeout(function () { if (!over) { showFallback(true); } }, 20000);
 
   function progress(tag, n) {
     attempts[tag] = n;
@@ -231,12 +249,19 @@
   var lastReport = Date.now();
   function slice() {
     if (over) { return; }
-    var t0 = Date.now();
-    do {
-      var found = main.step(256);
-      if (found !== null) { finish(found); return; }
-    } while (Date.now() - t0 < SLICE_MS);
-    if (t0 - lastReport > 900) { lastReport = t0; progress("m", main.attempts()); }
+    try {
+      var t0 = Date.now();
+      do {
+        var found = main.step(256);
+        if (found !== null) { finish(found); return; }
+      } while (Date.now() - t0 < SLICE_MS);
+      if (t0 - lastReport > 900) { lastReport = t0; progress("m", main.attempts()); }
+    } catch (e) {
+      // The main lane died: whatever the Workers do, the visitor gets the
+      // sure way through now.
+      failed();
+      return;
+    }
     yieldTo(slice);
   }
   slice();
