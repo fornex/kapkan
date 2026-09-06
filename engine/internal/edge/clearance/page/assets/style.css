@@ -21,21 +21,11 @@ h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 .75rem; text-wrap: balanc
 p { margin: 0 0 1rem; }
 #kapkan-status, #kapkan-count { min-height: 1.5rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 #kapkan-count { margin-top: -1rem; }
-/* The fallback — the timed ticket's Continue — is for when the script does
-   not take over: blocked, failed, or a browser without WebCrypto. It reveals
-   itself after a while on its own (no script needed), at once when the
-   script asks (.kapkan-now), and never while the solver runs ([hidden]).
-   With JavaScript off, nojs.css shows it at once. */
-#kapkan-fallback { visibility: hidden; animation: kapkan-reveal 0s linear 15s forwards; }
-#kapkan-fallback.kapkan-now { visibility: visible; animation: none; }
+/* The fallback — the timed ticket's Continue — is visible unless the script,
+   as its first act, hides it; the script puts it back when it cannot solve
+   and beside a solve that runs long. No animation, no timer: nothing a user
+   style or a blocked script could switch off. */
 #kapkan-fallback[hidden] { display: none; }
-@keyframes kapkan-reveal { to { visibility: visible; } }
-/* A visitor who turned animations off would never see the timed reveal: for
-   them the fallback is there from the start (the script hides it at once
-   when it runs). */
-@media (prefers-reduced-motion: reduce) {
-  #kapkan-fallback { visibility: visible; animation: none; }
-}
 form { margin: 1rem 0; }
 button {
   font: inherit; font-weight: 600; color: var(--bg); background: var(--fg);

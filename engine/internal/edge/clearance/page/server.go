@@ -43,6 +43,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -99,7 +100,7 @@ const (
 	headerClearance = "X-Kapkan-Clearance"
 )
 
-//go:embed assets/app.js assets/style.css assets/nojs.css
+//go:embed assets/app.js assets/style.css
 var assetFS embed.FS
 
 // Server serves the clearance page over a unix socket.
@@ -119,11 +120,10 @@ type Server struct {
 	// means the defaults.
 	IssuePerSource, IssuePerZone int
 
-	once    sync.Once
-	assets  map[string]asset // by URL path
-	appURL  string
-	cssURL  string
-	nojsURL string
+	once   sync.Once
+	assets map[string]asset // by URL path
+	appURL string
+	cssURL string
 
 	mu        sync.Mutex
 	perSource map[capKey]*capWindow
@@ -166,7 +166,6 @@ func (s *Server) init() {
 		s.assets = make(map[string]asset)
 		s.appURL = s.addAsset("app", "js", "text/javascript; charset=utf-8")
 		s.cssURL = s.addAsset("style", "css", "text/css; charset=utf-8")
-		s.nojsURL = s.addAsset("nojs", "css", "text/css; charset=utf-8")
 	})
 }
 
@@ -454,7 +453,10 @@ func (s *Server) serveNoJS(w http.ResponseWriter, r *http.Request, req *request)
 		// behind the issuer's: say so, and retry this same ticket by itself
 		// after the wait.
 		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "invalid").Inc()
-		s.renderNotice(w, req, http.StatusForbidden, false, req.lang.TooEarly, req.lang.Again, r.URL.RequestURI(), tooEarlyRetrySecs)
+		// The retry link is this same ticket's URL, composed here from the
+		// ticket that just verified — not the request's own URI, whose length
+		// a return path's bound does not cover.
+		s.renderNotice(w, req, http.StatusForbidden, false, req.lang.TooEarly, req.lang.Again, nojsPath+"?t="+url.QueryEscape(r.URL.Query().Get("t")), tooEarlyRetrySecs)
 	default:
 		// Expired, or not ours (another source, a dead key, tampering): the
 		// way forward is the page the client came from, which the ticket names
