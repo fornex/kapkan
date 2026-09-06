@@ -151,6 +151,23 @@ func telling(state string) bool {
 	return false
 }
 
+// shedByLimit counts the would-be sources the body limit made the report
+// shed: per zone still in the trimmed report, what its count grew by over the
+// untrimmed one. A zone dropped whole is ZonesTruncated's to tell, not this.
+func shedByLimit(raw, trimmed api.EdgeReport) int {
+	before := make(map[string]int, len(raw.Zones))
+	for _, z := range raw.Zones {
+		before[z.Zone] = z.SourcesTruncated
+	}
+	n := 0
+	for _, z := range trimmed.Zones {
+		if d := z.SourcesTruncated - before[z.Zone]; d > 0 {
+			n += d
+		}
+	}
+	return n
+}
+
 // shedSources sums the per-source entries the report shed across its zones.
 func shedSources(rep api.EdgeReport) int {
 	n := 0
