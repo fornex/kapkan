@@ -48,4 +48,19 @@ func TestZoneFlipLapseIsRetiredPerRequestAndLogged(t *testing.T) {
 	if strings.Count(buf.String(), "zone-wide challenge off") != 1 {
 		t.Fatalf("the lapse was logged again:\n%s", buf.String())
 	}
+
+	// A node with NO traffic: the periodic Tick retires the lapsed flip —
+	// gauge and log line — without a request to do it.
+	buf.Reset()
+	if !s.SetZoneChallenge("shop.example", true, c.t.Add(5*time.Second), "zone-rps") {
+		t.Fatal("re-flip refused")
+	}
+	c.add(20 * time.Second) // past the flip's hold and past sweepEvery
+	s.Tick()
+	s.mu.Lock()
+	on := s.zones["shop.example"].flipOn
+	s.mu.Unlock()
+	if on || strings.Count(buf.String(), "zone-wide challenge off") != 1 || !strings.Contains(buf.String(), "lapsed=true") {
+		t.Fatalf("Tick did not retire the lapsed flip: on=%v log:\n%s", on, buf.String())
+	}
 }

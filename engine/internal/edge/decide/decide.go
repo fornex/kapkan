@@ -302,6 +302,18 @@ type flipLapse struct {
 	until        time.Time
 }
 
+// Tick runs the periodic sweep on the node's clock — paced by sweepEvery like
+// the decision path's — so a lapsed zone-wide flip is retired (its gauge to
+// 0, its "off" line written) on a node with no request to retire it. The
+// node's one-second ticker calls it beside the aggregator's Tick.
+func (s *Service) Tick() {
+	now := s.now()
+	s.mu.Lock()
+	s.maybeSweep(now)
+	s.mu.Unlock()
+	s.flushLapsed()
+}
+
 // flushLapsed logs the flips retired since the last flush. Called WITHOUT
 // the mutex; it takes it only to detach the slice.
 func (s *Service) flushLapsed() {
