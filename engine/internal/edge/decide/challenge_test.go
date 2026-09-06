@@ -202,18 +202,11 @@ func TestAutoChallengesOnlyWhenTold(t *testing.T) {
 	if s.Challenged("shop.example", ip) {
 		t.Fatal("Challenged reported a denied source")
 	}
+	// The deny displaced the same source's challenge and mark: the block is
+	// the verdict now, and the room they held is the block's.
 	entries := s.Verdicts()
-	var ch, dn int
-	for _, e := range entries {
-		if e.Challenge {
-			ch++
-		}
-		if e.Deny {
-			dn++
-		}
-	}
-	if ch != 1 || dn != 1 || len(entries) != 3 {
-		t.Fatalf("verdicts: %+v", entries)
+	if len(entries) != 1 || !entries[0].Deny || entries[0].Reason != "abuse" {
+		t.Fatalf("verdicts after the deny: %+v (want the deny alone)", entries)
 	}
 	// The verdict expires with its TTL.
 	s.Clear("shop.example", ip)

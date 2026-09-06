@@ -77,12 +77,24 @@ type WindowStats struct {
 	Challenged     uint64
 	Cleared        uint64
 	WouldChallenge uint64
-	Status2xx      uint64
-	Status3xx      uint64
-	Status4xx      uint64
-	Status5xx      uint64
-	Bytes          uint64
-	RPS            float64
+	// WouldDeny counts the dry-run denials (any reason): refused traffic
+	// under enforcement, so not admitted load either.
+	WouldDeny uint64
+	Status2xx uint64
+	Status3xx uint64
+	Status4xx uint64
+	Status5xx uint64
+	Bytes     uint64
+	RPS       float64
+	// AdmittedRPS is the rate of decided requests the node did not refuse —
+	// nor WOULD have refused under enforcement — what reached the origin or
+	// the clearance page (a would-challenge preview included, like the 401
+	// it stands for). A table-denied bot's 403s, a flooder's 429s, their
+	// dry-run would-deny previews, the :80 redirects and undecided requests
+	// are not in it: it is the load the rung can act on, and what the
+	// zone-wide trigger measures — the same figure in dry-run as enforcing,
+	// so the preview shows the flips enforcement would make.
+	AdmittedRPS float64
 	// Sources is the top-N by requests for OnWindow (the report); OnWindowFull
 	// receives every source. SourcesTotal is how many there were.
 	Sources      []SourceStats
@@ -215,6 +227,9 @@ func (a *Aggregator) Observe(r Record) {
 	if wouldChallenge {
 		zs.WouldChallenge++
 	}
+	if wouldDeny != "" {
+		zs.WouldDeny++
+	}
 	if r.Undecided() {
 		zs.Undecided++
 	}
@@ -292,6 +307,9 @@ func (a *Aggregator) rollIfDue(now time.Time) (top, full []WindowStats) {
 		st := zw.stats
 		st.Elapsed = elapsed
 		st.RPS = float64(st.Requests) / elapsed.Seconds()
+		if refused := st.Denied + st.WouldDeny; st.Decided > refused {
+			st.AdmittedRPS = float64(st.Decided-refused) / elapsed.Seconds()
+		}
 		st.SourcesTotal = len(zw.sources)
 		st.Sources = make([]SourceStats, 0, len(zw.sources))
 		for _, s := range zw.sources {
