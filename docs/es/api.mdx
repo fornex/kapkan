@@ -339,8 +339,7 @@ ciclo de vida.
 
 ### GET /api/v1/audit
 
-Devuelve el registro de auditoría atribuido al operador: quién emitió cada `ban`, `unban` o
-`config_reload`, cuándo, y el resultado (incluidas las acciones **rechazadas**). Los registros van
+Devuelve el registro de auditoría atribuido al operador: quién emitió cada `ban`, `unban`, `config_reload`, `source_block` o `source_unblock`, cuándo, y el resultado (incluidas las acciones **rechazadas**). Los registros van
 de más reciente a más antiguo y el endpoint está acotado al tenant en el servidor. Acepta los parámetros de
 consulta opcionales `from`/`to` (RFC 3339), `action`
 (`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`) y `target` (una IP), y
