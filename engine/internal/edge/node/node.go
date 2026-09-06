@@ -748,12 +748,17 @@ func trimReport(rep api.EdgeReport) api.EdgeReport {
 	if fits() {
 		return rep
 	}
+	// The caller's report stays whole: the zones are copied before any is
+	// touched, and a shortened source list is a fresh slice — never the
+	// caller's array compacted in place — so what the body limit changed can
+	// be told from the untrimmed report afterwards.
+	rep.Zones = append([]api.EdgeReportZone(nil), rep.Zones...)
 	// The sources that tell nothing go first, uncounted: none of them is in
 	// the would-be set, so the set is as whole as before and the brain must
 	// not call it partial.
 	for i := range rep.Zones {
 		z := &rep.Zones[i]
-		kept := z.TopSources[:0]
+		kept := make([]api.EdgeReportSource, 0, len(z.TopSources))
 		for _, s := range z.TopSources {
 			if telling(s.State) {
 				kept = append(kept, s)

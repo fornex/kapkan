@@ -321,10 +321,13 @@ func (s SourceStats) Telling() bool {
 	return s.DeniedTable > 0 || s.Challenged > 0 || s.WouldDeny > 0 || s.WouldChallenge > 0
 }
 
-// WouldBe reports whether the node PREVIEWED a challenge or a deny for the
-// source — the would-be set edge-spec §8 asks the report to carry.
+// WouldBe reports whether the source is in the would-be set edge-spec §8
+// asks the report to carry: the node PREVIEWED a challenge or a deny for it
+// and did not refuse or challenge it for real in the same window — a refusal
+// outranks a preview, as the report's per-source state does, so the two
+// never disagree on who is in the set.
 func (s SourceStats) WouldBe() bool {
-	return s.WouldDeny > 0 || s.WouldChallenge > 0
+	return (s.WouldDeny > 0 || s.WouldChallenge > 0) && s.DeniedTable == 0 && s.Challenged == 0
 }
 
 // rank orders the bounded view: the would-be sources first, then the refused
