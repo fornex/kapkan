@@ -171,7 +171,9 @@ type EdgeChallengeLeverResponse struct {
 	Mode   string     `json:"mode,omitempty"`
 	Until  *time.Time `json:"until,omitempty"`
 	Reason string     `json:"reason,omitempty"`
-	// FileMode is policy.challenge as the zones file has it.
+	// FileMode is policy.challenge as the zones file has it — empty for a zone
+	// a reload has since removed from the file (whose lever can be cleared,
+	// never set); ZoneWatchOnly and RungWatchOnly are false there too.
 	FileMode string `json:"file_mode"`
 	// ZoneWatchOnly is the zone's policy.dry_run; RungWatchOnly its
 	// challenge_options.dry_run — on either, the lever previews rather than

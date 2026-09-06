@@ -310,6 +310,9 @@ type Service struct {
 type flipLapse struct {
 	zone, reason string
 	until        time.Time
+	// lapsed says the hold ran out; false when a document retired the flip
+	// (a lever or a file that made it inert) before its until.
+	lapsed bool
 }
 
 // Tick runs the periodic sweep on the node's clock — paced by sweepEvery like
@@ -332,7 +335,7 @@ func (s *Service) flushLapsed() {
 	s.lapsed = nil
 	s.mu.Unlock()
 	for _, l := range lapsed {
-		s.log.Info("zone-wide challenge off", "zone", l.zone, "reason", l.reason, "until", l.until.UTC().Format(time.RFC3339), "lapsed", true)
+		s.log.Info("zone-wide challenge off", "zone", l.zone, "reason", l.reason, "until", l.until.UTC().Format(time.RFC3339), "lapsed", l.lapsed)
 	}
 }
 
@@ -390,7 +393,12 @@ func (s *Service) SetZones(doc *edgedoc.Doc) {
 			if z.EffectiveChallenge(now) == edgedoc.ChallengeAuto {
 				st.flipOn, st.flipUntil, st.flipWhy = old.flipOn, old.flipUntil, old.flipWhy
 			} else {
+				// Retired by the document — a lever or a file that made the
+				// flip inert — not by its hold: the episode's closing line
+				// is owed all the same, so the log never leaves an "on …
+				// until T" open.
 				metrics.EdgeChallengeActive.WithLabelValues(z.Name).Set(0)
+				s.lapsed = append(s.lapsed, flipLapse{zone: z.Name, reason: old.flipWhy, until: old.flipUntil})
 			}
 		}
 		// The brain's lever is news once, when it arrives or changes.
@@ -408,6 +416,7 @@ func (s *Service) SetZones(doc *edgedoc.Doc) {
 	s.mu.Unlock()
 	// Said outside the lock, like every line of this file: a stalled logger
 	// must never hold up a decision.
+	s.flushLapsed()
 	for _, a := range announce {
 		s.log.Info("challenge override in effect", "zone", a.zone, "mode", a.o.Mode, "until", a.o.Until.UTC().Format(time.RFC3339), "reason", a.o.Reason)
 	}
@@ -836,14 +845,15 @@ func (zs *zoneState) mode(now time.Time) string {
 // is queued for flushLapsed, which the caller runs after releasing it.
 func (s *Service) retireLapsedFlip(zs *zoneState, now time.Time) {
 	// Retired when its hold has passed — or when the zone's mode is no longer
-	// auto (the brain's lever lapsed back to an off or manual file, or a
-	// manual lever took over): an inert flip must not read as active.
+	// auto (the brain's lever lapsed back to an off or manual file): an inert
+	// flip must not read as active. A lever ARRIVING over a live flip is a new
+	// document, and SetZones retires the flip itself, with the same line.
 	if !zs.flipOn || (now.Before(zs.flipUntil) && zs.mode(now) == edgedoc.ChallengeAuto) {
 		return
 	}
 	zs.flipOn = false
 	metrics.EdgeChallengeActive.WithLabelValues(zs.name).Set(0)
-	s.lapsed = append(s.lapsed, flipLapse{zone: zs.name, reason: zs.flipWhy, until: zs.flipUntil})
+	s.lapsed = append(s.lapsed, flipLapse{zone: zs.name, reason: zs.flipWhy, until: zs.flipUntil, lapsed: !now.Before(zs.flipUntil)})
 }
 
 // Complete records that a decided request for (zone, src) was logged by the
