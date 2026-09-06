@@ -289,7 +289,17 @@ security-relevant.
   §8's "who would have been challenged", for the console and the acceptance rig alike. The
   console gains an **Edge** view (shown when `edge.nodes[]` is configured; `/api/v1/status` now
   carries `edge_nodes_total`): the zones table with a challenge column (off / preview / active with
-  its reasons) and a "Who would be challenged" panel, in all five languages.
+  its reasons) and a "Who would be challenged" panel, in all five languages. The aggregator's
+  bounded view ranks the sources that tell something — refused, challenged, or previewed as either
+  — ahead of the busiest allowed ones, so a would-be source is never lost to a busier bystander,
+  and counts the telling ones its bound cut; the report carries `rung_dry_run` (the rung previews
+  on this node: the node's, the zone's or the rung's own watch-only switch) beside `dry_run`, so
+  the status (`rung_watch_only`) and the console tell an enforcing rung from a watching one by
+  state, not by guessing from a window's counters; zone entries a node cut from its report reach
+  the status as `zones_truncated` and the console says so; shedding the sources that tell nothing
+  is not a cut of the would-be set and is not called partial. A marked source's origin errors
+  count again (the mark had shadowed them, so the errors rule could not renew the mark it set),
+  and a node forgets the kept windows of zones the document no longer has.
 
 ## [1.7.0] - 2026-09-02
 

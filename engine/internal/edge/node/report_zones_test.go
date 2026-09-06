@@ -51,6 +51,12 @@ func TestNodeReportsRollups(t *testing.T) {
 	if rep.Zones[0].DryRun || !rep.Zones[1].DryRun || rep.Zones[0].Requests != 0 || rep.Zones[0].TopSources != nil {
 		t.Fatalf("zone flags before a window: %+v", rep.Zones)
 	}
+	// The rung's own layer: example.com wrote challenge_options.dry_run false
+	// on an enforcing node, so its rung bites; quiet.example is watch-only as
+	// a zone, so its rung previews whatever its options say.
+	if rep.Zones[0].RungDryRun || !rep.Zones[1].RungDryRun {
+		t.Fatalf("rung flags before a window: %+v", rep.Zones)
+	}
 	if rep.Zones[0].Challenge != edgedoc.ChallengeAuto || rep.Zones[1].Challenge != edgedoc.ChallengeOff {
 		t.Fatalf("zone modes: %q %q", rep.Zones[0].Challenge, rep.Zones[1].Challenge)
 	}
@@ -204,9 +210,10 @@ func TestTrimReportOrder(t *testing.T) {
 		t.Fatalf("a small report was trimmed: %+v", rep)
 	}
 	// A little over: the sources that tell nothing go first, and that is
-	// enough — every telling source survives, counted what went.
+	// enough — every telling source survives, and nothing is counted as cut:
+	// the would-be set is as whole as it was.
 	rep := trimReport(big(45, 20, 10))
-	if size(rep) > maxReportBytes || len(rep.Zones) != 45 || len(rep.Zones[0].TopSources) != 10 || rep.Zones[0].SourcesTruncated != 10 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
+	if size(rep) > maxReportBytes || len(rep.Zones) != 45 || len(rep.Zones[0].TopSources) != 10 || rep.Zones[0].SourcesTruncated != 0 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
 		t.Fatalf("a little over: size=%d sources=%d shed=%d trunc=%d/%d", size(rep), len(rep.Zones[0].TopSources), rep.Zones[0].SourcesTruncated, rep.CertsTruncated, rep.ZonesTruncated)
 	}
 	for _, s := range rep.Zones[0].TopSources {
@@ -220,8 +227,10 @@ func TestTrimReportOrder(t *testing.T) {
 	if size(rep) > maxReportBytes || len(rep.Zones) != 200 || len(rep.Certs) != 50 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
 		t.Fatalf("halving: size=%d zones=%d certs=%d trunc=%d/%d", size(rep), len(rep.Zones), len(rep.Certs), rep.CertsTruncated, rep.ZonesTruncated)
 	}
-	if z := rep.Zones[0]; len(z.TopSources) == 0 || len(z.TopSources) >= 10 || z.TopSources[0].Requests != 1000 || z.SourcesTruncated+len(z.TopSources) != 20 {
-		t.Fatalf("halving kept %d of 20 (shed %d), busiest %d", len(z.TopSources), z.SourcesTruncated, z.TopSources[0].Requests)
+	// Only the telling sources the halving cut are counted (the ten allowed
+	// ones went uncounted first).
+	if z := rep.Zones[0]; len(z.TopSources) == 0 || len(z.TopSources) >= 10 || z.TopSources[0].Requests != 1000 || z.SourcesTruncated+len(z.TopSources) != 10 {
+		t.Fatalf("halving kept %d of 10 telling (shed %d), busiest %d", len(z.TopSources), z.SourcesTruncated, z.TopSources[0].Requests)
 	}
 	// Certificates next: the tail goes, the zones stay whole.
 	rep = trimReport(big(100, 0, 3000))
@@ -232,5 +241,19 @@ func TestTrimReportOrder(t *testing.T) {
 	rep = trimReport(big(2000, 0, 0))
 	if size(rep) > maxReportBytes || rep.ZonesTruncated == 0 || len(rep.Zones)+rep.ZonesTruncated != 2000 || rep.Zones[0].Zone == "" {
 		t.Fatalf("zones last: size=%d zones=%d trunc=%d", size(rep), len(rep.Zones), rep.ZonesTruncated)
+	}
+}
+
+// TestPruneWindowsFollowsTheDocument pins that a kept window of a zone the
+// document no longer has is forgotten, and the others stay.
+func TestPruneWindowsFollowsTheDocument(t *testing.T) {
+	n := &Node{}
+	n.keepWindow(rollup.WindowStats{Zone: "a.example"})
+	n.keepWindow(rollup.WindowStats{Zone: "gone.example"})
+	n.mu.Lock()
+	n.pruneWindows([]string{"a.example", "new.example"})
+	n.mu.Unlock()
+	if _, ok := n.windows["a.example"]; !ok || len(n.windows) != 1 {
+		t.Fatalf("windows after the prune: %+v", n.windows)
 	}
 }

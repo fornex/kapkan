@@ -346,8 +346,13 @@ type EdgeReportZone struct {
 	At            time.Time `json:"at,omitzero"`
 	WindowSeconds float64   `json:"window_seconds,omitempty"`
 	// DryRun is the zone's EFFECTIVE watch-only state on this node: the node's
-	// own dry_run or the zone's policy.dry_run (E4.7).
-	DryRun bool `json:"dry_run,omitempty"`
+	// own dry_run or the zone's policy.dry_run (E4.7). RungDryRun is the
+	// rung's: DryRun, or the rung's own challenge_options.dry_run — where it
+	// is set, a challenge previews (would-challenge) rather than bites, so a
+	// consumer can tell an enforcing rung from a watching one by state, not
+	// by a window's counters.
+	DryRun     bool `json:"dry_run,omitempty"`
+	RungDryRun bool `json:"rung_dry_run,omitempty"`
 	// Challenge is the zone's challenge mode (policy.challenge as the node
 	// applies it): off, manual or auto.
 	Challenge string `json:"challenge,omitempty"`

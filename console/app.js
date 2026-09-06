@@ -40,7 +40,7 @@
     /* edge zones status (E4.5) — the same on-demand + freshness-guard shape:
        it merges the nodes' last ten-second windows, so a 10s refresh is the
        data's own pace */
-    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zones: [] },
+    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] },
     last: { rung: -1 }
   };
 
@@ -344,7 +344,7 @@
       API.getEdgeZones().then(function (r) {
         e.loading = false; e.fetchedAt = Date.now();
         e.ok = r.ok; e.forbidden = !!r.forbidden;
-        e.nodesAlive = r.nodesAlive; e.nodesReporting = r.nodesReporting; e.zones = r.zones;
+        e.nodesAlive = r.nodesAlive; e.nodesReporting = r.nodesReporting; e.zonesTruncated = r.zonesTruncated || 0; e.zones = r.zones;
         if (state.view === "edge") renderView();
       });
     },

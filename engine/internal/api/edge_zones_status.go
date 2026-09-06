@@ -21,6 +21,10 @@ type EdgeZonesStatusDoc struct {
 	NodesAlive     int              `json:"nodes_alive"`
 	NodesReporting int              `json:"nodes_reporting"`
 	Zones          []EdgeZoneStatus `json:"zones"`
+	// ZonesTruncated sums the zone entries the alive nodes cut from their
+	// reports to fit the size limit: those zones are missing or undercounted
+	// here, and a consumer must say so rather than show a shorter fleet.
+	ZonesTruncated int `json:"zones_truncated,omitempty"`
 }
 
 // EdgeZoneStatus is one zone across the alive nodes.
@@ -45,6 +49,11 @@ type EdgeZoneStatus struct {
 	// WatchOnly names the nodes on which the zone is watch-only (the node's
 	// dry_run or the zone's policy.dry_run): where the rung would not bite.
 	WatchOnly []string `json:"watch_only,omitempty"`
+	// RungWatchOnly names the nodes on which the RUNG previews rather than
+	// bites: the watch-only ones, plus those where the rung's own
+	// challenge_options.dry_run holds. A manual or auto zone challenges for
+	// real on the nodes not named here.
+	RungWatchOnly []string `json:"rung_watch_only,omitempty"`
 	// ChallengeActive names the nodes with a zone-wide challenge in force.
 	ChallengeActive []EdgeZoneChallengeNode `json:"challenge_active,omitempty"`
 	// WouldBe is the union, across nodes, of the sources the nodes previewed
@@ -127,6 +136,7 @@ func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
 	sets := make(map[string]map[string]*wouldBe)
 	for _, name := range names {
 		rep := reports[name]
+		doc.ZonesTruncated += rep.ZonesTruncated
 		if len(rep.Zones) == 0 {
 			continue
 		}
@@ -155,6 +165,9 @@ func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
 			zs.WouldChallenge += z.WouldChallenge
 			if z.DryRun {
 				zs.WatchOnly = append(zs.WatchOnly, name)
+			}
+			if z.RungDryRun {
+				zs.RungWatchOnly = append(zs.RungWatchOnly, name)
 			}
 			if z.ChallengeActive != nil {
 				zs.ChallengeActive = append(zs.ChallengeActive, EdgeZoneChallengeNode{Node: name, Reason: z.ChallengeActive.Reason, Until: z.ChallengeActive.Until, DryRun: z.ChallengeActive.DryRun})

@@ -489,6 +489,7 @@ func (n *Node) acceptDocument(ctx context.Context, body []byte, etag string, per
 	n.challenges.SetFanned(doc.ACMEChallenges)
 	n.mu.Lock()
 	n.doc, n.acceptedETag = doc, etag
+	n.pruneWindows(names)
 	n.mu.Unlock()
 	if persist {
 		if err := n.saveCached(body, etag); err != nil {
@@ -740,14 +741,15 @@ func trimReport(rep api.EdgeReport) api.EdgeReport {
 	if fits() {
 		return rep
 	}
+	// The sources that tell nothing go first, uncounted: none of them is in
+	// the would-be set, so the set is as whole as before and the brain must
+	// not call it partial.
 	for i := range rep.Zones {
 		z := &rep.Zones[i]
 		kept := z.TopSources[:0]
 		for _, s := range z.TopSources {
 			if telling(s.State) {
 				kept = append(kept, s)
-			} else {
-				z.SourcesTruncated++
 			}
 		}
 		z.TopSources = kept

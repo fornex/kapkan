@@ -105,6 +105,11 @@ type WindowStats struct {
 	// receives every source. SourcesTotal is how many there were.
 	Sources      []SourceStats
 	SourcesTotal int
+	// TellingTruncated counts the sources the TopSources bound cut that TOLD
+	// something — refused, challenged, or previewed as either — so a consumer
+	// knows the would-be set it sees is short, not that allowed sources went.
+	// Zero in the full stats.
+	TellingTruncated int
 	// Overflow reports that the zone's pair cap was hit: SourcesTotal is
 	// then a floor and unnamed sources were counted in the zone totals only.
 	Overflow bool
@@ -278,14 +283,18 @@ func (a *Aggregator) Observe(r Record) {
 			}
 		case wouldChallenge:
 			ss.WouldChallenge++
-		case r.Mark != "" && !r.Cleared():
-			ss.Marked++
 		case r.Undecided():
 			// Says nothing about the source.
 		case r.Status >= 500:
 			ss.Errors5xx++
 		case r.Status >= 400:
 			ss.Errors4xx++
+		}
+		// A reputation mark travels beside the status, not instead of it: a
+		// marked source's origin errors still count, so the rule that set the
+		// mark can renew it.
+		if r.Mark != "" && !r.Cleared() && wouldDeny == "" && !wouldChallenge {
+			ss.Marked++
 		}
 	}
 	a.mu.Unlock()
@@ -300,6 +309,14 @@ func (a *Aggregator) Tick() {
 	closedTop, closedFull := a.rollIfDue(a.now())
 	a.mu.Unlock()
 	a.emit(closedTop, closedFull)
+}
+
+// Telling reports whether the window's stats say the node did, or would have
+// done, something to the source — a table denial, a challenge, or a dry-run
+// preview of either. These are the sources the brain's would-be set and an
+// operator's eye need; an allowed, marked or cleared source tells nothing.
+func (s SourceStats) Telling() bool {
+	return s.DeniedTable > 0 || s.Challenged > 0 || s.WouldDeny > 0 || s.WouldChallenge > 0
 }
 
 // rollIfDue closes the current window when it has run its length, returning
@@ -327,7 +344,13 @@ func (a *Aggregator) rollIfDue(now time.Time) (top, full []WindowStats) {
 			s.RPS = float64(s.Requests) / elapsed.Seconds()
 			st.Sources = append(st.Sources, *s)
 		}
+		// The sources that tell something — refused, challenged, or previewed
+		// as either — rank first, so the bounded view never loses a would-be
+		// source to a busier allowed one; the busiest first within each kind.
 		sort.Slice(st.Sources, func(i, j int) bool {
+			if ti, tj := st.Sources[i].Telling(), st.Sources[j].Telling(); ti != tj {
+				return ti
+			}
 			if st.Sources[i].Requests != st.Sources[j].Requests {
 				return st.Sources[i].Requests > st.Sources[j].Requests
 			}
@@ -336,7 +359,14 @@ func (a *Aggregator) rollIfDue(now time.Time) (top, full []WindowStats) {
 		full = append(full, st)
 		truncated := st
 		if len(truncated.Sources) > limit {
-			truncated.Sources = truncated.Sources[:limit]
+			for _, s := range st.Sources[limit:] {
+				if s.Telling() {
+					truncated.TellingTruncated++
+				}
+			}
+			// A copy, not a reslice: a consumer that keeps the bounded view
+			// must not pin a flood's whole source array.
+			truncated.Sources = append([]SourceStats(nil), st.Sources[:limit]...)
 		}
 		top = append(top, truncated)
 	}
