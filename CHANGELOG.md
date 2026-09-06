@@ -324,6 +324,17 @@ security-relevant.
   lever as challenging, not as the file's `off`. **Upgrade the nodes first**: a node older than
   this release does not know `challenge_override`, follows its file, and is still listed by the
   response as a node the lever would bite; `GET /api/v1/edge/nodes` shows each node's version.
+- Edge track, E4.8 — the documentation of the rung, in all five languages. *Edge nodes* gains
+  *The proof-of-work rung* — the ladder, the clearance page, the lever, the three watch-only
+  layers and how to go live one layer at a time — with the failure table and the reading section
+  that go with it; the install guide's check and go-live steps, the rung's troubleshooting rows
+  and the fourth socket; the zones reference's `policy.dry_run`, `policy.challenge` and
+  `challenge_options.*` keys, a full example, and the request table's challenge reasons and
+  `cleared` marks; the API reference's `GET /api/v1/edge/zones/status` and the lever, the report's
+  zones section and the document's `clearance_keys` and `challenge_override`; the new
+  `kapkan_edge_decisions_total` results, `kapkan_edge_challenge_active` and
+  `kapkan_edge_clearance_total` in the metrics reference; the console's Edge view on the
+  dashboard page; `edge.state_file` and `socket_group` brought up to date.
 
 ## [1.7.0] - 2026-09-02
 
