@@ -475,6 +475,30 @@ headline and the long pole.
   ladder integration, console "who would be challenged" view.
   *Acceptance:* an HTTP flood from residential proxies collapses to challenge-passers in
   enforce mode; the same run in dry-run shows the would-be set and touches nothing.
+  *Passed 2026-09-06 (E4.9, `engine/scripts/labnet/edge-e4.sh`, 101/101 on stock nginx with a
+  Pebble-issued certificate):* switching the rung off/manual/auto three times moved the accepted
+  ETag and nothing else (no render, no reload — the clearance machinery is in every deciding
+  zone's file); under `manual` a plain client got the page (403, `no-store`, a CSP, no cookie), a
+  browser solved once and was served marked `cleared`, its cookie was refused from another
+  address and no longer cleared after `cookie_ttl_seconds`; a **64-source flood** at 2 rps each
+  (under the per-source ceiling of 5) tripped `auto.zone_rps: 40` within two windows — from the
+  flip on none of the 1 914 bot requests reached the origin (≥ 95 % answered with the page, no
+  cookie ever set), the browser kept being served, a plain client without a solver was
+  challenged too, and the flip lapsed on its own after its hold; **the same flood in dry-run**
+  reached the origin in full (3 782 of 3 782, marked `would-challenge:zone:zone-rps`), the fleet
+  status named the flip as a preview and the would-be set as partial (20 named of 64), no cookie
+  was set, the clearance page served nothing, no generation moved, nginx's error log stayed
+  quiet — and with the node in dry-run and the zone live the flood was still marked, not
+  refused (the node floor wins); the local ladder took a single flooder from 429 to the page to a
+  bare 403 over three windows, and a flooder that cleared the rung and flooded on was denied
+  without a second page; the no-JS ticket was refused early with a page and cleared after 4 s
+  with `cleared:nojs`; `/api/` passed without a clearance while `/api/../admin` did not, and a
+  POST under challenge got the JSON refusal; with the brain dead cookies kept verifying and a new
+  visitor still cleared, the node restarted from disk with the same keys, and the returned brain
+  served the same clearance keys (persisted in `edge.state_file`); the lever put an `off` zone
+  under challenge and back without a reload, audited both ways, refused a TTL under a minute and
+  a `mode: none` zone; the challenge page cost **−0.13 ms at p50** against a `mode: none` 200 on
+  the same node — as cheap as the origin round trip it replaces.
 - **E5 — QUIC/HTTP3 in earnest**: per-zone h3 (default off), Retry under load, Initial-rate
   XDP caps, ticket-key rotation for multi-node PoPs, 0-RTT policy, the "kill QUIC" lever
   (drop UDP/443 → clients fall back to TCP — cheap and already expressible as a static rule),

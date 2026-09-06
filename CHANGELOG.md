@@ -335,6 +335,20 @@ security-relevant.
   `kapkan_edge_decisions_total` results, `kapkan_edge_challenge_active` and
   `kapkan_edge_clearance_total` in the metrics reference; the console's Edge view on the
   dashboard page; `edge.state_file` and `socket_group` brought up to date.
+- Edge track, E4.9 — the E4 acceptance rig `engine/scripts/labnet/edge-e4.sh`: the E3 rig's
+  topology (brain, edge with stock nginx, origin, Pebble as a real ACME CA, clients) plus a
+  `botnet` netns of 64 sources, a python browser that solves the hashcash and keeps its cookie, a
+  no-JS client that follows the timed ticket, and a per-source flooder. Ten arms prove edge-spec
+  §8 for E4 on real nginx: the rung's switches never reload; manual enforcement, the cookie's
+  binding and expiry; the residential-proxy flood collapsing to challenge-passers (no bot reaches
+  the origin after the zone-wide flip, the browser does, a plain client is challenged too); the
+  same flood in dry-run touching nothing while the status names who would have been challenged
+  and the node's dry-run flooring the zone's; the local ladder (429 → page → 403, a cleared
+  flooder denied at once); the no-JS ticket; exempt paths and the JSON refusal for non-GET
+  clients; the brain killed mid-challenge (cookies verify, new visitors clear, the node restarts
+  from disk with its keys, the returned brain serves the same keys); the lever, audited; and the
+  challenge page's cost (−0.13 ms at p50 against a mode:none 200). 101/101 on the first complete
+  run; the results are recorded in edge-spec §8.
 
 ## [1.7.0] - 2026-09-02
 
