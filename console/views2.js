@@ -624,19 +624,24 @@
   function edgeChallengeCell(z) {
     var active = z.challenge_active || [];
     var nodes = z.nodes || 0, rungWatch = (z.rung_watch_only || []).length, biting = Math.max(0, nodes - rungWatch);
+    var previewWhy = "";
     if (active.length) {
       var reasons = {}, bite = 0;
       active.forEach(function (c) { reasons[c.reason || "manual"] = true; if (!c.dry_run) bite++; });
       var why = " · " + Object.keys(reasons).sort().join(", ");
-      if (bite === 0) return K.badge("badge--dry", I.t("ed.challenge.preview") + why);
-      return K.badge("badge--active", I.plural(bite, "edgeActiveOnNodes") + why, "shield-alert");
+      if (bite > 0) return K.badge("badge--active", I.plural(bite, "edgeActiveOnNodes") + why, "shield-alert");
+      /* every flip previews: said beside the mode, never INSTEAD of a rung
+         that bites on other nodes — fall through with the reasons */
+      previewWhy = why;
     }
     if (z.challenge === "manual" || z.challenge === "auto") {
-      if (biting === 0) return K.badge("badge--dry", I.t("ed.challenge.preview"));
+      if (biting === 0) return K.badge("badge--dry", I.t("ed.challenge.preview") + previewWhy);
       var label = I.t(z.challenge === "manual" ? "ed.challenge.manual" : "ed.challenge.auto");
       if (rungWatch > 0) label += " · " + I.plural(biting, "edgeBitingNodes");
+      if (previewWhy) label += " · " + I.t("ed.challenge.preview") + previewWhy;
       return K.badge(z.challenge === "manual" ? "badge--active" : "badge--muted", label);
     }
+    if (previewWhy) return K.badge("badge--dry", I.t("ed.challenge.preview") + previewWhy);
     return h("span", { class: "td-muted", text: I.t("ed.challenge.off") });
   }
   function edge(root, ctx) {

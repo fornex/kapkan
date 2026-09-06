@@ -702,7 +702,8 @@ func (n *Node) terminatorAlive() *bool {
 
 // report assembles the node's self-report; the certificate list is cut to
 // what fits the brain's body limit, the count of dropped entries reported.
-func (n *Node) report() api.EdgeReport {
+// buildReport assembles the self-report, untrimmed.
+func (n *Node) buildReport() api.EdgeReport {
 	n.mu.Lock()
 	rep := api.EdgeReport{
 		Version:   buildinfo.Version(),
@@ -722,17 +723,24 @@ func (n *Node) report() api.EdgeReport {
 		}
 		sort.Slice(rep.Certs, func(i, j int) bool { return rep.Certs[i].Zone < rep.Certs[j].Zone })
 	}
-	return trimReport(rep)
+	return rep
+}
+
+// report is the self-report as the brain receives it: built, then cut to
+// the body limit.
+func (n *Node) report() api.EdgeReport {
+	return trimReport(n.buildReport())
 }
 
 // trimReport cuts the report down to the brain's body limit, least valuable
 // detail first and a little at a time, so the would-be set — the report's
 // reason to exist under dry-run — survives longest: first the sources that
-// tell nothing (allowed, marked, cleared) go from every zone; then every
-// zone's list is halved, busiest first kept, until it fits or is empty; then
+// tell nothing (allowed, marked, cleared) go from every zone, uncounted
+// (they are not in the set); then every zone's list is halved, the head kept
+// (the would-be sources rank first in it), each cut source counted; then
 // certificate entries from the (zone-sorted) tail; then zones from their
-// tail — each counted, so the brain knows what it is missing and can say
-// "shed", not "nobody".
+// tail — counted too, so the brain knows what it is missing and can say
+// "short", not "nobody".
 func trimReport(rep api.EdgeReport) api.EdgeReport {
 	fits := func() bool {
 		body, err := json.Marshal(rep)
@@ -817,12 +825,19 @@ func (n *Node) reportLoop(ctx context.Context) error {
 }
 
 func (n *Node) postReport(ctx context.Context) {
-	rep := n.report()
+	raw := n.buildReport()
+	rep := trimReport(raw)
 	if rep.CertsTruncated > 0 {
 		n.log.Warn("self-report certificate list truncated to fit the brain's body limit", "dropped", rep.CertsTruncated)
 	}
-	if shed := shedSources(rep); shed > 0 {
-		n.log.Warn("self-report per-source detail shed to fit the brain's body limit; the would-be set is partial", "sources", shed, "zones_dropped", rep.ZonesTruncated)
+	// Two reasons a would-be set is short, told apart: what the body limit
+	// made this report shed is a warning; what the aggregator's per-window
+	// bound left out is the flood's size, not a fault, and is said at Debug.
+	if shed := shedSources(rep) - shedSources(raw); shed > 0 || rep.ZonesTruncated > 0 {
+		n.log.Warn("self-report detail shed to fit the brain's body limit; the would-be set is partial", "sources", shed, "zones_dropped", rep.ZonesTruncated)
+	}
+	if short := shedSources(raw); short > 0 {
+		n.log.Debug("would-be sources beyond the per-window bound; the would-be set is partial", "sources", short)
 	}
 	body, err := json.Marshal(rep)
 	if err != nil {

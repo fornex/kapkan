@@ -373,10 +373,13 @@ type EdgeReportZone struct {
 	// node (the local trigger, E4.4; the brain's lever, E4.6).
 	ChallengeActive *EdgeReportChallenge `json:"challenge_active,omitempty"`
 	// TopSources are the window's busiest sources (the aggregator's top-N),
-	// each with the strongest thing the node did to it. SourcesTruncated
-	// counts the ones the node shed from this list to fit the body limit —
-	// the least telling first (allowed, marked, cleared), then the tail of
-	// the rest — so an empty list with a count is "shed", not "nobody".
+	// each with the strongest thing the node did to it — the would-be sources
+	// first (a challenge or a deny previewed), then the refused and challenged
+	// ones, then the busiest of the rest. SourcesTruncated counts the WOULD-BE
+	// sources missing from this list: the ones the node's per-window bound
+	// left out, and the ones a report too big for the body limit shed (the
+	// sources that tell nothing go first and uncounted — they are not in the
+	// set) — so an empty list with a count is "short", not "nobody".
 	TopSources       []EdgeReportSource `json:"top_sources,omitempty"`
 	SourcesTruncated int                `json:"sources_truncated,omitempty"`
 }

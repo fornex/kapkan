@@ -101,10 +101,10 @@ func (n *Node) pruneWindows(names []string) {
 func fillReportZone(rz *api.EdgeReportZone, w rollup.WindowStats) {
 	rz.At = w.Start.Add(w.Elapsed)
 	rz.WindowSeconds = w.Elapsed.Seconds()
-	// The aggregator's own bound counts here too: a telling source it cut is
-	// one the would-be set lacks, and the brain must say "partial", not
-	// "nobody".
-	rz.SourcesTruncated = w.TellingTruncated
+	// The aggregator's own bound counts here too: a would-be source it cut is
+	// one the set lacks, and the brain must say "partial", not "nobody". A
+	// refused or challenged source it cut is not in the set and not counted.
+	rz.SourcesTruncated = w.WouldBeTruncated
 	rz.RPS = w.RPS
 	rz.Requests, rz.Decided, rz.Denied = w.Requests, w.Decided, w.Denied
 	rz.Challenged, rz.Cleared = w.Challenged, w.Cleared
