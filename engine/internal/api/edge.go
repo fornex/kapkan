@@ -321,6 +321,101 @@ type EdgeReport struct {
 	// the body limit (the list is zone-sorted; the tail went).
 	Certs          []EdgeReportCert `json:"certs,omitempty"`
 	CertsTruncated int              `json:"certs_truncated,omitempty"`
+	// Zones is the node's last closed rollup window for every zone it serves
+	// in decide mode (E4.5): what it saw and did in the last window, its
+	// busiest sources and what it did to each, whether a zone-wide challenge
+	// is in force, whether the zone is watch-only there. A zone without
+	// traffic still appears, so its state is visible. ZonesTruncated counts
+	// zones the node dropped to fit the body limit (zone-sorted; the tail
+	// went — after every zone's per-source detail and the certificates).
+	Zones          []EdgeReportZone `json:"zones,omitempty"`
+	ZonesTruncated int              `json:"zones_truncated,omitempty"`
+}
+
+// The report's zone-level challenge mode, as the zones file (or the brain)
+// set it: what the challenge column reads before it looks at counters.
+// (Values are edgedoc.ChallengeOff / Manual / Auto.)
+
+// EdgeReportZone is one zone's last rollup window on one node. Advisory, like
+// the rest of the report: the brain sums and merges, never acts on it.
+type EdgeReportZone struct {
+	Zone string `json:"zone"`
+	// At is when the window closed; WindowSeconds its REAL length. A consumer
+	// judges freshness by At, not by the report's arrival. Both zero when the
+	// node has not closed a window for the zone yet.
+	At            time.Time `json:"at,omitzero"`
+	WindowSeconds float64   `json:"window_seconds,omitempty"`
+	// DryRun is the zone's EFFECTIVE watch-only state on this node: the node's
+	// own dry_run or the zone's policy.dry_run (E4.7). RungDryRun is the
+	// rung's: DryRun, or the rung's own challenge_options.dry_run — where it
+	// is set, a challenge previews (would-challenge) rather than bites, so a
+	// consumer can tell an enforcing rung from a watching one by state, not
+	// by a window's counters.
+	DryRun     bool `json:"dry_run,omitempty"`
+	RungDryRun bool `json:"rung_dry_run,omitempty"`
+	// Challenge is the zone's challenge mode (policy.challenge as the node
+	// applies it): off, manual or auto.
+	Challenge string `json:"challenge,omitempty"`
+	// RPS is requests over the window's real length.
+	RPS            float64 `json:"rps,omitempty"`
+	Requests       uint64  `json:"requests,omitempty"`
+	Decided        uint64  `json:"decided,omitempty"`
+	Denied         uint64  `json:"denied,omitempty"`
+	Challenged     uint64  `json:"challenged,omitempty"`
+	Cleared        uint64  `json:"cleared,omitempty"`
+	WouldDeny      uint64  `json:"would_deny,omitempty"`
+	WouldChallenge uint64  `json:"would_challenge,omitempty"`
+	Status2xx      uint64  `json:"status_2xx,omitempty"`
+	Status3xx      uint64  `json:"status_3xx,omitempty"`
+	Status4xx      uint64  `json:"status_4xx,omitempty"`
+	Status5xx      uint64  `json:"status_5xx,omitempty"`
+	// ChallengeActive is set while a zone-wide challenge is in force on this
+	// node (the local trigger, E4.4; the brain's lever, E4.6).
+	ChallengeActive *EdgeReportChallenge `json:"challenge_active,omitempty"`
+	// TopSources are the window's busiest sources (the aggregator's top-N),
+	// each with the strongest thing the node did to it — the would-be sources
+	// first (a challenge or a deny previewed), then the refused and challenged
+	// ones, then the busiest of the rest. SourcesTruncated counts the WOULD-BE
+	// sources missing from this list: the ones the node's per-window bound
+	// left out, and the ones a report too big for the body limit shed (the
+	// sources that tell nothing go first and uncounted — they are not in the
+	// set) — so an empty list with a count is "short", not "nobody".
+	TopSources       []EdgeReportSource `json:"top_sources,omitempty"`
+	SourcesTruncated int                `json:"sources_truncated,omitempty"`
+}
+
+// EdgeReportChallenge is a zone-wide challenge in force.
+type EdgeReportChallenge struct {
+	Reason string    `json:"reason,omitempty"`
+	Until  time.Time `json:"until"`
+	// DryRun says the flip is a PREVIEW on this node: the rung's own
+	// watch-only switch (challenge_options.dry_run, true by default) or the
+	// node's dry_run means every request it would challenge is answered as
+	// an allow marked would-challenge.
+	DryRun bool `json:"dry_run,omitempty"`
+}
+
+// The states EdgeReportSource.State takes, strongest first.
+const (
+	SourceStateDenied         = "denied"
+	SourceStateChallenged     = "challenged"
+	SourceStateWouldDeny      = "would-deny"
+	SourceStateWouldChallenge = "would-challenge"
+	SourceStateCleared        = "cleared"
+	SourceStateMarked         = "marked"
+	SourceStateAllow          = "allow"
+)
+
+// EdgeReportSource is one of a window's busiest sources.
+type EdgeReportSource struct {
+	// Source is the accounting key: an IPv4 address or an IPv6 /64.
+	Source   string  `json:"source"`
+	RPS      float64 `json:"rps,omitempty"`
+	Requests uint64  `json:"requests"`
+	// State is the strongest thing the node did to the source in the window:
+	// denied (a table verdict refused it), challenged, would-deny,
+	// would-challenge (previewed under dry-run), cleared, marked, allow.
+	State string `json:"state"`
 }
 
 // EdgeReportTerminator is the state of the orchestrated terminator.

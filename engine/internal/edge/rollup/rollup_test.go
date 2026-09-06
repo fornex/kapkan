@@ -147,10 +147,12 @@ func TestAggregatorWindows(t *testing.T) {
 	if w.Elapsed != 20*time.Second || w.RPS < 3.59 || w.RPS > 3.61 {
 		t.Fatalf("rps must divide by the real elapsed: elapsed=%v rps=%v", w.Elapsed, w.RPS)
 	}
-	if w.SourcesTotal != 6 || len(w.Sources) != 2 || w.Sources[0].Src.String() != "198.51.100.1" || w.Sources[0].Requests != 30 {
+	// The bounded view ranks the would-be .6 first, then the table-denied .5,
+	// ahead of the busiest allowed one.
+	if w.SourcesTotal != 6 || len(w.Sources) != 2 || w.Sources[0].Src.String() != "198.51.100.6" || w.Sources[1].Src.String() != "198.51.100.5" || w.WouldBeTruncated != 0 {
 		t.Fatalf("top sources: total=%d %+v", w.SourcesTotal, w.Sources)
 	}
-	if w.Sources[0].RPS < 1.49 || w.Sources[0].RPS > 1.51 {
+	if w.Sources[0].RPS < 0.49 || w.Sources[0].RPS > 0.51 {
 		t.Fatalf("per-source rps must divide by the real elapsed: %v", w.Sources[0].RPS)
 	}
 	// The full window carries every source, with the denial split.

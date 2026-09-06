@@ -207,6 +207,9 @@ type Node struct {
 	termVer      string
 	termAlive    *bool
 	statusAddr   string
+	// windows is the last closed rollup window per zone (the aggregator's
+	// top-N view), for the self-report's zones section (E4.5).
+	windows map[string]rollup.WindowStats
 }
 
 type nodeFiles struct {
@@ -281,6 +284,7 @@ func New(opt Options) (*Node, error) {
 			}
 		},
 		OnWindowFull: func(w rollup.WindowStats) { n.rules.Apply(w, n.svc) },
+		OnWindow:     n.keepWindow,
 	}
 	n.challenges = acme.NewChallengeTable(nil)
 	if !opt.ACME.Disabled {
@@ -485,6 +489,7 @@ func (n *Node) acceptDocument(ctx context.Context, body []byte, etag string, per
 	n.challenges.SetFanned(doc.ACMEChallenges)
 	n.mu.Lock()
 	n.doc, n.acceptedETag = doc, etag
+	n.pruneWindows(names)
 	n.mu.Unlock()
 	if persist {
 		if err := n.saveCached(body, etag); err != nil {
@@ -695,9 +700,9 @@ func (n *Node) terminatorAlive() *bool {
 	return &alive
 }
 
-// report assembles the node's self-report; the certificate list is cut to
-// what fits the brain's body limit, the count of dropped entries reported.
-func (n *Node) report() api.EdgeReport {
+// buildReport assembles the self-report, untrimmed; report cuts it to the
+// brain's body limit.
+func (n *Node) buildReport() api.EdgeReport {
 	n.mu.Lock()
 	rep := api.EdgeReport{
 		Version:   buildinfo.Version(),
@@ -709,6 +714,7 @@ func (n *Node) report() api.EdgeReport {
 			Alive: n.termAlive,
 		},
 	}
+	rep.Zones = n.reportZones(time.Now())
 	n.mu.Unlock()
 	if n.certs != nil {
 		for _, c := range n.certs.Inventory() {
@@ -716,17 +722,79 @@ func (n *Node) report() api.EdgeReport {
 		}
 		sort.Slice(rep.Certs, func(i, j int) bool { return rep.Certs[i].Zone < rep.Certs[j].Zone })
 	}
-	return trimReport(rep)
+	return rep
 }
 
-// trimReport drops certificate entries from the (zone-sorted) tail until the
-// report fits the brain's body limit, counting what went.
+// report is the self-report as the brain receives it: built, then cut to
+// the body limit.
+func (n *Node) report() api.EdgeReport {
+	return trimReport(n.buildReport())
+}
+
+// trimReport cuts the report down to the brain's body limit, least valuable
+// detail first and a little at a time, so the would-be set — the report's
+// reason to exist under dry-run — survives longest: first the sources that
+// tell nothing (allowed, marked, cleared) go from every zone, uncounted
+// (they are not in the set); then every zone's list is halved, the head kept
+// (the would-be sources rank first in it), the would-be sources among the
+// cut counted; then certificate entries from the (zone-sorted) tail; then
+// zones from their tail — counted too, so the brain knows what it is
+// missing and can say "short", not "nobody".
 func trimReport(rep api.EdgeReport) api.EdgeReport {
-	for {
+	fits := func() bool {
 		body, err := json.Marshal(rep)
-		if err != nil || len(body) <= maxReportBytes || len(rep.Certs) == 0 {
-			return rep
+		return err != nil || len(body) <= maxReportBytes
+	}
+	if fits() {
+		return rep
+	}
+	// The caller's report stays whole: the zones are copied before any is
+	// touched, and a shortened source list is a fresh slice — never the
+	// caller's array compacted in place — so what the body limit changed can
+	// be told from the untrimmed report afterwards.
+	rep.Zones = append([]api.EdgeReportZone(nil), rep.Zones...)
+	// The sources that tell nothing go first, uncounted: none of them is in
+	// the would-be set, so the set is as whole as before and the brain must
+	// not call it partial.
+	for i := range rep.Zones {
+		z := &rep.Zones[i]
+		kept := make([]api.EdgeReportSource, 0, len(z.TopSources))
+		for _, s := range z.TopSources {
+			if telling(s.State) {
+				kept = append(kept, s)
+			}
 		}
+		z.TopSources = kept
+	}
+	for !fits() {
+		any := false
+		for i := range rep.Zones {
+			z := &rep.Zones[i]
+			if len(z.TopSources) == 0 {
+				continue
+			}
+			any = true
+			keep := len(z.TopSources) / 2
+			// Only a would-be source cut is a shortfall of the set: the list
+			// is in tier order, so the refused and challenged tail goes first,
+			// uncounted, and the would-be head last.
+			for _, s := range z.TopSources[keep:] {
+				if s.State == api.SourceStateWouldDeny || s.State == api.SourceStateWouldChallenge {
+					z.SourcesTruncated++
+				}
+			}
+			z.TopSources = z.TopSources[:keep]
+		}
+		if !any {
+			break
+		}
+	}
+	for i := range rep.Zones {
+		if len(rep.Zones[i].TopSources) == 0 {
+			rep.Zones[i].TopSources = nil
+		}
+	}
+	for len(rep.Certs) > 0 && !fits() {
 		drop := len(rep.Certs) / 10
 		if drop == 0 {
 			drop = 1
@@ -734,6 +802,15 @@ func trimReport(rep api.EdgeReport) api.EdgeReport {
 		rep.Certs = rep.Certs[:len(rep.Certs)-drop]
 		rep.CertsTruncated += drop
 	}
+	for len(rep.Zones) > 0 && !fits() {
+		drop := len(rep.Zones) / 10
+		if drop == 0 {
+			drop = 1
+		}
+		rep.Zones = rep.Zones[:len(rep.Zones)-drop]
+		rep.ZonesTruncated += drop
+	}
+	return rep
 }
 
 // reportLoop posts the self-report on a fixed cadence; on the same tick it
@@ -759,9 +836,19 @@ func (n *Node) reportLoop(ctx context.Context) error {
 }
 
 func (n *Node) postReport(ctx context.Context) {
-	rep := n.report()
+	raw := n.buildReport()
+	rep := trimReport(raw)
 	if rep.CertsTruncated > 0 {
 		n.log.Warn("self-report certificate list truncated to fit the brain's body limit", "dropped", rep.CertsTruncated)
+	}
+	// Two reasons a would-be set is short, told apart: what the body limit
+	// made this report shed is a warning; what the aggregator's per-window
+	// bound left out is the flood's size, not a fault, and is said at Debug.
+	if shed := shedByLimit(raw, rep); shed > 0 || rep.ZonesTruncated > 0 {
+		n.log.Warn("self-report detail shed to fit the brain's body limit; the would-be set is partial", "sources", shed, "zones_dropped", rep.ZonesTruncated)
+	}
+	if short := shedSources(raw); short > 0 {
+		n.log.Debug("would-be sources beyond the per-window bound; the would-be set is partial", "sources", short)
 	}
 	body, err := json.Marshal(rep)
 	if err != nil {

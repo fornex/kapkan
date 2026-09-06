@@ -612,9 +612,126 @@
     K.mount(root, children);
   }
 
+  /* ===== EDGE (E4.5): the edge nodes' zones, merged, and who would be
+     challenged. Read-only; the lever (E4.6) comes later. ===== */
+  /* The challenge column reads the zone's MODE first, then where it bites —
+     from STATE, never from a window's counters: off — nothing challenges;
+     manual — everyone without a clearance is challenged; auto — the ladder is
+     armed. Either is a preview on the nodes rung_watch_only names (the node's
+     dry_run, the zone's, or the rung's own challenge_options.dry_run) and
+     bites on the rest; a zone-wide flip shows as active on the nodes where it
+     bites, as a preview where it only counts. */
+  function edgeChallengeCell(z) {
+    var active = z.challenge_active || [];
+    var nodes = z.nodes || 0, rungWatch = (z.rung_watch_only || []).length, biting = Math.max(0, nodes - rungWatch);
+    var previewWhy = "";
+    if (active.length) {
+      var reasons = {}, bite = 0;
+      active.forEach(function (c) { reasons[c.reason || "manual"] = true; if (!c.dry_run) bite++; });
+      var why = " · " + Object.keys(reasons).sort().join(", ");
+      if (bite > 0) return K.badge("badge--active", I.plural(bite, "edgeActiveOnNodes") + why, "shield-alert");
+      /* every flip previews: said beside the mode, never INSTEAD of a rung
+         that bites on other nodes — fall through with the reasons */
+      previewWhy = why;
+    }
+    if (z.challenge === "manual" || z.challenge === "auto") {
+      if (biting === 0) return K.badge("badge--dry", I.t("ed.challenge.preview") + previewWhy);
+      var label = I.t(z.challenge === "manual" ? "ed.challenge.manual" : "ed.challenge.auto");
+      if (rungWatch > 0) label += " · " + I.plural(biting, "edgeBitingNodes");
+      if (previewWhy) label += " · " + I.t("ed.challenge.preview") + previewWhy;
+      return K.badge(z.challenge === "manual" ? "badge--active" : "badge--muted", label);
+    }
+    if (previewWhy) return K.badge("badge--dry", I.t("ed.challenge.preview") + previewWhy);
+    return h("span", { class: "td-muted", text: I.t("ed.challenge.off") });
+  }
+  function edge(root, ctx) {
+    ctx.actions.loadEdge();
+    var st = ctx.state.edge;
+    var children = [V.viewHead(I.t("nav.edge"), I.t("ed.sub"))];
+
+    if (!ctx.status.edge_nodes_total) {
+      children.push(h("div", { class: "card" }, K.empty("shield-check", I.t("ed.empty.title"), I.t("ed.empty.sub"), "muted")));
+    } else if (st.forbidden) {
+      children.push(h("div", { class: "banner banner--info" }, [w.icon("lock"), h("span", { class: "banner__txt", text: I.t("ed.adminonly") })]));
+    } else if (!st.fetchedAt) {
+      children.push(h("div", { class: "card" }, h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.loading") }))));
+    } else if (!st.ok) {
+      /* a failed fetch is an error, never "no zones": the status says edge
+         nodes exist, so an empty table would be a false claim */
+      children.push(h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.error") })]));
+    } else if (!st.zones.length) {
+      children.push(h("div", { class: "card" }, K.empty("shield-check", I.t("ed.nozones.title"), I.plural(st.nodesAlive, "edgeNodesUp") + " " + I.t("ed.nozones.sub"), "muted")));
+    } else {
+      var rows = st.zones.map(function (z) {
+        var watch = z.watch_only || [];
+        return h("tr", {}, [
+          h("td", { class: "target-cell" }, [
+            h("div", { class: "mono", text: z.zone }),
+            watch.length ? h("div", { class: "td-muted", text: I.plural(watch.length, "edgeWatchOnlyNodes") }) : null
+          ]),
+          h("td", { class: "num mono", text: I.num(z.nodes || 0) }),
+          h("td", { class: "num mono", text: I.num(Math.round(z.rps || 0)) }),
+          h("td", { class: "num mono", text: I.abbr(z.challenged || 0) }),
+          h("td", { class: "num mono", text: I.abbr(z.cleared || 0) }),
+          h("td", { class: "num mono", text: I.abbr(z.would_challenge || 0) }),
+          h("td", { class: "num mono", text: I.abbr(z.would_deny || 0) }),
+          h("td", {}, edgeChallengeCell(z))
+        ]);
+      });
+      children.push(h("div", { class: "card" }, [
+        h("div", { class: "card__head" }, [
+          h("div", { class: "card__title" }, [w.icon("shield-check"), h("span", { text: I.t("ed.zones") }), K.badge("badge--muted", String(st.zones.length))]),
+          h("span", { class: "td-muted", text: I.plural(st.nodesReporting, "edgeReportingNodes") })
+        ]),
+        h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+          h("thead", {}, h("tr", {}, [V.th("ed.zone"), V.thNum("ed.nodes"), V.thNum("ed.rps"), V.thNum("ed.challenged"), V.thNum("ed.cleared"),
+            V.thNum("ed.wouldchallenge"), V.thNum("ed.woulddeny"), V.th("ed.challenge")])),
+          h("tbody", {}, rows)
+        ]))
+      ]));
+
+      /* zone entries the nodes cut from their reports to fit: those zones are
+         missing or undercounted above, and the table must not read as whole */
+      if (st.zonesTruncated) {
+        children.push(h("div", { class: "banner banner--info mt-4" }, [w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.zonestruncated", { n: st.zonesTruncated }) })]));
+      }
+
+      /* who would be challenged: the union across nodes, busiest first across
+         zones (the caption says so); partial when a node cut part of its
+         per-source detail — the aggregator's bound or the report's size */
+      var would = [], partial = false;
+      st.zones.forEach(function (z) { if (z.partial) partial = true; (z.would_be || []).forEach(function (s) { would.push({ zone: z.zone, s: s }); }); });
+      would.sort(function (a, b) { return (b.s.requests || 0) - (a.s.requests || 0) || (a.s.source < b.s.source ? -1 : a.s.source > b.s.source ? 1 : 0); });
+      var wouldRows = would.map(function (e) {
+        return h("tr", {}, [
+          h("td", { class: "mono", text: e.s.source }),
+          h("td", { class: "mono td-muted", text: e.zone }),
+          h("td", {}, K.badge(e.s.state === "would-deny" ? "badge--dry" : "badge--muted", I.t("ed.state." + e.s.state))),
+          h("td", { class: "num mono", text: I.abbr(e.s.requests || 0) }),
+          h("td", {}, h("span", { class: "row wrap", style: { gap: "4px" } }, (e.s.nodes || []).map(function (n) { return K.badge("badge--muted", n); })))
+        ]);
+      });
+      children.push(h("div", { class: "card mt-4" }, [
+        h("div", { class: "card__head" }, [
+          h("div", { class: "card__title" }, [w.icon("shield-alert"), h("span", { text: I.t("ed.wouldbe.title") }), K.badge("badge--muted", String(would.length)), partial ? K.badge("badge--dry", I.t("ed.wouldbe.partial")) : null]),
+          h("span", { class: "td-muted", text: I.t("ed.wouldbe.sub") })
+        ]),
+        would.length
+          ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+            h("thead", {}, h("tr", {}, [V.th("ed.source"), V.th("ed.zone"), V.th("col.state"), V.thNum("ed.requests"), V.th("col.node")])),
+            h("tbody", {}, wouldRows)
+          ]))
+          : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t(partial ? "ed.wouldbe.shed" : "ed.wouldbe.empty") }))
+      ]));
+    }
+    K.mount(root, children);
+  }
+
   V.hostgroups = hostgroups;
   V.traffic = traffic;
   V.settings = settings;
   V.attackDetail = attackDetail;
   V.nodes = nodes;
+  V.edge = edge;
 })(window);
