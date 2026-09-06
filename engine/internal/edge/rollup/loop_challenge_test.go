@@ -258,3 +258,81 @@ func TestDecisionLoopPreviewsChallengesInDryRun(t *testing.T) {
 		t.Fatalf("would-deny: %+v", v)
 	}
 }
+
+// TestDecisionLoopRefusedTrafficDoesNotFlipTheZone pins that the zone-wide
+// trigger measures ADMITTED load: one flooder far over zone_rps — rate-refused,
+// then challenged, then table-denied — never flips the zone on the bystanders,
+// and neither does a plain-HTTP flood the decision service never sees.
+func TestDecisionLoopRefusedTrafficDoesNotFlipTheZone(t *testing.T) {
+	l := newChallengeLoop(t, 10, false, &edgedoc.AutoChallenge{ZoneRPS: 50, HoldSeconds: 60})
+	bot := netip.MustParseAddr("203.0.113.40")
+	for window := 0; window < 4; window++ {
+		l.flood(bot, 2000, 5*time.Millisecond) // 200 rps against a ceiling of 10
+		l.agg.Tick()
+		if on, _, why := l.svc.ZoneChallenge("example.com"); on {
+			t.Fatalf("window %d: a lone flooder flipped the zone (%s)", window, why)
+		}
+	}
+	if !l.svc.Denied("example.com", bot) {
+		t.Fatalf("the flooder was not denied: %+v", l.svc.Verdicts())
+	}
+	// The :80 server answers redirects itself; the decider never sees them.
+	for i := 0; i < 2000; i++ {
+		l.agg.Observe(rollup.Record{TS: l.now, Zone: "example.com", Src: netip.MustParseAddr("203.0.113.41"), Port: 80, Status: 301})
+		l.now = l.now.Add(5 * time.Millisecond)
+	}
+	l.agg.Tick()
+	if on, _, _ := l.svc.ZoneChallenge("example.com"); on {
+		t.Fatal("a plain-HTTP flood flipped the zone")
+	}
+	if v := l.request(netip.MustParseAddr("203.0.113.42")); !v.Allow || v.Challenge {
+		t.Fatalf("bystander: %+v", v)
+	}
+}
+
+// TestDecisionLoopFlooderUnderZoneFlipIsDenied pins that a source flooding
+// while the whole zone is under challenge has had the rung: the window's rule
+// denies it outright rather than stack a challenge of its own on the flip.
+func TestDecisionLoopFlooderUnderZoneFlipIsDenied(t *testing.T) {
+	l := newChallengeLoop(t, 10, false, &edgedoc.AutoChallenge{ZoneRPS: 50, HoldSeconds: 60})
+	if !l.svc.SetZoneChallenge("example.com", true, l.now.Add(time.Minute), "zone-rps") {
+		t.Fatal("flip refused")
+	}
+	bot := netip.MustParseAddr("203.0.113.50")
+	if _, challenged, allowed := l.flood(bot, 200, 50*time.Millisecond); challenged == 0 || allowed != 0 {
+		t.Fatalf("under the flip: challenged=%d allowed=%d", challenged, allowed)
+	}
+	l.agg.Tick()
+	if !l.svc.Denied("example.com", bot) {
+		t.Fatalf("a flooder under the zone flip was not denied: %+v", l.svc.Verdicts())
+	}
+}
+
+// TestDecisionLoopRepeatOffenderIsNotReChallenged pins the escalation memory's
+// say in the ladder: a source that was challenged, then denied, and floods
+// again after BOTH lapsed is denied with the doubled TTL — the rung is offered
+// once per remembered offence, not once per deny.
+func TestDecisionLoopRepeatOffenderIsNotReChallenged(t *testing.T) {
+	l := newChallengeLoop(t, 10, false, nil)
+	bot := netip.MustParseAddr("203.0.113.60")
+	l.flood(bot, 200, 50*time.Millisecond)
+	l.agg.Tick() // the rung
+	l.flood(bot, 200, 50*time.Millisecond)
+	l.agg.Tick() // the block, one minute
+	if !l.svc.Denied("example.com", bot) {
+		t.Fatal("not denied after flooding through the challenge")
+	}
+	l.now = l.now.Add(6 * time.Minute) // the deny (1m) and the challenge (5m) are both gone
+	if l.svc.Denied("example.com", bot) || l.svc.Challenged("example.com", bot) {
+		t.Fatal("verdicts did not lapse")
+	}
+	l.flood(bot, 200, 50*time.Millisecond)
+	l.agg.Tick()
+	vs := l.svc.Verdicts()
+	if len(vs) != 1 || !vs[0].Deny || vs[0].Reason != "flood" {
+		t.Fatalf("repeat offender: %+v (want one deny, no second challenge)", vs)
+	}
+	if !vs[0].Until.Equal(l.now.Add(2 * rollup.DefaultDenyTTL)) {
+		t.Fatalf("repeat deny TTL = %v, want the doubled %v", vs[0].Until.Sub(l.now), 2*rollup.DefaultDenyTTL)
+	}
+}

@@ -242,6 +242,14 @@ type fakeSink struct {
 	ttls       []time.Duration
 	denied     map[string]bool
 	challenged map[string]bool
+	zoneOn     map[string]bool
+}
+
+func (f *fakeSink) ZoneChallenge(zone string) (bool, time.Time, string) {
+	if f.zoneOn[zone] {
+		return true, time.Time{}, "zone-rps"
+	}
+	return false, time.Time{}, ""
 }
 
 func (f *fakeSink) Deny(zone string, src netip.Addr, ttl time.Duration, reason string) bool {

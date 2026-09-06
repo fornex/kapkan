@@ -11,12 +11,15 @@ import (
 
 // TestRulesLadderInAutoZones pins the rung's place in the ladder (D9): in an
 // auto zone the flood rule CHALLENGES a first-time flooder for ChallengeTTL,
-// DENIES one that is already challenged or already cleared, and in any other
-// zone denies as before; a source under a deny is skipped either way.
+// DENIES one that already had the rung's chance — challenged, cleared, or
+// remembered from an earlier promotion — and in any other zone denies as
+// before; a source under a deny is skipped either way.
 func TestRulesLadderInAutoZones(t *testing.T) {
 	now := time.Now()
 	r := &Rules{Now: func() time.Time { return now }}
 	r.SetZones(map[string]ZoneRule{"auto.example": {Auto: true}, "manual.example": {Auto: false}})
+	// 198.51.100.4 was promoted before: its deny expired, the memory has not.
+	r.repeats = map[repeatKey]*repeat{{zone: "auto.example", src: netip.MustParseAddr("198.51.100.4")}: {n: 2, last: now.Add(-20 * time.Minute)}}
 	sink := &fakeSink{
 		denied:     map[string]bool{"auto.example/198.51.100.7": true},
 		challenged: map[string]bool{"auto.example/198.51.100.2": true},
@@ -24,20 +27,30 @@ func TestRulesLadderInAutoZones(t *testing.T) {
 	flooding := func(ip string, cleared uint64) SourceStats {
 		return SourceStats{Src: netip.MustParseAddr(ip), Requests: 100, Decided: 100, Denied: 80, DeniedRate: 80, Cleared: cleared}
 	}
-	got := r.Apply(WindowStats{Zone: "auto.example", Requests: 400, Sources: []SourceStats{
+	got := r.Apply(WindowStats{Zone: "auto.example", Requests: 500, Sources: []SourceStats{
 		flooding("198.51.100.1", 0),  // first flood: the rung
 		flooding("198.51.100.2", 0),  // still flooding while challenged: the block
 		flooding("198.51.100.3", 20), // cleared the rung and floods anyway: the block
+		flooding("198.51.100.4", 0),  // remembered repeat offender: the block, escalated
 		flooding("198.51.100.7", 0),  // already denied: skipped
 	}}, sink)
-	if got.Challenged != 1 || got.Denied != 2 || got.Skipped != 1 || got.ZoneChallenge {
+	if got.Challenged != 1 || got.Denied != 3 || got.Skipped != 1 || got.ZoneChallenge {
 		t.Fatalf("Applied = %+v challenges=%v denies=%v", got, sink.challenges, sink.denies)
 	}
 	if strings.Join(sink.challenges, ",") != "auto.example/198.51.100.1/flood/5m0s" {
 		t.Fatalf("challenges = %v", sink.challenges)
 	}
-	if strings.Join(sink.denies, ",") != "auto.example/198.51.100.2/flood,auto.example/198.51.100.3/flood" {
+	if strings.Join(sink.denies, ",") != "auto.example/198.51.100.2/flood,auto.example/198.51.100.3/flood,auto.example/198.51.100.4/flood" {
 		t.Fatalf("denies = %v", sink.denies)
+	}
+	if sink.ttls[2] != 4*time.Minute {
+		t.Fatalf("the remembered offender's deny TTL = %v, want the escalated 4m", sink.ttls[2])
+	}
+	// While the whole zone is under challenge, a flooder has had the rung:
+	// it is denied, not given a challenge of its own on top.
+	sink = &fakeSink{zoneOn: map[string]bool{"auto.example": true}}
+	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 100, Sources: []SourceStats{flooding("198.51.100.1", 0)}}, sink); got.Denied != 1 || got.Challenged != 0 {
+		t.Fatalf("flooder under the zone flip: %+v %v %v", got, sink.challenges, sink.denies)
 	}
 	// A zone whose rung is not auto denies a flooder outright, as before.
 	sink = &fakeSink{}
@@ -52,9 +65,10 @@ func TestRulesLadderInAutoZones(t *testing.T) {
 	}
 }
 
-// TestRulesZoneRPSTrigger pins the zone-wide trigger: an auto zone at or over
-// its zone_rps flips the whole zone to challenge for the hold, every window
-// over the rate extends it, a window under it does not, and zones without a
+// TestRulesZoneRPSTrigger pins the zone-wide trigger: an auto zone whose
+// ADMITTED rate is at or over its zone_rps flips the whole zone to challenge
+// for the hold, every window over the rate extends it, a window under it
+// does not — however much refused traffic it carries — and zones without a
 // trigger (or not auto) never flip.
 func TestRulesZoneRPSTrigger(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
@@ -65,19 +79,24 @@ func TestRulesZoneRPSTrigger(t *testing.T) {
 		"manual.example": {Auto: false, ZoneRPS: 1000, Hold: 5 * time.Minute},
 	})
 	sink := &fakeSink{}
-	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 9990, RPS: 999}, sink); got.ZoneChallenge || len(sink.flips) != 0 {
+	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 9990, RPS: 999, AdmittedRPS: 999}, sink); got.ZoneChallenge || len(sink.flips) != 0 {
 		t.Fatalf("under the rate flipped: %+v %v", got, sink.flips)
 	}
-	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 10000, RPS: 1000}, sink); !got.ZoneChallenge || strings.Join(sink.flips, ",") != "auto.example/zone-rps/2026-09-05T12:05:00Z" {
+	// A blocked bot's 403s, a flooder's 429s or an :80 flood are requests,
+	// not admitted load: the zone stays as it is.
+	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 50000, RPS: 5000, AdmittedRPS: 12}, sink); got.ZoneChallenge || len(sink.flips) != 0 {
+		t.Fatalf("refused traffic flipped the zone: %+v %v", got, sink.flips)
+	}
+	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 10000, RPS: 1000, AdmittedRPS: 1000}, sink); !got.ZoneChallenge || strings.Join(sink.flips, ",") != "auto.example/zone-rps/2026-09-05T12:05:00Z" {
 		t.Fatalf("at the rate: %+v %v", got, sink.flips)
 	}
 	now = now.Add(10 * time.Second)
-	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 20000, RPS: 2000}, sink); !got.ZoneChallenge || sink.flips[len(sink.flips)-1] != "auto.example/zone-rps/2026-09-05T12:05:10Z" {
+	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 20000, RPS: 2000, AdmittedRPS: 2000}, sink); !got.ZoneChallenge || sink.flips[len(sink.flips)-1] != "auto.example/zone-rps/2026-09-05T12:05:10Z" {
 		t.Fatalf("over the rate did not extend: %+v %v", got, sink.flips)
 	}
 	before := len(sink.flips)
-	r.Apply(WindowStats{Zone: "quiet.example", Requests: 100000, RPS: 10000}, sink)
-	r.Apply(WindowStats{Zone: "manual.example", Requests: 100000, RPS: 10000}, sink)
+	r.Apply(WindowStats{Zone: "quiet.example", Requests: 100000, RPS: 10000, AdmittedRPS: 10000}, sink)
+	r.Apply(WindowStats{Zone: "manual.example", Requests: 100000, RPS: 10000, AdmittedRPS: 10000}, sink)
 	if len(sink.flips) != before {
 		t.Fatalf("a zone without a trigger, or not auto, flipped: %v", sink.flips)
 	}

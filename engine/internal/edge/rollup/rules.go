@@ -24,6 +24,8 @@ type Sink interface {
 	// SetZoneChallenge flips the zone-wide challenge (every source of an auto
 	// zone) on until `until`, or off.
 	SetZoneChallenge(zone string, on bool, until time.Time, reason string) bool
+	// ZoneChallenge reports the zone-wide flip: on, until when, why.
+	ZoneChallenge(zone string) (on bool, until time.Time, reason string)
 }
 
 // ZoneRule is what the rules need to know about one zone's rung: whether it
@@ -32,8 +34,9 @@ type ZoneRule struct {
 	// Auto is policy.challenge: auto — the flood rule challenges before it
 	// denies, and the zone-wide trigger below applies.
 	Auto bool
-	// ZoneRPS is the zone-wide rate (this node's window) at which every
-	// source is challenged; 0 = no zone-wide trigger.
+	// ZoneRPS is the zone-wide ADMITTED rate (this node's window: decided
+	// requests the node did not refuse, WindowStats.AdmittedRPS) at which
+	// every source is challenged; 0 = no zone-wide trigger.
 	ZoneRPS float64
 	// Hold is how long the zone-wide challenge stays on after a window that
 	// tripped it.
@@ -69,21 +72,30 @@ func ZoneRulesFromDoc(doc *edgedoc.Doc) map[string]ZoneRule {
 //     bucket refuses about 45 % once its burst is spent). In a zone whose
 //     rung is AUTO it is first CHALLENGED for ChallengeTTL (edge-spec §5: the
 //     rung between the ceiling and the block; D9) — a browser clears and is
-//     rate-limited like anyone, a bot cannot; a source that floods on while
-//     challenged, or that had already cleared the rung and floods anyway, is
-//     DENIED. In any other zone, and for those, it is denied outright for
-//     DenyTTL, doubling on every repeat up to MaxDenyTTL, so the per-request
-//     bucket stops being consulted for it (and the XDP plane can take over,
-//     E4.10). A source the table already denies is skipped: its 403s are the
-//     deny at work, and re-promoting on them would escalate a one-time
-//     offence into a never-expiring ban. A repeat therefore means a flood
-//     AFTER the previous deny expired.
+//     rate-limited like anyone, a bot cannot. A source that has ALREADY had
+//     the rung's chance is DENIED instead: one flooding on while challenged
+//     (or while the whole zone is under challenge), one that had cleared the
+//     rung and floods anyway (a browser or a solver farm — either way not a
+//     client the rung can sort out), and one the escalation memory still
+//     knows (its deny may outlive its challenge; the rung is offered once
+//     per repeatMemory, not once per deny). In any other zone, and for
+//     those, it is denied outright for DenyTTL, doubling on every repeat up
+//     to MaxDenyTTL, so the per-request bucket stops being consulted for it
+//     (and the XDP plane can take over, E4.10). A source the table already
+//     denies is skipped: its 403s are the deny at work, and re-promoting on
+//     them would escalate a one-time offence into a never-expiring ban. A
+//     repeat therefore means a flood AFTER the previous deny expired.
 //   - zone-wide (auto zones with challenge_options.auto.zone_rps): when the
-//     whole zone runs at or over that rate on this node — a flood spread over
-//     so many sources that none trips its own ceiling — every source is
-//     challenged for the hold; each window still over the rate extends it.
-//     Node-local by design: per-request decisions are local, and the
-//     fleet-wide view is the brain's (E6).
+//     zone's ADMITTED rate on this node — decided requests the node did not
+//     refuse (WindowStats.AdmittedRPS) — runs at or over that rate, a flood
+//     spread over so many sources that none trips its own ceiling, every
+//     source is challenged for the hold; each window still over the rate
+//     extends it. Refused traffic is not load: a table-denied bot's 403s, a
+//     single flooder's 429s, the :80 redirects and undecided requests never
+//     trip or extend the flip (the rung cannot act on them, and one blocked
+//     bot must not keep every visitor on the page). Node-local by design:
+//     per-request decisions are local, and the fleet-wide view is the
+//     brain's (E6).
 //   - errors: a source with at least ErrorMinRequests requests of which
 //     ErrorShare or more were 4xx/5xx from the origin (the decider's own
 //     answers excluded) is MARKED "errors" for MarkTTL — a scanner or a broken
@@ -214,8 +226,12 @@ func (r *Rules) Apply(w WindowStats, sink Sink) Applied {
 	// again at the base TTL rather than at its old level.
 	r.forget(now)
 	var out Applied
-	// The zone-wide trigger: the whole zone over its rate on this node.
-	if zr.Auto && zr.ZoneRPS > 0 && w.RPS >= zr.ZoneRPS {
+	// Was the zone under challenge while this window ran? Read before this
+	// window's trigger, so the ladder below knows a flooder had the rung.
+	zoneWasChallenged, _, _ := sink.ZoneChallenge(w.Zone)
+	// The zone-wide trigger: the zone's admitted load over its rate on this
+	// node.
+	if zr.Auto && zr.ZoneRPS > 0 && w.AdmittedRPS >= zr.ZoneRPS {
 		if sink.SetZoneChallenge(w.Zone, true, now.Add(zr.Hold), "zone-rps") {
 			out.ZoneChallenge = true
 		}
@@ -239,16 +255,17 @@ func (r *Rules) Apply(w WindowStats, sink Sink) Applied {
 		over := s.DeniedRate + s.WouldDenyRate
 		if over >= r.FloodMinDenied && s.Decided > 0 && float64(over)/float64(s.Decided) >= r.FloodDeniedShare {
 			// The ladder (D9): in an auto zone a first flood earns a challenge;
-			// a source that floods on while challenged, or that had cleared
-			// the rung and floods anyway (a browser or a solver farm — either
-			// way not a client the rung can sort out), is denied.
-			if zr.Auto && s.Cleared == 0 && !sink.Challenged(w.Zone, s.Src) {
+			// a source that already had the rung's chance — challenged (by
+			// name or with the whole zone), cleared, or remembered from an
+			// earlier promotion — is denied.
+			k := repeatKey{zone: w.Zone, src: s.Src}
+			if zr.Auto && s.Cleared == 0 && r.repeats[k] == nil && !zoneWasChallenged && !sink.Challenged(w.Zone, s.Src) {
 				if sink.Challenge(w.Zone, s.Src, r.ChallengeTTL, "flood") {
 					out.Challenged++
 				}
 				continue
 			}
-			ttl := r.escalate(repeatKey{zone: w.Zone, src: s.Src}, now)
+			ttl := r.escalate(k, now)
 			if sink.Deny(w.Zone, s.Src, ttl, "flood") {
 				out.Denied++
 			}
