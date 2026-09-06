@@ -51,7 +51,14 @@ on a stale copy.
 | `zones[].acme.fallback` | A second directory a node turns to after three consecutive failures with the primary (the answer to a duplicate-certificate ceiling on a fleet), alternating from then on; a success from either clears the failure state and the following renewal tries the primary first. Must differ from `acme.directory`. Empty means the node default, which may be none. A CA that requires an External Account Binding (ZeroSSL, Google Trust Services) needs its credentials in the **node's** `edge.yaml` — the zones file carries no secrets. |
 | `zones[].policy.mode` | `decide` (default): every request to the zone asks the node's decision service through nginx's `auth_request`. `none`: proxy only — no decision, no rate, no marks; the zone still gets its certificate and its access log. |
 | `zones[].policy.failure_mode` | What nginx does when the decision service is down, slow or off-contract: `open` (default) passes the request undecided — the edge's equivalent of the data plane's default-pass — and counts it; `closed` answers `503`. With `open` the failure is absorbed inside the subrequest, so the client's keepalive connection survives it; with `closed` nginx answers `503` on that connection. |
-| `zones[].policy.challenge` | Client challenges (proof-of-work, JavaScript) are a later milestone; only `"off"` is accepted today. |
+| `zones[].policy.dry_run` | `true` makes **this zone** watch-only on every node: its denies and challenges are counted and marked (`would-deny:<reason>`, `would-challenge:<why>`) and none is enforced, while sibling zones enforce as before. The node's own `dry_run` (`edge.yaml`) is the floor a zone cannot go below — a zone can only be *more* watch-only than its node. Default `false`: the zone follows its node. A node older than this release does not know the key and enforces the zone under its own `dry_run`; upgrade the nodes first. |
+| `zones[].policy.challenge` | The proof-of-work rung ([the clearance page](/docs/edge#the-clearance-page)): `off` (default), `manual` or `auto`. **`manual`**: every request without a valid clearance is sent to the page. **`auto`**: a source is challenged when the node's rollups say so — a flooder is *challenged before it is denied*, and the whole zone when `challenge_options.auto.zone_rps` trips — or when an operator pulls [the lever](/docs/edge#the-lever). A valid clearance passes the rung, never the rate ceiling. Watch-only until `challenge_options.dry_run` is `false`. Changing it never reloads nginx. |
+| `zones[].policy.challenge_options.dry_run` | The rung's own watch-only switch, **`true` by default**: a challenge is answered as an allow marked `would-challenge:<why>`, so you see who *would* have been asked before any zone asks anyone. Set `false` to let the rung bite (the node's and the zone's `dry_run` still win). |
+| `zones[].policy.challenge_options.exempt_paths[]` | Request-path prefixes the rung never challenges — health checks, API clients, webhooks: absolute paths, matched as prefixes of the request path without its query, in both the normalised and the raw form (a path with a dot segment, `;`, a backslash, a control byte or a surviving `%`-escape is never exempt). The one place the edge reads a path, for an exemption only — never for a verdict. At most 64. |
+| `zones[].policy.challenge_options.difficulty` | The puzzle's leading zero bits, `12..22` (default `18`: a few seconds in a browser's Worker lanes; each step doubles the work). A slow device must still finish inside the puzzle's two-minute window; the page offers the timed no-JS path beside a long solve. |
+| `zones[].policy.challenge_options.cookie_ttl_seconds` | How long a solved puzzle's clearance lasts, `60..86400` (default `1800`). A cleared client solves again when it expires or when its address (IPv6: `/64`) changes. The no-JS ticket's clearance is fixed at five minutes. |
+| `zones[].policy.challenge_options.auto.zone_rps` | For `challenge: auto`: the zone's **admitted** request rate on one node — decided requests the node did not refuse — at or over which every source of the zone is challenged (the flood spread over so many sources that none trips its own ceiling). `0` (default) sets no zone-wide trigger. Node-local: each node measures its own window. |
+| `zones[].policy.challenge_options.auto.hold_seconds` | How long the zone-wide challenge stays on after a window that tripped it, `30..3600` (default `300`); every window still over the rate extends it, and it lapses on its own. |
 | `zones[].policy.rate.rps` | Requests per second per **source** — an IPv4 address, or an IPv6 `/64` — enforced by the decision service with a token bucket whose burst is one second's worth. `0` (default) sets no ceiling. Changing it never reloads nginx. |
 | `zones[].policy.rate.concurrency` | In-flight requests per source, counted approximately from decisions and completions in the access log (a source whose log stream goes quiet has its ceiling suspended rather than wrongly enforced). `0` (default) sets no ceiling. |
 | `zones[].extra_directives_file` | An **absolute** path on the node to an nginx snippet included last in the zone's `:443` server — the one escape hatch (an extra header, a custom location). You own what it breaks; `nginx -t` is the only guard, and a snippet that fails it keeps the previous generation serving. No whitespace, `;`, `#`, braces, quotes, backslash, `$` or glob characters (`* ? [ ]`) in the path. |
@@ -60,20 +67,29 @@ on a stale copy.
 
 With `mode: decide`, nginx asks the node's decision service before proxying. The answer is
 `200` — the request goes to the origin, with `X-Kapkan-Mark` set when the source carries a mark
-— or `403` with a reason:
+— `401` — the source must clear the rung first, so nginx serves [the clearance
+page](/docs/edge#the-clearance-page) instead of the origin — or `403` with a reason:
 
 | Reason | nginx answers | Set by |
 | --- | --- | --- |
 | `rate` | `429` with `Retry-After: 1` | The source exceeded `policy.rate.rps`. |
 | `concurrency` | `429` with `Retry-After: 1` | The source has `policy.rate.concurrency` requests in flight. |
-| `table:<reason>` | `403` | The source is in the node's verdict table: promoted by the rollups (`table:flood` — a source that kept pushing through its rate ceiling is denied for one minute, doubling to ten on repeat) or, later, by the brain's ladder. The dry-run mark is `would-deny:table:<reason>`. |
+| `table:<reason>` | `403` | The source is in the node's verdict table: promoted by the rollups (`table:flood` — a source that kept pushing through its rate ceiling is denied for one minute, doubling to ten on repeat). The dry-run mark is `would-deny:table:<reason>`. |
+| `challenge:manual` | the clearance page (`403`, never cached) | `policy.challenge: manual` and the request carries no valid clearance. |
+| `challenge:zone:<reason>` | the clearance page | The whole zone is under challenge: the node's `auto.zone_rps` trigger (`zone-rps`) or the operator's lever. |
+| `challenge:table:<reason>` | the clearance page | The source is in the verdict table with a challenge: the rollups' flood rule in an `auto` zone (`table:flood`) — the rung a flooder gets before the block. |
+
+A request that clears the rung reaches the origin marked `cleared` (or `cleared:nojs` for the
+timed no-JS ticket) — the rate ceiling still applies to it. A source that floods on while
+challenged, or that had cleared the rung and floods anyway, is denied.
 
 Two headers are under Kapkan's control and can never be forged by a client: `X-Kapkan-Zone`
 (the zone name) always reaches the origin; `X-Kapkan-Mark` is present only when the source
 carries a mark and absent otherwise — a client-sent value of either is dropped. A source whose
-requests are almost all `4xx`/`5xx` is marked `errors`; in **dry-run** every would-be denial
-becomes an allow marked `would-deny:<reason>`, so the origin sees exactly what live mode would
-have refused.
+requests are almost all `4xx`/`5xx` is marked `errors`; in **dry-run** — the node's, the
+zone's `policy.dry_run`, or the rung's `challenge_options.dry_run` — every would-be denial
+becomes an allow marked `would-deny:<reason>` and every would-be challenge one marked
+`would-challenge:<why>`, so the origin sees exactly what live mode would have refused or asked.
 
 The node keeps a bounded number of sources per zone; when the table is full a new source is
 passed **untracked** (default-pass) and counted, never refused for lack of room.
