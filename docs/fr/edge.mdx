@@ -1,7 +1,7 @@
 export const metadata = {
   title: "Nœuds edge (frontal HTTPS géré)",
   description:
-    "Transformez une machine Linux exécutant nginx ou Angie en frontal HTTPS géré pour vos zones : certificats émis sur le nœud, configuration générée par Kapkan, décisions prises localement à chaque requête, rien n'est relayé par Kapkan lui-même.",
+    "Transformez une machine Linux exécutant nginx ou Angie en frontal HTTPS géré pour vos zones : certificats émis sur le nœud, configuration générée par Kapkan, décisions prises localement à chaque requête — un plafond de débit, un palier de preuve de travail, un blocage — rien n'est relayé par Kapkan lui-même.",
 };
 
 # Nœuds edge (frontal HTTPS géré)
@@ -9,16 +9,18 @@ export const metadata = {
 <Callout type="info" title="Ce que c'est — et ce que ce n'est pas">
 Un **nœud edge** est une machine Linux exécutant **nginx ou Angie** que Kapkan gère : il émet les
 certificats des zones sur la machine, génère la configuration du terminateur, décide à chaque
-requête s'il faut laisser passer un client, et rend compte au cerveau. Kapkan **ne relaie jamais les
-octets d'un client** — nginx termine le TLS et fait le proxy vers vos origines ; Kapkan lui dit quoi
-servir et, pour chaque requête, s'il faut la servir. Vous apportez le réseau (anycast, transit, DNS)
-et les machines ; Kapkan apporte la boucle de protection.
+requête s'il faut laisser passer un client — ou lui demander d'abord de prouver qu'il est un
+navigateur — et rend compte au cerveau. Kapkan **ne relaie jamais les octets d'un client** — nginx
+termine le TLS et fait le proxy vers vos origines ; Kapkan lui dit quoi servir et, pour chaque
+requête, s'il faut la servir. Vous apportez le réseau (anycast, transit, DNS) et les machines ;
+Kapkan apporte la boucle de protection.
 </Callout>
 
 En clair : vous listez vos sites web (les zones) dans un fichier sur le cerveau, vous pointez leur
 DNS vers vos machines edge, et chaque machine reçoit un certificat, une configuration nginx générée
-et un service de décision local qui compte chaque client et refuse ceux qui dépassent la politique
-de la zone — sans aller-retour vers quoi que ce soit.
+et un service de décision local qui compte chaque client, refuse ceux qui dépassent la politique de
+la zone et, là où vous l'autorisez, demande à un client suspect de résoudre une petite énigme avant
+de le bloquer — sans aller-retour vers quoi que ce soit.
 
 ```yaml
 # zones.yaml on the brain (edge.zones_file) — see the zones reference
@@ -30,6 +32,9 @@ zones:
       mode: decide            # every request asks the local decision service
       failure_mode: open      # decider down → requests pass, undecided
       rate: { rps: 50, concurrency: 20 }
+      challenge: auto         # a flooder is asked to prove it is a browser before it is blocked
+      challenge_options:
+        dry_run: true         # watch-only: shows who WOULD be challenged, challenges nobody
 ```
 
 Le rôle est le troisième du même binaire : `kapkan` (le cerveau), [`kapkan scrub`](/docs/scrubbing#nœuds-de-nettoyage-gérés)
@@ -43,35 +48,43 @@ et désormais [`kapkan edge`](/docs/cli#edge). L'installer de bout en bout fait 
  client ──TLS──▶ nginx / Angie  (terminates, proxies to your origins)
                     │ auth_request        │ access log (JSON, unix socket)
                     ▼                     ▼
-               kapkan edge  ── decision service · rollups · ACME · renderer
+               kapkan edge  ── decision service · clearance page · rollups · ACME · renderer
                     ▲ long-poll of the zone document, self-reports
-               kapkan (brain) — zones.yaml, issuance coordinator, console
+               kapkan (brain) — zones.yaml, the lever, issuance coordinator, console
 ```
 
 - **Le cerveau distribue la politique, jamais les verdicts.** `kapkan edge` interroge en long-poll
   un seul document — les zones avec leurs origines, le plancher TLS, les annuaires ACME et la
-  politique par requête — et en garde une copie sur disque. Chaque décision par requête est prise
-  **sur le nœud** ; un cerveau arrêté ou injoignable ne change rien à la façon dont les requêtes
-  sont servies.
+  politique par requête, les clés de signature du palier et tout levier qu'un opérateur a
+  actionné — et en garde une copie sur disque. Chaque décision par requête est prise **sur le
+  nœud** ; un cerveau arrêté ou injoignable ne change rien à la façon dont les requêtes sont
+  servies.
 - **Le générateur (renderer)** transforme le document en configuration nginx sous le répertoire
   d'état du nœud : un fichier commun (un `log_format` JSON, les upstreams des sockets unix de
   Kapkan, un fourre-tout qui refuse les hôtes inconnus) et un fichier par zone (l'écouteur `:80`
   qui répond aux défis ACME et redirige, le serveur `:443` qui fait le proxy vers les origines
-  derrière un `auth_request` au service de décision). Chaque génération est testée avec `nginx -t`
-  **avant** d'être installée et rechargée ; un candidat qui échoue n'est jamais installé — la
-  configuration précédente continue de servir et l'échec est rapporté.
+  derrière un `auth_request` au service de décision, et les points de terminaison de la page de
+  laissez-passer). Chaque génération est testée avec `nginx -t` **avant** d'être installée et
+  rechargée ; un candidat qui échoue n'est jamais installé — la configuration précédente continue
+  de servir et l'échec est rapporté.
 - **Le service de décision** répond à l'`auth_request` de nginx sur un socket unix en quelques
-  microsecondes : `200` (avec un en-tête `X-Kapkan-Mark` optionnel que l'origine reçoit) ou `403`.
-  Il applique le `policy.rate` de la zone par **source** — une adresse IPv4, ou un `/64` IPv6 —
-  avec un seau de jetons (token bucket) pour les requêtes par seconde et un compte approximatif des
-  requêtes en cours pour la concurrence, et tient une table bornée de verdicts (refus ou marque,
-  avec un TTL). Un client au-dessus de son plafond reçoit `429` avec `Retry-After` ; un client que
-  la table refuse reçoit `403`.
+  microsecondes, par l'un de trois mots : `200` (avec un en-tête `X-Kapkan-Mark` optionnel que
+  l'origine reçoit), `401` — *franchis d'abord le palier*, de sorte que nginx sert
+  [la page de laissez-passer](#la-page-de-laissez-passer) à la place de l'origine — ou `403`. Il
+  applique le `policy.rate` de la zone par **source** — une adresse IPv4, ou un `/64` IPv6 — avec
+  un seau de jetons (token bucket) pour les requêtes par seconde et un compte approximatif des
+  requêtes en cours pour la concurrence, et tient une table bornée de verdicts (refus, défi ou
+  marque, chacun avec un TTL ; un refus prime sur un défi, un défi sur une marque). Un client
+  au-dessus de son plafond reçoit `429` avec `Retry-After` ; un client que la table refuse reçoit
+  `403` ; un client que la table met au défi reçoit la page.
 - **Les rollups** lisent le journal d'accès du terminateur (JSON sur un socket datagramme unix) et
-  l'agrègent en fenêtres par zone et par source. Une source qui continue de forcer son plafond de
-  débit est promue en refus (une minute, doublée jusqu'à dix en cas de récidive) ; une source dont
-  les requêtes sont presque toutes des erreurs est marquée `errors` à l'intention de l'origine. Les
-  verdicts restent sur le nœud.
+  l'agrègent en fenêtres de dix secondes par zone et par source. Une source qui continue de forcer
+  son plafond de débit est promue : dans une zone dont le palier est `off`, directement en refus
+  (une minute, doublée jusqu'à dix en cas de récidive) ; dans une zone `auto`, d'abord vers le
+  palier — [l'échelle](#léchelle). Une source dont les requêtes sont presque toutes des erreurs
+  est marquée `errors` à l'intention de l'origine. Les verdicts restent sur le nœud ; les rollups
+  alimentent aussi le rapport du nœud, de sorte que le cerveau et la console voient qui a été
+  refusé ou mis au défi, et qui l'*aurait* été.
 - **ACME** tourne sur chaque nœud : les clés de compte et les certificats sont générés sur la
   machine et ne la quittent jamais. Le cerveau se contente de sérialiser l'émission par zone (un
   seul nœud commande à la fois) et de diffuser un défi HTTP-01 en attente à tous les nœuds, de
@@ -80,29 +93,174 @@ et désormais [`kapkan edge`](/docs/cli#edge). L'installer de bout en bout fait 
 
 ### La séparation rapide/lent
 
-Modifier le **débit** (`rate`) d'une zone ou un **verdict** ne recharge jamais nginx ; ces
-changements vont au service de décision et prennent effet à la requête suivante. Seuls les
-changements **lents** — une zone ajoutée ou retirée, une origine modifiée, le plancher TLS, un
-certificat émis ou renouvelé — produisent une nouvelle génération de configuration, testée puis
-rechargée. C'est ce qui permet de resserrer un débit sous attaque sans toucher au terminateur.
+Modifier le **débit** (`rate`) d'une zone, son **palier** (`policy.challenge` et ses options), un
+**verdict** ou actionner le levier ne recharge jamais nginx ; ces changements vont au service de
+décision et prennent effet à la requête suivante. Seuls les changements **lents** — une zone
+ajoutée ou retirée, une origine modifiée, le plancher TLS, un certificat émis ou renouvelé —
+produisent une nouvelle génération de configuration, testée puis rechargée. C'est ce qui permet de
+resserrer un débit ou de mettre une zone sous défi en plein milieu d'une attaque sans toucher au
+terminateur : la mécanique du laissez-passer est générée pour chaque zone qui décide, quoi que dise
+son palier, de sorte que les octets sont les mêmes pour `off`, `manual` et `auto`.
 
-### Dry-run : observer d'abord
+## Le palier de preuve de travail
 
-Comme tout rôle distant, un nœud edge **démarre en dry-run par défaut** : les décisions sont
-comptées et marquées, aucune n'est appliquée. Une requête que la politique refuserait atteint tout
-de même l'origine, avec l'en-tête `X-Kapkan-Mark: would-deny:rate` (ou `would-deny:concurrency`,
-`would-deny:table:<reason>` — aujourd'hui `would-deny:table:flood`, la règle de rollup qui a promu
-la source), de sorte que vous pouvez fouiller les journaux de votre origine et regarder les
-métriques avant qu'un seul client ne soit refoulé. Définissez `dry_run: false` dans l'`edge.yaml`
-du nœud quand les comptes vous paraissent justes.
+Entre *laisser passer* et *bloquer*, l'edge dispose d'un mot intermédiaire : **prouve que tu es un
+navigateur**. Un client mis au défi reçoit une petite page à la place de l'origine ; le script de
+la page résout une énigme hashcash (quelques secondes de CPU à la difficulté par défaut) et poste
+la réponse, ce qui lui vaut un **laissez-passer** — un cookie signé, lié à cette zone et à la
+source de ce client — qui laisse ses requêtes franchir le palier pendant une demi-heure. Un
+navigateur s'en aperçoit à peine ; un script incapable d'exécuter JavaScript prend le chemin
+temporisé (ci-dessous) ; un bot qui ne fait que tirer des requêtes ne passe jamais. Le palier n'est
+**pas un WAF** ni un détecteur de bots : il ne lit rien de la requête hormis le préfixe du chemin,
+et seulement pour l'exempter ; il fait *coûter* quelque chose à une requête, et un client qui a du
+CPU à dépenser peut le franchir — il est alors limité en débit comme tout le monde.
+
+Le palier d'une zone est fixé par `policy.challenge` dans le [fichier de zones](/docs/zones) :
+`off` (par défaut), **`manual`** — chaque requête sans laissez-passer valide est mise au défi,
+l'interrupteur d'un site sous attaque — ou **`auto`** — personne n'est mis au défi tant que les
+rollups du nœud ou un opérateur ne désignent pas une source ou la zone entière. Les deux mots sont
+**en observation seule tant que vous n'en décidez pas autrement** : `challenge_options.dry_run`
+vaut `true` par défaut, de sorte que le palier montre d'abord qui il *demanderait* (la marque
+`would-challenge:<why>`, l'ensemble des candidats du rapport, la console) et ne demande rien à
+personne.
+
+### L'échelle
+
+Dans une zone `auto`, la règle de flood des rollups **met au défi avant de refuser**. Une source
+qui force son plafond de débit pendant une fenêtre est envoyée au palier pour cinq minutes
+(`table:flood`) — un navigateur le franchit et est limité en débit comme n'importe qui ; un bot
+n'y parvient pas. Une source qui a déjà eu sa chance au palier — qui continue d'inonder alors
+qu'elle est mise au défi (nommément, ou avec la zone entière), qui a franchi le palier et inonde
+quand même, ou dont on se souvient d'une promotion antérieure — est **refusée**, une minute doublée
+jusqu'à dix en cas de récidive. Dans la table de verdicts, les défis ne peuvent occuper qu'au plus
+la moitié de la place, de sorte que les défis d'un botnet tournant ne peuvent jamais évincer les
+refus qui doivent suivre ; une source qui inonde et dont le défi ne trouve pas de place est refusée
+à la place.
+
+Le **déclencheur global de la zone** est fait pour le flood qu'aucune source ne déclenche seule —
+proxys résidentiels, botnet étalé finement : `challenge_options.auto.zone_rps` (par nœud ; `0` =
+désactivé) bascule la zone entière sous défi pour `auto.hold_seconds` (cinq minutes par défaut)
+lorsque le débit **admis** de la zone sur le nœud — les requêtes décidées que le nœud n'a pas
+refusées — atteint ou dépasse cette valeur ; chaque fenêtre encore au-dessus prolonge le maintien,
+et il expire de lui-même. Le trafic refusé n'est pas de la charge : les `403` d'un bot bloqué ou
+les `429` d'une source isolée qui inonde ne basculent jamais une zone ni ne la maintiennent
+basculée. Le déclencheur est local au nœud par conception — chaque nœud mesure sa propre fenêtre ;
+la vue sur toute la flotte est le rapport du cerveau.
+
+### La page de laissez-passer
+
+Sur un `401` du service de décision, le terminateur sert, à la place de l'origine, une page HTML
+**`403`** `Cache-Control: no-store` issue du service de laissez-passer propre au nœud (le
+quatrième socket unix, `edge-clearance.sock`) : l'énigme sous forme de bloc de données, un script
+et une feuille de style référencés par hachage de contenu, une CSP stricte, aucune image, aucun
+tiers, dans la langue du visiteur (`en`, `ru`, `de`, `fr`, `es` d'après `Accept-Language`). Une
+requête d'origine autre que `GET` — un appel d'API, l'envoi d'un formulaire — reçoit à la place le
+compact `{"error":"challenge_required"}`. Le script résout l'énigme sur plusieurs voies (quelques
+Workers plus une voie découpée en tranches de temps sur le fil principal, pour que le
+ralentissement des minuteurs d'un onglet en arrière-plan ne puisse pas la bloquer) et poste la
+réponse sur `/_kapkan/clearance/answer` ; une réponse correcte reçoit un `303` vers le chemin même
+de la requête, avec
+
+```
+Set-Cookie: kapkan_clr=…; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=1800
+```
+
+— host-only, de sorte qu'une zone voisine ne peut jamais le lire, et lié à la zone et à la clé de
+source du client, de sorte qu'il est inutilisable depuis une autre adresse ou sur une autre zone.
+La valeur du cookie est la **seule** valeur venant du client que la sous-requête de décision
+transporte ; elle est vérifiée contre les clés par zone du document (dérivées d'une clé maîtresse
+de flotte que le cerveau fait tourner à minuit UTC, celle de la veille restant honorée 48 heures,
+persistées via `edge.state_file` pour qu'un redémarrage du cerveau n'oblige pas chaque visiteur
+admis à résoudre de nouveau) — et, en dernier, contre une clé propre au nœud, de sorte qu'un nœud
+coupé du cerveau continue de mettre au défi et d'admettre au lieu de murer tout le monde dehors.
+Une requête admise atteint l'origine marquée `cleared` ; les plafonds de débit et de concurrence
+s'appliquent toujours à elle, de sorte qu'un flood sans cookies reçoit des `429`, pas une page par
+requête.
+
+**L'absence de JavaScript est un chemin de premier rang.** La page porte un ticket temporisé,
+échangeable de quatre secondes à deux minutes après son émission, à la fois sous forme de meta
+refresh dans `<noscript>` et de bouton **Continuer** qui reste en place à moins que le script ne le
+masque comme premier geste — JavaScript désactivé, un script bloqué ou cassé et un moteur qui
+échoue à l'auto-test du solveur laissent tous le bouton là, et il revient à côté d'une résolution
+qui s'éternise. Le ticket vaut le laissez-passer plus court de **cinq minutes** (`cleared:nojs`).
+Chaque refus qu'un navigateur peut rencontrer est une page avec la marche à suivre : un ticket trop
+précoce réessaie de lui-même, un ticket expiré et une réponse périmée ou fausse ramènent à la page
+d'où venait le visiteur, le plafond d'émission dit d'attendre une minute. Les laissez-passer sont
+plafonnés à 6 par source et 6 000 par zone et par minute (`429` au-delà). L'accessibilité est un
+critère de revue de la page : HTML sémantique, une ligne d'état annoncée une seule fois, une
+alternative non temporisée à chaque minuteur, les deux schémas de couleurs à un contraste de texte
+≥ 13:1, contours de focus, mouvement réduit respecté.
+
+Deux réglages par zone : `challenge_options.difficulty` (`12..22`, `18` par défaut ; chaque cran
+double le travail, et un téléphone lent doit encore finir dans la fenêtre de deux minutes de
+l'énigme) et `cookie_ttl_seconds` (`60..86400`, `1800` par défaut). `challenge_options.exempt_paths`
+nomme des préfixes de chemin que le palier ne met jamais au défi — vérifications de santé, clients
+d'API, webhooks. Si le service de laissez-passer lui-même est arrêté, le `401` suit le
+`failure_mode` de la zone comme tout autre échec de décision : `open` laisse passer la requête sans
+décision, `closed` répond `503`.
+
+### Le levier
+
+Un opérateur peut fixer le palier d'une zone **pour une durée bornée, quoi que dise le fichier de
+zones** :
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  https://kapkan.example.net:8443/api/v1/edge/zones/shop.example.com/challenge \
+  -d '{"mode":"manual","ttl_seconds":1800,"reason":"credential stuffing from residential proxies"}'
+```
+
+`mode` vaut `manual`, `auto` ou `off` (qui le lève, comme `DELETE`) ; `ttl_seconds` est dans
+`60..86400`. La surcharge voyage dans le document de zones — les interrogations retenues sont
+réveillées aussitôt — et chaque nœud applique le mode effectif sur son chemin rapide, en le lisant
+à chaque décision, de sorte qu'il **prend fin à l'heure, avec ou sans cerveau**, et qu'une bascule
+globale de zone qu'il avait rendue inerte est retirée avec lui. La réponse dit où le levier agit :
+le mode propre au fichier, les indicateurs d'observation seule de la zone (`policy.dry_run` et
+`challenge_options.dry_run` — avec l'un ou l'autre, le levier *prévisualise* au lieu d'agir) et
+chaque nœud configuré avec sa vivacité et le `dry_run` qu'il rapporte — un nœud qui ne fait que
+compter doit être repéré avant de faire confiance au levier. C'est une action d'opérateur (rang
+`operator`, jetons non rattachés), auditée comme `edge_challenge`, affichée par
+[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) et par la console comme
+**override**, et tenue dans la mémoire du cerveau comme le coordinateur d'émission — un outil
+d'incident, à réactionner après un redémarrage du cerveau. Le `dry_run` propre au cerveau ne le
+conditionne pas : actionner le levier est une modification de politique ; l'observation seule vit
+sur le nœud et la zone. Un nœud qui exécute une version antérieure au levier ne connaît pas la
+surcharge et suit son fichier, alors que la réponse le liste tout de même — mettez les nœuds à
+niveau avant de vous y fier (l'inventaire montre la version de chaque nœud).
+
+### Observer avant d'appliquer
+
+Comme tout rôle distant, un nœud edge **démarre en dry-run par défaut**, et l'edge en a trois
+couches, chacune un plancher que la couche du dessous ne peut pas défaire :
+
+| Couche | Où | Couvre |
+| --- | --- | --- |
+| Le `dry_run` du nœud (`edge.yaml`, `true` par défaut) | le propriétaire de la machine | chaque décision de chaque zone sur ce nœud |
+| Le `policy.dry_run` de la zone (`false` par défaut) | le fichier de zones | chaque décision de cette zone, sur chaque nœud — une zone ne peut être que *plus* en observation seule que son nœud |
+| Le `challenge_options.dry_run` du palier (**`true`** par défaut) | le fichier de zones | le palier seul : les défis sont prévisualisés, le plafond et le blocage s'appliquent comme le disent les couches du dessus |
+
+Sous l'une quelconque d'entre elles, un refus qui aurait eu lieu atteint l'origine comme une
+autorisation marquée `X-Kapkan-Mark: would-deny:rate` (ou `would-deny:concurrency`,
+`would-deny:table:flood`), et un défi qui aurait eu lieu comme `would-challenge:manual`,
+`would-challenge:zone:<reason>` ou `would-challenge:table:flood` — de sorte que vous pouvez
+fouiller les journaux de votre origine, surveiller
+`kapkan_edge_decisions_total{result="would_deny"|"would_challenge"}` et lire **qui aurait été mis
+au défi** avant qu'un seul client ne le soit : chaque nœud rapporte la dernière fenêtre de ses
+zones avec les sources les plus actives et la chose la plus forte qu'il a faite — ou aurait
+faite — à chacune, le cerveau les fusionne dans `GET /api/v1/edge/zones/status`, et la vue
+**Edge** de la console montre l'ensemble des candidats par zone. Passez en production une couche à
+la fois : `dry_run: false` sur le nœud quand les comptes de would-deny paraissent justes,
+`challenge_options.dry_run: false` sur une zone quand son ensemble des candidats nomme les bons
+clients.
 
 ## Ce que fait le nœud en cas de panne
 
 | Panne | Comportement |
 | --- | --- |
-| Cerveau arrêté ou injoignable | Le nœud continue de servir le dernier document et les certificats depuis le disque ; les renouvellements continuent ; un redémarrage revient en service sans le cerveau (fail-static). Sous une adresse partagée ou anycast, la validation HTTP-01 d'un renouvellement peut atterrir sur un autre nœud pendant que le cerveau est absent ; ces tentatives sont réessayées toutes les heures et ne comptent jamais pour la CA de repli. |
+| Cerveau arrêté ou injoignable | Le nœud continue de servir le dernier document et les certificats depuis le disque ; les renouvellements continuent ; un redémarrage revient en service sans le cerveau (fail-static). Un levier présent dans le document en cache prend toujours fin à son `until` ; les clés du palier restent valides 48 heures, puis la clé propre au nœud prend le relais. Sous une adresse partagée ou anycast, la validation HTTP-01 d'un renouvellement peut atterrir sur un autre nœud pendant que le cerveau est absent ; ces tentatives sont réessayées toutes les heures et ne comptent jamais pour la CA de repli. |
 | Service de décision arrêté ou lent | Par zone : `failure_mode: open` (la valeur par défaut) laisse passer la requête sans décision et la compte ; `closed` répond `503`. |
-| Document refusé (générateur, ou échec de `nginx -t`) | La génération précédente continue de servir ; le nœud reste sain mais `converged: false`, rapporte l'ETag du document **généré** (pas celui accepté), et réessaie localement toutes les 1 → 10 minutes jusqu'à ce qu'il s'applique ou qu'un document plus récent arrive. |
+| Page de laissez-passer arrêtée | Un `401` qui ne peut pas être transformé en page suit le `failure_mode` de la zone de la même façon : `open` laisse passer la requête, `closed` répond `503`. |
+| Document refusé (générateur, ou échec de `nginx -t`) | La génération précédente continue de servir ; le nœud reste sain mais `converged: false`, rapporte l'ETag du document **généré** (pas celui accepté), et réessaie localement toutes les 1 → 10 minutes jusqu'à ce qu'il s'applique ou qu'un document plus récent arrive. Le chemin rapide — débits, paliers, le levier — est appliqué entre-temps depuis le document **accepté**. |
 | nginx meurt | systemd le redémarre ; avec `terminator.pid_file` défini, le nœud rapporte `alive: false` et répond `503` sur son `/healthz` entre-temps. Kapkan ne supervise jamais le terminateur lui-même. |
 | Certificat non renouvelable | Le certificat courant sert jusqu'à son expiration ; `kapkan_edge_cert_not_after_seconds` est l'alarme à J−30 ; après trois échecs le nœud essaie la CA de repli. |
 | Le nœud meurt | Le cerveau voit l'interrogation s'arrêter (`edge.stale_after_seconds`) et l'affiche dans l'inventaire ; détourner le trafic est le travail de votre réseau (retrait anycast, DNS). |
@@ -114,11 +272,20 @@ du nœud quand les comptes vous paraissent justes.
   sinon. Le corps porte `converged`, les ETags généré et accepté, la génération en service et son
   résultat de test, la dernière erreur, la prochaine tentative, la dernière fois que le cerveau a
   été vu, et `dry_run`.
-- **`/metrics`** sur la même adresse expose les séries Prometheus du nœud — voir
-  [métriques](/docs/metrics#nœuds-edge).
+- **`/metrics`** sur la même adresse expose les séries Prometheus du nœud — les décisions par
+  résultat (`challenge`, `would_challenge`, `allow_cleared` entre autres), les issues de la page de
+  laissez-passer, si un défi global de zone est actif — voir [métriques](/docs/metrics#nœuds-edge).
 - **L'inventaire du cerveau**, `GET /api/v1/edge/nodes`, joint la vivacité de chaque nœud configuré
   à son dernier rapport : version, dry-run, ETag généré, type et version du terminateur, génération
-  et résultat de test, certificats (jamais une clé). Voir [l'API](/docs/api#le-canal-edge).
+  et résultat de test, certificats (jamais une clé), et la **section zones** — la dernière fenêtre
+  de dix secondes de chaque zone, les sources qu'elle a refusées, mises au défi ou qu'elle l'aurait
+  fait, et si son palier s'y applique ou n'y fait que prévisualiser. Voir
+  [l'API](/docs/api#le-canal-edge).
+- **Les zones sur toute la flotte**, `GET /api/v1/edge/zones/status`, fusionne les zones des nœuds
+  vivants : débits sommés, les nœuds sur lesquels une zone est en observation seule ou sous un défi
+  global (appliqué ou en aperçu), le levier en vigueur, et l'ensemble des candidats. La vue
+  **Edge** de la console — affichée dès que `edge.nodes[]` est configuré — la rend ; voir
+  [le tableau de bord](/docs/dashboard).
 
 ## Limites à connaître
 
@@ -134,8 +301,17 @@ du nœud quand les comptes vous paraissent justes.
 - **Les origines sont résolues au moment du test.** Une origine donnée par nom d'hôte est résolue
   une seule fois, quand nginx charge la configuration ; une qui ne se résout pas fait échouer
   `nginx -t` pour toute la génération (qui est réessayée). Préférez des adresses.
-- **Jokers, HTTP/3 et défis viendront dans des jalons ultérieurs.** `tls.h3` et un
-  `policy.challenge` autre que `off` sont refusés aujourd'hui ; chaque nom est listé explicitement.
+- **Le palier est un coût, pas un verdict.** Un client qui a du CPU à dépenser le franchit (et est
+  alors limité en débit comme n'importe qui) ; un client derrière une adresse partagée — un bureau,
+  un NAT d'opérateur — partage sa clé de source avec ses voisins, et le plafond de six
+  laissez-passer par minute et par source leur est commun. Le palier ne lit jamais une requête
+  au-delà du préfixe de chemin qu'il peut exempter : ce n'est pas un WAF et il n'essaie pas de
+  l'être.
+- **Le déclencheur global de la zone est par nœud**, et le levier vit dans la mémoire du cerveau :
+  un redémarrage du cerveau l'oublie (les nœuds en gardent la copie dans leur document en cache
+  jusqu'à sa fin).
+- **Jokers et HTTP/3 viendront dans des jalons ultérieurs.** `tls.h3` est refusé aujourd'hui ;
+  chaque nom est listé explicitement.
 - **Plafonds de certificats en double.** Des certificats par nœud signifient que N nœuds sur une
   zone font N commandes ; Let's Encrypt limite un nom à environ cinq par semaine. Le créneau
   d'émission du cerveau et le jitter des renouvellements les étalent ; `acme.fallback` (ZeroSSL,
@@ -149,8 +325,9 @@ du nœud quand les comptes vous paraissent justes.
 ## Voir aussi
 
 - [Installer un nœud edge](/docs/edge-install) — côté cerveau, côté nginx, l'unité, la mise en production
-- [Référence des zones](/docs/zones) — chaque clé de `zones.yaml`
+- [Référence des zones](/docs/zones) — chaque clé de `zones.yaml`, et ce qu'une politique fait d'une requête
 - [`kapkan edge`](/docs/cli#edge) — la commande, ses options et `edge.yaml`
-- [Le canal edge](/docs/api#le-canal-edge) — les routes du cerveau
+- [Le canal edge](/docs/api#le-canal-edge) — les routes du cerveau, l'état des zones et le levier
 - [Métriques](/docs/metrics#nœuds-edge) — les séries `kapkan_edge_*`
+- [Tableau de bord](/docs/dashboard) — la vue Edge de la console
 - [Plan d'empreintes](/docs/fingerprinting) — bloquer les clients hors chemin par JA4, avant le terminateur

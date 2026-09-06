@@ -71,6 +71,16 @@ Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher
   und seine eigene gemeldete Last, Drops, Version und das Dry-Run-Flag — die gemeldeten Spalten
   sind als solche gekennzeichnet, denn der Selbstreport eines Knotens ist beratend, niemals die
   Quelle seiner Lebendigkeit.
+- **Edge** — nur angezeigt, wenn [Edge-Knoten](/docs/edge) konfiguriert sind: jede Zone, die die
+  lebendigen Knoten melden, mit ihrer Anfragerate über die Flotte hinweg, den Knoten, auf denen
+  sie nur beobachtend ist, und einer Challenge-Spalte — *aus*, *Vorschau* (die Stufe würde fragen,
+  beobachtet aber nur, auf jedem Knoten) oder der Modus der Zone mit den Knoten, auf denen er
+  greift, sowie eine zonenweite Challenge mit ihrem Grund (der Auslöser eines Knotens oder der
+  Hebel des Betreibers) — dazu ein Panel **Wer herausgefordert würde**: die Quellen, für die die
+  Knoten eine Challenge oder eine Sperre als Vorschau gezeigt haben, die aktivsten zuerst, mit den
+  Knoten, die jede gesehen haben. Lesen Sie es, bevor die Stufe einer Zone in den Echtbetrieb geht;
+  die Ansicht sagt *teilweise*, wenn ein Knoten einen Teil dieser Menge wegschneiden musste, und
+  warnt, wenn Knoten ganze Zonen aus ihren Reports geschnitten haben.
 - **Sperrtabelle** — jede Sperre, aktiv und historisch (mit der Scrubbing-Knoten-Spalte, wenn
   Knoten konfiguriert sind).
 - **Traffic / Reports** — Live-Diagramme für ein- und ausgehenden Verkehr, die aus den

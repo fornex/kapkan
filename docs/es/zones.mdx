@@ -28,7 +28,16 @@ zones:
     policy:
       mode: decide                       # decide (default) | none
       failure_mode: open                 # open (default) | closed
-      challenge: "off"                   # only "off" today
+      dry_run: false                     # true = this zone is watch-only on every node
+      challenge: auto                    # off (default) | manual | auto — the proof-of-work rung
+      challenge_options:
+        dry_run: true                    # true (default) = the rung only shows who it would ask
+        exempt_paths: ["/healthz", "/api/"]
+        difficulty: 18                   # 12..22 leading zero bits
+        cookie_ttl_seconds: 1800         # how long a clearance lasts, 60..86400
+        auto:
+          zone_rps: 2000                 # zone-wide challenge at this admitted rate per node; 0 = off
+          hold_seconds: 300              # how long the zone stays under challenge, 30..3600
       rate:
         rps: 50                          # requests per second per source; 0 = no ceiling
         concurrency: 20                  # in-flight requests per source; 0 = no ceiling
@@ -52,7 +61,14 @@ copia obsoleta.
 | `zones[].acme.fallback` | Un segundo directorio al que un nodo recurre tras tres fallos consecutivos con el primario (la respuesta a un límite de certificados duplicados en una flota), alternando desde entonces; un éxito con cualquiera de los dos borra el estado de fallo y la siguiente renovación prueba primero el primario. Debe ser distinto de `acme.directory`. Vacío significa el valor por defecto del nodo, que puede ser ninguno. Una CA que requiere un External Account Binding (ZeroSSL, Google Trust Services) necesita sus credenciales en el `edge.yaml` del **nodo** — el archivo de zonas no lleva secretos. |
 | `zones[].policy.mode` | `decide` (por defecto): cada petición a la zona consulta al servicio de decisión del nodo a través del `auth_request` de nginx. `none`: solo proxy — sin decisión, sin tasa, sin marcas; la zona sigue recibiendo su certificado y su access log. |
 | `zones[].policy.failure_mode` | Qué hace nginx cuando el servicio de decisión está caído, lento o fuera de contrato: `open` (por defecto) deja pasar la petición sin decidir — el equivalente en el edge del paso por defecto (default-pass) del plano de datos — y la cuenta; `closed` responde `503`. Con `open` el fallo se absorbe dentro de la subpetición, de modo que la conexión keepalive del cliente lo sobrevive; con `closed` nginx responde `503` en esa conexión. |
-| `zones[].policy.challenge` | Los desafíos al cliente (prueba de trabajo, JavaScript) son un hito posterior; hoy solo se acepta `"off"`. |
+| `zones[].policy.dry_run` | `true` pone **esta zona** en solo observación en todos los nodos: sus denegaciones y desafíos se cuentan y se marcan (`would-deny:<reason>`, `would-challenge:<why>`) y ninguno se aplica, mientras las zonas hermanas siguen aplicando como antes. El `dry_run` propio del nodo (`edge.yaml`) es el suelo por debajo del cual una zona no puede bajar — una zona solo puede estar *más* en solo observación que su nodo. Por defecto `false`: la zona sigue a su nodo. Un nodo anterior a esta versión no conoce la clave y aplica la zona bajo su propio `dry_run`; actualiza primero los nodos. |
+| `zones[].policy.challenge` | El peldaño de prueba de trabajo ([la página de pase](/docs/edge#la-página-de-pase)): `off` (por defecto), `manual` o `auto`. **`manual`**: toda petición sin un pase válido se envía a la página. **`auto`**: se desafía a una fuente cuando los rollups del nodo lo dicen — a una fuente que inunda se la *desafía antes de denegarla*, y a toda la zona cuando `challenge_options.auto.zone_rps` se dispara — o cuando un operador acciona [la palanca](/docs/edge#la-palanca). Un pase válido supera el peldaño, nunca el techo de tasa. En solo observación hasta que `challenge_options.dry_run` sea `false`. Cambiarlo nunca recarga nginx. |
+| `zones[].policy.challenge_options.dry_run` | El interruptor de solo observación propio del peldaño, **`true` por defecto**: un desafío se responde como un permiso marcado `would-challenge:<why>`, de modo que ves a quién se *habría* desafiado antes de que ninguna zona desafíe a nadie. Ponlo en `false` para que el peldaño actúe (el `dry_run` del nodo y el de la zona siguen prevaleciendo). |
+| `zones[].policy.challenge_options.exempt_paths[]` | Prefijos de ruta de petición que el peldaño nunca desafía — comprobaciones de salud, clientes de API, webhooks: rutas absolutas, comparadas como prefijos de la ruta de la petición sin su query, tanto en la forma normalizada como en la cruda (una ruta con un segmento de punto, `;`, una barra invertida, un byte de control o un escape `%` superviviente nunca está exenta). El único lugar donde el edge lee una ruta, y solo para una exención — nunca para un veredicto. Como máximo 64. |
+| `zones[].policy.challenge_options.difficulty` | Los bits cero iniciales del acertijo, `12..22` (por defecto `18`: unos segundos en los carriles Worker de un navegador; cada paso duplica el trabajo). Un dispositivo lento debe seguir terminando dentro de la ventana de dos minutos del acertijo; la página ofrece la vía temporizada sin JS junto a una resolución larga. |
+| `zones[].policy.challenge_options.cookie_ttl_seconds` | Cuánto dura el pase de un acertijo resuelto, `60..86400` (por defecto `1800`). Un cliente con pase resuelve de nuevo cuando este caduca o cuando cambia su dirección (IPv6: el `/64`). El pase del tique sin JS está fijado en cinco minutos. |
+| `zones[].policy.challenge_options.auto.zone_rps` | Para `challenge: auto`: la tasa de peticiones **admitidas** de la zona en un nodo — peticiones decididas que el nodo no rechazó — a partir de la cual se desafía a todas las fuentes de la zona (la inundación repartida entre tantas fuentes que ninguna dispara su propio techo). `0` (por defecto) no fija ningún disparador de zona completa. Local al nodo: cada nodo mide su propia ventana. |
+| `zones[].policy.challenge_options.auto.hold_seconds` | Cuánto tiempo sigue activo el desafío de zona completa tras una ventana que lo disparó, `30..3600` (por defecto `300`); cada ventana que siga por encima de la tasa lo prolonga, y caduca por sí solo. |
 | `zones[].policy.rate.rps` | Peticiones por segundo por **fuente** — una dirección IPv4, o un `/64` IPv6 — aplicadas por el servicio de decisión con un token bucket cuya ráfaga equivale a un segundo. `0` (por defecto) no fija ningún techo. Cambiarlo nunca recarga nginx. |
 | `zones[].policy.rate.concurrency` | Peticiones en curso por fuente, contadas de forma aproximada a partir de las decisiones y las finalizaciones en el access log (a una fuente cuyo flujo de log se queda en silencio se le suspende el techo en lugar de aplicárselo erróneamente). `0` (por defecto) no fija ningún techo. |
 | `zones[].extra_directives_file` | Una ruta **absoluta** en el nodo a un fragmento (snippet) de nginx incluido en último lugar en el servidor `:443` de la zona — la única vía de escape (una cabecera extra, un location personalizado). Lo que rompa es cosa tuya; `nginx -t` es la única salvaguarda, y un fragmento que la falla mantiene en servicio la generación anterior. Sin espacios en blanco, `;`, `#`, llaves, comillas, barra invertida, `$` ni caracteres glob (`* ? [ ]`) en la ruta. |
@@ -61,21 +77,31 @@ copia obsoleta.
 
 Con `mode: decide`, nginx consulta al servicio de decisión del nodo antes de hacer de proxy. La
 respuesta es `200` — la petición va al origen, con `X-Kapkan-Mark` puesto cuando la fuente lleva
-una marca — o `403` con un motivo:
+una marca — `401` — la fuente debe superar primero el peldaño, de modo que nginx sirve
+[la página de pase](/docs/edge#la-página-de-pase) en lugar del origen — o `403` con un motivo:
 
 | Motivo | nginx responde | Lo fija |
 | --- | --- | --- |
 | `rate` | `429` con `Retry-After: 1` | La fuente superó `policy.rate.rps`. |
 | `concurrency` | `429` con `Retry-After: 1` | La fuente tiene `policy.rate.concurrency` peticiones en curso. |
-| `table:<reason>` | `403` | La fuente está en la tabla de veredictos del nodo: promovida por los rollups (`table:flood` — una fuente que siguió empujando a través de su techo de tasa se deniega durante un minuto, que se duplica hasta diez si reincide) o, más adelante, por la escalera del cerebro. La marca en dry-run es `would-deny:table:<reason>`. |
+| `table:<reason>` | `403` | La fuente está en la tabla de veredictos del nodo: promovida por los rollups (`table:flood` — una fuente que siguió empujando a través de su techo de tasa se deniega durante un minuto, que se duplica hasta diez si reincide). La marca en dry-run es `would-deny:table:<reason>`. |
+| `challenge:manual` | la página de pase (`403`, nunca cacheada) | `policy.challenge: manual` y la petición no lleva un pase válido. |
+| `challenge:zone:<reason>` | la página de pase | Toda la zona está en desafío: el disparador `auto.zone_rps` del nodo (`zone-rps`) o la palanca del operador. |
+| `challenge:table:<reason>` | la página de pase | La fuente está en la tabla de veredictos con un desafío: la regla de inundación de los rollups en una zona `auto` (`table:flood`) — el peldaño que una fuente que inunda recibe antes del bloqueo. |
+
+Una petición que supera el peldaño llega al origen marcada `cleared` (o `cleared:nojs` en el caso
+del tique temporizado sin JS) — el techo de tasa sigue aplicándose a ella. Una fuente que sigue
+inundando mientras está desafiada, o que había superado el peldaño y aun así inunda, se deniega.
 
 Dos cabeceras están bajo el control de Kapkan y un cliente nunca puede falsificarlas:
 `X-Kapkan-Zone` (el nombre de la zona) llega siempre al origen; `X-Kapkan-Mark` está presente solo
 cuando la fuente lleva una marca y ausente en caso contrario — un valor de cualquiera de las dos
 enviado por el cliente se descarta. Una fuente cuyas peticiones son casi todas `4xx`/`5xx` se marca
-como `errors`; en **dry-run** cada denegación que se habría producido se convierte en un permiso
-marcado `would-deny:<reason>`, de modo que el origen ve exactamente lo que el modo real habría
-rechazado.
+como `errors`; en **dry-run** — el del nodo, el `policy.dry_run` de la zona o el
+`challenge_options.dry_run` del peldaño — cada denegación que se habría producido se convierte en
+un permiso marcado `would-deny:<reason>` y cada desafío que se habría producido en uno marcado
+`would-challenge:<why>`, de modo que el origen ve exactamente lo que el modo real habría rechazado
+o pedido.
 
 El nodo mantiene un número acotado de fuentes por zona; cuando la tabla está llena, una fuente
 nueva pasa **sin seguimiento** (paso por defecto) y se cuenta, nunca se rechaza por falta de

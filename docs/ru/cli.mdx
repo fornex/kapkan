@@ -319,7 +319,7 @@ controller:
   name: edge-1                         # must equal an edge.nodes[] name on the brain
   report_interval_seconds: 10          # self-report cadence
 state_dir: /var/lib/kapkan-edge        # document cache, generations, ACME keys and certificates
-sockets_dir: /run/kapkan-edge          # edge-decide.sock, edge-challenge.sock, edge-log.sock
+sockets_dir: /run/kapkan-edge          # edge-decide.sock, edge-clearance.sock, edge-log.sock, edge-challenge.sock
 socket_group: nginx                    # the terminator's worker group (nginx | www-data | angie)
 terminator:
   binary: nginx                        # nginx (default) | angie
@@ -346,7 +346,7 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `dry_run` | Отсутствует или `true`: решения подсчитываются и помечаются (`X-Kapkan-Mark: would-deny:<reason>` доходит до исходного сервера), но ни одно не применяется. Задайте `false`, чтобы отказывать. |
 | `controller.url` / `token_env` / `name` | Базовый адрес API мозга (без пути, без учётных данных в URL), переменная окружения с токеном **agent** и имя этого узла — оно должно совпадать с записью `edge.nodes[]` на мозге, иначе каждый опрос — это громкий `404`. |
 | `state_dir` / `sockets_dir` | Собственные каталоги роли (по умолчанию `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — никогда не `/var/lib/kapkan` и `/run/kapkan` мозга: на общем хосте systemd сменил бы им владельца и удалил бы их прямо из-под роли. Абсолютные, без символов, которые nginx мог бы истолковать неверно. |
-| `socket_group` | Группа обработчиков терминатора. Сокеты решений и лога имеют для неё режим `0660`; сокет challenge — `0666` (он отвечает на публичные токены). Пустое значение оставляет два ограниченных по группе сокета доступными только владельцу. |
+| `socket_group` | Группа обработчиков терминатора. Сокеты решений, лога и страницы допуска имеют для неё режим `0660`; сокет вызовов ACME — `0666` (он отвечает на публичные токены). Пустое значение оставляет три ограниченных по группе сокета доступными только владельцу. |
 | `terminator.binary` / `main_conf` | Что запускать для `-t` и перезагрузок, и основная конфигурация, передаваемая как `-c`. Этот файл должен один раз содержать `include /var/lib/kapkan-edge/conf/live/*.conf;` внутри `http {}`. |
 | `terminator.reload` | `exec` запускает `<binary> -s reload` (нужно послать сигнал master-процессу nginx — юнит работает от root); `signal` посылает `HUP` процессу с pid из `pid_file`; `command` запускает `terminator.command`, например `[systemctl, reload, nginx]`. |
 | `terminator.pid_file` | Если задан, читается на каждом такте отчёта и проверяется сигналом `0`: `/healthz` отвечает `503`, а отчёт говорит `alive: false`, пока ни у одного процесса нет этого pid. |

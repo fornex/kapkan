@@ -28,7 +28,16 @@ zones:
     policy:
       mode: decide                       # decide (default) | none
       failure_mode: open                 # open (default) | closed
-      challenge: "off"                   # only "off" today
+      dry_run: false                     # true = this zone is watch-only on every node
+      challenge: auto                    # off (default) | manual | auto — the proof-of-work rung
+      challenge_options:
+        dry_run: true                    # true (default) = the rung only shows who it would ask
+        exempt_paths: ["/healthz", "/api/"]
+        difficulty: 18                   # 12..22 leading zero bits
+        cookie_ttl_seconds: 1800         # how long a clearance lasts, 60..86400
+        auto:
+          zone_rps: 2000                 # zone-wide challenge at this admitted rate per node; 0 = off
+          hold_seconds: 300              # how long the zone stays under challenge, 30..3600
       rate:
         rps: 50                          # requests per second per source; 0 = no ceiling
         concurrency: 20                  # in-flight requests per source; 0 = no ceiling
@@ -52,7 +61,14 @@ Testsuite schlägt bei einer veralteten Kopie fehl.
 | `zones[].acme.fallback` | Ein zweites Verzeichnis, zu dem ein Knoten nach drei aufeinanderfolgenden Fehlschlägen mit dem primären wechselt (die Antwort auf eine Duplikat-Zertifikat-Obergrenze in einer Flotte) und von da an abwechselt; ein Erfolg bei einem der beiden löscht den Fehlerzustand, und die folgende Erneuerung versucht zuerst das primäre. Muss sich von `acme.directory` unterscheiden. Leer bedeutet den Standard des Knotens, der auch keiner sein kann. Eine CA, die ein External Account Binding verlangt (ZeroSSL, Google Trust Services), braucht ihre Zugangsdaten in der `edge.yaml` des **Knotens** — die Zonen-Datei trägt keine Geheimnisse. |
 | `zones[].policy.mode` | `decide` (Standard): Jede Anfrage an die Zone fragt über den `auth_request` von nginx den Entscheidungsdienst des Knotens. `none`: nur Proxy — keine Entscheidung, keine Rate, keine Markierungen; die Zone erhält trotzdem ihr Zertifikat und ihr Zugriffsprotokoll. |
 | `zones[].policy.failure_mode` | Was nginx tut, wenn der Entscheidungsdienst ausgefallen, langsam oder außerhalb des Vertrags ist: `open` (Standard) lässt die Anfrage unentschieden durch — das Edge-Gegenstück zum Default-Pass der Datenebene — und zählt sie; `closed` antwortet `503`. Mit `open` wird der Fehler innerhalb der Subrequest abgefangen, sodass die Keepalive-Verbindung des Clients ihn überlebt; mit `closed` antwortet nginx auf dieser Verbindung mit `503`. |
-| `zones[].policy.challenge` | Client-Challenges (Proof-of-Work, JavaScript) sind ein späterer Meilenstein; heute wird nur `"off"` akzeptiert. |
+| `zones[].policy.dry_run` | `true` macht **diese Zone** auf jedem Knoten nur beobachtend: Ihre Sperren und Challenges werden gezählt und markiert (`would-deny:<reason>`, `would-challenge:<why>`), keine wird durchgesetzt, während die Schwesterzonen wie zuvor durchsetzen. Der eigene `dry_run` des Knotens (`edge.yaml`) ist der Boden, unter den eine Zone nicht gehen kann — eine Zone kann gegenüber ihrem Knoten nur *mehr* beobachten, nie weniger. Standard `false`: Die Zone folgt ihrem Knoten. Ein Knoten, der älter ist als dieses Release, kennt den Schlüssel nicht und setzt die Zone unter seinem eigenen `dry_run` durch; aktualisieren Sie zuerst die Knoten. |
+| `zones[].policy.challenge` | Die Proof-of-Work-Stufe ([die Freigabeseite](/docs/edge#die-freigabeseite)): `off` (Standard), `manual` oder `auto`. **`manual`**: Jede Anfrage ohne gültige Freigabe wird auf die Seite geschickt. **`auto`**: Eine Quelle wird herausgefordert, wenn die Rollups des Knotens es sagen — ein Flooder wird *herausgefordert, bevor er gesperrt wird*, und die ganze Zone, wenn `challenge_options.auto.zone_rps` auslöst — oder wenn ein Betreiber [den Hebel](/docs/edge#der-hebel) zieht. Eine gültige Freigabe passiert die Stufe, niemals die Ratenobergrenze. Nur beobachtend, bis `challenge_options.dry_run` `false` ist. Eine Änderung lädt nginx niemals neu. |
+| `zones[].policy.challenge_options.dry_run` | Der eigene Nur-beobachten-Schalter der Stufe, **standardmäßig `true`**: Eine Challenge wird als Allow mit der Markierung `would-challenge:<why>` beantwortet, sodass Sie sehen, wer gefragt worden *wäre*, bevor irgendeine Zone irgendjemanden fragt. Setzen Sie `false`, damit die Stufe greift (der `dry_run` des Knotens und der der Zone gewinnen weiterhin). |
+| `zones[].policy.challenge_options.exempt_paths[]` | Anfragepfad-Präfixe, die die Stufe niemals herausfordert — Health-Checks, API-Clients, Webhooks: absolute Pfade, verglichen als Präfixe des Anfragepfads ohne seine Query, sowohl in der normalisierten als auch in der rohen Form (ein Pfad mit einem Punkt-Segment, `;`, einem Backslash, einem Steuerbyte oder einem übrig gebliebenen `%`-Escape ist niemals ausgenommen). Die eine Stelle, an der der Edge einen Pfad liest, nur für eine Ausnahme — niemals für ein Verdikt. Höchstens 64. |
+| `zones[].policy.challenge_options.difficulty` | Die führenden Nullbits des Rätsels, `12..22` (Standard `18`: ein paar Sekunden in den Worker-Bahnen eines Browsers; jeder Schritt verdoppelt die Arbeit). Ein langsames Gerät muss trotzdem innerhalb des Zwei-Minuten-Fensters des Rätsels fertig werden; die Seite bietet neben einem langen Lösen den zeitgesteuerten Pfad ohne JavaScript an. |
+| `zones[].policy.challenge_options.cookie_ttl_seconds` | Wie lange die Freigabe eines gelösten Rätsels gilt, `60..86400` (Standard `1800`). Ein freigegebener Client löst erneut, wenn sie abläuft oder wenn sich seine Adresse (IPv6: `/64`) ändert. Die Freigabe des Tickets ohne JavaScript ist fest auf fünf Minuten gesetzt. |
+| `zones[].policy.challenge_options.auto.zone_rps` | Für `challenge: auto`: die **zugelassene** Anfragerate der Zone auf einem Knoten — entschiedene Anfragen, die der Knoten nicht abgewiesen hat —, ab der jede Quelle der Zone herausgefordert wird (die Flut, die über so viele Quellen verteilt ist, dass keine ihre eigene Obergrenze auslöst). `0` (Standard) setzt keinen zonenweiten Auslöser. Knotenlokal: Jeder Knoten misst sein eigenes Fenster. |
+| `zones[].policy.challenge_options.auto.hold_seconds` | Wie lange die zonenweite Challenge nach einem Fenster, das sie ausgelöst hat, aktiv bleibt, `30..3600` (Standard `300`); jedes Fenster, das weiterhin über der Rate liegt, verlängert sie, und sie läuft von selbst ab. |
 | `zones[].policy.rate.rps` | Anfragen pro Sekunde pro **Quelle** — eine IPv4-Adresse oder ein IPv6-`/64` — durchgesetzt vom Entscheidungsdienst mit einem Token-Bucket, dessen Burst dem Wert einer Sekunde entspricht. `0` (Standard) setzt keine Obergrenze. Eine Änderung lädt nginx niemals neu. |
 | `zones[].policy.rate.concurrency` | Gleichzeitig laufende Anfragen pro Quelle, näherungsweise gezählt aus Entscheidungen und Abschlüssen im Zugriffsprotokoll (bei einer Quelle, deren Log-Strom verstummt, wird die Obergrenze ausgesetzt statt fälschlich durchgesetzt). `0` (Standard) setzt keine Obergrenze. |
 | `zones[].extra_directives_file` | Ein **absoluter** Pfad auf dem Knoten zu einem nginx-Snippet, das als Letztes in den `:443`-Server der Zone eingebunden wird — der eine Notausgang (ein zusätzlicher Header, eine eigene Location). Was es kaputt macht, verantworten Sie; `nginx -t` ist der einzige Schutz, und ein Snippet, das daran scheitert, lässt die vorherige Generation weiter bedienen. Keine Leerzeichen, `;`, `#`, geschweiften Klammern, Anführungszeichen, Backslash, `$` oder Glob-Zeichen (`* ? [ ]`) im Pfad. |
@@ -61,21 +77,33 @@ Testsuite schlägt bei einer veralteten Kopie fehl.
 
 Mit `mode: decide` fragt nginx den Entscheidungsdienst des Knotens, bevor es weiterreicht. Die
 Antwort ist `200` — die Anfrage geht an den Origin, mit gesetztem `X-Kapkan-Mark`, wenn die Quelle
-eine Markierung trägt — oder `403` mit einem Grund:
+eine Markierung trägt —, `401` — die Quelle muss zuerst die Stufe überwinden, sodass nginx anstelle
+des Origins [die Freigabeseite](/docs/edge#die-freigabeseite) ausliefert — oder `403` mit einem
+Grund:
 
 | Grund | nginx antwortet | Gesetzt durch |
 | --- | --- | --- |
 | `rate` | `429` mit `Retry-After: 1` | Die Quelle hat `policy.rate.rps` überschritten. |
 | `concurrency` | `429` mit `Retry-After: 1` | Die Quelle hat `policy.rate.concurrency` Anfragen gleichzeitig laufen. |
-| `table:<reason>` | `403` | Die Quelle steht in der Verdikt-Tabelle des Knotens: hochgestuft durch die Rollups (`table:flood` — eine Quelle, die weiter gegen ihre Ratenobergrenze gedrückt hat, wird für eine Minute gesperrt, bei Wiederholung verdoppelt bis auf zehn) oder, später, durch die Stufenleiter des Gehirns. Die Dry-Run-Markierung ist `would-deny:table:<reason>`. |
+| `table:<reason>` | `403` | Die Quelle steht in der Verdikt-Tabelle des Knotens: hochgestuft durch die Rollups (`table:flood` — eine Quelle, die weiter gegen ihre Ratenobergrenze gedrückt hat, wird für eine Minute gesperrt, bei Wiederholung verdoppelt bis auf zehn). Die Dry-Run-Markierung ist `would-deny:table:<reason>`. |
+| `challenge:manual` | die Freigabeseite (`403`, niemals gecacht) | `policy.challenge: manual`, und die Anfrage trägt keine gültige Freigabe. |
+| `challenge:zone:<reason>` | die Freigabeseite | Die ganze Zone steht unter Challenge: der `auto.zone_rps`-Auslöser des Knotens (`zone-rps`) oder der Hebel des Betreibers. |
+| `challenge:table:<reason>` | die Freigabeseite | Die Quelle steht mit einer Challenge in der Verdikt-Tabelle: die Flut-Regel der Rollups in einer `auto`-Zone (`table:flood`) — die Stufe, die ein Flooder vor der Sperre bekommt. |
+
+Eine Anfrage, die die Stufe überwindet, erreicht den Origin mit der Markierung `cleared` (oder
+`cleared:nojs` für das zeitgesteuerte Ticket ohne JavaScript) — die Ratenobergrenze gilt für sie
+weiterhin. Eine Quelle, die weiter flutet, während sie herausgefordert ist, oder die die Stufe
+überwunden hatte und trotzdem flutet, wird gesperrt.
 
 Zwei Header stehen unter Kapkans Kontrolle und können von einem Client niemals gefälscht werden:
 `X-Kapkan-Zone` (der Zonenname) erreicht den Origin immer; `X-Kapkan-Mark` ist nur vorhanden, wenn
 die Quelle eine Markierung trägt, und fehlt sonst — ein vom Client gesendeter Wert eines der beiden
 wird verworfen. Eine Quelle, deren Anfragen fast ausschließlich `4xx`/`5xx` sind, wird mit `errors`
-markiert; im **Dry-Run** wird jede eigentlich fällige Abweisung zu einem Allow, das mit
-`would-deny:<reason>` markiert ist, sodass der Origin genau sieht, was der Echtbetrieb abgewiesen
-hätte.
+markiert; im **Dry-Run** — dem des Knotens, dem `policy.dry_run` der Zone oder dem
+`challenge_options.dry_run` der Stufe — wird jede eigentlich fällige Abweisung zu einem Allow, das
+mit `would-deny:<reason>` markiert ist, und jede eigentlich fällige Challenge zu einem, das mit
+`would-challenge:<why>` markiert ist, sodass der Origin genau sieht, was der Echtbetrieb abgewiesen
+oder gefragt hätte.
 
 Der Knoten hält eine begrenzte Anzahl Quellen pro Zone; ist die Tabelle voll, wird eine neue
 Quelle **unverfolgt** durchgelassen (Default-Pass) und gezählt, niemals aus Platzmangel abgewiesen.

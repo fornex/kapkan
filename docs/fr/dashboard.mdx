@@ -67,6 +67,16 @@ Le tableau de bord interroge l'API JSON et restitue tout ce que Kapkan suit en m
   sa charge, ses suppressions, sa version et son indicateur dry-run tels qu'il les rapporte — les
   colonnes rapportées sont étiquetées comme telles, car le rapport qu'un nœud fait sur lui-même est
   consultatif, jamais la source de sa vivacité.
+- **Edge** — affichée uniquement lorsque des [nœuds edge](/docs/edge) sont configurés : chaque zone
+  que les nœuds vivants rapportent, avec son débit de requêtes sur toute la flotte, les nœuds sur
+  lesquels elle est en observation seule, et une colonne défi — *off*, *aperçu* (le palier
+  demanderait mais ne fait qu'observer, sur chaque nœud), ou le mode de la zone avec les nœuds sur
+  lesquels il s'applique, et un défi global de zone avec son motif (le déclencheur d'un nœud, ou le
+  levier de l'opérateur) — plus un panneau **Qui serait mis au défi** : les sources pour lesquelles
+  les nœuds ont prévisualisé un défi ou un refus, les plus actives d'abord, avec les nœuds qui ont
+  vu chacune. Lisez-le avant que le palier d'une zone ne passe en production ; la vue indique
+  *partiel* quand un nœud a dû couper une partie de cet ensemble, et avertit quand des nœuds ont
+  coupé des zones entières de leurs rapports.
 - **Table de bannissement** — chaque bannissement, actif et historique (avec la colonne du nœud de
   scrubbing lorsque des nœuds sont configurés).
 - **Trafic / Rapports** — des graphiques de trafic entrant/sortant en direct construits à partir des

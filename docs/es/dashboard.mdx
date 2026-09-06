@@ -65,6 +65,16 @@ El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea e
   porque sigue sondeando reglas), cuántos bloqueos desvían hacia él, y su propia carga, descartes,
   versión y flag de dry-run reportados — las columnas reportadas se etiquetan como tales, porque el
   autoinforme de un nodo es orientativo, nunca la fuente de su vitalidad.
+- **Edge** — se muestra solo cuando hay [nodos edge](/docs/edge) configurados: cada zona que
+  reportan los nodos vivos, con su tasa de peticiones en toda la flota, los nodos en los que está
+  en solo observación y una columna de desafío — *off*, *previsualización* (el peldaño pediría,
+  pero solo observa, en todos los nodos) o el modo de la zona con los nodos en los que actúa, y un
+  desafío de zona completa con su motivo (el disparador de un nodo, o la palanca del operador) —
+  más un panel **A quién se desafiaría**: las fuentes para las que los nodos previsualizaron un
+  desafío o una denegación, las más activas primero, con los nodos que vieron a cada una. Léelo
+  antes de que el peldaño de una zona pase a producción; la vista dice *parcial* cuando un nodo
+  tuvo que recortar parte de ese conjunto, y avisa cuando los nodos recortaron zonas enteras de
+  sus reportes.
 - **Tabla de bloqueos** — todos los bloqueos, activos e históricos (con la columna de nodo de
   scrubbing cuando hay nodos configurados).
 - **Tráfico / Informes** — gráficas de ingress/egress en vivo construidas a partir de los búferes
