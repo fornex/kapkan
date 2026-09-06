@@ -713,6 +713,9 @@ func (s *Service) SetZoneChallenge(zone string, on bool, until time.Time, reason
 		s.mu.Unlock()
 		return false
 	}
+	// A lapsed flip is off, whatever the flag still says.
+	wasOn := zs.flipOn && now.Before(zs.flipUntil)
+	wasWhy := zs.flipWhy
 	zs.flipOn, zs.flipUntil, zs.flipWhy = on, until, sanitizeMark(reason)
 	active := 0.0
 	if on {
@@ -720,9 +723,15 @@ func (s *Service) SetZoneChallenge(zone string, on bool, until time.Time, reason
 	}
 	metrics.EdgeChallengeActive.WithLabelValues(zone).Set(active)
 	s.mu.Unlock()
-	if on {
+	// The transition is the news; an extension (every window of a flood
+	// still over the rate) is not — it would say "on" every ten seconds for
+	// the flood's whole duration.
+	switch {
+	case on && (!wasOn || wasWhy != zs.flipWhy):
 		s.log.Info("zone-wide challenge on", "zone", zone, "until", until.UTC().Format(time.RFC3339), "reason", reason)
-	} else {
+	case on:
+		s.log.Debug("zone-wide challenge extended", "zone", zone, "until", until.UTC().Format(time.RFC3339), "reason", reason)
+	case wasOn:
 		s.log.Info("zone-wide challenge off", "zone", zone)
 	}
 	return true

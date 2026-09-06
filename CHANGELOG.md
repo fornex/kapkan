@@ -234,16 +234,23 @@ security-relevant.
 - Edge track, E4.4 — the local ladder (edge-spec §5: the rung between the ceiling and the block).
   In a zone with `policy.challenge: auto` the rollup's flood rule now **challenges before it
   denies**: a source pushing through its rate ceiling for a window is sent to the rung for five
-  minutes (a browser clears it and is rate-limited like anyone; a bot cannot), and only a source
-  that floods on while challenged — or that had already cleared the rung and floods anyway — is
+  minutes (a browser clears it and is rate-limited like anyone; a bot cannot), and a source that
+  already had the rung's chance — flooding on while challenged (by name, or with the whole zone),
+  having cleared the rung and flooding anyway, or remembered from an earlier promotion — is
   denied, with the doubling TTL as before. The **zone-wide trigger** for the flood no single
   source trips (residential proxies): `challenge_options.auto.zone_rps` (0 = off) flips the
-  whole zone to challenge for `auto.hold_seconds` (30..3600, default 300) when the node's window
-  runs at or over that rate; each window still over it extends the hold; the flip lapses on its
-  own. Node-local by design (the fleet-wide view is the brain's). The rules take the per-zone
-  rung settings from the document on every new one; dry-run at any layer previews the whole
-  ladder as `would-challenge` / `would-deny` marks without the rules knowing. Zones schema
-  regenerated.
+  whole zone to challenge for `auto.hold_seconds` (30..3600, default 300) when the zone's
+  **admitted** rate on the node — decided requests the node did not refuse — runs at or over it;
+  each window still over extends the hold; the flip lapses on its own. Refused traffic is not
+  load: a blocked bot's 403s, a lone flooder's 429s or a plain-HTTP flood never flip the zone or
+  keep it flipped. Node-local by design (the fleet-wide view is the brain's). The rules take the
+  per-zone rung settings from the document on every new one. Dry-run: the node's `dry_run`
+  previews the whole ladder as `would-challenge` / `would-deny` marks; a zone's
+  `challenge_options.dry_run` (the default) previews the rung only — the deny that follows a
+  second flood window stays the ceiling's and is enforced as before, one window later than in an
+  `off` zone because the rung's turn is taken first. A deny now displaces the same source's
+  challenge in the verdict table, and challenges may fill at most half of it, so a rotating
+  botnet's challenges cannot crowd out the denies that must follow. Zones schema regenerated.
 
 ## [1.7.0] - 2026-09-02
 

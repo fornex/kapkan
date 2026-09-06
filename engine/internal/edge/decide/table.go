@@ -78,8 +78,13 @@ func (t *table) lookupMark(k key, now time.Time) *entry {
 	return nil
 }
 
-// setDeny installs or replaces k's deny.
+// setDeny installs or replaces k's deny. It displaces k's own weaker
+// verdicts first: a deny outranks them anyway, and the room they held is
+// the deny's — so the block a challenged source earns always lands, however
+// full the table.
 func (t *table) setDeny(k key, reason string, until, now time.Time) bool {
+	delete(t.challenges, k)
+	delete(t.marks, k)
 	if !t.room(t.denies, k, now) {
 		return false
 	}
@@ -88,8 +93,22 @@ func (t *table) setDeny(k key, reason string, until, now time.Time) bool {
 	return true
 }
 
+// challengeShare is the part of the table challenges may fill. They are the
+// weakest verdict a flood installs and the most numerous (a rotating botnet
+// earns one per source per window), so without a quota they could hold the
+// whole table and leave no room for the denies that must follow.
+const challengeShare = 2
+
 // setChallenge installs or replaces k's challenge.
 func (t *table) setChallenge(k key, reason string, until, now time.Time) bool {
+	if _, exists := t.challenges[k]; !exists && len(t.challenges) >= t.max/challengeShare {
+		if now.Sub(t.lastSweep) >= fullSweepEvery {
+			t.sweep(now, nil)
+		}
+		if len(t.challenges) >= t.max/challengeShare {
+			return false
+		}
+	}
 	if !t.room(t.challenges, k, now) {
 		return false
 	}
