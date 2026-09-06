@@ -240,6 +240,14 @@ func applyBounds(s map[string]any, path string) {
 			s[k] = v
 		}
 	}
+	// "0 = the default, otherwise the range" cannot be said with minimum and
+	// maximum alone: it is 0, or the range.
+	if r, ok := lookupZoneZeroOrRange(path); ok {
+		s["anyOf"] = []any{
+			map[string]any{"const": 0},
+			map[string]any{"minimum": r[0], "maximum": r[1]},
+		}
+	}
 }
 
 // stripHostgroups returns the path with a single leading "hostgroups." removed,

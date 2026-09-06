@@ -99,7 +99,7 @@ const (
 	headerClearance = "X-Kapkan-Clearance"
 )
 
-//go:embed assets/app.js assets/style.css
+//go:embed assets/app.js assets/style.css assets/nojs.css
 var assetFS embed.FS
 
 // Server serves the clearance page over a unix socket.
@@ -119,10 +119,11 @@ type Server struct {
 	// means the defaults.
 	IssuePerSource, IssuePerZone int
 
-	once   sync.Once
-	assets map[string]asset // by URL path
-	appURL string
-	cssURL string
+	once    sync.Once
+	assets  map[string]asset // by URL path
+	appURL  string
+	cssURL  string
+	nojsURL string
 
 	mu        sync.Mutex
 	perSource map[capKey]*capWindow
@@ -165,6 +166,7 @@ func (s *Server) init() {
 		s.assets = make(map[string]asset)
 		s.appURL = s.addAsset("app", "js", "text/javascript; charset=utf-8")
 		s.cssURL = s.addAsset("style", "css", "text/css; charset=utf-8")
+		s.nojsURL = s.addAsset("nojs", "css", "text/css; charset=utf-8")
 	})
 }
 
@@ -356,7 +358,7 @@ func (s *Server) serveChallenge(w http.ResponseWriter, r *http.Request, req *req
 	if !ok {
 		// No live key: the rung cannot be cleared; the decider would not have
 		// challenged, so this is a race with a key set change. Refuse plainly.
-		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "bad_request").Inc()
+		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "error").Inc()
 		http.Error(w, "no clearance key", http.StatusServiceUnavailable)
 		return
 	}
@@ -366,13 +368,13 @@ func (s *Server) serveChallenge(w http.ResponseWriter, r *http.Request, req *req
 	}
 	puzzle, err := clearance.NewPuzzle(key, req.zone, req.sourceKey, ret, req.pol.Difficulty, req.now)
 	if err != nil {
-		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "bad_request").Inc()
+		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "error").Inc()
 		http.Error(w, "puzzle: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	ticket, err := clearance.NewTicket(key, req.zone, req.sourceKey, ret, req.now)
 	if err != nil {
-		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "bad_request").Inc()
+		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "error").Inc()
 		http.Error(w, "ticket: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -414,19 +416,28 @@ func (s *Server) serveAnswer(w http.ResponseWriter, r *http.Request, req *reques
 		http.Error(w, "the answer is a POST", http.StatusMethodNotAllowed)
 		return
 	}
+	// A form post is the browser's shape (app.js submits the form as a
+	// navigation, so whatever comes back IS the page the visitor sees); a
+	// JSON body is a client library's, which reads the compact refusal.
+	browser := !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json")
 	a, ok := s.readAnswer(w, r)
+	back := a.Return
+	if !clearance.ValidReturnPath(back) {
+		back = "/"
+	}
 	if !ok || len(a.Nonce) > 128 || len(a.Solution) > 64 || !clearance.ValidReturnPath(a.Return) {
-		s.refuse(w, req, "invalid")
+		s.refuse(w, req, "invalid", browser, back)
 		return
 	}
 	if !clearance.Check(req.keys, req.zone, req.sourceKey, a.Return, req.pol.Difficulty, a.Nonce, a.Solution, req.now) {
-		s.refuse(w, req, "invalid")
+		s.refuse(w, req, "invalid", browser, back)
 		return
 	}
-	s.issue(w, req, clearance.KindPoW, req.pol.CookieTTL, a.Return, "issued")
+	s.issue(w, req, clearance.KindPoW, req.pol.CookieTTL, a.Return, "issued", browser)
 }
 
 // serveNoJS redeems the timed ticket a client without JavaScript waited on.
+// Every answer here is a page: a no-JS client cannot read JSON.
 func (s *Server) serveNoJS(w http.ResponseWriter, r *http.Request, req *request) {
 	noStore(w)
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -434,23 +445,41 @@ func (s *Server) serveNoJS(w http.ResponseWriter, r *http.Request, req *request)
 		http.Error(w, "the ticket is a GET", http.StatusMethodNotAllowed)
 		return
 	}
-	ret, ok := clearance.CheckTicket(req.keys, req.zone, req.sourceKey, r.URL.Query().Get("t"), req.now)
-	if !ok {
-		// Too early, too late or not ours. A no-JS client cannot read JSON:
-		// a small page says to wait and try again, or to start over.
+	ret, err := clearance.InspectTicket(req.keys, req.zone, req.sourceKey, r.URL.Query().Get("t"), req.now)
+	switch {
+	case err == nil:
+		s.issue(w, req, clearance.KindNoJS, req.pol.NoJSTTL, ret, "issued_nojs", true)
+	case errors.Is(err, clearance.ErrTicketEarly):
+		// The client did not wait — an eager click, or a node whose clock runs
+		// behind the issuer's: say so, and retry this same ticket by itself
+		// after the wait.
 		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "invalid").Inc()
-		s.renderTooEarly(w, req, req.uri)
-		return
+		s.renderNotice(w, req, http.StatusForbidden, req.lang.TooEarly, req.lang.Again, r.URL.RequestURI(), tooEarlyRetrySecs)
+	default:
+		// Expired, or not ours (another source, a dead key, tampering): the
+		// way forward is the page the client came from, which the ticket names
+		// — a same-host path even unverified — where it is challenged afresh.
+		// NOT this request's own URI, which would offer the dead ticket again.
+		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "invalid").Inc()
+		if ret == "" {
+			ret = "/"
+		}
+		s.renderNotice(w, req, http.StatusForbidden, req.lang.Expired, req.lang.Retry, ret, 0)
 	}
-	s.issue(w, req, clearance.KindNoJS, req.pol.NoJSTTL, ret, "issued_nojs")
 }
 
 // issue mints the clearance cookie under the issuing key and answers 303 to
-// the return path — after the issuance caps have had their say.
-func (s *Server) issue(w http.ResponseWriter, req *request, kind string, ttl time.Duration, ret, result string) {
+// the return path — after the issuance caps have had their say. A browser
+// (browser: a form post, the no-JS ticket) is refused with a page that says
+// to wait a minute and links back; a JSON client with the compact refusal.
+func (s *Server) issue(w http.ResponseWriter, req *request, kind string, ttl time.Duration, ret, result string, browser bool) {
 	if !s.allowIssue(req.zone, req.sourceKey, req.now) {
 		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "rate_limited").Inc()
-		w.Header().Set("Retry-After", "10")
+		w.Header().Set("Retry-After", "60")
+		if browser {
+			s.renderNotice(w, req, http.StatusTooManyRequests, req.lang.Busy, req.lang.Retry, ret, 0)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"error":"rate_limited"}` + "\n"))
@@ -458,7 +487,7 @@ func (s *Server) issue(w http.ResponseWriter, req *request, kind string, ttl tim
 	}
 	key, ok := issuingKey(req.keys, req.now)
 	if !ok {
-		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "bad_request").Inc()
+		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "error").Inc()
 		http.Error(w, "no clearance key", http.StatusServiceUnavailable)
 		return
 	}
@@ -467,7 +496,7 @@ func (s *Server) issue(w http.ResponseWriter, req *request, kind string, ttl tim
 	}
 	tok, err := clearance.Issue(key, req.zone, req.sourceKey, kind, req.now.Add(ttl), req.now)
 	if err != nil {
-		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "bad_request").Inc()
+		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "error").Inc()
 		http.Error(w, "issue: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -480,8 +509,16 @@ func (s *Server) issue(w http.ResponseWriter, req *request, kind string, ttl tim
 	w.WriteHeader(http.StatusSeeOther)
 }
 
-func (s *Server) refuse(w http.ResponseWriter, req *request, result string) {
+// refuse answers a bad answer. A browser gets a sentence and the way back to
+// the page it came from, where the decision service challenges it afresh (a
+// stale nonce after a long solve, a source key that changed under a phone,
+// a wrong solution); a JSON client gets the compact refusal.
+func (s *Server) refuse(w http.ResponseWriter, req *request, result string, browser bool, back string) {
 	metrics.EdgeClearanceTotal.WithLabelValues(req.zone, result).Inc()
+	if browser {
+		s.renderNotice(w, req, http.StatusForbidden, req.lang.Expired, req.lang.Retry, back, 0)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	_, _ = w.Write([]byte(`{"error":"` + result + `"}` + "\n"))

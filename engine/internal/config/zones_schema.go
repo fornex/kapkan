@@ -34,10 +34,19 @@ var zoneEnumValues = map[string][]string{
 var zoneNumericBounds = map[string]map[string]float64{
 	"zones.policy.rate.rps":         {"minimum": 0},
 	"zones.policy.rate.concurrency": {"minimum": 0},
-	// 0 means "the default" for both rung knobs; otherwise the validator's
-	// range.
-	"zones.policy.challenge_options.difficulty":         {"minimum": 0, "maximum": maxChallengeDifficulty},
-	"zones.policy.challenge_options.cookie_ttl_seconds": {"minimum": 0, "maximum": edgedoc.MaxCookieTTLSeconds},
+}
+
+// zoneZeroOrRange: 0 means "the default" for both rung knobs, otherwise the
+// validator's range — published as exactly that (anyOf: 0, or the range), so
+// an editor validating against the schema refuses what the validator would.
+var zoneZeroOrRange = map[string][2]float64{
+	"zones.policy.challenge_options.difficulty":         {minChallengeDifficulty, maxChallengeDifficulty},
+	"zones.policy.challenge_options.cookie_ttl_seconds": {edgedoc.MinCookieTTLSeconds, edgedoc.MaxCookieTTLSeconds},
+}
+
+func lookupZoneZeroOrRange(path string) ([2]float64, bool) {
+	r, ok := zoneZeroOrRange[path]
+	return r, ok
 }
 
 // GenerateZonesSchema returns the canonical JSON Schema for the zones file.

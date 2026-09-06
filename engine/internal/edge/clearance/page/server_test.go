@@ -50,13 +50,14 @@ func newFixture(t *testing.T) (*Server, *fakeZones, *clock) {
 	return s, z, c
 }
 
-// get performs a request as the renderer would forward it.
+// do performs a request as the renderer would forward it: X-Kapkan-URI is
+// the request's own target (nginx's $request_uri), on the public prefix too.
 func do(h http.Handler, method, path string, hdr map[string]string, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("X-Kapkan-Zone", "shop.example")
 	req.Header.Set("X-Kapkan-Client", "203.0.113.4")
 	req.Header.Set("X-Kapkan-Method", "GET")
-	req.Header.Set("X-Kapkan-URI", "/cart?x=1")
+	req.Header.Set("X-Kapkan-URI", path)
 	for k, v := range hdr {
 		if v == "" {
 			req.Header.Del(k)
@@ -123,9 +124,14 @@ func TestChallengePageShape(t *testing.T) {
 	if p.Difficulty != clearance.MinDifficulty || p.Return != "/cart?x=1" || !strings.HasPrefix(p.Nonce, "c1.") {
 		t.Fatalf("puzzle: %+v (the document key, not the local one, must issue)", p)
 	}
+	// The status line is announced once (role=status, no live counter in
+	// it); the fallback — the ticket's Continue — is outside <noscript>, so a
+	// browser whose script cannot run reaches it too; the <noscript> block
+	// carries the timer and the stylesheet that shows the fallback at once.
 	for _, want := range []string{
-		`<html lang="ru">`, "Проверяем браузер", `role="status" aria-live="polite"`, "<noscript>",
-		`<meta http-equiv="refresh" content="5;url=/_kapkan/clearance/nojs?t=` + ticket + `">`,
+		`<html lang="ru">`, "Проверяем браузер", `<p id="kapkan-status" role="status"></p>`, `<p id="kapkan-count" aria-hidden="true"></p>`,
+		`<noscript><meta http-equiv="refresh" content="7;url=/_kapkan/clearance/nojs?t=` + ticket + `"><link rel="stylesheet" href="/_kapkan/clearance/a/nojs.`,
+		`<div id="kapkan-fallback">`, "Если страница не продолжится сама",
 		`<form method="get" action="/_kapkan/clearance/nojs">`, `<form id="kapkan-answer" method="post" action="/_kapkan/clearance/answer" hidden>`,
 		`name="return" value="/cart?x=1"`, `<button type="submit">Продолжить</button>`,
 	} {
@@ -133,12 +139,16 @@ func TestChallengePageShape(t *testing.T) {
 			t.Errorf("page lacks %q", want)
 		}
 	}
+	if strings.Contains(body, "aria-live") {
+		t.Error("the page has a live region that would re-announce the counter")
+	}
 	if strings.Contains(body, "http://") || strings.Contains(body, "https://") {
 		t.Error("the page references an external resource")
 	}
-	// Both assets by content hash, immutable, right types; nothing else there.
+	// The three assets by content hash, immutable, right types; nothing else
+	// there.
 	assets := assetRe.FindAllString(body, -1)
-	if len(assets) != 2 {
+	if len(assets) != 3 {
 		t.Fatalf("assets in page: %v", assets)
 	}
 	for _, a := range assets {
@@ -237,12 +247,17 @@ func TestAnswerRoundTrip(t *testing.T) {
 		t.Fatalf("json answer: %d %s", r.Code, r.Body)
 	}
 	// Wrong solution, wrong return (the redirect guard), another source's
-	// nonce, a GET: all refused, none issue a cookie.
-	for name, hdr := range map[string]map[string]string{
-		"wrong solution":  {"Content-Type": "application/x-www-form-urlencoded"},
-		"other return":    {"Content-Type": "application/x-www-form-urlencoded"},
-		"other source":    {"Content-Type": "application/x-www-form-urlencoded", "X-Kapkan-Client": "203.0.113.9"},
-		"absolute return": {"Content-Type": "application/x-www-form-urlencoded"},
+	// nonce, a GET: all refused, none issue a cookie. The form post is the
+	// browser's navigation, so its refusal is a PAGE with the way back to
+	// where the visitor came from (a same-host path only), not JSON.
+	for name, tc := range map[string]struct {
+		hdr  map[string]string
+		back string
+	}{
+		"wrong solution":  {map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, "/cart?x=1"},
+		"other return":    {map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, "/admin"},
+		"other source":    {map[string]string{"Content-Type": "application/x-www-form-urlencoded", "X-Kapkan-Client": "203.0.113.9"}, "/cart?x=1"},
+		"absolute return": {map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, "/"},
 	} {
 		f := url.Values{"nonce": {p.Nonce}, "solution": {sol}, "return": {p.Return}}
 		switch name {
@@ -253,30 +268,41 @@ func TestAnswerRoundTrip(t *testing.T) {
 		case "absolute return":
 			f.Set("return", "https://evil.example/")
 		}
-		r := do(h, http.MethodPost, "/_kapkan/clearance/answer", hdr, f.Encode())
-		if r.Code != 403 || len(r.Result().Cookies()) != 0 || !strings.Contains(r.Body.String(), `"invalid"`) {
-			t.Errorf("%s: %d %s cookies=%d", name, r.Code, r.Body, len(r.Result().Cookies()))
+		r := do(h, http.MethodPost, "/_kapkan/clearance/answer", tc.hdr, f.Encode())
+		b := r.Body.String()
+		if r.Code != 403 || len(r.Result().Cookies()) != 0 || r.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
+			!strings.Contains(b, "This took too long") || !strings.Contains(b, `<a href="`+tc.back+`">Start over</a>`) || r.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("%s: %d %s cookies=%d", name, r.Code, b, len(r.Result().Cookies()))
 		}
+	}
+	// The same refusal to a JSON client is the compact JSON.
+	body, _ = json.Marshal(answer{Nonce: p.Nonce, Solution: sol + "x", Return: p.Return})
+	if r := do(h, http.MethodPost, "/_kapkan/clearance/answer", map[string]string{"Content-Type": "application/json"}, string(body)); r.Code != 403 || r.Header().Get("Content-Type") != "application/json" || strings.TrimSpace(r.Body.String()) != `{"error":"invalid"}` {
+		t.Errorf("json refusal: %d %s %s", r.Code, r.Header().Get("Content-Type"), r.Body)
 	}
 	if r := do(h, http.MethodGet, "/_kapkan/clearance/answer", nil, ""); r.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET answer = %d", r.Code)
 	}
 	// A puzzle answered too late (the nonce's window passed) is invalid.
 	c.add(10 * time.Minute)
-	if r := do(h, http.MethodPost, "/_kapkan/clearance/answer", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form); r.Code != 403 {
-		t.Errorf("stale answer = %d", r.Code)
+	if r := do(h, http.MethodPost, "/_kapkan/clearance/answer", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form); r.Code != 403 || !strings.Contains(r.Body.String(), `<a href="/cart?x=1">`) {
+		t.Errorf("stale answer = %d %s", r.Code, r.Body)
 	}
 }
 
 // TestNoJSTicket pins the fallback: redeemed too early it is refused with a
-// small page (a no-JS client cannot read JSON), after the wait it grants the
-// shorter nojs clearance, and after two minutes it is dead.
+// small page that retries the ticket by itself (a no-JS client cannot read
+// JSON), after the wait it grants the shorter nojs clearance, and after two
+// minutes it is dead — and THAT page leads back to where the visitor came
+// from, never to the dead ticket again.
 func TestNoJSTicket(t *testing.T) {
 	s, z, c := newFixture(t)
 	h := s.Handler()
 	_, _, ticket := challengePage(t, h, nil)
-	early := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket), nil, "")
-	if early.Code != 403 || !strings.Contains(early.Body.String(), "Not yet") || !strings.Contains(early.Body.String(), `<a href="/cart?x=1">`) || len(early.Result().Cookies()) != 0 {
+	nojs := "/_kapkan/clearance/nojs?t=" + url.QueryEscape(ticket)
+	early := do(h, http.MethodGet, nojs, nil, "")
+	if b := early.Body.String(); early.Code != 403 || !strings.Contains(b, "Not yet") || !strings.Contains(b, `<a href="`+nojs+`">Try again</a>`) ||
+		!strings.Contains(b, `<meta http-equiv="refresh" content="5;url=`+nojs+`">`) || len(early.Result().Cookies()) != 0 {
 		t.Fatalf("too early: %d %s", early.Code, early.Body)
 	}
 	c.add(5 * time.Second)
@@ -292,16 +318,22 @@ func TestNoJSTicket(t *testing.T) {
 		t.Fatalf("nojs cookie kind: %v %q", ok, kind)
 	}
 	// Another source cannot redeem it; a tampered ticket is refused; dead
-	// after two minutes.
-	if r := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket), map[string]string{"X-Kapkan-Client": "203.0.113.9"}, ""); r.Code != 403 {
-		t.Errorf("other source redeemed = %d", r.Code)
+	// after two minutes. Each of these says to start over and links the page
+	// the ticket was issued for (a same-host path, so safe to link even
+	// unverified) — not the ticket URL, which would loop forever.
+	startOver := func(name string, r *httptest.ResponseRecorder) {
+		t.Helper()
+		if b := r.Body.String(); r.Code != 403 || !strings.Contains(b, "This took too long") || !strings.Contains(b, `<a href="/cart?x=1">Start over</a>`) || strings.Contains(b, "refresh") || len(r.Result().Cookies()) != 0 {
+			t.Errorf("%s: %d %s", name, r.Code, b)
+		}
 	}
-	if r := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket[:len(ticket)-2]+"AA"), nil, ""); r.Code != 403 {
-		t.Errorf("tampered ticket = %d", r.Code)
-	}
+	startOver("other source", do(h, http.MethodGet, nojs, map[string]string{"X-Kapkan-Client": "203.0.113.9"}, ""))
+	startOver("tampered", do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket[:len(ticket)-2]+"AA"), nil, ""))
 	c.add(3 * time.Minute)
-	if r := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket), nil, ""); r.Code != 403 {
-		t.Errorf("expired ticket = %d", r.Code)
+	startOver("expired", do(h, http.MethodGet, nojs, nil, ""))
+	// A ticket that does not even parse sends the visitor home.
+	if r := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t=garbage", nil, ""); r.Code != 403 || !strings.Contains(r.Body.String(), `<a href="/">Start over</a>`) {
+		t.Errorf("garbage ticket: %d %s", r.Code, r.Body)
 	}
 	if r := do(h, http.MethodPost, "/_kapkan/clearance/nojs?t=x", nil, ""); r.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST nojs = %d", r.Code)
@@ -324,8 +356,12 @@ func TestIssuanceCaps(t *testing.T) {
 			t.Fatalf("issuance %d = %d", i+1, code)
 		}
 	}
-	if code := redeem("203.0.113.4"); code != http.StatusTooManyRequests {
-		t.Fatalf("seventh issuance = %d, want 429", code)
+	// The seventh is refused — with a page (this is a browser's navigation)
+	// that says to wait and links back, not a JSON blob.
+	seventh := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket), nil, "")
+	if b := seventh.Body.String(); seventh.Code != http.StatusTooManyRequests || seventh.Header().Get("Retry-After") == "" ||
+		seventh.Header().Get("Content-Type") != "text/html; charset=utf-8" || !strings.Contains(b, "Too many attempts") || !strings.Contains(b, `<a href="/cart?x=1">Start over</a>`) {
+		t.Fatalf("seventh issuance = %d %s", seventh.Code, b)
 	}
 	// Another source gets its own budget — until the zone's cap holds.
 	_, _, ticket2 := challengePage(t, h, map[string]string{"X-Kapkan-Client": "203.0.113.7"})

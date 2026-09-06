@@ -203,23 +203,33 @@ security-relevant.
   **403** `Cache-Control: no-store` HTML page — the puzzle as a data block, one script and one
   stylesheet by content hash, a strict CSP, no images and no third parties — in the visitor's
   language (en/ru/de/fr/es from `Accept-Language`); a non-GET original gets the compact
-  `{"error":"challenge_required"}` instead. The browser solves the hashcash in short chunks on
-  the main thread (WebCrypto SHA-256, progress in an `aria-live` line) and posts the form to
+  `{"error":"challenge_required"}` instead. The browser solves the hashcash in lanes — a few
+  Workers started from the page's own script plus a time-sliced lane on the main thread, so a
+  visible tab uses its fastest core and a background tab's timer throttling cannot stall the
+  search — with its own SHA-256 (WebCrypto's per-call cost, not the hashing, was the bottleneck;
+  checked against a known digest before use), asks for a fresh puzzle rather than post a solution
+  that outlived the nonce's window, and posts the form to
   `/_kapkan/clearance/answer`, which checks the solution and answers `303` back to the request's
   own path with `Set-Cookie: kapkan_clr=…; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<ttl>`
   — host-only, so a sibling zone can never read it, and bound to zone and source key, so it is
   useless elsewhere. **No JavaScript** is a first-class path, not an afterthought: the page
   carries a timed ticket (redeemable four seconds to two minutes after issue) both as a
-  `<noscript>` meta refresh and as a visible Continue button, and it earns the shorter five-minute
-  `nojs` clearance. The page signs with the decision service's own keys (the document's newest
-  live key, else the node's) and reads each zone's rung from it, so the two halves cannot
-  disagree; clearances are capped at 6 per source and 6000 per zone a minute (`429` beyond). Two
-  new zone knobs, `policy.challenge_options.difficulty` (12..22, default 18) and
-  `cookie_ttl_seconds` (60..86400, default 1800), reach the document only when set (schema
-  regenerated). `kapkan_edge_clearance_total{zone,result=page|page_json|issued|issued_nojs|
-  invalid|rate_limited|bad_request}` counts it. Accessibility as a review gate: semantic HTML,
-  status via `aria-live`, a non-timed alternative to every timer, both colour schemes at ≥13:1
-  text contrast, focus outlines, reduced-motion honoured.
+  `<noscript>` meta refresh and as a Continue button that shows itself when the script does not
+  take over (JavaScript off, a browser without WebCrypto, the script blocked), and it earns the
+  shorter five-minute `nojs` clearance. Every refusal a browser can meet is a page with the way
+  forward — a too-early ticket retries itself, an expired one and a stale or wrong answer lead
+  back to the page the visitor came from, the issuance cap says to wait a minute — and the compact
+  JSON is kept for clients that post JSON. The page signs with the decision service's own keys
+  (the document's newest live key, else the node's) and reads each zone's rung from it, so the
+  two halves cannot disagree; clearances are capped at 6 per source and 6000 per zone a minute
+  (`429` beyond). Two new zone knobs, `policy.challenge_options.difficulty` (12..22, default 18)
+  and `cookie_ttl_seconds` (60..86400, default 1800), reach the document only when set (schema
+  regenerated; the published schema admits 0 — the default — or the range, exactly as the
+  validator does). `kapkan_edge_clearance_total{zone,result=page|page_json|issued|issued_nojs|
+  invalid|rate_limited|unknown_zone|bad_request|error}` counts it. Accessibility as a review
+  gate: semantic HTML, a status line announced once (the moving counter is not a live region), a
+  non-timed alternative to every timer, both colour schemes at ≥13:1 text contrast, focus
+  outlines, reduced-motion honoured.
 
 ## [1.7.0] - 2026-09-02
 

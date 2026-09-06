@@ -19,7 +19,17 @@ body { min-height: 100vh; display: flex; flex-direction: column; align-items: ce
 main { max-width: 34rem; width: 100%; }
 h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 .75rem; text-wrap: balance; }
 p { margin: 0 0 1rem; }
-#kapkan-status { min-height: 1.5rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+#kapkan-status, #kapkan-count { min-height: 1.5rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+#kapkan-count { margin-top: -1rem; }
+/* The fallback — the timed ticket's Continue — is for when the script does
+   not take over: blocked, failed, or a browser without WebCrypto. It reveals
+   itself after a while on its own (no script needed), at once when the
+   script asks (.kapkan-now), and never while the solver runs ([hidden]).
+   With JavaScript off, nojs.css shows it at once. */
+#kapkan-fallback { visibility: hidden; animation: kapkan-reveal 0s linear 15s forwards; }
+#kapkan-fallback.kapkan-now { visibility: visible; animation: none; }
+#kapkan-fallback[hidden] { display: none; }
+@keyframes kapkan-reveal { to { visibility: visible; } }
 form { margin: 1rem 0; }
 button {
   font: inherit; font-weight: 600; color: var(--bg); background: var(--fg);
