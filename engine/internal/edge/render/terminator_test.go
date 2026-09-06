@@ -424,8 +424,8 @@ func TestRealTerminator(t *testing.T) {
 			t.Errorf("public endpoint's headers: %v", last)
 		}
 		s.request(t, "PUT", true, "example.com", "/_kapkan/clearance/answer", "x", nil).expect(t, 403, "")
-		if r, err := s.try("POST", true, "example.com", "/_kapkan/clearance/answer", strings.Repeat("b", 5000), nil, 0); err == nil && r.status != 413 {
-			t.Errorf("5 KB answer body: status %d, want 413", r.status)
+		if r, err := s.try("POST", true, "example.com", "/_kapkan/clearance/answer", strings.Repeat("b", 9000), nil, 0); err == nil && r.status != 413 {
+			t.Errorf("9 KB answer body: status %d, want 413", r.status)
 		}
 		s.get(t, "example.com", "/_kapkan/decide").expect(t, 404, "")
 		s.get(t, "example.com", "/_kapkan/undecided").expect(t, 404, "")

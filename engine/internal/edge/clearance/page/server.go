@@ -15,7 +15,10 @@
 //     refusal, to a client it is an answer it can act on.
 //   - The public prefix /_kapkan/clearance/: the answer (POST), the no-JS
 //     ticket (GET) and the assets, with kapkan's headers plus the client's
-//     Content-Type and Accept-Language, a 4 KiB body at most.
+//     Content-Type and Accept-Language, an 8 KiB body at most — the room the
+//     longest return path the puzzle admits needs once a browser has
+//     form-encoded it (three bytes per reserved byte), with the nonce and
+//     the solution beside it; maxBody below matches.
 //
 // WHAT IT KNOWS. Only what the decision service tells it per zone: the keys
 // to sign with (the document's, or the node's own) and the rung's policy

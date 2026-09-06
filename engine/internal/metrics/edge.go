@@ -38,8 +38,8 @@ var (
 	// by the document; "unknown" for a zone it does not serve) and result:
 	// page (the challenge page was served), page_json (a non-GET original got
 	// the compact refusal), issued (a solved puzzle earned a clearance),
-	// issued_nojs (the timed no-JS ticket did), invalid (a wrong or stale
-	// answer or ticket), rate_limited (the issuance cap held), unknown_zone
+	// issued_nojs (the timed no-JS ticket did), invalid (a wrong, stale or
+	// not-yet-valid answer or ticket), rate_limited (the issuance cap held), unknown_zone
 	// (a request for a zone this node does not serve or whose rung is off),
 	// bad_request (a request off the renderer's contract), error (the page
 	// could not answer: no live key, or a puzzle or clearance it could not
