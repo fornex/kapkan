@@ -101,15 +101,17 @@ type WindowStats struct {
 	// zone-wide trigger measures — the same figure in dry-run as enforcing,
 	// so the preview shows the flips enforcement would make.
 	AdmittedRPS float64
-	// Sources is the top-N by requests for OnWindow (the report); OnWindowFull
-	// receives every source. SourcesTotal is how many there were.
+	// Sources is the bounded view for OnWindow (the report): at most TopSources
+	// entries, the would-be sources first, then the refused and challenged
+	// ones, then the busiest of the rest. OnWindowFull receives every source.
+	// SourcesTotal is how many there were.
 	Sources      []SourceStats
 	SourcesTotal int
-	// TellingTruncated counts the sources the TopSources bound cut that TOLD
-	// something — refused, challenged, or previewed as either — so a consumer
-	// knows the would-be set it sees is short, not that allowed sources went.
-	// Zero in the full stats.
-	TellingTruncated int
+	// WouldBeTruncated counts the WOULD-BE sources — previewed a challenge or
+	// a deny — the TopSources bound cut, so a consumer knows the would-be set
+	// it sees is short. A refused or challenged source the bound cut is not
+	// counted: it is not in the set. Zero in the full stats.
+	WouldBeTruncated int
 	// Overflow reports that the zone's pair cap was hit: SourcesTotal is
 	// then a floor and unnamed sources were counted in the zone totals only.
 	Overflow bool
@@ -319,6 +321,24 @@ func (s SourceStats) Telling() bool {
 	return s.DeniedTable > 0 || s.Challenged > 0 || s.WouldDeny > 0 || s.WouldChallenge > 0
 }
 
+// WouldBe reports whether the node PREVIEWED a challenge or a deny for the
+// source — the would-be set edge-spec §8 asks the report to carry.
+func (s SourceStats) WouldBe() bool {
+	return s.WouldDeny > 0 || s.WouldChallenge > 0
+}
+
+// rank orders the bounded view: the would-be sources first, then the refused
+// and challenged ones, then the rest.
+func (s SourceStats) rank() int {
+	switch {
+	case s.WouldBe():
+		return 0
+	case s.Telling():
+		return 1
+	}
+	return 2
+}
+
 // rollIfDue closes the current window when it has run its length, returning
 // the closed zones' stats: with the sources truncated to TopSources, and in
 // full. Caller holds a.mu.
@@ -344,12 +364,13 @@ func (a *Aggregator) rollIfDue(now time.Time) (top, full []WindowStats) {
 			s.RPS = float64(s.Requests) / elapsed.Seconds()
 			st.Sources = append(st.Sources, *s)
 		}
-		// The sources that tell something — refused, challenged, or previewed
-		// as either — rank first, so the bounded view never loses a would-be
-		// source to a busier allowed one; the busiest first within each kind.
+		// The would-be sources rank first, then the ones the node refused or
+		// challenged, then the rest — the busiest first within each tier — so
+		// the bounded view never loses a would-be source to a busier bystander,
+		// and a cut would-be source is the only cut that shortens the set.
 		sort.Slice(st.Sources, func(i, j int) bool {
-			if ti, tj := st.Sources[i].Telling(), st.Sources[j].Telling(); ti != tj {
-				return ti
+			if ri, rj := st.Sources[i].rank(), st.Sources[j].rank(); ri != rj {
+				return ri < rj
 			}
 			if st.Sources[i].Requests != st.Sources[j].Requests {
 				return st.Sources[i].Requests > st.Sources[j].Requests
@@ -360,8 +381,8 @@ func (a *Aggregator) rollIfDue(now time.Time) (top, full []WindowStats) {
 		truncated := st
 		if len(truncated.Sources) > limit {
 			for _, s := range st.Sources[limit:] {
-				if s.Telling() {
-					truncated.TellingTruncated++
+				if s.WouldBe() {
+					truncated.WouldBeTruncated++
 				}
 			}
 			// A copy, not a reslice: a consumer that keeps the bounded view

@@ -88,7 +88,7 @@ func TestTopSourcesRankTellingFirst(t *testing.T) {
 	}
 	now = now.Add(11 * time.Second)
 	a.Tick()
-	if len(top) != 1 || len(top[0].Sources) != 5 || top[0].SourcesTotal != 11 || top[0].TellingTruncated != 0 {
+	if len(top) != 1 || len(top[0].Sources) != 5 || top[0].SourcesTotal != 11 || top[0].WouldBeTruncated != 0 {
 		t.Fatalf("bounded view: %+v", top)
 	}
 	for i := 0; i < 3; i++ {
@@ -106,7 +106,27 @@ func TestTopSourcesRankTellingFirst(t *testing.T) {
 	}
 	now = now.Add(11 * time.Second)
 	a.Tick()
-	if len(top) != 1 || len(top[0].Sources) != 5 || top[0].TellingTruncated != 2 {
+	if len(top) != 1 || len(top[0].Sources) != 5 || top[0].WouldBeTruncated != 2 {
 		t.Fatalf("telling cut: %+v", top)
+	}
+	// Refused sources rank after the would-be ones and, cut, are no shortfall
+	// of the would-be set: three previewed and seven table-denied sources in a
+	// five-entry view keep the three previewed first and count nothing.
+	top = nil
+	for i := 0; i < 3; i++ {
+		a.Observe(Record{TS: now, Zone: "z.example", Src: netip.MustParseAddr("203.0.113." + strconv.Itoa(50+i)), Port: 443, Status: 200, Decision: "200", Mark: "would-deny:rate"})
+	}
+	for i := 0; i < 7; i++ {
+		a.Observe(Record{TS: now, Zone: "z.example", Src: netip.MustParseAddr("203.0.113." + strconv.Itoa(60+i)), Port: 443, Status: 403, Decision: "403", Reason: "table:flood"})
+	}
+	now = now.Add(11 * time.Second)
+	a.Tick()
+	if len(top) != 1 || len(top[0].Sources) != 5 || top[0].WouldBeTruncated != 0 {
+		t.Fatalf("refused cut: %+v", top)
+	}
+	for i, src := range top[0].Sources {
+		if (i < 3) != src.WouldBe() || !src.Telling() {
+			t.Fatalf("ranking: would-be first, then refused: %+v", top[0].Sources)
+		}
 	}
 }

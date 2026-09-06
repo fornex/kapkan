@@ -59,8 +59,9 @@ type EdgeZoneStatus struct {
 	// WouldBe is the union, across nodes, of the sources the nodes previewed
 	// a deny or a challenge for — the would-be set. The busiest first,
 	// bounded to 20 per reporting node; WouldBeTruncated counts the rest.
-	// Partial says at least one node shed part of its per-source detail to
-	// fit its report, so the set is what survived, not everyone.
+	// Partial says at least one node's would-be sources did not all fit its
+	// report — its per-window bound, or a report that had to shrink — so the
+	// set is what survived, not everyone.
 	WouldBe          []EdgeZoneWouldBe `json:"would_be,omitempty"`
 	WouldBeTruncated int               `json:"would_be_truncated,omitempty"`
 	Partial          bool              `json:"partial,omitempty"`

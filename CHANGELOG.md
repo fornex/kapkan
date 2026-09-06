@@ -275,13 +275,15 @@ security-relevant.
   Each self-report now carries a **zones section**: for every decide-mode zone the live generation
   serves, the last closed ten-second window (`rps`, requests, decided, denied, challenged, cleared,
   `would_deny`, `would_challenge`, status classes), whether a zone-wide challenge is in force and
-  why, whether the zone is watch-only on that node, and the window's busiest sources with the
-  strongest thing the node did to each (`denied` / `challenged` / `would-deny` / `would-challenge`
-  / `cleared` / `marked` / `allow`), the zone's challenge mode, and whether a flip bites or
-  previews there. A window older than two aggregator windows reads as a quiet zone. A report too
-  big for the brain's limit sheds detail a little at a time — the sources that tell nothing first,
-  then every zone's list halved, then certificates, then zones — each counted, so the brain and
-  the console say "partial", never "nobody". New **`GET
+  why, whether the zone is watch-only on that node, and the window's sources — the would-be ones
+  first, then the refused and challenged, then the busiest of the rest — with the strongest thing
+  the node did to each (`denied` / `challenged` / `would-deny` / `would-challenge` / `cleared` /
+  `marked` / `allow`), the zone's challenge mode, and whether a flip bites or previews there. A
+  window older than two aggregator windows reads as a quiet zone. A report too big for the brain's
+  limit sheds detail a little at a time — the sources that tell nothing first (uncounted: they are
+  not in the would-be set), then every zone's list halved, then certificates, then zones — the
+  would-be sources it loses counted, so the brain and the console say "partial", never "nobody".
+  New **`GET
   /api/v1/edge/zones/status`** (viewer rank, unscoped tokens, like the inventory) merges the alive
   nodes' zones: sums per zone, the zone's mode, the nodes on which it is watch-only or under a
   zone-wide challenge (biting or previewing), how many nodes are alive, and the **would-be set** — the union of sources the nodes previewed a challenge or a deny for,
@@ -290,9 +292,10 @@ security-relevant.
   console gains an **Edge** view (shown when `edge.nodes[]` is configured; `/api/v1/status` now
   carries `edge_nodes_total`): the zones table with a challenge column (off / preview / active with
   its reasons) and a "Who would be challenged" panel, in all five languages. The aggregator's
-  bounded view ranks the sources that tell something — refused, challenged, or previewed as either
-  — ahead of the busiest allowed ones, so a would-be source is never lost to a busier bystander,
-  and counts the telling ones its bound cut; the report carries `rung_dry_run` (the rung previews
+  bounded view ranks the would-be sources first, then the refused and challenged ones, then the
+  busiest of the rest, so a would-be source is never lost to a busier bystander, and counts the
+  would-be ones its bound cut — a refused source the bound cut is not in the set and not a
+  shortfall; the report carries `rung_dry_run` (the rung previews
   on this node: the node's, the zone's or the rung's own watch-only switch) beside `dry_run`, so
   the status (`rung_watch_only`) and the console tell an enforcing rung from a watching one by
   state, not by guessing from a window's counters; zone entries a node cut from its report reach

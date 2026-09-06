@@ -147,9 +147,9 @@ func TestAggregatorWindows(t *testing.T) {
 	if w.Elapsed != 20*time.Second || w.RPS < 3.59 || w.RPS > 3.61 {
 		t.Fatalf("rps must divide by the real elapsed: elapsed=%v rps=%v", w.Elapsed, w.RPS)
 	}
-	// The bounded view ranks the sources that tell something first — the
-	// table-denied .5 and the previewed .6 — ahead of the busiest allowed one.
-	if w.SourcesTotal != 6 || len(w.Sources) != 2 || w.Sources[0].Src.String() != "198.51.100.5" || w.Sources[1].Src.String() != "198.51.100.6" || w.TellingTruncated != 0 {
+	// The bounded view ranks the would-be .6 first, then the table-denied .5,
+	// ahead of the busiest allowed one.
+	if w.SourcesTotal != 6 || len(w.Sources) != 2 || w.Sources[0].Src.String() != "198.51.100.6" || w.Sources[1].Src.String() != "198.51.100.5" || w.WouldBeTruncated != 0 {
 		t.Fatalf("top sources: total=%d %+v", w.SourcesTotal, w.Sources)
 	}
 	if w.Sources[0].RPS < 0.49 || w.Sources[0].RPS > 0.51 {
