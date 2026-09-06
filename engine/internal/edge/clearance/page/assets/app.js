@@ -142,15 +142,21 @@
   if (fallback) { fallback.hidden = true; }
 
   // showFallback puts the timed ticket's Continue back in front of the
-  // visitor; the block is a live region, so its sentence is announced. Without
-  // keep the solving status is cleared (its pulse with it): the solver is
-  // done for. With keep the solver goes on beside it — a slow client gets the
-  // timed path without losing the puzzle.
+  // visitor and SAYS so through the status line: the live region the page has
+  // had since it loaded. (A region that appears together with its text is
+  // announced by some engines and not by WebKit, so the block itself is not
+  // one; its own sentence is hidden once the status line carries it.) Without
+  // keep the solver is done for: the counter and the pulse go. With keep the
+  // solver goes on beside it — a slow client gets the timed path without
+  // losing the puzzle.
   function showFallback(keep) {
+    var said = fallback && fallback.querySelector("p");
     if (fallback) { fallback.hidden = false; }
+    status.textContent = said ? said.textContent : "";
+    if (said) { said.hidden = true; }
     if (!keep) {
+      status.className = "";
       if (count) { count.textContent = ""; }
-      if (status) { status.textContent = ""; }
     }
   }
 
@@ -174,7 +180,8 @@
   var attempts = {}; // per lane
 
   // Announced once by assistive technology (role=status); the moving counter
-  // is a separate element it does not read.
+  // is a separate element it does not read. The class carries the pulse.
+  status.className = "kapkan-busy";
   status.textContent = w[0];
   // A solve that is taking long — a slow device, a high difficulty — gets the
   // timed path offered beside it: the ticket is redeemable from 4 s to 120 s

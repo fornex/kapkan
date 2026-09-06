@@ -121,11 +121,15 @@ const (
 // is VISIBLE unless the script hides it — its first act, before anything can
 // fail — so JavaScript off, a blocked or broken script, and an engine that
 // fails the solver's self-check all leave the button in place; the script
-// puts it back on every bail-out and beside a solve that runs long. The
-// block is a live region, so its appearance is announced. The script is not
-// deferred: it sits after the form and runs while the page parses, so the
-// button is hidden before the first paint. Nobody depends on the timer, the
-// script or the button alone (§5: accessibility is a review gate).
+// puts it back on every bail-out and beside a solve that runs long, and says
+// so through the status line — the live region the page has had since it
+// loaded; a block that appears together with its text is not announced by
+// every engine, so the block itself is not one. The script is not deferred:
+// it sits after the form and blocks the parser, not the paint — on a cold
+// cache the button can show for the moment the script takes to arrive, and a
+// press then lands on the too-early notice, which retries by itself. Nobody
+// depends on the timer, the script or the button alone (§5: accessibility is
+// a review gate).
 var challengeTmpl = template.Must(template.New("challenge").Parse(`<!DOCTYPE html>
 <html lang="{{.L.Tag}}">
 <head>
@@ -142,7 +146,7 @@ var challengeTmpl = template.Must(template.New("challenge").Parse(`<!DOCTYPE htm
 <p>{{.L.Lead}}</p>
 <p id="kapkan-status" role="status"></p>
 <p id="kapkan-count" aria-hidden="true"></p>
-<div id="kapkan-fallback" role="status">
+<div id="kapkan-fallback">
 <p>{{.L.Fallback}}</p>
 <form method="get" action="{{.NoJSPath}}">
 <input type="hidden" name="t" value="{{.Ticket}}">
