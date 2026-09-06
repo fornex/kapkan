@@ -378,6 +378,9 @@ func (n *Node) Run(ctx context.Context) error {
 				return nil
 			case <-t.C:
 				n.agg.Tick()
+				// The decision service's periodic sweep, so a lapsed
+				// zone-wide flip is retired on a node with no traffic.
+				n.svc.Tick()
 			}
 		}
 	})

@@ -50,10 +50,13 @@ func TestDenyDisplacesChallengeAndChallengesAreCapped(t *testing.T) {
 	// bots challenged (5m) then denied (1m) with room to spare keep their
 	// challenges beneath — six entries, full — and a new flooder's block
 	// lands by dropping what is beneath, not by refusing.
+	// Seven slots: two bots challenged then denied keep their challenges
+	// beneath, a third source (.3) is challenged and NOT denied — a live,
+	// visible verdict that must survive the room-making.
 	c3 := newClock()
-	s3 := New(Options{Now: c3.now, MaxSources: 6})
+	s3 := New(Options{Now: c3.now, MaxSources: 7})
 	s3.SetZones(doc(zone("example.com", 0, 0)))
-	for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"} {
 		if !s3.Challenge("example.com", src(ip), 5*time.Minute, "flood") {
 			t.Fatalf("challenge %s refused", ip)
 		}
@@ -65,15 +68,16 @@ func TestDenyDisplacesChallengeAndChallengesAreCapped(t *testing.T) {
 			t.Fatalf("deny %s refused with room to spare", ip)
 		}
 	}
-	if n := len(s3.Verdicts()); n != 6 {
-		t.Fatalf("verdicts with two challenges beneath their denies = %d, want 6", n)
+	if n := len(s3.Verdicts()); n != 7 {
+		t.Fatalf("verdicts with two challenges beneath their denies = %d, want 7", n)
 	}
 	c3.add(2 * time.Second)
 	if !s3.Deny("example.com", src("198.51.100.7"), time.Minute, "c") {
 		t.Fatal("a full table refused a new block while challenges sat beneath live denies")
 	}
-	if n := len(s3.Verdicts()); n != 5 || s3.Challenged("example.com", src("198.51.100.1")) || !s3.Denied("example.com", src("198.51.100.1")) || !s3.Denied("example.com", src("198.51.100.7")) {
-		t.Fatalf("the beneath-challenges did not make way for the new block: verdicts=%d", n)
+	// The two hidden challenges went; .3's visible one did not.
+	if n := len(s3.Verdicts()); n != 6 || !s3.Challenged("example.com", src("198.51.100.3")) || !s3.Denied("example.com", src("198.51.100.1")) || !s3.Denied("example.com", src("198.51.100.7")) {
+		t.Fatalf("room-making was not selective: verdicts=%d challenged(.3)=%v", n, s3.Challenged("example.com", src("198.51.100.3")))
 	}
 	// The same room-making serves a challenge refused by its share: with the
 	// share held only by hidden challenges, a new flooder still gets the rung.
