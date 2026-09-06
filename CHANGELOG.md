@@ -311,11 +311,11 @@ security-relevant.
   document as `challenge_override {mode, until, reason}` with a fixed `until`, so the document's
   bytes and ETag move exactly when an operator acts (and once more when it lapses); parked polls
   are woken at once and every node applies the effective mode on its fast path — a policy
-  change, never a reload — reading the override per decision so it ends on time, brain or no
-  brain. The response says where the lever bites: the file's mode, the zone's watch-only flags
+  change, never a reload — reading the override per decision — the rules too, at each window's close — so it ends on time,
+  brain or no brain, and a zone-wide flip made inert by its lapse is retired with it. The response says where the lever bites: the file's mode, the zone's watch-only flags
   (`policy.dry_run`, `challenge_options.dry_run`) and every configured node with its liveness and
   reported `dry_run` — a node that only counts must be seen before the lever is trusted. A zone
-  in `mode: none` is refused (409). Audited (`edge_challenge` set / cleared); shown by
+  in `mode: none` is refused (409); the reason is at most 200 characters. Audited (`edge_challenge` set / cleared); shown by
   `GET /api/v1/edge/zones/status` as `override`. The brain's own `dry_run` does not gate the lever:
   it is a policy edit; enforcement watch-only lives on the node and the zone. In memory, like the
   ACME coordinator — an incident's tool, re-pulled after a brain restart.

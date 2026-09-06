@@ -31,9 +31,13 @@ type Sink interface {
 // ZoneRule is what the rules need to know about one zone's rung: whether it
 // is automatic, and the zone-wide trigger.
 type ZoneRule struct {
-	// Auto is policy.challenge: auto — the flood rule challenges before it
-	// denies, and the zone-wide trigger below applies.
+	// Auto is the zones FILE's policy.challenge: auto — the flood rule
+	// challenges before it denies, and the zone-wide trigger below applies.
 	Auto bool
+	// Override is the brain's lever (E4.6), if any: while it is live its mode
+	// is the zone's, read at Apply time (autoAt) so a lapse ends on the clock
+	// with or without a new document — as the decision service reads it.
+	Override *edgedoc.ChallengeOverride
 	// ZoneRPS is the zone-wide ADMITTED rate (this node's window: decided
 	// requests the node did not refuse, WindowStats.AdmittedRPS) at which
 	// every source is challenged; 0 = no zone-wide trigger.
@@ -43,10 +47,19 @@ type ZoneRule struct {
 	Hold time.Duration
 }
 
-// ZoneRulesFromDoc reads the per-zone rung settings the rules act on, as they
-// stand at now: the brain's challenge override (E4.6) counts while it is live
-// — the brain re-issues the document when it lapses, so the rules follow.
-func ZoneRulesFromDoc(doc *edgedoc.Doc, now time.Time) map[string]ZoneRule {
+// autoAt reports whether the zone's rung is automatic at now: the override's
+// word while it is live, the file's otherwise.
+func (zr ZoneRule) autoAt(now time.Time) bool {
+	if zr.Override.Live(now) {
+		return zr.Override.Mode == edgedoc.ChallengeAuto
+	}
+	return zr.Auto
+}
+
+// ZoneRulesFromDoc reads the per-zone rung settings the rules act on: the
+// file's mode and the brain's challenge override (E4.6), which the rules
+// evaluate at Apply time.
+func ZoneRulesFromDoc(doc *edgedoc.Doc) map[string]ZoneRule {
 	out := make(map[string]ZoneRule, len(doc.Zones))
 	for i := range doc.Zones {
 		z := &doc.Zones[i]
@@ -54,9 +67,10 @@ func ZoneRulesFromDoc(doc *edgedoc.Doc, now time.Time) map[string]ZoneRule {
 			continue
 		}
 		out[z.Name] = ZoneRule{
-			Auto:    z.EffectiveChallenge(now) == edgedoc.ChallengeAuto,
-			ZoneRPS: float64(z.Policy.AutoZoneRPS()),
-			Hold:    z.Policy.AutoHold(),
+			Auto:     z.Policy.Challenge == edgedoc.ChallengeAuto,
+			Override: z.ChallengeOverride,
+			ZoneRPS:  float64(z.Policy.AutoZoneRPS()),
+			Hold:     z.Policy.AutoHold(),
 		}
 	}
 	return out
@@ -225,6 +239,7 @@ func (r *Rules) Apply(w WindowStats, sink Sink) Applied {
 	r.defaults()
 	now := r.Now()
 	zr := r.zones[w.Zone]
+	auto := zr.autoAt(now)
 	// Forget stale escalation first, so a source quiet for repeatMemory starts
 	// again at the base TTL rather than at its old level.
 	r.forget(now)
@@ -234,7 +249,7 @@ func (r *Rules) Apply(w WindowStats, sink Sink) Applied {
 	zoneWasChallenged, _, _ := sink.ZoneChallenge(w.Zone)
 	// The zone-wide trigger: the zone's admitted load over its rate on this
 	// node.
-	if zr.Auto && zr.ZoneRPS > 0 && w.AdmittedRPS >= zr.ZoneRPS {
+	if auto && zr.ZoneRPS > 0 && w.AdmittedRPS >= zr.ZoneRPS {
 		if sink.SetZoneChallenge(w.Zone, true, now.Add(zr.Hold), "zone-rps") {
 			out.ZoneChallenge = true
 		}
@@ -267,7 +282,7 @@ func (r *Rules) Apply(w WindowStats, sink Sink) Applied {
 			k := repeatKey{zone: w.Zone, src: s.Src}
 			hadRung := s.Challenged > 0 || s.WouldChallenge > 0 || s.Cleared > 0 || r.repeats[k] != nil ||
 				zoneWasChallenged || sink.Challenged(w.Zone, s.Src)
-			if zr.Auto && !hadRung && sink.Challenge(w.Zone, s.Src, r.ChallengeTTL, "flood") {
+			if auto && !hadRung && sink.Challenge(w.Zone, s.Src, r.ChallengeTTL, "flood") {
 				out.Challenged++
 				continue
 			}

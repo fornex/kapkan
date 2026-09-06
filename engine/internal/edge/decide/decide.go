@@ -825,7 +825,10 @@ func (zs *zoneState) mode(now time.Time) string {
 // `until` long past for the flip's whole life. Caller holds s.mu; the line
 // is queued for flushLapsed, which the caller runs after releasing it.
 func (s *Service) retireLapsedFlip(zs *zoneState, now time.Time) {
-	if !zs.flipOn || now.Before(zs.flipUntil) {
+	// Retired when its hold has passed — or when the zone's mode is no longer
+	// auto (the brain's lever lapsed back to an off or manual file, or a
+	// manual lever took over): an inert flip must not read as active.
+	if !zs.flipOn || (now.Before(zs.flipUntil) && zs.mode(now) == edgedoc.ChallengeAuto) {
 		return
 	}
 	zs.flipOn = false
