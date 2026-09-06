@@ -119,13 +119,21 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	doc := mergeEdgeZones(reports)
 	doc.NodesAlive = alive
-	now := time.Now()
+	// The operator's lever is brain state: it shows for its zone whether or
+	// not a node has reported the zone yet.
+	live := s.edgeLever.live(time.Now())
 	for i := range doc.Zones {
-		if o, ok := s.edgeLever.get(doc.Zones[i].Zone, now); ok {
+		if o, ok := live[doc.Zones[i].Zone]; ok {
 			c := o
 			doc.Zones[i].Override = &c
+			delete(live, doc.Zones[i].Zone)
 		}
 	}
+	for zone, o := range live {
+		c := o
+		doc.Zones = append(doc.Zones, EdgeZoneStatus{Zone: zone, Override: &c})
+	}
+	sort.Slice(doc.Zones, func(i, j int) bool { return doc.Zones[i].Zone < doc.Zones[j].Zone })
 	writeJSON(w, http.StatusOK, doc)
 }
 

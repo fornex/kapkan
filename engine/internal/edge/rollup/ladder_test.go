@@ -151,11 +151,11 @@ func TestZoneRulesFromDoc(t *testing.T) {
 		edgedoc.Zone{Name: "e.example", Policy: pol(edgedoc.ChallengeOff, nil), ChallengeOverride: &edgedoc.ChallengeOverride{Mode: edgedoc.ChallengeAuto, Until: time.Now().Add(time.Hour)}},
 		edgedoc.Zone{Name: "f.example", Policy: pol(edgedoc.ChallengeOff, nil), ChallengeOverride: &edgedoc.ChallengeOverride{Mode: edgedoc.ChallengeAuto, Until: time.Now().Add(-time.Minute)}},
 	)
-	got := ZoneRulesFromDoc(&d, time.Now())
+	got := ZoneRulesFromDoc(&d)
 	if len(got) != 5 {
 		t.Fatalf("rules for %d zones, want 5 (mode none excluded): %+v", len(got), got)
 	}
-	if !got["e.example"].Auto || got["f.example"].Auto {
+	if !got["e.example"].autoAt(time.Now()) || got["f.example"].autoAt(time.Now()) || got["e.example"].Auto || got["f.example"].Auto {
 		t.Fatalf("override: e=%+v f=%+v", got["e.example"], got["f.example"])
 	}
 	if a := got["a.example"]; !a.Auto || a.ZoneRPS != 500 || a.Hold != time.Minute {

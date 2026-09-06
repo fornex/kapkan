@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
@@ -85,6 +86,19 @@ func (l *challengeLever) clear(zone string, now time.Time) bool {
 		l.notify()
 	}
 	return ok && now.Before(o.Until)
+}
+
+// live returns every override in force at now, by zone.
+func (l *challengeLever) live(now time.Time) map[string]edgedoc.ChallengeOverride {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make(map[string]edgedoc.ChallengeOverride, len(l.byZone))
+	for zone, o := range l.byZone {
+		if now.Before(o.Until) {
+			out[zone] = o
+		}
+	}
+	return out
 }
 
 // get returns the zone's live override.
@@ -219,7 +233,7 @@ func (s *Server) handleEdgeChallengeLever(w http.ResponseWriter, r *http.Request
 			return
 		}
 		req.Reason = strings.TrimSpace(req.Reason)
-		if len(req.Reason) > maxLeverReason || strings.ContainsFunc(req.Reason, func(r rune) bool { return unicode.IsControl(r) }) {
+		if utf8.RuneCountInString(req.Reason) > maxLeverReason || strings.ContainsFunc(req.Reason, func(r rune) bool { return unicode.IsControl(r) }) {
 			writeError(w, http.StatusBadRequest, "reason must be at most 200 characters without control characters")
 			return
 		}

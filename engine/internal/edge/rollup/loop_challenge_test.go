@@ -31,7 +31,7 @@ func newChallengeLoop(t *testing.T, rps uint64, dryRun bool, auto *edgedoc.AutoC
 	})
 	l.svc.SetZones(&doc)
 	l.rules = &rollup.Rules{Now: clock}
-	l.rules.SetZones(rollup.ZoneRulesFromDoc(&doc, l.now))
+	l.rules.SetZones(rollup.ZoneRulesFromDoc(&doc))
 	l.agg = &rollup.Aggregator{
 		Window: 10 * time.Second,
 		Now:    clock,

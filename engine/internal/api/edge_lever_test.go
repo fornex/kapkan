@@ -40,8 +40,15 @@ func zonesDoc(t *testing.T, h http.Handler) (EdgeDoc, string) {
 func TestEdgeChallengeLever(t *testing.T) {
 	store, _ := edgeStore(t, edgeZonesOne)
 	s := testServer(t, store)
+	aw := &fakeAuditWriter{}
+	s.SetAuditWriter(aw)
 	h := s.Handler()
 	set := `{"mode":"manual","ttl_seconds":600,"reason":"incident 42"}`
+	// The node has reported (in dry-run) but not polled yet: the lever's
+	// response must say so.
+	if rec := postEdgeReport(h, "e1", `{"version":"1.8.0","dry_run":true}`, "agent-secret"); rec.Code != http.StatusNoContent {
+		t.Fatalf("report = %d", rec.Code)
+	}
 
 	if rec := lever(h, http.MethodPost, "a.example", set, "scoped-secret"); rec.Code != http.StatusForbidden {
 		t.Fatalf("scoped operator = %d, want 403", rec.Code)
@@ -65,15 +72,26 @@ func TestEdgeChallengeLever(t *testing.T) {
 			t.Errorf("%s = %d, want 400: %s", name, rec.Code, rec.Body)
 		}
 	}
+	// A reason is 200 CHARACTERS, not bytes.
+	if rec := lever(h, http.MethodPost, "a.example", `{"mode":"manual","ttl_seconds":600,"reason":"`+strings.Repeat("д", 150)+`"}`, "op-secret"); rec.Code != http.StatusOK {
+		t.Fatalf("a 150-character Cyrillic reason = %d: %s", rec.Code, rec.Body)
+	}
+	if rec := lever(h, http.MethodPost, "a.example", `{"mode":"off"}`, "op-secret"); rec.Code != http.StatusOK {
+		t.Fatalf("clear after the long reason = %d", rec.Code)
+	}
+	if len(aw.rows) != 2 || aw.rows[0].Action != "edge_challenge" || aw.rows[0].Result != "set" || aw.rows[1].Result != "cleared" {
+		t.Fatalf("audit rows so far: %+v", aw.rows)
+	}
+	aw.rows = nil
 
 	before, etag0 := zonesDoc(t, h)
 	if before.Zones[0].ChallengeOverride != nil {
 		t.Fatal("an override before any pull")
 	}
-	// A parked poll wakes when the lever is pulled.
+	// A parked poll wakes when the lever is pulled — parked for real first.
 	woke := make(chan *httptest.ResponseRecorder, 1)
 	go func() { woke <- getZones(h, etag0, "agent-secret", "e1") }()
-	time.Sleep(50 * time.Millisecond)
+	waitEdgeHolds(t, s, 1)
 
 	rec := lever(h, http.MethodPost, "a.example", set, "op-secret")
 	if rec.Code != http.StatusOK {
@@ -86,8 +104,18 @@ func TestEdgeChallengeLever(t *testing.T) {
 	if resp.Zone != "a.example" || resp.Mode != edgedoc.ChallengeManual || resp.Until == nil || resp.Reason != "incident 42" || resp.FileMode != edgedoc.ChallengeOff || !resp.RungWatchOnly || resp.ZoneWatchOnly {
 		t.Fatalf("set response: %+v", resp)
 	}
-	if len(resp.Nodes) != 1 || resp.Nodes[0].Name != "e1" || resp.Nodes[0].DryRun != nil {
+	// Where the lever bites: e1 is alive (its poll is parked) and has said it
+	// is in dry-run — the operator sees the lever would only preview there.
+	if len(resp.Nodes) != 1 || resp.Nodes[0].Name != "e1" || !resp.Nodes[0].Alive || resp.Nodes[0].DryRun == nil || !*resp.Nodes[0].DryRun {
 		t.Fatalf("nodes in the response: %+v", resp.Nodes)
+	}
+	if len(aw.rows) != 1 || aw.rows[0].Action != "edge_challenge" || aw.rows[0].Result != "set" || aw.rows[0].Target != "a.example" || aw.rows[0].TargetType != "zone" || !strings.Contains(aw.rows[0].Reason, "manual until ") || !strings.Contains(aw.rows[0].Reason, "incident 42") {
+		t.Fatalf("audit row for the set: %+v", aw.rows)
+	}
+	// The zone status shows the lever even though no node has reported the
+	// zone: it is brain state.
+	if st, code := getEdgeZonesStatus(h, "op-secret"); code != http.StatusOK || len(st.Zones) != 1 || st.Zones[0].Zone != "a.example" || st.Zones[0].Override == nil || st.Zones[0].Override.Mode != edgedoc.ChallengeManual {
+		t.Fatalf("zone status with the lever pulled: %d %+v", code, st)
 	}
 	if d := time.Until(*resp.Until); d < 9*time.Minute || d > 10*time.Minute {
 		t.Fatalf("until = %v from now, want ~10 min", d)
@@ -116,13 +144,17 @@ func TestEdgeChallengeLever(t *testing.T) {
 	if etag2 == etag1 || again.Zones[0].ChallengeOverride.Mode != edgedoc.ChallengeAuto {
 		t.Fatalf("document after the second pull: %q %+v", etag2, again.Zones[0].ChallengeOverride)
 	}
-	// DELETE clears: the document is what it was, byte for byte.
+	// DELETE clears: the document is what it was, byte for byte, and the
+	// clear is audited.
 	if rec := lever(h, http.MethodDelete, "a.example", "", "op-secret"); rec.Code != http.StatusOK {
 		t.Fatalf("delete = %d", rec.Code)
 	}
 	cleared, etag3 := zonesDoc(t, h)
 	if etag3 != etag0 || cleared.Zones[0].ChallengeOverride != nil {
 		t.Fatalf("document after the clear: %q %+v", etag3, cleared.Zones[0].ChallengeOverride)
+	}
+	if last := aw.rows[len(aw.rows)-1]; last.Action != "edge_challenge" || last.Result != "cleared" || last.Target != "a.example" {
+		t.Fatalf("audit row for the clear: %+v", last)
 	}
 	// So does mode off.
 	lever(h, http.MethodPost, "a.example", set, "op-secret")
