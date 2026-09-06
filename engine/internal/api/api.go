@@ -136,6 +136,8 @@ type Server struct {
 	// edgeClearance is the proof-of-work clearance keyring (edge_clearance.go);
 	// its per-zone keys are merged into the zones document.
 	edgeClearance *clearanceKeyring
+	// edgeLever is the operator's challenge override per zone (edge_lever.go).
+	edgeLever *challengeLever
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -156,6 +158,7 @@ func New(store *config.Store, eng *engine.Engine, mit *mitigate.Mitigator, log *
 		edgeHolds:     newHoldGate(maxRuleHoldsPerToken, maxRuleHoldsTotal),
 		edgeIssuance:  newIssuanceCoordinator(),
 		edgeClearance: newClearanceKeyring(log),
+		edgeLever:     newChallengeLever(),
 		rulesHold:     rulesHoldMax,
 	}
 }
@@ -351,6 +354,11 @@ func (s *Server) Handler() http.Handler {
 	// the console's Edge view and the "who would be challenged" set. Viewer
 	// rank, unscoped tokens only, like the inventory.
 	read("GET /api/v1/edge/zones/status", s.handleEdgeZonesStatus)
+	// The operator's lever on a zone's rung (edge_lever.go): set a challenge
+	// mode for a bounded time, or clear it. Operator rank, unscoped tokens
+	// only — the zones file spans every tenant's zones.
+	write("POST /api/v1/edge/zones/{name}/challenge", s.handleEdgeChallengeLever)
+	write("DELETE /api/v1/edge/zones/{name}/challenge", s.handleEdgeChallengeLever)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater
 	// or supervisor can confirm the daemon is fully up after a restart. 503 until

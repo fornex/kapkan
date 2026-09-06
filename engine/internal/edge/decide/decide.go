@@ -273,6 +273,9 @@ type zoneState struct {
 	// dry-run, while the sibling zones enforce. Adds to the node's flag,
 	// never subtracts.
 	watchOnly bool
+	// override is the brain's lever on the rung (E4.6): the mode while it is
+	// live, read per decision (mode) so it ends on time without a document.
+	override *edgedoc.ChallengeOverride
 	// flipOn until flipUntil challenges every source of an auto zone (E4.4's
 	// zone-rps trigger, E4.6's override); flipWhy names the reason.
 	flipOn    bool
@@ -307,6 +310,9 @@ type Service struct {
 type flipLapse struct {
 	zone, reason string
 	until        time.Time
+	// lapsed says the hold ran out; false when a document retired the flip
+	// (a lever or a file that made it inert) before its until.
+	lapsed bool
 }
 
 // Tick runs the periodic sweep on the node's clock — paced by sweepEvery like
@@ -329,7 +335,7 @@ func (s *Service) flushLapsed() {
 	s.lapsed = nil
 	s.mu.Unlock()
 	for _, l := range lapsed {
-		s.log.Info("zone-wide challenge off", "zone", l.zone, "reason", l.reason, "until", l.until.UTC().Format(time.RFC3339), "lapsed", true)
+		s.log.Info("zone-wide challenge off", "zone", l.zone, "reason", l.reason, "until", l.until.UTC().Format(time.RFC3339), "lapsed", l.lapsed)
 	}
 }
 
@@ -371,27 +377,54 @@ func New(opts Options) *Service {
 // auto zone; any other mode makes it inert, so it is dropped and its gauge
 // cleared.
 func (s *Service) SetZones(doc *edgedoc.Doc) {
+	now := s.now()
+	type news struct {
+		zone string
+		o    edgedoc.ChallengeOverride
+	}
+	var announce []news
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	zones := make(map[string]*zoneState, len(doc.Zones))
 	for i := range doc.Zones {
 		z := &doc.Zones[i]
-		st := &zoneState{name: z.Name, pol: z.Policy, keys: s.keysFor(z), exempt: z.Policy.ExemptPaths(), dryRun: z.Policy.ChallengeDryRun(), watchOnly: z.Policy.DryRun}
-		if old := s.zones[z.Name]; old != nil && old.flipOn {
-			if z.Policy.Challenge == edgedoc.ChallengeAuto {
+		st := &zoneState{name: z.Name, pol: z.Policy, keys: s.keysFor(z), exempt: z.Policy.ExemptPaths(), dryRun: z.Policy.ChallengeDryRun(), watchOnly: z.Policy.DryRun, override: z.ChallengeOverride}
+		old := s.zones[z.Name]
+		if old != nil && old.flipOn {
+			if z.EffectiveChallenge(now) == edgedoc.ChallengeAuto {
 				st.flipOn, st.flipUntil, st.flipWhy = old.flipOn, old.flipUntil, old.flipWhy
 			} else {
+				// Retired by the document — a lever or a file that made the
+				// flip inert — not by its hold: the episode's closing line
+				// is owed all the same, so the log never leaves an "on …
+				// until T" open.
 				metrics.EdgeChallengeActive.WithLabelValues(z.Name).Set(0)
+				s.lapsed = append(s.lapsed, flipLapse{zone: z.Name, reason: old.flipWhy, until: old.flipUntil, lapsed: !now.Before(old.flipUntil)})
 			}
+		}
+		// The brain's lever is news once, when it arrives or changes.
+		if o := z.ChallengeOverride; o.Live(now) && (old == nil || old.override == nil || old.override.Mode != o.Mode || !old.override.Until.Equal(o.Until)) {
+			announce = append(announce, news{z.Name, *o})
 		}
 		zones[z.Name] = st
 	}
-	for name := range s.zones {
+	for name, old := range s.zones {
 		if _, still := zones[name]; !still {
 			metrics.EdgeChallengeActive.DeleteLabelValues(name)
+			// A zone that leaves the document under a live flip: the
+			// episode's closing line is owed here too.
+			if old.flipOn {
+				s.lapsed = append(s.lapsed, flipLapse{zone: name, reason: old.flipWhy, until: old.flipUntil, lapsed: !now.Before(old.flipUntil)})
+			}
 		}
 	}
 	s.zones = zones
+	s.mu.Unlock()
+	// Said outside the lock, like every line of this file: a stalled logger
+	// must never hold up a decision.
+	s.flushLapsed()
+	for _, a := range announce {
+		s.log.Info("challenge override in effect", "zone", a.zone, "mode", a.o.Mode, "until", a.o.Until.UTC().Format(time.RFC3339), "reason", a.o.Reason)
+	}
 }
 
 // LocalKeyID names the key a node derives for itself: last in every zone's
@@ -436,10 +469,11 @@ func anyLive(keys []clearance.Key, now time.Time) bool {
 // the service does not know or whose rung is off (the page has nothing to
 // offer such a zone).
 func (s *Service) Rung(zone string) (clearance.Policy, bool) {
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	zs := s.zones[zone]
-	if zs == nil || zs.pol.Challenge == edgedoc.ChallengeOff || zs.pol.Mode != edgedoc.ModeDecide {
+	if zs == nil || zs.mode(now) == edgedoc.ChallengeOff || zs.pol.Mode != edgedoc.ModeDecide {
 		return clearance.Policy{}, false
 	}
 	return clearance.Policy{
@@ -508,7 +542,7 @@ func (s *Service) DecideRequest(req Request) Verdict {
 	// The clearance is verified OUTSIDE the lock: an HMAC per request must
 	// not serialise every zone on the node. The key slice is never mutated
 	// once set, so the snapshot is safe to read unlocked.
-	keys, rung := zs.keys, zs.pol.Challenge != edgedoc.ChallengeOff
+	keys, rung := zs.keys, zs.mode(now) != edgedoc.ChallengeOff
 	s.mu.Unlock()
 	cleared := ""
 	if rung && req.Clearance != "" && len(req.Clearance) <= maxClearance && len(keys) > 0 {
@@ -620,7 +654,7 @@ func (zs *zoneState) challengeWhy(e *entry, now time.Time) string {
 	if !anyLive(zs.keys, now) {
 		return ""
 	}
-	switch zs.pol.Challenge {
+	switch zs.mode(now) {
 	case edgedoc.ChallengeManual:
 		return "manual"
 	case edgedoc.ChallengeAuto:
@@ -752,7 +786,7 @@ func (s *Service) SetZoneChallenge(zone string, on bool, until time.Time, reason
 	now := s.now()
 	s.mu.Lock()
 	zs := s.zones[zone]
-	if zs == nil || (on && (zs.pol.Challenge != edgedoc.ChallengeAuto || !until.After(now))) {
+	if zs == nil || (on && (zs.mode(now) != edgedoc.ChallengeAuto || !until.After(now))) {
 		s.mu.Unlock()
 		return false
 	}
@@ -799,18 +833,32 @@ func (s *Service) ZoneChallenge(zone string) (on bool, until time.Time, reason s
 	return true, zs.flipUntil, zs.flipWhy
 }
 
+// mode is the zone's challenge mode at now: the brain's override while it is
+// live, the document's policy otherwise — read per decision, so a lapsed
+// override ends on time whether or not a new document arrived.
+func (zs *zoneState) mode(now time.Time) string {
+	if zs.override.Live(now) {
+		return zs.override.Mode
+	}
+	return zs.pol.Challenge
+}
+
 // retireLapsedFlip turns a zone-wide flip off once its hold has passed: the
 // gauge, and the Info line that closes the episode the "on" line opened —
 // extensions are Debug, so without it the only Info line would state an
 // `until` long past for the flip's whole life. Caller holds s.mu; the line
 // is queued for flushLapsed, which the caller runs after releasing it.
 func (s *Service) retireLapsedFlip(zs *zoneState, now time.Time) {
-	if !zs.flipOn || now.Before(zs.flipUntil) {
+	// Retired when its hold has passed — or when the zone's mode is no longer
+	// auto (the brain's lever lapsed back to an off or manual file): an inert
+	// flip must not read as active. A lever ARRIVING over a live flip is a new
+	// document, and SetZones retires the flip itself, with the same line.
+	if !zs.flipOn || (now.Before(zs.flipUntil) && zs.mode(now) == edgedoc.ChallengeAuto) {
 		return
 	}
 	zs.flipOn = false
 	metrics.EdgeChallengeActive.WithLabelValues(zs.name).Set(0)
-	s.lapsed = append(s.lapsed, flipLapse{zone: zs.name, reason: zs.flipWhy, until: zs.flipUntil})
+	s.lapsed = append(s.lapsed, flipLapse{zone: zs.name, reason: zs.flipWhy, until: zs.flipUntil, lapsed: !now.Before(zs.flipUntil)})
 }
 
 // Complete records that a decided request for (zone, src) was logged by the
