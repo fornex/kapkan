@@ -103,6 +103,8 @@ func TestRoleMatrix(t *testing.T) {
 			"POST /api/v1/edge/nodes/{name}/acme/challenges", map[string]bool{"operator": true, "agent": true}},
 		{"GET", "/api/v1/edge/nodes", "", "", map[string]bool{"viewer": true, "operator": true}},
 		{"GET", "/api/v1/edge/zones/status", "", "", map[string]bool{"viewer": true, "operator": true}},
+		{"POST", "/api/v1/edge/zones/a.example/challenge", `{"mode":"manual","ttl_seconds":600}`, "POST /api/v1/edge/zones/{name}/challenge", map[string]bool{"operator": true}},
+		{"DELETE", "/api/v1/edge/zones/a.example/challenge", "", "DELETE /api/v1/edge/zones/{name}/challenge", map[string]bool{"operator": true}},
 	}
 
 	// The two route sets must be IDENTICAL: every registered /api/v1 pattern

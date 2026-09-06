@@ -43,15 +43,18 @@ type ZoneRule struct {
 	Hold time.Duration
 }
 
-// ZoneRulesFromDoc reads the per-zone rung settings the rules act on.
-func ZoneRulesFromDoc(doc *edgedoc.Doc) map[string]ZoneRule {
+// ZoneRulesFromDoc reads the per-zone rung settings the rules act on, as they
+// stand at now: the brain's challenge override (E4.6) counts while it is live
+// — the brain re-issues the document when it lapses, so the rules follow.
+func ZoneRulesFromDoc(doc *edgedoc.Doc, now time.Time) map[string]ZoneRule {
 	out := make(map[string]ZoneRule, len(doc.Zones))
-	for _, z := range doc.Zones {
+	for i := range doc.Zones {
+		z := &doc.Zones[i]
 		if z.Policy.Mode != edgedoc.ModeDecide {
 			continue
 		}
 		out[z.Name] = ZoneRule{
-			Auto:    z.Policy.Challenge == edgedoc.ChallengeAuto,
+			Auto:    z.EffectiveChallenge(now) == edgedoc.ChallengeAuto,
 			ZoneRPS: float64(z.Policy.AutoZoneRPS()),
 			Hold:    z.Policy.AutoHold(),
 		}
