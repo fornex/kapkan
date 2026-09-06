@@ -49,6 +49,12 @@ type SourceStats struct {
 	Challenged     uint64
 	Cleared        uint64
 	WouldChallenge uint64
+	// WouldDeny counts every dry-run denial (a 200 marked would-deny, for a
+	// rate, a concurrency or a table verdict): with WouldChallenge, what the
+	// report shows as "who would be" (E4.5). Marked counts requests that
+	// carried another mark — a reputation the origin was told about.
+	WouldDeny uint64
+	Marked    uint64
 	// Errors4xx/5xx are origin (or terminator) statuses of decided or
 	// non-deciding requests — the decider's own 403s and undecided requests
 	// excluded, since neither says anything about the source.
@@ -95,10 +101,17 @@ type WindowStats struct {
 	// zone-wide trigger measures — the same figure in dry-run as enforcing,
 	// so the preview shows the flips enforcement would make.
 	AdmittedRPS float64
-	// Sources is the top-N by requests for OnWindow (the report); OnWindowFull
-	// receives every source. SourcesTotal is how many there were.
+	// Sources is the bounded view for OnWindow (the report): at most TopSources
+	// entries, the would-be sources first, then the refused and challenged
+	// ones, then the busiest of the rest. OnWindowFull receives every source.
+	// SourcesTotal is how many there were.
 	Sources      []SourceStats
 	SourcesTotal int
+	// WouldBeTruncated counts the WOULD-BE sources — previewed a challenge or
+	// a deny — the TopSources bound cut, so a consumer knows the would-be set
+	// it sees is short. A refused or challenged source the bound cut is not
+	// counted: it is not in the set. Zero in the full stats.
+	WouldBeTruncated int
 	// Overflow reports that the zone's pair cap was hit: SourcesTotal is
 	// then a floor and unnamed sources were counted in the zone totals only.
 	Overflow bool
@@ -265,8 +278,11 @@ func (a *Aggregator) Observe(r Record) {
 			}
 		case challenged:
 			ss.Challenged++
-		case wouldDeny == "rate" || wouldDeny == "concurrency":
-			ss.WouldDenyRate++
+		case wouldDeny != "":
+			ss.WouldDeny++
+			if wouldDeny == "rate" || wouldDeny == "concurrency" {
+				ss.WouldDenyRate++
+			}
 		case wouldChallenge:
 			ss.WouldChallenge++
 		case r.Undecided():
@@ -275,6 +291,12 @@ func (a *Aggregator) Observe(r Record) {
 			ss.Errors5xx++
 		case r.Status >= 400:
 			ss.Errors4xx++
+		}
+		// A reputation mark travels beside the status, not instead of it: a
+		// marked source's origin errors still count, so the rule that set the
+		// mark can renew it.
+		if r.Mark != "" && !r.Cleared() && wouldDeny == "" && !wouldChallenge {
+			ss.Marked++
 		}
 	}
 	a.mu.Unlock()
@@ -289,6 +311,35 @@ func (a *Aggregator) Tick() {
 	closedTop, closedFull := a.rollIfDue(a.now())
 	a.mu.Unlock()
 	a.emit(closedTop, closedFull)
+}
+
+// Telling reports whether the window's stats say the node did, or would have
+// done, something to the source — a table denial, a challenge, or a dry-run
+// preview of either. These are the sources the brain's would-be set and an
+// operator's eye need; an allowed, marked or cleared source tells nothing.
+func (s SourceStats) Telling() bool {
+	return s.DeniedTable > 0 || s.Challenged > 0 || s.WouldDeny > 0 || s.WouldChallenge > 0
+}
+
+// WouldBe reports whether the source is in the would-be set edge-spec §8
+// asks the report to carry: the node PREVIEWED a challenge or a deny for it
+// and did not refuse or challenge it for real in the same window — a refusal
+// outranks a preview, as the report's per-source state does, so the two
+// never disagree on who is in the set.
+func (s SourceStats) WouldBe() bool {
+	return (s.WouldDeny > 0 || s.WouldChallenge > 0) && s.DeniedTable == 0 && s.Challenged == 0
+}
+
+// rank orders the bounded view: the would-be sources first, then the refused
+// and challenged ones, then the rest.
+func (s SourceStats) rank() int {
+	switch {
+	case s.WouldBe():
+		return 0
+	case s.Telling():
+		return 1
+	}
+	return 2
 }
 
 // rollIfDue closes the current window when it has run its length, returning
@@ -316,7 +367,14 @@ func (a *Aggregator) rollIfDue(now time.Time) (top, full []WindowStats) {
 			s.RPS = float64(s.Requests) / elapsed.Seconds()
 			st.Sources = append(st.Sources, *s)
 		}
+		// The would-be sources rank first, then the ones the node refused or
+		// challenged, then the rest — the busiest first within each tier — so
+		// the bounded view never loses a would-be source to a busier bystander,
+		// and a cut would-be source is the only cut that shortens the set.
 		sort.Slice(st.Sources, func(i, j int) bool {
+			if ri, rj := st.Sources[i].rank(), st.Sources[j].rank(); ri != rj {
+				return ri < rj
+			}
 			if st.Sources[i].Requests != st.Sources[j].Requests {
 				return st.Sources[i].Requests > st.Sources[j].Requests
 			}
@@ -325,7 +383,14 @@ func (a *Aggregator) rollIfDue(now time.Time) (top, full []WindowStats) {
 		full = append(full, st)
 		truncated := st
 		if len(truncated.Sources) > limit {
-			truncated.Sources = truncated.Sources[:limit]
+			for _, s := range st.Sources[limit:] {
+				if s.WouldBe() {
+					truncated.WouldBeTruncated++
+				}
+			}
+			// A copy, not a reslice: a consumer that keeps the bounded view
+			// must not pin a flood's whole source array.
+			truncated.Sources = append([]SourceStats(nil), st.Sources[:limit]...)
 		}
 		top = append(top, truncated)
 	}

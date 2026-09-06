@@ -102,6 +102,7 @@ func TestRoleMatrix(t *testing.T) {
 		{"POST", "/api/v1/edge/nodes/n1/acme/challenges", `{"zone":"example.com","token":"tok","key_authorization":"tok.thumb"}`,
 			"POST /api/v1/edge/nodes/{name}/acme/challenges", map[string]bool{"operator": true, "agent": true}},
 		{"GET", "/api/v1/edge/nodes", "", "", map[string]bool{"viewer": true, "operator": true}},
+		{"GET", "/api/v1/edge/zones/status", "", "", map[string]bool{"viewer": true, "operator": true}},
 	}
 
 	// The two route sets must be IDENTICAL: every registered /api/v1 pattern

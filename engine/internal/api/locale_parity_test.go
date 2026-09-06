@@ -176,7 +176,7 @@ func TestLocaleParityRegistered(t *testing.T) {
 //
 // The scrubbing Nodes view added 23: nav.nodes, col.node, and the twenty-one
 // nd.* keys of the inventory table, its states, its provenance labels and its
-// error/empty notes (269 + 23 = 292).
+// error/empty notes (269 + 23 + 32 = 324).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -185,9 +185,9 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		want   int
 	}{
 		{"units", 0, 4},
-		{"plurals", 1, 5},
-		{"plurals", 0, 10},  // 5 keys × {one, other}
-		{"strings", 0, 292}, // +23: nav.nodes, col.node, nd.*
+		{"plurals", 1, 10},
+		{"plurals", 0, 20},  // 8 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes
+		{"strings", 0, 324}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5)
 		{"enums", 1, 8},
 		{"enums", 0, 43},
 		{"enumsShort", 1, 1},
