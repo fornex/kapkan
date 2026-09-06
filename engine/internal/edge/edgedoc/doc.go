@@ -116,6 +116,13 @@ type Policy struct {
 	FailureMode string `json:"failure_mode"`
 	Challenge   string `json:"challenge"`
 	Rate        Rate   `json:"rate"`
+	// DryRun is the zone's watch-only switch (E4.7): the node counts and marks
+	// this zone's decisions — a deny as an allow marked would-deny:<reason>, a
+	// challenge as would-challenge:<why> — and enforces none, whatever its
+	// siblings do. It adds to the node's own dry-run, never subtracts: the
+	// node's flag is the floor. Omitted when false, so a document written
+	// before E4.7 keeps its bytes.
+	DryRun bool `json:"dry_run,omitempty"`
 	// ChallengeOptions tunes the proof-of-work rung (E4.2, edge-spec §5).
 	// Nil means the defaults — the rung watch-only, nothing exempt — and is
 	// what the brain sends for a zones file that set none, so a document
@@ -196,9 +203,10 @@ func (p Policy) AutoHold() time.Duration {
 }
 
 // ChallengeDryRun reports whether the rung is watch-only for this zone: true
-// unless the options say otherwise.
+// unless the options say otherwise — and always when the zone itself is
+// watch-only (policy.dry_run), which the rung's own switch cannot undo.
 func (p Policy) ChallengeDryRun() bool {
-	return p.ChallengeOptions == nil || p.ChallengeOptions.DryRun
+	return p.DryRun || p.ChallengeOptions == nil || p.ChallengeOptions.DryRun
 }
 
 // ChallengeDifficulty is the puzzle difficulty with the default applied.

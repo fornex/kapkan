@@ -105,6 +105,13 @@ type ZonePolicy struct {
 	// unreachable: "open" (default — pass, the edge fails open like every other
 	// kapkan layer) or "closed" (refuse).
 	FailureMode string `yaml:"failure_mode"`
+	// DryRun makes THIS zone watch-only: the node counts and marks its
+	// decisions (would-deny:<reason>, would-challenge:<why>) and enforces
+	// none, while its sibling zones enforce as before. The node's own dry_run
+	// (edge.yaml) is the floor a zone cannot go below — a zone can only be
+	// more watch-only than its node, never less. Default false: the zone
+	// follows the node.
+	DryRun bool `yaml:"dry_run"`
 	// Challenge is the proof-of-work rung (E4): "off" (default), "manual"
 	// (every request without a valid clearance is challenged) or "auto" (a
 	// source or the whole zone is challenged when the node's rollups or the
