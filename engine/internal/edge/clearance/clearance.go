@@ -348,44 +348,74 @@ func NewTicket(key Key, zone, sourceKey, returnPath string, now time.Time) (stri
 	return key.ID + "." + issued + "." + base64.RawURLEncoding.EncodeToString([]byte(returnPath)) + "." + base64.RawURLEncoding.EncodeToString(mac), nil
 }
 
+// Why a ticket was refused, for the page to word its answer: a client that
+// came too early is told to wait, one whose ticket aged out to start over.
+var (
+	ErrTicketEarly   = errors.New("clearance: ticket redeemed before its wait")
+	ErrTicketExpired = errors.New("clearance: ticket expired")
+	ErrTicketInvalid = errors.New("clearance: ticket invalid")
+)
+
 // CheckTicket verifies a no-JS ticket presented by sourceKey for zone at now
 // and returns the return path it was issued for. It fails before
 // TicketMinWait has passed (the client did not wait), after TicketMaxAge, and
 // for any tampering.
 func CheckTicket(keys []Key, zone, sourceKey, ticket string, now time.Time) (returnPath string, ok bool) {
-	if len(ticket) == 0 || len(ticket) > maxTicket {
+	ret, err := InspectTicket(keys, zone, sourceKey, ticket, now)
+	if err != nil {
 		return "", false
+	}
+	return ret, true
+}
+
+// InspectTicket is CheckTicket with the reason: err is nil for a good ticket,
+// ErrTicketEarly or ErrTicketExpired for one outside its window, and
+// ErrTicketInvalid for anything else. The return path comes back whenever the
+// ticket parses at all — a same-host path (checkReturnPath), so it is safe to
+// LINK a client back to even when the ticket did not verify; only with err ==
+// nil is it authenticated.
+func InspectTicket(keys []Key, zone, sourceKey, ticket string, now time.Time) (returnPath string, err error) {
+	if len(ticket) == 0 || len(ticket) > maxTicket {
+		return "", ErrTicketInvalid
 	}
 	parts := strings.Split(ticket, ".")
 	if len(parts) != 4 {
-		return "", false
+		return "", ErrTicketInvalid
 	}
 	keyID, issuedStr, retB64, macB64 := parts[0], parts[1], parts[2], parts[3]
-	issued, err := strconv.ParseInt(issuedStr, 10, 64)
-	if err != nil || issued <= 0 {
-		return "", false
-	}
-	age := now.Sub(time.Unix(issued, 0))
-	if age < TicketMinWait || age > TicketMaxAge {
-		return "", false
-	}
 	ret, err := base64.RawURLEncoding.DecodeString(retB64)
 	if err != nil || checkReturnPath(string(ret)) != nil {
-		return "", false
+		return "", ErrTicketInvalid
+	}
+	returnPath = string(ret)
+	issued, err := strconv.ParseInt(issuedStr, 10, 64)
+	if err != nil || issued <= 0 {
+		return returnPath, ErrTicketInvalid
 	}
 	mac, err := base64.RawURLEncoding.DecodeString(macB64)
 	if err != nil || len(mac) != sha256.Size {
-		return "", false
+		return returnPath, ErrTicketInvalid
 	}
+	verified := false
 	for _, k := range keys {
 		if k.ID != keyID || !k.live(now) {
 			continue
 		}
-		if subtle.ConstantTimeCompare(mac, ticketMAC(k.Secret, zone, sourceKey, string(ret), issuedStr)) == 1 {
-			return string(ret), true
+		if subtle.ConstantTimeCompare(mac, ticketMAC(k.Secret, zone, sourceKey, returnPath, issuedStr)) == 1 {
+			verified = true
+			break
 		}
 	}
-	return "", false
+	if !verified {
+		return returnPath, ErrTicketInvalid
+	}
+	switch age := now.Sub(time.Unix(issued, 0)); {
+	case age < TicketMinWait:
+		return returnPath, ErrTicketEarly
+	case age > TicketMaxAge:
+		return returnPath, ErrTicketExpired
+	}
+	return returnPath, nil
 }
 
 func ticketMAC(secret []byte, zone, sourceKey, returnPath, issued string) []byte {

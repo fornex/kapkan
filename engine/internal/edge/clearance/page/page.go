@@ -17,12 +17,15 @@ type locale struct {
 	Title    string
 	Heading  string
 	Lead     string
-	Working  string // aria-live progress while solving
-	Done     string // aria-live when the answer is being sent
-	NoScript string // shown when JavaScript is off
+	Working  string // the status line while solving (announced once)
+	Done     string // the status line when the answer is being sent
+	Fallback string // above the Continue form: JavaScript off, or the solver could not run
 	Continue string // the button of the no-JS form
-	TooEarly string // the ticket redeemed too soon or too late
-	Retry    string // the link back to start over
+	TooEarly string // the ticket redeemed too soon: wait, it retries by itself
+	Expired  string // the ticket or the answer aged out: start over from the page
+	Busy     string // the issuance cap held: wait a minute
+	Again    string // the link that retries the ticket
+	Retry    string // the link back to the page the client came from
 	Footer   string
 }
 
@@ -30,32 +33,47 @@ var locales = map[string]*locale{
 	"en": {Tag: "en", Title: "One moment", Heading: "Checking your browser",
 		Lead:    "This site is under heavier load than usual. Your browser is doing a short calculation to show it is a browser; the page continues by itself.",
 		Working: "Working…", Done: "Done, continuing…",
-		NoScript: "JavaScript is off in your browser. Wait a few seconds, then press Continue.",
-		Continue: "Continue", TooEarly: "Not yet. Wait a few seconds and try again.", Retry: "Start over",
+		Fallback: "If this page does not continue by itself, wait a few seconds and press Continue.",
+		Continue: "Continue", TooEarly: "Not yet. Wait a few seconds and try again.",
+		Expired: "This took too long. Go back to the page and start over.",
+		Busy:    "Too many attempts from your network right now. Wait a minute and try again.",
+		Again:   "Try again", Retry: "Start over",
 		Footer: "Protected by Kapkan. No cookies other than the one that lets you through, no tracking."},
 	"ru": {Tag: "ru", Title: "Одну секунду", Heading: "Проверяем браузер",
 		Lead:    "На сайт сейчас повышенная нагрузка. Ваш браузер выполняет короткое вычисление, чтобы показать, что это браузер; страница продолжится сама.",
 		Working: "Считаем…", Done: "Готово, продолжаем…",
-		NoScript: "В браузере выключен JavaScript. Подождите несколько секунд и нажмите «Продолжить».",
-		Continue: "Продолжить", TooEarly: "Пока рано. Подождите несколько секунд и попробуйте ещё раз.", Retry: "Начать заново",
+		Fallback: "Если страница не продолжится сама, подождите несколько секунд и нажмите «Продолжить».",
+		Continue: "Продолжить", TooEarly: "Пока рано. Подождите несколько секунд и попробуйте ещё раз.",
+		Expired: "Прошло слишком много времени. Вернитесь на страницу и начните заново.",
+		Busy:    "Слишком много попыток из вашей сети. Подождите минуту и попробуйте ещё раз.",
+		Again:   "Попробовать ещё раз", Retry: "Начать заново",
 		Footer: "Под защитой Kapkan. Никаких cookie, кроме пропуска, никакого отслеживания."},
 	"de": {Tag: "de", Title: "Einen Moment", Heading: "Ihr Browser wird geprüft",
 		Lead:    "Diese Website ist stärker belastet als sonst. Ihr Browser führt eine kurze Berechnung aus, um zu zeigen, dass er ein Browser ist; die Seite geht von selbst weiter.",
 		Working: "Wird berechnet…", Done: "Fertig, weiter geht es…",
-		NoScript: "JavaScript ist in Ihrem Browser ausgeschaltet. Warten Sie ein paar Sekunden und drücken Sie dann auf Weiter.",
-		Continue: "Weiter", TooEarly: "Noch nicht. Warten Sie ein paar Sekunden und versuchen Sie es erneut.", Retry: "Von vorn beginnen",
+		Fallback: "Wenn die Seite nicht von selbst weitergeht, warten Sie ein paar Sekunden und drücken Sie auf Weiter.",
+		Continue: "Weiter", TooEarly: "Noch nicht. Warten Sie ein paar Sekunden und versuchen Sie es erneut.",
+		Expired: "Das hat zu lange gedauert. Gehen Sie zur Seite zurück und beginnen Sie von vorn.",
+		Busy:    "Zu viele Versuche aus Ihrem Netz. Warten Sie eine Minute und versuchen Sie es erneut.",
+		Again:   "Erneut versuchen", Retry: "Von vorn beginnen",
 		Footer: "Geschützt von Kapkan. Kein Cookie außer dem Passierschein, kein Tracking."},
 	"fr": {Tag: "fr", Title: "Un instant", Heading: "Vérification de votre navigateur",
 		Lead:    "Ce site est plus sollicité que d'habitude. Votre navigateur effectue un court calcul pour montrer qu'il est un navigateur ; la page continue toute seule.",
 		Working: "Calcul en cours…", Done: "Terminé, on continue…",
-		NoScript: "JavaScript est désactivé dans votre navigateur. Attendez quelques secondes, puis appuyez sur Continuer.",
-		Continue: "Continuer", TooEarly: "Pas encore. Attendez quelques secondes et réessayez.", Retry: "Recommencer",
+		Fallback: "Si la page ne continue pas toute seule, attendez quelques secondes puis appuyez sur Continuer.",
+		Continue: "Continuer", TooEarly: "Pas encore. Attendez quelques secondes et réessayez.",
+		Expired: "Cela a pris trop de temps. Revenez à la page et recommencez.",
+		Busy:    "Trop de tentatives depuis votre réseau. Attendez une minute et réessayez.",
+		Again:   "Réessayer", Retry: "Recommencer",
 		Footer: "Protégé par Kapkan. Aucun cookie autre que le laissez-passer, aucun pistage."},
 	"es": {Tag: "es", Title: "Un instante", Heading: "Comprobando su navegador",
 		Lead:    "Este sitio tiene más carga de lo habitual. Su navegador hace un breve cálculo para demostrar que es un navegador; la página continúa por sí sola.",
 		Working: "Calculando…", Done: "Listo, continuamos…",
-		NoScript: "JavaScript está desactivado en su navegador. Espere unos segundos y pulse Continuar.",
-		Continue: "Continuar", TooEarly: "Todavía no. Espere unos segundos y vuelva a intentarlo.", Retry: "Empezar de nuevo",
+		Fallback: "Si la página no continúa por sí sola, espere unos segundos y pulse Continuar.",
+		Continue: "Continuar", TooEarly: "Todavía no. Espere unos segundos y vuelva a intentarlo.",
+		Expired: "Ha tardado demasiado. Vuelva a la página y empiece de nuevo.",
+		Busy:    "Demasiados intentos desde su red. Espere un minuto y vuelva a intentarlo.",
+		Again:   "Intentar de nuevo", Retry: "Empezar de nuevo",
 		Footer: "Protegido por Kapkan. Ninguna cookie salvo el pase, ningún rastreo."},
 }
 
@@ -80,11 +98,24 @@ func pickLocale(header string) *locale {
 	return locales["en"]
 }
 
+// The no-JS timer. TicketMinWait is 4 s; the refresh fires later than that
+// so a node whose clock runs a couple of seconds behind the issuing node's
+// (a fleet behind one address) still finds the wait served. The too-early
+// page retries on its own after the same margin.
+const (
+	nojsRefreshSeconds = 7
+	tooEarlyRetrySecs  = 5
+)
+
 // The page. Semantic HTML, the puzzle as a data block (not executed, so it
 // needs no CSP allowance), one script and one stylesheet by content hash,
-// aria-live progress, and a no-JS path that is both timed (meta refresh)
-// and manual (the form), so nobody depends on the timer (§5: accessibility is
-// a review gate).
+// a status line announced once and a counter assistive technology does not
+// read, and a FALLBACK that does not depend on the script: the timed ticket
+// (meta refresh, JavaScript off) and its Continue form, which shows itself
+// after a while if the script never took over — blocked, or a browser
+// without WebCrypto — at once when the script asks for it, and at once when
+// JavaScript is off (the <noscript> stylesheet). Nobody depends on the
+// timer, the script or the button alone (§5: accessibility is a review gate).
 var challengeTmpl = template.Must(template.New("challenge").Parse(`<!DOCTYPE html>
 <html lang="{{.L.Tag}}">
 <head>
@@ -93,20 +124,21 @@ var challengeTmpl = template.Must(template.New("challenge").Parse(`<!DOCTYPE htm
 <meta name="robots" content="noindex, nofollow">
 <title>{{.L.Title}}</title>
 <link rel="stylesheet" href="{{.CSS}}">
-<noscript><meta http-equiv="refresh" content="5;url={{.NoJSURL}}"></noscript>
+<noscript><meta http-equiv="refresh" content="{{.Refresh}};url={{.NoJSURL}}"><link rel="stylesheet" href="{{.NoJSCSS}}"></noscript>
 </head>
 <body>
 <main>
 <h1>{{.L.Heading}}</h1>
 <p>{{.L.Lead}}</p>
-<p id="kapkan-status" role="status" aria-live="polite"></p>
-<noscript>
-<p>{{.L.NoScript}}</p>
+<p id="kapkan-status" role="status"></p>
+<p id="kapkan-count" aria-hidden="true"></p>
+<div id="kapkan-fallback">
+<p>{{.L.Fallback}}</p>
 <form method="get" action="{{.NoJSPath}}">
 <input type="hidden" name="t" value="{{.Ticket}}">
 <button type="submit">{{.L.Continue}}</button>
 </form>
-</noscript>
+</div>
 <form id="kapkan-answer" method="post" action="{{.AnswerPath}}" hidden>
 <input type="hidden" name="nonce" value="{{.Puzzle.Nonce}}">
 <input type="hidden" name="solution" value="">
@@ -120,7 +152,9 @@ var challengeTmpl = template.Must(template.New("challenge").Parse(`<!DOCTYPE htm
 </html>
 `))
 
-var tooEarlyTmpl = template.Must(template.New("tooearly").Parse(`<!DOCTYPE html>
+// noticeTmpl is every answer that is not the page or the clearance: a
+// sentence and one link, optionally retried by a timer.
+var noticeTmpl = template.Must(template.New("notice").Parse(`<!DOCTYPE html>
 <html lang="{{.L.Tag}}">
 <head>
 <meta charset="utf-8">
@@ -128,12 +162,13 @@ var tooEarlyTmpl = template.Must(template.New("tooearly").Parse(`<!DOCTYPE html>
 <meta name="robots" content="noindex, nofollow">
 <title>{{.L.Title}}</title>
 <link rel="stylesheet" href="{{.CSS}}">
-</head>
+{{if .Refresh}}<meta http-equiv="refresh" content="{{.Refresh}};url={{.RefreshURL}}">
+{{end}}</head>
 <body>
 <main>
 <h1>{{.L.Heading}}</h1>
-<p>{{.L.TooEarly}}</p>
-<p><a href="{{.Return}}">{{.L.Retry}}</a></p>
+<p>{{.Message}}</p>
+<p><a href="{{.Link}}">{{.LinkText}}</a></p>
 </main>
 <footer><p>{{.L.Footer}}</p></footer>
 </body>
@@ -143,17 +178,30 @@ var tooEarlyTmpl = template.Must(template.New("tooearly").Parse(`<!DOCTYPE html>
 type challengeData struct {
 	L          *locale
 	CSS, JS    string
+	NoJSCSS    string
 	Puzzle     clearance.Puzzle
 	PuzzleJSON template.JS
 	Ticket     string
 	NoJSPath   string
 	NoJSURL    template.URL
+	Refresh    int
 	AnswerPath string
+}
+
+type noticeData struct {
+	L          *locale
+	CSS        string
+	Message    string
+	Link       string
+	LinkText   string
+	Refresh    int
+	RefreshURL template.URL
 }
 
 // csp is the page's own policy: its script and stylesheet by hash-named
 // URL on this host, a form to this host, nothing else — no frames, no
-// images, no third parties.
+// images, no third parties. The script starts a Worker from its own URL,
+// which script-src 'self' covers (there is no worker-src, so it inherits).
 const csp = "default-src 'none'; script-src 'self'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 
 func (s *Server) renderChallenge(w http.ResponseWriter, r *http.Request, req *request, p clearance.Puzzle, ticket, ret string) {
@@ -161,8 +209,8 @@ func (s *Server) renderChallenge(w http.ResponseWriter, r *http.Request, req *re
 	// A data block is not executed, but "</script>" inside it would end it:
 	// json.Marshal escapes '<' and '>' as < / >, so it cannot.
 	data := challengeData{
-		L: req.lang, CSS: s.cssURL, JS: s.appURL, Puzzle: p, PuzzleJSON: template.JS(raw), Ticket: ticket,
-		NoJSPath: nojsPath, NoJSURL: template.URL(nojsPath + "?t=" + ticket), AnswerPath: answerPath,
+		L: req.lang, CSS: s.cssURL, JS: s.appURL, NoJSCSS: s.nojsURL, Puzzle: p, PuzzleJSON: template.JS(raw), Ticket: ticket,
+		NoJSPath: nojsPath, NoJSURL: template.URL(nojsPath + "?t=" + ticket), Refresh: nojsRefreshSeconds, AnswerPath: answerPath,
 	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
@@ -178,18 +226,19 @@ func (s *Server) renderChallenge(w http.ResponseWriter, r *http.Request, req *re
 	}
 }
 
-func (s *Server) renderTooEarly(w http.ResponseWriter, req *request, ret string) {
-	if !clearance.ValidReturnPath(ret) {
-		ret = "/"
+// renderNotice answers status with a sentence and a link; a refresh of n
+// seconds to the link retries it by itself (the too-early ticket).
+func (s *Server) renderNotice(w http.ResponseWriter, req *request, status int, message, linkText, link string, refresh int) {
+	if !clearance.ValidReturnPath(link) {
+		link = "/"
 	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Content-Security-Policy", csp)
 	h.Set("Content-Language", req.lang.Tag)
-	w.WriteHeader(http.StatusForbidden)
-	_ = tooEarlyTmpl.Execute(w, struct {
-		L      *locale
-		CSS    string
-		Return string
-	}{req.lang, s.cssURL, ret})
+	w.WriteHeader(status)
+	_ = noticeTmpl.Execute(w, noticeData{
+		L: req.lang, CSS: s.cssURL, Message: message, Link: link, LinkText: linkText,
+		Refresh: refresh, RefreshURL: template.URL(link),
+	})
 }
