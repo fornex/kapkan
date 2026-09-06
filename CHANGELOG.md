@@ -266,7 +266,10 @@ security-relevant.
   switch is never undone by a tenant's zones file. The rung's own `challenge_options.dry_run` is
   the third layer, for the rung alone. Travels in the document as `policy.dry_run` (omitted when
   false — a document written before E4.7 keeps its bytes and its ETag); zones schema regenerated.
-  The per-zone flag in the node's report arrives with the per-zone rollups (E4.5).
+  **Upgrade the nodes before relying on it**: a node older than this release does not know the key
+  and enforces the zone under its own `dry_run` — the document is tolerant of unknown keys by
+  contract, so the flag is silently absent there; `GET /api/v1/edge/nodes` shows each node's
+  version. The per-zone flag in the node's report arrives with the per-zone rollups (E4.5).
 
 ## [1.7.0] - 2026-09-02
 
