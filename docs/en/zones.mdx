@@ -27,7 +27,16 @@ zones:
     policy:
       mode: decide                       # decide (default) | none
       failure_mode: open                 # open (default) | closed
-      challenge: "off"                   # only "off" today
+      dry_run: false                     # true = this zone is watch-only on every node
+      challenge: auto                    # off (default) | manual | auto — the proof-of-work rung
+      challenge_options:
+        dry_run: true                    # true (default) = the rung only shows who it would ask
+        exempt_paths: ["/healthz", "/api/"]
+        difficulty: 18                   # 12..22 leading zero bits
+        cookie_ttl_seconds: 1800         # how long a clearance lasts, 60..86400
+        auto:
+          zone_rps: 2000                 # zone-wide challenge at this admitted rate per node; 0 = off
+          hold_seconds: 300              # how long the zone stays under challenge, 30..3600
       rate:
         rps: 50                          # requests per second per source; 0 = no ceiling
         concurrency: 20                  # in-flight requests per source; 0 = no ceiling

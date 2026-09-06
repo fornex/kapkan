@@ -310,7 +310,7 @@ controller:
   name: edge-1                         # must equal an edge.nodes[] name on the brain
   report_interval_seconds: 10          # self-report cadence
 state_dir: /var/lib/kapkan-edge        # document cache, generations, ACME keys and certificates
-sockets_dir: /run/kapkan-edge          # edge-decide.sock, edge-challenge.sock, edge-log.sock
+sockets_dir: /run/kapkan-edge          # edge-decide.sock, edge-clearance.sock, edge-log.sock, edge-challenge.sock
 socket_group: nginx                    # the terminator's worker group (nginx | www-data | angie)
 terminator:
   binary: nginx                        # nginx (default) | angie
@@ -337,7 +337,7 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `dry_run` | Absent or `true`: decisions are counted and marked (`X-Kapkan-Mark: would-deny:<reason>` reaches the origin), none enforced. Set `false` to refuse. |
 | `controller.url` / `token_env` / `name` | The brain's API base (no path, no credentials in the URL), the environment variable holding the **agent** token, and this node's name — it must equal an `edge.nodes[]` entry on the brain or every poll is a loud `404`. |
 | `state_dir` / `sockets_dir` | The role's own directories (defaults `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — never the brain's `/var/lib/kapkan` and `/run/kapkan`, which systemd would re-chown and remove under it on a shared host. Absolute, no characters nginx would misread. |
-| `socket_group` | The terminator's worker group. The decision and log sockets are `0660` for it; the challenge socket is `0666` (it answers public tokens). Empty leaves the two group-restricted sockets owner-only. |
+| `socket_group` | The terminator's worker group. The decision, log and clearance-page sockets are `0660` for it; the ACME challenge socket is `0666` (it answers public tokens). Empty leaves the three group-restricted sockets owner-only. |
 | `terminator.binary` / `main_conf` | What to run for `-t` and reloads, and the main configuration to pass as `-c`. That file must `include /var/lib/kapkan-edge/conf/live/*.conf;` once, inside `http {}`. |
 | `terminator.reload` | `exec` runs `<binary> -s reload` (needs to signal nginx's master — the unit runs as root); `signal` sends `HUP` to the pid in `pid_file`; `command` runs `terminator.command`, e.g. `[systemctl, reload, nginx]`. |
 | `terminator.pid_file` | When set, read on every report tick and signalled with `0`: `/healthz` answers `503` and the report says `alive: false` while no process has that pid. |

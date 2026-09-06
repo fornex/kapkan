@@ -230,15 +230,18 @@ Go runtime's:
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `kapkan_edge_decisions_total` | counter | `zone`, `result` | Decision-service verdicts: `allow`, `allow_marked` (allowed with a mark), `deny_rate`, `deny_concurrency`, `deny_table`, `would_deny` (a dry-run deny, answered as allow), `untracked` (the per-source tables were full, the request passed undecided), `mode_none` (a zone without decisions), `unknown_zone`, `bad_request` (a subrequest off the contract). |
+| `kapkan_edge_decisions_total` | counter | `zone`, `result` | Decision-service verdicts: `allow`, `allow_marked` (allowed with a mark), `allow_cleared` (a valid clearance cookie passed the rung), `deny_rate`, `deny_concurrency`, `deny_table`, `challenge` (a `401`: the client must clear the rung — nginx serves the clearance page), `would_deny` / `would_challenge` (a dry-run deny or challenge, answered as allow), `untracked` (the per-source tables were full, the request passed undecided), `mode_none` (a zone without decisions), `unknown_zone`, `bad_request` (a subrequest off the contract). |
+| `kapkan_edge_challenge_active` | gauge | `zone` | `1` while the zone-wide challenge of the node's `auto.zone_rps` trigger is in force on this node, `0` otherwise (a `manual` zone or an operator's lever challenges everyone too, but as the zone's *mode*, which the report and `GET /api/v1/edge/zones/status` show). Whether the flip bites or previews, and its reason, are in the node's report, not a label. |
+| `kapkan_edge_clearance_total` | counter | `zone`, `result` | What the clearance page did: `page` (the challenge page was served), `page_json` (a non-GET original got the compact refusal), `issued` (a solved puzzle earned a clearance), `issued_nojs` (the timed no-JS ticket did), `invalid` (a wrong, stale or not-yet-valid answer or ticket), `rate_limited` (the issuance cap held: 6 per source, 6 000 per zone a minute), `unknown_zone` (a zone this node does not serve, or whose rung is off), `bad_request`, `error` (the page could not answer — a `5xx`). |
 | `kapkan_edge_log_records_total` | counter | `result` | Access-log datagrams from the terminator: `ok`, `malformed`, `oversized`, `dropped` (the node's own handler could not keep up — its 8192-record queue was full), `unknown_zone`. Datagrams the kernel discards never reach the node and are not counted here. |
 | `kapkan_edge_inflight_resets_total` | counter | — | In-flight counters the decision service reset because a busy source saw no completion for a whole idle period — its log stream was lossy or dead. A steady rate means access-log datagrams are being lost before they reach the node: raise `net.unix.max_dgram_qlen` (the node warns at start when it is below 512). |
-| `kapkan_edge_verdict_table_entries` | gauge | — | Live deny/mark entries in the node's verdict table. |
+| `kapkan_edge_verdict_table_entries` | gauge | — | Live deny, challenge and mark entries in the node's verdict table (a challenge or a mark hidden beneath a live deny counts, a lapsed one does not). |
 | `kapkan_edge_cert_not_after_seconds` | gauge | `zone` | Expiry of the zone's certificate as a Unix timestamp — the **T−30 d alarm**: alert when it is less than 30 days away. Dropped when a zone leaves the document. |
 | `kapkan_edge_acme_attempts_total` | counter | `zone`, `result` | Certificate orders: `issued`, `renewed`, `failed` (on either CA), and `fallback` — a certificate obtained from the fallback CA, counted alongside its `issued`/`renewed` entry, so sum `issued+renewed+failed` for attempts. |
 
 The brain adds nothing per edge node to its own `/metrics`; a node's liveness and last report
-are read from [`GET /api/v1/edge/nodes`](/docs/api#the-edge-channel).
+are read from [`GET /api/v1/edge/nodes`](/docs/api#the-edge-channel), and the zones' rates and
+would-be sets across the fleet from [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus).
 
 ## Scraping
 
