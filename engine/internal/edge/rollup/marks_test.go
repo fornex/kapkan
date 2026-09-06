@@ -130,3 +130,31 @@ func TestTopSourcesRankTellingFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestWouldBeFollowsThePrecedence pins that the aggregator's notion of the
+// would-be set is the report's: a source the node refused or challenged for
+// real in the window is not would-be, whatever previews it also got, so the
+// bounded view's ranking and its cut count never disagree with the report's
+// per-source state.
+func TestWouldBeFollowsThePrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		s    SourceStats
+		want bool
+		rank int
+	}{
+		{SourceStats{WouldDeny: 3}, true, 0},
+		{SourceStats{WouldChallenge: 1, Cleared: 2, Marked: 1}, true, 0},
+		{SourceStats{WouldDeny: 3, DeniedTable: 1}, false, 1},
+		{SourceStats{WouldChallenge: 4, Challenged: 1}, false, 1},
+		{SourceStats{DeniedTable: 2}, false, 1},
+		{SourceStats{DeniedRate: 9, Requests: 50}, false, 2},
+		{SourceStats{Cleared: 1, Marked: 1}, false, 2},
+	} {
+		if got := tc.s.WouldBe(); got != tc.want {
+			t.Errorf("WouldBe(%+v) = %v, want %v", tc.s, got, tc.want)
+		}
+		if got := tc.s.rank(); got != tc.rank {
+			t.Errorf("rank(%+v) = %d, want %d", tc.s, got, tc.rank)
+		}
+	}
+}

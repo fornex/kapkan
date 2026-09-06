@@ -226,8 +226,13 @@ func TestTrimReportOrder(t *testing.T) {
 		}
 	}
 	// Well over: the lists are halved, busiest first kept, until it fits —
-	// the zones and certs stay whole, and every zone keeps its busiest.
-	rep = trimReport(big(200, 20, 50))
+	// the zones and certs stay whole, and every zone keeps its busiest. The
+	// caller's report is not touched: postReport compares the two.
+	raw := big(200, 20, 50)
+	rep = trimReport(raw)
+	if raw.Zones[0].SourcesTruncated != 0 || len(raw.Zones[0].TopSources) != 20 || len(raw.Zones) != 200 {
+		t.Fatalf("trimReport changed the caller's report: %+v", raw.Zones[0])
+	}
 	if size(rep) > maxReportBytes || len(rep.Zones) != 200 || len(rep.Certs) != 50 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
 		t.Fatalf("halving: size=%d zones=%d certs=%d trunc=%d/%d", size(rep), len(rep.Zones), len(rep.Certs), rep.CertsTruncated, rep.ZonesTruncated)
 	}
@@ -245,8 +250,8 @@ func TestTrimReportOrder(t *testing.T) {
 	}
 	// What the body limit made the report shed, for the node's warning: the
 	// per-zone growth of the count, never a negative from dropped zones.
-	if got, want := shedByLimit(big(200, 20, 50), rep), 200*rep.Zones[0].SourcesTruncated; got != want {
-		t.Fatalf("shedByLimit = %d, want %d", got, want)
+	if got, want := shedByLimit(raw, rep), 200*rep.Zones[0].SourcesTruncated; got != want || got == 0 {
+		t.Fatalf("shedByLimit = %d, want %d (and not zero)", got, want)
 	}
 	// Certificates next: the tail goes, the zones stay whole.
 	rep = trimReport(big(100, 0, 3000))
@@ -258,12 +263,13 @@ func TestTrimReportOrder(t *testing.T) {
 	if size(rep) > maxReportBytes || rep.ZonesTruncated == 0 || len(rep.Zones)+rep.ZonesTruncated != 2000 || rep.Zones[0].Zone == "" {
 		t.Fatalf("zones last: size=%d zones=%d trunc=%d", size(rep), len(rep.Zones), rep.ZonesTruncated)
 	}
-	// Dropped zones are ZonesTruncated's to tell: the sources figure stays
-	// zero, never negative.
-	raw := big(3000, 4, 0)
+	// Dropped zones are ZonesTruncated's to tell; the sources figure counts
+	// what the surviving zones lost (each its one would-challenge here) and
+	// never goes negative for the zones that went.
+	raw = big(3000, 4, 0)
 	rep = trimReport(raw)
-	if rep.ZonesTruncated == 0 || shedByLimit(raw, rep) != 0 {
-		t.Fatalf("dropped zones: zones_truncated=%d shed=%d", rep.ZonesTruncated, shedByLimit(raw, rep))
+	if rep.ZonesTruncated == 0 || shedByLimit(raw, rep) != len(rep.Zones) {
+		t.Fatalf("dropped zones: zones_truncated=%d kept=%d shed=%d", rep.ZonesTruncated, len(rep.Zones), shedByLimit(raw, rep))
 	}
 }
 
