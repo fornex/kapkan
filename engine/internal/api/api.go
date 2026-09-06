@@ -347,6 +347,10 @@ func (s *Server) Handler() http.Handler {
 	handle("POST /api/v1/edge/nodes/{name}/acme/challenges",
 		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleEdgeACMEChallenge))
 	read("GET /api/v1/edge/nodes", s.handleEdgeNodes)
+	// The zones the alive edge nodes report, merged (edge_zones_status.go):
+	// the console's Edge view and the "who would be challenged" set. Viewer
+	// rank, unscoped tokens only, like the inventory.
+	read("GET /api/v1/edge/zones/status", s.handleEdgeZonesStatus)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater
 	// or supervisor can confirm the daemon is fully up after a restart. 503 until
@@ -681,6 +685,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// request. The inventory itself (names, next-hops: topology) stays behind
 	// GET /api/v1/dataplane/nodes, unscoped tokens only.
 	resp["nodes_total"] = len(cfg.Scrubbing.Nodes)
+	// Likewise for edge nodes: a COUNT for every role, so the console shows
+	// its Edge view only where there is an edge (E4.5).
+	edgeNodes := 0
+	if cfg.Edge != nil {
+		edgeNodes = len(cfg.Edge.Nodes)
+	}
+	resp["edge_nodes_total"] = edgeNodes
 
 	// Update availability (only meaningful when the opt-in check is enabled).
 	// Defaults to "no update" so the console can render unconditionally.

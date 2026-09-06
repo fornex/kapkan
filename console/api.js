@@ -261,7 +261,9 @@
         /* managed scrubbing nodes, COUNT only, sent to every role: it gates
            the Nodes nav item and the node column in bans. The inventory
            itself is a separate, admin-only fetch (getNodes). */
-        nodes_total: status.nodes_total || 0
+        nodes_total: status.nodes_total || 0,
+        /* edge nodes, COUNT only, for every role: gates the Edge view (E4.5) */
+        edge_nodes_total: status.edge_nodes_total || 0
       };
       cache.attacks = {
         active: (attacks.active || []).map(function (a) { return mapAttack(a, groups, bansRaw); }),
@@ -299,6 +301,19 @@
             staleAfter: r.stale_after_seconds || 15, nodes: r.nodes || [] };
         });
       }).catch(function () { return { ok: false, forbidden: false, total: 0, staleAfter: 15, nodes: [] }; });
+    },
+    /* edge zones status (Edge view, E4.5): the alive edge nodes' last windows
+       merged per zone, with the "who would be challenged" set. On demand like
+       getNodes; a 403 (scoped token: node names are topology) is forbidden,
+       not an error. */
+    getEdgeZones: function () {
+      return request("/api/v1/edge/zones/status").then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, nodesReporting: 0, zones: [] };
+        if (!res.ok) throw new Error("edge -> " + res.status);
+        return res.json().then(function (r) {
+          return { ok: true, forbidden: false, nodesReporting: r.nodes_reporting || 0, zones: r.zones || [] };
+        });
+      }).catch(function () { return { ok: false, forbidden: false, nodesReporting: 0, zones: [] }; });
     },
     getTraffic: function (key, fromISO, toISO, step) {
       var qs = "key=" + encodeURIComponent(key);

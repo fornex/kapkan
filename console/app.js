@@ -13,6 +13,9 @@
     /* shown only when /status reports nodes_total > 0 — most deployments have
        no managed scrubbing nodes and must not carry a permanently-empty view */
     { id: "nodes", icon: "divert", key: "nav.nodes", section: "monitor", whenNodes: true },
+    /* likewise gated on edge_nodes_total: the Edge view (E4.5) exists only
+       where edge nodes front zones */
+    { id: "edge", icon: "shield-check", key: "nav.edge", section: "monitor", whenEdge: true },
     { id: "hostgroups", icon: "layers", key: "nav.hostgroups", section: "config" },
     { id: "traffic", icon: "chart", key: "nav.traffic", section: "config" },
     { id: "settings", icon: "settings", key: "nav.settings", section: "config" }
@@ -34,6 +37,10 @@
        3s poll: liveness moves at stale_after (15s) pace and the endpoint walks
        the ban table, so refreshing it with the firehose buys nothing */
     nodes: { loading: false, fetchedAt: 0, ok: false, forbidden: false, total: 0, staleAfter: 15, list: [] },
+    /* edge zones status (E4.5) — the same on-demand + freshness-guard shape:
+       it merges the nodes' last ten-second windows, so a 10s refresh is the
+       data's own pace */
+    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesReporting: 0, zones: [] },
     last: { rung: -1 }
   };
 
@@ -184,9 +191,10 @@
     /* node-gated nav items: hidden until /status reports managed nodes, but
        never hidden out from under the operator who is LOOKING at the view */
     NAV.forEach(function (item) {
-      if (!item.whenNodes) return;
+      if (!item.whenNodes && !item.whenEdge) return;
+      var have = item.whenNodes ? ctx.status.nodes_total > 0 : ctx.status.edge_nodes_total > 0;
       var el = document.querySelector('.nav__item[data-view="' + item.id + '"]');
-      if (el) el.style.display = (ctx.status.nodes_total > 0 || state.view === item.id) ? "" : "none";
+      if (el) el.style.display = (have || state.view === item.id) ? "" : "none";
     });
 
     document.getElementById("lastUpdated").textContent = I.time(new Date());
@@ -324,6 +332,20 @@
         n.ok = r.ok; n.forbidden = !!r.forbidden;
         n.total = r.total; n.staleAfter = r.staleAfter; n.list = r.nodes;
         if (state.view === "nodes") renderView();
+      });
+    },
+    /* edge zones status — the nodes' last windows merged; 10s freshness, the
+       window's own length */
+    loadEdge: function () {
+      var e = state.edge;
+      if (e.loading) return;
+      if (e.fetchedAt && Date.now() - e.fetchedAt < 10000) return;
+      e.loading = true;
+      API.getEdgeZones().then(function (r) {
+        e.loading = false; e.fetchedAt = Date.now();
+        e.ok = r.ok; e.forbidden = !!r.forbidden;
+        e.nodesReporting = r.nodesReporting; e.zones = r.zones;
+        if (state.view === "edge") renderView();
       });
     },
     openDrawer: openDrawer, closeDrawer: closeDrawer,

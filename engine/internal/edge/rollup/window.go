@@ -49,6 +49,12 @@ type SourceStats struct {
 	Challenged     uint64
 	Cleared        uint64
 	WouldChallenge uint64
+	// WouldDeny counts every dry-run denial (a 200 marked would-deny, for a
+	// rate, a concurrency or a table verdict): with WouldChallenge, what the
+	// report shows as "who would be" (E4.5). Marked counts requests that
+	// carried another mark — a reputation the origin was told about.
+	WouldDeny uint64
+	Marked    uint64
 	// Errors4xx/5xx are origin (or terminator) statuses of decided or
 	// non-deciding requests — the decider's own 403s and undecided requests
 	// excluded, since neither says anything about the source.
@@ -265,10 +271,15 @@ func (a *Aggregator) Observe(r Record) {
 			}
 		case challenged:
 			ss.Challenged++
-		case wouldDeny == "rate" || wouldDeny == "concurrency":
-			ss.WouldDenyRate++
+		case wouldDeny != "":
+			ss.WouldDeny++
+			if wouldDeny == "rate" || wouldDeny == "concurrency" {
+				ss.WouldDenyRate++
+			}
 		case wouldChallenge:
 			ss.WouldChallenge++
+		case r.Mark != "" && !r.Cleared():
+			ss.Marked++
 		case r.Undecided():
 			// Says nothing about the source.
 		case r.Status >= 500:
