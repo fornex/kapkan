@@ -106,6 +106,9 @@
                 },
                 "type": "object"
               },
+              "dry_run": {
+                "type": "boolean"
+              },
               "failure_mode": {
                 "enum": [
                   "open",
