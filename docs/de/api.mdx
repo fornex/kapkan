@@ -743,7 +743,9 @@ was auch immer die Zonendatei sagt. `operator`-Rang, nur ungebundene Tokens.
 
 `mode` ist `manual`, `auto` oder `off` (`off` löscht die Übersteuerung, wie `DELETE`);
 `ttl_seconds` ist `60..86400` und erforderlich, sofern `mode` nicht `off` ist; `reason` ist für das
-Log, die Audit-Zeile und die Konsole (höchstens 200 Zeichen). Eine unbekannte Zone ist `404`; eine
+Log, die Audit-Zeile und die Antworten der API — `override.reason` in
+`GET /api/v1/edge/zones/status` und die eigene Antwort dieses Endpunkts (höchstens 200 Zeichen).
+Eine unbekannte Zone ist `404`; eine
 Zone in `policy.mode: none` ist `409` — dort fordert nichts heraus. Die Übersteuerung reist als
 `challenge_override` im Zonendokument (geparkte Polls werden sofort geweckt), und jeder Knoten
 wendet den effektiven Modus auf seinem schnellen Pfad an, sodass sie zu `until` endet, mit oder

@@ -99,11 +99,12 @@ Deux en-têtes sont sous le contrôle de Kapkan et ne peuvent jamais être forg�
 `X-Kapkan-Zone` (le nom de la zone) atteint toujours l'origine ; `X-Kapkan-Mark` n'est présent que
 lorsque la source porte une marque, et absent sinon — une valeur envoyée par le client pour l'un ou
 l'autre est supprimée. Une source dont les requêtes sont presque toutes des `4xx`/`5xx` est marquée
-`errors` ; en **dry-run** — celui du nœud, le `policy.dry_run` de la zone, ou le
-`challenge_options.dry_run` du palier — chaque refus qui aurait eu lieu devient une autorisation
-marquée `would-deny:<reason>` et chaque défi qui aurait eu lieu une autorisation marquée
-`would-challenge:<why>`, de sorte que l'origine voit exactement ce que le mode réel aurait refusé ou
-demandé.
+`errors`. En **dry-run**, l'origine voit exactement ce que le mode réel aurait refusé ou demandé :
+sous le `dry_run` du nœud ou le `policy.dry_run` de la zone, chaque refus qui aurait eu lieu devient
+une autorisation marquée `would-deny:<reason>` et chaque défi qui aurait eu lieu une autorisation
+marquée `would-challenge:<why>` ; sous le `challenge_options.dry_run` propre au palier, seul le défi
+est prévisualisé (`would-challenge:<why>`) tandis que le plafond et le blocage s'appliquent comme
+avant.
 
 Le nœud garde un nombre borné de sources par zone ; quand la table est pleine, une nouvelle source
 passe **sans être suivie** (default-pass) et est comptée, jamais refusée par manque de place.

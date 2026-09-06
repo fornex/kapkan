@@ -745,7 +745,9 @@ dise le fichier de zones. Rang `operator`, jetons non rattachés uniquement.
 
 `mode` vaut `manual`, `auto` ou `off` (`off` lève la surcharge, comme le fait `DELETE`) ;
 `ttl_seconds` est dans `60..86400` et requis sauf si `mode` vaut `off` ; `reason` est destiné au
-journal, à la ligne d'audit et à la console (au plus 200 caractères). Une zone inconnue renvoie
+journal, à la ligne d'audit et aux réponses de l'API — `override.reason` dans
+`GET /api/v1/edge/zones/status` et la propre réponse de ce point de terminaison (au plus
+200 caractères). Une zone inconnue renvoie
 `404` ; une zone en `policy.mode: none` renvoie `409` — rien n'y met au défi. La surcharge voyage
 dans le document de zones sous `challenge_override` (les interrogations retenues sont réveillées
 aussitôt) et chaque nœud applique le mode effectif sur son chemin rapide, de sorte qu'elle prend

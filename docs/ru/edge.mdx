@@ -227,10 +227,11 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 | `policy.dry_run` зоны (по умолчанию `false`) | файл зон | каждое решение этой зоны на каждом узле — зона может быть лишь *осторожнее* своего узла, но не наоборот |
 | `challenge_options.dry_run` ступени (по умолчанию **`true`**) | файл зон | только ступень: вызовы лишь показываются, а потолок и блокировка применяются так, как велят слои выше |
 
-При любом из них отказ, который состоялся бы, доходит до исходного сервера как пропуск с меткой
-`X-Kapkan-Mark: would-deny:rate` (или `would-deny:concurrency`, `would-deny:table:flood`), а вызов,
-который состоялся бы, — как `would-challenge:manual`, `would-challenge:zone:<reason>` или
-`would-challenge:table:flood`. Так вы можете поискать их в логах исходного сервера, следить за
+При первых двух отказ, который состоялся бы, доходит до исходного сервера как пропуск с меткой
+`X-Kapkan-Mark: would-deny:rate` (или `would-deny:concurrency`, `would-deny:table:flood`); при
+любом из трёх вызов, который состоялся бы, доходит до него как `would-challenge:manual`,
+`would-challenge:zone:<reason>` или `would-challenge:table:flood`. Так вы можете поискать их в логах
+исходного сервера, следить за
 `kapkan_edge_decisions_total{result="would_deny"|"would_challenge"}` и прочитать, **кто получил бы
 вызов**, до того как будет спрошен хоть один клиент: каждый узел сообщает последнее окно своих зон
 с самыми активными источниками и самым сильным, что он с каждым сделал — или сделал бы, — мозг

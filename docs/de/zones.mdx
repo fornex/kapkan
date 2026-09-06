@@ -99,11 +99,12 @@ Zwei Header stehen unter Kapkans Kontrolle und können von einem Client niemals 
 `X-Kapkan-Zone` (der Zonenname) erreicht den Origin immer; `X-Kapkan-Mark` ist nur vorhanden, wenn
 die Quelle eine Markierung trägt, und fehlt sonst — ein vom Client gesendeter Wert eines der beiden
 wird verworfen. Eine Quelle, deren Anfragen fast ausschließlich `4xx`/`5xx` sind, wird mit `errors`
-markiert; im **Dry-Run** — dem des Knotens, dem `policy.dry_run` der Zone oder dem
-`challenge_options.dry_run` der Stufe — wird jede eigentlich fällige Abweisung zu einem Allow, das
-mit `would-deny:<reason>` markiert ist, und jede eigentlich fällige Challenge zu einem, das mit
-`would-challenge:<why>` markiert ist, sodass der Origin genau sieht, was der Echtbetrieb abgewiesen
-oder gefragt hätte.
+markiert. Im **Dry-Run** sieht der Origin genau, was der Echtbetrieb abgewiesen oder gefragt hätte:
+Unter dem `dry_run` des Knotens oder dem `policy.dry_run` der Zone wird jede eigentlich fällige
+Abweisung zu einem Allow, das mit `would-deny:<reason>` markiert ist, und jede eigentlich fällige
+Challenge zu einem, das mit `would-challenge:<why>` markiert ist; unter dem eigenen
+`challenge_options.dry_run` der Stufe wird nur die Challenge als Vorschau gezeigt
+(`would-challenge:<why>`), während Obergrenze und Sperre wie zuvor greifen.
 
 Der Knoten hält eine begrenzte Anzahl Quellen pro Zone; ist die Tabelle voll, wird eine neue
 Quelle **unverfolgt** durchgelassen (Default-Pass) und gezählt, niemals aus Platzmangel abgewiesen.

@@ -97,11 +97,12 @@ Dos cabeceras están bajo el control de Kapkan y un cliente nunca puede falsific
 `X-Kapkan-Zone` (el nombre de la zona) llega siempre al origen; `X-Kapkan-Mark` está presente solo
 cuando la fuente lleva una marca y ausente en caso contrario — un valor de cualquiera de las dos
 enviado por el cliente se descarta. Una fuente cuyas peticiones son casi todas `4xx`/`5xx` se marca
-como `errors`; en **dry-run** — el del nodo, el `policy.dry_run` de la zona o el
-`challenge_options.dry_run` del peldaño — cada denegación que se habría producido se convierte en
-un permiso marcado `would-deny:<reason>` y cada desafío que se habría producido en uno marcado
-`would-challenge:<why>`, de modo que el origen ve exactamente lo que el modo real habría rechazado
-o pedido.
+como `errors`. En **dry-run** el origen ve exactamente lo que el modo real habría rechazado o
+pedido: bajo el `dry_run` del nodo o el `policy.dry_run` de la zona, cada denegación que se habría
+producido se convierte en un permiso marcado `would-deny:<reason>` y cada desafío que se habría
+producido en uno marcado `would-challenge:<why>`; bajo el `challenge_options.dry_run` propio del
+peldaño solo se previsualiza el desafío (`would-challenge:<why>`), mientras el techo y el bloqueo
+se aplican como antes.
 
 El nodo mantiene un número acotado de fuentes por zona; cuando la tabla está llena, una fuente
 nueva pasa **sin seguimiento** (paso por defecto) y se cuenta, nunca se rechaza por falta de

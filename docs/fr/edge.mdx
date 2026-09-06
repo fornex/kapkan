@@ -241,11 +241,11 @@ couches, chacune un plancher que la couche du dessous ne peut pas défaire :
 | Le `policy.dry_run` de la zone (`false` par défaut) | le fichier de zones | chaque décision de cette zone, sur chaque nœud — une zone ne peut être que *plus* en observation seule que son nœud |
 | Le `challenge_options.dry_run` du palier (**`true`** par défaut) | le fichier de zones | le palier seul : les défis sont prévisualisés, le plafond et le blocage s'appliquent comme le disent les couches du dessus |
 
-Sous l'une quelconque d'entre elles, un refus qui aurait eu lieu atteint l'origine comme une
-autorisation marquée `X-Kapkan-Mark: would-deny:rate` (ou `would-deny:concurrency`,
-`would-deny:table:flood`), et un défi qui aurait eu lieu comme `would-challenge:manual`,
-`would-challenge:zone:<reason>` ou `would-challenge:table:flood` — de sorte que vous pouvez
-fouiller les journaux de votre origine, surveiller
+Sous les deux premières, un refus qui aurait eu lieu atteint l'origine comme une autorisation
+marquée `X-Kapkan-Mark: would-deny:rate` (ou `would-deny:concurrency`, `would-deny:table:flood`) ;
+sous l'une quelconque des trois, un défi qui aurait eu lieu l'atteint comme
+`would-challenge:manual`, `would-challenge:zone:<reason>` ou `would-challenge:table:flood` — de
+sorte que vous pouvez fouiller les journaux de votre origine, surveiller
 `kapkan_edge_decisions_total{result="would_deny"|"would_challenge"}` et lire **qui aurait été mis
 au défi** avant qu'un seul client ne le soit : chaque nœud rapporte la dernière fenêtre de ses
 zones avec les sources les plus actives et la chose la plus forte qu'il a faite — ou aurait

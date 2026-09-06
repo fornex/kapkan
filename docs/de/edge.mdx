@@ -240,11 +240,11 @@ Schichten davon, jede ein Boden, den die Schicht darunter nicht aufheben kann:
 | Der `policy.dry_run` der Zone (Standard `false`) | die Zonen-Datei | jede Entscheidung dieser Zone, auf jedem Knoten — eine Zone kann gegenüber ihrem Knoten nur *mehr* beobachten, nie weniger |
 | Der `challenge_options.dry_run` der Stufe (Standard **`true`**) | die Zonen-Datei | die Stufe allein: Challenges werden als Vorschau gezeigt, Obergrenze und Sperre greifen so, wie die Schichten darüber es sagen |
 
-Unter jeder von ihnen erreicht eine eigentlich fällige Sperre den Origin als Allow mit der
+Unter den ersten beiden erreicht eine eigentlich fällige Sperre den Origin als Allow mit der
 Markierung `X-Kapkan-Mark: would-deny:rate` (oder `would-deny:concurrency`,
-`would-deny:table:flood`), und eine eigentlich fällige Challenge als `would-challenge:manual`,
-`would-challenge:zone:<reason>` oder `would-challenge:table:flood` — sodass Sie die Logs Ihres
-Origins durchsuchen, `kapkan_edge_decisions_total{result="would_deny"|"would_challenge"}`
+`would-deny:table:flood`); unter jeder der drei erreicht ihn eine eigentlich fällige Challenge als
+`would-challenge:manual`, `would-challenge:zone:<reason>` oder `would-challenge:table:flood` —
+sodass Sie die Logs Ihres Origins durchsuchen, `kapkan_edge_decisions_total{result="would_deny"|"would_challenge"}`
 beobachten und lesen können, **wer herausgefordert worden wäre**, bevor ein einziger Client gefragt
 wird: Jeder Knoten meldet das letzte Fenster seiner Zonen mit den aktivsten Quellen und dem
 Stärksten, was er jeder angetan hat — oder angetan hätte —, das Gehirn führt sie in

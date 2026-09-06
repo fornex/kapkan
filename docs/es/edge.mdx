@@ -234,10 +234,11 @@ de él, cada una un suelo que la capa inferior no puede deshacer:
 | El `policy.dry_run` de la zona (por defecto `false`) | el archivo de zonas | cada decisión de esta zona, en todos los nodos — una zona solo puede estar *más* en solo observación que su nodo |
 | El `challenge_options.dry_run` del peldaño (por defecto **`true`**) | el archivo de zonas | solo el peldaño: los desafíos se previsualizan, el techo y el bloqueo se aplican según digan las capas superiores |
 
-Bajo cualquiera de ellas, una denegación que se habría producido llega al origen como un permiso
-marcado `X-Kapkan-Mark: would-deny:rate` (o `would-deny:concurrency`, `would-deny:table:flood`), y
-un desafío que se habría producido como `would-challenge:manual`, `would-challenge:zone:<reason>` o
-`would-challenge:table:flood` — de modo que puedes hacer grep en los logs de tu origen, observar
+Bajo las dos primeras, una denegación que se habría producido llega al origen como un permiso
+marcado `X-Kapkan-Mark: would-deny:rate` (o `would-deny:concurrency`, `would-deny:table:flood`);
+bajo cualquiera de las tres, un desafío que se habría producido le llega como
+`would-challenge:manual`, `would-challenge:zone:<reason>` o `would-challenge:table:flood` — de modo
+que puedes hacer grep en los logs de tu origen, observar
 `kapkan_edge_decisions_total{result="would_deny"|"would_challenge"}` y leer **a quién se habría
 desafiado** antes de que se pida nada a un solo cliente: cada nodo reporta la última ventana de sus
 zonas con las fuentes más activas y lo más fuerte que hizo — o habría hecho — con cada una, el

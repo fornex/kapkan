@@ -729,7 +729,8 @@ diga lo que diga el archivo de zonas. Rango `operator`, solo tokens sin acotar.
 
 `mode` es `manual`, `auto` u `off` (`off` retira la anulación, igual que `DELETE`); `ttl_seconds` es
 `60..86400` y obligatorio salvo que `mode` sea `off`; `reason` es para el log, la fila de auditoría y
-la consola (como máximo 200 caracteres). Una zona desconocida es `404`; una zona en
+las respuestas de la API — `override.reason` en `GET /api/v1/edge/zones/status` y la respuesta
+propia de este endpoint (como máximo 200 caracteres). Una zona desconocida es `404`; una zona en
 `policy.mode: none` es `409` — ahí nada desafía. La anulación viaja en el documento de zonas como
 `challenge_override` (los sondeos retenidos se despiertan de inmediato) y cada nodo aplica el modo
 efectivo en su ruta rápida, de modo que termina en `until` con o sin cerebro. Se audita como
