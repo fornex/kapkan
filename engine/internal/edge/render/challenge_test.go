@@ -71,7 +71,7 @@ func TestChallengeMachineryShape(t *testing.T) {
 		"proxy_set_header Accept-Language $http_accept_language;",
 		"location ^~ /_kapkan/clearance/ {",
 		"limit_except GET HEAD POST { deny all; }",
-		"client_max_body_size 4k;",
+		"client_max_body_size 8k;",
 		"proxy_pass http://kapkan_clearance;",
 	} {
 		if !strings.Contains(zone, want) {
