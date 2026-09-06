@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
 )
@@ -27,6 +28,17 @@ func TestBuildEdgeDocChallengeOptions(t *testing.T) {
 		{Name: "d.example", Origins: []string{"10.0.0.4:80"}, TLS: config.ZoneTLS{MinVersion: config.ZoneTLS12},
 			Policy: config.ZonePolicy{Mode: config.ZonePolicyDecide, FailureMode: config.ZoneFailOpen, Challenge: config.ZoneChallengeAuto,
 				ChallengeOptions: config.ZoneChallengeOptions{ExemptPaths: []string{"/hook"}}}},
+		// The zone-wide trigger travels only when set; the hold's default
+		// (300, what validation fills in) encodes to nothing.
+		{Name: "e.example", Origins: []string{"10.0.0.5:80"}, TLS: config.ZoneTLS{MinVersion: config.ZoneTLS12},
+			Policy: config.ZonePolicy{Mode: config.ZonePolicyDecide, FailureMode: config.ZoneFailOpen, Challenge: config.ZoneChallengeAuto,
+				ChallengeOptions: config.ZoneChallengeOptions{Auto: config.ZoneAutoChallenge{ZoneRPS: 500, HoldSeconds: 60}}}},
+		{Name: "f.example", Origins: []string{"10.0.0.6:80"}, TLS: config.ZoneTLS{MinVersion: config.ZoneTLS12},
+			Policy: config.ZonePolicy{Mode: config.ZonePolicyDecide, FailureMode: config.ZoneFailOpen, Challenge: config.ZoneChallengeAuto,
+				ChallengeOptions: config.ZoneChallengeOptions{Auto: config.ZoneAutoChallenge{HoldSeconds: 300}}}},
+		{Name: "g.example", Origins: []string{"10.0.0.7:80"}, TLS: config.ZoneTLS{MinVersion: config.ZoneTLS12},
+			Policy: config.ZonePolicy{Mode: config.ZonePolicyDecide, FailureMode: config.ZoneFailOpen, Challenge: config.ZoneChallengeAuto,
+				ChallengeOptions: config.ZoneChallengeOptions{Auto: config.ZoneAutoChallenge{ZoneRPS: 20, HoldSeconds: 300}}}},
 	}}
 	doc := buildEdgeDoc(z)
 	body, err := json.Marshal(doc)
@@ -34,8 +46,30 @@ func TestBuildEdgeDocChallengeOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(body)
-	if strings.Count(s, `"challenge_options"`) != 2 {
-		t.Fatalf("challenge_options present %d times, want 2 (c and d):\n%s", strings.Count(s, `"challenge_options"`), s)
+	if strings.Count(s, `"challenge_options"`) != 4 {
+		t.Fatalf("challenge_options present %d times, want 4 (c, d, e, g):\n%s", strings.Count(s, `"challenge_options"`), s)
+	}
+	if !strings.Contains(s, `"challenge_options":{"dry_run":true,"auto":{"zone_rps":500,"hold_seconds":60}}`) {
+		t.Fatalf("zone e auto trigger: %s", s)
+	}
+	if !strings.Contains(s, `"challenge_options":{"dry_run":true,"auto":{"zone_rps":20}}`) {
+		t.Fatalf("zone g (default hold encodes to nothing): %s", s)
+	}
+	for _, zn := range doc.Zones {
+		switch zn.Name {
+		case "e.example":
+			if zn.Policy.AutoZoneRPS() != 500 || zn.Policy.AutoHold() != time.Minute {
+				t.Errorf("e: zone_rps=%d hold=%v", zn.Policy.AutoZoneRPS(), zn.Policy.AutoHold())
+			}
+		case "f.example":
+			if zn.Policy.ChallengeOptions != nil || zn.Policy.AutoZoneRPS() != 0 || zn.Policy.AutoHold() != 5*time.Minute {
+				t.Errorf("f: the default hold alone must encode to nothing: %+v", zn.Policy.ChallengeOptions)
+			}
+		case "g.example":
+			if zn.Policy.AutoZoneRPS() != 20 || zn.Policy.AutoHold() != 5*time.Minute {
+				t.Errorf("g: zone_rps=%d hold=%v", zn.Policy.AutoZoneRPS(), zn.Policy.AutoHold())
+			}
+		}
 	}
 	if !strings.Contains(s, `"name":"c.example"`) || !strings.Contains(s, `"challenge_options":{"dry_run":false,"exempt_paths":["/healthz","/api/"]}`) {
 		t.Fatalf("zone c options: %s", s)

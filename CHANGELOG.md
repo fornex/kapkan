@@ -231,6 +231,32 @@ security-relevant.
   gate: semantic HTML, a status line announced once (the moving counter is not a live region), a
   non-timed alternative to every timer, both colour schemes at ≥13:1 text contrast, focus
   outlines, reduced-motion honoured.
+- Edge track, E4.4 — the local ladder (edge-spec §5: the rung between the ceiling and the block).
+  In a zone with `policy.challenge: auto` the rollup's flood rule now **challenges before it
+  denies**: a source pushing through its rate ceiling for a window is sent to the rung for five
+  minutes (a browser clears it and is rate-limited like anyone; a bot cannot), and a source that
+  already had the rung's chance — flooding on while challenged (by name, or with the whole zone),
+  having cleared the rung and flooding anyway, or remembered from an earlier promotion — is
+  denied, with the doubling TTL as before. The **zone-wide trigger** for the flood no single
+  source trips (residential proxies): `challenge_options.auto.zone_rps` (0 = off) flips the
+  whole zone to challenge for `auto.hold_seconds` (30..3600, default 300) when the zone's
+  **admitted** rate on the node — decided requests the node did not refuse — runs at or over it;
+  each window still over extends the hold; the flip lapses on its own. Refused traffic is not
+  load: a blocked bot's 403s, a lone flooder's 429s or a plain-HTTP flood never flip the zone or
+  keep it flipped. Node-local by design (the fleet-wide view is the brain's). The rules take the
+  per-zone rung settings from the document on every new one. Dry-run: the node's `dry_run`
+  previews the whole ladder as `would-challenge` / `would-deny` marks; a zone's
+  `challenge_options.dry_run` (the default) previews the rung only — the deny that follows a
+  second flood window stays the ceiling's and is enforced as before, one window later than in an
+  `off` zone because the rung's turn is taken first; under a zone-wide challenge — previewed or
+  not — a flooder had the rung with everyone else and is denied at once. In the verdict table a
+  deny drops the same source's challenge only when it outlives it — or when the table is full and
+  the block needs the room, a challenge beneath a live deny being invisible anyway (a shorter block otherwise leaves the
+  challenge beneath it, in force again when the block lapses), and challenges may fill at most half
+  of the table, so a rotating botnet's challenges cannot crowd out the denies that must follow; a
+  flooder whose challenge the quota refuses is denied instead. The zone-wide trigger measures the
+  same admitted load in dry-run as enforcing (a would-deny preview is refused traffic too), so the
+  preview shows the flips enforcement would make. Zones schema regenerated.
 
 ## [1.7.0] - 2026-09-02
 

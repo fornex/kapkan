@@ -413,7 +413,11 @@ func TestApplyPacesAttempts(t *testing.T) {
 	a, ft, fr := newApplier(t)
 	a.MinInterval = 300 * time.Millisecond
 	mustApply(t, a, "a")
-	start := time.Now()
+	// Pace from a stamp taken now, not from the first attempt's start: on a
+	// slow disk the first apply can eat most of the interval, and the wait
+	// below would be short for that reason alone.
+	a.lastAttempt = time.Now()
+	start := a.lastAttempt
 	mustApply(t, a, "b")
 	if el := time.Since(start); el < 200*time.Millisecond {
 		t.Fatalf("second apply after %v; want the pacing interval", el)

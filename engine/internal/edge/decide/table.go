@@ -30,6 +30,28 @@ type table struct {
 	marks      map[key]entry
 	max        int
 	lastSweep  time.Time
+	// lastBeneath paces dropBeneath, like lastSweep paces the on-full sweep.
+	lastBeneath time.Time
+}
+
+// dropBeneath frees the challenges and marks that sit beneath a LIVE deny of
+// the same key: lookup never sees them while the deny stands, so when the
+// table is full — or the challenges' share is — they are the entries that
+// cost nothing to lose (the source is blocked anyway, and the rules' memory
+// carries its history past the block). Paced: a rotating flood must not make
+// every refused insert walk the tables.
+func (t *table) dropBeneath(now time.Time) {
+	if now.Sub(t.lastBeneath) < fullSweepEvery {
+		return
+	}
+	t.lastBeneath = now
+	for k, d := range t.denies {
+		if !now.Before(d.until) {
+			continue
+		}
+		delete(t.challenges, k)
+		delete(t.marks, k)
+	}
 }
 
 func newTable(max int) *table {
@@ -78,18 +100,56 @@ func (t *table) lookupMark(k key, now time.Time) *entry {
 	return nil
 }
 
-// setDeny installs or replaces k's deny.
+// setDeny installs or replaces k's deny. A weaker verdict of k's the deny
+// OUTLIVES is dead weight and goes; one that outlasts the deny stays beneath
+// it (lookup hides it while the deny is live), so a challenged source that
+// earned a one-minute block is challenged again when the block lapses rather
+// than set free — unless the table is full and the deny needs the room, in
+// which case the block lands and the weaker verdicts make way: the block a
+// challenged flooder earns always lands.
 func (t *table) setDeny(k key, reason string, until, now time.Time) bool {
+	if c, ok := t.challenges[k]; ok && !c.until.After(until) {
+		delete(t.challenges, k)
+	}
+	if m, ok := t.marks[k]; ok && !m.until.After(until) {
+		delete(t.marks, k)
+	}
 	if !t.room(t.denies, k, now) {
-		return false
+		delete(t.challenges, k)
+		delete(t.marks, k)
+		if !t.room(t.denies, k, now) {
+			// Still full: the challenges hidden beneath OTHER live denies
+			// make way before a new block is refused.
+			t.dropBeneath(now)
+			if !t.room(t.denies, k, now) {
+				return false
+			}
+		}
 	}
 	t.denies[k] = entry{deny: true, reason: reason, until: until}
 	t.gauge()
 	return true
 }
 
+// challengeShare is the part of the table challenges may fill. They are the
+// weakest verdict a flood installs and the most numerous (a rotating botnet
+// earns one per source per window), so without a quota they could hold the
+// whole table and leave no room for the denies that must follow.
+const challengeShare = 2
+
 // setChallenge installs or replaces k's challenge.
 func (t *table) setChallenge(k key, reason string, until, now time.Time) bool {
+	if _, exists := t.challenges[k]; !exists && len(t.challenges) >= t.max/challengeShare {
+		if now.Sub(t.lastSweep) >= fullSweepEvery {
+			t.sweep(now, nil)
+		}
+		// The share may be held by challenges beneath live denies — blocked
+		// sources that no longer need a rung: those make way first.
+		t.dropBeneath(now)
+		if len(t.challenges) >= t.max/challengeShare {
+			return false
+		}
+	}
 	if !t.room(t.challenges, k, now) {
 		return false
 	}
