@@ -454,7 +454,7 @@ func (s *Server) serveNoJS(w http.ResponseWriter, r *http.Request, req *request)
 		// behind the issuer's: say so, and retry this same ticket by itself
 		// after the wait.
 		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "invalid").Inc()
-		s.renderNotice(w, req, http.StatusForbidden, req.lang.TooEarly, req.lang.Again, r.URL.RequestURI(), tooEarlyRetrySecs)
+		s.renderNotice(w, req, http.StatusForbidden, false, req.lang.TooEarly, req.lang.Again, r.URL.RequestURI(), tooEarlyRetrySecs)
 	default:
 		// Expired, or not ours (another source, a dead key, tampering): the
 		// way forward is the page the client came from, which the ticket names
@@ -464,7 +464,7 @@ func (s *Server) serveNoJS(w http.ResponseWriter, r *http.Request, req *request)
 		if ret == "" {
 			ret = "/"
 		}
-		s.renderNotice(w, req, http.StatusForbidden, req.lang.Expired, req.lang.Retry, ret, 0)
+		s.renderNotice(w, req, http.StatusForbidden, true, req.lang.Expired, req.lang.Retry, ret, 0)
 	}
 }
 
@@ -477,7 +477,7 @@ func (s *Server) issue(w http.ResponseWriter, req *request, kind string, ttl tim
 		metrics.EdgeClearanceTotal.WithLabelValues(req.zone, "rate_limited").Inc()
 		w.Header().Set("Retry-After", "60")
 		if browser {
-			s.renderNotice(w, req, http.StatusTooManyRequests, req.lang.Busy, req.lang.Retry, ret, 0)
+			s.renderNotice(w, req, http.StatusTooManyRequests, true, req.lang.Busy, req.lang.Retry, ret, 0)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -516,7 +516,7 @@ func (s *Server) issue(w http.ResponseWriter, req *request, kind string, ttl tim
 func (s *Server) refuse(w http.ResponseWriter, req *request, result string, browser bool, back string) {
 	metrics.EdgeClearanceTotal.WithLabelValues(req.zone, result).Inc()
 	if browser {
-		s.renderNotice(w, req, http.StatusForbidden, req.lang.Expired, req.lang.Retry, back, 0)
+		s.renderNotice(w, req, http.StatusForbidden, true, req.lang.Expired, req.lang.Retry, back, 0)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -202,10 +202,43 @@ func TestChallengeRefusals(t *testing.T) {
 	if r := do(h, http.MethodGet, "/_kapkan/clearance/other", nil, ""); r.Code != 404 {
 		t.Errorf("unknown path = %d", r.Code)
 	}
-	// An original whose URI is not a usable return path is sent home.
-	_, p, _ := challengePage(t, h, map[string]string{"X-Kapkan-URI": "//evil.example/"})
-	if p.Return != "/" {
-		t.Errorf("return for a scheme-relative URI = %q", p.Return)
+	// An original whose URI is not a usable return path is sent home — a
+	// scheme-relative one, or one a browser would read as off-host.
+	for _, uri := range []string{"//evil.example/", `/\evil.example/`} {
+		if _, p, _ := challengePage(t, h, map[string]string{"X-Kapkan-URI": uri}); p.Return != "/" {
+			t.Errorf("return for %q = %q", uri, p.Return)
+		}
+	}
+	// A long target rides in the ticket and comes back whole.
+	long := "/search?" + strings.Repeat("filter=value&", 120)
+	_, p, ticket := challengePage(t, h, map[string]string{"X-Kapkan-URI": long})
+	if p.Return != long {
+		t.Fatalf("long return = %d bytes", len(p.Return))
+	}
+	s.Now = func() time.Time { return t0.Add(5 * time.Second) }
+	if r := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket), nil, ""); r.Code != http.StatusSeeOther || r.Header().Get("Location") != long {
+		t.Fatalf("long ticket: %d %q", r.Code, r.Header().Get("Location"))
+	}
+}
+
+// TestNoticeTitles pins that a notice which ends the attempt says so in its
+// title and heading, while the too-early one keeps the challenge's.
+func TestNoticeTitles(t *testing.T) {
+	s, _, c := newFixture(t)
+	h := s.Handler()
+	_, p, ticket := challengePage(t, h, nil)
+	early := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket), nil, "")
+	if b := early.Body.String(); !strings.Contains(b, "<title>One moment</title>") || !strings.Contains(b, "<h1>Checking your browser</h1>") {
+		t.Fatalf("too early keeps the challenge's title: %s", b)
+	}
+	c.add(3 * time.Minute)
+	expired := do(h, http.MethodGet, "/_kapkan/clearance/nojs?t="+url.QueryEscape(ticket), nil, "")
+	if b := expired.Body.String(); !strings.Contains(b, "<title>Could not continue</title>") || !strings.Contains(b, "<h1>Could not continue</h1>") || strings.Contains(b, "Checking your browser") {
+		t.Fatalf("expired notice title: %s", b)
+	}
+	wrong := url.Values{"nonce": {p.Nonce}, "solution": {"nope"}, "return": {p.Return}}.Encode()
+	if r := do(h, http.MethodPost, "/_kapkan/clearance/answer", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, wrong); !strings.Contains(r.Body.String(), "<h1>Could not continue</h1>") {
+		t.Fatalf("wrong answer notice: %s", r.Body)
 	}
 }
 
