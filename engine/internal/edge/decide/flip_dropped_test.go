@@ -42,4 +42,17 @@ func TestSetZonesRetiresAnInertFlipWithItsLine(t *testing.T) {
 	if strings.Count(out, "challenge override in effect") != 1 {
 		t.Fatalf("the override line:\n%s", out)
 	}
+	// A zone that LEAVES the document under a live flip is closed the same
+	// way — here after its hold ran out unnoticed, so the line says lapsed.
+	s.SetZones(doc(z))
+	if !s.SetZoneChallenge("shop.example", true, c.t.Add(5*time.Second), "zone-rps") {
+		t.Fatal("re-flip refused")
+	}
+	c.add(6 * time.Second)
+	other, _ := challengeZone(t, "other.example", edgedoc.ChallengeAuto, 0)
+	s.SetZones(doc(other))
+	out = buf.String()
+	if strings.Count(out, "zone-wide challenge off") != 2 || !strings.Contains(out, "lapsed=true") {
+		t.Fatalf("the closing line of a removed zone:\n%s", out)
+	}
 }
