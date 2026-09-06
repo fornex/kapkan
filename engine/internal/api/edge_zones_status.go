@@ -15,7 +15,10 @@ import (
 
 // EdgeZonesStatusDoc is the response.
 type EdgeZonesStatusDoc struct {
-	// NodesReporting counts the alive nodes whose last report carried zones.
+	// NodesAlive counts the alive edge nodes; NodesReporting those among them
+	// whose last report carried zones (a node whose zones are all in observe
+	// mode is alive and reports none).
+	NodesAlive     int              `json:"nodes_alive"`
 	NodesReporting int              `json:"nodes_reporting"`
 	Zones          []EdgeZoneStatus `json:"zones"`
 }
@@ -25,6 +28,9 @@ type EdgeZoneStatus struct {
 	Zone string `json:"zone"`
 	// Nodes counts the alive nodes reporting the zone.
 	Nodes int `json:"nodes"`
+	// Challenge is the zone's challenge mode as the nodes apply it (off,
+	// manual, auto) — the same on every node, from the one document.
+	Challenge string `json:"challenge,omitempty"`
 	// The window figures summed across those nodes (each node's last window;
 	// the windows are not aligned, so this is a fleet-wide rate to the
 	// nearest window, not an exact one).
@@ -44,15 +50,20 @@ type EdgeZoneStatus struct {
 	// WouldBe is the union, across nodes, of the sources the nodes previewed
 	// a deny or a challenge for — the would-be set. The busiest first,
 	// bounded to 20 per reporting node; WouldBeTruncated counts the rest.
+	// Partial says at least one node shed part of its per-source detail to
+	// fit its report, so the set is what survived, not everyone.
 	WouldBe          []EdgeZoneWouldBe `json:"would_be,omitempty"`
 	WouldBeTruncated int               `json:"would_be_truncated,omitempty"`
+	Partial          bool              `json:"partial,omitempty"`
 }
 
-// EdgeZoneChallengeNode is one node's zone-wide challenge.
+// EdgeZoneChallengeNode is one node's zone-wide challenge. DryRun says the
+// flip previews on that node (would-challenge marks) rather than bites.
 type EdgeZoneChallengeNode struct {
 	Node   string    `json:"node"`
 	Reason string    `json:"reason,omitempty"`
 	Until  time.Time `json:"until"`
+	DryRun bool      `json:"dry_run,omitempty"`
 }
 
 // EdgeZoneWouldBe is one source of the would-be set.
@@ -79,18 +90,22 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Get()
 	staleAfter := edgeStaleAfter(cfg)
 	reports := make(map[string]EdgeReport)
+	alive := 0
 	if cfg.Edge != nil {
 		for i := range cfg.Edge.Nodes {
 			name := cfg.Edge.Nodes[i].Name
 			if !s.edgePresence.alive(name, staleAfter) {
 				continue
 			}
+			alive++
 			if rep, _, ok := s.edgeReports.get(name); ok {
 				reports[name] = rep
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, mergeEdgeZones(reports))
+	doc := mergeEdgeZones(reports)
+	doc.NodesAlive = alive
+	writeJSON(w, http.StatusOK, doc)
 }
 
 // mergeEdgeZones folds the alive nodes' reports into one status per zone.
@@ -124,6 +139,12 @@ func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
 				sets[z.Zone] = make(map[string]*wouldBe)
 			}
 			zs.Nodes++
+			if zs.Challenge == "" {
+				zs.Challenge = z.Challenge
+			}
+			if z.SourcesTruncated > 0 {
+				zs.Partial = true
+			}
 			zs.RPS += z.RPS
 			zs.Requests += z.Requests
 			zs.Decided += z.Decided
@@ -136,7 +157,7 @@ func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
 				zs.WatchOnly = append(zs.WatchOnly, name)
 			}
 			if z.ChallengeActive != nil {
-				zs.ChallengeActive = append(zs.ChallengeActive, EdgeZoneChallengeNode{Node: name, Reason: z.ChallengeActive.Reason, Until: z.ChallengeActive.Until})
+				zs.ChallengeActive = append(zs.ChallengeActive, EdgeZoneChallengeNode{Node: name, Reason: z.ChallengeActive.Reason, Until: z.ChallengeActive.Until, DryRun: z.ChallengeActive.DryRun})
 			}
 			for _, src := range z.TopSources {
 				if src.State != SourceStateWouldDeny && src.State != SourceStateWouldChallenge {

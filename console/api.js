@@ -308,12 +308,12 @@
        not an error. */
     getEdgeZones: function () {
       return request("/api/v1/edge/zones/status").then(function (res) {
-        if (res.status === 403) return { ok: false, forbidden: true, nodesReporting: 0, zones: [] };
+        if (res.status === 403) return { ok: false, forbidden: true, nodesAlive: 0, nodesReporting: 0, zones: [] };
         if (!res.ok) throw new Error("edge -> " + res.status);
         return res.json().then(function (r) {
-          return { ok: true, forbidden: false, nodesReporting: r.nodes_reporting || 0, zones: r.zones || [] };
+          return { ok: true, forbidden: false, nodesAlive: r.nodes_alive || 0, nodesReporting: r.nodes_reporting || 0, zones: r.zones || [] };
         });
-      }).catch(function () { return { ok: false, forbidden: false, nodesReporting: 0, zones: [] }; });
+      }).catch(function () { return { ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zones: [] }; });
     },
     getTraffic: function (key, fromISO, toISO, step) {
       var qs = "key=" + encodeURIComponent(key);

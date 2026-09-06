@@ -277,11 +277,14 @@ security-relevant.
   `would_deny`, `would_challenge`, status classes), whether a zone-wide challenge is in force and
   why, whether the zone is watch-only on that node, and the window's busiest sources with the
   strongest thing the node did to each (`denied` / `challenged` / `would-deny` / `would-challenge`
-  / `cleared` / `marked` / `allow`). A report too big for the brain's limit sheds the per-source
-  detail first, then certificates, then zones — each counted. New **`GET
+  / `cleared` / `marked` / `allow`), the zone's challenge mode, and whether a flip bites or
+  previews there. A window older than two aggregator windows reads as a quiet zone. A report too
+  big for the brain's limit sheds detail a little at a time — the sources that tell nothing first,
+  then every zone's list halved, then certificates, then zones — each counted, so the brain and
+  the console say "partial", never "nobody". New **`GET
   /api/v1/edge/zones/status`** (viewer rank, unscoped tokens, like the inventory) merges the alive
-  nodes' zones: sums per zone, the nodes on which it is watch-only or under a zone-wide challenge,
-  and the **would-be set** — the union of sources the nodes previewed a challenge or a deny for,
+  nodes' zones: sums per zone, the zone's mode, the nodes on which it is watch-only or under a
+  zone-wide challenge (biting or previewing), how many nodes are alive, and the **would-be set** — the union of sources the nodes previewed a challenge or a deny for,
   with the nodes that saw each, the busiest first, bounded to 20 per node. That set is edge-spec
   §8's "who would have been challenged", for the console and the acceptance rig alike. The
   console gains an **Edge** view (shown when `edge.nodes[]` is configured; `/api/v1/status` now

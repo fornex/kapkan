@@ -713,7 +713,7 @@ func (n *Node) report() api.EdgeReport {
 			Alive: n.termAlive,
 		},
 	}
-	rep.Zones = n.reportZones()
+	rep.Zones = n.reportZones(time.Now())
 	n.mu.Unlock()
 	if n.certs != nil {
 		for _, c := range n.certs.Inventory() {
@@ -725,9 +725,13 @@ func (n *Node) report() api.EdgeReport {
 }
 
 // trimReport cuts the report down to the brain's body limit, least valuable
-// detail first: every zone's per-source list goes as one step (the zone
-// figures stay), then certificate entries from the (zone-sorted) tail, then
-// zones from their tail — each counted so the brain knows what it is missing.
+// detail first and a little at a time, so the would-be set — the report's
+// reason to exist under dry-run — survives longest: first the sources that
+// tell nothing (allowed, marked, cleared) go from every zone; then every
+// zone's list is halved, busiest first kept, until it fits or is empty; then
+// certificate entries from the (zone-sorted) tail; then zones from their
+// tail — each counted, so the brain knows what it is missing and can say
+// "shed", not "nobody".
 func trimReport(rep api.EdgeReport) api.EdgeReport {
 	fits := func() bool {
 		body, err := json.Marshal(rep)
@@ -737,7 +741,37 @@ func trimReport(rep api.EdgeReport) api.EdgeReport {
 		return rep
 	}
 	for i := range rep.Zones {
-		rep.Zones[i].TopSources = nil
+		z := &rep.Zones[i]
+		kept := z.TopSources[:0]
+		for _, s := range z.TopSources {
+			if telling(s.State) {
+				kept = append(kept, s)
+			} else {
+				z.SourcesTruncated++
+			}
+		}
+		z.TopSources = kept
+	}
+	for !fits() {
+		any := false
+		for i := range rep.Zones {
+			z := &rep.Zones[i]
+			if len(z.TopSources) == 0 {
+				continue
+			}
+			any = true
+			keep := len(z.TopSources) / 2
+			z.SourcesTruncated += len(z.TopSources) - keep
+			z.TopSources = z.TopSources[:keep]
+		}
+		if !any {
+			break
+		}
+	}
+	for i := range rep.Zones {
+		if len(rep.Zones[i].TopSources) == 0 {
+			rep.Zones[i].TopSources = nil
+		}
 	}
 	for len(rep.Certs) > 0 && !fits() {
 		drop := len(rep.Certs) / 10
@@ -784,6 +818,9 @@ func (n *Node) postReport(ctx context.Context) {
 	rep := n.report()
 	if rep.CertsTruncated > 0 {
 		n.log.Warn("self-report certificate list truncated to fit the brain's body limit", "dropped", rep.CertsTruncated)
+	}
+	if shed := shedSources(rep); shed > 0 {
+		n.log.Warn("self-report per-source detail shed to fit the brain's body limit; the would-be set is partial", "sources", shed, "zones_dropped", rep.ZonesTruncated)
 	}
 	body, err := json.Marshal(rep)
 	if err != nil {

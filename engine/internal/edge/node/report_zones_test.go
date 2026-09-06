@@ -42,7 +42,8 @@ func TestNodeReportsRollups(t *testing.T) {
 	stop := run(t, n)
 	waitFor(t, "first install", func() bool { return n.Status().Generation == 1 })
 
-	// Before any window: both decide zones, zeros, the watched one flagged.
+	// Before any window: both decide zones, zeros, the watched one flagged,
+	// each with its challenge mode.
 	rep := n.report()
 	if len(rep.Zones) != 2 || rep.Zones[0].Zone != "example.com" || rep.Zones[1].Zone != "quiet.example" {
 		t.Fatalf("zones before a window: %+v", rep.Zones)
@@ -50,10 +51,14 @@ func TestNodeReportsRollups(t *testing.T) {
 	if rep.Zones[0].DryRun || !rep.Zones[1].DryRun || rep.Zones[0].Requests != 0 || rep.Zones[0].TopSources != nil {
 		t.Fatalf("zone flags before a window: %+v", rep.Zones)
 	}
+	if rep.Zones[0].Challenge != edgedoc.ChallengeAuto || rep.Zones[1].Challenge != edgedoc.ChallengeOff {
+		t.Fatalf("zone modes: %q %q", rep.Zones[0].Challenge, rep.Zones[1].Challenge)
+	}
 
 	// A closed window arrives through the aggregator's OnWindow, as the log
-	// reader's Tick would deliver it.
-	start := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	// reader's Tick would deliver it — a RECENT one (the report reads a
+	// window older than two aggregator windows as a quiet zone).
+	start := time.Now().Add(-10 * time.Second).Truncate(time.Second)
 	w := rollup.WindowStats{
 		Zone: "example.com", Start: start, Elapsed: 10 * time.Second, Requests: 300, Decided: 290, Denied: 40, Challenged: 20, Cleared: 5,
 		WouldDeny: 3, WouldChallenge: 7, Status2xx: 230, Status4xx: 60, RPS: 30,
@@ -77,7 +82,9 @@ func TestNodeReportsRollups(t *testing.T) {
 		z.Challenged != 20 || z.Cleared != 5 || z.WouldDeny != 3 || z.WouldChallenge != 7 || z.Status2xx != 230 || z.Status4xx != 60 {
 		t.Fatalf("zone figures: %+v", z)
 	}
-	if z.ChallengeActive == nil || z.ChallengeActive.Reason != "zone-rps" || !z.ChallengeActive.Until.Equal(start.Add(time.Hour)) {
+	// The flip bites here: the rung is enforced (challenge_options.dry_run
+	// false) on an enforcing node.
+	if z.ChallengeActive == nil || z.ChallengeActive.Reason != "zone-rps" || !z.ChallengeActive.Until.Equal(start.Add(time.Hour)) || z.ChallengeActive.DryRun {
 		t.Fatalf("challenge active: %+v", z.ChallengeActive)
 	}
 	states := make([]string, 0, len(z.TopSources))
@@ -101,21 +108,87 @@ func TestNodeReportsRollups(t *testing.T) {
 	if strings.Contains(string(raw), "passthrough.example") {
 		t.Error("a mode:none zone is in the report")
 	}
+	// A zone that went quiet: its last window is older than two aggregator
+	// windows, so the report shows a quiet zone — zeros, no sources, no At —
+	// not a stopped flood as current.
+	old := w
+	old.Zone = "quiet.example"
+	old.Start = time.Now().Add(-5 * time.Minute)
+	n.agg.OnWindow(old)
+	rep = n.report()
+	if q := rep.Zones[1]; q.Requests != 0 || q.RPS != 0 || q.TopSources != nil || !q.At.IsZero() {
+		t.Fatalf("a stale window was reported as current: %+v", q)
+	}
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// TestTrimReportOrder pins what goes first when the report is too big: every
-// zone's per-source detail, then certificates from the tail, then zones from
-// the tail — each counted.
+// TestNodeReportDryRunFloor pins the node's half of the zone's watch-only
+// flag: on a dry-run node every zone reports dry_run, and a flip on it
+// reports as a preview, whatever the zone's own flags say.
+func TestNodeReportDryRunFloor(t *testing.T) {
+	brain := &fakeBrain{}
+	doc := testDoc(10)
+	doc.Zones[0].Policy.Challenge = edgedoc.ChallengeAuto
+	doc.Zones[0].Policy.ChallengeOptions = &edgedoc.ChallengeOptions{DryRun: false}
+	brain.set(doc, `"v1"`)
+	srv := httptest.NewServer(brain)
+	defer srv.Close()
+	state, sockets := shortDirs(t)
+	n := newNode(t, srv, state, sockets, &fakeTester{}, &fakeReloader{}) // baseOptions: DryRun true
+	stop := run(t, n)
+	waitFor(t, "first install", func() bool { return n.Status().Generation == 1 })
+	if !n.svc.SetZoneChallenge("example.com", true, time.Now().Add(time.Minute), "zone-rps") {
+		t.Fatal("flip refused")
+	}
+	rep := n.report()
+	if len(rep.Zones) != 1 || !rep.Zones[0].DryRun || rep.Zones[0].ChallengeActive == nil || !rep.Zones[0].ChallengeActive.DryRun {
+		t.Fatalf("a dry-run node's zone: %+v", rep.Zones)
+	}
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSourceStatePrecedence pins the order of the strongest-thing rule when a
+// source did several things in one window.
+func TestSourceStatePrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		s    rollup.SourceStats
+		want string
+	}{
+		{rollup.SourceStats{DeniedTable: 1, Challenged: 5, WouldDeny: 2, Cleared: 3, Marked: 1}, api.SourceStateDenied},
+		{rollup.SourceStats{Challenged: 3, Cleared: 2, Marked: 1, WouldChallenge: 4}, api.SourceStateChallenged},
+		{rollup.SourceStats{WouldDeny: 1, WouldChallenge: 4, Cleared: 1}, api.SourceStateWouldDeny},
+		{rollup.SourceStats{WouldChallenge: 1, Cleared: 9, Marked: 9}, api.SourceStateWouldChallenge},
+		{rollup.SourceStats{Cleared: 1, Marked: 9, DeniedRate: 50}, api.SourceStateCleared},
+		{rollup.SourceStats{Marked: 1, DeniedRate: 50}, api.SourceStateMarked},
+		{rollup.SourceStats{Requests: 100, DeniedRate: 50}, api.SourceStateAllow},
+	} {
+		if got := sourceState(tc.s); got != tc.want {
+			t.Errorf("sourceState(%+v) = %q, want %q", tc.s, got, tc.want)
+		}
+	}
+}
+
+// TestTrimReportOrder pins what goes first when the report is too big: the
+// sources that tell nothing, then every zone's list halved (busiest first
+// kept) until it fits, then certificates from the tail, then zones from the
+// tail — each counted.
 func TestTrimReportOrder(t *testing.T) {
+	// Every zone carries `sources` entries, alternating would-challenge (a
+	// telling state) and allow, busiest first.
 	big := func(zones, sources, certs int) api.EdgeReport {
 		var rep api.EdgeReport
 		for i := 0; i < zones; i++ {
 			z := api.EdgeReportZone{Zone: "zone-" + strings.Repeat("x", 40) + string(rune('a'+i%26)) + string(rune('a'+i/26)), Requests: 1}
 			for j := 0; j < sources; j++ {
-				z.TopSources = append(z.TopSources, api.EdgeReportSource{Source: "2001:db8:" + strings.Repeat("f", 4) + ":" + string(rune('a'+j%26)) + "::", Requests: 1, State: api.SourceStateAllow})
+				state := api.SourceStateWouldChallenge
+				if j%2 == 1 {
+					state = api.SourceStateAllow
+				}
+				z.TopSources = append(z.TopSources, api.EdgeReportSource{Source: "2001:db8:" + strings.Repeat("f", 4) + ":" + string(rune('a'+j%26)) + "::", Requests: uint64(1000 - j), State: state})
 			}
 			rep.Zones = append(rep.Zones, z)
 		}
@@ -127,13 +200,28 @@ func TestTrimReportOrder(t *testing.T) {
 	size := func(rep api.EdgeReport) int { b, _ := json.Marshal(rep); return len(b) }
 
 	// Small: untouched.
-	if rep := trimReport(big(3, 20, 10)); len(rep.Zones[0].TopSources) != 20 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
+	if rep := trimReport(big(3, 20, 10)); len(rep.Zones[0].TopSources) != 20 || rep.Zones[0].SourcesTruncated != 0 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
 		t.Fatalf("a small report was trimmed: %+v", rep)
 	}
-	// Sources alone put it over: they go, the zones and certs stay whole.
-	rep := trimReport(big(200, 20, 50))
-	if size(rep) > maxReportBytes || len(rep.Zones) != 200 || rep.Zones[0].TopSources != nil || len(rep.Certs) != 50 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
-		t.Fatalf("sources first: size=%d zones=%d certs=%d trunc=%d/%d", size(rep), len(rep.Zones), len(rep.Certs), rep.CertsTruncated, rep.ZonesTruncated)
+	// A little over: the sources that tell nothing go first, and that is
+	// enough — every telling source survives, counted what went.
+	rep := trimReport(big(45, 20, 10))
+	if size(rep) > maxReportBytes || len(rep.Zones) != 45 || len(rep.Zones[0].TopSources) != 10 || rep.Zones[0].SourcesTruncated != 10 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
+		t.Fatalf("a little over: size=%d sources=%d shed=%d trunc=%d/%d", size(rep), len(rep.Zones[0].TopSources), rep.Zones[0].SourcesTruncated, rep.CertsTruncated, rep.ZonesTruncated)
+	}
+	for _, s := range rep.Zones[0].TopSources {
+		if s.State != api.SourceStateWouldChallenge {
+			t.Fatalf("a telling source went before an allowed one: %+v", rep.Zones[0].TopSources)
+		}
+	}
+	// Well over: the lists are halved, busiest first kept, until it fits —
+	// the zones and certs stay whole, and every zone keeps its busiest.
+	rep = trimReport(big(200, 20, 50))
+	if size(rep) > maxReportBytes || len(rep.Zones) != 200 || len(rep.Certs) != 50 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
+		t.Fatalf("halving: size=%d zones=%d certs=%d trunc=%d/%d", size(rep), len(rep.Zones), len(rep.Certs), rep.CertsTruncated, rep.ZonesTruncated)
+	}
+	if z := rep.Zones[0]; len(z.TopSources) == 0 || len(z.TopSources) >= 10 || z.TopSources[0].Requests != 1000 || z.SourcesTruncated+len(z.TopSources) != 20 {
+		t.Fatalf("halving kept %d of 20 (shed %d), busiest %d", len(z.TopSources), z.SourcesTruncated, z.TopSources[0].Requests)
 	}
 	// Certificates next: the tail goes, the zones stay whole.
 	rep = trimReport(big(100, 0, 3000))

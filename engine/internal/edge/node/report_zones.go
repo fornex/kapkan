@@ -1,6 +1,8 @@
 package node
 
 import (
+	"time"
+
 	"github.com/kapkan-io/kapkan/internal/api"
 	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 	"github.com/kapkan-io/kapkan/internal/edge/rollup"
@@ -17,27 +19,54 @@ func (n *Node) keepWindow(w rollup.WindowStats) {
 	n.mu.Unlock()
 }
 
+// staleWindowAfter is how long a zone's last window stands for "now": two
+// aggregator windows. The aggregator closes windows only for zones that saw
+// traffic, so a zone that went quiet would otherwise report its last busy
+// window as current for as long as it stays quiet.
+func (n *Node) staleWindowAfter() time.Duration {
+	w := n.agg.Window
+	if w <= 0 {
+		w = rollup.DefaultWindow
+	}
+	return 2 * w
+}
+
 // reportZones is the self-report's zones section (E4.5): one entry per zone
 // the LIVE generation serves in decide mode, with its last window (if one
-// closed yet), whether a zone-wide challenge is in force and whether the zone
-// is watch-only here. The document's order (by name) is kept. Caller holds
-// n.mu.
-func (n *Node) reportZones() []api.EdgeReportZone {
+// closed recently — an older one reads as a quiet zone: zeros), whether a
+// zone-wide challenge is in force and whether it bites, and whether the zone
+// is watch-only here. The zone LIST is the rendered document's (what the
+// terminator serves); the policy flags are the ACCEPTED document's, the one
+// the decision service enforces — they differ while a document the renderer
+// refused is still being retried. The document's order (by name) is kept.
+// Caller holds n.mu.
+func (n *Node) reportZones(now time.Time) []api.EdgeReportZone {
 	if n.renderedDoc == nil {
 		return nil
 	}
+	policies := make(map[string]edgedoc.Policy, len(n.renderedDoc.Zones))
+	if n.doc != nil {
+		for i := range n.doc.Zones {
+			policies[n.doc.Zones[i].Name] = n.doc.Zones[i].Policy
+		}
+	}
+	stale := n.staleWindowAfter()
 	var out []api.EdgeReportZone
 	for i := range n.renderedDoc.Zones {
 		z := &n.renderedDoc.Zones[i]
 		if z.Policy.Mode != edgedoc.ModeDecide {
 			continue
 		}
-		rz := api.EdgeReportZone{Zone: z.Name, DryRun: n.opt.DryRun || z.Policy.DryRun}
-		if w, ok := n.windows[z.Name]; ok {
+		pol, ok := policies[z.Name]
+		if !ok {
+			pol = z.Policy
+		}
+		rz := api.EdgeReportZone{Zone: z.Name, DryRun: n.opt.DryRun || pol.DryRun, Challenge: pol.Challenge}
+		if w, ok := n.windows[z.Name]; ok && now.Sub(w.Start.Add(w.Elapsed)) <= stale {
 			fillReportZone(&rz, w)
 		}
 		if on, until, why := n.svc.ZoneChallenge(z.Name); on {
-			rz.ChallengeActive = &api.EdgeReportChallenge{Reason: why, Until: until}
+			rz.ChallengeActive = &api.EdgeReportChallenge{Reason: why, Until: until, DryRun: n.opt.DryRun || pol.ChallengeDryRun()}
 		}
 		out = append(out, rz)
 	}
@@ -81,4 +110,24 @@ func sourceState(s rollup.SourceStats) string {
 		return api.SourceStateMarked
 	}
 	return api.SourceStateAllow
+}
+
+// telling reports whether a source's state is one the brain's would-be set
+// or an operator's eye needs: what the node did or would do to it. An allowed,
+// marked or cleared source is the first to go when the report must shrink.
+func telling(state string) bool {
+	switch state {
+	case api.SourceStateDenied, api.SourceStateChallenged, api.SourceStateWouldDeny, api.SourceStateWouldChallenge:
+		return true
+	}
+	return false
+}
+
+// shedSources sums the per-source entries the report shed across its zones.
+func shedSources(rep api.EdgeReport) int {
+	n := 0
+	for _, z := range rep.Zones {
+		n += z.SourcesTruncated
+	}
+	return n
 }

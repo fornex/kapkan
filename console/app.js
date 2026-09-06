@@ -40,7 +40,7 @@
     /* edge zones status (E4.5) — the same on-demand + freshness-guard shape:
        it merges the nodes' last ten-second windows, so a 10s refresh is the
        data's own pace */
-    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesReporting: 0, zones: [] },
+    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zones: [] },
     last: { rung: -1 }
   };
 
@@ -104,7 +104,7 @@
       /* node-gated items start hidden so a zero-node deployment never sees
          them flash before the first /status answer; renderShellDynamic
          reveals them (CSSOM, not a style attribute — CSP style-src 'self') */
-      if (item.whenNodes && state.view !== item.id) btn.style.display = "none";
+      if ((item.whenNodes || item.whenEdge) && state.view !== item.id) btn.style.display = "none";
       nav.appendChild(btn);
     });
 
@@ -344,7 +344,7 @@
       API.getEdgeZones().then(function (r) {
         e.loading = false; e.fetchedAt = Date.now();
         e.ok = r.ok; e.forbidden = !!r.forbidden;
-        e.nodesReporting = r.nodesReporting; e.zones = r.zones;
+        e.nodesAlive = r.nodesAlive; e.nodesReporting = r.nodesReporting; e.zones = r.zones;
         if (state.view === "edge") renderView();
       });
     },
