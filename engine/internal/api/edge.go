@@ -160,6 +160,7 @@ func (s *Server) edgeSnapshot() ([]byte, string, error) {
 		s.edgeClearance.setPath(cfg.Edge.StateFile)
 	}
 	s.edgeClearance.fill(&doc, now)
+	s.edgeLever.fill(&doc, now)
 	return edgeDocBytes(doc)
 }
 
@@ -245,6 +246,7 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		changed := s.store.Changed()
 		acmeChanged := s.edgeIssuance.Changed()
 		keysChanged := s.edgeClearance.Changed()
+		leverChanged := s.edgeLever.Changed()
 		body, cur, err := s.edgeSnapshot()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "encoding zones document failed")
@@ -258,7 +260,9 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		// goroutine owns the keyring, so a parked poll wakes itself for it:
 		// the snapshot it then takes is what rotates the keys and notifies
 		// every other holder.
-		rotate := time.NewTimer(s.edgeClearance.untilNextChange(time.Now()))
+		// Likewise a challenge override lapses at a fixed instant: the poll
+		// that wakes for it takes the snapshot that drops it.
+		rotate := time.NewTimer(min(s.edgeClearance.untilNextChange(time.Now()), s.edgeLever.untilNextChange(time.Now())))
 		select {
 		case <-r.Context().Done():
 			rotate.Stop()
@@ -283,8 +287,13 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		case <-keysChanged:
 			// Woken by a clearance rotation another snapshot performed.
 			rotate.Stop()
+		case <-leverChanged:
+			// Woken by an operator's lever: a mode change must reach the
+			// nodes within a poll, not a hold.
+			rotate.Stop()
 		case <-rotate.C:
-			// An epoch boundary; the next snapshot rotates the keys.
+			// An epoch boundary or a lever's lapse; the next snapshot
+			// rotates the keys or drops the override.
 		}
 	}
 }

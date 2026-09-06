@@ -304,6 +304,27 @@ security-relevant.
   count again (the mark had shadowed them, so the errors rule could not renew the mark it set),
   and a node forgets the kept windows of zones the document no longer has.
 
+- Edge track, E4.6 — the operator's lever on a zone's rung. **`POST
+  /api/v1/edge/zones/{name}/challenge`** `{"mode":"manual|auto|off","ttl_seconds":60..86400,"reason":"…"}`
+  (operator rank, unscoped tokens) sets the zone's challenge mode for a bounded time, whatever
+  the zones file says; **`DELETE`** — or `mode: off` — clears it. The override travels in the zones
+  document as `challenge_override {mode, until, reason}` with a fixed `until`, so the document's
+  bytes and ETag move exactly when an operator acts (and once more when it lapses); parked polls
+  are woken at once and every node applies the effective mode on its fast path — a policy
+  change, never a reload — reading the override per decision — the rules too, at each window's close — so it ends on time,
+  brain or no brain, and a zone-wide flip made inert by its lapse is retired with it. The response says where the lever bites: the file's mode, the zone's watch-only flags
+  (`policy.dry_run`, `challenge_options.dry_run`) and every configured node with its liveness and
+  reported `dry_run` — a node that only counts must be seen before the lever is trusted. A zone
+  in `mode: none` is refused (409); the reason is at most 200 characters. Audited (`edge_challenge` set / cleared); shown by
+  `GET /api/v1/edge/zones/status` as `override`. The brain's own `dry_run` does not gate the lever:
+  it is a policy edit; enforcement watch-only lives on the node and the zone. In memory, like the
+  ACME coordinator — an incident's tool, re-pulled after a brain restart. A lever on a zone a
+  reload has since removed can still be cleared. The node's report carries the mode it APPLIES
+  — the lever's, while one is live — so `zones/status` and the console read a zone under a manual
+  lever as challenging, not as the file's `off`. **Upgrade the nodes first**: a node older than
+  this release does not know `challenge_override`, follows its file, and is still listed by the
+  response as a node the lever would bite; `GET /api/v1/edge/nodes` shows each node's version.
+
 ## [1.7.0] - 2026-09-02
 
 ### Config changes

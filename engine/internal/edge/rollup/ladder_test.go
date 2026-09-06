@@ -146,10 +146,17 @@ func TestZoneRulesFromDoc(t *testing.T) {
 		edgedoc.Zone{Name: "b.example", Policy: pol(edgedoc.ChallengeAuto, nil)},
 		edgedoc.Zone{Name: "c.example", Policy: pol(edgedoc.ChallengeManual, nil)},
 		edgedoc.Zone{Name: "d.example", Policy: edgedoc.Policy{Mode: edgedoc.ModeNone, Challenge: edgedoc.ChallengeAuto}},
+		// The brain's lever (E4.6): a live auto override makes the rules
+		// challenge before they deny; a lapsed one is the file's word again.
+		edgedoc.Zone{Name: "e.example", Policy: pol(edgedoc.ChallengeOff, nil), ChallengeOverride: &edgedoc.ChallengeOverride{Mode: edgedoc.ChallengeAuto, Until: time.Now().Add(time.Hour)}},
+		edgedoc.Zone{Name: "f.example", Policy: pol(edgedoc.ChallengeOff, nil), ChallengeOverride: &edgedoc.ChallengeOverride{Mode: edgedoc.ChallengeAuto, Until: time.Now().Add(-time.Minute)}},
 	)
 	got := ZoneRulesFromDoc(&d)
-	if len(got) != 3 {
-		t.Fatalf("rules for %d zones, want 3 (mode none excluded): %+v", len(got), got)
+	if len(got) != 5 {
+		t.Fatalf("rules for %d zones, want 5 (mode none excluded): %+v", len(got), got)
+	}
+	if !got["e.example"].autoAt(time.Now()) || got["f.example"].autoAt(time.Now()) || got["e.example"].Auto || got["f.example"].Auto {
+		t.Fatalf("override: e=%+v f=%+v", got["e.example"], got["f.example"])
 	}
 	if a := got["a.example"]; !a.Auto || a.ZoneRPS != 500 || a.Hold != time.Minute {
 		t.Fatalf("a: %+v", a)

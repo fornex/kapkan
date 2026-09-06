@@ -91,6 +91,37 @@ type Zone struct {
 	// omitempty extension; the secrets make the document sensitive, which is
 	// why a node caches it 0600.
 	ClearanceKeys []ClearanceKey `json:"clearance_keys,omitempty"`
+	// ChallengeOverride is the brain's lever on the rung (E4.6, edge-spec §5):
+	// while Until is ahead the zone's challenge mode is Mode, whatever
+	// policy.challenge says, and the node re-reads the file's mode the moment
+	// it lapses — brain or no brain. Until is fixed when the operator acts, so
+	// the document's bytes (and its ETag) move only then. Nil when no lever
+	// is set. Added in E4.6 — an omitempty extension.
+	ChallengeOverride *ChallengeOverride `json:"challenge_override,omitempty"`
+}
+
+// ChallengeOverride is an operator's temporary say on a zone's rung: manual
+// or auto, until when, and why (for the log and the console).
+type ChallengeOverride struct {
+	Mode   string    `json:"mode"`
+	Until  time.Time `json:"until"`
+	Reason string    `json:"reason,omitempty"`
+}
+
+// Live reports whether the override is in force at now. A mode the node does
+// not know is not in force: an older node ignores what it cannot apply
+// rather than guess.
+func (o *ChallengeOverride) Live(now time.Time) bool {
+	return o != nil && now.Before(o.Until) && (o.Mode == ChallengeManual || o.Mode == ChallengeAuto)
+}
+
+// EffectiveChallenge is the zone's challenge mode at now: the override's
+// while it is live, the file's otherwise.
+func (z *Zone) EffectiveChallenge(now time.Time) string {
+	if z.ChallengeOverride.Live(now) {
+		return z.ChallengeOverride.Mode
+	}
+	return z.Policy.Challenge
 }
 
 // ClearanceKey is one clearance key: an opaque ID (the brain's epoch), the

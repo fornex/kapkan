@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"sort"
 	"time"
+
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
 
 // GET /api/v1/edge/zones/status (E4.5): the zones the ALIVE edge nodes
@@ -56,6 +58,8 @@ type EdgeZoneStatus struct {
 	RungWatchOnly []string `json:"rung_watch_only,omitempty"`
 	// ChallengeActive names the nodes with a zone-wide challenge in force.
 	ChallengeActive []EdgeZoneChallengeNode `json:"challenge_active,omitempty"`
+	// Override is the operator's lever in force on the zone (E4.6), if any.
+	Override *edgedoc.ChallengeOverride `json:"override,omitempty"`
 	// WouldBe is the union, across nodes, of the sources the nodes previewed
 	// a deny or a challenge for — the would-be set. The busiest first,
 	// bounded to 20 per reporting node; WouldBeTruncated counts the rest.
@@ -115,6 +119,21 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	doc := mergeEdgeZones(reports)
 	doc.NodesAlive = alive
+	// The operator's lever is brain state: it shows for its zone whether or
+	// not a node has reported the zone yet.
+	live := s.edgeLever.live(time.Now())
+	for i := range doc.Zones {
+		if o, ok := live[doc.Zones[i].Zone]; ok {
+			c := o
+			doc.Zones[i].Override = &c
+			delete(live, doc.Zones[i].Zone)
+		}
+	}
+	for zone, o := range live {
+		c := o
+		doc.Zones = append(doc.Zones, EdgeZoneStatus{Zone: zone, Override: &c})
+	}
+	sort.Slice(doc.Zones, func(i, j int) bool { return doc.Zones[i].Zone < doc.Zones[j].Zone })
 	writeJSON(w, http.StatusOK, doc)
 }
 

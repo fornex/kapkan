@@ -44,10 +44,10 @@ func (n *Node) reportZones(now time.Time) []api.EdgeReportZone {
 	if n.renderedDoc == nil {
 		return nil
 	}
-	policies := make(map[string]edgedoc.Policy, len(n.renderedDoc.Zones))
+	accepted := make(map[string]*edgedoc.Zone, len(n.renderedDoc.Zones))
 	if n.doc != nil {
 		for i := range n.doc.Zones {
-			policies[n.doc.Zones[i].Name] = n.doc.Zones[i].Policy
+			accepted[n.doc.Zones[i].Name] = &n.doc.Zones[i]
 		}
 	}
 	stale := n.staleWindowAfter()
@@ -57,16 +57,20 @@ func (n *Node) reportZones(now time.Time) []api.EdgeReportZone {
 		if z.Policy.Mode != edgedoc.ModeDecide {
 			continue
 		}
-		pol, ok := policies[z.Name]
+		az, ok := accepted[z.Name]
 		if !ok {
-			pol = z.Policy
+			az = z
 		}
+		pol := az.Policy
+		// The mode is the EFFECTIVE one — the brain's lever included — as the
+		// decision service applies it, not the file's word: under a manual
+		// lever the zone challenges everyone, and the report must say so.
 		// DryRun is the zone's watch-only state here (the node's or the zone's
 		// own); RungDryRun the rung's — those two, or the rung's own switch —
 		// so a consumer can tell an enforcing rung from one that only previews
 		// without guessing from a window's counters.
 		watchOnly := n.opt.DryRun || pol.DryRun
-		rz := api.EdgeReportZone{Zone: z.Name, DryRun: watchOnly, RungDryRun: watchOnly || pol.ChallengeDryRun(), Challenge: pol.Challenge}
+		rz := api.EdgeReportZone{Zone: z.Name, DryRun: watchOnly, RungDryRun: watchOnly || pol.ChallengeDryRun(), Challenge: az.EffectiveChallenge(now)}
 		if w, ok := n.windows[z.Name]; ok && now.Sub(w.Start.Add(w.Elapsed)) <= stale {
 			fillReportZone(&rz, w)
 		}
