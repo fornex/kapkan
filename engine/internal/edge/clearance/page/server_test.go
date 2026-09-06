@@ -124,14 +124,15 @@ func TestChallengePageShape(t *testing.T) {
 	if p.Difficulty != clearance.MinDifficulty || p.Return != "/cart?x=1" || !strings.HasPrefix(p.Nonce, "c1.") {
 		t.Fatalf("puzzle: %+v (the document key, not the local one, must issue)", p)
 	}
-	// The status line is announced once (role=status, no live counter in
-	// it); the fallback — the ticket's Continue — is outside <noscript>, so a
-	// browser whose script cannot run reaches it too; the <noscript> block
-	// carries the timer and the stylesheet that shows the fallback at once.
+	// The status line is the page's one live region, announced once (no live
+	// counter in it, and the fallback block is not one: its appearance is
+	// spoken through the status line); the fallback — the ticket's Continue —
+	// is outside <noscript>, so a browser whose script cannot run reaches it
+	// too; the <noscript> block carries the timer.
 	for _, want := range []string{
 		`<html lang="ru">`, "Проверяем браузер", `<p id="kapkan-status" role="status"></p>`, `<p id="kapkan-count" aria-hidden="true"></p>`,
 		`<noscript><meta http-equiv="refresh" content="7;url=/_kapkan/clearance/nojs?t=` + ticket + `"></noscript>`,
-		`<div id="kapkan-fallback" role="status">`, `<script src="/_kapkan/clearance/a/app.`, "Если страница не продолжится сама",
+		`<div id="kapkan-fallback">`, `<script src="/_kapkan/clearance/a/app.`, "Если страница не продолжится сама",
 		`<form method="get" action="/_kapkan/clearance/nojs">`, `<form id="kapkan-answer" method="post" action="/_kapkan/clearance/answer" hidden>`,
 		`name="return" value="/cart?x=1"`, `<button type="submit">Продолжить</button>`,
 	} {
@@ -139,8 +140,14 @@ func TestChallengePageShape(t *testing.T) {
 			t.Errorf("page lacks %q", want)
 		}
 	}
-	if strings.Contains(body, "aria-live") {
-		t.Error("the page has a live region that would re-announce the counter")
+	if strings.Contains(body, "aria-live") || strings.Count(body, `role="status"`) != 1 {
+		t.Error("the page has a live region besides the status line")
+	}
+	// The solver script is a plain, parser-blocking tag on purpose: no defer,
+	// no async — it hides the fallback as its first act, and the puzzle block
+	// above it is parsed by the time it runs.
+	if strings.Contains(body, " defer") || strings.Contains(body, " async") || !regexp.MustCompile(`<script src="/_kapkan/clearance/a/app\.[0-9a-f]+\.js"></script>`).MatchString(body) {
+		t.Error("the solver script is not a plain, parser-blocking script tag")
 	}
 	if strings.Contains(body, "http://") || strings.Contains(body, "https://") {
 		t.Error("the page references an external resource")

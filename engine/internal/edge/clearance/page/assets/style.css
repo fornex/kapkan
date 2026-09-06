@@ -23,9 +23,10 @@ p { margin: 0 0 1rem; }
 #kapkan-count { margin-top: -1rem; }
 /* The fallback — the timed ticket's Continue — is visible unless the script,
    as its first act, hides it; the script puts it back when it cannot solve
-   and beside a solve that runs long. No animation, no timer: nothing a user
-   style or a blocked script could switch off. */
-#kapkan-fallback[hidden] { display: none; }
+   and beside a solve that runs long, its sentence moved to the status line.
+   No animation, no timer: nothing a user style or a blocked script could
+   switch off. */
+[hidden] { display: none; }
 form { margin: 1rem 0; }
 button {
   font: inherit; font-weight: 600; color: var(--bg); background: var(--fg);
@@ -36,6 +37,6 @@ a { color: var(--accent); }
 footer { margin-top: 2rem; color: var(--muted); font-size: .875rem; border-top: 1px solid var(--border); padding-top: 1rem; max-width: 34rem; width: 100%; }
 footer p { margin: 0; }
 @media (prefers-reduced-motion: no-preference) {
-  #kapkan-status:not(:empty)::after { content: ""; display: inline-block; width: .5em; height: .5em; margin-left: .5em; border-radius: 50%; background: var(--muted); animation: kapkan-pulse 1.2s ease-in-out infinite; vertical-align: middle; }
+  #kapkan-status.kapkan-busy::after { content: ""; display: inline-block; width: .5em; height: .5em; margin-left: .5em; border-radius: 50%; background: var(--muted); animation: kapkan-pulse 1.2s ease-in-out infinite; vertical-align: middle; }
   @keyframes kapkan-pulse { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }
 }
