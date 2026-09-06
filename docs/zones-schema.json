@@ -50,8 +50,15 @@
                     "additionalProperties": false,
                     "properties": {
                       "hold_seconds": {
-                        "maximum": 3600,
-                        "minimum": 0,
+                        "anyOf": [
+                          {
+                            "const": 0
+                          },
+                          {
+                            "maximum": 3600,
+                            "minimum": 30
+                          }
+                        ],
                         "type": "integer"
                       },
                       "zone_rps": {
