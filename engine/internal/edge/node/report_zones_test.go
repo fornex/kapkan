@@ -183,16 +183,20 @@ func TestSourceStatePrecedence(t *testing.T) {
 // kept) until it fits, then certificates from the tail, then zones from the
 // tail — each counted.
 func TestTrimReportOrder(t *testing.T) {
-	// Every zone carries `sources` entries, alternating would-challenge (a
-	// telling state) and allow, busiest first.
+	// Every zone carries `sources` entries in the aggregator's tier order,
+	// busiest first within each tier: the first quarter previewed
+	// (would-challenge), the second refused (denied), the rest allowed.
 	big := func(zones, sources, certs int) api.EdgeReport {
 		var rep api.EdgeReport
 		for i := 0; i < zones; i++ {
 			z := api.EdgeReportZone{Zone: "zone-" + strings.Repeat("x", 40) + string(rune('a'+i%26)) + string(rune('a'+i/26)), Requests: 1}
 			for j := 0; j < sources; j++ {
 				state := api.SourceStateWouldChallenge
-				if j%2 == 1 {
+				switch {
+				case j >= sources/2:
 					state = api.SourceStateAllow
+				case j >= sources/4:
+					state = api.SourceStateDenied
 				}
 				z.TopSources = append(z.TopSources, api.EdgeReportSource{Source: "2001:db8:" + strings.Repeat("f", 4) + ":" + string(rune('a'+j%26)) + "::", Requests: uint64(1000 - j), State: state})
 			}
@@ -217,7 +221,7 @@ func TestTrimReportOrder(t *testing.T) {
 		t.Fatalf("a little over: size=%d sources=%d shed=%d trunc=%d/%d", size(rep), len(rep.Zones[0].TopSources), rep.Zones[0].SourcesTruncated, rep.CertsTruncated, rep.ZonesTruncated)
 	}
 	for _, s := range rep.Zones[0].TopSources {
-		if s.State != api.SourceStateWouldChallenge {
+		if s.State == api.SourceStateAllow {
 			t.Fatalf("a telling source went before an allowed one: %+v", rep.Zones[0].TopSources)
 		}
 	}
@@ -227,10 +231,22 @@ func TestTrimReportOrder(t *testing.T) {
 	if size(rep) > maxReportBytes || len(rep.Zones) != 200 || len(rep.Certs) != 50 || rep.CertsTruncated != 0 || rep.ZonesTruncated != 0 {
 		t.Fatalf("halving: size=%d zones=%d certs=%d trunc=%d/%d", size(rep), len(rep.Zones), len(rep.Certs), rep.CertsTruncated, rep.ZonesTruncated)
 	}
-	// Only the telling sources the halving cut are counted (the ten allowed
-	// ones went uncounted first).
-	if z := rep.Zones[0]; len(z.TopSources) == 0 || len(z.TopSources) >= 10 || z.TopSources[0].Requests != 1000 || z.SourcesTruncated+len(z.TopSources) != 10 {
-		t.Fatalf("halving kept %d of 10 telling (shed %d), busiest %d", len(z.TopSources), z.SourcesTruncated, z.TopSources[0].Requests)
+	// Only the WOULD-BE sources the halving cut are counted: the ten allowed
+	// ones went uncounted first, the five refused go next uncounted (the list
+	// is in tier order, the would-be head is kept longest), and the count is
+	// exactly the would-be sources missing.
+	if z := rep.Zones[0]; len(z.TopSources) == 0 || len(z.TopSources) >= 10 || z.TopSources[0].Requests != 1000 || z.SourcesTruncated != 5-min(len(z.TopSources), 5) {
+		t.Fatalf("halving kept %d of 10 telling (would-be missing %d), busiest %d", len(z.TopSources), z.SourcesTruncated, z.TopSources[0].Requests)
+	}
+	for i, s := range rep.Zones[0].TopSources {
+		if (i < 5) != (s.State == api.SourceStateWouldChallenge) {
+			t.Fatalf("the head is not the would-be sources: %+v", rep.Zones[0].TopSources)
+		}
+	}
+	// What the body limit made the report shed, for the node's warning: the
+	// per-zone growth of the count, never a negative from dropped zones.
+	if got, want := shedByLimit(big(200, 20, 50), rep), 200*rep.Zones[0].SourcesTruncated; got != want {
+		t.Fatalf("shedByLimit = %d, want %d", got, want)
 	}
 	// Certificates next: the tail goes, the zones stay whole.
 	rep = trimReport(big(100, 0, 3000))
@@ -241,6 +257,13 @@ func TestTrimReportOrder(t *testing.T) {
 	rep = trimReport(big(2000, 0, 0))
 	if size(rep) > maxReportBytes || rep.ZonesTruncated == 0 || len(rep.Zones)+rep.ZonesTruncated != 2000 || rep.Zones[0].Zone == "" {
 		t.Fatalf("zones last: size=%d zones=%d trunc=%d", size(rep), len(rep.Zones), rep.ZonesTruncated)
+	}
+	// Dropped zones are ZonesTruncated's to tell: the sources figure stays
+	// zero, never negative.
+	raw := big(3000, 4, 0)
+	rep = trimReport(raw)
+	if rep.ZonesTruncated == 0 || shedByLimit(raw, rep) != 0 {
+		t.Fatalf("dropped zones: zones_truncated=%d shed=%d", rep.ZonesTruncated, shedByLimit(raw, rep))
 	}
 }
 

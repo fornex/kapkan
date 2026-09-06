@@ -700,9 +700,8 @@ func (n *Node) terminatorAlive() *bool {
 	return &alive
 }
 
-// report assembles the node's self-report; the certificate list is cut to
-// what fits the brain's body limit, the count of dropped entries reported.
-// buildReport assembles the self-report, untrimmed.
+// buildReport assembles the self-report, untrimmed; report cuts it to the
+// brain's body limit.
 func (n *Node) buildReport() api.EdgeReport {
 	n.mu.Lock()
 	rep := api.EdgeReport{
@@ -737,10 +736,10 @@ func (n *Node) report() api.EdgeReport {
 // reason to exist under dry-run — survives longest: first the sources that
 // tell nothing (allowed, marked, cleared) go from every zone, uncounted
 // (they are not in the set); then every zone's list is halved, the head kept
-// (the would-be sources rank first in it), each cut source counted; then
-// certificate entries from the (zone-sorted) tail; then zones from their
-// tail — counted too, so the brain knows what it is missing and can say
-// "short", not "nobody".
+// (the would-be sources rank first in it), the would-be sources among the
+// cut counted; then certificate entries from the (zone-sorted) tail; then
+// zones from their tail — counted too, so the brain knows what it is
+// missing and can say "short", not "nobody".
 func trimReport(rep api.EdgeReport) api.EdgeReport {
 	fits := func() bool {
 		body, err := json.Marshal(rep)
@@ -771,7 +770,14 @@ func trimReport(rep api.EdgeReport) api.EdgeReport {
 			}
 			any = true
 			keep := len(z.TopSources) / 2
-			z.SourcesTruncated += len(z.TopSources) - keep
+			// Only a would-be source cut is a shortfall of the set: the list
+			// is in tier order, so the refused and challenged tail goes first,
+			// uncounted, and the would-be head last.
+			for _, s := range z.TopSources[keep:] {
+				if s.State == api.SourceStateWouldDeny || s.State == api.SourceStateWouldChallenge {
+					z.SourcesTruncated++
+				}
+			}
 			z.TopSources = z.TopSources[:keep]
 		}
 		if !any {
@@ -833,7 +839,7 @@ func (n *Node) postReport(ctx context.Context) {
 	// Two reasons a would-be set is short, told apart: what the body limit
 	// made this report shed is a warning; what the aggregator's per-window
 	// bound left out is the flood's size, not a fault, and is said at Debug.
-	if shed := shedSources(rep) - shedSources(raw); shed > 0 || rep.ZonesTruncated > 0 {
+	if shed := shedByLimit(raw, rep); shed > 0 || rep.ZonesTruncated > 0 {
 		n.log.Warn("self-report detail shed to fit the brain's body limit; the would-be set is partial", "sources", shed, "zones_dropped", rep.ZonesTruncated)
 	}
 	if short := shedSources(raw); short > 0 {
