@@ -250,7 +250,8 @@ security-relevant.
   second flood window stays the ceiling's and is enforced as before, one window later than in an
   `off` zone because the rung's turn is taken first; under a zone-wide challenge — previewed or
   not — a flooder had the rung with everyone else and is denied at once. In the verdict table a
-  deny drops the same source's challenge only when it outlives it (a shorter block leaves the
+  deny drops the same source's challenge only when it outlives it — or when the table is full and
+  the block needs the room, a challenge beneath a live deny being invisible anyway (a shorter block otherwise leaves the
   challenge beneath it, in force again when the block lapses), and challenges may fill at most half
   of the table, so a rotating botnet's challenges cannot crowd out the denies that must follow; a
   flooder whose challenge the quota refuses is denied instead. The zone-wide trigger measures the
