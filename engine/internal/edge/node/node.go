@@ -207,6 +207,9 @@ type Node struct {
 	termVer      string
 	termAlive    *bool
 	statusAddr   string
+	// windows is the last closed rollup window per zone (the aggregator's
+	// top-N view), for the self-report's zones section (E4.5).
+	windows map[string]rollup.WindowStats
 }
 
 type nodeFiles struct {
@@ -281,6 +284,7 @@ func New(opt Options) (*Node, error) {
 			}
 		},
 		OnWindowFull: func(w rollup.WindowStats) { n.rules.Apply(w, n.svc) },
+		OnWindow:     n.keepWindow,
 	}
 	n.challenges = acme.NewChallengeTable(nil)
 	if !opt.ACME.Disabled {
@@ -709,6 +713,7 @@ func (n *Node) report() api.EdgeReport {
 			Alive: n.termAlive,
 		},
 	}
+	rep.Zones = n.reportZones()
 	n.mu.Unlock()
 	if n.certs != nil {
 		for _, c := range n.certs.Inventory() {
@@ -719,14 +724,22 @@ func (n *Node) report() api.EdgeReport {
 	return trimReport(rep)
 }
 
-// trimReport drops certificate entries from the (zone-sorted) tail until the
-// report fits the brain's body limit, counting what went.
+// trimReport cuts the report down to the brain's body limit, least valuable
+// detail first: every zone's per-source list goes as one step (the zone
+// figures stay), then certificate entries from the (zone-sorted) tail, then
+// zones from their tail — each counted so the brain knows what it is missing.
 func trimReport(rep api.EdgeReport) api.EdgeReport {
-	for {
+	fits := func() bool {
 		body, err := json.Marshal(rep)
-		if err != nil || len(body) <= maxReportBytes || len(rep.Certs) == 0 {
-			return rep
-		}
+		return err != nil || len(body) <= maxReportBytes
+	}
+	if fits() {
+		return rep
+	}
+	for i := range rep.Zones {
+		rep.Zones[i].TopSources = nil
+	}
+	for len(rep.Certs) > 0 && !fits() {
 		drop := len(rep.Certs) / 10
 		if drop == 0 {
 			drop = 1
@@ -734,6 +747,15 @@ func trimReport(rep api.EdgeReport) api.EdgeReport {
 		rep.Certs = rep.Certs[:len(rep.Certs)-drop]
 		rep.CertsTruncated += drop
 	}
+	for len(rep.Zones) > 0 && !fits() {
+		drop := len(rep.Zones) / 10
+		if drop == 0 {
+			drop = 1
+		}
+		rep.Zones = rep.Zones[:len(rep.Zones)-drop]
+		rep.ZonesTruncated += drop
+	}
+	return rep
 }
 
 // reportLoop posts the self-report on a fixed cadence; on the same tick it

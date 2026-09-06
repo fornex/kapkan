@@ -612,9 +612,97 @@
     K.mount(root, children);
   }
 
+  /* ===== EDGE (E4.5): the edge nodes' zones, merged, and who would be
+     challenged. Read-only; the lever (E4.6) comes later. ===== */
+  function edgeChallengeCell(z) {
+    var active = z.challenge_active || [];
+    if (active.length) {
+      var reasons = {};
+      active.forEach(function (c) { reasons[c.reason || "manual"] = true; });
+      return K.badge("badge--active", I.t("ed.challenge.active", { n: active.length }) + " · " + Object.keys(reasons).sort().join(", "), "shield-alert");
+    }
+    if ((z.would_challenge || 0) > 0 || (z.would_deny || 0) > 0) return K.badge("badge--dry", I.t("ed.challenge.preview"));
+    return h("span", { class: "td-muted", text: I.t("ed.challenge.off") });
+  }
+  function edge(root, ctx) {
+    ctx.actions.loadEdge();
+    var st = ctx.state.edge;
+    var children = [V.viewHead(I.t("nav.edge"), I.t("ed.sub"))];
+
+    if (!ctx.status.edge_nodes_total) {
+      children.push(h("div", { class: "card" }, K.empty("shield-check", I.t("ed.empty.title"), I.t("ed.empty.sub"), "muted")));
+    } else if (st.forbidden) {
+      children.push(h("div", { class: "banner banner--info" }, [w.icon("lock"), h("span", { class: "banner__txt", text: I.t("ed.adminonly") })]));
+    } else if (!st.fetchedAt) {
+      children.push(h("div", { class: "card" }, h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.loading") }))));
+    } else if (!st.ok) {
+      /* a failed fetch is an error, never "no zones": the status says edge
+         nodes exist, so an empty table would be a false claim */
+      children.push(h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.error") })]));
+    } else if (!st.zones.length) {
+      children.push(h("div", { class: "card" }, K.empty("shield-check", I.t("ed.nozones.title"), I.t("ed.nozones.sub", { n: st.nodesReporting }), "muted")));
+    } else {
+      var rows = st.zones.map(function (z) {
+        var watch = z.watch_only || [];
+        return h("tr", {}, [
+          h("td", { class: "target-cell" }, [
+            h("div", { class: "mono", text: z.zone }),
+            watch.length ? h("div", { class: "td-muted", text: I.t("ed.watchonly", { n: watch.length }) }) : null
+          ]),
+          h("td", { class: "num mono", text: I.num(z.nodes || 0) }),
+          h("td", { class: "num mono", text: I.num(Math.round(z.rps || 0)) }),
+          h("td", { class: "num mono", text: I.abbr(z.challenged || 0) }),
+          h("td", { class: "num mono", text: I.abbr(z.cleared || 0) }),
+          h("td", { class: "num mono", text: I.abbr(z.would_challenge || 0) }),
+          h("td", { class: "num mono", text: I.abbr(z.would_deny || 0) }),
+          h("td", {}, edgeChallengeCell(z))
+        ]);
+      });
+      children.push(h("div", { class: "card" }, [
+        h("div", { class: "card__head" }, [
+          h("div", { class: "card__title" }, [w.icon("shield-check"), h("span", { text: I.t("ed.zones") }), K.badge("badge--muted", String(st.zones.length))]),
+          h("span", { class: "td-muted", text: I.t("ed.note", { n: st.nodesReporting }) })
+        ]),
+        h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+          h("thead", {}, h("tr", {}, [V.th("ed.zone"), V.thNum("ed.nodes"), V.thNum("ed.rps"), V.thNum("ed.challenged"), V.thNum("ed.cleared"),
+            V.thNum("ed.wouldchallenge"), V.thNum("ed.woulddeny"), V.th("ed.challenge")])),
+          h("tbody", {}, rows)
+        ]))
+      ]));
+
+      /* who would be challenged: the union across nodes, per zone */
+      var would = [];
+      st.zones.forEach(function (z) { (z.would_be || []).forEach(function (s) { would.push({ zone: z.zone, s: s }); }); });
+      var wouldRows = would.map(function (e) {
+        return h("tr", {}, [
+          h("td", { class: "mono", text: e.s.source }),
+          h("td", { class: "mono td-muted", text: e.zone }),
+          h("td", {}, K.badge(e.s.state === "would-deny" ? "badge--dry" : "badge--muted", I.t("ed.state." + e.s.state))),
+          h("td", { class: "num mono", text: I.abbr(e.s.requests || 0) }),
+          h("td", {}, h("span", { class: "row wrap", style: { gap: "4px" } }, (e.s.nodes || []).map(function (n) { return K.badge("badge--muted", n); })))
+        ]);
+      });
+      children.push(h("div", { class: "card mt-4" }, [
+        h("div", { class: "card__head" }, [
+          h("div", { class: "card__title" }, [w.icon("shield-alert"), h("span", { text: I.t("ed.wouldbe.title") }), K.badge("badge--muted", String(would.length))]),
+          h("span", { class: "td-muted", text: I.t("ed.wouldbe.sub") })
+        ]),
+        would.length
+          ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+            h("thead", {}, h("tr", {}, [V.th("ed.source"), V.th("ed.zone"), V.th("col.state"), V.thNum("ed.requests"), V.th("col.node")])),
+            h("tbody", {}, wouldRows)
+          ]))
+          : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.wouldbe.empty") }))
+      ]));
+    }
+    K.mount(root, children);
+  }
+
   V.hostgroups = hostgroups;
   V.traffic = traffic;
   V.settings = settings;
   V.attackDetail = attackDetail;
   V.nodes = nodes;
+  V.edge = edge;
 })(window);

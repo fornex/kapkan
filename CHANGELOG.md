@@ -271,6 +271,23 @@ security-relevant.
   contract, so the flag is silently absent there; `GET /api/v1/edge/nodes` shows each node's
   version. The per-zone flag in the node's report arrives with the per-zone rollups (E4.5).
 
+- Edge track, E4.5 — signals up: the node's rollups in its report, and "who would be challenged".
+  Each self-report now carries a **zones section**: for every decide-mode zone the live generation
+  serves, the last closed ten-second window (`rps`, requests, decided, denied, challenged, cleared,
+  `would_deny`, `would_challenge`, status classes), whether a zone-wide challenge is in force and
+  why, whether the zone is watch-only on that node, and the window's busiest sources with the
+  strongest thing the node did to each (`denied` / `challenged` / `would-deny` / `would-challenge`
+  / `cleared` / `marked` / `allow`). A report too big for the brain's limit sheds the per-source
+  detail first, then certificates, then zones — each counted. New **`GET
+  /api/v1/edge/zones/status`** (viewer rank, unscoped tokens, like the inventory) merges the alive
+  nodes' zones: sums per zone, the nodes on which it is watch-only or under a zone-wide challenge,
+  and the **would-be set** — the union of sources the nodes previewed a challenge or a deny for,
+  with the nodes that saw each, the busiest first, bounded to 20 per node. That set is edge-spec
+  §8's "who would have been challenged", for the console and the acceptance rig alike. The
+  console gains an **Edge** view (shown when `edge.nodes[]` is configured; `/api/v1/status` now
+  carries `edge_nodes_total`): the zones table with a challenge column (off / preview / active with
+  its reasons) and a "Who would be challenged" panel, in all five languages.
+
 ## [1.7.0] - 2026-09-02
 
 ### Config changes
