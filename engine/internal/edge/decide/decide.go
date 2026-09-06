@@ -263,9 +263,16 @@ type zoneState struct {
 	pol    edgedoc.Policy
 	keys   []clearance.Key
 	exempt []string
-	// dryRun is challenge_options.dry_run: the rung is watch-only for this
-	// zone whatever the node's own dry-run says.
+	// dryRun is the rung's watch-only switch for this zone
+	// (challenge_options.dry_run, or the zone's own watchOnly): a challenge
+	// is answered as an allow marked would-challenge whatever the node's own
+	// dry-run says.
 	dryRun bool
+	// watchOnly is policy.dry_run (E4.7): every verdict of this zone — a
+	// deny, a challenge — is previewed as a mark, as under the node's
+	// dry-run, while the sibling zones enforce. Adds to the node's flag,
+	// never subtracts.
+	watchOnly bool
 	// flipOn until flipUntil challenges every source of an auto zone (E4.4's
 	// zone-rps trigger, E4.6's override); flipWhy names the reason.
 	flipOn    bool
@@ -369,7 +376,7 @@ func (s *Service) SetZones(doc *edgedoc.Doc) {
 	zones := make(map[string]*zoneState, len(doc.Zones))
 	for i := range doc.Zones {
 		z := &doc.Zones[i]
-		st := &zoneState{name: z.Name, pol: z.Policy, keys: s.keysFor(z), exempt: z.Policy.ExemptPaths(), dryRun: z.Policy.ChallengeDryRun()}
+		st := &zoneState{name: z.Name, pol: z.Policy, keys: s.keysFor(z), exempt: z.Policy.ExemptPaths(), dryRun: z.Policy.ChallengeDryRun(), watchOnly: z.Policy.DryRun}
 		if old := s.zones[z.Name]; old != nil && old.flipOn {
 			if z.Policy.Challenge == edgedoc.ChallengeAuto {
 				st.flipOn, st.flipUntil, st.flipWhy = old.flipOn, old.flipUntil, old.flipWhy
@@ -591,7 +598,9 @@ func (s *Service) DecideRequest(req Request) Verdict {
 	// will log, and that log line is what closes it (Complete).
 	s.open(k, now)
 
-	if !v.Allow && !v.Challenge && s.dryRun {
+	// Watch-only — the node's (every zone) or this zone's own (policy.dry_run,
+	// E4.7): the deny is previewed as a mark.
+	if !v.Allow && !v.Challenge && (s.dryRun || zs.watchOnly) {
 		v.DryRun = true
 		v.Allow = true
 		v.Mark = clipMark("would-deny:" + v.Reason)

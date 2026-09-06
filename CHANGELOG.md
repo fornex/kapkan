@@ -258,6 +258,16 @@ security-relevant.
   same admitted load in dry-run as enforcing (a would-deny preview is refused traffic too), so the
   preview shows the flips enforcement would make. Zones schema regenerated.
 
+- Edge track, E4.7 — per-zone dry-run. A zone can now be watch-only on its own: `policy.dry_run:
+  true` in the zones file makes the node count and mark that zone's decisions — a deny as an allow
+  marked `would-deny:<reason>`, a challenge as `would-challenge:<why>` — and enforce none, while
+  its sibling zones on the same node enforce as before. The node's own `dry_run` (edge.yaml) stays
+  the floor: a zone can only be MORE watch-only than its node, never less, so the box owner's
+  switch is never undone by a tenant's zones file. The rung's own `challenge_options.dry_run` is
+  the third layer, for the rung alone. Travels in the document as `policy.dry_run` (omitted when
+  false — a document written before E4.7 keeps its bytes and its ETag); zones schema regenerated.
+  The per-zone flag in the node's report arrives with the per-zone rollups (E4.5).
+
 ## [1.7.0] - 2026-09-02
 
 ### Config changes
