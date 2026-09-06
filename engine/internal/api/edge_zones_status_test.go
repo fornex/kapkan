@@ -30,14 +30,14 @@ func TestEdgeZonesStatus(t *testing.T) {
 		t.Fatalf("scoped token = %d, want 403", code)
 	}
 	body := `{"version":"1.8.0","zones":[{"zone":"a.example","at":"2026-09-06T12:00:10Z","window_seconds":10,"rps":42.5,"requests":425,"decided":420,` +
-		`"denied":30,"challenged":5,"would_challenge":12,"would_deny":3,"dry_run":true,` +
-		`"challenge_active":{"reason":"zone-rps","until":"2026-09-06T12:05:00Z"},` +
+		`"denied":30,"challenged":5,"would_challenge":12,"would_deny":3,"dry_run":true,"challenge":"auto",` +
+		`"challenge_active":{"reason":"zone-rps","until":"2026-09-06T12:05:00Z","dry_run":true},` +
 		`"top_sources":[{"source":"203.0.113.9","rps":20,"requests":200,"state":"would-deny"},{"source":"203.0.113.10","rps":1,"requests":10,"state":"would-challenge"},{"source":"203.0.113.11","rps":1,"requests":10,"state":"allow"}]}]}`
 	if rec := postEdgeReport(h, "e1", body, "agent-secret"); rec.Code != http.StatusNoContent {
 		t.Fatalf("report = %d (%s)", rec.Code, rec.Body.String())
 	}
 	// Reported, never polled: not alive, so nothing is merged.
-	if doc, code := getEdgeZonesStatus(h, "op-secret"); code != http.StatusOK || doc.NodesReporting != 0 || len(doc.Zones) != 0 {
+	if doc, code := getEdgeZonesStatus(h, "op-secret"); code != http.StatusOK || doc.NodesAlive != 0 || doc.NodesReporting != 0 || len(doc.Zones) != 0 {
 		t.Fatalf("before a poll: %d %+v", code, doc)
 	}
 	// The zones poll is presence.
@@ -45,12 +45,26 @@ func TestEdgeZonesStatus(t *testing.T) {
 		t.Fatalf("poll = %d", rec.Code)
 	}
 	doc, code := getEdgeZonesStatus(h, "op-secret")
-	if code != http.StatusOK || doc.NodesReporting != 1 || len(doc.Zones) != 1 {
+	if code != http.StatusOK || doc.NodesAlive != 1 || doc.NodesReporting != 1 || len(doc.Zones) != 1 {
 		t.Fatalf("after the poll: %d %+v", code, doc)
 	}
 	z := doc.Zones[0]
-	if z.Zone != "a.example" || z.Nodes != 1 || z.RPS != 42.5 || z.Requests != 425 || z.Challenged != 5 || z.WouldChallenge != 12 || z.WouldDeny != 3 {
+	if z.Zone != "a.example" || z.Nodes != 1 || z.RPS != 42.5 || z.Requests != 425 || z.Challenged != 5 || z.WouldChallenge != 12 || z.WouldDeny != 3 || z.Challenge != "auto" || z.Partial {
 		t.Fatalf("zone figures: %+v", z)
+	}
+	if len(z.ChallengeActive) != 1 || !z.ChallengeActive[0].DryRun {
+		t.Fatalf("the flip's preview flag did not travel: %+v", z.ChallengeActive)
+	}
+	// The console's gate: /api/v1/status carries the edge node count for
+	// every role.
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	r.Header.Set("Authorization", "Bearer scoped-secret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	var st map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &st)
+	if rec.Code != http.StatusOK || st["edge_nodes_total"] != float64(1) {
+		t.Fatalf("status edge_nodes_total = %v (%d)", st["edge_nodes_total"], rec.Code)
 	}
 	if len(z.WatchOnly) != 1 || z.WatchOnly[0] != "e1" || len(z.ChallengeActive) != 1 || z.ChallengeActive[0].Node != "e1" || z.ChallengeActive[0].Reason != "zone-rps" {
 		t.Fatalf("watch-only / challenge: %+v", z)
@@ -71,13 +85,13 @@ func TestMergeEdgeZones(t *testing.T) {
 	}
 	reports := map[string]EdgeReport{
 		"e2": {Zones: []EdgeReportZone{
-			{Zone: "b.example", RPS: 1, Requests: 10},
-			{Zone: "a.example", RPS: 10, Requests: 100, WouldDeny: 4, TopSources: []EdgeReportSource{
-				src("203.0.113.1", SourceStateWouldChallenge, 50), src("203.0.113.2", SourceStateWouldDeny, 40), src("203.0.113.3", SourceStateDenied, 30)}},
+			{Zone: "b.example", RPS: 1, Requests: 10, Challenge: "off"},
+			{Zone: "a.example", RPS: 10, Requests: 100, WouldDeny: 4, Challenge: "auto", SourcesTruncated: 7, TopSources: []EdgeReportSource{
+				src("203.0.113.1", SourceStateWouldDeny, 50), src("203.0.113.2", SourceStateWouldDeny, 40), src("203.0.113.3", SourceStateDenied, 30)}},
 		}},
 		"e1": {Zones: []EdgeReportZone{
-			{Zone: "a.example", RPS: 5, Requests: 50, Challenged: 2, DryRun: true, ChallengeActive: &EdgeReportChallenge{Reason: "manual", Until: until}, TopSources: []EdgeReportSource{
-				src("203.0.113.1", SourceStateWouldDeny, 20), src("203.0.113.4", SourceStateWouldChallenge, 5)}},
+			{Zone: "a.example", RPS: 5, Requests: 50, Challenged: 2, DryRun: true, Challenge: "auto", ChallengeActive: &EdgeReportChallenge{Reason: "manual", Until: until, DryRun: true}, TopSources: []EdgeReportSource{
+				src("203.0.113.1", SourceStateWouldChallenge, 20), src("203.0.113.4", SourceStateWouldChallenge, 5)}},
 		}},
 		"e3": {Version: "1.8.0"}, // alive, no zones: not reporting zones
 	}
@@ -86,14 +100,15 @@ func TestMergeEdgeZones(t *testing.T) {
 		t.Fatalf("doc: %+v", doc)
 	}
 	a := doc.Zones[0]
-	if a.Nodes != 2 || a.RPS != 15 || a.Requests != 150 || a.Challenged != 2 || a.WouldDeny != 4 {
+	if a.Nodes != 2 || a.RPS != 15 || a.Requests != 150 || a.Challenged != 2 || a.WouldDeny != 4 || a.Challenge != "auto" || !a.Partial {
 		t.Fatalf("a sums: %+v", a)
 	}
-	if len(a.WatchOnly) != 1 || a.WatchOnly[0] != "e1" || len(a.ChallengeActive) != 1 || a.ChallengeActive[0].Node != "e1" || !a.ChallengeActive[0].Until.Equal(until) {
+	if len(a.WatchOnly) != 1 || a.WatchOnly[0] != "e1" || len(a.ChallengeActive) != 1 || a.ChallengeActive[0].Node != "e1" || !a.ChallengeActive[0].Until.Equal(until) || !a.ChallengeActive[0].DryRun {
 		t.Fatalf("a flags: %+v", a)
 	}
-	// .1 seen by both (would-challenge on e2, would-deny on e1 → would-deny,
-	// 70 requests, nodes e1,e2); .2 by e2; .4 by e1; .3 is denied, not would-be.
+	// .1 seen by both — would-challenge on e1 (merged first), would-deny on
+	// e2: the stronger state wins whichever came first — 70 requests, nodes
+	// e1,e2; .2 by e2; .4 by e1; .3 is denied, not would-be.
 	want := []EdgeZoneWouldBe{
 		{Source: "203.0.113.1", State: SourceStateWouldDeny, Requests: 70, Nodes: []string{"e1", "e2"}},
 		{Source: "203.0.113.2", State: SourceStateWouldDeny, Requests: 40, Nodes: []string{"e2"}},
@@ -104,7 +119,7 @@ func TestMergeEdgeZones(t *testing.T) {
 	if string(got) != string(exp) {
 		t.Fatalf("would-be:\n got %s\nwant %s", got, exp)
 	}
-	if b := doc.Zones[1]; b.Nodes != 1 || b.RPS != 1 || len(b.WouldBe) != 0 || len(b.WatchOnly) != 0 {
+	if b := doc.Zones[1]; b.Nodes != 1 || b.RPS != 1 || len(b.WouldBe) != 0 || len(b.WatchOnly) != 0 || b.Challenge != "off" || b.Partial {
 		t.Fatalf("b: %+v", b)
 	}
 	// The bound: one node names 25 would-be sources; 20 survive, 5 are counted.

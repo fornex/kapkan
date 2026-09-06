@@ -614,14 +614,27 @@
 
   /* ===== EDGE (E4.5): the edge nodes' zones, merged, and who would be
      challenged. Read-only; the lever (E4.6) comes later. ===== */
+  /* The challenge column reads the zone's MODE first, then what is in force:
+     off — nothing challenges; manual — everyone without a clearance is (or,
+     watch-only, would be) challenged; auto — the ladder is armed, and a
+     zone-wide flip shows as active on the nodes where it bites, as a preview
+     where the rung is watch-only. */
   function edgeChallengeCell(z) {
     var active = z.challenge_active || [];
+    var previewing = (z.would_challenge || 0) > 0;
     if (active.length) {
-      var reasons = {};
-      active.forEach(function (c) { reasons[c.reason || "manual"] = true; });
-      return K.badge("badge--active", I.t("ed.challenge.active", { n: active.length }) + " · " + Object.keys(reasons).sort().join(", "), "shield-alert");
+      var reasons = {}, biting = 0;
+      active.forEach(function (c) { reasons[c.reason || "manual"] = true; if (!c.dry_run) biting++; });
+      var why = " · " + Object.keys(reasons).sort().join(", ");
+      if (biting === 0) return K.badge("badge--dry", I.t("ed.challenge.preview") + why);
+      return K.badge("badge--active", I.t("ed.challenge.active", { n: biting }) + why, "shield-alert");
     }
-    if ((z.would_challenge || 0) > 0 || (z.would_deny || 0) > 0) return K.badge("badge--dry", I.t("ed.challenge.preview"));
+    if (z.challenge === "manual") {
+      return K.badge(previewing ? "badge--dry" : "badge--active", I.t(previewing ? "ed.challenge.preview" : "ed.challenge.manual"));
+    }
+    if (z.challenge === "auto") {
+      return K.badge(previewing ? "badge--dry" : "badge--muted", I.t(previewing ? "ed.challenge.preview" : "ed.challenge.auto"));
+    }
     return h("span", { class: "td-muted", text: I.t("ed.challenge.off") });
   }
   function edge(root, ctx) {
@@ -641,14 +654,14 @@
       children.push(h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
         w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.error") })]));
     } else if (!st.zones.length) {
-      children.push(h("div", { class: "card" }, K.empty("shield-check", I.t("ed.nozones.title"), I.t("ed.nozones.sub", { n: st.nodesReporting }), "muted")));
+      children.push(h("div", { class: "card" }, K.empty("shield-check", I.t("ed.nozones.title"), I.plural(st.nodesAlive, "edgeNodesUp") + " " + I.t("ed.nozones.sub"), "muted")));
     } else {
       var rows = st.zones.map(function (z) {
         var watch = z.watch_only || [];
         return h("tr", {}, [
           h("td", { class: "target-cell" }, [
             h("div", { class: "mono", text: z.zone }),
-            watch.length ? h("div", { class: "td-muted", text: I.t("ed.watchonly", { n: watch.length }) }) : null
+            watch.length ? h("div", { class: "td-muted", text: I.plural(watch.length, "edgeWatchOnlyNodes") }) : null
           ]),
           h("td", { class: "num mono", text: I.num(z.nodes || 0) }),
           h("td", { class: "num mono", text: I.num(Math.round(z.rps || 0)) }),
@@ -662,7 +675,7 @@
       children.push(h("div", { class: "card" }, [
         h("div", { class: "card__head" }, [
           h("div", { class: "card__title" }, [w.icon("shield-check"), h("span", { text: I.t("ed.zones") }), K.badge("badge--muted", String(st.zones.length))]),
-          h("span", { class: "td-muted", text: I.t("ed.note", { n: st.nodesReporting }) })
+          h("span", { class: "td-muted", text: I.plural(st.nodesReporting, "edgeReportingNodes") })
         ]),
         h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
           h("thead", {}, h("tr", {}, [V.th("ed.zone"), V.thNum("ed.nodes"), V.thNum("ed.rps"), V.thNum("ed.challenged"), V.thNum("ed.cleared"),
@@ -671,9 +684,10 @@
         ]))
       ]));
 
-      /* who would be challenged: the union across nodes, per zone */
-      var would = [];
-      st.zones.forEach(function (z) { (z.would_be || []).forEach(function (s) { would.push({ zone: z.zone, s: s }); }); });
+      /* who would be challenged: the union across nodes, per zone; partial
+         when a node shed part of its per-source detail to fit its report */
+      var would = [], partial = false;
+      st.zones.forEach(function (z) { if (z.partial) partial = true; (z.would_be || []).forEach(function (s) { would.push({ zone: z.zone, s: s }); }); });
       var wouldRows = would.map(function (e) {
         return h("tr", {}, [
           h("td", { class: "mono", text: e.s.source }),
@@ -685,7 +699,7 @@
       });
       children.push(h("div", { class: "card mt-4" }, [
         h("div", { class: "card__head" }, [
-          h("div", { class: "card__title" }, [w.icon("shield-alert"), h("span", { text: I.t("ed.wouldbe.title") }), K.badge("badge--muted", String(would.length))]),
+          h("div", { class: "card__title" }, [w.icon("shield-alert"), h("span", { text: I.t("ed.wouldbe.title") }), K.badge("badge--muted", String(would.length)), partial ? K.badge("badge--dry", I.t("ed.wouldbe.partial")) : null]),
           h("span", { class: "td-muted", text: I.t("ed.wouldbe.sub") })
         ]),
         would.length
@@ -693,7 +707,7 @@
             h("thead", {}, h("tr", {}, [V.th("ed.source"), V.th("ed.zone"), V.th("col.state"), V.thNum("ed.requests"), V.th("col.node")])),
             h("tbody", {}, wouldRows)
           ]))
-          : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.wouldbe.empty") }))
+          : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t(partial ? "ed.wouldbe.shed" : "ed.wouldbe.empty") }))
       ]));
     }
     K.mount(root, children);

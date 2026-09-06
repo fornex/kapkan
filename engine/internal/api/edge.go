@@ -332,6 +332,10 @@ type EdgeReport struct {
 	ZonesTruncated int              `json:"zones_truncated,omitempty"`
 }
 
+// The report's zone-level challenge mode, as the zones file (or the brain)
+// set it: what the challenge column reads before it looks at counters.
+// (Values are edgedoc.ChallengeOff / Manual / Auto.)
+
 // EdgeReportZone is one zone's last rollup window on one node. Advisory, like
 // the rest of the report: the brain sums and merges, never acts on it.
 type EdgeReportZone struct {
@@ -344,6 +348,9 @@ type EdgeReportZone struct {
 	// DryRun is the zone's EFFECTIVE watch-only state on this node: the node's
 	// own dry_run or the zone's policy.dry_run (E4.7).
 	DryRun bool `json:"dry_run,omitempty"`
+	// Challenge is the zone's challenge mode (policy.challenge as the node
+	// applies it): off, manual or auto.
+	Challenge string `json:"challenge,omitempty"`
 	// RPS is requests over the window's real length.
 	RPS            float64 `json:"rps,omitempty"`
 	Requests       uint64  `json:"requests,omitempty"`
@@ -361,14 +368,23 @@ type EdgeReportZone struct {
 	// node (the local trigger, E4.4; the brain's lever, E4.6).
 	ChallengeActive *EdgeReportChallenge `json:"challenge_active,omitempty"`
 	// TopSources are the window's busiest sources (the aggregator's top-N),
-	// each with the strongest thing the node did to it.
-	TopSources []EdgeReportSource `json:"top_sources,omitempty"`
+	// each with the strongest thing the node did to it. SourcesTruncated
+	// counts the ones the node shed from this list to fit the body limit —
+	// the least telling first (allowed, marked, cleared), then the tail of
+	// the rest — so an empty list with a count is "shed", not "nobody".
+	TopSources       []EdgeReportSource `json:"top_sources,omitempty"`
+	SourcesTruncated int                `json:"sources_truncated,omitempty"`
 }
 
 // EdgeReportChallenge is a zone-wide challenge in force.
 type EdgeReportChallenge struct {
 	Reason string    `json:"reason,omitempty"`
 	Until  time.Time `json:"until"`
+	// DryRun says the flip is a PREVIEW on this node: the rung's own
+	// watch-only switch (challenge_options.dry_run, true by default) or the
+	// node's dry_run means every request it would challenge is answered as
+	// an allow marked would-challenge.
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // The states EdgeReportSource.State takes, strongest first.
