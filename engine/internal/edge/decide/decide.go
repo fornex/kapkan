@@ -495,6 +495,7 @@ func (s *Service) DecideRequest(req Request) Verdict {
 			v.Mark = e.mark
 			result = "allow_marked"
 		}
+		s.retireLapsedFlip(zs, now)
 		why := zs.challengeWhy(e, now)
 		if why != "" && pathExempt(zs.exempt, req.Path, req.RawURI) {
 			why = ""
@@ -567,13 +568,9 @@ func (s *Service) DecideRequest(req Request) Verdict {
 // "" (no), "manual", "zone:<reason>" (the zone is flipped) or
 // "table:<reason>" (a challenge verdict for this source). A zone with no LIVE
 // key cannot verify a clearance, so it cannot challenge either — nobody would
-// ever get through. Caller holds the mutex; a lapsed flip is retired here,
-// so the gauge does not wait for a sweep on an idle zone.
+// ever get through. Caller holds the mutex and has retired a lapsed flip
+// (retireLapsedFlip), so the gauge does not wait for a sweep on an idle zone.
 func (zs *zoneState) challengeWhy(e *entry, now time.Time) string {
-	if zs.flipOn && !now.Before(zs.flipUntil) {
-		zs.flipOn = false
-		metrics.EdgeChallengeActive.WithLabelValues(zs.name).Set(0)
-	}
 	if !anyLive(zs.keys, now) {
 		return ""
 	}
@@ -744,15 +741,27 @@ func (s *Service) ZoneChallenge(zone string) (on bool, until time.Time, reason s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	zs := s.zones[zone]
-	if zs == nil || !zs.flipOn {
+	if zs == nil {
 		return false, time.Time{}, ""
 	}
-	if !now.Before(zs.flipUntil) {
-		zs.flipOn = false
-		metrics.EdgeChallengeActive.WithLabelValues(zone).Set(0)
+	s.retireLapsedFlip(zs, now)
+	if !zs.flipOn {
 		return false, time.Time{}, ""
 	}
 	return true, zs.flipUntil, zs.flipWhy
+}
+
+// retireLapsedFlip turns a zone-wide flip off once its hold has passed: the
+// gauge, and the Info line that closes the episode the "on" line opened —
+// extensions are Debug, so without it the only Info line would state an
+// `until` long past for the flip's whole life. Caller holds s.mu.
+func (s *Service) retireLapsedFlip(zs *zoneState, now time.Time) {
+	if !zs.flipOn || now.Before(zs.flipUntil) {
+		return
+	}
+	zs.flipOn = false
+	metrics.EdgeChallengeActive.WithLabelValues(zs.name).Set(0)
+	s.log.Info("zone-wide challenge off", "zone", zs.name, "reason", zs.flipWhy, "until", zs.flipUntil.UTC().Format(time.RFC3339), "lapsed", true)
 }
 
 // Complete records that a decided request for (zone, src) was logged by the
@@ -940,11 +949,8 @@ func (s *Service) maybeSweep(now time.Time) {
 // everything belonging to a zone that is no longer configured.
 func (s *Service) sweep(now time.Time) {
 	s.lastSweep = now
-	for name, zs := range s.zones {
-		if zs.flipOn && !now.Before(zs.flipUntil) {
-			zs.flipOn = false
-			metrics.EdgeChallengeActive.WithLabelValues(name).Set(0)
-		}
+	for _, zs := range s.zones {
+		s.retireLapsedFlip(zs, now)
 	}
 	for k, b := range s.buckets {
 		if _, ok := s.zones[k.zone]; !ok || now.Sub(b.last) > idleAfter {

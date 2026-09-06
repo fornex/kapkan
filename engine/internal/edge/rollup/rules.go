@@ -255,16 +255,21 @@ func (r *Rules) Apply(w WindowStats, sink Sink) Applied {
 		over := s.DeniedRate + s.WouldDenyRate
 		if over >= r.FloodMinDenied && s.Decided > 0 && float64(over)/float64(s.Decided) >= r.FloodDeniedShare {
 			// The ladder (D9): in an auto zone a first flood earns a challenge;
-			// a source that already had the rung's chance — challenged (by
-			// name or with the whole zone), cleared, or remembered from an
-			// earlier promotion — is denied.
+			// a source that already had the rung's chance is denied. The
+			// window's own evidence says so first — it was served the rung
+			// (401s, or their would-challenge preview) during the window — and
+			// the sink's state at the close is the fallback for a source
+			// challenged late in the window that sent nothing after; cleared,
+			// or remembered from an earlier promotion, counts the same way.
 			k := repeatKey{zone: w.Zone, src: s.Src}
-			if zr.Auto && s.Cleared == 0 && r.repeats[k] == nil && !zoneWasChallenged && !sink.Challenged(w.Zone, s.Src) {
-				if sink.Challenge(w.Zone, s.Src, r.ChallengeTTL, "flood") {
-					out.Challenged++
-				}
+			hadRung := s.Challenged > 0 || s.WouldChallenge > 0 || s.Cleared > 0 || r.repeats[k] != nil ||
+				zoneWasChallenged || sink.Challenged(w.Zone, s.Src)
+			if zr.Auto && !hadRung && sink.Challenge(w.Zone, s.Src, r.ChallengeTTL, "flood") {
+				out.Challenged++
 				continue
 			}
+			// A rung that could not be offered (the table's challenge quota
+			// is full) does not spare the flooder: the block follows.
 			ttl := r.escalate(k, now)
 			if sink.Deny(w.Zone, s.Src, ttl, "flood") {
 				out.Denied++
