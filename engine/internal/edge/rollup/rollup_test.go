@@ -243,6 +243,8 @@ type fakeSink struct {
 	denied     map[string]bool
 	challenged map[string]bool
 	zoneOn     map[string]bool
+	// refuseChallenges makes Challenge fail, as the table's quota would.
+	refuseChallenges bool
 }
 
 func (f *fakeSink) ZoneChallenge(zone string) (bool, time.Time, string) {
@@ -268,6 +270,9 @@ func (f *fakeSink) Denied(zone string, src netip.Addr) bool {
 }
 
 func (f *fakeSink) Challenge(zone string, src netip.Addr, ttl time.Duration, reason string) bool {
+	if f.refuseChallenges {
+		return false
+	}
 	f.challenges = append(f.challenges, zone+"/"+src.String()+"/"+reason+"/"+ttl.String())
 	return true
 }
@@ -278,6 +283,10 @@ func (f *fakeSink) Challenged(zone string, src netip.Addr) bool {
 
 func (f *fakeSink) SetZoneChallenge(zone string, on bool, until time.Time, reason string) bool {
 	f.flips = append(f.flips, zone+"/"+reason+"/"+until.UTC().Format(time.RFC3339))
+	if f.zoneOn == nil {
+		f.zoneOn = map[string]bool{}
+	}
+	f.zoneOn[zone] = on
 	return true
 }
 

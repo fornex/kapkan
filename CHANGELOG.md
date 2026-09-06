@@ -248,9 +248,14 @@ security-relevant.
   previews the whole ladder as `would-challenge` / `would-deny` marks; a zone's
   `challenge_options.dry_run` (the default) previews the rung only — the deny that follows a
   second flood window stays the ceiling's and is enforced as before, one window later than in an
-  `off` zone because the rung's turn is taken first. A deny now displaces the same source's
-  challenge in the verdict table, and challenges may fill at most half of it, so a rotating
-  botnet's challenges cannot crowd out the denies that must follow. Zones schema regenerated.
+  `off` zone because the rung's turn is taken first; under a zone-wide challenge — previewed or
+  not — a flooder had the rung with everyone else and is denied at once. In the verdict table a
+  deny drops the same source's challenge only when it outlives it (a shorter block leaves the
+  challenge beneath it, in force again when the block lapses), and challenges may fill at most half
+  of the table, so a rotating botnet's challenges cannot crowd out the denies that must follow; a
+  flooder whose challenge the quota refuses is denied instead. The zone-wide trigger measures the
+  same admitted load in dry-run as enforcing (a would-deny preview is refused traffic too), so the
+  preview shows the flips enforcement would make. Zones schema regenerated.
 
 ## [1.7.0] - 2026-09-02
 

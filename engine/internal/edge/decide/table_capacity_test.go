@@ -43,4 +43,29 @@ func TestDenyDisplacesChallengeAndChallengesAreCapped(t *testing.T) {
 	if n := len(s.Verdicts()); n != 4 {
 		t.Fatalf("verdicts = %d, want 4 (three denies, one challenge)", n)
 	}
+
+	// With room to spare, a challenge that OUTLIVES the deny stays beneath
+	// it: hidden while the block is live, in force again when it lapses —
+	// the block does not set the source free.
+	c2 := newClock()
+	s2 := New(Options{Now: c2.now, MaxSources: 16})
+	s2.SetZones(doc(zone("example.com", 0, 0)))
+	s2.Challenge("example.com", src("198.51.100.1"), 5*time.Minute, "flood")
+	s2.Deny("example.com", src("198.51.100.1"), time.Minute, "flood")
+	if v := s2.Decide("example.com", src("198.51.100.1")); v.Allow || v.Reason != "table:flood" || v.Challenge {
+		t.Fatalf("under the deny: %+v", v)
+	}
+	if s2.Challenged("example.com", src("198.51.100.1")) || len(s2.Verdicts()) != 2 {
+		t.Fatalf("challenge beneath the deny: challenged=%v verdicts=%d", s2.Challenged("example.com", src("198.51.100.1")), len(s2.Verdicts()))
+	}
+	c2.add(61 * time.Second)
+	if !s2.Challenged("example.com", src("198.51.100.1")) {
+		t.Fatal("the challenge did not outlive the deny")
+	}
+	// A challenge the deny outlives is dropped at once.
+	s2.Challenge("example.com", src("198.51.100.2"), time.Minute, "flood")
+	s2.Deny("example.com", src("198.51.100.2"), time.Hour, "flood")
+	if n := len(s2.Verdicts()); n != 2 {
+		t.Fatalf("verdicts after a longer deny = %d, want 2 (the .1 challenge, the .2 deny)", n)
+	}
 }

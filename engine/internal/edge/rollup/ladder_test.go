@@ -52,6 +52,32 @@ func TestRulesLadderInAutoZones(t *testing.T) {
 	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 100, Sources: []SourceStats{flooding("198.51.100.1", 0)}}, sink); got.Denied != 1 || got.Challenged != 0 {
 		t.Fatalf("flooder under the zone flip: %+v %v %v", got, sink.challenges, sink.denies)
 	}
+	// The window's own evidence counts even when the sink's state lapsed at
+	// the close: a source served 401s (or their preview) during the window
+	// had the rung.
+	served := flooding("198.51.100.5", 0)
+	served.Challenged = 30
+	previewed := flooding("198.51.100.6", 0)
+	previewed.WouldChallenge = 30
+	sink = &fakeSink{}
+	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 200, Sources: []SourceStats{served, previewed}}, sink); got.Denied != 2 || got.Challenged != 0 {
+		t.Fatalf("flooders served the rung during the window: %+v %v", got, sink.challenges)
+	}
+	// A rung that cannot be offered (the challenge quota is full) does not
+	// spare the flooder: the block follows.
+	sink = &fakeSink{refuseChallenges: true}
+	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 100, Sources: []SourceStats{flooding("198.51.100.1", 0)}}, sink); got.Denied != 1 || got.Challenged != 0 || len(sink.denies) != 1 {
+		t.Fatalf("flooder with the quota full: %+v %v", got, sink.denies)
+	}
+	// The order of the window's two effects: the zone flip is read BEFORE
+	// this window's trigger, so the flooder that trips the trigger is
+	// offered the rung in that same window, not denied for a flip that did
+	// not exist while it flooded.
+	r.SetZones(map[string]ZoneRule{"auto.example": {Auto: true, ZoneRPS: 50, Hold: time.Minute}})
+	sink = &fakeSink{}
+	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 1000, AdmittedRPS: 60, Sources: []SourceStats{flooding("198.51.100.9", 0)}}, sink); !got.ZoneChallenge || got.Challenged != 1 || got.Denied != 0 {
+		t.Fatalf("flip and first flood in one window: %+v %v %v", got, sink.challenges, sink.denies)
+	}
 	// A zone whose rung is not auto denies a flooder outright, as before.
 	sink = &fakeSink{}
 	got = r.Apply(WindowStats{Zone: "manual.example", Requests: 100, Sources: []SourceStats{flooding("198.51.100.1", 0)}}, sink)

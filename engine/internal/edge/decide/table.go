@@ -78,15 +78,26 @@ func (t *table) lookupMark(k key, now time.Time) *entry {
 	return nil
 }
 
-// setDeny installs or replaces k's deny. It displaces k's own weaker
-// verdicts first: a deny outranks them anyway, and the room they held is
-// the deny's — so the block a challenged source earns always lands, however
-// full the table.
+// setDeny installs or replaces k's deny. A weaker verdict of k's the deny
+// OUTLIVES is dead weight and goes; one that outlasts the deny stays beneath
+// it (lookup hides it while the deny is live), so a challenged source that
+// earned a one-minute block is challenged again when the block lapses rather
+// than set free — unless the table is full and the deny needs the room, in
+// which case the block lands and the weaker verdicts make way: the block a
+// challenged flooder earns always lands.
 func (t *table) setDeny(k key, reason string, until, now time.Time) bool {
-	delete(t.challenges, k)
-	delete(t.marks, k)
+	if c, ok := t.challenges[k]; ok && !c.until.After(until) {
+		delete(t.challenges, k)
+	}
+	if m, ok := t.marks[k]; ok && !m.until.After(until) {
+		delete(t.marks, k)
+	}
 	if !t.room(t.denies, k, now) {
-		return false
+		delete(t.challenges, k)
+		delete(t.marks, k)
+		if !t.room(t.denies, k, now) {
+			return false
+		}
 	}
 	t.denies[k] = entry{deny: true, reason: reason, until: until}
 	t.gauge()

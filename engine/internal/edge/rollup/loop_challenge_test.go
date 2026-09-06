@@ -290,6 +290,28 @@ func TestDecisionLoopRefusedTrafficDoesNotFlipTheZone(t *testing.T) {
 	}
 }
 
+// TestDecisionLoopDryRunTriggerMatchesEnforcement pins that the zone-wide
+// trigger previews only the flips enforcement would make: under the node's
+// dry-run a lone flooder's would-deny 200s are refused traffic too, so the
+// zone stays as it is — and the flooder's own ladder previews itself.
+func TestDecisionLoopDryRunTriggerMatchesEnforcement(t *testing.T) {
+	l := newChallengeLoop(t, 10, true, &edgedoc.AutoChallenge{ZoneRPS: 50, HoldSeconds: 60})
+	bot := netip.MustParseAddr("203.0.113.45")
+	for window := 0; window < 4; window++ {
+		l.flood(bot, 2000, 5*time.Millisecond)
+		l.agg.Tick()
+		if on, _, why := l.svc.ZoneChallenge("example.com"); on {
+			t.Fatalf("window %d: a lone flooder flipped the zone in dry-run (%s)", window, why)
+		}
+	}
+	if v := l.request(bot); !v.Allow || !v.DryRun || v.Mark != "would-deny:table:flood" {
+		t.Fatalf("the flooder's preview: %+v", v)
+	}
+	if v := l.request(netip.MustParseAddr("203.0.113.46")); !v.Allow || v.Mark != "" {
+		t.Fatalf("bystander: %+v", v)
+	}
+}
+
 // TestDecisionLoopFlooderUnderZoneFlipIsDenied pins that a source flooding
 // while the whole zone is under challenge has had the rung: the window's rule
 // denies it outright rather than stack a challenge of its own on the flip.
