@@ -94,6 +94,7 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 				FailureMode:      zn.Policy.FailureMode,
 				Challenge:        zn.Policy.Challenge,
 				Rate:             EdgeDocRate{RPS: zn.Policy.Rate.RPS, Concurrency: zn.Policy.Rate.Concurrency},
+				DryRun:           zn.Policy.DryRun,
 				ChallengeOptions: challengeOptions(zn.Policy.ChallengeOptions),
 			},
 			ExtraDirectivesFile: zn.ExtraDirectivesFile,
