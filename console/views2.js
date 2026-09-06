@@ -614,26 +614,28 @@
 
   /* ===== EDGE (E4.5): the edge nodes' zones, merged, and who would be
      challenged. Read-only; the lever (E4.6) comes later. ===== */
-  /* The challenge column reads the zone's MODE first, then what is in force:
-     off — nothing challenges; manual — everyone without a clearance is (or,
-     watch-only, would be) challenged; auto — the ladder is armed, and a
-     zone-wide flip shows as active on the nodes where it bites, as a preview
-     where the rung is watch-only. */
+  /* The challenge column reads the zone's MODE first, then where it bites —
+     from STATE, never from a window's counters: off — nothing challenges;
+     manual — everyone without a clearance is challenged; auto — the ladder is
+     armed. Either is a preview on the nodes rung_watch_only names (the node's
+     dry_run, the zone's, or the rung's own challenge_options.dry_run) and
+     bites on the rest; a zone-wide flip shows as active on the nodes where it
+     bites, as a preview where it only counts. */
   function edgeChallengeCell(z) {
     var active = z.challenge_active || [];
-    var previewing = (z.would_challenge || 0) > 0;
+    var nodes = z.nodes || 0, rungWatch = (z.rung_watch_only || []).length, biting = Math.max(0, nodes - rungWatch);
     if (active.length) {
-      var reasons = {}, biting = 0;
-      active.forEach(function (c) { reasons[c.reason || "manual"] = true; if (!c.dry_run) biting++; });
+      var reasons = {}, bite = 0;
+      active.forEach(function (c) { reasons[c.reason || "manual"] = true; if (!c.dry_run) bite++; });
       var why = " · " + Object.keys(reasons).sort().join(", ");
-      if (biting === 0) return K.badge("badge--dry", I.t("ed.challenge.preview") + why);
-      return K.badge("badge--active", I.t("ed.challenge.active", { n: biting }) + why, "shield-alert");
+      if (bite === 0) return K.badge("badge--dry", I.t("ed.challenge.preview") + why);
+      return K.badge("badge--active", I.plural(bite, "edgeActiveOnNodes") + why, "shield-alert");
     }
-    if (z.challenge === "manual") {
-      return K.badge(previewing ? "badge--dry" : "badge--active", I.t(previewing ? "ed.challenge.preview" : "ed.challenge.manual"));
-    }
-    if (z.challenge === "auto") {
-      return K.badge(previewing ? "badge--dry" : "badge--muted", I.t(previewing ? "ed.challenge.preview" : "ed.challenge.auto"));
+    if (z.challenge === "manual" || z.challenge === "auto") {
+      if (biting === 0) return K.badge("badge--dry", I.t("ed.challenge.preview"));
+      var label = I.t(z.challenge === "manual" ? "ed.challenge.manual" : "ed.challenge.auto");
+      if (rungWatch > 0) label += " · " + I.plural(biting, "edgeBitingNodes");
+      return K.badge(z.challenge === "manual" ? "badge--active" : "badge--muted", label);
     }
     return h("span", { class: "td-muted", text: I.t("ed.challenge.off") });
   }
@@ -684,10 +686,18 @@
         ]))
       ]));
 
-      /* who would be challenged: the union across nodes, per zone; partial
-         when a node shed part of its per-source detail to fit its report */
+      /* zone entries the nodes cut from their reports to fit: those zones are
+         missing or undercounted above, and the table must not read as whole */
+      if (st.zonesTruncated) {
+        children.push(h("div", { class: "banner banner--info mt-4" }, [w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.zonestruncated", { n: st.zonesTruncated }) })]));
+      }
+
+      /* who would be challenged: the union across nodes, busiest first across
+         zones (the caption says so); partial when a node cut part of its
+         per-source detail — the aggregator's bound or the report's size */
       var would = [], partial = false;
       st.zones.forEach(function (z) { if (z.partial) partial = true; (z.would_be || []).forEach(function (s) { would.push({ zone: z.zone, s: s }); }); });
+      would.sort(function (a, b) { return (b.s.requests || 0) - (a.s.requests || 0) || (a.s.source < b.s.source ? -1 : a.s.source > b.s.source ? 1 : 0); });
       var wouldRows = would.map(function (e) {
         return h("tr", {}, [
           h("td", { class: "mono", text: e.s.source }),

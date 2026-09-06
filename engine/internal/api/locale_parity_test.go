@@ -185,8 +185,8 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		want   int
 	}{
 		{"units", 0, 4},
-		{"plurals", 1, 8},
-		{"plurals", 0, 16},  // 5 keys × {one, other}
+		{"plurals", 1, 10},
+		{"plurals", 0, 20},  // 8 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes
 		{"strings", 0, 324}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5)
 		{"enums", 1, 8},
 		{"enums", 0, 43},

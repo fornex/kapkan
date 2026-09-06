@@ -61,22 +61,50 @@ func (n *Node) reportZones(now time.Time) []api.EdgeReportZone {
 		if !ok {
 			pol = z.Policy
 		}
-		rz := api.EdgeReportZone{Zone: z.Name, DryRun: n.opt.DryRun || pol.DryRun, Challenge: pol.Challenge}
+		// DryRun is the zone's watch-only state here (the node's or the zone's
+		// own); RungDryRun the rung's — those two, or the rung's own switch —
+		// so a consumer can tell an enforcing rung from one that only previews
+		// without guessing from a window's counters.
+		watchOnly := n.opt.DryRun || pol.DryRun
+		rz := api.EdgeReportZone{Zone: z.Name, DryRun: watchOnly, RungDryRun: watchOnly || pol.ChallengeDryRun(), Challenge: pol.Challenge}
 		if w, ok := n.windows[z.Name]; ok && now.Sub(w.Start.Add(w.Elapsed)) <= stale {
 			fillReportZone(&rz, w)
 		}
 		if on, until, why := n.svc.ZoneChallenge(z.Name); on {
-			rz.ChallengeActive = &api.EdgeReportChallenge{Reason: why, Until: until, DryRun: n.opt.DryRun || pol.ChallengeDryRun()}
+			rz.ChallengeActive = &api.EdgeReportChallenge{Reason: why, Until: until, DryRun: rz.RungDryRun}
 		}
 		out = append(out, rz)
 	}
 	return out
 }
 
+// pruneWindows forgets the kept windows of zones the document no longer has:
+// the per-zone stores follow the document, this one like the others, so a
+// fleet that adds and removes zones for years does not keep every departed
+// zone's last window. Caller holds n.mu.
+func (n *Node) pruneWindows(names []string) {
+	if len(n.windows) == 0 {
+		return
+	}
+	keep := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		keep[name] = struct{}{}
+	}
+	for name := range n.windows {
+		if _, ok := keep[name]; !ok {
+			delete(n.windows, name)
+		}
+	}
+}
+
 // fillReportZone copies a closed window into the report's shape.
 func fillReportZone(rz *api.EdgeReportZone, w rollup.WindowStats) {
 	rz.At = w.Start.Add(w.Elapsed)
 	rz.WindowSeconds = w.Elapsed.Seconds()
+	// The aggregator's own bound counts here too: a telling source it cut is
+	// one the would-be set lacks, and the brain must say "partial", not
+	// "nobody".
+	rz.SourcesTruncated = w.TellingTruncated
 	rz.RPS = w.RPS
 	rz.Requests, rz.Decided, rz.Denied = w.Requests, w.Decided, w.Denied
 	rz.Challenged, rz.Cleared = w.Challenged, w.Cleared

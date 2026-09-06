@@ -84,26 +84,26 @@ func TestMergeEdgeZones(t *testing.T) {
 		return EdgeReportSource{Source: ip, Requests: n, State: state}
 	}
 	reports := map[string]EdgeReport{
-		"e2": {Zones: []EdgeReportZone{
+		"e2": {ZonesTruncated: 2, Zones: []EdgeReportZone{
 			{Zone: "b.example", RPS: 1, Requests: 10, Challenge: "off"},
 			{Zone: "a.example", RPS: 10, Requests: 100, WouldDeny: 4, Challenge: "auto", SourcesTruncated: 7, TopSources: []EdgeReportSource{
 				src("203.0.113.1", SourceStateWouldDeny, 50), src("203.0.113.2", SourceStateWouldDeny, 40), src("203.0.113.3", SourceStateDenied, 30)}},
 		}},
 		"e1": {Zones: []EdgeReportZone{
-			{Zone: "a.example", RPS: 5, Requests: 50, Challenged: 2, DryRun: true, Challenge: "auto", ChallengeActive: &EdgeReportChallenge{Reason: "manual", Until: until, DryRun: true}, TopSources: []EdgeReportSource{
+			{Zone: "a.example", RPS: 5, Requests: 50, Challenged: 2, DryRun: true, RungDryRun: true, Challenge: "auto", ChallengeActive: &EdgeReportChallenge{Reason: "manual", Until: until, DryRun: true}, TopSources: []EdgeReportSource{
 				src("203.0.113.1", SourceStateWouldChallenge, 20), src("203.0.113.4", SourceStateWouldChallenge, 5)}},
 		}},
-		"e3": {Version: "1.8.0"}, // alive, no zones: not reporting zones
+		"e3": {Version: "1.8.0", ZonesTruncated: 1}, // alive, no zones left in its report: not reporting zones, but its cut counts
 	}
 	doc := mergeEdgeZones(reports)
-	if doc.NodesReporting != 2 || len(doc.Zones) != 2 || doc.Zones[0].Zone != "a.example" || doc.Zones[1].Zone != "b.example" {
+	if doc.NodesReporting != 2 || len(doc.Zones) != 2 || doc.Zones[0].Zone != "a.example" || doc.Zones[1].Zone != "b.example" || doc.ZonesTruncated != 3 {
 		t.Fatalf("doc: %+v", doc)
 	}
 	a := doc.Zones[0]
 	if a.Nodes != 2 || a.RPS != 15 || a.Requests != 150 || a.Challenged != 2 || a.WouldDeny != 4 || a.Challenge != "auto" || !a.Partial {
 		t.Fatalf("a sums: %+v", a)
 	}
-	if len(a.WatchOnly) != 1 || a.WatchOnly[0] != "e1" || len(a.ChallengeActive) != 1 || a.ChallengeActive[0].Node != "e1" || !a.ChallengeActive[0].Until.Equal(until) || !a.ChallengeActive[0].DryRun {
+	if len(a.WatchOnly) != 1 || a.WatchOnly[0] != "e1" || len(a.RungWatchOnly) != 1 || a.RungWatchOnly[0] != "e1" || len(a.ChallengeActive) != 1 || a.ChallengeActive[0].Node != "e1" || !a.ChallengeActive[0].Until.Equal(until) || !a.ChallengeActive[0].DryRun {
 		t.Fatalf("a flags: %+v", a)
 	}
 	// .1 seen by both — would-challenge on e1 (merged first), would-deny on
@@ -119,8 +119,17 @@ func TestMergeEdgeZones(t *testing.T) {
 	if string(got) != string(exp) {
 		t.Fatalf("would-be:\n got %s\nwant %s", got, exp)
 	}
-	if b := doc.Zones[1]; b.Nodes != 1 || b.RPS != 1 || len(b.WouldBe) != 0 || len(b.WatchOnly) != 0 || b.Challenge != "off" || b.Partial {
+	if b := doc.Zones[1]; b.Nodes != 1 || b.RPS != 1 || len(b.WouldBe) != 0 || len(b.WatchOnly) != 0 || len(b.RungWatchOnly) != 0 || b.Challenge != "off" || b.Partial {
 		t.Fatalf("b: %+v", b)
+	}
+	// The stronger state wins in EITHER merge order: nodes sort by name, so
+	// the would-deny report is merged first here and second above.
+	both := map[string]EdgeReport{
+		"a1": {Zones: []EdgeReportZone{{Zone: "z.example", TopSources: []EdgeReportSource{src("203.0.113.1", SourceStateWouldDeny, 50)}}}},
+		"b1": {Zones: []EdgeReportZone{{Zone: "z.example", TopSources: []EdgeReportSource{src("203.0.113.1", SourceStateWouldChallenge, 20)}}}},
+	}
+	if wb := mergeEdgeZones(both).Zones[0].WouldBe; len(wb) != 1 || wb[0].State != SourceStateWouldDeny || wb[0].Requests != 70 || len(wb[0].Nodes) != 2 {
+		t.Fatalf("would-be with the deny merged first: %+v", wb)
 	}
 	// The bound: one node names 25 would-be sources; 20 survive, 5 are counted.
 	many := EdgeReport{Zones: []EdgeReportZone{{Zone: "c.example"}}}
