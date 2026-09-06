@@ -64,10 +64,11 @@ func TestRulesLadderInAutoZones(t *testing.T) {
 		t.Fatalf("flooders served the rung during the window: %+v %v", got, sink.challenges)
 	}
 	// A rung that cannot be offered (the challenge quota is full) does not
-	// spare the flooder: the block follows.
+	// spare the flooder: the block follows — a fresh source, so the deny can
+	// only be the fall-through's, at the base TTL, with no challenge landed.
 	sink = &fakeSink{refuseChallenges: true}
-	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 100, Sources: []SourceStats{flooding("198.51.100.1", 0)}}, sink); got.Denied != 1 || got.Challenged != 0 || len(sink.denies) != 1 {
-		t.Fatalf("flooder with the quota full: %+v %v", got, sink.denies)
+	if got := r.Apply(WindowStats{Zone: "auto.example", Requests: 100, Sources: []SourceStats{flooding("198.51.100.8", 0)}}, sink); got.Denied != 1 || got.Challenged != 0 || len(sink.denies) != 1 || len(sink.challenges) != 0 || sink.ttls[0] != DefaultDenyTTL {
+		t.Fatalf("flooder with the quota full: %+v denies=%v challenges=%v ttls=%v", got, sink.denies, sink.challenges, sink.ttls)
 	}
 	// The order of the window's two effects: the zone flip is read BEFORE
 	// this window's trigger, so the flooder that trips the trigger is

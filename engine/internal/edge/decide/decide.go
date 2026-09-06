@@ -290,6 +290,28 @@ type Service struct {
 	// document carries no clearance keys (an older brain): valid on this node
 	// alone, for the life of the process.
 	localMaster []byte
+	// lapsed collects zone-wide flips retired under the mutex, for the log
+	// lines the caller writes once it has let go of it (flushLapsed): a
+	// back-pressured log must never stall every decision on the node.
+	lapsed []flipLapse
+}
+
+// flipLapse is one retired zone-wide flip, to be logged.
+type flipLapse struct {
+	zone, reason string
+	until        time.Time
+}
+
+// flushLapsed logs the flips retired since the last flush. Called WITHOUT
+// the mutex; it takes it only to detach the slice.
+func (s *Service) flushLapsed() {
+	s.mu.Lock()
+	lapsed := s.lapsed
+	s.lapsed = nil
+	s.mu.Unlock()
+	for _, l := range lapsed {
+		s.log.Info("zone-wide challenge off", "zone", l.zone, "reason", l.reason, "until", l.until.UTC().Format(time.RFC3339), "lapsed", true)
+	}
 }
 
 // New returns a Service with no zones: every request is answered allow with
@@ -448,6 +470,9 @@ func (s *Service) DecideRequest(req Request) Verdict {
 	now := s.now()
 	zone := req.Zone
 	k := key{zone: zone, src: edgedoc.SourceKey(req.Src)}
+	// Registered before the locks' defers, so it runs after their unlocks:
+	// the log lines for flips the sweep or this decision retired.
+	defer s.flushLapsed()
 	s.mu.Lock()
 	s.maybeSweep(now)
 	zs, ok := s.zones[zone]
@@ -738,6 +763,7 @@ func (s *Service) SetZoneChallenge(zone string, on bool, until time.Time, reason
 // flip is retired here too.
 func (s *Service) ZoneChallenge(zone string) (on bool, until time.Time, reason string) {
 	now := s.now()
+	defer s.flushLapsed()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	zs := s.zones[zone]
@@ -754,14 +780,15 @@ func (s *Service) ZoneChallenge(zone string) (on bool, until time.Time, reason s
 // retireLapsedFlip turns a zone-wide flip off once its hold has passed: the
 // gauge, and the Info line that closes the episode the "on" line opened —
 // extensions are Debug, so without it the only Info line would state an
-// `until` long past for the flip's whole life. Caller holds s.mu.
+// `until` long past for the flip's whole life. Caller holds s.mu; the line
+// is queued for flushLapsed, which the caller runs after releasing it.
 func (s *Service) retireLapsedFlip(zs *zoneState, now time.Time) {
 	if !zs.flipOn || now.Before(zs.flipUntil) {
 		return
 	}
 	zs.flipOn = false
 	metrics.EdgeChallengeActive.WithLabelValues(zs.name).Set(0)
-	s.log.Info("zone-wide challenge off", "zone", zs.name, "reason", zs.flipWhy, "until", zs.flipUntil.UTC().Format(time.RFC3339), "lapsed", true)
+	s.lapsed = append(s.lapsed, flipLapse{zone: zs.name, reason: zs.flipWhy, until: zs.flipUntil})
 }
 
 // Complete records that a decided request for (zone, src) was logged by the
