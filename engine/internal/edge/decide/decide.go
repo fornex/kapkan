@@ -398,7 +398,7 @@ func (s *Service) SetZones(doc *edgedoc.Doc) {
 				// is owed all the same, so the log never leaves an "on …
 				// until T" open.
 				metrics.EdgeChallengeActive.WithLabelValues(z.Name).Set(0)
-				s.lapsed = append(s.lapsed, flipLapse{zone: z.Name, reason: old.flipWhy, until: old.flipUntil})
+				s.lapsed = append(s.lapsed, flipLapse{zone: z.Name, reason: old.flipWhy, until: old.flipUntil, lapsed: !now.Before(old.flipUntil)})
 			}
 		}
 		// The brain's lever is news once, when it arrives or changes.
@@ -407,9 +407,14 @@ func (s *Service) SetZones(doc *edgedoc.Doc) {
 		}
 		zones[z.Name] = st
 	}
-	for name := range s.zones {
+	for name, old := range s.zones {
 		if _, still := zones[name]; !still {
 			metrics.EdgeChallengeActive.DeleteLabelValues(name)
+			// A zone that leaves the document under a live flip: the
+			// episode's closing line is owed here too.
+			if old.flipOn {
+				s.lapsed = append(s.lapsed, flipLapse{zone: name, reason: old.flipWhy, until: old.flipUntil, lapsed: !now.Before(old.flipUntil)})
+			}
 		}
 	}
 	s.zones = zones
