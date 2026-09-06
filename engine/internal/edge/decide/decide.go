@@ -375,8 +375,12 @@ func New(opts Options) *Service {
 // cleared.
 func (s *Service) SetZones(doc *edgedoc.Doc) {
 	now := s.now()
+	type news struct {
+		zone string
+		o    edgedoc.ChallengeOverride
+	}
+	var announce []news
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	zones := make(map[string]*zoneState, len(doc.Zones))
 	for i := range doc.Zones {
 		z := &doc.Zones[i]
@@ -391,7 +395,7 @@ func (s *Service) SetZones(doc *edgedoc.Doc) {
 		}
 		// The brain's lever is news once, when it arrives or changes.
 		if o := z.ChallengeOverride; o.Live(now) && (old == nil || old.override == nil || old.override.Mode != o.Mode || !old.override.Until.Equal(o.Until)) {
-			s.log.Info("challenge override in effect", "zone", z.Name, "mode", o.Mode, "until", o.Until.UTC().Format(time.RFC3339), "reason", o.Reason)
+			announce = append(announce, news{z.Name, *o})
 		}
 		zones[z.Name] = st
 	}
@@ -401,6 +405,12 @@ func (s *Service) SetZones(doc *edgedoc.Doc) {
 		}
 	}
 	s.zones = zones
+	s.mu.Unlock()
+	// Said outside the lock, like every line of this file: a stalled logger
+	// must never hold up a decision.
+	for _, a := range announce {
+		s.log.Info("challenge override in effect", "zone", a.zone, "mode", a.o.Mode, "until", a.o.Until.UTC().Format(time.RFC3339), "reason", a.o.Reason)
+	}
 }
 
 // LocalKeyID names the key a node derives for itself: last in every zone's
