@@ -2,53 +2,18 @@ package node
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"net"
-	"net/http"
-	"time"
 
-	"github.com/kapkan-io/kapkan/internal/edge/unixsock"
+	"github.com/kapkan-io/kapkan/internal/edge/clearance/page"
 )
 
-// serveClearance holds the fourth socket — the clearance page the renderer
-// points every decide-mode zone at (upstream kapkan_clearance) — so that the
-// rendered configuration always has something to connect to. Until E4.3
-// lands the page itself, it answers 503 with no-store: nginx's
-// proxy_intercept_errors turns that into the zone's failure_mode (open →
-// the origin, undecided; closed → 503), exactly what a dead page server
-// would get, so a zone switched to challenge on a node without the page
-// degrades predictably rather than hanging. Same socket contract as the
-// decision service: 0660, the terminator's worker group.
+// serveClearance runs the clearance page on the fourth socket — the
+// proof-of-work rung's face (edge-spec §5, E4.3): the challenge page the
+// terminator serves in place of the origin on a 401, the answer endpoint
+// that mints the clearance cookie, the no-JS ticket, and the page's two
+// assets. It signs with the keys the decision service verifies with, and
+// reads each zone's rung policy from it, so the two halves cannot disagree.
+// Same socket contract as the decision service: 0660, the terminator's
+// worker group — the page mints cookies, so nobody else may ask it.
 func (n *Node) serveClearance(ctx context.Context) error {
-	gid, err := unixsock.GroupID(n.opt.SocketGroup)
-	if err != nil {
-		return fmt.Errorf("clearance socket: %w", err)
-	}
-	sock, release, err := unixsock.Listen("unix", n.files.clearanceSock, 0o660, gid)
-	if err != nil {
-		return fmt.Errorf("clearance socket: %w", err)
-	}
-	srv := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Cache-Control", "no-store")
-			http.Error(w, "the clearance page is not available on this node", http.StatusServiceUnavailable)
-		}),
-		ReadHeaderTimeout: 2 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		MaxHeaderBytes:    64 << 10,
-	}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-	n.log.Info("clearance page listening", "socket", n.files.clearanceSock, "mode", "660", "group", n.opt.SocketGroup)
-	err = srv.Serve(sock.(net.Listener))
-	release()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
-	return err
+	return (&page.Server{Zones: n.svc, Path: n.files.clearanceSock, SocketGroup: n.opt.SocketGroup, Logger: n.opt.Logger}).ListenAndServe(ctx)
 }

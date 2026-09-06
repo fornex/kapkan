@@ -390,6 +390,28 @@ func anyLive(keys []clearance.Key, now time.Time) bool {
 	return false
 }
 
+// Rung reports the zone's resolved challenge policy for the clearance page:
+// the puzzle difficulty and the clearance lifetimes. ok is false for a zone
+// the service does not know or whose rung is off (the page has nothing to
+// offer such a zone).
+func (s *Service) Rung(zone string) (clearance.Policy, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	zs := s.zones[zone]
+	if zs == nil || zs.pol.Challenge == edgedoc.ChallengeOff || zs.pol.Mode != edgedoc.ModeDecide {
+		return clearance.Policy{}, false
+	}
+	return clearance.Policy{
+		Difficulty: zs.pol.ChallengeDifficulty(),
+		CookieTTL:  time.Duration(zs.pol.CookieTTLSeconds()) * time.Second,
+		NoJSTTL:    NoJSClearanceTTL,
+	}, true
+}
+
+// NoJSClearanceTTL is the lifetime of a clearance earned by the timed no-JS
+// ticket: short, because the ticket cost the client nothing but patience.
+const NoJSClearanceTTL = 5 * time.Minute
+
 // Keys returns a copy of the clearance keys the service verifies zone's
 // cookies with — what the clearance page signs with (E4.3): the document's
 // keys first, the node's own last. Nil for an unknown zone.
