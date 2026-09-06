@@ -86,8 +86,8 @@ Grund:
 | `rate` | `429` mit `Retry-After: 1` | Die Quelle hat `policy.rate.rps` überschritten. |
 | `concurrency` | `429` mit `Retry-After: 1` | Die Quelle hat `policy.rate.concurrency` Anfragen gleichzeitig laufen. |
 | `table:<reason>` | `403` | Die Quelle steht in der Verdikt-Tabelle des Knotens: hochgestuft durch die Rollups (`table:flood` — eine Quelle, die weiter gegen ihre Ratenobergrenze gedrückt hat, wird für eine Minute gesperrt, bei Wiederholung verdoppelt bis auf zehn). Die Dry-Run-Markierung ist `would-deny:table:<reason>`. |
-| `challenge:manual` | die Freigabeseite (`403`, niemals gecacht) | `policy.challenge: manual`, und die Anfrage trägt keine gültige Freigabe. |
-| `challenge:zone:<reason>` | die Freigabeseite | Die ganze Zone steht unter Challenge: der `auto.zone_rps`-Auslöser des Knotens (`zone-rps`) oder der Hebel des Betreibers. |
+| `challenge:manual` | die Freigabeseite (`403`, niemals gecacht) | `policy.challenge: manual` — oder ein manueller [Hebel](/docs/edge#der-hebel) — und die Anfrage trägt keine gültige Freigabe. |
+| `challenge:zone:<reason>` | die Freigabeseite | Die ganze Zone steht unter ihrem `auto.zone_rps`-Auslöser (`zone-rps`). |
 | `challenge:table:<reason>` | die Freigabeseite | Die Quelle steht mit einer Challenge in der Verdikt-Tabelle: die Flut-Regel der Rollups in einer `auto`-Zone (`table:flood`) — die Stufe, die ein Flooder vor der Sperre bekommt. |
 
 Eine Anfrage, die die Stufe überwindet, erreicht den Origin mit der Markierung `cleared` (oder

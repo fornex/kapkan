@@ -86,8 +86,8 @@ une marque — `401` — la source doit d'abord franchir le palier, de sorte que
 | `rate` | `429` avec `Retry-After: 1` | La source a dépassé `policy.rate.rps`. |
 | `concurrency` | `429` avec `Retry-After: 1` | La source a `policy.rate.concurrency` requêtes en cours. |
 | `table:<reason>` | `403` | La source est dans la table de verdicts du nœud : promue par les rollups (`table:flood` — une source qui a continué de forcer son plafond de débit est refusée pendant une minute, doublée jusqu'à dix en cas de récidive). La marque en dry-run est `would-deny:table:<reason>`. |
-| `challenge:manual` | la page de laissez-passer (`403`, jamais mise en cache) | `policy.challenge: manual` et la requête ne porte aucun laissez-passer valide. |
-| `challenge:zone:<reason>` | la page de laissez-passer | La zone entière est sous défi : le déclencheur `auto.zone_rps` du nœud (`zone-rps`) ou le levier de l'opérateur. |
+| `challenge:manual` | la page de laissez-passer (`403`, jamais mise en cache) | `policy.challenge: manual` — ou un [levier](/docs/edge#le-levier) en `manual` — et la requête ne porte aucun laissez-passer valide. |
+| `challenge:zone:<reason>` | la page de laissez-passer | La zone entière est sous son déclencheur `auto.zone_rps` (`zone-rps`). |
 | `challenge:table:<reason>` | la page de laissez-passer | La source est dans la table de verdicts avec un défi : la règle de flood des rollups dans une zone `auto` (`table:flood`) — le palier qu'une source qui inonde obtient avant le blocage. |
 
 Une requête qui franchit le palier atteint l'origine marquée `cleared` (ou `cleared:nojs` pour le

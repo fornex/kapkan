@@ -84,8 +84,8 @@ page](/docs/edge#the-clearance-page) instead of the origin — or `403` with a r
 | `rate` | `429` with `Retry-After: 1` | The source exceeded `policy.rate.rps`. |
 | `concurrency` | `429` with `Retry-After: 1` | The source has `policy.rate.concurrency` requests in flight. |
 | `table:<reason>` | `403` | The source is in the node's verdict table: promoted by the rollups (`table:flood` — a source that kept pushing through its rate ceiling is denied for one minute, doubling to ten on repeat). The dry-run mark is `would-deny:table:<reason>`. |
-| `challenge:manual` | the clearance page (`403`, never cached) | `policy.challenge: manual` and the request carries no valid clearance. |
-| `challenge:zone:<reason>` | the clearance page | The whole zone is under challenge: the node's `auto.zone_rps` trigger (`zone-rps`) or the operator's lever. |
+| `challenge:manual` | the clearance page (`403`, never cached) | `policy.challenge: manual` — or a manual [lever](/docs/edge#the-lever) — and the request carries no valid clearance. |
+| `challenge:zone:<reason>` | the clearance page | The whole zone is under its `auto.zone_rps` trigger (`zone-rps`). |
 | `challenge:table:<reason>` | the clearance page | The source is in the verdict table with a challenge: the rollups' flood rule in an `auto` zone (`table:flood`) — the rung a flooder gets before the block. |
 
 A request that clears the rung reaches the origin marked `cleared` (or `cleared:nojs` for the

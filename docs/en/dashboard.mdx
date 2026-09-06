@@ -68,8 +68,8 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
 - **Edge** — shown only when [edge nodes](/docs/edge) are configured: every zone the alive
   nodes report, with its request rate across the fleet, the nodes it is watch-only on, and a
   challenge column — *off*, *preview* (the rung would ask but only watches, on every node), or
-  the zone's mode with the nodes it bites on, and a zone-wide challenge with its reason (a node's
-  trigger, or the operator's lever) — plus a **Who would be challenged** panel: the sources the
+  the zone's mode with the nodes it bites on (a lever shows as that mode), and a zone-wide
+  challenge with its reason (the node's `zone-rps` trigger) — plus a **Who would be challenged** panel: the sources the
   nodes previewed a challenge or a deny for, the busiest first, with the nodes that saw each. Read
   it before a zone's rung goes live; the view says *partial* when a node had to cut part of that
   set, and warns when nodes cut whole zones from their reports.

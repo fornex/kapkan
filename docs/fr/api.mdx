@@ -620,8 +620,7 @@ jeton agent.
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } },
-      "clearance_keys": [ "…" ]
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
   "acme_challenges": [],
@@ -632,9 +631,10 @@ jeton agent.
 `acme_directory`, `acme_fallback`, `extra_directives_file` et `tls.h3` sont omis lorsqu'ils ne sont
 pas définis ; un `acme_directory` absent signifie que le nœud commande auprès de sa propre CA par
 défaut (Let's Encrypt sauf si son `edge.yaml` en dit autrement). La politique porte `dry_run` et les
-`challenge_options` qu'une zone définit ; `clearance_keys` sont les clés de signature par zone du
-palier (celle du jour UTC courant et celle de la veille, chacune honorée 48 h — le document porte
-des secrets, et un nœud le met en cache en `0600`) ; une zone sur laquelle un opérateur a actionné
+`challenge_options` qu'une zone définit ; `clearance_keys` (non montrées) sont les clés de signature
+par zone du palier (celle du jour UTC courant et celle de la veille, chacune honorée 48 h — le
+document porte des secrets, et un nœud le met en cache en `0600`) ; une zone sur laquelle un
+opérateur a actionné
 [le levier](/docs/edge#le-levier) porte `challenge_override` `{mode, until, reason}` avec un `until`
 fixe, de sorte que les octets et l'ETag du document ne bougent qu'au moment où l'opérateur agit et
 une fois de plus quand il expire.
@@ -653,15 +653,16 @@ le nœud l'applique, si la zone est en observation seule sur ce nœud (`dry_run`
 fait que prévisualiser (`rung_dry_run` : le `dry_run` du nœud, celui de la zone ou le
 `challenge_options.dry_run` propre au palier), un défi global de zone en vigueur
 (`challenge_active {reason, until, dry_run}` — `dry_run` indique que la bascule n'y est qu'un
-aperçu), et les sources de la fenêtre — d'abord celles que le nœud a refusées, mises au défi ou
-prévisualisées comme l'un ou l'autre, puis les plus actives parmi les autorisées — chacune avec la
-chose la plus forte que le nœud lui a faite (`state` : `denied`, `challenged`, `would-deny`,
+aperçu), et les sources de la fenêtre — d'abord les candidates (un défi ou un refus prévisualisé),
+puis les refusées et les mises au défi, puis les plus actives du reste — chacune avec la chose la
+plus forte que le nœud lui a faite (`state` : `denied`, `challenged`, `would-deny`,
 `would-challenge`, `cleared`, `marked`, `allow`). Un rapport trop gros pour la limite se déleste du
 détail petit à petit — d'abord les sources qui ne disent rien (sans les compter : elles ne font pas
 partie de l'ensemble des candidats), puis la liste de chaque zone réduite de moitié, puis les
-certificats, puis les zones — chaque coupe étant comptée (`sources_truncated`, qui compte aussi les
-sources parlantes que la borne propre au nœud de 20 par fenêtre a laissées de côté,
-`certs_truncated`, `zones_truncated`). Stocké et renvoyé par `GET /api/v1/edge/nodes`. Jamais un
+certificats, puis les zones — chaque coupe étant comptée : `sources_truncated` est le nombre de
+sources candidates manquantes dans la liste (celles que la borne propre au nœud de 20 par fenêtre a
+laissées de côté, et celles qu'un rapport en train de rétrécir a délestées), `certs_truncated` et
+`zones_truncated` les entrées supprimées. Stocké et renvoyé par `GET /api/v1/edge/nodes`. Jamais un
 signal de vivacité (l'interrogation l'est). Un `{name}` inconnu renvoie `404` ; le succès est
 `204 No Content`.
 
@@ -681,7 +682,7 @@ pas nommés), les nœuds où un défi global de zone est en vigueur et si chacun
 qu'un aperçu, le levier en vigueur (`override`), et **l'ensemble des candidats** : l'union des
 sources pour lesquelles les nœuds ont prévisualisé un défi ou un refus, l'état le plus fort
 conservé, les plus actives d'abord, bornée à 20 par nœud rapporteur (`would_be_truncated` compte le
-reste). `partial` indique qu'un nœud a coupé une partie de ses sources parlantes — sa borne par
+reste). `partial` indique que les sources candidates d'un nœud n'ont pas toutes tenu — sa borne par
 fenêtre, ou un rapport qui a dû rétrécir — de sorte que l'ensemble est ce qui a survécu, pas tout le
 monde ; `zones_truncated` sur le document somme les entrées de zone que les nœuds vivants ont
 coupées de leurs rapports, des zones absentes ou sous-comptées ici. Une lecture de rang `viewer`,
@@ -714,7 +715,9 @@ spécification edge : lisez-le avant que le palier d'une zone ne passe en produc
 ```
 
 Une zone qu'aucun nœud vivant n'a encore rapportée apparaît tout de même lorsqu'un levier est posé
-sur elle, avec `override` seul. Les compteurs à zéro sont omis.
+sur elle : `nodes: 0`, `rps: 0` et `override`, sans mode. Les compteurs de requêtes (`requests`,
+`decided`, `denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`) sont omis quand ils
+valent zéro ; `nodes` et `rps` sont toujours présents.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot et …/acme/challenges
 

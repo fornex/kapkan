@@ -212,12 +212,14 @@ La respuesta dice dónde actúa la palanca: el modo propio del archivo, los indi
 observación de la zona (`policy.dry_run` y `challenge_options.dry_run` — con cualquiera de los dos,
 la palanca *previsualiza* en lugar de actuar) y cada nodo configurado con su vitalidad y su
 `dry_run` reportado — un nodo que solo cuenta debe verse antes de confiar en la palanca. Es una
-acción de operador (rango `operator`, tokens sin acotar), auditada como `edge_challenge`, mostrada
-por [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) y por la consola como
-**override**, y guardada en la memoria del cerebro como el coordinador de emisión — una herramienta
-para incidentes, que se vuelve a accionar tras un reinicio del cerebro. El `dry_run` propio del
-cerebro no la condiciona: accionar la palanca es una edición de política; la solo observación vive
-en el nodo y en la zona. Un nodo que ejecuta una versión anterior a la palanca no conoce la
+acción de operador (rango `operator`, tokens sin acotar), auditada como `edge_challenge`, llamada
+`override` por [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) — la vista
+Edge de la consola muestra el modo que los nodos aplican bajo ella (`manual`, `auto`), no la
+palanca en sí — y guardada en la memoria del cerebro como el coordinador de emisión: una
+herramienta para incidentes, que desaparece tras un reinicio del cerebro (los nodos la descartan
+con el primer documento que sirve el cerebro reiniciado; acciónala de nuevo). El `dry_run` propio
+del cerebro no la condiciona: accionar la palanca es una edición de política; la solo observación
+vive en el nodo y en la zona. Un nodo que ejecuta una versión anterior a la palanca no conoce la
 anulación y sigue su archivo, aunque la respuesta lo siga listando — actualiza los nodos antes de
 confiar en ella (el inventario muestra la versión de cada nodo).
 
@@ -298,8 +300,9 @@ zona cuando su conjunto de candidatos nombre a los clientes correctos.
   pases por minuto por fuente es de todos ellos juntos. El peldaño nunca lee de una petición más
   que el prefijo de ruta que puede exentar: no es un WAF y no intenta serlo.
 - **El disparador de zona completa es por nodo**, y la palanca vive en la memoria del cerebro: un
-  reinicio del cerebro la olvida (los nodos conservan la copia en su documento en caché hasta que
-  termina).
+  reinicio del cerebro la olvida, y los nodos la descartan con el primer documento que sirve el
+  cerebro reiniciado — acciónala de nuevo. Un cerebro que sigue caído es distinto: la palanca del
+  documento en caché termina en su `until` (ver la tabla de fallos).
 - **Comodines y HTTP/3 son hitos posteriores.** `tls.h3` se rechaza hoy; cada nombre se enumera
   explícitamente.
 - **Límites de certificados duplicados.** Certificados por nodo significa que N nodos en una zona

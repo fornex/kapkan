@@ -606,8 +606,7 @@ que el nodo trata como un fallo y ante el que espera antes de reintentar (1 s, d
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } },
-      "clearance_keys": [ "…" ]
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
   "acme_challenges": [],
@@ -618,9 +617,10 @@ que el nodo trata como un fallo y ante el que espera antes de reintentar (1 s, d
 `acme_directory`, `acme_fallback`, `extra_directives_file` y `tls.h3` se omiten cuando no están
 definidos; un `acme_directory` ausente significa que el nodo pide a su propia CA por defecto (Let's
 Encrypt salvo que su `edge.yaml` diga otra cosa). La política lleva `dry_run` y las
-`challenge_options` que una zona fija; `clearance_keys` son las claves de firma por zona del peldaño
-(la del día UTC actual y la del anterior, cada una honrada durante 48 h — el documento lleva
-secretos, y un nodo lo cachea en `0600`); una zona sobre la que un operador ha accionado
+`challenge_options` que una zona fija; `clearance_keys` (no se muestran) son las claves de firma por
+zona del peldaño (la del día UTC actual y la del anterior, cada una honrada durante 48 h — el
+documento lleva secretos, y un nodo lo cachea en `0600`); una zona sobre la que un operador ha
+accionado
 [la palanca](/docs/edge#la-palanca) lleva `challenge_override` `{mode, until, reason}` con un `until`
 fijo, de modo que los bytes y el ETag del documento cambian exactamente cuando el operador actúa y
 una vez más cuando caduca.
@@ -639,14 +639,15 @@ lo aplica, si la zona está en solo observación en este nodo (`dry_run`) y si s
 previsualiza (`rung_dry_run`: por el `dry_run` del nodo, el de la zona o el
 `challenge_options.dry_run` propio del peldaño), un desafío de zona completa en vigor
 (`challenge_active {reason, until, dry_run}` — `dry_run` indica que ahí el cambio solo
-previsualiza), y las fuentes de la ventana — primero las que el nodo rechazó, desafió o previsualizó
-como una de las dos cosas, después las permitidas más activas — cada una con lo más fuerte que el
-nodo hizo con ella (`state`: `denied`, `challenged`, `would-deny`, `would-challenge`, `cleared`,
-`marked`, `allow`). Un reporte demasiado grande para el límite recorta detalle poco a poco — primero
-las fuentes que no dicen nada (sin contarlas: no están en el conjunto de candidatos), luego la lista
-de cada zona a la mitad, luego los certificados, luego las zonas — y cada recorte se cuenta
-(`sources_truncated`, que cuenta también las fuentes que sí dicen algo y que el propio límite por
-ventana del nodo, 20, dejó fuera; `certs_truncated`; `zones_truncated`). Almacenado y devuelto por
+previsualiza), y las fuentes de la ventana — primero las candidatas (un desafío o una denegación
+previsualizados), después las rechazadas y las desafiadas, después las más activas del resto — cada
+una con lo más fuerte que el nodo hizo con ella (`state`: `denied`, `challenged`, `would-deny`,
+`would-challenge`, `cleared`, `marked`, `allow`). Un reporte demasiado grande para el límite recorta
+detalle poco a poco — primero las fuentes que no dicen nada (sin contarlas: no están en el conjunto
+de candidatos), luego la lista de cada zona a la mitad, luego los certificados, luego las zonas — y
+cada recorte se cuenta: `sources_truncated` son las fuentes candidatas que faltan en la lista (las
+que el límite por ventana del nodo, 20, dejó fuera, y las que recortó un reporte que tuvo que
+encogerse), `certs_truncated` y `zones_truncated` las entradas eliminadas. Almacenado y devuelto por
 `GET /api/v1/edge/nodes`. Nunca es una señal de vitalidad (el sondeo lo es). Un `{name}`
 desconocido es `404`; el éxito es `204 No Content`.
 
@@ -666,7 +667,7 @@ desafío de zona completa en vigor y si en cada uno actúa o previsualiza, la pa
 (`override`), y el **conjunto de candidatos**: la unión de las fuentes para las que los nodos
 previsualizaron un desafío o una denegación, conservando el estado más fuerte, las más activas
 primero, acotada a 20 por nodo que reporta (`would_be_truncated` cuenta el resto). `partial` indica
-que un nodo recortó parte de sus fuentes que sí dicen algo — por su límite por ventana, o por un
+que no todas las fuentes candidatas de un nodo cupieron — por su límite por ventana, o por un
 reporte que tuvo que encogerse — así que el conjunto es lo que sobrevivió, no todo el mundo;
 `zones_truncated` en el documento suma las entradas de zona que los nodos vivos recortaron de sus
 reportes: zonas que aquí faltan o están infracontadas. Una lectura de rango `viewer`, solo tokens
@@ -698,8 +699,10 @@ edge: léelo antes de que el peldaño de una zona pase a producción.
 }
 ```
 
-Una zona que ningún nodo vivo ha reportado aún aparece igualmente cuando tiene una palanca fijada,
-solo con `override`. Los contadores a cero se omiten.
+Una zona que ningún nodo vivo ha reportado aún aparece igualmente cuando tiene una palanca fijada:
+`nodes: 0`, `rps: 0` y `override`, sin modo. Los contadores de peticiones (`requests`, `decided`,
+`denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`) se omiten cuando valen cero;
+`nodes` y `rps` están siempre presentes.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot y …/acme/challenges
 

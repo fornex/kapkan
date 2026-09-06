@@ -600,8 +600,7 @@ doubling to 30 s) — give each node its own agent token.
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } },
-      "clearance_keys": [ "…" ]
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
   "acme_challenges": [],
@@ -612,8 +611,9 @@ doubling to 30 s) — give each node its own agent token.
 `acme_directory`, `acme_fallback`, `extra_directives_file` and `tls.h3` are omitted when unset;
 an absent `acme_directory` means the node orders from its own default CA (Let's Encrypt unless
 its `edge.yaml` says otherwise). The policy carries `dry_run` and the `challenge_options` a zone
-sets; `clearance_keys` are the rung's per-zone signing keys (the current and the previous UTC
-day's, each honoured 48 h — the document carries secrets, and a node caches it `0600`); a zone
+sets; `clearance_keys` (not shown) are the rung's per-zone signing keys (the current and the
+previous UTC day's, each honoured 48 h — the document carries secrets, and a node caches it
+`0600`); a zone
 an operator has pulled [the lever](/docs/edge#the-lever) on carries `challenge_override`
 `{mode, until, reason}` with a fixed `until`, so the document's bytes and ETag move exactly when
 the operator acts and once more when it lapses.
@@ -630,14 +630,15 @@ serves, the last closed ten-second window (`at`, `window_seconds`, `rps`, `reque
 challenge mode as the node applies it, whether the zone is watch-only on this node (`dry_run`) and
 whether its rung only previews there (`rung_dry_run`: the node's, the zone's or the rung's own
 `challenge_options.dry_run`), a zone-wide challenge in force (`challenge_active {reason, until,
-dry_run}` — `dry_run` says the flip previews there), and the window's sources — the ones the node
-refused, challenged or previewed as either first, then the busiest allowed ones — each with the
-strongest thing the node did to it (`state`: `denied`, `challenged`, `would-deny`,
-`would-challenge`, `cleared`, `marked`, `allow`). A report too big for the limit sheds detail a
-little at a time — the sources that tell nothing first (uncounted: they are not in the would-be
-set), then every zone's list halved, then certificates, then zones — each cut counted
-(`sources_truncated`, which also counts the telling sources the node's own per-window bound of 20
-left out, `certs_truncated`, `zones_truncated`). Stored and returned by `GET /api/v1/edge/nodes`. Never a
+dry_run}` — `dry_run` says the flip previews there), and the window's sources — the would-be ones
+first (a challenge or a deny previewed), then the refused and challenged, then the busiest of the
+rest — each with the strongest thing the node did to it (`state`: `denied`, `challenged`,
+`would-deny`, `would-challenge`, `cleared`, `marked`, `allow`). A report too big for the limit
+sheds detail a little at a time — the sources that tell nothing first (uncounted: they are not in
+the would-be set), then every zone's list halved, then certificates, then zones — each cut
+counted: `sources_truncated` is the would-be sources missing from the list (the ones the node's
+per-window bound of 20 left out, and the ones a shrinking report shed), `certs_truncated` and
+`zones_truncated` the entries dropped. Stored and returned by `GET /api/v1/edge/nodes`. Never a
 liveness signal (the poll is). An unknown `{name}` is `404`; success is `204 No Content`.
 
 #### GET /api/v1/edge/nodes
@@ -654,9 +655,9 @@ its rung only previews (`rung_watch_only` — a `manual` or `auto` zone challeng
 nodes not named there), the nodes with a zone-wide challenge in force and whether each bites or
 previews, the lever in force (`override`), and the **would-be set**: the union of the sources the
 nodes previewed a challenge or a deny for, the stronger state kept, the busiest first, bounded to
-20 per reporting node (`would_be_truncated` counts the rest). `partial` says a node cut part of
-its telling sources — its per-window bound, or a report that had to shrink — so the set is what
-survived, not everyone; `zones_truncated` on the document sums the zone entries the alive nodes
+20 per reporting node (`would_be_truncated` counts the rest). `partial` says a node's would-be
+sources did not all fit — its per-window bound, or a report that had to shrink — so the set is
+what survived, not everyone; `zones_truncated` on the document sums the zone entries the alive nodes
 cut from their reports, zones that are missing or undercounted here. A `viewer`-rank read,
 unscoped tokens only, like the inventory. This is edge-spec's *who would have been challenged*:
 read it before a zone's rung goes live.
@@ -686,8 +687,10 @@ read it before a zone's rung goes live.
 }
 ```
 
-A zone no alive node has reported yet still appears when a lever is set on it, with `override`
-alone. Counters that are zero are omitted.
+A zone no alive node has reported yet still appears when a lever is set on it: `nodes: 0`,
+`rps: 0` and `override`, no mode. The request counters (`requests`, `decided`, `denied`,
+`challenged`, `cleared`, `would_deny`, `would_challenge`) are omitted when zero; `nodes` and
+`rps` are always present.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot and …/acme/challenges
 

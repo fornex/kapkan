@@ -219,10 +219,12 @@ le mode propre au fichier, les indicateurs d'observation seule de la zone (`poli
 `challenge_options.dry_run` — avec l'un ou l'autre, le levier *prévisualise* au lieu d'agir) et
 chaque nœud configuré avec sa vivacité et le `dry_run` qu'il rapporte — un nœud qui ne fait que
 compter doit être repéré avant de faire confiance au levier. C'est une action d'opérateur (rang
-`operator`, jetons non rattachés), auditée comme `edge_challenge`, affichée par
-[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) et par la console comme
-**override**, et tenue dans la mémoire du cerveau comme le coordinateur d'émission — un outil
-d'incident, à réactionner après un redémarrage du cerveau. Le `dry_run` propre au cerveau ne le
+`operator`, jetons non rattachés), auditée comme `edge_challenge`, nommée `override` par
+[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) — la vue Edge de la console
+montre le mode que les nœuds appliquent sous lui (`manual`, `auto`), pas le levier lui-même — et
+tenue dans la mémoire du cerveau comme le coordinateur d'émission : un outil d'incident, disparu
+après un redémarrage du cerveau (les nœuds l'abandonnent avec le premier document que sert le
+cerveau redémarré ; actionnez-le de nouveau). Le `dry_run` propre au cerveau ne le
 conditionne pas : actionner le levier est une modification de politique ; l'observation seule vit
 sur le nœud et la zone. Un nœud qui exécute une version antérieure au levier ne connaît pas la
 surcharge et suit son fichier, alors que la réponse le liste tout de même — mettez les nœuds à
@@ -308,8 +310,9 @@ clients.
   au-delà du préfixe de chemin qu'il peut exempter : ce n'est pas un WAF et il n'essaie pas de
   l'être.
 - **Le déclencheur global de la zone est par nœud**, et le levier vit dans la mémoire du cerveau :
-  un redémarrage du cerveau l'oublie (les nœuds en gardent la copie dans leur document en cache
-  jusqu'à sa fin).
+  un redémarrage du cerveau l'oublie, et les nœuds l'abandonnent avec le premier document que sert
+  le cerveau redémarré — actionnez-le de nouveau. Un cerveau qui reste arrêté, c'est différent : le
+  levier du document en cache prend fin à son `until` (voir le tableau des pannes).
 - **Jokers et HTTP/3 viendront dans des jalons ultérieurs.** `tls.h3` est refusé aujourd'hui ;
   chaque nom est listé explicitement.
 - **Plafonds de certificats en double.** Des certificats par nœud signifient que N nœuds sur une

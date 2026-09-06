@@ -85,8 +85,8 @@ una marca — `401` — la fuente debe superar primero el peldaño, de modo que 
 | `rate` | `429` con `Retry-After: 1` | La fuente superó `policy.rate.rps`. |
 | `concurrency` | `429` con `Retry-After: 1` | La fuente tiene `policy.rate.concurrency` peticiones en curso. |
 | `table:<reason>` | `403` | La fuente está en la tabla de veredictos del nodo: promovida por los rollups (`table:flood` — una fuente que siguió empujando a través de su techo de tasa se deniega durante un minuto, que se duplica hasta diez si reincide). La marca en dry-run es `would-deny:table:<reason>`. |
-| `challenge:manual` | la página de pase (`403`, nunca cacheada) | `policy.challenge: manual` y la petición no lleva un pase válido. |
-| `challenge:zone:<reason>` | la página de pase | Toda la zona está en desafío: el disparador `auto.zone_rps` del nodo (`zone-rps`) o la palanca del operador. |
+| `challenge:manual` | la página de pase (`403`, nunca cacheada) | `policy.challenge: manual` — o una [palanca](/docs/edge#la-palanca) en `manual` — y la petición no lleva un pase válido. |
+| `challenge:zone:<reason>` | la página de pase | Toda la zona está bajo su disparador `auto.zone_rps` (`zone-rps`). |
 | `challenge:table:<reason>` | la página de pase | La fuente está en la tabla de veredictos con un desafío: la regla de inundación de los rollups en una zona `auto` (`table:flood`) — el peldaño que una fuente que inunda recibe antes del bloqueo. |
 
 Una petición que supera el peldaño llega al origen marcada `cleared` (o `cleared:nojs` en el caso

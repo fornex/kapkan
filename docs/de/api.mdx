@@ -617,8 +617,7 @@ beantwortet (1 s, verdoppelt bis 30 s) — geben Sie jedem Knoten ein eigenes ag
       "name": "shop.example.com",
       "origins": ["10.0.0.10:8080"],
       "tls": { "min_version": "1.2" },
-      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } },
-      "clearance_keys": [ "…" ]
+      "policy": { "mode": "decide", "failure_mode": "open", "challenge": "auto", "rate": { "rps": 50, "concurrency": 20 } }
     }
   ],
   "acme_challenges": [],
@@ -629,8 +628,8 @@ beantwortet (1 s, verdoppelt bis 30 s) — geben Sie jedem Knoten ein eigenes ag
 `acme_directory`, `acme_fallback`, `extra_directives_file` und `tls.h3` werden weggelassen, wenn sie
 nicht gesetzt sind; ein fehlendes `acme_directory` bedeutet, dass der Knoten bei seiner eigenen
 Standard-CA bestellt (Let's Encrypt, sofern seine `edge.yaml` nichts anderes sagt). Die Richtlinie
-trägt `dry_run` und die `challenge_options`, die eine Zone setzt; `clearance_keys` sind die
-Signaturschlüssel der Stufe pro Zone (der des aktuellen und der des vorherigen UTC-Tages, jeder
+trägt `dry_run` und die `challenge_options`, die eine Zone setzt; `clearance_keys` (nicht gezeigt)
+sind die Signaturschlüssel der Stufe pro Zone (der des aktuellen und der des vorherigen UTC-Tages, jeder
 48 h anerkannt — das Dokument trägt Geheimnisse, und ein Knoten speichert es mit `0600` zwischen);
 eine Zone, auf der ein Betreiber [den Hebel](/docs/edge#der-hebel) gezogen hat, trägt
 `challenge_override` `{mode, until, reason}` mit einem festen `until`, sodass sich Bytes und ETag
@@ -651,15 +650,16 @@ diesem Knoten nur beobachtend ist (`dry_run`) und ob ihre Stufe dort nur eine Vo
 (`rung_dry_run`: der `dry_run` des Knotens, der der Zone oder der eigene `challenge_options.dry_run`
 der Stufe), eine wirksame zonenweite Challenge (`challenge_active {reason, until, dry_run}` —
 `dry_run` sagt, dass die Umstellung dort nur eine Vorschau ist) und die Quellen des Fensters —
-zuerst die, die der Knoten abgewiesen, herausgefordert oder als eines von beiden in der Vorschau
-gezeigt hat, dann die aktivsten zugelassenen —, jede mit dem Stärksten, was der Knoten ihr angetan
-hat (`state`: `denied`, `challenged`, `would-deny`, `would-challenge`, `cleared`, `marked`,
+zuerst die Kandidaten (eine Challenge oder eine Sperre in der Vorschau), dann die abgewiesenen und
+herausgeforderten, dann die aktivsten der übrigen —, jede mit dem Stärksten, was der Knoten ihr
+angetan hat (`state`: `denied`, `challenged`, `would-deny`, `would-challenge`, `cleared`, `marked`,
 `allow`). Ein Report, der zu groß für die Grenze ist, gibt Details Stück für Stück ab — zuerst die
 Quellen, die nichts aussagen (ungezählt: sie stehen nicht in der Kandidatenmenge), dann die Liste
-jeder Zone halbiert, dann Zertifikate, dann Zonen — und jeder Schnitt wird gezählt
-(`sources_truncated`, das auch die aussagekräftigen Quellen zählt, die die eigene Grenze des
-Knotens von 20 pro Fenster weggelassen hat, `certs_truncated`, `zones_truncated`). Gespeichert und
-von `GET /api/v1/edge/nodes` zurückgegeben. Niemals ein Lebendigkeitssignal (das ist der Poll). Ein
+jeder Zone halbiert, dann Zertifikate, dann Zonen — und jeder Schnitt wird gezählt:
+`sources_truncated` sind die Kandidaten, die in der Liste fehlen (die, die die eigene Grenze des
+Knotens von 20 pro Fenster weggelassen hat, und die, die ein schrumpfender Report abgegeben hat),
+`certs_truncated` und `zones_truncated` die verworfenen Einträge. Gespeichert und von
+`GET /api/v1/edge/nodes` zurückgegeben. Niemals ein Lebendigkeitssignal (das ist der Poll). Ein
 unbekanntes `{name}` ist `404`; Erfolg ist `204 No Content`.
 
 #### GET /api/v1/edge/nodes
@@ -678,9 +678,9 @@ wirklich heraus), die Knoten mit einer wirksamen zonenweiten Challenge und ob di
 oder nur eine Vorschau ist, der wirksame Hebel (`override`) und die **Kandidatenmenge**: die
 Vereinigung der Quellen, für die die Knoten eine Challenge oder eine Sperre als Vorschau gezeigt
 haben, der stärkere Zustand behalten, die aktivsten zuerst, begrenzt auf 20 pro meldendem Knoten
-(`would_be_truncated` zählt den Rest). `partial` sagt, dass ein Knoten einen Teil seiner
-aussagekräftigen Quellen weggeschnitten hat — seine Grenze pro Fenster, oder ein Report, der
-schrumpfen musste —, die Menge ist also, was übrig blieb, nicht jeder; `zones_truncated` auf dem
+(`would_be_truncated` zählt den Rest). `partial` sagt, dass die Kandidaten eines Knotens nicht
+alle Platz fanden — seine Grenze pro Fenster, oder ein Report, der schrumpfen musste —, die Menge
+ist also, was übrig blieb, nicht jeder; `zones_truncated` auf dem
 Dokument summiert die Zoneneinträge, die die lebendigen Knoten aus ihren Reports geschnitten
 haben — Zonen, die hier fehlen oder zu niedrig gezählt sind. Ein Lesezugriff mit `viewer`-Rang,
 nur ungebundene Tokens, wie das Inventar. Das ist das *wer herausgefordert worden wäre* der
@@ -712,7 +712,9 @@ Edge-Spezifikation: Lesen Sie es, bevor die Stufe einer Zone in den Echtbetrieb 
 ```
 
 Eine Zone, die noch kein lebendiger Knoten gemeldet hat, erscheint trotzdem, wenn ein Hebel auf ihr
-gesetzt ist, allein mit `override`. Zähler, die null sind, werden weggelassen.
+gesetzt ist: `nodes: 0`, `rps: 0` und `override`, kein Modus. Die Anfragezähler (`requests`,
+`decided`, `denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`) werden weggelassen,
+wenn sie null sind; `nodes` und `rps` sind immer vorhanden.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot und …/acme/challenges
 

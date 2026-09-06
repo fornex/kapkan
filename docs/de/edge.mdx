@@ -217,12 +217,14 @@ den eigenen Modus der Datei, die Nur-beobachten-Flags der Zone (`policy.dry_run`
 `challenge_options.dry_run` — bei einem von beiden zeigt der Hebel nur eine *Vorschau*, statt zu
 greifen) und jeden konfigurierten Knoten mit seiner Lebendigkeit und seinem gemeldeten `dry_run` —
 ein Knoten, der nur zählt, muss gesehen werden, bevor man dem Hebel vertraut. Er ist eine Aktion
-des Betreibers (`operator`-Rang, ungebundene Tokens), auditiert als `edge_challenge`, gezeigt von
-[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) und der Konsole als
-**override**, und wird wie der Ausstellungskoordinator im Speicher des Gehirns gehalten — das
-Werkzeug für einen Vorfall, nach einem Neustart des Gehirns erneut zu ziehen. Der eigene `dry_run`
-des Gehirns hält ihn nicht zurück: Den Hebel zu ziehen ist eine Richtlinienänderung; nur beobachten
-lebt auf dem Knoten und in der Zone. Ein Knoten mit einer Version von vor dem Hebel kennt die
+des Betreibers (`operator`-Rang, ungebundene Tokens), auditiert als `edge_challenge`, von
+[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) als `override` benannt —
+die Edge-Ansicht der Konsole zeigt den Modus, den die Knoten unter ihm anwenden (`manual`, `auto`),
+nicht den Hebel selbst — und wird wie der Ausstellungskoordinator im Speicher des Gehirns
+gehalten: das Werkzeug für einen Vorfall, nach einem Neustart des Gehirns verschwunden (die Knoten
+lassen ihn mit dem ersten Dokument fallen, das das neu gestartete Gehirn ausliefert; ziehen Sie
+ihn erneut). Der eigene `dry_run` des Gehirns hält ihn nicht zurück: Den Hebel zu ziehen ist eine
+Richtlinienänderung; nur beobachten lebt auf dem Knoten und in der Zone. Ein Knoten mit einer Version von vor dem Hebel kennt die
 Übersteuerung nicht und folgt seiner Datei, während die Antwort ihn trotzdem aufführt —
 aktualisieren Sie die Knoten, bevor Sie sich darauf verlassen (das Inventar zeigt die Version jedes
 Knotens).
@@ -307,8 +309,10 @@ wenn ihre Kandidatenmenge die richtigen Clients benennt.
   einer Anfrage nie mehr als das Pfadpräfix, das sie ausnehmen darf: Sie ist keine WAF und
   versucht nicht, eine zu sein.
 - **Der zonenweite Auslöser gilt pro Knoten**, und der Hebel lebt im Speicher des Gehirns: Ein
-  Neustart des Gehirns vergisst ihn (die Knoten behalten die Kopie in ihrem zwischengespeicherten
-  Dokument, bis er endet).
+  Neustart des Gehirns vergisst ihn, und die Knoten lassen ihn mit dem ersten Dokument fallen, das
+  das neu gestartete Gehirn ausliefert — ziehen Sie ihn erneut. Ein Gehirn, das ausgefallen
+  bleibt, ist etwas anderes: Der Hebel im zwischengespeicherten Dokument endet zu seinem `until`
+  (siehe die Ausfalltabelle).
 - **Wildcards und HTTP/3 sind spätere Meilensteine.** `tls.h3` wird heute abgelehnt; jeder Name
   wird explizit aufgeführt.
 - **Obergrenzen für Duplikat-Zertifikate.** Zertifikate pro Knoten bedeuten, dass N Knoten auf
