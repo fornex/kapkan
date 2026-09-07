@@ -106,6 +106,7 @@ func TestRealTerminator(t *testing.T) {
 	}
 	h := newHarness(t, image)
 	term := h.probe(t)
+	h.term = term
 	kind, version := term.Kind, term.Version
 	perServerTLS := honoursPerServerProtocols(kind, version)
 	t.Logf("terminator %s %s (core %s, %s, http_v3_module %v, 0-RTT capable %v, advisory %q); honours per-server ssl_protocols: %v",
@@ -116,6 +117,42 @@ func TestRealTerminator(t *testing.T) {
 			h.configTest(t, name)
 		})
 	}
+
+	if !term.HTTP3Module {
+		// What the probe gate prevents: forcing QUIC onto a build without the
+		// module fails the config test on the first QUIC token nginx meets —
+		// the http-level quic_retry in the shared file, which sorts first
+		// (the zone's `listen … quic` would fail next, on the parameter).
+		t.Run("test/h3/refused-when-forced", func(t *testing.T) {
+			h.configTestFails(t, "h3", "forced", func(in *render.Inputs) { in.Node.H3Supported = true }, `unknown directive "quic_retry"`)
+		})
+	}
+
+	// Alt-Svc over TCP announces the QUIC listener exactly where one exists:
+	// on a build with the module for the zones that asked (each with its own
+	// max-age), never for the zone that did not, never on a build without the
+	// module (its zones degraded to TCP), never for a quiet zone.
+	t.Run("serve/h3/tcp-alt-svc", func(t *testing.T) {
+		s := h.serve(t, "h3", "alt-svc")
+		for zone, want := range map[string]string{"example.com": `h3=":443"; ma=86400`, "static.example.org": `h3=":443"; ma=300`, "plain.example.net": ""} {
+			res := s.get(t, zone, "/")
+			res.expect(t, 200, "origin-ok")
+			if !term.HTTP3Module {
+				want = ""
+			}
+			if got := res.header.Get("Alt-Svc"); got != want {
+				t.Errorf("%s: Alt-Svc %q, want %q (http_v3_module %v)", zone, got, want, term.HTTP3Module)
+			}
+		}
+	})
+	t.Run("serve/h3/quiet", func(t *testing.T) {
+		s := h.serve(t, "h3-quiet", "quiet")
+		res := s.get(t, "example.com", "/")
+		res.expect(t, 200, "origin-ok")
+		if got := res.header.Get("Alt-Svc"); got != "" {
+			t.Errorf("quiet zone advertised %q", got)
+		}
+	})
 
 	t.Run("serve/decide-open/no-decider", func(t *testing.T) {
 		s := h.serve(t, "decide-open", "no-decider")
@@ -213,7 +250,9 @@ func TestRealTerminator(t *testing.T) {
 		// the rollup will aggregate and what closes the decider's in-flight
 		// slot — and its src is the very address the decider was asked about.
 		rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/probe?x=1" })
-		if rec.Zone != "example.com" || rec.Port != 443 || rec.Status != 403 || rec.Decision != "403" || rec.Method != "GET" || !rec.Decided() || rec.Host != "example.com" {
+		// The proto field is $server_protocol on every nginx (E5.2): the
+		// harness client speaks HTTP/1.1, so that is what the rollup must see.
+		if rec.Zone != "example.com" || rec.Port != 443 || rec.Status != 403 || rec.Decision != "403" || rec.Method != "GET" || !rec.Decided() || rec.Host != "example.com" || rec.Proto != "HTTP/1.1" {
 			t.Errorf("access-log record: %+v", rec)
 		}
 		if client, err := netipParse(seen.req.Header.Get("X-Kapkan-Client")); err != nil || client != rec.Src {
@@ -597,7 +636,14 @@ func versionAtLeast(version string, major, minor, patch int) bool {
 type harness struct {
 	image string
 	work  string
+	// term is what the image's binary said to -V; prepare renders QUIC only
+	// when it has the HTTP/3 module, as the node does.
+	term apply.Terminator
 }
+
+// quicHostKeyBytes stands in for the node's 32-byte host key: `nginx -t` reads
+// the file quic_host_key names, so it must exist in the mount.
+const quicHostKeyBytes = "0123456789abcdef0123456789abcdef"
 
 func newHarness(t *testing.T, image string) *harness {
 	t.Helper()
@@ -680,16 +726,21 @@ func (h *harness) probe(t *testing.T) apply.Terminator {
 func (h *harness) prepare(t *testing.T, name, arm string, mutate func(*render.Inputs)) string {
 	t.Helper()
 	in := loadFixture(t, name)
-	in.Node = render.Node{
-		DecideSocket:    containerWork + "/run/decide.sock",
-		ChallengeSocket: containerWork + "/run/challenge.sock",
-		LogSocket:       containerWork + "/run/log.sock",
-		ClearanceSocket: containerWork + "/run/clearance.sock",
-		EmptyRoot:       containerWork + "/empty",
-		// Containers commonly have no IPv6 stack; binding [::] would fail at
-		// start (not at -t) and hide what this test is after.
-		DisableIPv6: true,
-	}
+	// The fixture keeps its own decisions (omit_catch_all, omit_quic_anchor,
+	// quic_retry, h3_supported…); only what the mount dictates is overridden.
+	in.Node.DecideSocket = containerWork + "/run/decide.sock"
+	in.Node.ChallengeSocket = containerWork + "/run/challenge.sock"
+	in.Node.LogSocket = containerWork + "/run/log.sock"
+	in.Node.ClearanceSocket = containerWork + "/run/clearance.sock"
+	in.Node.EmptyRoot = containerWork + "/empty"
+	// Containers commonly have no IPv6 stack; binding [::] would fail at
+	// start (not at -t) and hide what this test is after.
+	in.Node.DisableIPv6 = true
+	// As the node does: QUIC only where the fixture asks AND the binary has
+	// the module (the refused-when-forced arm re-forces it afterwards).
+	in.Node.H3Supported = in.Node.H3Supported && h.term.HTTP3Module
+	in.Node.QUICHostKey = containerWork + "/quic_host.key"
+	writeFile(t, filepath.Join(h.work, "quic_host.key"), quicHostKeyBytes)
 	for zone := range in.Certs {
 		in.Certs[zone] = render.Cert{
 			Fullchain: containerWork + "/certs/" + zone + "/fullchain.pem",
@@ -747,6 +798,23 @@ func (h *harness) configTest(t *testing.T, name string) {
 	writeFile(t, filepath.Join(dir, "test.log"), string(out))
 	if err != nil {
 		t.Fatalf("%s rejected the %s render: %v\n%s\n--- rendered files ---\n%s", h.image, name, err, out, dumpConf(t, dir))
+	}
+	t.Logf("%s", strings.TrimSpace(string(out)))
+}
+
+// configTestFails runs `nginx -t` on a mutated fixture and requires the
+// failure the mutation must provoke.
+func (h *harness) configTestFails(t *testing.T, name, arm string, mutate func(*render.Inputs), wantErr string) {
+	t.Helper()
+	dir := h.prepare(t, name, arm, mutate)
+	script := termBinary + " -t -c " + containerWork + "/" + name + "/" + arm + "/main.conf"
+	out, err := exec.Command("docker", "run", "--rm", "-v", h.work+":"+containerWork, h.image, "sh", "-c", script).CombinedOutput()
+	writeFile(t, filepath.Join(dir, "test.log"), string(out))
+	if err == nil {
+		t.Fatalf("%s accepted the %s/%s render; want a failure mentioning %q\n%s", h.image, name, arm, wantErr, dumpConf(t, dir))
+	}
+	if !strings.Contains(string(out), wantErr) {
+		t.Fatalf("%s rejected %s/%s for another reason (want %q):\n%s", h.image, name, arm, wantErr, out)
 	}
 	t.Logf("%s", strings.TrimSpace(string(out)))
 }

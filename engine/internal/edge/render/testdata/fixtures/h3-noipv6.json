@@ -1,0 +1,22 @@
+{
+  "doc": {
+    "version": 1,
+    "zones": [
+      {
+        "name": "example.com",
+        "origins": ["10.0.0.1:8080"],
+        "tls": {"min_version": "1.2", "h3": true},
+        "policy": {"mode": "decide", "failure_mode": "closed", "challenge": "manual", "rate": {}}
+      }
+    ],
+    "acme_challenges": [],
+    "issuance_grants": []
+  },
+  "certs": {
+    "example.com": {
+      "fullchain": "/var/lib/kapkan/edge/certs/example.com/fullchain.pem",
+      "key": "/var/lib/kapkan/edge/certs/example.com/privkey.pem"
+    }
+  },
+  "node": {"h3_supported": true, "disable_ipv6": true, "quic_retry": false, "quic_host_key": "/srv/kapkan-edge/tls/host.key"}
+}

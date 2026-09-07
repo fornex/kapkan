@@ -387,6 +387,33 @@ security-relevant.
   and warns on an advisory. Nothing renders QUIC yet — that is E5.2; `tls.h3` is still refused
   by the zones file until E5.3. The real-terminator matrix pins what each image must report
   (`nginx:1.22` without the module, `nginx:stable` and Angie with it).
+- Edge track, E5.2 — the renderer speaks QUIC where the terminator can (edge-spec §8, E5). A
+  zone with `tls.h3` now renders `listen 443 quic` beside its TCP listeners and announces it
+  with `Alt-Svc` — only on a node whose probe found the HTTP/3 module (`render.Node.H3Supported`);
+  elsewhere the zone renders byte for byte as `tls.h3: false` plus a comment block, and the
+  render reports it (`render.RenderDetailed` → `Info.Degraded`), so a zone is never held hostage
+  to one node's package. Everything QUIC needs before SNI names a zone sits at the `http` level
+  of the shared file — `quic_retry` (on; node-wide `quic_retry` input) and `quic_host_key` (the
+  node's file, default `/var/lib/kapkan-edge/tls/quic_host.key`) — because nginx binds a QUIC
+  connection to the address's default server first. The catch-all carries the address's one
+  `reuseport` QUIC listener; under `omit_catch_all` a bare QUIC anchor (`server_name _;
+  ssl_reject_handshake on`) carries it unless `omit_quic_anchor` says the operator's own server
+  does (a second `reuseport` fails `nginx -t`). New document field `tls.h3_options {advertise,
+  alt_svc_max_age_seconds}` (nil at the defaults: unchanged bytes and ETag); `advertise: false`
+  renders the listener without announcing it. The access log gains `"proto":"$server_protocol"`
+  (`HTTP/1.0`, `HTTP/1.1`, `HTTP/2.0`, `HTTP/3.0`) — the shared file changes, so every node
+  tests and reloads once on upgrade, as with the earlier log-field additions — and the rollups
+  parse it. Not rendered, by decision: `ssl_early_data` (0-RTT off by policy), `quic_bpf`,
+  `quic_gso`, `http3`. The QUIC anchor carries `ssl_protocols TLSv1.3` of its own: the UDP
+  default server's protocol set governs every QUIC handshake on the address, and an http-level
+  `ssl_protocols TLSv1.2;` in an operator's `nginx.conf` would otherwise pass `nginx -t` and fail
+  every HTTP/3 handshake silently (verified on nginx 1.28, 1.30 and Angie). Golden fixtures for
+  seven HTTP/3 shapes; the real-terminator matrix runs every one through `nginx -t` on all three
+  images (TCP-only on `nginx:1.22`, where forcing QUIC is shown to fail on `unknown directive
+  "quic_retry"` — the first QUIC token nginx meets, in the shared file) and checks `Alt-Svc` over
+  TCP and the `proto` field in the access log.
+  The node does not pass its readiness to the renderer yet and `tls.h3` is still refused by the
+  zones file — both are E5.3.
 
 ## [1.7.0] - 2026-09-02
 

@@ -48,7 +48,28 @@
 // included verbatim at the end of the TLS server block and guarded by nothing
 // but `nginx -t`. Nothing is ever proxied over cleartext: a zone without a
 // certificate renders only the :80 listener, and that serves ACME challenges
-// and 503. HTTP/3 is refused upstream (E5), so no QUIC directives appear here.
+// and 503.
+//
+// HTTP/3 (edge-spec §8, E5). A zone with tls.h3 renders `listen 443 quic`
+// beside its TCP listeners — only on a node whose terminator has the HTTP/3
+// module (Node.H3Supported, from the node's `-V` probe: `listen … quic` fails
+// `nginx -t` without it). Elsewhere the zone renders byte for byte as tls.h3:
+// false plus a comment block, and RenderDetailed names it in Info.Degraded, so
+// a zone is never held hostage to one node's package. Everything QUIC needs
+// BEFORE SNI names a zone — quic_retry, quic_host_key — sits at the http level
+// of the shared file: nginx binds a QUIC connection to the address's default
+// server first, so the same lines in a zone's server would be dead
+// configuration. The catch-all carries the address's one `reuseport` QUIC
+// listener (reuseport is what lets each worker own a socket and keep a
+// connection's datagrams on one worker; a second reuseport on the same address
+// fails `nginx -t`); under OmitCatchAll a bare QUIC anchor carries it instead,
+// unless OmitQUICAnchor says the operator's own server does. Alt-Svc is the
+// one truly per-zone knob (a server-level add_header, after SNI):
+// H3Options.Advertise false renders the listener without announcing it. The
+// log gains `proto` ($server_protocol) so the rollups can tell h3 from h2.
+// Not rendered, by decision: ssl_early_data (0-RTT is off by policy),
+// quic_bpf and quic_gso (an operator's own main/http lines), http3 (on by
+// default since 1.25.0).
 //
 // WHAT THE SHARED FILE ADDS. A kapkan-owned catch-all default server on :80
 // and :443 (444, and ssl_reject_handshake for an unknown or absent SNI), so a
@@ -111,6 +132,10 @@ const (
 	DefaultLogSocket       = "/run/kapkan-edge/edge-log.sock"
 	DefaultClearanceSocket = "/run/kapkan-edge/edge-clearance.sock"
 	DefaultEmptyRoot       = "/var/lib/kapkan-edge/empty"
+	// DefaultQUICHostKey is where the node keeps the terminator's QUIC host
+	// key (edge-spec §8, E5): 32 random bytes, 0600, created once and reused
+	// across restarts, so Retry and stateless-reset tokens survive a reload.
+	DefaultQUICHostKey = "/var/lib/kapkan-edge/tls/quic_host.key"
 
 	// sslCiphersTLS12 is the ECDHE subset of Mozilla's "intermediate" list: no
 	// DHE (would need a dhparam file the node does not manage), no CBC. Only
@@ -196,6 +221,23 @@ type Node struct {
 	// `nginx -t`). Refusing unknown Host/SNI traffic — and the node-wide TLS
 	// floor on nginx before 1.29.2 — then falls to the operator's servers.
 	OmitCatchAll bool `json:"omit_catch_all,omitempty"`
+	// H3Supported says this node may render QUIC: the terminator has the HTTP/3
+	// module and edge.yaml's quic.h3 is not off (the node's readiness is
+	// "ready"). False degrades every tls.h3 zone to its TCP render.
+	H3Supported bool `json:"h3_supported,omitempty"`
+	// QUICRetry is the node-wide quic_retry (nil = on). Node-wide because
+	// nginx decides Retry from the address's default server, before SNI.
+	QUICRetry *bool `json:"quic_retry,omitempty"`
+	// QUICHostKey is the file quic_host_key names; "" = DefaultQUICHostKey.
+	// The node creates it; the renderer only names it.
+	QUICHostKey string `json:"quic_host_key,omitempty"`
+	// OmitQUICAnchor drops kapkan's QUIC anchor under OmitCatchAll, for an
+	// operator whose own default server already listens `443 quic` with
+	// socket options: nginx allows one listen with options (reuseport, rcvbuf,
+	// backlog, bind, ipv6only, …) per address:port, so the anchor's reuseport
+	// would fail `nginx -t` beside it. That server must then carry reuseport
+	// and TLSv1.3 itself (the anchor's two lines).
+	OmitQUICAnchor bool `json:"omit_quic_anchor,omitempty"`
 }
 
 func (n Node) withDefaults() Node {
@@ -214,6 +256,9 @@ func (n Node) withDefaults() Node {
 	if n.EmptyRoot == "" {
 		n.EmptyRoot = DefaultEmptyRoot
 	}
+	if n.QUICHostKey == "" {
+		n.QUICHostKey = DefaultQUICHostKey
+	}
 	return n
 }
 
@@ -224,6 +269,7 @@ func (n Node) validate() error {
 		{"log_socket", n.LogSocket},
 		{"clearance_socket", n.ClearanceSocket},
 		{"empty_root", n.EmptyRoot},
+		{"quic_host_key", n.QUICHostKey},
 	} {
 		if err := safeAbsPath(p.path); err != nil {
 			return fmt.Errorf("node.%s: %w", p.name, err)
@@ -298,6 +344,29 @@ type commonData struct {
 	// $kapkan_path, which only such a server's location / declares (set), and
 	// nginx refuses a map over a variable nothing declares.
 	HasDecide bool
+	// AnyH3 is true when at least one zone renders a QUIC listener: only then
+	// do the http-level quic_* directives and the catch-all's QUIC listener
+	// appear, so a node without h3 zones renders the same shared bytes as
+	// before E5.
+	AnyH3 bool
+	// QUICRetry is the resolved node-wide quic_retry.
+	QUICRetry bool
+	// QUICAnchor renders the bare QUIC anchor: AnyH3 under OmitCatchAll,
+	// unless OmitQUICAnchor.
+	QUICAnchor bool
+}
+
+// Info is what RenderDetailed reports beside the files: facts the node puts
+// in its report and its log, none of which change a byte of the render.
+type Info struct {
+	// H3Zones are the zones that render a QUIC listener on this node.
+	H3Zones []string
+	// Degraded are the zones that asked for HTTP/3 and are served over TCP
+	// here, because this node's terminator cannot render QUIC — whether or
+	// not the zone has a certificate yet (the node cannot ever serve it h3);
+	// a zone without a certificate on a node that CAN is in neither list
+	// until its TLS server exists.
+	Degraded []string
 }
 
 // zoneData is one zone with every decision already made. The template only
@@ -322,21 +391,37 @@ type zoneData struct {
 	ExtraDirectivesFile string
 	CommonFile          string
 	Node                Node
+	// H3 renders the QUIC listener: the zone asked, the node may, and the
+	// zone has a certificate (no TLS server, no QUIC). H3Degraded: the zone
+	// asked and this node cannot — rendered as tls.h3: false plus a comment.
+	H3         bool
+	H3Degraded bool
+	// AltSvc is the Alt-Svc header value announcing h3, "" when the zone does
+	// not advertise (or renders no QUIC).
+	AltSvc string
 }
 
 // Render produces the configuration files for the document. It validates
 // everything it interpolates: the document crossed a network, and a value that
 // ends a directive early is a config injection.
 func Render(in Inputs) (Files, error) {
+	files, _, err := RenderDetailed(in)
+	return files, err
+}
+
+// RenderDetailed is Render plus the facts about the render the node reports:
+// which zones got a QUIC listener and which were degraded to TCP here.
+func RenderDetailed(in Inputs) (Files, Info, error) {
+	var info Info
 	if in.Doc == nil {
-		return nil, errors.New("render: nil edge document")
+		return nil, info, errors.New("render: nil edge document")
 	}
 	if in.Doc.Version != edgedoc.Version {
-		return nil, fmt.Errorf("render: edge document version %d, this renderer speaks version %d", in.Doc.Version, edgedoc.Version)
+		return nil, info, fmt.Errorf("render: edge document version %d, this renderer speaks version %d", in.Doc.Version, edgedoc.Version)
 	}
 	node := in.Node.withDefaults()
 	if err := node.validate(); err != nil {
-		return nil, fmt.Errorf("render: %w", err)
+		return nil, info, fmt.Errorf("render: %w", err)
 	}
 
 	zones := make([]zoneData, 0, len(in.Doc.Zones))
@@ -344,19 +429,19 @@ func Render(in Inputs) (Files, error) {
 	for i := range in.Doc.Zones {
 		z := &in.Doc.Zones[i]
 		if seen[z.Name] {
-			return nil, fmt.Errorf("render: zone %q appears twice in the document", z.Name)
+			return nil, info, fmt.Errorf("render: zone %q appears twice in the document", z.Name)
 		}
 		seen[z.Name] = true
 		zd, err := prepareZone(z, in.Certs[z.Name], node)
 		if err != nil {
-			return nil, fmt.Errorf("render: zone %q: %w", z.Name, err)
+			return nil, info, fmt.Errorf("render: zone %q: %w", z.Name, err)
 		}
 		zones = append(zones, zd)
 	}
 	// The brain sorts, but the output must not depend on that.
 	sort.Slice(zones, func(i, j int) bool { return zones[i].Name < zones[j].Name })
 
-	common := commonData{Node: node, Zones: zones, NodeSSLProtocols: sslProtocolsTLS13}
+	common := commonData{Node: node, Zones: zones, NodeSSLProtocols: sslProtocolsTLS13, QUICRetry: node.QUICRetry == nil || *node.QUICRetry}
 	longest := 0
 	for i := range zones {
 		if zones[i].AllowsTLS12 {
@@ -367,10 +452,18 @@ func Render(in Inputs) (Files, error) {
 			// location / declares $kapkan_path.
 			common.HasDecide = true
 		}
+		if zones[i].H3 {
+			common.AnyH3 = true
+			info.H3Zones = append(info.H3Zones, zones[i].Name)
+		}
+		if zones[i].H3Degraded {
+			info.Degraded = append(info.Degraded, zones[i].Name)
+		}
 		if l := len(zones[i].Name); l > longest {
 			longest = l
 		}
 	}
+	common.QUICAnchor = common.AnyH3 && node.OmitCatchAll && !node.OmitQUICAnchor
 	if len(zones) == 0 {
 		// Nothing to be stricter than; the catch-all refuses everything anyway.
 		common.NodeSSLProtocols = sslProtocolsTLS12
@@ -382,17 +475,17 @@ func Render(in Inputs) (Files, error) {
 	files := make(Files, len(zones)+1)
 	var buf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&buf, "common.conf.tmpl", common); err != nil {
-		return nil, fmt.Errorf("render: %w", err)
+		return nil, info, fmt.Errorf("render: %w", err)
 	}
 	files[CommonFile] = append([]byte(nil), buf.Bytes()...)
 	for i := range zones {
 		buf.Reset()
 		if err := tmpl.ExecuteTemplate(&buf, "zone.conf.tmpl", &zones[i]); err != nil {
-			return nil, fmt.Errorf("render: zone %q: %w", zones[i].Name, err)
+			return nil, info, fmt.Errorf("render: zone %q: %w", zones[i].Name, err)
 		}
 		files[ZoneFile(zones[i].Name)] = append([]byte(nil), buf.Bytes()...)
 	}
-	return files, nil
+	return files, info, nil
 }
 
 // prepareZone validates one zone and resolves its policy into template facts.
@@ -432,10 +525,6 @@ func prepareZone(z *edgedoc.Zone, cert Cert, node Node) (zoneData, error) {
 	default:
 		return zoneData{}, fmt.Errorf("tls.min_version %q is not %q or %q", z.TLS.MinVersion, edgedoc.TLS12, edgedoc.TLS13)
 	}
-	if z.TLS.H3 {
-		return zoneData{}, errors.New("tls.h3 is not supported by this renderer (HTTP/3 is a later milestone)")
-	}
-
 	switch z.Policy.Mode {
 	case edgedoc.ModeDecide:
 		d.Decide = true
@@ -484,6 +573,34 @@ func prepareZone(z *edgedoc.Zone, cert Cert, node Node) (zoneData, error) {
 			return zoneData{}, fmt.Errorf("extra_directives_file: %w", err)
 		}
 		d.ExtraDirectivesFile = z.ExtraDirectivesFile
+	}
+	if z.TLS.H3 {
+		// The options are checked whether or not this node renders QUIC: the
+		// document crossed a network, and a value is interpolated only once
+		// it is known to be a number in range.
+		advertise, maxAge := true, edgedoc.DefaultAltSvcMaxAge
+		if o := z.TLS.H3Options; o != nil {
+			if o.AltSvcMaxAgeSeconds != 0 {
+				if o.AltSvcMaxAgeSeconds < edgedoc.MinAltSvcMaxAge || o.AltSvcMaxAgeSeconds > edgedoc.MaxAltSvcMaxAge {
+					return zoneData{}, fmt.Errorf("tls.h3_options.alt_svc_max_age_seconds %d is outside %d..%d", o.AltSvcMaxAgeSeconds, edgedoc.MinAltSvcMaxAge, edgedoc.MaxAltSvcMaxAge)
+				}
+				maxAge = o.AltSvcMaxAgeSeconds
+			}
+			if o.Advertise != nil {
+				advertise = *o.Advertise
+			}
+		}
+		switch {
+		case !node.H3Supported:
+			// Byte for byte the tls.h3: false render, plus the comment block:
+			// the zone is served over TCP here and the node reports it.
+			d.H3Degraded = true
+		case d.HasCert:
+			d.H3 = true
+			if advertise {
+				d.AltSvc = fmt.Sprintf(`h3=":443"; ma=%d`, maxAge)
+			}
+		}
 	}
 	return d, nil
 }

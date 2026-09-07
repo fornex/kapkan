@@ -13,6 +13,10 @@
 # One JSON object per request, shipped to kapkan over a unix datagram socket
 # (internal/edge/rollup parses it). escape=json makes every $variable safe
 # inside its quotes. "port" tells :80 traffic from decided :443 traffic;
+# "proto" is the request's protocol (HTTP/1.1, HTTP/2.0, HTTP/3.0), so the
+# rollups can tell HTTP/3 traffic from TCP ($server_protocol exists on every
+# nginx, unlike the HTTP/3 module's own variable, which fails the config test
+# on a build without the module);
 # "decision" is the decision service's answer for this request (200/403/401,
 # a 5xx when it could not be reached, empty when the zone does not decide),
 # "reason" why it denied or challenged (rate, concurrency, table:<reason>,
@@ -24,6 +28,7 @@ log_format kapkan_edge escape=json '{'
     '"zone":"$server_name",'
     '"src":"$remote_addr",'
     '"port":$server_port,'
+    '"proto":"$server_protocol",'
     '"method":"$request_method",'
     '"host":"$host",'
     '"uri":"$request_uri",'
@@ -121,6 +126,21 @@ map $kapkan_path $kapkan_path_safe {
 # Set once, here; the operator's nginx.conf must not set it as well.
 server_names_hash_bucket_size {{.HashBucketSize}};
 {{- end}}
+{{- if .AnyH3}}
+
+# HTTP/3 (edge-spec §8, E5). nginx binds a QUIC connection to the DEFAULT
+# server of its address before SNI names a zone, so a zone's own quic_* lines
+# would never apply; these sit at the http level and reach whichever server is
+# the default — kapkan's catch-all, its QUIC anchor, or the operator's own.
+# quic_retry makes every new address prove it can receive before the handshake
+# costs the node anything (a Retry is smaller than the Initial it answers, so a
+# spoofed source amplifies nothing); quic_host_key is the node's stable key for
+# the Retry and stateless-reset tokens, so a reload does not void the tokens
+# already handed out. Set once here; the operator's nginx.conf must not set them
+# as well.
+quic_retry {{if .QUICRetry}}on{{else}}off{{end}};
+quic_host_key {{.Node.QUICHostKey}};
+{{- end}}
 {{- if not .Node.OmitCatchAll}}
 
 # The catch-all: a Host or SNI that matches no zone is refused, instead of
@@ -141,6 +161,16 @@ server {
 {{- if not .Node.DisableIPv6}}
     listen [::]:443 ssl default_server;
 {{- end}}
+{{- if .AnyH3}}
+    # The address's ONE reuseport QUIC listener (edge-spec §8, E5): reuseport
+    # is what lets every worker own a socket and keep a connection's datagrams
+    # on one worker; a second reuseport on the same address fails `nginx -t`.
+    # Unknown SNI is refused over QUIC as over TCP (ssl_reject_handshake).
+    listen 443 quic reuseport default_server;
+{{- if not .Node.DisableIPv6}}
+    listen [::]:443 quic reuseport default_server;
+{{- end}}
+{{- end}}
     server_name _;
     ssl_reject_handshake on;
     # nginx before 1.29.2 fixes the TLS protocol set from the DEFAULT server
@@ -149,5 +179,30 @@ server {
     # and on Angie, each zone's own ssl_protocols is honoured.
     ssl_protocols {{.NodeSSLProtocols}};
     return 444;
+}
+{{- end}}
+{{- if .QUICAnchor}}
+
+# The QUIC anchor (edge-spec §8, E5): with omit_catch_all the operator's own
+# default server refuses unknown names over TCP, but the address still needs
+# exactly one reuseport QUIC listener for HTTP/3 to work across workers. This
+# bare server carries it and refuses unknown SNI over QUIC; the quic_* lines
+# above reach it from the http level. nginx allows ONE listen with socket
+# options (reuseport, rcvbuf, backlog, bind, ipv6only, …) per address:port:
+# set the node's quic.omit_anchor when your own server's `listen 443 quic`
+# carries any of them — and give that server reuseport and TLSv1.3 yourself.
+server {
+    listen 443 quic reuseport;
+{{- if not .Node.DisableIPv6}}
+    listen [::]:443 quic reuseport;
+{{- end}}
+    server_name _;
+    ssl_reject_handshake on;
+    # The UDP default server's protocol set governs EVERY QUIC handshake on the
+    # address (nginx fixes it before SNI, on every build), and QUIC is TLS 1.3
+    # only: without this line an http-level ssl_protocols in your nginx.conf
+    # that omits TLSv1.3 would pass `nginx -t` and fail every HTTP/3 handshake
+    # silently.
+    ssl_protocols TLSv1.3;
 }
 {{- end}}

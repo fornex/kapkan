@@ -41,7 +41,12 @@ type Record struct {
 	Src netip.Addr
 	// Port is the server port the request arrived on: 443 for decided
 	// traffic, 80 for the redirect/ACME listener.
-	Port   int
+	Port int
+	// Proto is the request's protocol as nginx names it: "HTTP/1.0",
+	// "HTTP/1.1", "HTTP/2.0", "HTTP/3.0"; "" when the request carried no
+	// protocol token (HTTP/0.9, a 400 before the request line parsed) or from
+	// a node whose render predates the field.
+	Proto  string
 	Method string
 	Host   string
 	URI    string
@@ -121,6 +126,7 @@ type wire struct {
 	Zone     string  `json:"zone"`
 	Src      string  `json:"src"`
 	Port     int     `json:"port"`
+	Proto    string  `json:"proto"`
 	Method   string  `json:"method"`
 	Host     string  `json:"host"`
 	URI      string  `json:"uri"`
@@ -163,7 +169,7 @@ func Parse(datagram []byte) (Record, error) {
 		return Record{}, fmt.Errorf("access-log record: status %d", w.Status)
 	}
 	return Record{
-		TS: ts, Zone: w.Zone, Src: src.Unmap(), Port: w.Port, Method: w.Method, Host: w.Host, URI: w.URI,
+		TS: ts, Zone: w.Zone, Src: src.Unmap(), Port: w.Port, Proto: w.Proto, Method: w.Method, Host: w.Host, URI: w.URI,
 		Status: w.Status, Bytes: w.Bytes, RT: w.RT, URT: lastAttempt(w.URT), UA: w.UA,
 		Decision: lastAttempt(w.Decision), Reason: lastAttempt(w.Reason), Mark: lastAttempt(w.Mark),
 	}, nil
