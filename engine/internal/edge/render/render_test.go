@@ -220,10 +220,103 @@ func TestPolicyShapes(t *testing.T) {
 				"ssl_protocols TLSv1.2 TLSv1.3;", "return 444;",
 				"map $http_upgrade $kapkan_connection {", "map $upstream_status $kapkan_decided_mark {",
 				"map $upstream_status $kapkan_decision {", "map $upstream_status $kapkan_reason {", "map $upstream_status $kapkan_mark {",
-				`'"port":$server_port,'`, `'"decision":"$kapkan_decision",'`, `'"reason":"$kapkan_reason",'`, `'"mark":"$kapkan_mark"'`,
+				`'"port":$server_port,'`, `'"proto":"$server_protocol",'`, `'"decision":"$kapkan_decision",'`, `'"reason":"$kapkan_reason",'`, `'"mark":"$kapkan_mark"'`,
 				"upstream kapkan_decide {", "keepalive 64;", "upstream kapkan_challenge {",
 			},
-			wantNot: []string{"server_names_hash_bucket_size", "limit_req_zone", "limit_conn_zone"},
+			// No zone asks for HTTP/3: not one QUIC byte, so a node without h3
+			// zones renders the shared file it rendered before E5.
+			wantNot: []string{"server_names_hash_bucket_size", "limit_req_zone", "limit_conn_zone", "quic", "$http3"},
+		},
+		{
+			// HTTP/3 on a node that may render it: the zone gets the QUIC
+			// listeners and announces them; nothing QUIC-wide lives here.
+			fixture: "h3", file: render.ZoneFile("example.com"),
+			want: []string{
+				"listen 443 ssl http2;", "listen [::]:443 ssl http2;",
+				"listen 443 quic;", "listen [::]:443 quic;",
+				`add_header Alt-Svc 'h3=":443"; ma=86400';`,
+				"auth_request /_kapkan/decide;",
+			},
+			wantNot: []string{"reuseport", "quic_retry", "quic_host_key", "ssl_early_data", "NOT RENDERED", "default_server"},
+		},
+		{
+			// A mode: none zone speaks h3 too — it is a TLS-level fact, not a
+			// policy — with its own Alt-Svc max-age.
+			fixture: "h3", file: render.ZoneFile("static.example.org"),
+			want:    []string{"listen 443 quic;", `add_header Alt-Svc 'h3=":443"; ma=300';`},
+			wantNot: []string{"auth_request", "ma=86400", "NOT RENDERED"},
+		},
+		{
+			// The zone beside them that did not ask stays as it was.
+			fixture: "h3", file: render.ZoneFile("plain.example.net"),
+			want:    []string{"listen 443 ssl http2;"},
+			wantNot: []string{"quic", "Alt-Svc", "NOT RENDERED"},
+		},
+		{
+			// The shared file: quic_* at the http level (before SNI, nginx
+			// reads the default server), the catch-all's one reuseport QUIC
+			// listener per family, the proto field; nothing 0-RTT.
+			fixture: "h3", file: render.CommonFile,
+			want: []string{
+				"quic_retry on;", "quic_host_key /var/lib/kapkan-edge/tls/quic_host.key;",
+				"listen 443 quic reuseport default_server;", "listen [::]:443 quic reuseport default_server;",
+				"ssl_reject_handshake on;", `'"proto":"$server_protocol",'`,
+			},
+			wantNot: []string{"ssl_early_data", "quic_gso", "quic_bpf", "http3", "server_name _;\n    listen"},
+		},
+		{
+			// The same document on a node without the module: TCP only, the
+			// comment says why, and the shared file carries no QUIC at all.
+			fixture: "h3-unsupported", file: render.ZoneFile("example.com"),
+			want:    []string{"HTTP/3 ASKED FOR, NOT RENDERED", "listen 443 ssl http2;"},
+			wantNot: []string{"quic", "Alt-Svc"},
+		},
+		{
+			fixture: "h3-unsupported", file: render.CommonFile,
+			want:    []string{`'"proto":"$server_protocol",'`, "listen 443 ssl default_server;"},
+			wantNot: []string{"quic"},
+		},
+		{
+			// omit_catch_all: the operator's default server handles TCP; the
+			// address still needs its one reuseport QUIC listener — the anchor.
+			fixture: "h3-omit-catchall", file: render.CommonFile,
+			want:    []string{"quic_retry on;", "quic_host_key", "listen 443 quic reuseport;", "listen [::]:443 quic reuseport;", "server_name _;", "ssl_reject_handshake on;"},
+			wantNot: []string{"default_server", "return 444"},
+		},
+		{
+			// …unless the operator's own server carries it.
+			fixture: "h3-omit-anchor", file: render.CommonFile,
+			want:    []string{"quic_retry on;", "quic_host_key"},
+			wantNot: []string{"reuseport", "listen 443 quic", "server_name _;"},
+		},
+		{
+			// IPv6 off drops the [::] QUIC listeners too; Retry can be turned
+			// off node-wide; the host key path is the node's to name.
+			fixture: "h3-noipv6", file: render.CommonFile,
+			want:    []string{"quic_retry off;", "quic_host_key /srv/kapkan-edge/tls/host.key;", "listen 443 quic reuseport default_server;"},
+			wantNot: []string{"[::]", "quic_retry on"},
+		},
+		{
+			fixture: "h3-noipv6", file: render.ZoneFile("example.com"),
+			want:    []string{"listen 443 quic;", "error_page 500 502 503 504 = @kapkan_unavailable;"},
+			wantNot: []string{"[::]"},
+		},
+		{
+			// No certificate, no TLS server, no QUIC — and no QUIC-wide lines
+			// either, since nothing listens.
+			fixture: "h3-no-cert", file: render.ZoneFile("new.example.com"),
+			want:    []string{"NO CERTIFICATE YET", "listen 80;"},
+			wantNot: []string{"quic", "NOT RENDERED", "Alt-Svc"},
+		},
+		{
+			fixture: "h3-no-cert", file: render.CommonFile,
+			wantNot: []string{"quic"},
+		},
+		{
+			// The canary: the listener is there, nobody is told.
+			fixture: "h3-quiet", file: render.ZoneFile("example.com"),
+			want:    []string{"listen 443 quic;", "listen [::]:443 quic;"},
+			wantNot: []string{"Alt-Svc"},
 		},
 		{
 			fixture: "decide-closed", file: render.ZoneFile("closed.example.net"),
@@ -395,7 +488,17 @@ func TestRenderRejects(t *testing.T) {
 		{"origin with scheme", func(in *render.Inputs) { in.Doc.Zones[0].Origins = []string{"http://10.0.0.1:80"} }, "not a canonical host:port"},
 		{"origin with space", func(in *render.Inputs) { in.Doc.Zones[0].Origins = []string{"10.0.0.1:80 backup"} }, "not a canonical host:port"},
 		{"tls 1.1", func(in *render.Inputs) { in.Doc.Zones[0].TLS.MinVersion = "1.1" }, "tls.min_version"},
-		{"h3", func(in *render.Inputs) { in.Doc.Zones[0].TLS.H3 = true }, "tls.h3"},
+		{"alt-svc max-age too small", func(in *render.Inputs) {
+			in.Doc.Zones[0].TLS.H3 = true
+			in.Doc.Zones[0].TLS.H3Options = &edgedoc.H3Options{AltSvcMaxAgeSeconds: 59}
+		}, "alt_svc_max_age_seconds 59"},
+		{"alt-svc max-age too large, even where h3 is not rendered", func(in *render.Inputs) {
+			in.Node.H3Supported = false
+			in.Doc.Zones[0].TLS.H3 = true
+			in.Doc.Zones[0].TLS.H3Options = &edgedoc.H3Options{AltSvcMaxAgeSeconds: 604801}
+		}, "alt_svc_max_age_seconds 604801"},
+		{"quic host key with space", func(in *render.Inputs) { in.Node.QUICHostKey = "/var/lib/kapkan edge/host.key" }, "node.quic_host_key"},
+		{"quic host key relative", func(in *render.Inputs) { in.Node.QUICHostKey = "tls/host.key" }, "node.quic_host_key"},
 		{"unknown mode", func(in *render.Inputs) { in.Doc.Zones[0].Policy.Mode = "maybe" }, "policy.mode"},
 		{"empty mode", func(in *render.Inputs) { in.Doc.Zones[0].Policy.Mode = "" }, "policy.mode"},
 		{"unknown failure mode", func(in *render.Inputs) { in.Doc.Zones[0].Policy.FailureMode = "half" }, "policy.failure_mode"},
@@ -453,5 +556,159 @@ func TestNamesAndZoneFile(t *testing.T) {
 	c := render.Files{"x": []byte("12"), "y": []byte("")}
 	if a.Hash() == c.Hash() {
 		t.Fatal("hash must separate names from contents")
+	}
+}
+
+// A zone that asks for HTTP/3 on a node that cannot render it is served over
+// TCP: byte for byte the tls.h3: false render, plus the comment block that
+// says why — a zone is never held hostage to one node's package, and the node
+// reports the zones it degraded.
+func TestH3DegradesToTheTCPRender(t *testing.T) {
+	in := loadFixture(t, "h3-unsupported")
+	degraded, info, err := render.RenderDetailed(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(info.Degraded, ",") != "example.com,static.example.org" || len(info.H3Zones) != 0 {
+		t.Fatalf("info = %+v", info)
+	}
+	for i := range in.Doc.Zones {
+		in.Doc.Zones[i].TLS.H3 = false
+		in.Doc.Zones[i].TLS.H3Options = nil
+	}
+	plain, err := render.Render(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(degraded.Names(), ",") != strings.Join(plain.Names(), ",") {
+		t.Fatalf("file sets differ: %v vs %v", degraded.Names(), plain.Names())
+	}
+	for _, name := range degraded.Names() {
+		body, stripped := stripDegradedComment(t, string(degraded[name]))
+		wantStripped := name == render.ZoneFile("example.com") || name == render.ZoneFile("static.example.org")
+		if stripped != wantStripped {
+			t.Errorf("%s: degraded comment present=%v, want %v", name, stripped, wantStripped)
+		}
+		if body != string(plain[name]) {
+			t.Errorf("%s differs from the tls.h3: false render beyond the comment:\n%s", name, firstDiff(plain[name], []byte(body)))
+		}
+	}
+}
+
+// stripDegradedComment removes the HTTP/3 ASKED FOR, NOT RENDERED block (a "#"
+// line, the headline and its two continuation lines) and reports whether it
+// was there.
+func stripDegradedComment(t *testing.T, body string) (string, bool) {
+	t.Helper()
+	lines := strings.Split(body, "\n")
+	for i, l := range lines {
+		if !strings.HasPrefix(l, "# HTTP/3 ASKED FOR, NOT RENDERED") {
+			continue
+		}
+		if i < 1 || lines[i-1] != "#" || i+2 >= len(lines) || !strings.HasPrefix(lines[i+1], "# ") || !strings.HasPrefix(lines[i+2], "# ") {
+			t.Fatalf("degraded comment block has an unexpected shape around line %d:\n%s", i+1, body)
+		}
+		return strings.Join(append(lines[:i-1:i-1], lines[i+3:]...), "\n"), true
+	}
+	return body, false
+}
+
+// Toggling tls.h3 on a node that renders QUIC changes the bytes — that is the
+// slow path, edge-spec §2.2 ("h3 toggle → reload yes") — while the fast-path
+// fields still change nothing on an h3 zone.
+func TestH3ToggleIsANewGeneration(t *testing.T) {
+	in := loadFixture(t, "h3")
+	on, err := render.Render(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Doc.Zones[0].TLS.H3 = false // example.com
+	off, err := render.Render(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on.Hash() == off.Hash() {
+		t.Fatal("turning tls.h3 off rendered the same bytes")
+	}
+	if !strings.Contains(string(off[render.CommonFile]), "quic_retry on;") {
+		t.Fatal("static.example.org still speaks h3, so the shared file must keep its QUIC lines")
+	}
+	in = loadFixture(t, "h3")
+	in.Doc.Zones[0].Policy.Rate = edgedoc.Rate{RPS: 5, Concurrency: 2}
+	in.Doc.Zones[0].Policy.Challenge = edgedoc.ChallengeAuto
+	in.Doc.Zones[0].Policy.DryRun = true
+	fast, err := render.Render(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fast.Hash() != on.Hash() {
+		t.Fatal("a fast-path change altered an h3 zone's render")
+	}
+}
+
+// Exactly one reuseport per address family in a render, and only when some
+// zone listens over QUIC: nginx refuses a second reuseport on one address:port
+// (the operator's own is the reason omit_quic_anchor exists), and a node
+// without h3 zones must not carry a QUIC socket at all.
+func TestReuseportOncePerAddress(t *testing.T) {
+	want := map[string][2]int{
+		"h3": {1, 1}, "h3-omit-catchall": {1, 1}, "h3-omit-anchor": {0, 0}, "h3-noipv6": {1, 0},
+		"h3-quiet": {1, 1}, "h3-unsupported": {0, 0}, "h3-no-cert": {0, 0}, "decide-open": {0, 0}, "multi": {0, 0},
+	}
+	for _, name := range fixtureNames(t) {
+		files, err := render.Render(loadFixture(t, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var v4, v6, quic int
+		for _, body := range files {
+			for _, l := range strings.Split(string(body), "\n") {
+				l = strings.TrimSpace(l)
+				if !strings.HasPrefix(l, "listen ") {
+					continue
+				}
+				if strings.Contains(l, " quic") {
+					quic++
+				}
+				if strings.Contains(l, "reuseport") {
+					if strings.Contains(l, "[::]") {
+						v6++
+					} else {
+						v4++
+					}
+				}
+			}
+		}
+		if v4 > 1 || v6 > 1 {
+			t.Errorf("%s: %d IPv4 and %d IPv6 reuseport listeners", name, v4, v6)
+		}
+		if w, ok := want[name]; ok && (v4 != w[0] || v6 != w[1]) {
+			t.Errorf("%s: reuseport v4=%d v6=%d, want %d/%d", name, v4, v6, w[0], w[1])
+		}
+		if quic > 0 && v4+v6 == 0 && name != "h3-omit-anchor" {
+			t.Errorf("%s: QUIC listeners without a reuseport one", name)
+		}
+	}
+}
+
+func TestRenderDetailedInfo(t *testing.T) {
+	cases := map[string]struct{ h3, degraded string }{
+		"h3":             {"example.com,static.example.org", ""},
+		"h3-unsupported": {"", "example.com,static.example.org"},
+		"h3-no-cert":     {"", ""},
+		"h3-quiet":       {"example.com", ""},
+		"decide-open":    {"", ""},
+	}
+	for name, want := range cases {
+		_, info, err := render.RenderDetailed(loadFixture(t, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(info.H3Zones, ","); got != want.h3 {
+			t.Errorf("%s: H3Zones %q, want %q", name, got, want.h3)
+		}
+		if got := strings.Join(info.Degraded, ","); got != want.degraded {
+			t.Errorf("%s: Degraded %q, want %q", name, got, want.degraded)
+		}
 	}
 }
