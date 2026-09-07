@@ -803,8 +803,9 @@ func (n *Node) report() api.EdgeReport {
 // tell nothing (allowed, marked, cleared) go from every zone, uncounted
 // (they are not in the set); then every zone's list is halved, the head kept
 // (the would-be sources rank first in it), the would-be sources among the
-// cut counted; then certificate entries from the (zone-sorted) tail; then
-// zones from their tail — counted too, so the brain knows what it is
+// cut counted; then the terminator's h3 zone-name lists (bare names, the
+// least valuable bytes); then certificate entries from the (zone-sorted) tail;
+// then zones from their tail — all counted too, so the brain knows what it is
 // missing and can say "short", not "nobody".
 func trimReport(rep api.EdgeReport) api.EdgeReport {
 	fits := func() bool {
