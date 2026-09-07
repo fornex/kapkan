@@ -401,11 +401,17 @@ security-relevant.
   does (a second `reuseport` fails `nginx -t`). New document field `tls.h3_options {advertise,
   alt_svc_max_age_seconds}` (nil at the defaults: unchanged bytes and ETag); `advertise: false`
   renders the listener without announcing it. The access log gains `"proto":"$server_protocol"`
-  (`HTTP/1.1`, `HTTP/2.0`, `HTTP/3.0`) — one upgrade reload per node, as E4's log fields were —
-  and the rollups parse it. Not rendered, by decision: `ssl_early_data` (0-RTT off by policy),
-  `quic_bpf`, `quic_gso`, `http3`. Golden fixtures for seven HTTP/3 shapes; the real-terminator
-  matrix runs every one through `nginx -t` on all three images (TCP-only on `nginx:1.22`, where
-  forcing QUIC is shown to fail on `invalid parameter "quic"`) and checks `Alt-Svc` over TCP.
+  (`HTTP/1.0`, `HTTP/1.1`, `HTTP/2.0`, `HTTP/3.0`) — the shared file changes, so every node
+  tests and reloads once on upgrade, as with the earlier log-field additions — and the rollups
+  parse it. Not rendered, by decision: `ssl_early_data` (0-RTT off by policy), `quic_bpf`,
+  `quic_gso`, `http3`. The QUIC anchor carries `ssl_protocols TLSv1.3` of its own: the UDP
+  default server's protocol set governs every QUIC handshake on the address, and an http-level
+  `ssl_protocols TLSv1.2;` in an operator's `nginx.conf` would otherwise pass `nginx -t` and fail
+  every HTTP/3 handshake silently (verified on nginx 1.28, 1.30 and Angie). Golden fixtures for
+  seven HTTP/3 shapes; the real-terminator matrix runs every one through `nginx -t` on all three
+  images (TCP-only on `nginx:1.22`, where forcing QUIC is shown to fail on `unknown directive
+  "quic_retry"` — the first QUIC token nginx meets, in the shared file) and checks `Alt-Svc` over
+  TCP and the `proto` field in the access log.
   The node does not pass its readiness to the renderer yet and `tls.h3` is still refused by the
   zones file — both are E5.3.
 

@@ -42,8 +42,10 @@ type Record struct {
 	// Port is the server port the request arrived on: 443 for decided
 	// traffic, 80 for the redirect/ACME listener.
 	Port int
-	// Proto is the request's protocol as nginx names it: "HTTP/1.1",
-	// "HTTP/2.0", "HTTP/3.0" ("" from a node whose render predates the field).
+	// Proto is the request's protocol as nginx names it: "HTTP/1.0",
+	// "HTTP/1.1", "HTTP/2.0", "HTTP/3.0"; "" when the request carried no
+	// protocol token (HTTP/0.9, a 400 before the request line parsed) or from
+	// a node whose render predates the field.
 	Proto  string
 	Method string
 	Host   string

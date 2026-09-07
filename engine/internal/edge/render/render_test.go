@@ -262,7 +262,8 @@ func TestPolicyShapes(t *testing.T) {
 				"listen 443 quic reuseport default_server;", "listen [::]:443 quic reuseport default_server;",
 				"ssl_reject_handshake on;", `'"proto":"$server_protocol",'`,
 			},
-			wantNot: []string{"ssl_early_data", "quic_gso", "quic_bpf", "http3", "server_name _;\n    listen"},
+			// No anchor beside a catch-all (its comment is the anchor's signature).
+			wantNot: []string{"ssl_early_data", "quic_gso", "quic_bpf", "http3", "The QUIC anchor"},
 		},
 		{
 			// The same document on a node without the module: TCP only, the
@@ -280,8 +281,11 @@ func TestPolicyShapes(t *testing.T) {
 			// omit_catch_all: the operator's default server handles TCP; the
 			// address still needs its one reuseport QUIC listener — the anchor.
 			fixture: "h3-omit-catchall", file: render.CommonFile,
-			want:    []string{"quic_retry on;", "quic_host_key", "listen 443 quic reuseport;", "listen [::]:443 quic reuseport;", "server_name _;", "ssl_reject_handshake on;"},
-			wantNot: []string{"default_server", "return 444"},
+			// The anchor is the UDP default server: its protocol set governs
+			// every QUIC handshake, so it must say TLSv1.3 whatever the
+			// operator's http level says.
+			want:    []string{"quic_retry on;", "quic_host_key", "listen 443 quic reuseport;", "listen [::]:443 quic reuseport;", "server_name _;", "ssl_reject_handshake on;", "ssl_protocols TLSv1.3;", "The QUIC anchor"},
+			wantNot: []string{"default_server", "return 444", "TLSv1.2"},
 		},
 		{
 			// …unless the operator's own server carries it.
@@ -488,7 +492,8 @@ func TestRenderRejects(t *testing.T) {
 		{"origin with scheme", func(in *render.Inputs) { in.Doc.Zones[0].Origins = []string{"http://10.0.0.1:80"} }, "not a canonical host:port"},
 		{"origin with space", func(in *render.Inputs) { in.Doc.Zones[0].Origins = []string{"10.0.0.1:80 backup"} }, "not a canonical host:port"},
 		{"tls 1.1", func(in *render.Inputs) { in.Doc.Zones[0].TLS.MinVersion = "1.1" }, "tls.min_version"},
-		{"alt-svc max-age too small", func(in *render.Inputs) {
+		{"alt-svc max-age too small, on the rendered path", func(in *render.Inputs) {
+			in.Node.H3Supported = true
 			in.Doc.Zones[0].TLS.H3 = true
 			in.Doc.Zones[0].TLS.H3Options = &edgedoc.H3Options{AltSvcMaxAgeSeconds: 59}
 		}, "alt_svc_max_age_seconds 59"},
@@ -596,8 +601,8 @@ func TestH3DegradesToTheTCPRender(t *testing.T) {
 }
 
 // stripDegradedComment removes the HTTP/3 ASKED FOR, NOT RENDERED block (a "#"
-// line, the headline and its two continuation lines) and reports whether it
-// was there.
+// line, the headline and its continuation lines) and reports whether it was
+// there.
 func stripDegradedComment(t *testing.T, body string) (string, bool) {
 	t.Helper()
 	lines := strings.Split(body, "\n")
@@ -605,10 +610,17 @@ func stripDegradedComment(t *testing.T, body string) (string, bool) {
 		if !strings.HasPrefix(l, "# HTTP/3 ASKED FOR, NOT RENDERED") {
 			continue
 		}
-		if i < 1 || lines[i-1] != "#" || i+2 >= len(lines) || !strings.HasPrefix(lines[i+1], "# ") || !strings.HasPrefix(lines[i+2], "# ") {
+		if i < 1 || lines[i-1] != "#" {
 			t.Fatalf("degraded comment block has an unexpected shape around line %d:\n%s", i+1, body)
 		}
-		return strings.Join(append(lines[:i-1:i-1], lines[i+3:]...), "\n"), true
+		end := i + 1
+		for end < len(lines) && strings.HasPrefix(lines[end], "# ") {
+			end++
+		}
+		if end == i+1 {
+			t.Fatalf("degraded comment block has no continuation lines:\n%s", body)
+		}
+		return strings.Join(append(lines[:i-1:i-1], lines[end:]...), "\n"), true
 	}
 	return body, false
 }

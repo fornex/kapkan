@@ -250,7 +250,9 @@ func TestRealTerminator(t *testing.T) {
 		// the rollup will aggregate and what closes the decider's in-flight
 		// slot — and its src is the very address the decider was asked about.
 		rec := logs.wait(t, func(r rollup.Record) bool { return r.URI == "/probe?x=1" })
-		if rec.Zone != "example.com" || rec.Port != 443 || rec.Status != 403 || rec.Decision != "403" || rec.Method != "GET" || !rec.Decided() || rec.Host != "example.com" {
+		// The proto field is $server_protocol on every nginx (E5.2): the
+		// harness client speaks HTTP/1.1, so that is what the rollup must see.
+		if rec.Zone != "example.com" || rec.Port != 443 || rec.Status != 403 || rec.Decision != "403" || rec.Method != "GET" || !rec.Decided() || rec.Host != "example.com" || rec.Proto != "HTTP/1.1" {
 			t.Errorf("access-log record: %+v", rec)
 		}
 		if client, err := netipParse(seen.req.Header.Get("X-Kapkan-Client")); err != nil || client != rec.Src {
@@ -724,19 +726,20 @@ func (h *harness) probe(t *testing.T) apply.Terminator {
 func (h *harness) prepare(t *testing.T, name, arm string, mutate func(*render.Inputs)) string {
 	t.Helper()
 	in := loadFixture(t, name)
-	in.Node = render.Node{
-		DecideSocket:    containerWork + "/run/decide.sock",
-		ChallengeSocket: containerWork + "/run/challenge.sock",
-		LogSocket:       containerWork + "/run/log.sock",
-		ClearanceSocket: containerWork + "/run/clearance.sock",
-		EmptyRoot:       containerWork + "/empty",
-		// Containers commonly have no IPv6 stack; binding [::] would fail at
-		// start (not at -t) and hide what this test is after.
-		DisableIPv6: true,
-		// As the node does: QUIC only where the binary has the module.
-		H3Supported: h.term.HTTP3Module,
-		QUICHostKey: containerWork + "/quic_host.key",
-	}
+	// The fixture keeps its own decisions (omit_catch_all, omit_quic_anchor,
+	// quic_retry, h3_supported…); only what the mount dictates is overridden.
+	in.Node.DecideSocket = containerWork + "/run/decide.sock"
+	in.Node.ChallengeSocket = containerWork + "/run/challenge.sock"
+	in.Node.LogSocket = containerWork + "/run/log.sock"
+	in.Node.ClearanceSocket = containerWork + "/run/clearance.sock"
+	in.Node.EmptyRoot = containerWork + "/empty"
+	// Containers commonly have no IPv6 stack; binding [::] would fail at
+	// start (not at -t) and hide what this test is after.
+	in.Node.DisableIPv6 = true
+	// As the node does: QUIC only where the fixture asks AND the binary has
+	// the module (the refused-when-forced arm re-forces it afterwards).
+	in.Node.H3Supported = in.Node.H3Supported && h.term.HTTP3Module
+	in.Node.QUICHostKey = containerWork + "/quic_host.key"
 	writeFile(t, filepath.Join(h.work, "quic_host.key"), quicHostKeyBytes)
 	for zone := range in.Certs {
 		in.Certs[zone] = render.Cert{

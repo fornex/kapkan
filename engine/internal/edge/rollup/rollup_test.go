@@ -14,7 +14,7 @@ import (
 
 // A frame exactly as nginx sends it with `nohostname,tag=kapkan` and the
 // renderer's log_format kapkan_edge.
-const nginxFrame = `<190>Sep  2 12:39:47 kapkan: {"ts":"2026-09-02T12:39:47+00:00","zone":"example.com","src":"172.17.0.1","port":443,"method":"GET","host":"example.com","uri":"/probe?x=1","status":429,"bytes":153,"rt":0.001,"urt":"","ua":"Go-http-client/1.1","decision":"403","reason":"rate","mark":""}`
+const nginxFrame = `<190>Sep  2 12:39:47 kapkan: {"ts":"2026-09-02T12:39:47+00:00","zone":"example.com","src":"172.17.0.1","port":443,"proto":"HTTP/1.1","method":"GET","host":"example.com","uri":"/probe?x=1","status":429,"bytes":153,"rt":0.001,"urt":"","ua":"Go-http-client/1.1","decision":"403","reason":"rate","mark":""}`
 
 func TestParseNginxFrame(t *testing.T) {
 	r, err := Parse([]byte(nginxFrame + "\n"))
@@ -22,7 +22,7 @@ func TestParseNginxFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Record{
-		TS: time.Date(2026, 9, 2, 12, 39, 47, 0, time.UTC), Zone: "example.com", Src: netip.MustParseAddr("172.17.0.1"), Port: 443,
+		TS: time.Date(2026, 9, 2, 12, 39, 47, 0, time.UTC), Zone: "example.com", Src: netip.MustParseAddr("172.17.0.1"), Port: 443, Proto: "HTTP/1.1",
 		Method: "GET", Host: "example.com", URI: "/probe?x=1", Status: 429, Bytes: 153, RT: 0.001, URT: "", UA: "Go-http-client/1.1", Decision: "403", Reason: "rate",
 	}
 	if !r.TS.Equal(want.TS) {
@@ -34,6 +34,12 @@ func TestParseNginxFrame(t *testing.T) {
 	}
 	if !r.Decided() || r.Undecided() {
 		t.Fatal("a 403 decision is a decided request")
+	}
+	// A frame from a node rendered before E5.2 has no proto: it parses, and
+	// the protocol is simply unknown.
+	old, err := Parse([]byte(strings.Replace(nginxFrame, `"proto":"HTTP/1.1",`, "", 1)))
+	if err != nil || old.Proto != "" || old.Port != 443 {
+		t.Fatalf("frame without proto: %+v %v", old, err)
 	}
 	// With a hostname in the header, and no header at all.
 	for _, frame := range []string{
