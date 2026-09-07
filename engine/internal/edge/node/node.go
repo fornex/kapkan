@@ -70,6 +70,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/edge/poll"
 	"github.com/kapkan-io/kapkan/internal/edge/render"
 	"github.com/kapkan-io/kapkan/internal/edge/rollup"
+	"github.com/kapkan-io/kapkan/internal/metrics"
 )
 
 // Reload methods for the terminator.
@@ -127,17 +128,29 @@ type Options struct {
 	// OmitCatchAll and DisableIPv6 pass through to the renderer.
 	OmitCatchAll bool
 	DisableIPv6  bool
-	Logger       *slog.Logger
+	// QUIC is the node's HTTP/3 switch (edge.yaml quic.*).
+	QUIC   QUIC
+	Logger *slog.Logger
 	// HTTPClient talks to the brain (polls, reports, ACME coordination); nil
 	// means a default client. Redirects are never followed on any of them —
 	// a redirect would re-send the bearer wherever Location points. Tests
 	// inject one.
 	HTTPClient *http.Client
-	// Tester and Reloader override the terminator adapters; Prober the
-	// kind/version probe (tests).
+	// Tester and Reloader override the terminator adapters; Prober the `-V`
+	// probe (tests).
 	Tester   apply.Tester
 	Reloader apply.Reloader
-	Prober   func(ctx context.Context, binary string) (kind, version string, err error)
+	Prober   func(ctx context.Context, binary string) (apply.Terminator, error)
+}
+
+// QUIC is the node-level HTTP/3 configuration (edge-spec §8, E5). Whether a
+// zone speaks HTTP/3 is the document's tls.h3; this says whether THIS box
+// may render it at all.
+type QUIC struct {
+	// H3Off never renders QUIC on this node, whatever the zones ask and the
+	// binary supports (edge.yaml quic.h3: off) — the switch for a build whose
+	// HTTP/3 the operator does not trust.
+	H3Off bool
 }
 
 // Terminator is how the node drives nginx or Angie.
@@ -180,7 +193,7 @@ type Node struct {
 	challenges *acme.ChallengeTable
 	certs      *acme.Manager
 	applier    *apply.Applier
-	prober     func(ctx context.Context, binary string) (string, string, error)
+	prober     func(ctx context.Context, binary string) (apply.Terminator, error)
 
 	// renderMu serialises the whole slow path (read inputs, render, apply).
 	renderMu sync.Mutex
@@ -203,10 +216,12 @@ type Node struct {
 	lastErr      string
 	retryAt      time.Time
 	retryBackoff time.Duration
-	termKind     string
-	termVer      string
-	termAlive    *bool
-	statusAddr   string
+	// term is what the `-V` probe learned about the binary; termProbed says
+	// the probe succeeded (a zero term with termProbed false is "unknown").
+	term       apply.Terminator
+	termProbed bool
+	termAlive  *bool
+	statusAddr string
 	// windows is the last closed rollup window per zone (the aggregator's
 	// top-N view), for the self-report's zones section (E4.5).
 	windows map[string]rollup.WindowStats
@@ -394,12 +409,26 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// 2. The terminator: what it is, and whether a predecessor left an
 	// untested generation live.
-	if kind, ver, err := n.prober(ctx, n.opt.Terminator.Binary); err == nil {
+	if term, err := n.prober(ctx, n.opt.Terminator.Binary); err == nil {
 		n.mu.Lock()
-		n.termKind, n.termVer = kind, ver
+		n.term, n.termProbed = term, true
+		h3 := n.h3Locked()
 		n.mu.Unlock()
+		n.log.Info("terminator probed", "kind", term.Kind, "version", term.Version, "core", term.Core,
+			"tls", term.TLSLibrary, "http_v3_module", term.HTTP3Module, "early_data_capable", term.EarlyDataCapable, "h3", h3.State)
+		if h3.Advisory != "" {
+			n.log.Warn("terminator HTTP/3 advisory", "advisory", h3.Advisory)
+		}
 	} else if ctx.Err() == nil {
-		n.log.Warn("terminator probe failed; kind and version will be missing from reports", "err", err)
+		n.log.Warn("terminator probe failed; kind, version and HTTP/3 readiness will be missing from reports, and no QUIC is rendered", "err", err)
+	}
+	n.mu.Lock()
+	h3Ready := n.h3Locked().State == api.H3StateReady
+	n.mu.Unlock()
+	if h3Ready {
+		metrics.EdgeH3Ready.Set(1)
+	} else {
+		metrics.EdgeH3Ready.Set(0)
 	}
 	if res, err := n.applier.Recover(ctx); err != nil {
 		n.log.Error("recovering the live generation failed", "err", err)
@@ -709,9 +738,10 @@ func (n *Node) buildReport() api.EdgeReport {
 		DryRun:    n.opt.DryRun,
 		ZonesETag: n.renderedETag,
 		Terminator: &api.EdgeReportTerminator{
-			Kind: n.termKind, Version: n.termVer,
+			Kind: n.term.Kind, Version: n.term.Version,
 			Generation: n.last.Generation, TestOK: n.last.TestOK, TestError: n.last.TestError,
 			Alive: n.termAlive,
+			H3:    n.h3Locked(),
 		},
 	}
 	rep.Zones = n.reportZones(time.Now())
@@ -898,6 +928,8 @@ type Status struct {
 	Terminator   string    `json:"terminator,omitempty"`
 	// TerminatorAlive is nil when no pid file is configured.
 	TerminatorAlive *bool `json:"terminator_alive,omitempty"`
+	// H3 is the node's HTTP/3 readiness — the same object the report carries.
+	H3 *api.EdgeReportH3 `json:"h3,omitempty"`
 }
 
 // Status snapshots the node.
@@ -908,7 +940,8 @@ func (n *Node) Status() Status {
 		ZonesETag: n.renderedETag, AcceptedETag: n.acceptedETag,
 		Generation: n.last.Generation, TestOK: n.last.TestOK, TestError: n.last.TestError,
 		LastError: n.lastErr, RetryAt: n.retryAt, DryRun: n.opt.DryRun,
-		Terminator: strings.TrimSpace(n.termKind + " " + n.termVer), TerminatorAlive: n.termAlive,
+		Terminator: strings.TrimSpace(n.term.Kind + " " + n.term.Version), TerminatorAlive: n.termAlive,
+		H3: n.h3Locked(),
 	}
 	st.Healthy = n.last.Generation != 0 && n.doc != nil && (n.termAlive == nil || *n.termAlive)
 	st.Converged = st.Healthy && n.lastErr == "" && n.renderedETag == n.acceptedETag
@@ -919,6 +952,34 @@ func (n *Node) Status() Status {
 		st.BrainSeen = n.poller.LastOK()
 	}
 	return st
+}
+
+// h3Locked is the node's HTTP/3 readiness from the probe and quic.h3, as the
+// report and /healthz carry it. n.mu held.
+func (n *Node) h3Locked() *api.EdgeReportH3 {
+	h := &api.EdgeReportH3{State: H3State(n.term, n.termProbed, n.opt.QUIC.H3Off)}
+	if n.termProbed {
+		h.Module, h.TLSLibrary, h.EarlyDataCapable = n.term.HTTP3Module, n.term.TLSLibrary, n.term.EarlyDataCapable
+		h.Advisory = n.term.Advisory()
+	}
+	return h
+}
+
+// H3State is the readiness the renderer keys on: ready only when the probe
+// found the HTTP/3 module and the node's switch is not off. A node switched
+// off is node_off whatever its binary; a failed probe is unknown, and the
+// renderer treats unknown as no_module — it never guesses about a binary it
+// could not ask.
+func H3State(term apply.Terminator, probed, off bool) string {
+	switch {
+	case off:
+		return api.H3StateNodeOff
+	case !probed:
+		return api.H3StateUnknown
+	case !term.HTTP3Module:
+		return api.H3StateNoModule
+	}
+	return api.H3StateReady
 }
 
 // StatusAddr is the address the status listener bound, "" until it has.

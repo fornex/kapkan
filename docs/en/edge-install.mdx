@@ -126,7 +126,11 @@ kapkan edge -config /etc/kapkan/edge.yaml -check
 `-check` validates the file and what it names on this box: the socket group must exist and
 any External Account Binding key must be well-formed (problems), while an absent token, binary
 or `main_conf` is a warning — the check may run before the environment file or the terminator
-is in place.
+is in place. When the binary is on `PATH` it also prints what `nginx -V` says — kind, version,
+nginx core, TLS library, whether the build has the HTTP/3 module — and the node's HTTP/3
+readiness; a build whose nginx core falls in a published QUIC advisory's range gets a warning
+naming the CVE (check your distribution's changelog: backports do not move the version, and
+`quic.h3: off` in `edge.yaml` keeps HTTP/3 off on that node either way).
 
 Install the shipped unit, `deploy/kapkan-edge.service`, and start it:
 

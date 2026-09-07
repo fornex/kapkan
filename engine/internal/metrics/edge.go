@@ -94,6 +94,17 @@ var (
 		Help:      "Expiry (unix seconds) of the certificate held for a zone.",
 	}, []string{"zone"})
 
+	// EdgeH3Ready is 1 when this node may render HTTP/3: the terminator probe
+	// found --with-http_v3_module and edge.yaml's quic.h3 is not off. 0 for
+	// no_module, node_off and unknown (the probe failed) — the states the
+	// node's report spells out.
+	EdgeH3Ready = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "h3_ready",
+		Help:      "1 when the node may render HTTP/3 (module present, quic.h3 not off), 0 otherwise.",
+	})
+
 	// EdgeACMEAttemptsTotal counts issuance attempts by zone and result:
 	// issued, renewed, failed, fallback (the fallback CA was used).
 	EdgeACMEAttemptsTotal = promauto.NewCounterVec(prometheus.CounterOpts{

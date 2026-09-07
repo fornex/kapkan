@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/api"
+	"github.com/kapkan-io/kapkan/internal/edge/apply"
 	"github.com/kapkan-io/kapkan/internal/edge/decide"
 	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
@@ -172,7 +173,9 @@ func baseOptions(brain *httptest.Server, state, sockets string, tester *fakeTest
 		StatusListen: "127.0.0.1:0",
 		Logger:       slog.New(slog.DiscardHandler),
 		Tester:       tester, Reloader: reloader,
-		Prober: func(context.Context, string) (string, string, error) { return "nginx", "1.99.0", nil },
+		Prober: func(context.Context, string) (apply.Terminator, error) {
+			return apply.Terminator{Kind: "nginx", Version: "1.99.0", Core: "1.99.0", TLSLibrary: "OpenSSL 3.5.7"}, nil
+		},
 	}
 }
 
