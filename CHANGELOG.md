@@ -435,6 +435,22 @@ security-relevant.
   refuses a document that carries `h3`, stays on its previous generation with
   `converged: false`, and installs nothing more — renewed certificates included — until `h3` is
   removed or the node upgraded; upgrade every node first.
+- Edge track, E5.5 — the operator console's Edge view gains an **HTTP/3** column (edge-spec §8,
+  E5). It reads the zone's h3 STATE from `GET /api/v1/edge/zones/status`, never a window's
+  counters: `off` when the status carries no `h3` for the zone (nobody asks and nobody speaks it —
+  and a brain older than E5.3 sends no such field, which renders the same way); `on · 42% · 3/3`
+  when every node reporting the zone serves it, the share being the alive nodes' last-window
+  HTTP/3 requests over the zone's requests (dropped when the window had none); `on · 2/3 ready`
+  in the watch-only treatment when the zone asks and a node cannot, with a tooltip naming each
+  such node, the reason from its own `terminator.h3.state` and any advisory its probe raised —
+  read from `GET /api/v1/edge/nodes`, which the view now fetches beside the status, since only a
+  node's report explains itself (a refused or failed inventory costs the tooltip's detail, never
+  the table); and `off · 2 nodes still serving` when the zones file no longer asks for HTTP/3
+  while a node still holds a QUIC listener, because a file and a fleet that disagree must not
+  read as a finished switch-off. A node reporting the zone that named neither list is said to
+  have reported no readiness at all rather than guessed about. Twelve new locale strings and two
+  plural keys in all five catalogs; `i18n.plural()` now interpolates `{vars}` as `t()` does, so a
+  form carrying a second number keeps its whole phrase, word order included, in the translation.
 
 ## [1.7.0] - 2026-09-02
 

@@ -644,6 +644,67 @@
     if (previewWhy) return K.badge("badge--dry", I.t("ed.challenge.preview") + previewWhy);
     return h("span", { class: "td-muted", text: I.t("ed.challenge.off") });
   }
+  /* The HTTP/3 column reads the zone's h3 STATE, never a window's counters.
+     No h3 object at all — nobody asks and nobody speaks it (an older brain
+     sends no such field either): off. Asked for and served by every node that
+     reports the zone: on, with the share of the last window that arrived over
+     HTTP/3. Asked for where a node cannot serve it: the preview look, because
+     the zone is only partly on — the tooltip names each such node, why (its
+     terminator.h3 state) and any advisory its probe raised, all from the
+     node's OWN report in the inventory. Switched off in the file while a node
+     still holds a QUIC listener: off, saying so — the file and the fleet
+     disagree, and hiding that would read as a finished switch-off. */
+  var h3States = { ready: 1, no_module: 1, node_off: 1, unknown: 1 };
+  function edgeH3Report(inv, name) {
+    for (var i = 0; i < inv.length; i++) {
+      if (inv[i].name === name) {
+        var rep = inv[i].report;
+        return (rep && rep.terminator && rep.terminator.h3) || null;
+      }
+    }
+    return null;
+  }
+  /* one tooltip line per node: its name, and — when the inventory carries its
+     report — the state that explains it plus any advisory. A node the
+     inventory does not cover is named alone rather than guessed about. */
+  function edgeH3Why(inv, names) {
+    return names.map(function (name) {
+      var h3 = edgeH3Report(inv, name);
+      if (!h3 || !h3.state) return name;
+      var line = name + " — " + (h3States[h3.state] ? I.t("ed.h3.state." + h3.state) : h3.state);
+      return h3.advisory ? line + " · " + h3.advisory : line;
+    }).join("\n");
+  }
+  function edgeH3Cell(z, inv) {
+    var h3 = z.h3;
+    if (!h3) return h("span", { class: "td-muted", text: I.t("ed.h3.off") });
+    var serving = (h3.serving || []).length, unsup = (h3.unsupported || []).length;
+    /* the nodes reporting the zone is the denominator; never below the nodes
+       h3 itself names, so the fraction cannot read as more than the whole */
+    var nodes = Math.max(z.nodes || 0, serving + unsup);
+    if (!h3.enabled) {
+      if (serving === 0) return h("span", { class: "td-muted", text: I.t("ed.h3.off") });
+      return K.badge("badge--elev", I.t("ed.h3.off") + " · " + I.plural(serving, "edgeH3StillServing"), null,
+        I.t("ed.h3.tip.offserving") + "\n" + edgeH3Why(inv, h3.serving));
+    }
+    if (unsup === 0 && serving >= nodes) {
+      var label = I.t("ed.h3.on"), tip = nodes > 0 ? I.t("ed.h3.tip.on") : null;
+      if (z.requests > 0) {
+        var share = I.pct((h3.requests || 0) / z.requests);
+        label += " · " + share;
+        tip = I.t("ed.h3.tip.share", { p: share });
+      }
+      if (nodes > 0) label += " · " + I.num(serving) + "/" + I.num(nodes);
+      return K.badge("badge--calm", label, null, tip);
+    }
+    /* the header names a list, so it is said only when there IS one; a node
+       reporting the zone that named neither list said nothing about HTTP/3 at
+       all — it predates the report that carries it */
+    var why = [];
+    if (unsup > 0) why.push(I.t("ed.h3.tip.partial"), edgeH3Why(inv, h3.unsupported));
+    if (serving + unsup < nodes) why.push(I.t("ed.h3.tip.silent"));
+    return K.badge("badge--dry", I.t("ed.h3.on") + " · " + I.plural(serving, "edgeH3ReadyNodes", { n: I.num(nodes) }), null, why.join("\n"));
+  }
   function edge(root, ctx) {
     ctx.actions.loadEdge();
     var st = ctx.state.edge;
@@ -663,6 +724,7 @@
     } else if (!st.zones.length) {
       children.push(h("div", { class: "card" }, K.empty("shield-check", I.t("ed.nozones.title"), I.plural(st.nodesAlive, "edgeNodesUp") + " " + I.t("ed.nozones.sub"), "muted")));
     } else {
+      var inv = st.inv || [];
       var rows = st.zones.map(function (z) {
         var watch = z.watch_only || [];
         return h("tr", {}, [
@@ -676,7 +738,8 @@
           h("td", { class: "num mono", text: I.abbr(z.cleared || 0) }),
           h("td", { class: "num mono", text: I.abbr(z.would_challenge || 0) }),
           h("td", { class: "num mono", text: I.abbr(z.would_deny || 0) }),
-          h("td", {}, edgeChallengeCell(z))
+          h("td", {}, edgeChallengeCell(z)),
+          h("td", {}, edgeH3Cell(z, inv))
         ]);
       });
       children.push(h("div", { class: "card" }, [
@@ -686,7 +749,7 @@
         ]),
         h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
           h("thead", {}, h("tr", {}, [V.th("ed.zone"), V.thNum("ed.nodes"), V.thNum("ed.rps"), V.thNum("ed.challenged"), V.thNum("ed.cleared"),
-            V.thNum("ed.wouldchallenge"), V.thNum("ed.woulddeny"), V.th("ed.challenge")])),
+            V.thNum("ed.wouldchallenge"), V.thNum("ed.woulddeny"), V.th("ed.challenge"), V.th("ed.h3")])),
           h("tbody", {}, rows)
         ]))
       ]));

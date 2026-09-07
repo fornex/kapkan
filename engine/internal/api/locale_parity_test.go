@@ -177,6 +177,12 @@ func TestLocaleParityRegistered(t *testing.T) {
 // The scrubbing Nodes view added 23: nav.nodes, col.node, and the twenty-one
 // nd.* keys of the inventory table, its states, its provenance labels and its
 // error/empty notes (269 + 23 + 32 = 324).
+//
+// The Edge view's HTTP/3 cell (E5.5) added 12 strings — ed.h3 (the column),
+// ed.h3.{on,off}, the four ed.h3.state.* readings a node's terminator.h3 can
+// report, and the five ed.h3.tip.* tooltips (324 + 12 = 336) — plus two plural
+// keys, edgeH3ReadyNodes and edgeH3StillServing (10 + 2 = 12 keys; in en, 20 +
+// 4 = 24 forms).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -185,9 +191,9 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		want   int
 	}{
 		{"units", 0, 4},
-		{"plurals", 1, 10},
-		{"plurals", 0, 20},  // 8 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes
-		{"strings", 0, 324}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5)
+		{"plurals", 1, 12},
+		{"plurals", 0, 24},  // 12 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5)
+		{"strings", 0, 336}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5)
 		{"enums", 1, 8},
 		{"enums", 0, 43},
 		{"enumsShort", 1, 1},
