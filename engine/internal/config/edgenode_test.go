@@ -20,7 +20,7 @@ func TestParseEdgeNodeDefaults(t *testing.T) {
 	if !e.DryRunResolved() {
 		t.Fatal("dry_run must default to true")
 	}
-	if e.StateDir != "/var/lib/kapkan-edge" || e.SocketsDir != "/run/kapkan-edge" || e.Terminator.Binary != "nginx" || e.Terminator.Reload != EdgeReloadExec || e.Controller.ReportIntervalSeconds != 10 {
+	if e.StateDir != "/var/lib/kapkan-edge" || e.SocketsDir != "/run/kapkan-edge" || e.Terminator.Binary != "nginx" || e.Terminator.Reload != EdgeReloadExec || e.Controller.ReportIntervalSeconds != 10 || e.QUIC.H3 != EdgeH3Auto {
 		t.Fatalf("defaults: %+v", e)
 	}
 	full := edgeYAML + `
@@ -40,12 +40,14 @@ acme:
 status_listen: 127.0.0.1:9102
 omit_catch_all: true
 disable_ipv6: true
+quic:
+  h3: off
 `
 	e, err = ParseEdgeNode([]byte(full))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.DryRunResolved() || e.Terminator.Binary != "angie" || len(e.Terminator.Command) != 3 || e.ACME.Contact[0] != "mailto:ops@example.com" || !e.OmitCatchAll {
+	if e.DryRunResolved() || e.Terminator.Binary != "angie" || len(e.Terminator.Command) != 3 || e.ACME.Contact[0] != "mailto:ops@example.com" || !e.OmitCatchAll || e.QUIC.H3 != EdgeH3Off {
 		t.Fatalf("full: %+v", e)
 	}
 }
@@ -68,6 +70,7 @@ func TestParseEdgeNodeRejects(t *testing.T) {
 		{"fallback equals directory", edgeYAML + "acme:\n  directory: https://ca.example/d\n  fallback: https://ca.example/d\n", "different directory"},
 		{"contact not mailto", edgeYAML + "acme:\n  contact: [ops@example.com]\n", "mailto:"},
 		{"bad status listen", edgeYAML + "status_listen: nope\n", "status_listen"},
+		{"bad quic.h3", edgeYAML + "quic:\n  h3: maybe\n", "quic.h3"},
 		{"zero report interval", strings.Replace(edgeYAML, "  name: edge-1\n", "  name: edge-1\n  report_interval_seconds: -1\n", 1), "report_interval_seconds"},
 	}
 	for _, c := range cases {

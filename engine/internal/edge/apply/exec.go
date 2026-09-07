@@ -90,35 +90,6 @@ func (r SignalReloader) Reload(_ context.Context) error {
 	return nil
 }
 
-// Probe asks the binary for its kind and version (`nginx -v` prints
-// "nginx version: nginx/1.26.2"; Angie prints "Angie version: Angie/1.6.2"),
-// for the node's report. Kind is lower-case: "nginx" or "angie".
-func Probe(ctx context.Context, binary string) (kind, version string, err error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	c := exec.CommandContext(ctx, binaryOr(binary), "-v")
-	c.WaitDelay = time.Second
-	out, err := c.CombinedOutput()
-	if err != nil {
-		return "", "", fmt.Errorf("%s -v: %w: %s", binaryOr(binary), err, tail(out))
-	}
-	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	before, after, ok := strings.Cut(line, "version:")
-	if !ok {
-		return "", "", fmt.Errorf("%s -v: unrecognised output %q", binaryOr(binary), line)
-	}
-	kind = strings.ToLower(strings.TrimSpace(before))
-	if i := strings.LastIndex(after, "/"); i >= 0 {
-		after = after[i+1:]
-	}
-	// Distro builds append their --build name: "nginx/1.24.0 (Ubuntu)".
-	version, _, _ = strings.Cut(strings.TrimSpace(after), " ")
-	if kind == "" || version == "" {
-		return "", "", fmt.Errorf("%s -v: unrecognised output %q", binaryOr(binary), line)
-	}
-	return kind, version, nil
-}
-
 func binaryOr(b string) string {
 	if b == "" {
 		return "nginx"

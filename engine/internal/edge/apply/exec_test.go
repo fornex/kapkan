@@ -67,28 +67,6 @@ func TestExecReloaderArgs(t *testing.T) {
 	}
 }
 
-func TestProbe(t *testing.T) {
-	cases := []struct {
-		out, kind, version string
-	}{
-		{"nginx version: nginx/1.22.1", "nginx", "1.22.1"},
-		{"nginx version: nginx/1.26.2\nbuilt by gcc 12.2.0", "nginx", "1.26.2"},
-		{"nginx version: nginx/1.24.0 (Ubuntu)", "nginx", "1.24.0"},
-		{"Angie version: Angie/1.6.2", "angie", "1.6.2"},
-	}
-	for _, c := range cases {
-		bin := fakeBinary(t, `printf '%s\n' "`+c.out+`" >&2`)
-		kind, version, err := Probe(context.Background(), bin)
-		if err != nil || kind != c.kind || version != c.version {
-			t.Errorf("Probe(%q) = %q %q %v", c.out, kind, version, err)
-		}
-	}
-	bin := fakeBinary(t, `echo "something else" >&2`)
-	if _, _, err := Probe(context.Background(), bin); err == nil {
-		t.Fatal("unrecognised output accepted")
-	}
-}
-
 func TestSignalReloader(t *testing.T) {
 	got := make(chan os.Signal, 1)
 	signal.Notify(got, syscall.SIGHUP)

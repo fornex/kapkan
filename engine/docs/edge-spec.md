@@ -139,7 +139,8 @@ locally on a 1 → 10 min backoff, and never reported as rendered. A refused doc
 previous generation serving and `/healthz` at 200 (`converged: false`, the error in the body);
 `/healthz` is 503 only when no tested generation of ours is live or, with `terminator.pid_file`
 set, the terminator process is gone. The node self-reports every 10 s (version, dry-run,
-rendered ETag, terminator kind/version/liveness, generation and test result, certificates — never
+rendered ETag, terminator kind/version/liveness and its HTTP/3 readiness (E5.1), generation and
+test result, certificates — never
 a key; the list is cut to the 64 KiB body limit with a `certs_truncated` count) and serves
 `/healthz` + `/metrics` on `status_listen` when set. A component that cannot start (a socket
 already served, an unknown group) ends the process with its error so systemd restarts it. The
@@ -511,6 +512,18 @@ headline and the long pole.
   (drop UDP/443 → clients fall back to TCP — cheap and already expressible as a static rule),
   and an honest doc section on what nginx cannot do (CID-aware ECMP routing) with the
   supported topologies stated.
+
+  *Decided in E5.1 (`internal/edge/apply/probe.go`, `internal/edge/node`):* the node asks its
+  binary `-V` once at start and keeps the answer — kind, version, the nginx core an Angie build
+  derives from, the TLS library it runs with, `--with-http_v3_module`, and whether the build
+  could do 0-RTT (recorded only; 0-RTT stays off by policy). `edge.yaml` gains a node-level
+  `quic {h3: auto|off}` — whether THIS box may render HTTP/3 at all, beside the zones file's
+  per-zone `tls.h3` — and the node reports a readiness of `ready | no_module | node_off |
+  unknown`. A failed probe is `unknown` and the renderer must treat it as `no_module`: the node
+  never guesses about a binary it could not ask. A published advisory whose affected range holds
+  the build's nginx core is reported as ADVICE, never a refusal — distributions backport fixes
+  without moving the version, so only the operator can settle it. The probe is not repeated: an
+  upgraded binary is reported after a restart.
 - **E6 — Fleet + product tail**: multi-tenant zones in console/API, per-node zone scoping via
   hostgroup-scoped agent tokens, analytics tables, deployment guide for operator-built
   anycast. **Candidate needing its own round:** self-steering — an edge node announcing zone

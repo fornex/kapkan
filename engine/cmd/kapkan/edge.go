@@ -16,6 +16,7 @@ import (
 
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/edge/acme"
+	"github.com/kapkan-io/kapkan/internal/edge/apply"
 	"github.com/kapkan-io/kapkan/internal/edge/node"
 	"github.com/kapkan-io/kapkan/internal/edge/unixsock"
 	"github.com/kapkan-io/kapkan/internal/logging"
@@ -56,7 +57,10 @@ func runEdgeCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
 		return 1
 	}
 	if *checkOnly {
-		problems, warnings := edgePreflight(ec)
+		problems, warnings, notes := edgePreflight(ec)
+		for _, n := range notes {
+			lineWriter{errOut}.printf("kapkan edge: note: %s\n", n)
+		}
 		for _, w := range warnings {
 			lineWriter{errOut}.printf("kapkan edge: warning: %s\n", w)
 		}
@@ -88,8 +92,8 @@ func runEdgeCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
 // box it runs on. Problems fail the check; warnings do not — -check may run
 // outside the unit's environment (no EnvironmentFile) or before the
 // terminator is installed, so an absent secret or binary is reported, not
-// refused.
-func edgePreflight(ec *config.EdgeNodeConfig) (problems, warnings []string) {
+// refused. Notes are facts worth printing (what the terminator probe found).
+func edgePreflight(ec *config.EdgeNodeConfig) (problems, warnings, notes []string) {
 	if os.Getenv(ec.Controller.TokenEnv) == "" {
 		warnings = append(warnings, fmt.Sprintf("the agent token variable %s is not set in this environment (the unit reads /etc/kapkan/edge.env)", ec.Controller.TokenEnv))
 	}
@@ -107,6 +111,22 @@ func edgePreflight(ec *config.EdgeNodeConfig) (problems, warnings []string) {
 	}
 	if _, err := exec.LookPath(ec.Terminator.Binary); err != nil {
 		warnings = append(warnings, fmt.Sprintf("terminator.binary %q is not on PATH here (nginx -t and reloads will fail until it is)", ec.Terminator.Binary))
+	} else {
+		// The same probe the node runs at start: what the binary is and
+		// whether this box may render HTTP/3 (E5.1).
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		term, err := apply.Probe(ctx, ec.Terminator.Binary)
+		cancel()
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("terminator probe failed: %v (the node will report no terminator facts and render no HTTP/3)", err))
+		} else {
+			off := ec.QUIC.H3 == config.EdgeH3Off
+			notes = append(notes, fmt.Sprintf("terminator: %s %s (nginx core %s, %s, http_v3_module %s, 0-RTT capable %s); HTTP/3 readiness: %s",
+				term.Kind, term.Version, term.Core, orUnknown(term.TLSLibrary), yesNo(term.HTTP3Module), yesNo(term.EarlyDataCapable), node.H3State(term, true, off)))
+			if adv := term.Advisory(); adv != "" && !off {
+				warnings = append(warnings, adv)
+			}
+		}
 	}
 	if ec.Terminator.MainConf != "" {
 		if _, err := os.Stat(ec.Terminator.MainConf); err != nil {
@@ -118,7 +138,21 @@ func edgePreflight(ec *config.EdgeNodeConfig) (problems, warnings []string) {
 			warnings = append(warnings, fmt.Sprintf("terminator.command %q is not on PATH here", ec.Terminator.Command[0]))
 		}
 	}
-	return problems, warnings
+	return problems, warnings, notes
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "TLS library unknown"
+	}
+	return s
 }
 
 // edgeNodeOptions maps the validated edge.yaml onto the node's options.
@@ -143,6 +177,7 @@ func edgeNodeOptions(ec *config.EdgeNodeConfig, token string, eab map[string]con
 		ReportInterval: time.Duration(ec.Controller.ReportIntervalSeconds) * time.Second,
 		StatusListen:   ec.StatusListen,
 		OmitCatchAll:   ec.OmitCatchAll,
+		QUIC:           node.QUIC{H3Off: ec.QUIC.H3 == config.EdgeH3Off},
 		DisableIPv6:    ec.DisableIPv6,
 		Logger:         log,
 	}
