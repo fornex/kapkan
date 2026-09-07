@@ -59,7 +59,7 @@ func runEdgeCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
 	if *checkOnly {
 		problems, warnings, notes := edgePreflight(ec)
 		for _, n := range notes {
-			lineWriter{errOut}.printf("kapkan edge: %s\n", n)
+			lineWriter{errOut}.printf("kapkan edge: note: %s\n", n)
 		}
 		for _, w := range warnings {
 			lineWriter{errOut}.printf("kapkan edge: warning: %s\n", w)
