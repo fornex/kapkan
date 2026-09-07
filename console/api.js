@@ -315,6 +315,17 @@
         });
       }).catch(function () { return { ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] }; });
     },
+    /* edge-node inventory (Edge view, E5.5): each node's last self-report, for
+       the per-node detail the merged zone status cannot carry — terminator.h3's
+       state and advisory behind the HTTP/3 cell's tooltip. Fetched beside the
+       zone status, which already gates the view; a 403 or a failure here costs
+       the tooltip's detail, never the table. */
+    getEdgeNodes: function () {
+      return request("/api/v1/edge/nodes").then(function (res) {
+        if (!res.ok) throw new Error("edge nodes -> " + res.status);
+        return res.json().then(function (r) { return { ok: true, nodes: r.nodes || [] }; });
+      }).catch(function () { return { ok: false, nodes: [] }; });
+    },
     getTraffic: function (key, fromISO, toISO, step) {
       var qs = "key=" + encodeURIComponent(key);
       if (fromISO) qs += "&from=" + encodeURIComponent(fromISO);
