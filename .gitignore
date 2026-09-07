@@ -13,6 +13,10 @@ files.zip
 engine/internal/api/static/
 # engine binary (built into engine/ by make build)
 /engine/kapkan
+# test-only tools built into engine/bin (make h3probe). See engine/hack/README.md.
+/engine/bin/
+# …and where `go build ./...` inside the probe's own module would drop it.
+/engine/hack/h3probe/h3probe
 # the site build copies the canonical top-level docs/ here for Next to render
 site/frontend/content/docs/
 # kernel-matrix scratch: cached guest kernels (~12MB each), the generated

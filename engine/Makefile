@@ -32,7 +32,7 @@ BPF_BENCH_N ?= 300000
 
 .PHONY: build test lint bench run-dev clean console-sync schema \
 	dataplane-sync dataplane-test dataplane-bench dataplane-matrix \
-	blockrate blockrate-fixtures edge-terminator-test
+	blockrate blockrate-fixtures edge-terminator-test h3probe
 
 # The operator console lives in the monorepo's top-level console/ folder; the Go
 # binary go:embeds internal/api/static. Copy console/ there before any compile
@@ -187,6 +187,15 @@ EDGE_TERMINATOR_IMAGE ?= nginx:stable
 edge-terminator-test:
 	KAPKAN_EDGE_TERMINATOR=require KAPKAN_EDGE_TERMINATOR_IMAGE=$(EDGE_TERMINATOR_IMAGE) \
 		go test -count=1 -v -run 'TestRealTerminator' ./internal/edge/render/
+
+# The HTTP/3 test client, into bin/h3probe. hack/h3probe is its OWN Go module:
+# quic-go is its dependency and nothing else's in this repository (E5 decision
+# D10, enforced by internal/edge/render/deps_guard_test.go), so `go build ./...`
+# never descends into it and this is the only target that compiles it. Test-only
+# — no part of the kapkan binary needs it. See hack/README.md.
+h3probe:
+	mkdir -p $(CURDIR)/bin
+	cd hack/h3probe && go build -trimpath -o $(CURDIR)/bin/h3probe .
 
 # Capacity numbers for the data plane, via the kernel's own PROG_TEST_RUN
 # repeat loop. Same container as dataplane-test. The absolute figures depend on
