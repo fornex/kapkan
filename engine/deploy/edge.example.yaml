@@ -91,12 +91,15 @@ omit_catch_all: false
 disable_ipv6: false
 
 # HTTP/3 on this node. Whether a ZONE speaks HTTP/3 is the zones file's
-# tls.h3; this says whether this box may render it at all.
+# tls.h3 — still refused today, a later milestone; this says whether this box
+# may render it at all, and until then what the node reports.
 quic:
-  # auto (default): render QUIC for zones that ask when the binary was built
-  # with --with-http_v3_module (`nginx -V`; the node probes it at start and
-  # `-check` prints what it found). off: never render QUIC here — the switch
-  # for a build whose HTTP/3 you do not trust, e.g. one the probe flags with
-  # an advisory. Zones asking for h3 are served over TCP on this node and
-  # its report says so.
+  # NOTHING RENDERS QUIC YET: today this key only decides what the node's
+  # report and `-check` claim about the binary.
+  # auto (default): once the zone-side switch lands, render QUIC for zones
+  # that ask, and only when the binary was built with --with-http_v3_module
+  # (`nginx -V`; the node probes it at start and `-check` prints what it
+  # found). off: never render QUIC here — the switch for a build whose HTTP/3
+  # you do not trust, e.g. one the probe flags with an advisory. Either way
+  # the node's report says what the probe found.
   h3: auto

@@ -371,11 +371,12 @@ security-relevant.
   The node now asks its binary `nginx -V` (was `-v`) and learns, beside kind and version, the
   nginx core an Angie build derives from, the TLS library it runs with, whether it was built
   with `--with-http_v3_module` and whether it could do 0-RTT over QUIC (recorded only: 0-RTT
-  stays off by policy). `edge.yaml` gains `quic.h3: auto|off` (default `auto`). The report and
-  `/healthz` carry `terminator.h3 {state, module, tls_library, early_data_capable, advisory}`
-  with `state` `ready`, `no_module`, `node_off` or `unknown` (the probe failed — treated as
-  `no_module`: the node never guesses about a binary it could not ask); the new gauge
-  `kapkan_edge_h3_ready` is `1` for `ready`. `advisory` names a published QUIC advisory whose
+  stays off by policy). `edge.yaml` gains `quic.h3: auto|off` (default `auto`). The report
+  carries `terminator.h3 {state, module, tls_library, early_data_capable, advisory}` and
+  `/healthz` the same object as `h3`, with `state` `ready`, `no_module`, `node_off` or
+  `unknown` (the probe failed — treated as `no_module`: the node never guesses about a binary
+  it could not ask); the new gauge `kapkan_edge_h3_ready` is `1` for `ready`. The probe runs
+  once, at start, so an upgraded binary is only reported after a restart. `advisory` names a published QUIC advisory whose
   affected range holds the build's nginx core — CVE-2026-40460 (1.25.0–1.30.0: a migrated QUIC
   connection's new streams carry an unverified client address, the accounting key kapkan
   decides on; fixed upstream in 1.30.1 and 1.31.0) or CVE-2026-42530 (1.31.0–1.31.1: a
