@@ -138,7 +138,35 @@ type ClearanceKey struct {
 type TLS struct {
 	MinVersion string `json:"min_version"`
 	H3         bool   `json:"h3,omitempty"`
+	// H3Options tunes a zone's HTTP/3 once H3 is on (E5). Added in E5.2 — an
+	// omitempty extension: nil means the defaults, so a document without
+	// options keeps its bytes and its ETag.
+	H3Options *H3Options `json:"h3_options,omitempty"`
 }
+
+// H3Options is what a zone may tune about its HTTP/3 (edge-spec §8, E5).
+// Both knobs are per zone because they act after SNI has named the zone —
+// unlike Retry, 0-RTT and the host key, which nginx takes from the address's
+// default server and which are therefore node-wide.
+type H3Options struct {
+	// Advertise controls the Alt-Svc header on the zone's TLS-over-TCP
+	// responses. nil or true announces h3; false renders the QUIC listener
+	// without announcing it — a canary reachable only by clients that already
+	// speak HTTP/3 to the name, since a transport has no watch-only mode.
+	Advertise *bool `json:"advertise,omitempty"`
+	// AltSvcMaxAgeSeconds is Alt-Svc's ma: how long a client may remember the
+	// alternative. MinAltSvcMaxAge..MaxAltSvcMaxAge; 0 means DefaultAltSvcMaxAge.
+	AltSvcMaxAgeSeconds int `json:"alt_svc_max_age_seconds,omitempty"`
+}
+
+// Bounds and default of tls.h3_options.alt_svc_max_age_seconds. The default
+// is a day, the value most deployments advertise; a short one (minutes) is
+// the rollout step between the silent canary and the default.
+const (
+	DefaultAltSvcMaxAge = 86400
+	MinAltSvcMaxAge     = 60
+	MaxAltSvcMaxAge     = 604800
+)
 
 // Policy mirrors config.ZonePolicy — always fully resolved (no empty strings):
 // the node never applies a default of its own.
