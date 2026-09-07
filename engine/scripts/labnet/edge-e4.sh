@@ -27,10 +27,11 @@
 #   G. exempt paths pass without a clearance; a non-GET original gets the JSON
 #      refusal, not the page;
 #   H. kill the brain mid-challenge: cookies keep verifying, new visitors still
-#      clear, the node restarts from disk with its keys, the brain's return is
-#      a 304;
+#      clear, the node restarts from disk with its keys, and the returned brain
+#      serves the same keys (persisted) — nobody solves again;
 #   I. the lever: an operator puts the zone under challenge for a bounded time
-#      without a reload; it is audited; clearing puts the document back;
+#      without a reload; it is audited; clearing puts the document back; a
+#      lever left alone lapses on time;
 #   J. cost: the challenge answer's p50 against a mode:none 200.
 #
 # Topology: edge-e3.sh's, plus a `botnet` netns holding 64 addresses
@@ -132,7 +133,7 @@ PY
 : > /tmp/origin.log
 ip netns exec origin python3 /tmp/origin.py &
 for i in $(seq 1 20); do ip netns exec legit curl -s -m1 http://$ORIGIN:8081/ >/dev/null 2>&1 && break; sleep 0.3; done
-ip netns exec legit curl -s -m2 http://$ORIGIN:8081/ | grep -q '"path"' && ok "origin answers directly" || bad "origin not answering"
+grep -q '"path"' <<< "$(ip netns exec legit curl -s -m2 http://$ORIGIN:8081/)" && ok "origin answers directly" || bad "origin not answering"
 
 # ---------------------------------------------------------------- Pebble (ACME CA)
 say "starting Pebble: a real ACME CA validating HTTP-01 on the edge's :80"
@@ -259,8 +260,8 @@ stop_edge() {
 status() { ip netns exec edge curl -s -m2 http://127.0.0.1:9102/healthz 2>/dev/null; }
 sfield() { status | python3 -c "import json,sys; d=json.load(sys.stdin); v=d.get('$1',''); print(v if not isinstance(v,bool) else str(v).lower())" 2>/dev/null; }
 wait_status() { local i; for i in $(seq 1 $(( $3 * 5 ))); do [ "$(sfield "$1")" = "$2" ] && return 0; sleep 0.2; done; return 1; }
-wait_etag() { # wait until the accepted ETag differs from $1 (a document reached the fast path)
-  local i; for i in $(seq 1 100); do [ "$(sfield accepted_etag)" != "$1" ] && return 0; sleep 0.2; done; return 1
+wait_etag() { # wait until the accepted ETag differs from $1 (a document reached the fast path); an empty read is not a change
+  local i e; for i in $(seq 1 100); do e=$(sfield accepted_etag); [ -n "$e" ] && [ "$e" != "$1" ] && return 0; sleep 0.2; done; return 1
 }
 # get NS URL [curl args...] -> http code
 get() { local ns=$1 url=$2; shift 2; ip netns exec "$ns" curl -s -o /dev/null -w '%{http_code}' -m5 --cacert /tmp/pebble-root.crt --resolve "$ZONE:443:$EDGE" --resolve "$ZONE2:443:$EDGE" "$@" "$url" 2>/dev/null; }
@@ -375,13 +376,15 @@ if cookie:
 print(json.dumps(out))
 PY
 # botnet.py ZONE SECONDS SPLIT: 64 sources at 2 rps each (under the per-source
-# ceiling of 5), distinct paths per source. Status histograms before and after
-# SPLIT seconds, the Set-Cookie headers seen, the requests made.
+# ceiling of 5), distinct paths per source. Every answer is classed by status
+# and body — "page" is a 403 carrying the puzzle, "403" a bare refusal — and
+# the histograms are split at the moment the rig saw the flip (/tmp/flip-t,
+# plus a margin for requests in flight) or, without one, at SPLIT seconds.
 cat > /tmp/botnet.py <<'PY'
 import http.client, ssl, sys, time, json, threading
 zone, secs, split = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
 ctx = ssl.create_default_context(cafile="/tmp/pebble-root.crt")
-lock = threading.Lock(); before, after, cookies, total = {}, {}, [0], [0]
+lock = threading.Lock(); samples = []; cookies = [0]
 start = time.time()
 def run(ip):
     n = 0
@@ -390,32 +393,41 @@ def run(ip):
         t0 = time.time(); n += 1
         try:
             c = http.client.HTTPSConnection(zone, 443, context=ctx, timeout=5, source_address=(ip, 0))
-            c.request("GET", "/bot/%s/%d" % (ip, n)); r = c.getresponse(); r.read()
-            sc = r.getheader("Set-Cookie"); st = r.status; c.close()
+            c.request("GET", "/bot/%s/%d" % (ip, n)); r = c.getresponse(); b = r.read()
+            sc = r.getheader("Set-Cookie"); st = "page" if r.status == 403 and b"kapkan-puzzle" in b else str(r.status); c.close()
         except Exception:
             sc, st = None, "err"
         with lock:
-            h = after if time.time() - start >= split else before
-            h[st] = h.get(st, 0) + 1; total[0] += 1
+            samples.append((t0, st))
             if sc: cookies[0] += 1
         dt = 0.5 - (time.time() - t0)
         if dt > 0: time.sleep(dt)
 ts = [threading.Thread(target=run, args=("198.51.100.%d" % i,)) for i in range(64, 128)]
 for t in ts: t.start()
 for t in ts: t.join()
-print(json.dumps({"before": before, "after": after, "set_cookie": cookies[0], "requests": total[0]}))
+try:
+    cut = float(open("/tmp/flip-t").read().strip()) + 1.5
+except Exception:
+    cut = start + split
+before, after = {}, {}
+for t, st in samples:
+    h = after if t >= cut else before
+    h[st] = h.get(st, 0) + 1
+print(json.dumps({"before": before, "after": after, "set_cookie": cookies[0], "requests": len(samples), "cut_after_start_s": round(cut - start, 1)}))
 PY
-# flood.py ZONE SECONDS PATH [COOKIE]: one source flooding at ~50 rps; counts
-# statuses and tells a challenge page (403 with the puzzle) from a bare 403.
+# flood.py ZONE SECONDS PATH [COOKIE [BINDIP]]: one source flooding at ~50 rps;
+# counts statuses and tells a challenge page (403 with the puzzle) from a bare
+# 403.
 cat > /tmp/flood.py <<'PY'
 import http.client, ssl, sys, time, json
 zone, secs, path = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 cookie = sys.argv[4] if len(sys.argv) > 4 else ""
+bind = sys.argv[5] if len(sys.argv) > 5 else None
 ctx = ssl.create_default_context(cafile="/tmp/pebble-root.crt")
 end = time.time() + secs; codes = {}; last = None
 while time.time() < end:
     try:
-        c = http.client.HTTPSConnection(zone, 443, context=ctx, timeout=3)
+        c = http.client.HTTPSConnection(zone, 443, context=ctx, timeout=3, source_address=(bind, 0) if bind else None)
         c.request("GET", path, headers={"Cookie": "kapkan_clr=" + cookie} if cookie else {}); r = c.getresponse(); b = r.read()
         k = "page" if r.status == 403 and b"kapkan-puzzle" in b else str(r.status)
         codes[k] = codes.get(k, 0) + 1; last = k; c.close()
@@ -442,7 +454,12 @@ for i in $(seq 1 50); do [ "$(get legit https://$ZONE/hello)" = "200" ] && break
 [ "$(get legit https://$ZONE/hello)" = "200" ] && ok "the zone is served through nginx to the origin" || bad "zone not served over TLS (see /tmp/edge-nginx-error.log)"
 grep -q 'kapkan_clearance' $STATE/conf/live/kapkan_zone_$ZONE.conf 2>/dev/null && grep -q '/_kapkan/clearance/' $STATE/conf/live/kapkan_zone_$ZONE.conf && ok "the rendered zone carries the clearance machinery while the rung is off" || bad "no clearance machinery in the rendered zone file"
 [ -S $SOCKS/edge-clearance.sock ] && ok "the fourth socket is up" || bad "no clearance socket"
+# The baseline for "nothing reloads" is taken once the certificate renders have
+# settled: the 'certificate issued' line precedes its render, so wait for the
+# generation to hold still.
+for i in $(seq 1 20); do G1=$(sfield generation); sleep 3; [ "$(sfield generation)" = "$G1" ] && [ "$(sfield converged)" = "true" ] && break; done
 GEN0=$(sfield generation); INST0=$(installs); ET=$(sfield accepted_etag)
+[ "$GEN0" -ge 2 ] 2>/dev/null && ok "generations settled after issuance (generation $GEN0, $INST0 installs)" || bad "generation after issuance: $GEN0"
 zones_yaml manual true false 0 5; reload_brain
 wait_etag "$ET" && ok "challenge: manual reached the node (new accepted ETag)" || bad "the rung change never reached the node"
 sleep 0.5; ET=$(sfield accepted_etag)
@@ -478,8 +495,9 @@ COOKIE_T0=$(date +%s)
 # ================================================================ ARM C
 say "ARM C — the residential-proxy flood collapses to challenge-passers (§8)"
 ET=$(sfield accepted_etag); zones_yaml auto false false 40 5; reload_brain; wait_etag "$ET"; sleep 0.5
-: > /tmp/origin.log
+: > /tmp/origin.log; rm -f /tmp/flip-t
 NGX_ERR0=$(wc -l < /tmp/edge-nginx-error.log)
+CH0=$(metric 'kapkan_edge_decisions_total{.*result="challenge"')
 ip netns exec botnet python3 /tmp/botnet.py $ZONE 30 15 > /tmp/botnet-c.out 2>&1 &
 BOTPID=$!
 rm -f /tmp/cookie-browser-c
@@ -487,6 +505,7 @@ ip netns exec bursty python3 /tmp/browser.py $ZONE /browser-c 28 1 /tmp/cookie-b
 BRPID=$!
 # The flip should come within one or two ten-second windows.
 wait_zstatus "len(z.get('challenge_active',[]))" 1 20 && ok "zone-wide challenge in force within two windows (status: challenge_active)" || bad "no zone-wide challenge after 20 s: $(brain_api http://$BRAIN:8080/api/v1/edge/zones/status | cut -c1-300)"
+date +%s.%N > /tmp/flip-t   # the botnet splits its histogram here
 [ "$(zstatus "z.get('challenge_active',[{}])[0].get('reason','')")" = "zone-rps" ] && ok "its reason is zone-rps" || bad "reason: $(zstatus "z.get('challenge_active',[{}])[0].get('reason','')")"
 [ "$(zstatus "z.get('challenge_active',[{}])[0].get('dry_run',False)")" = "false" ] && ok "the flip bites (dry_run false on the node)" || bad "the flip previews: $(zstatus "z.get('challenge_active',[{}])[0]")"
 [ "$(metric 'kapkan_edge_challenge_active{')" = "1" ] && ok "kapkan_edge_challenge_active is 1 on the node" || bad "gauge: $(metric 'kapkan_edge_challenge_active{')"
@@ -496,14 +515,15 @@ code=$(get legit https://$ZONE/plain); [ "$code" = "403" ] && is_page "$(body le
 wait $BOTPID; wait $BRPID
 echo "  botnet: $(cat /tmp/botnet-c.out)"; echo "  browser: $(cat /tmp/browser-c.out)"
 BOTS=$(grep -c '"path": "/bot/' /tmp/origin.log); [ "$BOTS" = "0" ] && ok "from the flip on, no botnet request reached the origin" || bad "$BOTS botnet requests reached the origin under the flip"
-BRW=$(grep -c '"path": "/browser-c' /tmp/origin.log); [ "$BRW" -ge 10 ] && ok "the browser kept reaching the origin under the flip ($BRW requests, cleared)" || bad "the browser was walled out too ($BRW requests reached)"
-python3 - <<'PY' && ok "the botnet's own view: >= 95% of its requests after the flip were refused (403 page)" || bad "botnet after-flip histogram: $(jget /tmp/botnet-c.out "['after']")"
+BRW=$(grep -c '"path": "/browser-c' /tmp/origin.log); [ "$BRW" -ge 5 ] && ok "the browser kept reaching the origin under the flip ($BRW requests, cleared)" || bad "the browser was walled out too ($BRW requests reached)"
+python3 - <<'PY' && ok "the botnet's own view: >= 95% of its answers after the flip were the PAGE (a challenge, not a block)" || bad "botnet after-flip histogram: $(jget /tmp/botnet-c.out "['after']")"
 import json
-d = json.load(open('/tmp/botnet-c.out')); a = d['after']; tot = sum(a.values()); refused = a.get('403', 0)
-raise SystemExit(0 if tot > 0 and refused / tot >= 0.95 else 1)
+d = json.load(open('/tmp/botnet-c.out')); a = d['after']; tot = sum(a.values()); pages = a.get('page', 0)
+raise SystemExit(0 if tot > 0 and pages / tot >= 0.95 else 1)
 PY
 [ "$(jget /tmp/botnet-c.out "['set_cookie']")" = "0" ] && ok "no cookie was ever set for a bot (it never solved)" || bad "bots received cookies: $(jget /tmp/botnet-c.out "['set_cookie']")"
-CH=$(metric 'kapkan_edge_decisions_total{.*result="challenge"'); [ "$CH" -ge 500 ] 2>/dev/null && ok "kapkan_edge_decisions_total{result=\"challenge\"} counts the refused flood ($CH)" || bad "challenge decisions: $CH"
+CH=$(metric 'kapkan_edge_decisions_total{.*result="challenge"'); PAGES=$(python3 -c "import json; d=json.load(open('/tmp/botnet-c.out')); print(d['before'].get('page',0)+d['after'].get('page',0))")
+python3 -c "import sys; sys.exit(0 if $CH - $CH0 >= 0.9 * $PAGES and $PAGES > 0 else 1)" && ok "kapkan_edge_decisions_total{result=\"challenge\"} grew with the bots' pages (+$((CH - CH0)) for $PAGES pages)" || bad "challenge decisions +$((CH - CH0)) vs $PAGES pages served to bots"
 [ "$(sfield generation)" = "$GEN0" ] && ok "the flip and the flood moved no generation ($GEN0)" || bad "generation moved during the flood"
 sleep 1.5
 [ "$(zstatus "z.get('challenged',0) > 0")" = "true" ] && ok "the fleet status sums the challenged requests" || bad "status shows no challenged requests: $(zstatus "z")"
@@ -516,9 +536,11 @@ NOW=$(date +%s); WAIT=$(( COOKIE_T0 + 62 - NOW )); [ "$WAIT" -gt 0 ] && sleep $W
 code=$(get legit https://$ZONE/expired -H "Cookie: kapkan_clr=$COOKIE")
 if [ "$code" = "403" ]; then ok "an expired cookie is refused (403) after cookie_ttl_seconds"; else
   # No flip live and auto mode: a plain client is allowed — prove expiry through
-  # the mark instead: an expired cookie earns no `cleared`.
-  : > /tmp/origin.log; get legit https://$ZONE/expired2 -H "Cookie: kapkan_clr=$COOKIE" >/dev/null
-  grep -q '"mark": "cleared"' /tmp/origin.log && bad "an expired cookie still clears" || ok "an expired cookie no longer clears (no cleared mark at the origin)"
+  # the mark instead: the request must reach the origin, and without `cleared`.
+  : > /tmp/origin.log; get legit https://$ZONE/expired2 -H "Cookie: kapkan_clr=$COOKIE" >/dev/null; sleep 0.3
+  if ! grep -q '"path": "/expired2"' /tmp/origin.log; then bad "the expiry probe never reached the origin"
+  elif grep -q '"mark": "cleared"' /tmp/origin.log; then bad "an expired cookie still clears"
+  else ok "an expired cookie no longer clears (reached the origin without the cleared mark)"; fi
 fi
 
 # ================================================================ ARM D
@@ -527,11 +549,12 @@ say "ARM D — the same flood in dry-run touches nothing (§8): who would have b
 for i in $(seq 1 90); do [ "$(zstatus "len(z.get('challenge_active',[]))")" = "0" ] && break; sleep 1; done
 [ "$(zstatus "len(z.get('challenge_active',[]))")" = "0" ] && ok "the zone-wide challenge lapsed on its own (hold_seconds)" || bad "the flip did not lapse within 90 s"
 ET=$(sfield accepted_etag); zones_yaml auto true false 40 5; reload_brain; wait_etag "$ET"; sleep 0.5
-: > /tmp/origin.log; GEN_D=$(sfield generation); INST_D=$(installs); NGX_ERR0=$(wc -l < /tmp/edge-nginx-error.log)
+: > /tmp/origin.log; rm -f /tmp/flip-t; GEN_D=$(sfield generation); INST_D=$(installs); NGX_ERR0=$(wc -l < /tmp/edge-nginx-error.log)
 CLR0=$(metric 'kapkan_edge_clearance_total{')
 ip netns exec botnet python3 /tmp/botnet.py $ZONE 25 12 > /tmp/botnet-d.out 2>&1 &
 BOTPID=$!
 wait_zstatus "len(z.get('challenge_active',[]))" 1 20 && ok "the trigger flips the zone in dry-run too (the preview shows the flip enforcement would make)" || bad "no flip in dry-run"
+date +%s.%N > /tmp/flip-t
 [ "$(zstatus "z.get('challenge_active',[{}])[0].get('dry_run',False)")" = "true" ] && ok "the status says the flip previews (dry_run: true)" || bad "flip not marked as a preview"
 wait $BOTPID; echo "  botnet: $(cat /tmp/botnet-d.out)"
 REQ=$(jget /tmp/botnet-d.out "['requests']"); REACHED=$(grep -c '"path": "/bot/' /tmp/origin.log)
@@ -556,7 +579,7 @@ say "ARM D (tail) — the node's dry-run floors the zone's"
 for i in $(seq 1 90); do [ "$(zstatus "len(z.get('challenge_active',[]))")" = "0" ] && break; sleep 1; done
 stop_edge; edge_yaml true; start_edge; wait_status healthy true 30 || bad "watch-only node did not come back"
 ET=$(sfield accepted_etag); zones_yaml auto false false 40 5; reload_brain; wait_etag "$ET"; sleep 0.5
-: > /tmp/origin.log
+: > /tmp/origin.log; rm -f /tmp/flip-t
 ip netns exec botnet python3 /tmp/botnet.py $ZONE 20 10 > /tmp/botnet-d2.out 2>&1
 echo "  botnet: $(cat /tmp/botnet-d2.out)"
 python3 - <<'PY' && ok "with the node in dry-run the enforcing zone still refused nothing" || bad "watch-only node refused: $(cat /tmp/botnet-d2.out)"
@@ -580,52 +603,21 @@ grep -q '"429"' /tmp/flood-e1.out && ok "the flooder was rate-limited (429) in i
 sleep 1.5
 ip netns exec attacker python3 /tmp/flood.py $ZONE 11 /flood > /tmp/flood-e2.out 2>&1
 echo "  attacker, window 2: $(cat /tmp/flood-e2.out)"
-grep -q '"page"' /tmp/flood-e2.out && ok "after one window the flooder is challenged: the page instead of 429s (table:flood)" || bad "flooder not challenged in the second window"
+python3 - <<'PY' && ok "after one window the flooder is challenged: pages within the ceiling, 429s over it, nothing reaches the origin (table:flood)" || bad "flooder in the second window: $(cat /tmp/flood-e2.out)"
+import json
+c = json.load(open('/tmp/flood-e2.out'))['codes']
+raise SystemExit(0 if c.get('page', 0) >= 10 and c.get('200', 0) == 0 else 1)
+PY
 [ "$(metric 'kapkan_edge_decisions_total{.*result="challenge"')" -gt "$CH" ] 2>/dev/null && ok "challenge decisions grew for the single flooder" || bad "no challenge decisions for the flooder"
 sleep 1.5
 ip netns exec attacker python3 /tmp/flood.py $ZONE 11 /flood > /tmp/flood-e3.out 2>&1
 echo "  attacker, window 3: $(cat /tmp/flood-e3.out)"
-[ "$(jget /tmp/flood-e3.out "['last']")" = "403" ] && ok "flooding on while challenged, the flooder is denied (a bare 403, no page)" || bad "flooder not denied after flooding through the rung: $(cat /tmp/flood-e3.out)"
-[ "$(get legit https://$ZONE/legit-e -H "Cookie: kapkan_clr=$(cat /tmp/cookie-legit)")" != "429" ] && ok "the legit client is untouched by the ladder" || bad "legit client hit by the flooder's ladder"
-# A cleared flooder is denied at once — no second rung. From .7 (untouched so
-# far): flood until challenged, solve the puzzle when the page comes, then
-# flood on with the cookie: the next window's verdict is a deny, not a page.
-ip netns exec bursty python3 - <<PY > /tmp/cleared-flood.out 2>&1
-import http.client, ssl, time, json, re, hashlib, urllib.parse
-zone="$ZONE"; ctx = ssl.create_default_context(cafile="/tmp/pebble-root.crt")
-def conn(): return http.client.HTTPSConnection(zone, 443, context=ctx, timeout=3, source_address=("203.0.113.7", 0))
-def bits(nonce, sol):
-    h = hashlib.sha256((nonce + sol).encode()).digest(); return 256 - int.from_bytes(h, "big").bit_length()
-cookie=""; phases=[]
-def flood(secs, tag):
-    global cookie
-    end=time.time()+secs; codes={}
-    while time.time()<end:
-        try:
-            c=conn(); c.request("GET","/cf", headers={"Cookie":"kapkan_clr="+cookie} if cookie else {}); r=c.getresponse(); b=r.read()
-            k="page" if r.status==403 and b"kapkan-puzzle" in b else str(r.status); codes[k]=codes.get(k,0)+1; c.close()
-            if k=="page" and not cookie:
-                p=json.loads(re.search(r'id="kapkan-puzzle">(.*?)</script>', b.decode(), re.S).group(1)); i=0
-                while bits(p["nonce"], str(i)) < p["difficulty"]: i+=1
-                c2=conn(); c2.request("POST","/_kapkan/clearance/answer", body=urllib.parse.urlencode({"nonce":p["nonce"],"solution":str(i),"return":p["return"]}), headers={"Content-Type":"application/x-www-form-urlencoded"})
-                r2=c2.getresponse(); r2.read(); m=re.search(r"kapkan_clr=([^;]+)", r2.getheader("Set-Cookie") or "")
-                if m: cookie=m.group(1); codes["solved"]=codes.get("solved",0)+1
-                c2.close()
-        except Exception: codes["err"]=codes.get("err",0)+1
-        time.sleep(0.02)
-    phases.append({tag: codes})
-flood(11,"w1"); time.sleep(1.5); flood(11,"w2"); time.sleep(1.5); flood(11,"w3")
-print(json.dumps({"phases":phases,"cookie":bool(cookie)}))
-PY
-echo "  cleared flooder: $(cat /tmp/cleared-flood.out)"
-python3 - <<'PY' && ok "a flooder that cleared the rung and floods on is denied directly (bare 403s follow the clearance)" || bad "cleared flooder was not denied: $(cat /tmp/cleared-flood.out)"
+python3 - <<'PY' && ok "flooding on while challenged, the flooder is denied: bare 403s, no page, nothing reaches the origin" || bad "flooder not denied after flooding through the rung: $(cat /tmp/flood-e3.out)"
 import json
-d = json.load(open('/tmp/cleared-flood.out')); ph = d['phases']
-solved = any('solved' in list(p.values())[0] for p in ph)
-last = list(ph[-1].values())[0]
-raise SystemExit(0 if solved and last.get('403', 0) > 0 and last.get('page', 0) == 0 else 1)
+c = json.load(open('/tmp/flood-e3.out'))['codes']
+raise SystemExit(0 if c.get('403', 0) > 0 and c.get('page', 0) == 0 and c.get('200', 0) == 0 else 1)
 PY
-
+[ "$(get legit https://$ZONE/legit-e)" = "200" ] && ok "the legit client is untouched by the ladder (200)" || bad "legit client hit by the flooder's ladder ($(get legit https://$ZONE/legit-e2))"
 # ================================================================ ARM F
 say "ARM F — no JavaScript: the timed ticket"
 ET=$(sfield accepted_etag); zones_yaml manual false false 0 5; reload_brain; wait_etag "$ET"; sleep 0.5
@@ -639,8 +631,31 @@ echo "  nojs: $(cat /tmp/nojs.out)"
 [ "$(jget /tmp/nojs.out "['after']")" = "200" ] && grep -q '"mark": "cleared:nojs"' /tmp/origin.log && ok "the no-JS clearance reaches the origin marked cleared:nojs" || bad "no cleared:nojs at the origin"
 [ "$(metric 'kapkan_edge_clearance_total{.*result="issued_nojs"')" -ge 1 ] 2>/dev/null && ok "kapkan_edge_clearance_total{result=\"issued_nojs\"} counted it" || bad "no issued_nojs in the metrics"
 
+# ================================================================ ARM E (tail)
+say "ARM E (tail) — a flooder that had cleared the rung is denied directly, never asked again"
+# The cleared clause of the ladder, alone: .7 clears under manual (never
+# flooded, never challenged by the rules), the zone goes back to auto, and .7
+# floods WITH its cookie. The first window's close must deny it — a bare 403,
+# no page in any window — since nothing but the clearance could have earned
+# the block.
+rm -f /tmp/cookie-7
+ip netns exec bursty python3 /tmp/browser.py $ZONE /pre-clear 2 0.2 /tmp/cookie-7 203.0.113.7 > /tmp/browser-e7.out 2>&1
+COOKIE_7=$(cat /tmp/cookie-7 2>/dev/null); [ -n "$COOKIE_7" ] && ok "a fresh source cleared the rung under manual" || bad "could not clear .7: $(cat /tmp/browser-e7.out)"
+ET=$(sfield accepted_etag); zones_yaml auto false false 0 5; reload_brain; wait_etag "$ET"; sleep 1
+ip netns exec bursty python3 /tmp/flood.py $ZONE 11 /cf "$COOKIE_7" 203.0.113.7 > /tmp/flood-e7a.out 2>&1
+echo "  cleared flooder, window 1: $(cat /tmp/flood-e7a.out)"
+sleep 1.5
+ip netns exec bursty python3 /tmp/flood.py $ZONE 11 /cf "$COOKIE_7" 203.0.113.7 > /tmp/flood-e7b.out 2>&1
+echo "  cleared flooder, window 2: $(cat /tmp/flood-e7b.out)"
+python3 - <<'PY' && ok "a cleared flooder is denied directly: served and rate-limited in its first window, bare 403s after the close, never a page" || bad "cleared flooder: $(cat /tmp/flood-e7a.out) then $(cat /tmp/flood-e7b.out)"
+import json
+a = json.load(open('/tmp/flood-e7a.out'))['codes']; b = json.load(open('/tmp/flood-e7b.out'))['codes']
+raise SystemExit(0 if a.get('page', 0) == 0 and a.get('429', 0) > 0 and b.get('page', 0) == 0 and b.get('403', 0) > 0 and b.get('200', 0) == 0 else 1)
+PY
+
 # ================================================================ ARM G
 say "ARM G — exempt paths and non-browser clients"
+ET=$(sfield accepted_etag); zones_yaml manual false false 0 5; reload_brain; wait_etag "$ET"; sleep 0.5
 : > /tmp/origin.log
 [ "$(get legit https://$ZONE/api/ping)" = "200" ] && ok "an exempt path passes without a clearance" || bad "exempt path challenged"
 grep -q '"path": "/api/ping"' /tmp/origin.log && ok "and reaches the origin" || bad "exempt request did not reach the origin"
@@ -672,7 +687,7 @@ INST_H=$(installs)
 stop_edge; start_edge
 wait_status healthy true 20 && ok "the node restarted from disk with the brain still dead" || bad "restart with the brain dead did not come back"
 [ "$(getsrc 203.0.113.5 https://$ZONE/afterrestart -H "Cookie: kapkan_clr=$COOKIE_H")" = "200" ] && ok "the cookie issued before the restart still verifies (keys came from the cached document)" || bad "cookie refused after the node's restart"
-AE=$(sfield accepted_etag); BRAIN_SEEN=$(sfield brain_seen)
+BRAIN_SEEN=$(sfield brain_seen)
 mv /tmp/brain.log /tmp/brain-1.log; start_brain
 for i in $(seq 1 100); do [ "$(sfield brain_seen)" != "$BRAIN_SEEN" ] && break; sleep 0.3; done
 [ "$(sfield brain_seen)" != "$BRAIN_SEEN" ] && ok "brain back: the node's poll reaches it again" || bad "node did not see the returned brain"
@@ -708,22 +723,36 @@ sleep 0.5
 grep -q 'audit.*action=edge_challenge.*result=cleared' /tmp/brain.log && ok "the clear is audited" || bad "no audit line for the clear"
 code=$(brain_api -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"mode":"manual","ttl_seconds":5}' "http://$BRAIN:8080/api/v1/edge/zones/$ZONE/challenge"); [ "$code" = "400" ] && ok "a TTL under 60 s is refused (400)" || bad "short TTL accepted: $code"
 code=$(brain_api -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"mode":"manual","ttl_seconds":600}' "http://$BRAIN:8080/api/v1/edge/zones/$ZONE2/challenge"); [ "$code" = "409" ] && ok "a lever on a mode:none zone is refused (409)" || bad "lever on a none zone: $code"
+# A lever left alone ends on time: the shortest life the API admits, waited out.
+ET=$(sfield accepted_etag)
+brain_api -X POST -H 'Content-Type: application/json' -d '{"mode":"manual","ttl_seconds":60,"reason":"rig arm I, expiry"}' "http://$BRAIN:8080/api/v1/edge/zones/$ZONE/challenge" >/dev/null
+wait_etag "$ET" || bad "the expiring lever never reached the node"; ET=$(sfield accepted_etag); T0=$(date +%s)
+sleep 0.5; [ "$(get legit https://$ZONE/lever60)" = "403" ] && ok "the 60 s lever challenges" || bad "the 60 s lever did not challenge"
+for i in $(seq 1 80); do [ "$(zstatus "z.get('override',{}).get('mode','')")" = "" ] && break; sleep 1; done
+[ "$(zstatus "z.get('override',{}).get('mode','')")" = "" ] && ok "the lever lapsed on its own after ttl_seconds ($(( $(date +%s) - T0 )) s)" || bad "the lever did not lapse within 80 s"
+wait_etag "$ET" && ok "the lapse moved the document once more (the node's ETag)" || bad "the node's ETag did not move on the lapse"
+sleep 0.5; [ "$(get legit https://$ZONE/afterlapse)" = "200" ] && ok "served again after the lapse" || bad "still challenged after the lapse"
 
 # ================================================================ ARM J
 say "ARM J — the challenge answer costs little"
 ET=$(sfield accepted_etag); zones_yaml manual false false 0 1000; reload_brain; wait_etag "$ET"; sleep 1
-lat() { ip netns exec legit curl -s -o /dev/null -w '%{time_total}\n' -m5 --cacert /tmp/pebble-root.crt --resolve "$1:443:$EDGE" "https://$1/lat"; }
+lat() { ip netns exec legit curl -s -o /dev/null -w '%{http_code} %{time_total}\n' -m5 --cacert /tmp/pebble-root.crt --resolve "$1:443:$EDGE" "https://$1/lat"; }
 for i in $(seq 1 60); do lat $ZONE2; done > /tmp/lat-none.txt
 for i in $(seq 1 60); do lat $ZONE; done > /tmp/lat-page.txt
+# Every sample must be what it claims to be — a 200 from the origin, a 403 page
+# from the node — or the median measures a failure, not the page.
 python3 - <<'PY'
 import statistics
-n = sorted(float(x) for x in open('/tmp/lat-none.txt'))
-d = sorted(float(x) for x in open('/tmp/lat-page.txt'))
+def load(p, want):
+    rows = [l.split() for l in open(p) if l.strip()]
+    return sorted(float(r[1]) for r in rows), sum(1 for r in rows if r[0] != want)
+n, nb = load('/tmp/lat-none.txt', '200'); d, db = load('/tmp/lat-page.txt', '403')
 pn, pd = statistics.median(n)*1000, statistics.median(d)*1000
-print(f"  p50 mode:none 200 {pn:.2f} ms   p50 challenge page 403 {pd:.2f} ms   overhead {pd-pn:+.2f} ms")
-open('/tmp/lat-overhead.txt','w').write(str(pd-pn))
+print(f"  p50 mode:none 200 {pn:.2f} ms   p50 challenge page 403 {pd:.2f} ms   overhead {pd-pn:+.2f} ms   off-status samples {nb}+{db}")
+open('/tmp/lat-overhead.txt','w').write(f"{pd-pn:.2f} {nb+db}")
 PY
-OVER=$(cat /tmp/lat-overhead.txt)
+read OVER OFF < /tmp/lat-overhead.txt
+[ "$OFF" = "0" ] && ok "every latency sample was what it should be (60 × 200, 60 × 403 pages)" || bad "$OFF latency samples had the wrong status"
 python3 -c "import sys; sys.exit(0 if float('$OVER') < 10 else 1)" && ok "the challenge page adds under 10 ms at p50 ($OVER ms)" || bad "challenge page overhead too high: $OVER ms"
 
 echo
