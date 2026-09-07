@@ -201,7 +201,17 @@ func TestProbeRunsDashV(t *testing.T) {
 	if _, err := Probe(context.Background(), fakeBinary(t, `echo "something else" >&2`)); err == nil || !strings.Contains(err.Error(), "unrecognised") {
 		t.Fatalf("unrecognised output: err = %v", err)
 	}
-	if _, err := Probe(context.Background(), fakeBinary(t, `exit 3`)); err == nil || !strings.Contains(err.Error(), "-V") {
-		t.Fatalf("failing binary: err = %v", err)
+	// A binary that refuses to answer: the error must carry the exit status
+	// AND what the binary said, since that is what `-check` and the node's
+	// startup warning put in front of the operator.
+	failing := fakeBinary(t, `echo "nginx: [emerg] unknown option \"-V\"" >&2; exit 3`)
+	_, err = Probe(context.Background(), failing)
+	if err == nil {
+		t.Fatal("failing binary reported success")
+	}
+	for _, want := range []string{"-V", "exit status 3", "unknown option"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("failing binary: err %v lacks %q", err, want)
+		}
 	}
 }
