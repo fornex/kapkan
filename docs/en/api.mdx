@@ -622,7 +622,11 @@ the operator acts and once more when it lapses.
 
 A node's advisory self-report — version, node-side dry-run, the ETag of the document it has
 **rendered** (so an operator can see a node lagging or refusing), the terminator's kind,
-version and liveness, the live generation and its `nginx -t` result, and the certificates it
+version and liveness, its HTTP/3 readiness from the node's `nginx -V` probe (`terminator.h3
+{state, module, tls_library, early_data_capable, advisory}` — `state` is `ready`, `no_module`,
+`node_off` or `unknown`; `advisory` names a published QUIC advisory whose range holds the
+build's nginx core, as advice: distributions backport fixes without moving the version), the
+live generation and its `nginx -t` result, and the certificates it
 holds (public metadata only, never a key; a long list is cut to the 64 KiB body limit with a
 `certs_truncated` count), and a **zones section**: for every deciding zone the live generation
 serves, the last closed ten-second window (`at`, `window_seconds`, `rps`, `requests`, `decided`,

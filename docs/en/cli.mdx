@@ -330,6 +330,8 @@ acme:
 status_listen: 127.0.0.1:9102          # /healthz + /metrics; unauthenticated, keep it private
 omit_catch_all: false                  # true when nginx.conf has its own default_server
 disable_ipv6: false                    # true on hosts without an IPv6 stack
+quic:
+  h3: auto                             # auto (default) | off — may this box render HTTP/3 at all
 ```
 
 | Key | Meaning |
@@ -346,6 +348,7 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `acme.disabled` | Issue nothing: zones stay on `:80` answering `503` (a lab that exercises everything but issuance). Operator-supplied certificates are not a feature yet. |
 | `status_listen` | Serves `/healthz` and `/metrics` when set. Unauthenticated — loopback or a private address. |
 | `omit_catch_all` / `disable_ipv6` | Drop Kapkan's `default_server` catch-all (your `nginx.conf` declares one) / drop the `[::]` listeners (no IPv6 stack). |
+| `quic.h3` | `auto` (default) or `off` — whether this box may render HTTP/3 at all. The node probes the binary at start (`nginx -V`) and reports what it found; **nothing renders QUIC yet** and a zone's `tls.h3` is still refused, so today the key only decides what the node claims. With `auto` this node will serve HTTP/3, once the per-zone switch lands, for zones that ask and only when the build carries `--with-http_v3_module`; `off` never renders it here — the switch for a build whose HTTP/3 you do not trust, for instance one the probe flags with a CVE advisory. Either way the node's report (`terminator.h3.state`) and `/healthz` (`h3.state`) carry `ready`, `no_module`, `node_off` or `unknown` (the probe failed; the node will render no QUIC then), so a fleet can be checked before the zone-side switch arrives. |
 
 <Callout type="warning" title="An edge node defaults to dry-run">
 `dry_run` defaults to **true** for a remote role — the node counts and marks what it *would*
@@ -357,7 +360,7 @@ outside a lab — a plaintext `controller.url` sends the token in the clear.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-config <path>` | `/etc/kapkan/edge.yaml` | The edge-node config. |
-| `-check` | off | Validate the file and what it names on this box — the socket group must exist and any EAB key be well-formed (problems); an absent token, terminator binary or `main_conf` is a warning — then exit. |
+| `-check` | off | Validate the file and what it names on this box — the socket group must exist and any EAB key be well-formed (problems); an absent token, terminator binary or `main_conf` is a warning — and, when the binary is on `PATH`, print what its `-V` says: kind, version, nginx core, TLS library, whether it has the HTTP/3 module and could do 0-RTT, and the node's HTTP/3 readiness (a CVE advisory for the build's core is a warning, unless `quic.h3: off` has already turned HTTP/3 off here) — then exit. |
 | `-log-format <fmt>` | `json` | `json` or `text`. |
 | `-log-level <lvl>` | `info` | `debug`, `info`, `warn` or `error`. |
 

@@ -69,7 +69,27 @@ type EdgeNodeConfig struct {
 	// nginx.conf that declares its own. DisableIPv6 drops the [::] listeners.
 	OmitCatchAll bool `yaml:"omit_catch_all"`
 	DisableIPv6  bool `yaml:"disable_ipv6"`
+	// QUIC is the node's HTTP/3 switch (edge-spec §8, E5).
+	QUIC EdgeQUIC `yaml:"quic"`
 }
+
+// EdgeQUIC is the node-level HTTP/3 configuration. Whether a ZONE speaks
+// HTTP/3 is the zones file's tls.h3; this block says whether THIS box may
+// render it at all.
+type EdgeQUIC struct {
+	// H3 is auto (default: render QUIC for zones that ask, when the binary
+	// was built with --with-http_v3_module) or off (never render QUIC on this
+	// node — the switch for a build whose HTTP/3 the operator does not trust,
+	// e.g. one the probe flags with an advisory). Zones asking for h3 are
+	// served over TCP here and the node's report says so.
+	H3 string `yaml:"h3"`
+}
+
+// Values of quic.h3.
+const (
+	EdgeH3Auto = "auto"
+	EdgeH3Off  = "off"
+)
 
 // EdgeTerminator names the terminator and how to test and reload it.
 type EdgeTerminator struct {
@@ -264,6 +284,13 @@ func (e *EdgeNodeConfig) validate() error {
 		if _, _, err := net.SplitHostPort(e.StatusListen); err != nil {
 			return fmt.Errorf("status_listen must be host:port, got %q: %v", e.StatusListen, err)
 		}
+	}
+	switch e.QUIC.H3 {
+	case "":
+		e.QUIC.H3 = EdgeH3Auto
+	case EdgeH3Auto, EdgeH3Off:
+	default:
+		return fmt.Errorf("quic.h3 %q is not auto or off", e.QUIC.H3)
 	}
 	return nil
 }

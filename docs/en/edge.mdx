@@ -251,7 +251,9 @@ names the right clients.
   (`challenge`, `would_challenge`, `allow_cleared` among them), the clearance page's outcomes,
   whether a zone-wide challenge is on — see [metrics](/docs/metrics#edge-nodes).
 - **The brain's inventory**, `GET /api/v1/edge/nodes`, joins each configured node's liveness
-  with its last self-report: version, dry-run, rendered ETag, terminator kind and version,
+  with its last self-report: version, dry-run, rendered ETag, terminator kind and version, its
+  HTTP/3 readiness (`terminator.h3.state`: `ready`, `no_module`, `node_off`, `unknown`, with an
+  advisory when the build's nginx core falls in a published QUIC advisory's range),
   generation and test result, certificates (never a key), and the **zones section** — each
   zone's last ten-second window, the sources it refused, asked or would have, and whether its
   rung bites or previews there. See [the API](/docs/api#the-edge-channel).
@@ -283,7 +285,9 @@ names the right clients.
   pull it again. A brain that stays down is different: the cached document's lever ends at its
   `until` (see the failure table).
 - **Wildcards and HTTP/3 are later milestones.** `tls.h3` is refused today; every name is
-  listed explicitly.
+  listed explicitly. A node already reports whether its binary *could* speak HTTP/3
+  (`terminator.h3` in the inventory, `quic.h3` in `edge.yaml`), so a fleet can be checked
+  before the zone-side switch arrives.
 - **Duplicate-certificate ceilings.** Per-node certificates mean N nodes on one zone are N
   orders; Let's Encrypt caps a name at about five per week. The brain's issuance slot and
   renewal jitter spread them; `acme.fallback` (ZeroSSL, Google Trust Services — both need an

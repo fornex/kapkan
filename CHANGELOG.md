@@ -367,6 +367,26 @@ security-relevant.
   `quic-go` requirement ever appears in `engine/go.mod` — or if h3probe stops holding one, so
   the guard cannot pass vacuously. Both tools are test-only; `make h3probe` builds the probe.
   Wiring them into the terminator harness comes with the rest of E5.
+- Edge track, E5.1 — the terminator capability probe and HTTP/3 readiness (edge-spec §8, E5).
+  The node now asks its binary `nginx -V` (was `-v`) and learns, beside kind and version, the
+  nginx core an Angie build derives from, the TLS library it runs with, whether it was built
+  with `--with-http_v3_module` and whether it could do 0-RTT over QUIC (recorded only: 0-RTT
+  stays off by policy). `edge.yaml` gains `quic.h3: auto|off` (default `auto`). The report
+  carries `terminator.h3 {state, module, tls_library, early_data_capable, advisory}` and
+  `/healthz` the same object as `h3`, with `state` `ready`, `no_module`, `node_off` or
+  `unknown` (the probe failed — treated as `no_module`: the node never guesses about a binary
+  it could not ask); the new gauge `kapkan_edge_h3_ready` is `1` for `ready`. The probe runs
+  once, at start, so an upgraded binary is only reported after a restart. `advisory` names a published QUIC advisory whose
+  affected range holds the build's nginx core — CVE-2026-40460 (1.25.0–1.30.0: a migrated QUIC
+  connection's new streams carry an unverified client address, the accounting key kapkan
+  decides on; fixed upstream in 1.30.1 and 1.31.0) or CVE-2026-42530 (1.31.0–1.31.1: a
+  use-after-free processing a crafted QUIC session, fixed upstream in 1.31.2) — as advice, never a
+  refusal: distributions backport fixes without moving the version (Debian 13's
+  `1.26.3-3+deb13u7` carries the first fix and reports `1.26.3`), so the operator checks the
+  package changelog or sets `quic.h3: off`. `kapkan edge -check` prints the probe's findings
+  and warns on an advisory. Nothing renders QUIC yet — that is E5.2; `tls.h3` is still refused
+  by the zones file until E5.3. The real-terminator matrix pins what each image must report
+  (`nginx:1.22` without the module, `nginx:stable` and Angie with it).
 
 ## [1.7.0] - 2026-09-02
 
