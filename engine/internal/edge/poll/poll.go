@@ -60,6 +60,11 @@ type Poller struct {
 	opt    Options
 	client *http.Client
 	log    *slog.Logger
+	// wait sleeps out one failure backoff, returning false when ctx ended and
+	// Run must return instead. Always sleepFor outside the package's own tests,
+	// which substitute it — before Run starts — to read the backoff sequence Run
+	// computes without waiting out the delays.
+	wait func(ctx context.Context, d time.Duration) bool
 
 	mu   sync.Mutex
 	etag string
@@ -97,7 +102,19 @@ func New(opt Options) (*Poller, error) {
 		client = &http.Client{Timeout: opt.PollTimeout}
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Poller{opt: opt, client: client, log: opt.Logger.With("component", "edge-poll"), etag: opt.ETag}, nil
+	return &Poller{opt: opt, client: client, log: opt.Logger.With("component", "edge-poll"), wait: sleepFor, etag: opt.ETag}, nil
+}
+
+// sleepFor waits out d, returning false when ctx ended first.
+func sleepFor(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // ETag is the ETag of the last document accepted.
@@ -131,12 +148,8 @@ func (p *Poller) Run(ctx context.Context) {
 			backoff = p.opt.BackoffMin
 			continue
 		}
-		t := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			t.Stop()
+		if !p.wait(ctx, backoff) {
 			return
-		case <-t.C:
 		}
 		if backoff *= 2; backoff > p.opt.BackoffMax {
 			backoff = p.opt.BackoffMax
