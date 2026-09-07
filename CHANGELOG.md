@@ -414,6 +414,19 @@ security-relevant.
   TCP and the `proto` field in the access log.
   The node does not pass its readiness to the renderer yet and `tls.h3` is still refused by the
   zones file — both are E5.3.
+- Edge track, E5.7 — the HTTP/3 documentation, in English (the five-locale wave follows). *Edge
+  nodes* gains a **`## HTTP/3 (QUIC)`** section: where h3 renders and where it honestly degrades
+  (the readiness table), what is node-wide and why (Retry always on, 0-RTT off, the per-node host
+  key — nginx fixes them on the address's default server before SNI), the rollout order (nodes
+  first, UDP 443 and MTU, the `advertise: false` canary, a short `ma`, rollback), the build
+  advisories (CVE-2026-40460/-42530 as advice, since distributions backport), the cap and kill
+  levers as data-plane static rules, and the supported topologies with what nginx cannot do — no
+  connection migration between nodes and **no TLS session resumption between nodes** (nginx binds
+  a session to the node's certificate, and Kapkan's certificates are per node; shared ticket keys
+  were investigated in E5 and do not help). *Install an edge node* gains the UDP-443 / `nginx -V`
+  / MTU / `TLSv1.3` prerequisites and four HTTP/3 troubleshooting rows; the glossary gains a TLS
+  and HTTP/3 table (QUIC, HTTP/3, QUIC Initial, Retry, Alt-Svc, 0-RTT); `edge-spec.md` §2.1 and
+  §3 record that cross-node resumption is out, with the reason. No code change.
 - Edge track, E5.3 — the switch is real (edge-spec §8, E5). The zones file accepts `tls.h3:
   true` and `tls.h3_options {advertise (default true), alt_svc_max_age_seconds 60..604800
   (default 86400)}` (refused without `h3`); the document carries the options only where they

@@ -229,6 +229,126 @@ would-be set per zone. Go live one layer at a time: `dry_run: false` on the node
 would-deny counts look right, `challenge_options.dry_run: false` on a zone when its would-be set
 names the right clients.
 
+## HTTP/3 (QUIC)
+
+A zone with `tls.h3: true` in the [zones file](/docs/zones) is served over **HTTP/3** — QUIC on
+UDP 443 — beside TLS-over-TCP, on every node whose nginx or Angie can do it. Nothing changes in
+what Kapkan decides: the same `auth_request`, the same decision service, the same rung and
+ceilings over h3 as over TCP; the access log gains a `proto` field (`HTTP/3.0`) so the rollups
+and `kapkan_edge_requests_total{protocol="h3"}` show how much of a zone's traffic moved.
+
+**Where it renders, and where it honestly does not.** At start the node asks its binary
+`nginx -V` and reports a readiness in `terminator.h3.state` (the inventory, `/healthz`,
+`kapkan edge -check`):
+
+| State | Meaning | What a zone with `h3: true` gets on this node |
+| --- | --- | --- |
+| `ready` | The build carries `--with-http_v3_module` and `edge.yaml` has `quic.h3: auto` (the default) | `listen 443 quic` and an `Alt-Svc` announcement |
+| `no_module` | The build has no HTTP/3 module (Debian 12's nginx 1.22, for one) | TLS over TCP only; the zone is listed under `terminator.h3.unsupported` |
+| `node_off` | `edge.yaml` says `quic.h3: off` | the same |
+| `unknown` | The probe failed; the node never guesses about a binary it could not ask | the same |
+
+A zone is never held hostage to one node's package: the document is accepted everywhere, the
+nodes that can serve h3 do, the others say so, and `GET /api/v1/edge/zones/status` shows the
+zone's `h3 {enabled, serving, unsupported, requests}` across the fleet (the console's Edge view
+has a cell for it). Turning `h3` on or off is a **slow-path** change — a new tested generation,
+a reload on every node — like an origin or a certificate; every fast-path knob (rates, the rung,
+the lever, watch-only) still changes no rendered byte on an h3 zone.
+
+**What is node-wide, and why.** nginx binds a QUIC connection to the address's *default
+server* before SNI names a zone, so three things cannot be per zone and Kapkan does not pretend
+they are:
+
+- **Retry is always on** (`quic_retry`, at the `http` level of the shared file; `quic.retry:
+  false` in `edge.yaml` turns it off node-wide). A new client address proves it can receive
+  before the handshake costs the node anything, and a Retry is smaller than the Initial it
+  answers, so a spoofed source amplifies nothing. The price is one round trip on a new,
+  unverified connection. There is no "Retry under load": load protection is the data plane's
+  Initial-rate ceiling, below.
+- **0-RTT is off**, with no knob: `ssl_early_data` is address-wide on nginx, and most builds
+  could not use it anyway (OpenSSL ≥ 3.5.1 with nginx ≥ 1.29.1 is the floor — the inventory
+  records `early_data_capable` per node for the day a policy wants it). Replayable early data
+  in front of a rung that issues clearances is not a trade Kapkan makes for you.
+- **The host key** (`state_dir/tls/quic_host.key`, minted once per node, `0600`) keeps Retry
+  and stateless-reset tokens valid across reloads; nginx's default — a fresh random key on
+  every reload — would void them exactly when a node reloads under load, and a client may not
+  accept a second Retry.
+
+**Rolling it out.** A transport has no watch-only mode, so the honest substitute is control over
+*discovery*, in this order:
+
+1. **Nodes first.** Upgrade every node before a zone says `h3: true`: a node older than E5
+   refuses a document that carries the key and stays on its previous generation with
+   `converged: false`. Check `terminator.h3.state` in the inventory.
+2. **UDP 443 and MTU.** Open UDP 443 on the box, the security group and the upstream ACL;
+   `terminator.h3.listening` says the box's half is bound, an external `curl --http3-only` says
+   the rest. Announcing h3 while UDP is blocked upstream costs every browser a race and a
+   timeout before it falls back to TCP. QUIC never fragments: a path MTU below 1280 bytes
+   (a GRE/IPIP diversion, an overlay) breaks h3 while TCP survives through MSS clamping — see
+   [network integration](/docs/network-integration#off-path-diversion-over-gre-or-ipip).
+3. **The canary:** `tls.h3_options.advertise: false` renders the QUIC listener without the
+   `Alt-Svc` announcement, so only clients that already speak HTTP/3 to the name reach it
+   (`curl --http3-only`), browsers stay on TCP.
+4. **A short memory:** `advertise: true` with `alt_svc_max_age_seconds: 300`, so a rollback is
+   forgotten in minutes, then the default (`86400`).
+5. **Rollback** is `h3: false` — one tested generation per node; clients that remembered the
+   announcement fall back on their next connection and mark h3 broken for the origin for a
+   while.
+
+**Builds and advisories.** nginx still calls HTTP/3 experimental, and the module has had
+security advisories of its own. The probe compares the build's nginx core with the published
+ranges and reports an `advisory` — *advice, not a verdict*: distributions backport fixes without
+moving the version, so a `1.26.3` may or may not carry the fix, and only the package changelog
+knows. CVE-2026-40460 (cores 1.25.0–1.30.0) matters to Kapkan specifically: after a QUIC
+connection migrates, new streams carry an unverified client address, and that address is the
+accounting key every decision is made on. Debian 13's `1.26.3-3+deb13u7` carries the fix and
+still reports `1.26.3`; nginx.org's stable 1.30.4 and Angie 1.12.1 (core 1.31.2) are past the
+ranges. Read the advisory before `h3: true`, or set `quic.h3: off` on the node until you have.
+
+**The two levers, on the data plane.** Both live in the [XDP data plane](/docs/dataplane) in
+front of the node (or on the same box), never in nginx — a reload at attack speed is the one
+thing the edge charter forbids:
+
+```yaml
+# kapkan.yaml on the data-plane box
+dataplane:
+  ratelimit_profiles:
+    - { name: quic_handshake_cap, pps: 20 }
+  static_rules:
+    - name: cap_quic                       # per-source ceiling on QUIC Initials
+      match: { proto: udp, dst_port: 443, payload: quic_initial }
+      action: ratelimit
+      profile: quic_handshake_cap
+    # - name: kill_quic                    # the "kill QUIC" lever: clients fall back to TCP
+    #   match: { proto: udp, dst_port: 443 }
+    #   action: drop
+```
+
+Both hot-reload (`kapkan -s reload`) and preview under the data plane's `dry_run`; the cap is
+[the handshake ceiling](/docs/dataplane-tuning#matching-quic-handshakes), the kill rule drops
+UDP 443 outright and every client is back on TCP within a round trip — the incident answer to a
+QUIC-only problem. A PoP without a Kapkan data plane in front has only the slow lever, `h3:
+false` in the zones file, or the host firewall.
+
+**What nginx cannot do, and the topologies Kapkan supports.** nginx routes a QUIC connection
+by the socket it arrived on, not by connection ID, so:
+
+- *Supported:* one node per address; several nodes behind a 4-tuple ECMP or anycast hash — a
+  client whose address changes (Wi-Fi to LTE, a NAT rebinding) lands on a node that does not
+  know the connection and reconnects; nothing breaks, per-node host keys are enough; a Kapkan
+  data plane in front of the node or on it for the cap and the kill.
+- *Not supported:* connection-ID-aware steering and connection migration **between** nodes
+  (`quic_bpf on`, an operator's own line in nginx's `main` context, only carries a connection
+  between the workers of one box); **TLS session resumption between nodes** — nginx binds a
+  session to the node's certificate through the session id context, and Kapkan's certificates
+  are per node, so a client that changes node does a full handshake (rare under a 4-tuple hash;
+  shared ticket keys were investigated and do not help here); WebSocket over HTTP/3 (nginx does
+  not implement RFC 9220 — it stays on TCP); 0-RTT.
+
+Two things to keep in mind: UDP flows need conntrack timeouts a firewall may not give them by
+default, and `quic_gso` (the `http` context) is yours to set in `nginx.conf` if you want it —
+Kapkan renders neither.
+
 ## What the node does when things fail
 
 | Failure | Behaviour |
@@ -285,19 +405,9 @@ names the right clients.
   pull it again. A brain that stays down is different: the cached document's lever ends at its
   `until` (see the failure table).
 - **Wildcards are a later milestone.** Every name is listed explicitly.
-- **HTTP/3 is per zone, rendered where the node can.** `tls.h3: true` adds `listen 443 quic`
-  and an `Alt-Svc` announcement to the zone on every node whose nginx or Angie carries the
-  HTTP/3 module and whose `edge.yaml` does not say `quic.h3: off` (`terminator.h3.state: ready`
-  in the inventory); a node that is not `ready` serves the zone over TCP and says so
-  (`unsupported`; the state says why) — a zone is never held hostage to one node's package.
-  `h3` and `h3_options` are rendered configuration: changing them is a reload (the slow path);
-  the fast-path knobs never are. Retry is on by default and 0-RTT off, node-wide, because nginx
-  decides both from the address's default server before SNI names a zone; `edge.yaml`'s
-  `quic.retry` is the only place Retry can be turned off. `tls.h3_options.advertise: false` is
-  the canary: the listener without the announcement. UDP 443 must reach the node;
-  `terminator.h3.listening` tells you the box's half of that. Upgrade nodes before zones: a node
-  older than E5 refuses a document that carries `h3` and then installs nothing more — renewed
-  certificates included — until it is upgraded.
+- **HTTP/3 is per zone, rendered where the node can**, node-wide in what nginx decides before
+  SNI (Retry on, 0-RTT off), with no connection migration or session resumption between nodes
+  — see [HTTP/3 (QUIC)](#http3-quic).
 - **Duplicate-certificate ceilings.** Per-node certificates mean N nodes on one zone are N
   orders; Let's Encrypt caps a name at about five per week. The brain's issuance slot and
   renewal jitter spread them; `acme.fallback` (ZeroSSL, Google Trust Services — both need an
