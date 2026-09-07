@@ -378,7 +378,8 @@ security-relevant.
   `kapkan_edge_h3_ready` is `1` for `ready`. `advisory` names a published QUIC advisory whose
   affected range holds the build's nginx core — CVE-2026-40460 (1.25.0–1.30.0: a migrated QUIC
   connection's new streams carry an unverified client address, the accounting key kapkan
-  decides on) or CVE-2026-42530 (1.31.0–1.31.1, a QPACK use-after-free) — as advice, never a
+  decides on; fixed upstream in 1.30.1 and 1.31.0) or CVE-2026-42530 (1.31.0–1.31.1: a
+  use-after-free processing a crafted QUIC session, fixed upstream in 1.31.2) — as advice, never a
   refusal: distributions backport fixes without moving the version (Debian 13's
   `1.26.3-3+deb13u7` carries the first fix and reports `1.26.3`), so the operator checks the
   package changelog or sets `quic.h3: off`. `kapkan edge -check` prints the probe's findings

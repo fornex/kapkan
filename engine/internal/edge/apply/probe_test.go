@@ -46,7 +46,7 @@ func TestParseVersionOutput(t *testing.T) {
 			advisory: "CVE-2026-40460",
 		},
 		{
-			name: "Angie 1.12.1 — core is the second line, module, capable, core 1.31.2 is past the QPACK range",
+			name: "Angie 1.12.1 — core is the second line, module, capable, core 1.31.2 is past the second range",
 			out:  readFixture(t, "angie-1.12.1.txt"),
 			want: Terminator{Kind: "angie", Version: "1.12.1", Core: "1.31.2", HTTP3Module: true, TLSLibrary: "OpenSSL 3.5.7", EarlyDataCapable: true},
 		},
