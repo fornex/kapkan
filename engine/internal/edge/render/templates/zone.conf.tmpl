@@ -2,8 +2,9 @@
 {{- if .H3Degraded}}
 #
 # HTTP/3 ASKED FOR, NOT RENDERED: this node's terminator was built without the
-# HTTP/3 module, or the node's HTTP/3 switch is off, so the zone is served over
-# TCP here and the node's report names it under h3: unsupported (edge-spec §8).
+# HTTP/3 module, its HTTP/3 switch is off, or the binary could not be probed,
+# so the zone is served over TCP here; the node's report and /healthz say why
+# under terminator.h3 (edge-spec §8).
 {{- end}}
 {{- if not .HasCert}}
 #
@@ -59,9 +60,10 @@ server {
     listen [::]:443 ssl http2;
 {{- end}}
 {{- if .H3}}
-    # HTTP/3 (edge-spec §8, E5): the same server over QUIC. The address's
-    # shared UDP socket options and the quic_* directives live in
-    # {{.CommonFile}}.
+    # HTTP/3 (edge-spec §8, E5): the same server over QUIC. The quic_*
+    # directives live in {{.CommonFile}}; the address's one socket-owning QUIC
+    # listener is the catch-all's or the QUIC anchor's there — or, under the
+    # node's omit-anchor switch, your own default server's.
     listen 443 quic;
 {{- if not .Node.DisableIPv6}}
     listen [::]:443 quic;
@@ -86,9 +88,10 @@ server {
     ssl_session_timeout 1d;
     ssl_session_tickets off;
 {{- if .AltSvc}}
-    # Announces HTTP/3 to clients on this TCP connection (edge-spec §8, E5);
-    # a location with an add_header of its own (@kapkan_denied) drops it for
-    # that answer, which is fine — a refused client learns nothing new.
+    # Announces HTTP/3 to clients on this TCP connection (edge-spec §8, E5).
+    # Without `always` add_header rides only 2xx/3xx answers, so a refusal
+    # (403, 429, 503) and an origin error never announce it — fine, a refused
+    # client learns nothing new.
     add_header Alt-Svc '{{.AltSvc}}';
 {{- end}}
 

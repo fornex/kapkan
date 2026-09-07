@@ -232,8 +232,11 @@ type Node struct {
 	// The node creates it; the renderer only names it.
 	QUICHostKey string `json:"quic_host_key,omitempty"`
 	// OmitQUICAnchor drops kapkan's QUIC anchor under OmitCatchAll, for an
-	// operator whose own default server already carries
-	// `listen 443 quic reuseport` (a second reuseport fails `nginx -t`).
+	// operator whose own default server already listens `443 quic` with
+	// socket options: nginx allows one listen with options (reuseport, rcvbuf,
+	// backlog, bind, ipv6only, …) per address:port, so the anchor's reuseport
+	// would fail `nginx -t` beside it. That server must then carry reuseport
+	// and TLSv1.3 itself (the anchor's two lines).
 	OmitQUICAnchor bool `json:"omit_quic_anchor,omitempty"`
 }
 
@@ -359,7 +362,10 @@ type Info struct {
 	// H3Zones are the zones that render a QUIC listener on this node.
 	H3Zones []string
 	// Degraded are the zones that asked for HTTP/3 and are served over TCP
-	// here, because this node's terminator cannot render QUIC.
+	// here, because this node's terminator cannot render QUIC — whether or
+	// not the zone has a certificate yet (the node cannot ever serve it h3);
+	// a zone without a certificate on a node that CAN is in neither list
+	// until its TLS server exists.
 	Degraded []string
 }
 
