@@ -65,7 +65,10 @@ func TestReportAndHealthzCarryH3Readiness(t *testing.T) {
 			api.EdgeReportH3{State: api.H3StateReady, Module: true, TLSLibrary: "OpenSSL 3.5.7", EarlyDataCapable: true}, "", 1},
 		{"node switched off keeps the build's facts", debian13, nil, true,
 			api.EdgeReportH3{State: api.H3StateNodeOff, Module: true, TLSLibrary: "OpenSSL 3.5.7"}, "CVE-2026-40460", 0},
-		{"probe failed: unknown, nothing claimed", apply.Terminator{}, errors.New("nginx -V: exit status 1"), false,
+		// The prober answers with facts AND an error, the way a half-parsed
+		// output would: the node must keep none of them. Expecting zeroes
+		// from a zero answer would prove nothing about the discard.
+		{"probe failed: unknown, and a partial answer is discarded", debian13, errors.New("nginx -V: exit status 1"), false,
 			api.EdgeReportH3{State: api.H3StateUnknown}, "", 0},
 	}
 	for _, c := range cases {
@@ -125,8 +128,12 @@ func checkH3(t *testing.T, where string, got *api.EdgeReportH3, want api.EdgeRep
 	if got == nil {
 		t.Fatalf("%s: no h3 section", where)
 	}
-	if got.State != want.State || got.Module != want.Module || got.TLSLibrary != want.TLSLibrary || got.EarlyDataCapable != want.EarlyDataCapable {
-		t.Errorf("%s: h3 = %+v, want %+v (advisory aside)", where, *got, want)
+	// The whole object, so a field added to it later cannot go unchecked;
+	// the advisory is long and is matched as a substring below.
+	bare := *got
+	bare.Advisory = ""
+	if bare != want {
+		t.Errorf("%s: h3 = %+v, want %+v (advisory aside)", where, bare, want)
 	}
 	switch {
 	case advisory == "" && got.Advisory != "":

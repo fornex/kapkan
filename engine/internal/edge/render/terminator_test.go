@@ -573,22 +573,7 @@ func TestRealTerminator(t *testing.T) {
 // honoursPerServerProtocols says whether this terminator applies ssl_protocols
 // per virtual server (nginx 1.29.2 fixed it; Angie always has).
 func honoursPerServerProtocols(kind, version string) bool {
-	if kind == "angie" {
-		return true
-	}
-	parts := strings.Split(version, ".")
-	nums := make([]int, 3)
-	for i := 0; i < 3 && i < len(parts); i++ {
-		nums[i], _ = strconv.Atoi(parts[i])
-	}
-	switch {
-	case nums[0] != 1:
-		return nums[0] > 1
-	case nums[1] != 29:
-		return nums[1] > 29
-	default:
-		return nums[2] >= 2
-	}
+	return kind == "angie" || versionAtLeast(version, 1, 29, 2)
 }
 
 // versionAtLeast compares a dotted version ("1.26.3") with major.minor.patch.
