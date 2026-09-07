@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kapkan-io/kapkan/internal/edge/apply"
@@ -52,6 +54,10 @@ func TestReadyNodeRendersQUICAndKeepsItsHostKey(t *testing.T) {
 	opt := baseOptions(srv, state, sockets, tester, reloader)
 	opt.ACME = ACME{Directory: "http://127.0.0.1:1/never"} // never contacted: the certificate is fresh
 	opt.Prober = withModule
+	// /proc/net/udp is not there off Linux, so stub the sampler to prove the
+	// report carries `listening` when the node serves QUIC (the parser itself
+	// is tested from fixtures in TestUDPListeningFromProc).
+	defer stubUDPListening(true)()
 	n, err := New(opt)
 	if err != nil {
 		t.Fatal(err)
@@ -92,16 +98,23 @@ func TestReadyNodeRendersQUICAndKeepsItsHostKey(t *testing.T) {
 	if strings.Join(rep.Terminator.H3.Serving, ",") != "example.com" || len(rep.Terminator.H3.Unsupported) != 0 || rep.Terminator.H3.State != "ready" {
 		t.Errorf("report h3 = %+v", *rep.Terminator.H3)
 	}
+	if rep.Terminator.H3.Listening == nil || !*rep.Terminator.H3.Listening {
+		t.Errorf("report h3.listening = %v, want true (the sampler is stubbed on)", rep.Terminator.H3.Listening)
+	}
 	if !n.Status().Converged {
 		t.Error("not converged")
 	}
+	gen1Installs := tester.calls.Load()
 
-	// Fast path: a rate change on the h3 zone moves the accepted ETag and
-	// nothing else.
+	// Fast path: a rate change on the h3 zone moves the ETag it renders (so we
+	// know the document was processed) but installs no new generation.
 	brain.set(h3Doc(20), `"v2"`)
-	waitFor(t, "v2 accepted", func() bool { return n.Status().AcceptedETag == `"v2"` })
+	waitFor(t, "v2 rendered", func() bool { return n.Status().ZonesETag == `"v2"` })
 	if g := n.Status().Generation; g != 1 {
 		t.Fatalf("a rate change on an h3 zone reinstalled: generation %d", g)
+	}
+	if c := tester.calls.Load(); c != gen1Installs {
+		t.Fatalf("a rate change ran nginx -t again: %d installs, want %d", c, gen1Installs)
 	}
 	// Slow path: h3 off is a new tested generation, and the QUIC lines go.
 	brain.set(testDoc(20), `"v3"`)
@@ -157,6 +170,10 @@ func TestNodeWithoutModuleDegradesH3Zones(t *testing.T) {
 			selfSignedSet(t, state, "example.com")
 			opt := baseOptions(srv, state, sockets, &fakeTester{}, &fakeReloader{})
 			opt.ACME = ACME{Directory: "http://127.0.0.1:1/never"}
+			// Count the degraded-set warning: exactly one, even across a
+			// second document that keeps the same degraded set.
+			warns := &countingHandler{substr: "served over TCP"}
+			opt.Logger = slog.New(warns)
 			if c.probe != nil {
 				opt.Prober = c.probe
 			}
@@ -171,7 +188,13 @@ func TestNodeWithoutModuleDegradesH3Zones(t *testing.T) {
 					t.Error(err)
 				}
 			}()
-			waitFor(t, "first install", func() bool { return n.Status().Generation == 1 })
+			// Converged and the h3 readiness are published in a later critical
+			// section than the one that bumps Generation, so wait on the whole
+			// condition, not just the generation.
+			waitFor(t, "the degraded zone converged", func() bool {
+				st := n.Status()
+				return st.Generation == 1 && st.Converged && st.H3 != nil && strings.Join(st.H3.Unsupported, ",") == "example.com"
+			})
 			for _, f := range []string{"kapkan_00_common.conf", "kapkan_zone_example.com.conf"} {
 				if body := readLive(t, state, f); strings.Contains(body, "quic") || strings.Contains(body, "Alt-Svc") {
 					t.Errorf("%s carries QUIC on a node that cannot render it", f)
@@ -180,7 +203,7 @@ func TestNodeWithoutModuleDegradesH3Zones(t *testing.T) {
 			if !strings.Contains(readLive(t, state, "kapkan_zone_example.com.conf"), "HTTP/3 ASKED FOR, NOT RENDERED") {
 				t.Error("the zone file does not say why HTTP/3 is missing")
 			}
-			if st := n.Status(); !st.Converged || st.H3 == nil || st.H3.State != c.state || strings.Join(st.H3.Unsupported, ",") != "example.com" || len(st.H3.Serving) != 0 {
+			if st := n.Status(); st.H3.State != c.state || len(st.H3.Serving) != 0 {
 				t.Errorf("status = %+v h3 %+v", st, st.H3)
 			}
 			waitFor(t, "a report", func() bool {
@@ -191,7 +214,139 @@ func TestNodeWithoutModuleDegradesH3Zones(t *testing.T) {
 			if strings.Join(rep.Terminator.H3.Unsupported, ",") != "example.com" || rep.Terminator.H3.Listening != nil {
 				t.Errorf("report h3 = %+v", *rep.Terminator.H3)
 			}
+			// A second document that keeps the degraded set (a new generation,
+			// via a rate change) must not warn again.
+			brain.set(h3Doc(20), `"v2"`)
+			waitFor(t, "v2 rendered", func() bool { return n.Status().ZonesETag == `"v2"` })
+			if got := warns.count(); got != 1 {
+				t.Errorf("degraded-set warnings = %d, want exactly 1", got)
+			}
 		})
+	}
+}
+
+// stubUDPListening replaces the /proc sampler for a test and returns a restore.
+func stubUDPListening(up bool) func() {
+	prev := udpListeningFn
+	udpListeningFn = func(int) *bool { return &up }
+	return func() { udpListeningFn = prev }
+}
+
+// countingHandler is a slog.Handler that counts WARN records whose message
+// contains substr.
+type countingHandler struct {
+	substr string
+	mu     sync.Mutex
+	n      int
+}
+
+func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn && strings.Contains(r.Message, h.substr) {
+		h.mu.Lock()
+		h.n++
+		h.mu.Unlock()
+	}
+	return nil
+}
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
+func (h *countingHandler) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.n
+}
+
+// The node's own quic.retry:false and omit_anchor reach the renderer: the
+// shared file says quic_retry off, and under omit_catch_all with omit_anchor
+// there is no anchor and no reuseport, while the zone still lists 443 quic.
+func TestNodeQUICRetryAndOmitAnchor(t *testing.T) {
+	brain := &fakeBrain{}
+	brain.set(h3Doc(10), `"v1"`)
+	srv := httptest.NewServer(brain)
+	defer srv.Close()
+	state, sockets := shortDirs(t)
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	selfSignedSet(t, state, "example.com")
+	opt := baseOptions(srv, state, sockets, &fakeTester{}, &fakeReloader{})
+	opt.ACME = ACME{Directory: "http://127.0.0.1:1/never"}
+	opt.Prober = withModule
+	no := false
+	opt.QUIC.Retry = &no
+	opt.OmitCatchAll = true
+	opt.QUIC.OmitAnchor = true
+	n, err := New(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := run(t, n)
+	defer func() {
+		if err := stop(); err != nil {
+			t.Error(err)
+		}
+	}()
+	waitFor(t, "first install", func() bool { return n.Status().Generation == 1 })
+	common := readLive(t, state, "kapkan_00_common.conf")
+	if !strings.Contains(common, "quic_retry off;") || strings.Contains(common, "quic_retry on;") {
+		t.Error("quic.retry:false did not render quic_retry off")
+	}
+	if strings.Contains(common, "reuseport") || strings.Contains(common, "The QUIC anchor") || strings.Contains(common, "default_server") {
+		t.Errorf("omit_catch_all + omit_anchor still rendered an anchor/catch-all:\n%s", common)
+	}
+	if !strings.Contains(common, "quic_host_key") {
+		t.Error("the http-level quic_host_key is still needed under omit_anchor")
+	}
+	if z := readLive(t, state, "kapkan_zone_example.com.conf"); !strings.Contains(z, "listen 443 quic;") {
+		t.Error("the zone still lists its own QUIC listener under omit_anchor")
+	}
+}
+
+// udpTableListens / udpListeningIn over fixtures: the local port is column 2,
+// "<hex addr>:<hex port>"; a header-only or empty file is false; no readable
+// file is nil.
+func TestUDPListeningFromProc(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	const header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+	v4on443 := write("udp", header+"  1: 00000000:01BB 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 12345 2 0000 0\n")
+	v4other := write("udp_other", header+"  1: 00000000:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 1 2 0000 0\n")
+	v6on443 := write("udp6", header+"  1: 00000000000000000000000000000000:01BB 00000000000000000000000000000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 9 2 0000 0\n")
+	headerOnly := write("udp_hdr", header)
+	empty := write("udp_empty", "")
+	missing := filepath.Join(dir, "nope")
+
+	tf := func(v *bool) string {
+		if v == nil {
+			return "nil"
+		}
+		return strconv.FormatBool(*v)
+	}
+	cases := []struct {
+		name  string
+		paths []string
+		want  string
+	}{
+		{"v4 has 443", []string{v4on443}, "true"},
+		{"v6 has 443", []string{v6on443}, "true"},
+		{"v4 only, other port", []string{v4other}, "false"},
+		{"443 in v6 only", []string{v4other, v6on443}, "true"},
+		{"header only", []string{headerOnly}, "false"},
+		{"empty file", []string{empty}, "false"},
+		{"one missing one present", []string{missing, v4on443}, "true"},
+		{"both missing", []string{missing, missing}, "nil"},
+	}
+	for _, c := range cases {
+		if got := tf(udpListeningIn(c.paths, 443)); got != c.want {
+			t.Errorf("%s: udpListeningIn = %s, want %s", c.name, got, c.want)
+		}
 	}
 }
 

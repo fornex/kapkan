@@ -18,6 +18,7 @@ func TestAggregatorCountsProtocols(t *testing.T) {
 	var closed []WindowStats
 	a := &Aggregator{Window: time.Second, Now: func() time.Time { return now }, OnWindow: func(w WindowStats) { closed = append(closed, w) }}
 	zone := "proto-test.example"
+	a.SetZones([]string{zone}) // the per-zone counter series exists only once a document is known
 	before := map[string]float64{}
 	for _, l := range []string{"h1", "h2", "h3", "other"} {
 		before[l] = testutil.ToFloat64(metrics.EdgeRequestsTotal.WithLabelValues(zone, l))
@@ -44,5 +45,24 @@ func TestAggregatorCountsProtocols(t *testing.T) {
 		if got := protoLabel(proto); got != want {
 			t.Errorf("protoLabel(%q) = %s, want %s", proto, got, want)
 		}
+	}
+}
+
+// A record for a zone the document does not have — and any record before the
+// first SetZones — must not open a kapkan_edge_requests_total series, so the
+// metric's zone label stays bounded by the document.
+func TestRequestsTotalStaysBounded(t *testing.T) {
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	before := testutil.CollectAndCount(metrics.EdgeRequestsTotal)
+	// No SetZones yet: known is nil, the record is still folded into a window
+	// but opens no series.
+	a := &Aggregator{Window: time.Second, Now: func() time.Time { return now }}
+	a.Observe(Record{TS: now, Zone: "never-carded.example", Src: netip.MustParseAddr("10.0.0.9"), Port: 443, Proto: "HTTP/2.0", Status: 200})
+	// With a document, a record for an unknown zone is dropped as unknown_zone
+	// and still opens no series.
+	a.SetZones([]string{"known.example"})
+	a.Observe(Record{TS: now, Zone: "stranger.example", Src: netip.MustParseAddr("10.0.0.9"), Port: 443, Proto: "HTTP/2.0", Status: 200})
+	if after := testutil.CollectAndCount(metrics.EdgeRequestsTotal); after != before {
+		t.Errorf("kapkan_edge_requests_total series count %d → %d: an unknown zone opened a series", before, after)
 	}
 }

@@ -432,8 +432,9 @@ security-relevant.
   /api/v1/edge/zones/status` gains `h3 {enabled, serving[], unsupported[], requests}` (`enabled`
   is the zones file's word, the lists are the alive nodes'). The zones schema is regenerated.
   Not rendered, still: `ssl_early_data`. Upgrade nodes before zones: a node older than E5
-  refuses a document that carries `h3` and stays on its previous generation with
-  `converged: false`.
+  refuses a document that carries `h3`, stays on its previous generation with
+  `converged: false`, and installs nothing more — renewed certificates included — until `h3` is
+  removed or the node upgraded; upgrade every node first.
 
 ## [1.7.0] - 2026-09-02
 

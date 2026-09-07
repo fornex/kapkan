@@ -228,7 +228,12 @@ type Node struct {
 	term       apply.Terminator
 	termProbed bool
 	termAlive  *bool
-	statusAddr string
+	// udpListening is the last /proc sample of UDP :443 (the QUIC listener's
+	// local half), taken by reportLoop OUTSIDE the file I/O so h3Locked — on
+	// the hot mutex, and behind the unauthenticated /healthz — only copies it.
+	// nil until the first sample, or off a box without /proc.
+	udpListening *bool
+	statusAddr   string
 	// windows is the last closed rollup window per zone (the aggregator's
 	// top-N view), for the self-report's zones section (E4.5).
 	windows map[string]rollup.WindowStats
@@ -423,6 +428,9 @@ func (n *Node) Run(ctx context.Context) error {
 	// untested generation live. The QUIC host key first: a render with h3
 	// names the file and `nginx -t` reads it.
 	if err := n.ensureQUICHostKey(); err != nil {
+		// Through finish() like every other startup exit, so the components
+		// spawned above are cancelled and waited on and their sockets unlinked.
+		_ = finish()
 		return fmt.Errorf("edge: quic host key: %w", err)
 	}
 	if term, err := n.prober(ctx, n.opt.Terminator.Binary); err == nil {
@@ -852,6 +860,33 @@ func trimReport(rep api.EdgeReport) api.EdgeReport {
 			rep.Zones[i].TopSources = nil
 		}
 	}
+	// The terminator's h3 name lists grow with the h3 zone count and are the
+	// least valuable bytes per entry (bare zone names), so they go before the
+	// certificates and the zones section. The Terminator pointer and its H3 are
+	// copied first: the caller's report must stay whole.
+	if rep.Terminator != nil && rep.Terminator.H3 != nil && (len(rep.Terminator.H3.Serving) > 0 || len(rep.Terminator.H3.Unsupported) > 0) {
+		term := *rep.Terminator
+		h3 := *term.H3
+		term.H3 = &h3
+		rep.Terminator = &term
+		for (len(h3.Serving) > 0 || len(h3.Unsupported) > 0) && !fits() {
+			if n := len(h3.Serving); n > len(h3.Unsupported) {
+				drop := max(n/10, 1)
+				h3.Serving = h3.Serving[:n-drop]
+				h3.ServingTruncated += drop
+			} else {
+				drop := max(len(h3.Unsupported)/10, 1)
+				h3.Unsupported = h3.Unsupported[:len(h3.Unsupported)-drop]
+				h3.UnsupportedTruncated += drop
+			}
+		}
+		if len(h3.Serving) == 0 {
+			h3.Serving = nil
+		}
+		if len(h3.Unsupported) == 0 {
+			h3.Unsupported = nil
+		}
+	}
 	for len(rep.Certs) > 0 && !fits() {
 		drop := len(rep.Certs) / 10
 		if drop == 0 {
@@ -884,8 +919,12 @@ func (n *Node) reportLoop(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			alive := n.terminatorAlive()
+			// Sampled here, outside n.mu: h3Locked (on the hot mutex, and
+			// behind /healthz) only copies the result.
+			listening := udpListeningFn(443)
 			n.mu.Lock()
 			n.termAlive = alive
+			n.udpListening = listening
 			n.mu.Unlock()
 			n.retryIfDue(ctx)
 			n.postReport(ctx)
@@ -898,6 +937,9 @@ func (n *Node) postReport(ctx context.Context) {
 	rep := trimReport(raw)
 	if rep.CertsTruncated > 0 {
 		n.log.Warn("self-report certificate list truncated to fit the brain's body limit", "dropped", rep.CertsTruncated)
+	}
+	if rep.Terminator != nil && rep.Terminator.H3 != nil && (rep.Terminator.H3.ServingTruncated > 0 || rep.Terminator.H3.UnsupportedTruncated > 0) {
+		n.log.Warn("self-report HTTP/3 zone lists truncated to fit the brain's body limit", "serving_dropped", rep.Terminator.H3.ServingTruncated, "unsupported_dropped", rep.Terminator.H3.UnsupportedTruncated)
 	}
 	// Two reasons a would-be set is short, told apart: what the body limit
 	// made this report shed is a warning; what the aggregator's per-window
@@ -993,9 +1035,10 @@ func (n *Node) h3Locked() *api.EdgeReportH3 {
 	h.Serving = append([]string(nil), n.renderedInfo.H3Zones...)
 	h.Unsupported = append([]string(nil), n.renderedInfo.Degraded...)
 	if len(h.Serving) > 0 {
-		// The local half of "is HTTP/3 reachable?": read at report time, so
-		// a reload that is still binding its sockets is caught on the next.
-		h.Listening = udpListeningFn(443)
+		// The local half of "is HTTP/3 reachable?": the last sample reportLoop
+		// took outside the lock (nil until the first, so a reload still binding
+		// its sockets shows nothing until the next report).
+		h.Listening = n.udpListening
 	}
 	return h
 }

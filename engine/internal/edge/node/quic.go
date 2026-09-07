@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,7 +23,10 @@ const quicHostKeyLen = 32
 // client that already took one Retry may not accept another (RFC 9000), so
 // it would fall back to TCP exactly when the node reloads under load.
 // Written whether or not this node renders QUIC: the render names the file
-// only when it does, and the bytes cost nothing.
+// only when it does, and the bytes cost nothing. The write is durable
+// (fsync + directory fsync), because the applied configuration names this
+// file and nginx refuses a zero-length host key: a torn first mint would
+// wedge both nginx and the node until an operator cleared it.
 func (n *Node) ensureQUICHostKey() error {
 	path := n.files.quicHostKey
 	if st, err := os.Stat(path); err == nil {
@@ -43,11 +47,35 @@ func (n *Node) ensureQUICHostKey() error {
 	if _, err := rand.Read(key); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, key, 0o600); err != nil {
+	if err := writeSecretFileSynced(path, key); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
+	n.log.Info("QUIC host key created", "path", path)
+	return nil
+}
+
+// writeSecretFileSynced writes content to path 0600 durably: a temp file
+// opened O_EXCL (so a second process cannot share the .tmp name), written,
+// fsynced and renamed into place, then the directory fsynced — so a crash
+// leaves either the old file or the whole new one, never a zero-length husk.
+func writeSecretFileSynced(path string, content []byte) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	cleanup := func(err error) error {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if _, err := f.Write(content); err != nil {
+		return cleanup(err)
+	}
+	if err := f.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -55,7 +83,10 @@ func (n *Node) ensureQUICHostKey() error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	n.log.Info("QUIC host key created", "path", path)
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }
 
@@ -67,28 +98,22 @@ var udpListeningFn = udpListening
 // the local half of "is the QUIC listener up?". nil where neither file can
 // be read (not Linux, or /proc not mounted).
 func udpListening(port int) *bool {
+	return udpListeningIn([]string{"/proc/net/udp", "/proc/net/udp6"}, port)
+}
+
+// udpListeningIn is udpListening over explicit paths, for tests. nil when no
+// path could be read at all; otherwise whether the port appears in any.
+func udpListeningIn(paths []string, port int) *bool {
 	readable := false
 	found := false
-	for _, path := range []string{"/proc/net/udp", "/proc/net/udp6"} {
+	for _, path := range paths {
 		f, err := os.Open(path)
 		if err != nil {
 			continue
 		}
 		readable = true
-		sc := bufio.NewScanner(f)
-		sc.Scan() // the header
-		for sc.Scan() {
-			fields := strings.Fields(sc.Text())
-			if len(fields) < 2 {
-				continue
-			}
-			_, hexPort, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			if p, err := strconv.ParseUint(hexPort, 16, 16); err == nil && int(p) == port {
-				found = true
-			}
+		if udpTableListens(f, port) {
+			found = true
 		}
 		_ = f.Close()
 	}
@@ -96,4 +121,25 @@ func udpListening(port int) *bool {
 		return nil
 	}
 	return &found
+}
+
+// udpTableListens scans one /proc/net/udp{,6} table for a local socket on the
+// port. The local address is the second column, "<hex addr>:<hex port>".
+func udpTableListens(r io.Reader, port int) bool {
+	sc := bufio.NewScanner(r)
+	sc.Scan() // the header
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		_, hexPort, ok := strings.Cut(fields[1], ":")
+		if !ok {
+			continue
+		}
+		if p, err := strconv.ParseUint(hexPort, 16, 16); err == nil && int(p) == port {
+			return true
+		}
+	}
+	return false
 }

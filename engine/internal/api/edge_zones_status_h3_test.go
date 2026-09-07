@@ -37,6 +37,49 @@ func TestEdgeZonesStatusH3(t *testing.T) {
 	}
 }
 
+// `h3.enabled` is the zones file's word and must show even before any node
+// serves the zone: a node that reports the zone but carries no terminator.h3
+// (an older or no_module node), and a zone present only through a lever.
+func TestEdgeZonesStatusH3EnabledBeforeServing(t *testing.T) {
+	store, _ := edgeStore(t, edgeZonesOne+`    tls: {h3: true}
+  - name: lever-only.example
+    origins: ["10.0.0.9:8080"]
+    tls: {h3: true}
+`)
+	s := testServer(t, store)
+	h := s.Handler()
+	// e1 reports a.example in its zones section but has no terminator.h3 lists
+	// and no h3_requests — the "enabled before any node serves it" case.
+	body := `{"version":"1.9.0","terminator":{"kind":"nginx","version":"1.22.1"},"zones":[{"zone":"a.example","requests":9}]}`
+	if rec := postEdgeReport(h, "e1", body, "agent-secret"); rec.Code != http.StatusNoContent {
+		t.Fatalf("report = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := getZones(h, "", "agent-secret", "e1"); rec.Code != http.StatusOK {
+		t.Fatalf("poll = %d", rec.Code)
+	}
+	// A lever on the other h3 zone, which no node reports at all.
+	lreq := `{"mode":"manual","ttl_seconds":600,"reason":"x"}`
+	if rec := lever(h, http.MethodPost, "lever-only.example", lreq, "op-secret"); rec.Code != http.StatusOK {
+		t.Fatalf("lever = %d (%s)", rec.Code, rec.Body.String())
+	}
+	doc, code := getEdgeZonesStatus(h, "op-secret")
+	if code != http.StatusOK {
+		t.Fatalf("status: %d", code)
+	}
+	byZone := map[string]EdgeZoneStatus{}
+	for _, z := range doc.Zones {
+		byZone[z.Zone] = z
+	}
+	a := byZone["a.example"]
+	if a.H3 == nil || !a.H3.Enabled || len(a.H3.Serving) != 0 || len(a.H3.Unsupported) != 0 || a.H3.Requests != 0 {
+		t.Fatalf("a.example enabled before serving: %+v", a.H3)
+	}
+	lv := byZone["lever-only.example"]
+	if lv.Override == nil || lv.H3 == nil || !lv.H3.Enabled {
+		t.Fatalf("lever-only zone must carry h3.enabled after the lever pass: h3=%+v override=%v", lv.H3, lv.Override)
+	}
+}
+
 // The merged status names, per zone, the nodes serving it over QUIC and the
 // nodes that degraded it to TCP, and sums the HTTP/3 requests; a zone no node
 // speaks or asks h3 for carries no h3 section (the handler adds `enabled`

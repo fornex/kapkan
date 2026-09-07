@@ -135,21 +135,6 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	doc := mergeEdgeZones(reports)
 	doc.NodesAlive = alive
-	// Whether a zone ASKS for HTTP/3 is the zones file's word, brain state;
-	// which nodes serve it is theirs.
-	if cfg.ZonesCfg != nil {
-		for i := range doc.Zones {
-			zs := &doc.Zones[i]
-			for j := range cfg.ZonesCfg.Zones {
-				if z := &cfg.ZonesCfg.Zones[j]; z.Name == zs.Zone && z.TLS.H3 {
-					if zs.H3 == nil {
-						zs.H3 = &EdgeZoneH3{}
-					}
-					zs.H3.Enabled = true
-				}
-			}
-		}
-	}
 	// The operator's lever is brain state: it shows for its zone whether or
 	// not a node has reported the zone yet.
 	live := s.edgeLever.live(time.Now())
@@ -163,6 +148,22 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 	for zone, o := range live {
 		c := o
 		doc.Zones = append(doc.Zones, EdgeZoneStatus{Zone: zone, Override: &c})
+	}
+	// Whether a zone ASKS for HTTP/3 is the zones file's word, brain state;
+	// which nodes serve it is theirs. After the lever pass, so a zone present
+	// only through a lever (no node has reported it) still shows h3.enabled.
+	if cfg.ZonesCfg != nil {
+		for i := range doc.Zones {
+			zs := &doc.Zones[i]
+			for j := range cfg.ZonesCfg.Zones {
+				if z := &cfg.ZonesCfg.Zones[j]; z.Name == zs.Zone && z.TLS.H3 {
+					if zs.H3 == nil {
+						zs.H3 = &EdgeZoneH3{}
+					}
+					zs.H3.Enabled = true
+				}
+			}
+		}
 	}
 	sort.Slice(doc.Zones, func(i, j int) bool { return doc.Zones[i].Zone < doc.Zones[j].Zone })
 	writeJSON(w, http.StatusOK, doc)
