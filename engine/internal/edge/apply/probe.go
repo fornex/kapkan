@@ -59,17 +59,30 @@ func Probe(ctx context.Context, binary string) (Terminator, error) {
 
 // ParseVersionOutput reads the output of `nginx -V` / `angie -V`. Exported so
 // the real-terminator harness reads a container's binary through the same
-// code the node runs. The first line must be the version line; everything
-// after it is optional (`-v` output parses too, with the build facts absent).
+// code the node runs. The version line is taken to be the FIRST line that
+// parses as one, not line one: anything else sharing that stderr writes above
+// it — glibc's loader complaining about a stale /etc/ld.so.preload entry, a
+// wrapper script, docker's platform warning in the harness — and a whole
+// probe must not be lost to a line that is not about the binary at all.
+// Everything below the version line is optional (`-v` output parses too, with
+// the build facts absent).
 func ParseVersionOutput(out string) (Terminator, error) {
 	var t Terminator
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	kind, version, ok := parseVersionLine(lines[0])
-	if !ok {
-		return t, fmt.Errorf("unrecognised output %q", lines[0])
+	// Angie prints its own version first and the nginx core second, so the
+	// first parseable line is the right one for both terminators.
+	first := -1
+	for i, line := range lines {
+		if kind, version, ok := parseVersionLine(line); ok {
+			t.Kind, t.Version, t.Core = kind, version, version
+			first = i
+			break
+		}
 	}
-	t.Kind, t.Version, t.Core = kind, version, version
-	for _, line := range lines[1:] {
+	if first < 0 {
+		return Terminator{}, fmt.Errorf("unrecognised output %q", lines[0])
+	}
+	for _, line := range lines[first+1:] {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "nginx version:"):
@@ -176,8 +189,11 @@ func (t Terminator) Advisory() string {
 	return ""
 }
 
-// parseVersion reads "1.26.3" (a trailing letter or suffix, "1.1.1k",
-// "3.0.13+quic", is ignored); ok is false for anything else.
+// parseVersion reads a three-component "1.26.3", ignoring a trailing run of
+// NON-DIGITS in any component ("1.1.1k", "3.0.13+quic"). ok is false for
+// anything else — a fourth component ("1.25.3.1"), or a suffix that ends in a
+// digit ("1.31.2p1", "1.25.0-rc1"), which mainline nginx and Angie never
+// print. An unparseable core carries no advisory rather than a guess.
 func parseVersion(s string) (v [3]int, ok bool) {
 	parts := strings.SplitN(s, ".", 3)
 	if len(parts) != 3 {

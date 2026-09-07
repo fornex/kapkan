@@ -88,6 +88,20 @@ func TestParseVersionOutput(t *testing.T) {
 			out:  "Angie version: Angie/1.6.2",
 			want: Terminator{Kind: "angie", Version: "1.6.2", Core: "1.6.2"},
 		},
+		{
+			// glibc's loader writes this to the same stderr for every
+			// dynamically linked program on a host with a stale preload
+			// entry; the probe must not be lost to it.
+			name:     "a loader complaint above the version line is skipped",
+			out:      "ERROR: ld.so: object 'libjemalloc.so.2' from /etc/ld.so.preload cannot be preloaded: ignored.\nnginx version: nginx/1.26.3\nbuilt with OpenSSL 3.5.7 9 Jun 2026\nconfigure arguments: --with-http_v3_module",
+			want:     Terminator{Kind: "nginx", Version: "1.26.3", Core: "1.26.3", HTTP3Module: true, TLSLibrary: "OpenSSL 3.5.7"},
+			advisory: "CVE-2026-40460",
+		},
+		{
+			name: "Angie below a preamble: its own line still wins over the core line",
+			out:  "WARNING: The requested image's platform does not match the detected host platform\nAngie version: Angie/1.12.1\nnginx version: nginx/1.31.2\nbuilt with OpenSSL 3.5.7 9 Jun 2026\nconfigure arguments: --with-http_v3_module",
+			want: Terminator{Kind: "angie", Version: "1.12.1", Core: "1.31.2", HTTP3Module: true, TLSLibrary: "OpenSSL 3.5.7", EarlyDataCapable: true},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -110,8 +124,13 @@ func TestParseVersionOutput(t *testing.T) {
 			}
 		})
 	}
+	// No line here is a version line, so the scan must still refuse the whole
+	// output rather than keep the build facts of a binary it cannot name.
 	if _, err := ParseVersionOutput("something else\nconfigure arguments: --with-http_v3_module"); err == nil {
 		t.Fatal("unrecognised output accepted")
+	}
+	if _, err := ParseVersionOutput(""); err == nil {
+		t.Fatal("empty output accepted")
 	}
 }
 
@@ -123,6 +142,10 @@ func TestAdvisoryBoundaries(t *testing.T) {
 		"1.24.9": "", "1.25.0": "CVE-2026-40460", "1.26.3": "CVE-2026-40460", "1.30.0": "CVE-2026-40460",
 		"1.30.1": "", "1.30.4": "", "1.31.0": "CVE-2026-42530", "1.31.1": "CVE-2026-42530", "1.31.2": "", "1.31.5": "",
 		"2.0.0": "", "garbage": "",
+		// A core parseVersion cannot read carries no advisory rather than a
+		// guess: a fourth component, or a suffix ending in a digit. Neither
+		// shape comes out of mainline nginx or Angie.
+		"1.26.3.1": "", "1.31.1p1": "", "1.31.1-rc1": "",
 	}
 	for core, want := range cases {
 		adv := Terminator{Kind: "nginx", Version: core, Core: core, HTTP3Module: true}.Advisory()
