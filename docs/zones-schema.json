@@ -146,6 +146,28 @@
               "h3": {
                 "type": "boolean"
               },
+              "h3_options": {
+                "additionalProperties": false,
+                "properties": {
+                  "advertise": {
+                    "type": "boolean",
+                    "x-optional": true
+                  },
+                  "alt_svc_max_age_seconds": {
+                    "anyOf": [
+                      {
+                        "const": 0
+                      },
+                      {
+                        "maximum": 604800,
+                        "minimum": 60
+                      }
+                    ],
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
               "min_version": {
                 "enum": [
                   "1.2",

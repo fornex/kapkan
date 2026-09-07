@@ -151,6 +151,10 @@ type QUIC struct {
 	// binary supports (edge.yaml quic.h3: off) — the switch for a build whose
 	// HTTP/3 the operator does not trust.
 	H3Off bool
+	// Retry is nginx's node-wide quic_retry (nil = on).
+	Retry *bool
+	// OmitAnchor drops kapkan's QUIC anchor under OmitCatchAll.
+	OmitAnchor bool
 }
 
 // Terminator is how the node drives nginx or Angie.
@@ -212,6 +216,9 @@ type Node struct {
 	// answer on :80 cannot pass an HTTP-01 validation.
 	renderedDoc  *edgedoc.Doc
 	renderedETag string
+	// renderedInfo is what the live render said about HTTP/3: the zones
+	// with a QUIC listener and the zones degraded to TCP here (E5.3).
+	renderedInfo render.Info
 	last         apply.Result
 	lastErr      string
 	retryAt      time.Time
@@ -230,6 +237,10 @@ type Node struct {
 type nodeFiles struct {
 	docPath, etagPath, confRoot, emptyRoot            string
 	decideSock, challengeSock, logSock, clearanceSock string
+	// quicHostKey is the terminator's QUIC host key (edge-spec §8, E5): 32
+	// random bytes the node creates once, so Retry and stateless-reset tokens
+	// survive a reload.
+	quicHostKey string
 }
 
 // New prepares a Node; nothing runs until Run.
@@ -280,6 +291,7 @@ func New(opt Options) (*Node, error) {
 		challengeSock: filepath.Join(opt.SocketsDir, "edge-challenge.sock"),
 		logSock:       filepath.Join(opt.SocketsDir, "edge-log.sock"),
 		clearanceSock: filepath.Join(opt.SocketsDir, "edge-clearance.sock"),
+		quicHostKey:   filepath.Join(opt.StateDir, "tls", "quic_host.key"),
 	}
 	for _, d := range []string{opt.StateDir, opt.SocketsDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -408,7 +420,11 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	// 2. The terminator: what it is, and whether a predecessor left an
-	// untested generation live.
+	// untested generation live. The QUIC host key first: a render with h3
+	// names the file and `nginx -t` reads it.
+	if err := n.ensureQUICHostKey(); err != nil {
+		return fmt.Errorf("edge: quic host key: %w", err)
+	}
 	if term, err := n.prober(ctx, n.opt.Terminator.Binary); err == nil {
 		n.mu.Lock()
 		n.term, n.termProbed = term, true
@@ -566,6 +582,9 @@ func (n *Node) renderAndApply(ctx context.Context) (reloaded bool, err error) {
 	defer n.renderMu.Unlock()
 	n.mu.Lock()
 	doc, etag := n.doc, n.acceptedETag
+	// QUIC is rendered only on a ready node: module present, quic.h3 not off.
+	// A failed probe is unknown and renders none — never a guess (E5.1).
+	h3Ready := H3State(n.term, n.termProbed, n.opt.QUIC.H3Off) == api.H3StateReady
 	n.mu.Unlock()
 	if doc == nil {
 		return false, nil
@@ -578,10 +597,11 @@ func (n *Node) renderAndApply(ctx context.Context) (reloaded bool, err error) {
 			certs[c.Zone] = render.Cert{Fullchain: c.Fullchain, Key: c.Key, Serial: c.Serial}
 		}
 	}
-	files, err := render.Render(render.Inputs{Doc: doc, Certs: certs, Node: render.Node{
+	files, info, err := render.RenderDetailed(render.Inputs{Doc: doc, Certs: certs, Node: render.Node{
 		DecideSocket: n.files.decideSock, ChallengeSocket: n.files.challengeSock, LogSocket: n.files.logSock,
 		ClearanceSocket: n.files.clearanceSock,
 		EmptyRoot:       n.files.emptyRoot, DisableIPv6: n.opt.DisableIPv6, OmitCatchAll: n.opt.OmitCatchAll,
+		H3Supported: h3Ready, QUICRetry: n.opt.QUIC.Retry, QUICHostKey: n.files.quicHostKey, OmitQUICAnchor: n.opt.QUIC.OmitAnchor,
 	}})
 	if err != nil {
 		err = fmt.Errorf("render: %w", err)
@@ -599,10 +619,18 @@ func (n *Node) renderAndApply(ctx context.Context) (reloaded bool, err error) {
 	}
 	n.mu.Lock()
 	n.renderedDoc, n.renderedETag = doc, etag
+	wasDegraded := strings.Join(n.renderedInfo.Degraded, ",")
+	n.renderedInfo = info
 	n.retryAt, n.retryBackoff = time.Time{}, 0
 	n.mu.Unlock()
 	if res.Changed {
-		n.log.Info("configuration installed", "generation", res.Generation, "reloaded", res.Reloaded, "zones", len(doc.Zones), "etag", etag)
+		n.log.Info("configuration installed", "generation", res.Generation, "reloaded", res.Reloaded, "zones", len(doc.Zones), "h3_zones", len(info.H3Zones), "etag", etag)
+	}
+	// Once per change of the set, not per render: a node without the module
+	// serving a fleet of h3 zones must not warn on every renewal.
+	if now := strings.Join(info.Degraded, ","); now != "" && now != wasDegraded {
+		n.log.Warn("zones asking for HTTP/3 are served over TCP on this node (no HTTP/3 module, or quic.h3 off); the report names them",
+			"zones", info.Degraded, "h3", H3State(n.term, n.termProbed, n.opt.QUIC.H3Off))
 	}
 	return res.Reloaded, nil
 }
@@ -961,6 +989,13 @@ func (n *Node) h3Locked() *api.EdgeReportH3 {
 	if n.termProbed {
 		h.Module, h.TLSLibrary, h.EarlyDataCapable = n.term.HTTP3Module, n.term.TLSLibrary, n.term.EarlyDataCapable
 		h.Advisory = n.term.Advisory()
+	}
+	h.Serving = append([]string(nil), n.renderedInfo.H3Zones...)
+	h.Unsupported = append([]string(nil), n.renderedInfo.Degraded...)
+	if len(h.Serving) > 0 {
+		// The local half of "is HTTP/3 reachable?": read at report time, so
+		// a reload that is still binding its sockets is caught on the next.
+		h.Listening = udpListeningFn(443)
 	}
 	return h
 }

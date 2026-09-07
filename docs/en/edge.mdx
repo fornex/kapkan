@@ -284,10 +284,17 @@ names the right clients.
   restart forgets it, and the nodes drop it with the first document the restarted brain serves —
   pull it again. A brain that stays down is different: the cached document's lever ends at its
   `until` (see the failure table).
-- **Wildcards and HTTP/3 are later milestones.** `tls.h3` is refused today; every name is
-  listed explicitly. A node already reports whether its binary *could* speak HTTP/3
-  (`terminator.h3` in the inventory, `quic.h3` in `edge.yaml`), so a fleet can be checked
-  before the zone-side switch arrives.
+- **Wildcards are a later milestone.** Every name is listed explicitly.
+- **HTTP/3 is per zone, rendered where the node can.** `tls.h3: true` adds `listen 443 quic`
+  and an `Alt-Svc` announcement to the zone on every node whose nginx or Angie carries the
+  HTTP/3 module (`terminator.h3.state: ready` in the inventory); a node without it serves the
+  zone over TCP and says so (`unsupported`) — a zone is never held hostage to one node's
+  package. Turning `h3` on or off is a reload (the slow path); nothing else about the zone is.
+  Retry is always on and 0-RTT off, node-wide, because nginx decides both from the address's
+  default server before SNI names a zone. `tls.h3_options.advertise: false` is the canary: the
+  listener without the announcement. UDP 443 must reach the node; `terminator.h3.listening`
+  tells you the box's half of that. Upgrade nodes before zones: a node older than E5 refuses a
+  document that carries `h3`.
 - **Duplicate-certificate ceilings.** Per-node certificates mean N nodes on one zone are N
   orders; Let's Encrypt caps a name at about five per week. The brain's issuance slot and
   renewal jitter spread them; `acme.fallback` (ZeroSSL, Google Trust Services — both need an

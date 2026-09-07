@@ -121,8 +121,8 @@ func edgePreflight(ec *config.EdgeNodeConfig) (problems, warnings, notes []strin
 			warnings = append(warnings, fmt.Sprintf("terminator probe failed: %v (the node will report no terminator facts and render no HTTP/3)", err))
 		} else {
 			off := ec.QUIC.H3 == config.EdgeH3Off
-			notes = append(notes, fmt.Sprintf("terminator: %s %s (nginx core %s, %s, http_v3_module %s, 0-RTT capable %s); HTTP/3 readiness: %s",
-				term.Kind, term.Version, term.Core, orUnknown(term.TLSLibrary), yesNo(term.HTTP3Module), yesNo(term.EarlyDataCapable), node.H3State(term, true, off)))
+			notes = append(notes, fmt.Sprintf("terminator: %s %s (nginx core %s, %s, http_v3_module %s, 0-RTT capable %s); HTTP/3 readiness: %s (quic.retry %s)",
+				term.Kind, term.Version, term.Core, orUnknown(term.TLSLibrary), yesNo(term.HTTP3Module), yesNo(term.EarlyDataCapable), node.H3State(term, true, off), onOff(ec.QUIC.RetryResolved())))
 			if adv := term.Advisory(); adv != "" && !off {
 				warnings = append(warnings, adv)
 			}
@@ -177,7 +177,7 @@ func edgeNodeOptions(ec *config.EdgeNodeConfig, token string, eab map[string]con
 		ReportInterval: time.Duration(ec.Controller.ReportIntervalSeconds) * time.Second,
 		StatusListen:   ec.StatusListen,
 		OmitCatchAll:   ec.OmitCatchAll,
-		QUIC:           node.QUIC{H3Off: ec.QUIC.H3 == config.EdgeH3Off},
+		QUIC:           node.QUIC{H3Off: ec.QUIC.H3 == config.EdgeH3Off, Retry: ec.QUIC.Retry, OmitAnchor: ec.QUIC.OmitAnchor},
 		DisableIPv6:    ec.DisableIPv6,
 		Logger:         log,
 	}
