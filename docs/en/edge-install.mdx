@@ -129,8 +129,10 @@ or `main_conf` is a warning — the check may run before the environment file or
 is in place. When the binary is on `PATH` it also prints what `nginx -V` says — kind, version,
 nginx core, TLS library, whether the build has the HTTP/3 module — and the node's HTTP/3
 readiness; a build whose nginx core falls in a published QUIC advisory's range gets a warning
-naming the CVE (check your distribution's changelog: backports do not move the version, and
-`quic.h3: off` in `edge.yaml` keeps HTTP/3 off on that node either way).
+naming the CVE (check your distribution's changelog: backports do not move the version). Set
+`quic.h3: off` in `edge.yaml` to keep HTTP/3 off on that node; `-check` then states the
+readiness as `node_off` and stops repeating the advisory, while the node's report keeps
+carrying it as a fact about the build.
 
 Install the shipped unit, `deploy/kapkan-edge.service`, and start it:
 
