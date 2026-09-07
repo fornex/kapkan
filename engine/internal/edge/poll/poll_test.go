@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,7 +23,6 @@ type fakeBrain struct {
 	seen   []string // If-None-Match values
 	auth   []string
 	nodes  []string
-	times  []time.Time
 }
 
 func (b *fakeBrain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +32,6 @@ func (b *fakeBrain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b.seen = append(b.seen, r.Header.Get("If-None-Match"))
 	b.auth = append(b.auth, r.Header.Get("Authorization"))
 	b.nodes = append(b.nodes, r.URL.Query().Get("node"))
-	b.times = append(b.times, time.Now())
 	if b.status != 0 {
 		w.WriteHeader(b.status)
 		return
@@ -54,16 +53,6 @@ func (b *fakeBrain) set(doc, etag string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.doc, b.etag = doc, etag
-}
-
-func (b *fakeBrain) gaps() []time.Duration {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	var out []time.Duration
-	for i := 1; i < len(b.times); i++ {
-		out = append(out, b.times[i].Sub(b.times[i-1]))
-	}
-	return out
 }
 
 func newPoller(t *testing.T, srv *httptest.Server, b *fakeBrain, onDoc func([]byte, string) error) *Poller {
@@ -156,8 +145,15 @@ func TestPollSeedsFromARestoredETag(t *testing.T) {
 	}
 }
 
-// A brain failure backs off EXPONENTIALLY (20, 40, 80, 160, 160 ms here),
-// leaves the ETag alone and never stamps LastOK.
+// A brain failure backs off EXPONENTIALLY (20, 40, 80, 160, 160 ms with the
+// options newPoller uses), leaves the ETag alone and never stamps LastOK.
+//
+// The sequence is read off the poller's own backoff seam, not off the wall
+// clock: what is under test is the delay Run computes after each failure, and a
+// real gap between two polls is that delay plus however long the machine felt
+// like taking. That the delay is really waited out — that Run does not hammer a
+// failing brain — is measured separately, and one-sidedly, by
+// TestPollBackoffActuallyDelaysPolls.
 func TestPollBacksOffOnFailures(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -181,21 +177,68 @@ func TestPollBacksOffOnFailures(t *testing.T) {
 			if p.ETag() != "" || !p.LastOK().IsZero() {
 				t.Fatalf("ETag %q / LastOK %v advanced on a failure", p.ETag(), p.LastOK())
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 450*time.Millisecond)
-			defer cancel()
-			p.Run(ctx)
-			gaps := b.gaps()
-			// The first gap is the Once above plus BackoffMin; then doubling.
-			if len(gaps) < 4 {
-				t.Fatalf("only %d polls in 450 ms: %v", len(gaps)+1, gaps)
+			if p.opt.BackoffMin != 20*time.Millisecond || p.opt.BackoffMax != 160*time.Millisecond {
+				t.Fatalf("the sequence below assumes 20/160 ms; newPoller now uses %v/%v", p.opt.BackoffMin, p.opt.BackoffMax)
 			}
-			for i := 1; i < len(gaps) && i < 4; i++ {
-				// Each gap should be roughly double the previous, until the cap.
-				if gaps[i] < gaps[i-1]+15*time.Millisecond {
-					t.Fatalf("backoff did not grow: gaps %v", gaps)
+			// Every backoff Run computes is recorded and returns at once; the
+			// sixth ends the loop. p.wait runs on Run's goroutine, which is this
+			// one, so the slice needs no lock.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var backoffs []time.Duration
+			p.wait = func(_ context.Context, d time.Duration) bool {
+				backoffs = append(backoffs, d)
+				if len(backoffs) == 6 {
+					cancel()
+					return false
 				}
+				return true
+			}
+			p.Run(ctx)
+			ms := time.Millisecond
+			want := []time.Duration{20 * ms, 40 * ms, 80 * ms, 160 * ms, 160 * ms, 160 * ms}
+			if !slices.Equal(backoffs, want) {
+				t.Fatalf("backoff sequence %v, want %v (BackoffMin doubling, capped at BackoffMax)", backoffs, want)
+			}
+			// One backoff per failure, no more: the Once above plus the six
+			// polls Run made before the sixth backoff ended it.
+			if n := b.polls.Load(); n != 7 {
+				t.Fatalf("%d polls for 6 backoffs; want 7 (1 + 6)", n)
+			}
+			// And not one of those failures advanced anything: the ETag and
+			// LastOK belong to a brain that answered.
+			if p.ETag() != "" || !p.LastOK().IsZero() {
+				t.Fatalf("ETag %q / LastOK %v advanced over 7 failing polls", p.ETag(), p.LastOK())
 			}
 		})
+	}
+}
+
+// The computed backoff is really waited out: a failing brain is polled a
+// handful of times, not thousands. The bound is one-sided on purpose — a loaded
+// machine can only push a poll LATER, never earlier, so it holds under any
+// scheduling, while dropping the wait from Run breaks it by orders of
+// magnitude. The exact delays are TestPollBacksOffOnFailures' business.
+func TestPollBackoffActuallyDelaysPolls(t *testing.T) {
+	b := &fakeBrain{status: http.StatusInternalServerError}
+	srv := httptest.NewServer(b)
+	defer srv.Close()
+	p := newPoller(t, srv, b, func([]byte, string) error { return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	p.Run(ctx)
+	// With 20, 40, 80 and 160 ms of backoff between them, the polls can start no
+	// earlier than 0, 20, 60, 140 and 300 ms in — four of them inside a 300 ms
+	// window, five if the last one races the deadline. More than that and the
+	// backoff is not being waited out at all.
+	n := b.polls.Load()
+	if n > 5 {
+		t.Fatalf("%d polls in 300 ms: the failure backoff is not being waited out", n)
+	}
+	// Only so the bound above cannot be satisfied by polling nothing at all;
+	// the exact count is TestPollBacksOffOnFailures' business.
+	if n < 2 {
+		t.Fatalf("%d polls in 300 ms: the loop is not polling", n)
 	}
 }
 
