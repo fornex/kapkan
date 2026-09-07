@@ -169,9 +169,9 @@ func (t Terminator) Advisory() string {
 	within := func(lo, hi [3]int) bool { return compareVersions(v, lo) >= 0 && compareVersions(v, hi) <= 0 }
 	switch {
 	case within([3]int{1, 25, 0}, [3]int{1, 30, 0}):
-		return fmt.Sprintf("nginx core %s is in the range CVE-2026-40460 names (1.25.0–1.30.0: after a QUIC connection migrates, new streams carry an unverified client address — the accounting key kapkan decides on); verify your build carries the fix (distributions backport it, e.g. Debian 13 nginx 1.26.3-3+deb13u7) or set quic.h3: off on this node", t.Core)
+		return fmt.Sprintf("nginx core %s is in the range CVE-2026-40460 names (1.25.0–1.30.0: after a QUIC connection migrates, new streams carry an unverified client address — the accounting key kapkan decides on; fixed upstream in 1.30.1 and 1.31.0); verify your build carries the fix (distributions backport it, e.g. Debian 13 nginx 1.26.3-3+deb13u7) or set quic.h3: off on this node", t.Core)
 	case within([3]int{1, 31, 0}, [3]int{1, 31, 1}):
-		return fmt.Sprintf("nginx core %s is in the range CVE-2026-42530 names (1.31.0–1.31.1: a use-after-free in the HTTP/3 QPACK decoder, fixed in 1.31.2); verify your build carries the fix or set quic.h3: off on this node", t.Core)
+		return fmt.Sprintf("nginx core %s is in the range CVE-2026-42530 names (1.31.0–1.31.1: a use-after-free processing a crafted QUIC session, fixed upstream in 1.31.2); verify your build carries the fix or set quic.h3: off on this node", t.Core)
 	}
 	return ""
 }
