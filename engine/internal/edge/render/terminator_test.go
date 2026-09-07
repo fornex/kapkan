@@ -61,6 +61,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kapkan-io/kapkan/internal/edge/apply"
 	"github.com/kapkan-io/kapkan/internal/edge/clearance"
 	"github.com/kapkan-io/kapkan/internal/edge/clearance/page"
 	"github.com/kapkan-io/kapkan/internal/edge/decide"
@@ -104,9 +105,11 @@ func TestRealTerminator(t *testing.T) {
 		t.Skipf("docker not found: %v", err)
 	}
 	h := newHarness(t, image)
-	kind, version := h.probe(t)
+	term := h.probe(t)
+	kind, version := term.Kind, term.Version
 	perServerTLS := honoursPerServerProtocols(kind, version)
-	t.Logf("terminator %s %s; honours per-server ssl_protocols: %v", kind, version, perServerTLS)
+	t.Logf("terminator %s %s (core %s, %s, http_v3_module %v, 0-RTT capable %v, advisory %q); honours per-server ssl_protocols: %v",
+		kind, version, term.Core, term.TLSLibrary, term.HTTP3Module, term.EarlyDataCapable, term.Advisory(), perServerTLS)
 
 	for _, name := range fixtureNames(t) {
 		t.Run("test/"+name, func(t *testing.T) {
@@ -588,6 +591,23 @@ func honoursPerServerProtocols(kind, version string) bool {
 	}
 }
 
+// versionAtLeast compares a dotted version ("1.26.3") with major.minor.patch.
+func versionAtLeast(version string, major, minor, patch int) bool {
+	parts := strings.Split(version, ".")
+	nums := make([]int, 3)
+	for i := 0; i < 3 && i < len(parts); i++ {
+		nums[i], _ = strconv.Atoi(parts[i])
+	}
+	switch {
+	case nums[0] != major:
+		return nums[0] > major
+	case nums[1] != minor:
+		return nums[1] > minor
+	default:
+		return nums[2] >= patch
+	}
+}
+
 // harness owns the work directory the containers mount.
 type harness struct {
 	image string
@@ -648,24 +668,25 @@ func newHarness(t *testing.T, image string) *harness {
 	return h
 }
 
-// probe asks the image's terminator for its kind and version.
-func (h *harness) probe(t *testing.T) (kind, version string) {
+// probe asks the image's terminator what it is and what it was built with,
+// through the same parser the node runs on `-V` (E5.1), and pins what the
+// matrix images must report: nginx.org's packages ship --with-http_v3_module
+// from 1.25.0 (nginx:1.22 has none), Angie always has it.
+func (h *harness) probe(t *testing.T) apply.Terminator {
 	t.Helper()
-	out, err := exec.Command("docker", "run", "--rm", h.image, "sh", "-c", termBinary+" -v").CombinedOutput()
+	out, err := exec.Command("docker", "run", "--rm", h.image, "sh", "-c", termBinary+" -V").CombinedOutput()
 	if err != nil {
 		t.Fatalf("probe: %v\n%s", err, out)
 	}
-	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	before, after, ok := strings.Cut(line, "version:")
-	if !ok {
-		t.Fatalf("probe: unrecognised output %q", line)
+	term, err := apply.ParseVersionOutput(string(out))
+	if err != nil {
+		t.Fatalf("probe: %v\n%s", err, out)
 	}
-	kind = strings.ToLower(strings.TrimSpace(before))
-	if i := strings.LastIndex(after, "/"); i >= 0 {
-		after = after[i+1:]
+	wantModule := term.Kind == "angie" || versionAtLeast(term.Core, 1, 25, 0)
+	if term.HTTP3Module != wantModule {
+		t.Errorf("probe: %s %s (core %s) reports http_v3_module=%v, want %v — the image changed under the matrix", term.Kind, term.Version, term.Core, term.HTTP3Module, wantModule)
 	}
-	version, _, _ = strings.Cut(strings.TrimSpace(after), " ")
-	return kind, version
+	return term
 }
 
 // prepare renders a fixture with every path remapped under the mount point and

@@ -442,7 +442,42 @@ type EdgeReportTerminator struct {
 	// Alive is the node's pid-file liveness check of the terminator; absent
 	// when the node has no pid file configured to check.
 	Alive *bool `json:"alive,omitempty"`
+	// H3 is what the node's probe of the binary (`nginx -V`) says about
+	// HTTP/3 (edge-spec §8, E5.1); absent from reports of nodes older than
+	// E5.1.
+	H3 *EdgeReportH3 `json:"h3,omitempty"`
 }
+
+// EdgeReportH3 is a node's HTTP/3 readiness, from the terminator probe and
+// the node's own quic.h3 switch. The renderer emits QUIC only on a node whose
+// state is ready; the other states say why a zone asking for h3 is served
+// over TCP there.
+type EdgeReportH3 struct {
+	// State: ready (module present, quic.h3 auto), no_module (the binary was
+	// built without --with-http_v3_module), node_off (edge.yaml quic.h3: off),
+	// unknown (the probe failed — treated as no_module by the renderer, which
+	// never guesses).
+	State string `json:"state"`
+	// Module reports --with-http_v3_module in the configure arguments.
+	Module bool `json:"module"`
+	// TLSLibrary is the library the binary runs with ("OpenSSL 3.5.7").
+	TLSLibrary string `json:"tls_library,omitempty"`
+	// EarlyDataCapable says the build could do 0-RTT over QUIC if asked;
+	// recorded for the inventory, nothing renders it (0-RTT is off by policy).
+	EarlyDataCapable bool `json:"early_data_capable"`
+	// Advisory names a published QUIC advisory whose affected range holds
+	// the build's nginx core — advice, not a verdict: distributions backport
+	// fixes without moving the version. Empty when none applies.
+	Advisory string `json:"advisory,omitempty"`
+}
+
+// The states EdgeReportH3.State takes.
+const (
+	H3StateReady    = "ready"
+	H3StateNoModule = "no_module"
+	H3StateNodeOff  = "node_off"
+	H3StateUnknown  = "unknown"
+)
 
 // EdgeReportCert is one held certificate. Public metadata only — never a key.
 type EdgeReportCert struct {
