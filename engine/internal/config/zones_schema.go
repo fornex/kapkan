@@ -41,6 +41,7 @@ var zoneNumericBounds = map[string]map[string]float64{
 // validator's range — published as exactly that (anyOf: 0, or the range), so
 // an editor validating against the schema refuses what the validator would.
 var zoneZeroOrRange = map[string][2]float64{
+	"zones.tls.h3_options.alt_svc_max_age_seconds":      {edgedoc.MinAltSvcMaxAge, edgedoc.MaxAltSvcMaxAge},
 	"zones.policy.challenge_options.difficulty":         {minChallengeDifficulty, maxChallengeDifficulty},
 	"zones.policy.challenge_options.cookie_ttl_seconds": {edgedoc.MinCookieTTLSeconds, edgedoc.MaxCookieTTLSeconds},
 	"zones.policy.challenge_options.auto.hold_seconds":  {edgedoc.MinChallengeHoldSeconds, edgedoc.MaxChallengeHoldSeconds},

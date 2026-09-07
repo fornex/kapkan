@@ -42,13 +42,18 @@ omit_catch_all: true
 disable_ipv6: true
 quic:
   h3: off
+  retry: false
+  omit_anchor: true
 `
 	e, err = ParseEdgeNode([]byte(full))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.DryRunResolved() || e.Terminator.Binary != "angie" || len(e.Terminator.Command) != 3 || e.ACME.Contact[0] != "mailto:ops@example.com" || !e.OmitCatchAll || e.QUIC.H3 != EdgeH3Off {
+	if e.DryRunResolved() || e.Terminator.Binary != "angie" || len(e.Terminator.Command) != 3 || e.ACME.Contact[0] != "mailto:ops@example.com" || !e.OmitCatchAll || e.QUIC.H3 != EdgeH3Off || e.QUIC.RetryResolved() || !e.QUIC.OmitAnchor {
 		t.Fatalf("full: %+v", e)
+	}
+	if !(EdgeQUIC{}).RetryResolved() {
+		t.Fatal("quic.retry must default to on")
 	}
 }
 
@@ -71,6 +76,7 @@ func TestParseEdgeNodeRejects(t *testing.T) {
 		{"contact not mailto", edgeYAML + "acme:\n  contact: [ops@example.com]\n", "mailto:"},
 		{"bad status listen", edgeYAML + "status_listen: nope\n", "status_listen"},
 		{"bad quic.h3", edgeYAML + "quic:\n  h3: maybe\n", "quic.h3"},
+		{"omit_anchor without omit_catch_all", edgeYAML + "quic:\n  omit_anchor: true\n", "quic.omit_anchor only applies with omit_catch_all"},
 		{"zero report interval", strings.Replace(edgeYAML, "  name: edge-1\n", "  name: edge-1\n  report_interval_seconds: -1\n", 1), "report_interval_seconds"},
 	}
 	for _, c := range cases {

@@ -10,6 +10,7 @@ package config
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -83,7 +84,20 @@ type EdgeQUIC struct {
 	// e.g. one the probe flags with an advisory). Zones asking for h3 are
 	// served over TCP here and the node's report says so.
 	H3 string `yaml:"h3"`
+	// Retry is nginx's quic_retry, node-wide (nginx decides it from the
+	// address's default server, before SNI names a zone): absent or true makes
+	// every new client address prove it can receive before the handshake costs
+	// the node anything — the anti-amplification stance; false turns it off
+	// and saves the round trip. A change is a new tested generation.
+	Retry *bool `yaml:"retry"`
+	// OmitAnchor drops kapkan's QUIC anchor under omit_catch_all — for an
+	// nginx.conf whose own default server already listens `443 quic
+	// reuseport` (a second reuseport on the address fails `nginx -t`).
+	OmitAnchor bool `yaml:"omit_anchor"`
 }
+
+// RetryResolved is the effective quic_retry: absent means on.
+func (q EdgeQUIC) RetryResolved() bool { return q.Retry == nil || *q.Retry }
 
 // Values of quic.h3.
 const (
@@ -291,6 +305,9 @@ func (e *EdgeNodeConfig) validate() error {
 	case EdgeH3Auto, EdgeH3Off:
 	default:
 		return fmt.Errorf("quic.h3 %q is not auto or off", e.QUIC.H3)
+	}
+	if e.QUIC.OmitAnchor && !e.OmitCatchAll {
+		return errors.New("quic.omit_anchor only applies with omit_catch_all: true (kapkan's catch-all carries the QUIC listener otherwise)")
 	}
 	return nil
 }
