@@ -108,10 +108,12 @@ quic:
   # address prove it can receive before the handshake costs this node anything
   # — a Retry is smaller than the Initial it answers, so a spoofed source
   # amplifies nothing. off saves that round trip. Changing it is a new tested
-  # generation (a reload).
+  # generation on a node that renders QUIC for some zone (elsewhere it waits
+  # for the first h3 render).
   # retry: true
   # With omit_catch_all: true, kapkan renders a bare QUIC "anchor" server that
   # carries the address's one `listen 443 quic reuseport` (HTTP/3 needs it to
-  # work across workers). Set true when your own default server already
-  # listens `443 quic reuseport` — two reuseports on one address fail nginx -t.
+  # work across workers). Set true when your own default server already listens
+  # `443 quic` with socket options — nginx allows one such listen per
+  # address:port, so give that server reuseport and ssl_protocols TLSv1.3.
   # omit_anchor: false

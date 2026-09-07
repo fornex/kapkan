@@ -231,7 +231,14 @@ func (a *Aggregator) Observe(r Record) {
 	if proto == "h3" {
 		zs.H3Requests++
 	}
-	metrics.EdgeRequestsTotal.WithLabelValues(r.Zone, proto).Inc()
+	// The per-zone counter series is created only once a document is known, so
+	// its `zone` label stays bounded by the document (the docs' guarantee): a
+	// record seen before the first SetZones is still folded into the window
+	// (pruned when the document lands) but does not open a Prometheus series
+	// for an unvetted name.
+	if a.known != nil {
+		metrics.EdgeRequestsTotal.WithLabelValues(r.Zone, proto).Inc()
+	}
 	switch r.Status / 100 {
 	case 2:
 		zs.Status2xx++

@@ -500,8 +500,14 @@ type EdgeReportH3 struct {
 	// Serving lists the zones this node renders a QUIC listener for;
 	// Unsupported the zones that asked for HTTP/3 and are served over TCP here
 	// (the state above says why). Both from the LIVE generation (E5.3).
-	Serving     []string `json:"serving,omitempty"`
-	Unsupported []string `json:"unsupported,omitempty"`
+	// ServingTruncated / UnsupportedTruncated count entries a report too big
+	// for the brain's body limit shed from the tail of each list (the lists
+	// grow with the h3 zone count; a huge fleet must not push the whole report
+	// past the limit).
+	Serving              []string `json:"serving,omitempty"`
+	Unsupported          []string `json:"unsupported,omitempty"`
+	ServingTruncated     int      `json:"serving_truncated,omitempty"`
+	UnsupportedTruncated int      `json:"unsupported_truncated,omitempty"`
 	// Listening says something on the box holds UDP :443 (read from
 	// /proc/net/udp) while the live generation has QUIC listeners — the local
 	// half of "is HTTP/3 reachable?"; whether the port is open from outside
