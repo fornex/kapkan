@@ -351,6 +351,22 @@ security-relevant.
   p50, every sample checked for its status). 108/108; the first run caught three rig bugs and its
   review ten more weaknesses of the rig, none in the product; the results are recorded in
   edge-spec §8.
+- Edge track, E5.4 (tools) — the two HTTP/3 test clients the E5 arms will be written against.
+  `engine/hack/h3client` is stock Debian 13 curl in a container, the ordinary-client half: its
+  build ends in `curl -V | grep -q HTTP3`, because `curl --http3` falls back to HTTP/2 rather
+  than failing and a point release that dropped HTTP/3 would otherwise leave every h3 arm
+  passing over the wrong protocol. `engine/hack/h3probe` is the instrumented half, for the two
+  facts curl cannot report: whether the server sent a QUIC **Retry** (read from the connection's
+  own qlog trace) and whether a session ticket issued by one node **resumes** on another
+  (`-resume` makes a second connection sharing one TLS session cache; `-resume-url` points it at
+  a different address). It prints one JSON object — `status`, `alpn`, `proto`, `alt_svc`,
+  `retry_seen`, `resumed`, `resume_status`, `error` — and exits 0 even on a failed request, so a
+  shell arm parses a refusal as readily as a success. **The product gains no QUIC dependency**
+  (E5 decision D10): h3probe is its own Go module, invisible to `go build ./...` and to the
+  kapkan binary's module graph, and `internal/edge/render/deps_guard_test.go` fails if a
+  `quic-go` requirement ever appears in `engine/go.mod` — or if h3probe stops holding one, so
+  the guard cannot pass vacuously. Both tools are test-only; `make h3probe` builds the probe.
+  Wiring them into the terminator harness comes with the rest of E5.
 
 ## [1.7.0] - 2026-09-02
 

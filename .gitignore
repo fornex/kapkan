@@ -13,6 +13,10 @@ files.zip
 engine/internal/api/static/
 # engine binary (built into engine/ by make build)
 /engine/kapkan
+# test-only tools built into engine/bin (make h3probe). See engine/hack/README.md.
+/engine/bin/
+# …and where `go build ./...` inside the probe's own module would drop it.
+/engine/hack/h3probe/h3probe
 # kernel-matrix scratch: cached guest kernels (~12MB each), the generated
 # initramfs payload and the per-kernel boot logs. See engine/hack/kernel-matrix.
 engine/.kernel-matrix/
