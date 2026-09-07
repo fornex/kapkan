@@ -641,16 +641,21 @@ say "ARM E (tail) — a flooder that had cleared the rung is denied directly, ne
 rm -f /tmp/cookie-7
 ip netns exec bursty python3 /tmp/browser.py $ZONE /pre-clear 2 0.2 /tmp/cookie-7 203.0.113.7 > /tmp/browser-e7.out 2>&1
 COOKIE_7=$(cat /tmp/cookie-7 2>/dev/null); [ -n "$COOKIE_7" ] && ok "a fresh source cleared the rung under manual" || bad "could not clear .7: $(cat /tmp/browser-e7.out)"
-ET=$(sfield accepted_etag); zones_yaml auto false false 0 5; reload_brain; wait_etag "$ET"; sleep 1
+ET=$(sfield accepted_etag); zones_yaml auto false false 0 5; reload_brain; wait_etag "$ET"
+# The manual page .7 was served is itself a 401 decision, counted as
+# 'challenged' in its ten-second window — and the ladder denies a source that
+# was challenged in the window it flooded in. Let that window close first, so
+# the flood's window holds the clearance and nothing else.
+sleep 12
 ip netns exec bursty python3 /tmp/flood.py $ZONE 11 /cf "$COOKIE_7" 203.0.113.7 > /tmp/flood-e7a.out 2>&1
 echo "  cleared flooder, window 1: $(cat /tmp/flood-e7a.out)"
 sleep 1.5
 ip netns exec bursty python3 /tmp/flood.py $ZONE 11 /cf "$COOKIE_7" 203.0.113.7 > /tmp/flood-e7b.out 2>&1
 echo "  cleared flooder, window 2: $(cat /tmp/flood-e7b.out)"
-python3 - <<'PY' && ok "a cleared flooder is denied directly: served and rate-limited in its first window, bare 403s after the close, never a page" || bad "cleared flooder: $(cat /tmp/flood-e7a.out) then $(cat /tmp/flood-e7b.out)"
+python3 - <<'PY' && ok "a cleared flooder is denied directly: served and rate-limited, then denied at the first window's close, bare 403s from then on, never a page" || bad "cleared flooder: $(cat /tmp/flood-e7a.out) then $(cat /tmp/flood-e7b.out)"
 import json
 a = json.load(open('/tmp/flood-e7a.out'))['codes']; b = json.load(open('/tmp/flood-e7b.out'))['codes']
-raise SystemExit(0 if a.get('page', 0) == 0 and a.get('429', 0) > 0 and b.get('page', 0) == 0 and b.get('403', 0) > 0 and b.get('200', 0) == 0 else 1)
+raise SystemExit(0 if a.get('page', 0) == 0 and a.get('429', 0) > 0 and a.get('403', 0) > 0 and b.get('page', 0) == 0 and b.get('403', 0) > 0 and b.get('200', 0) == 0 else 1)
 PY
 
 # ================================================================ ARM G
@@ -728,8 +733,10 @@ ET=$(sfield accepted_etag)
 brain_api -X POST -H 'Content-Type: application/json' -d '{"mode":"manual","ttl_seconds":60,"reason":"rig arm I, expiry"}' "http://$BRAIN:8080/api/v1/edge/zones/$ZONE/challenge" >/dev/null
 wait_etag "$ET" || bad "the expiring lever never reached the node"; ET=$(sfield accepted_etag); T0=$(date +%s)
 sleep 0.5; [ "$(get legit https://$ZONE/lever60)" = "403" ] && ok "the 60 s lever challenges" || bad "the 60 s lever did not challenge"
-for i in $(seq 1 80); do [ "$(zstatus "z.get('override',{}).get('mode','')")" = "" ] && break; sleep 1; done
-[ "$(zstatus "z.get('override',{}).get('mode','')")" = "" ] && ok "the lever lapsed on its own after ttl_seconds ($(( $(date +%s) - T0 )) s)" || bad "the lever did not lapse within 80 s"
+# A positive check — the status answered and carries no override — so a brain
+# that fails to answer cannot read as a lapse.
+for i in $(seq 1 80); do [ "$(zstatus "'override' not in z and z.get('zone','') == '$ZONE'")" = "true" ] && break; sleep 1; done
+[ "$(zstatus "'override' not in z and z.get('zone','') == '$ZONE'")" = "true" ] && ok "the lever lapsed on its own after ttl_seconds ($(( $(date +%s) - T0 )) s)" || bad "the lever did not lapse within 80 s (status: $(zstatus "z.get('override')"))"
 wait_etag "$ET" && ok "the lapse moved the document once more (the node's ETag)" || bad "the node's ETag did not move on the lapse"
 sleep 0.5; [ "$(get legit https://$ZONE/afterlapse)" = "200" ] && ok "served again after the lapse" || bad "still challenged after the lapse"
 
@@ -752,7 +759,7 @@ print(f"  p50 mode:none 200 {pn:.2f} ms   p50 challenge page 403 {pd:.2f} ms   o
 open('/tmp/lat-overhead.txt','w').write(f"{pd-pn:.2f} {nb+db}")
 PY
 read OVER OFF < /tmp/lat-overhead.txt
-[ "$OFF" = "0" ] && ok "every latency sample was what it should be (60 × 200, 60 × 403 pages)" || bad "$OFF latency samples had the wrong status"
+[ "$OFF" = "0" ] && ok "every latency sample was what it should be (60 × 200 from the origin, 60 × 403 from the rung)" || bad "$OFF latency samples had the wrong status"
 python3 -c "import sys; sys.exit(0 if float('$OVER') < 10 else 1)" && ok "the challenge page adds under 10 ms at p50 ($OVER ms)" || bad "challenge page overhead too high: $OVER ms"
 
 echo

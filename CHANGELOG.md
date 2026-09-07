@@ -347,9 +347,10 @@ security-relevant.
   flooder denied at once); the no-JS ticket; exempt paths and the JSON refusal for non-GET
   clients; the brain killed mid-challenge (cookies verify, new visitors clear, the node restarts
   from disk with its keys, the returned brain serves the same keys); the lever, audited, lapsing
-  on time; and the challenge page's cost (−0.07 ms at p50 against a mode:none 200, every sample
-  checked for its status). 108/108 on the third run — the first two caught six rig bugs and no
-  product bug; the results are recorded in edge-spec §8.
+  on time; and the challenge page's cost (within a tenth of a millisecond of a mode:none 200 at
+  p50, every sample checked for its status). 108/108; the first run caught three rig bugs and its
+  review ten more weaknesses of the rig, none in the product; the results are recorded in
+  edge-spec §8.
 
 ## [1.7.0] - 2026-09-02
 
