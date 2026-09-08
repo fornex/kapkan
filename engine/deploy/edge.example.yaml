@@ -103,3 +103,17 @@ quic:
   # you do not trust, e.g. one the probe flags with an advisory. Either way
   # the node's report says what the probe found.
   h3: auto
+  # nginx's quic_retry, node-wide (nginx decides it from the address's default
+  # server, before SNI names a zone): on (default) makes every new client
+  # address prove it can receive before the handshake costs this node anything
+  # — a Retry is smaller than the Initial it answers, so a spoofed source
+  # amplifies nothing. off saves that round trip. Changing it is a new tested
+  # generation on a node that renders QUIC for some zone (elsewhere it waits
+  # for the first h3 render).
+  # retry: true
+  # With omit_catch_all: true, kapkan renders a bare QUIC "anchor" server that
+  # carries the address's one `listen 443 quic reuseport` (HTTP/3 needs it to
+  # work across workers). Set true when your own default server already listens
+  # `443 quic` with socket options — nginx allows one such listen per
+  # address:port, so give that server reuseport and ssl_protocols TLSv1.3.
+  # omit_anchor: false

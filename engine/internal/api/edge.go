@@ -86,7 +86,7 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 		doc.Zones = append(doc.Zones, EdgeDocZone{
 			Name:          zn.Name,
 			Origins:       origins,
-			TLS:           EdgeDocTLS{MinVersion: zn.TLS.MinVersion, H3: zn.TLS.H3},
+			TLS:           EdgeDocTLS{MinVersion: zn.TLS.MinVersion, H3: zn.TLS.H3, H3Options: h3Options(zn.TLS)},
 			ACMEDirectory: zn.ACME.Directory,
 			ACMEFallback:  zn.ACME.Fallback,
 			Policy: EdgeDocPolicy{
@@ -103,6 +103,30 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 	// Names are unique (the zones file rejects duplicates), so this order is total.
 	sort.Slice(doc.Zones, func(i, j int) bool { return doc.Zones[i].Name < doc.Zones[j].Name })
 	return doc
+}
+
+// h3Options resolves the zones file's HTTP/3 options for the document: nil at
+// the defaults (announce, a day) and for a zone without h3 — so a zones file
+// written before E5 yields the bytes it always did — and only the departures
+// otherwise. The node fills the defaults back in.
+func h3Options(tls config.ZoneTLS) *edgedoc.H3Options {
+	if !tls.H3 {
+		return nil
+	}
+	o := tls.H3Options
+	advertise := o.Advertise == nil || *o.Advertise
+	if advertise && (o.AltSvcMaxAgeSeconds == 0 || o.AltSvcMaxAgeSeconds == edgedoc.DefaultAltSvcMaxAge) {
+		return nil
+	}
+	out := &edgedoc.H3Options{}
+	if !advertise {
+		f := false
+		out.Advertise = &f
+	}
+	if o.AltSvcMaxAgeSeconds != 0 && o.AltSvcMaxAgeSeconds != edgedoc.DefaultAltSvcMaxAge {
+		out.AltSvcMaxAgeSeconds = o.AltSvcMaxAgeSeconds
+	}
+	return out
 }
 
 // challengeOptions resolves the zones file's rung options for the document:
@@ -378,6 +402,10 @@ type EdgeReportZone struct {
 	Status3xx      uint64  `json:"status_3xx,omitempty"`
 	Status4xx      uint64  `json:"status_4xx,omitempty"`
 	Status5xx      uint64  `json:"status_5xx,omitempty"`
+	// H3Requests counts the window's requests that arrived over HTTP/3 (the
+	// log's proto field, E5); whether the zone speaks h3 on this node at all
+	// is terminator.h3.serving.
+	H3Requests uint64 `json:"h3_requests,omitempty"`
 	// ChallengeActive is set while a zone-wide challenge is in force on this
 	// node (the local trigger, E4.4; the brain's lever, E4.6).
 	ChallengeActive *EdgeReportChallenge `json:"challenge_active,omitempty"`
@@ -469,6 +497,23 @@ type EdgeReportH3 struct {
 	// the build's nginx core — advice, not a verdict: distributions backport
 	// fixes without moving the version. Empty when none applies.
 	Advisory string `json:"advisory,omitempty"`
+	// Serving lists the zones this node renders a QUIC listener for;
+	// Unsupported the zones that asked for HTTP/3 and are served over TCP here
+	// (the state above says why). Both from the LIVE generation (E5.3).
+	// ServingTruncated / UnsupportedTruncated count entries a report too big
+	// for the brain's body limit shed from the tail of each list (the lists
+	// grow with the h3 zone count; a huge fleet must not push the whole report
+	// past the limit).
+	Serving              []string `json:"serving,omitempty"`
+	Unsupported          []string `json:"unsupported,omitempty"`
+	ServingTruncated     int      `json:"serving_truncated,omitempty"`
+	UnsupportedTruncated int      `json:"unsupported_truncated,omitempty"`
+	// Listening says something on the box holds UDP :443 (read from
+	// /proc/net/udp) while the live generation has QUIC listeners — the local
+	// half of "is HTTP/3 reachable?"; whether the port is open from outside
+	// is the operator's firewall. Absent when nothing listens over QUIC or
+	// the box has no /proc.
+	Listening *bool `json:"listening,omitempty"`
 }
 
 // The states EdgeReportH3.State takes.

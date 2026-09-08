@@ -114,6 +114,7 @@ func fillReportZone(rz *api.EdgeReportZone, w rollup.WindowStats) {
 	rz.Challenged, rz.Cleared = w.Challenged, w.Cleared
 	rz.WouldDeny, rz.WouldChallenge = w.WouldDeny, w.WouldChallenge
 	rz.Status2xx, rz.Status3xx, rz.Status4xx, rz.Status5xx = w.Status2xx, w.Status3xx, w.Status4xx, w.Status5xx
+	rz.H3Requests = w.H3Requests
 	if len(w.Sources) > 0 {
 		rz.TopSources = make([]api.EdgeReportSource, 0, len(w.Sources))
 		for _, s := range w.Sources {

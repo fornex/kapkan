@@ -151,6 +151,10 @@ type QUIC struct {
 	// binary supports (edge.yaml quic.h3: off) — the switch for a build whose
 	// HTTP/3 the operator does not trust.
 	H3Off bool
+	// Retry is nginx's node-wide quic_retry (nil = on).
+	Retry *bool
+	// OmitAnchor drops kapkan's QUIC anchor under OmitCatchAll.
+	OmitAnchor bool
 }
 
 // Terminator is how the node drives nginx or Angie.
@@ -212,6 +216,9 @@ type Node struct {
 	// answer on :80 cannot pass an HTTP-01 validation.
 	renderedDoc  *edgedoc.Doc
 	renderedETag string
+	// renderedInfo is what the live render said about HTTP/3: the zones
+	// with a QUIC listener and the zones degraded to TCP here (E5.3).
+	renderedInfo render.Info
 	last         apply.Result
 	lastErr      string
 	retryAt      time.Time
@@ -221,7 +228,12 @@ type Node struct {
 	term       apply.Terminator
 	termProbed bool
 	termAlive  *bool
-	statusAddr string
+	// udpListening is the last /proc sample of UDP :443 (the QUIC listener's
+	// local half), taken by reportLoop OUTSIDE the file I/O so h3Locked — on
+	// the hot mutex, and behind the unauthenticated /healthz — only copies it.
+	// nil until the first sample, or off a box without /proc.
+	udpListening *bool
+	statusAddr   string
 	// windows is the last closed rollup window per zone (the aggregator's
 	// top-N view), for the self-report's zones section (E4.5).
 	windows map[string]rollup.WindowStats
@@ -230,6 +242,10 @@ type Node struct {
 type nodeFiles struct {
 	docPath, etagPath, confRoot, emptyRoot            string
 	decideSock, challengeSock, logSock, clearanceSock string
+	// quicHostKey is the terminator's QUIC host key (edge-spec §8, E5): 32
+	// random bytes the node creates once, so Retry and stateless-reset tokens
+	// survive a reload.
+	quicHostKey string
 }
 
 // New prepares a Node; nothing runs until Run.
@@ -280,6 +296,7 @@ func New(opt Options) (*Node, error) {
 		challengeSock: filepath.Join(opt.SocketsDir, "edge-challenge.sock"),
 		logSock:       filepath.Join(opt.SocketsDir, "edge-log.sock"),
 		clearanceSock: filepath.Join(opt.SocketsDir, "edge-clearance.sock"),
+		quicHostKey:   filepath.Join(opt.StateDir, "tls", "quic_host.key"),
 	}
 	for _, d := range []string{opt.StateDir, opt.SocketsDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -408,7 +425,14 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	// 2. The terminator: what it is, and whether a predecessor left an
-	// untested generation live.
+	// untested generation live. The QUIC host key first: a render with h3
+	// names the file and `nginx -t` reads it.
+	if err := n.ensureQUICHostKey(); err != nil {
+		// Through finish() like every other startup exit, so the components
+		// spawned above are cancelled and waited on and their sockets unlinked.
+		_ = finish()
+		return fmt.Errorf("edge: quic host key: %w", err)
+	}
 	if term, err := n.prober(ctx, n.opt.Terminator.Binary); err == nil {
 		n.mu.Lock()
 		n.term, n.termProbed = term, true
@@ -566,6 +590,9 @@ func (n *Node) renderAndApply(ctx context.Context) (reloaded bool, err error) {
 	defer n.renderMu.Unlock()
 	n.mu.Lock()
 	doc, etag := n.doc, n.acceptedETag
+	// QUIC is rendered only on a ready node: module present, quic.h3 not off.
+	// A failed probe is unknown and renders none — never a guess (E5.1).
+	h3Ready := H3State(n.term, n.termProbed, n.opt.QUIC.H3Off) == api.H3StateReady
 	n.mu.Unlock()
 	if doc == nil {
 		return false, nil
@@ -578,10 +605,11 @@ func (n *Node) renderAndApply(ctx context.Context) (reloaded bool, err error) {
 			certs[c.Zone] = render.Cert{Fullchain: c.Fullchain, Key: c.Key, Serial: c.Serial}
 		}
 	}
-	files, err := render.Render(render.Inputs{Doc: doc, Certs: certs, Node: render.Node{
+	files, info, err := render.RenderDetailed(render.Inputs{Doc: doc, Certs: certs, Node: render.Node{
 		DecideSocket: n.files.decideSock, ChallengeSocket: n.files.challengeSock, LogSocket: n.files.logSock,
 		ClearanceSocket: n.files.clearanceSock,
 		EmptyRoot:       n.files.emptyRoot, DisableIPv6: n.opt.DisableIPv6, OmitCatchAll: n.opt.OmitCatchAll,
+		H3Supported: h3Ready, QUICRetry: n.opt.QUIC.Retry, QUICHostKey: n.files.quicHostKey, OmitQUICAnchor: n.opt.QUIC.OmitAnchor,
 	}})
 	if err != nil {
 		err = fmt.Errorf("render: %w", err)
@@ -599,10 +627,18 @@ func (n *Node) renderAndApply(ctx context.Context) (reloaded bool, err error) {
 	}
 	n.mu.Lock()
 	n.renderedDoc, n.renderedETag = doc, etag
+	wasDegraded := strings.Join(n.renderedInfo.Degraded, ",")
+	n.renderedInfo = info
 	n.retryAt, n.retryBackoff = time.Time{}, 0
 	n.mu.Unlock()
 	if res.Changed {
-		n.log.Info("configuration installed", "generation", res.Generation, "reloaded", res.Reloaded, "zones", len(doc.Zones), "etag", etag)
+		n.log.Info("configuration installed", "generation", res.Generation, "reloaded", res.Reloaded, "zones", len(doc.Zones), "h3_zones", len(info.H3Zones), "etag", etag)
+	}
+	// Once per change of the set, not per render: a node without the module
+	// serving a fleet of h3 zones must not warn on every renewal.
+	if now := strings.Join(info.Degraded, ","); now != "" && now != wasDegraded {
+		n.log.Warn("zones asking for HTTP/3 are served over TCP on this node (no HTTP/3 module, or quic.h3 off); the report names them",
+			"zones", info.Degraded, "h3", H3State(n.term, n.termProbed, n.opt.QUIC.H3Off))
 	}
 	return res.Reloaded, nil
 }
@@ -767,8 +803,9 @@ func (n *Node) report() api.EdgeReport {
 // tell nothing (allowed, marked, cleared) go from every zone, uncounted
 // (they are not in the set); then every zone's list is halved, the head kept
 // (the would-be sources rank first in it), the would-be sources among the
-// cut counted; then certificate entries from the (zone-sorted) tail; then
-// zones from their tail — counted too, so the brain knows what it is
+// cut counted; then the terminator's h3 zone-name lists (bare names, the
+// least valuable bytes); then certificate entries from the (zone-sorted) tail;
+// then zones from their tail — all counted too, so the brain knows what it is
 // missing and can say "short", not "nobody".
 func trimReport(rep api.EdgeReport) api.EdgeReport {
 	fits := func() bool {
@@ -824,6 +861,33 @@ func trimReport(rep api.EdgeReport) api.EdgeReport {
 			rep.Zones[i].TopSources = nil
 		}
 	}
+	// The terminator's h3 name lists grow with the h3 zone count and are the
+	// least valuable bytes per entry (bare zone names), so they go before the
+	// certificates and the zones section. The Terminator pointer and its H3 are
+	// copied first: the caller's report must stay whole.
+	if rep.Terminator != nil && rep.Terminator.H3 != nil && (len(rep.Terminator.H3.Serving) > 0 || len(rep.Terminator.H3.Unsupported) > 0) {
+		term := *rep.Terminator
+		h3 := *term.H3
+		term.H3 = &h3
+		rep.Terminator = &term
+		for (len(h3.Serving) > 0 || len(h3.Unsupported) > 0) && !fits() {
+			if n := len(h3.Serving); n > len(h3.Unsupported) {
+				drop := max(n/10, 1)
+				h3.Serving = h3.Serving[:n-drop]
+				h3.ServingTruncated += drop
+			} else {
+				drop := max(len(h3.Unsupported)/10, 1)
+				h3.Unsupported = h3.Unsupported[:len(h3.Unsupported)-drop]
+				h3.UnsupportedTruncated += drop
+			}
+		}
+		if len(h3.Serving) == 0 {
+			h3.Serving = nil
+		}
+		if len(h3.Unsupported) == 0 {
+			h3.Unsupported = nil
+		}
+	}
 	for len(rep.Certs) > 0 && !fits() {
 		drop := len(rep.Certs) / 10
 		if drop == 0 {
@@ -856,8 +920,12 @@ func (n *Node) reportLoop(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			alive := n.terminatorAlive()
+			// Sampled here, outside n.mu: h3Locked (on the hot mutex, and
+			// behind /healthz) only copies the result.
+			listening := udpListeningFn(443)
 			n.mu.Lock()
 			n.termAlive = alive
+			n.udpListening = listening
 			n.mu.Unlock()
 			n.retryIfDue(ctx)
 			n.postReport(ctx)
@@ -870,6 +938,9 @@ func (n *Node) postReport(ctx context.Context) {
 	rep := trimReport(raw)
 	if rep.CertsTruncated > 0 {
 		n.log.Warn("self-report certificate list truncated to fit the brain's body limit", "dropped", rep.CertsTruncated)
+	}
+	if rep.Terminator != nil && rep.Terminator.H3 != nil && (rep.Terminator.H3.ServingTruncated > 0 || rep.Terminator.H3.UnsupportedTruncated > 0) {
+		n.log.Warn("self-report HTTP/3 zone lists truncated to fit the brain's body limit", "serving_dropped", rep.Terminator.H3.ServingTruncated, "unsupported_dropped", rep.Terminator.H3.UnsupportedTruncated)
 	}
 	// Two reasons a would-be set is short, told apart: what the body limit
 	// made this report shed is a warning; what the aggregator's per-window
@@ -961,6 +1032,14 @@ func (n *Node) h3Locked() *api.EdgeReportH3 {
 	if n.termProbed {
 		h.Module, h.TLSLibrary, h.EarlyDataCapable = n.term.HTTP3Module, n.term.TLSLibrary, n.term.EarlyDataCapable
 		h.Advisory = n.term.Advisory()
+	}
+	h.Serving = append([]string(nil), n.renderedInfo.H3Zones...)
+	h.Unsupported = append([]string(nil), n.renderedInfo.Degraded...)
+	if len(h.Serving) > 0 {
+		// The local half of "is HTTP/3 reachable?": the last sample reportLoop
+		// took outside the lock (nil until the first, so a reload still binding
+		// its sockets shows nothing until the next report).
+		h.Listening = n.udpListening
 	}
 	return h
 }
