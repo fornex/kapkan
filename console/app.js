@@ -40,7 +40,9 @@
     /* edge zones status (E4.5) — the same on-demand + freshness-guard shape:
        it merges the nodes' last ten-second windows, so a 10s refresh is the
        data's own pace */
-    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] },
+    /* inv is the edge-node inventory that rides along with the zone status:
+       the nodes' own reports, read for per-node HTTP/3 detail (E5.5) */
+    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [], inv: [] },
     last: { rung: -1 }
   };
 
@@ -335,16 +337,22 @@
       });
     },
     /* edge zones status — the nodes' last windows merged; 10s freshness, the
-       window's own length */
+       window's own length. The inventory is fetched with it because only a
+       node's own report says WHY it serves a zone over TCP (E5.5); the status
+       alone decides whether the view renders, so an inventory that fails or is
+       refused leaves the table intact and only the tooltip poorer. Both
+       fetches resolve — neither rejects — so one is never lost to the other. */
     loadEdge: function () {
       var e = state.edge;
       if (e.loading) return;
       if (e.fetchedAt && Date.now() - e.fetchedAt < 10000) return;
       e.loading = true;
-      API.getEdgeZones().then(function (r) {
+      Promise.all([API.getEdgeZones(), API.getEdgeNodes()]).then(function (res) {
+        var r = res[0];
         e.loading = false; e.fetchedAt = Date.now();
         e.ok = r.ok; e.forbidden = !!r.forbidden;
         e.nodesAlive = r.nodesAlive; e.nodesReporting = r.nodesReporting; e.zonesTruncated = r.zonesTruncated || 0; e.zones = r.zones;
+        e.inv = (res[1] && res[1].nodes) || [];
         if (state.view === "edge") renderView();
       });
     },

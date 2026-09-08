@@ -133,13 +133,23 @@
       return this._rtf.format(Math.round(diff / 86400), "day");
     },
 
-    /* pluralization: key resolves to a {one,few,many,other} object */
-    plural: function (n, key) {
+    /* pluralization: key resolves to a {one,few,many,other} object. "#" is the
+       count n; any further {vars} are interpolated as in t(), so a form that
+       carries a SECOND number ("#/{n} ready") keeps its whole phrase — word
+       order included — in the translator's hands rather than in the caller's
+       string concatenation. */
+    plural: function (n, key, vars) {
       var c = this._cat();
       var forms = (c.plurals && c.plurals[key]) || (this._en().plurals[key]);
       var cat = this._pr.select(n);
       var tmpl = forms[cat] || forms.other;
-      return tmpl.replace("#", this._nf0.format(n));
+      var s = tmpl.replace("#", this._nf0.format(n));
+      if (vars) {
+        s = s.replace(/\{(\w+)\}/g, function (_, k) {
+          return (vars[k] != null) ? vars[k] : "{" + k + "}";
+        });
+      }
+      return s;
     }
   };
 
