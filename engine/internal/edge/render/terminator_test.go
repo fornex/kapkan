@@ -153,6 +153,8 @@ func TestRealTerminator(t *testing.T) {
 			t.Errorf("quiet zone advertised %q", got)
 		}
 	})
+	// The HTTP/3 clients against the render (E5.4): terminator_h3_test.go.
+	h.h3Arms(t)
 
 	t.Run("serve/decide-open/no-decider", func(t *testing.T) {
 		s := h.serve(t, "decide-open", "no-decider")

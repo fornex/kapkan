@@ -374,8 +374,15 @@ jobs:
         with:
           go-version-file: engine/go.mod
           cache: true
-          cache-dependency-path: engine/go.sum
+          # The h3 arms cross-compile hack/h3probe (its own module) on first
+          # use; cache its downloads beside the engine's.
+          cache-dependency-path: |
+            engine/go.sum
+            engine/hack/h3probe/go.sum
 
+      # The HTTP/3 arms build the hack/h3client curl image and the linux
+      # h3probe binary themselves, once per run, and fail rather than skip
+      # when either cannot be had — see internal/edge/render/terminator_h3_test.go.
       - name: Render every fixture and run it on ${{ matrix.image }}
         run: >
           KAPKAN_EDGE_TERMINATOR=require
