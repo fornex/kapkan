@@ -91,6 +91,40 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   it to the engine, not an operator). This rig runs with storage disabled (no
   ClickHouse), so it asserts the reader's block log rather than the audit row.
 
+- **`edge-e5.sh`** — the edge track's E5 acceptance ("QUIC/HTTP-3 in earnest",
+  [`engine/docs/edge-spec.md`](../../docs/edge-spec.md) §8) with a **real HTTP/3**:
+  the E4 rig's topology on **Debian 13** (stock nginx 1.26.3 with the HTTP/3
+  module, curl 8.14.1 with HTTP3 — no third-party repository), the brain inside
+  the edge netns with its **XDP data plane on the edge's interface** in front of
+  nginx's UDP/443, and a second node whose `nginx -V` is wrapped to hide the
+  module. Arms A–M of the E5 plan's acceptance table (G, shared ticket keys, is
+  absent: E5.6 was cut): per-zone h3 as the slow path and nothing else reloading;
+  decisions and the rung over h3; **Retry** seen by `h3probe` and by tcpdump,
+  tokens outliving a reload because the host key does; the Initial-rate cap
+  shedding a flood in-kernel while a real handshake completes; 0-RTT provably
+  off; the **kill lever** (drop UDP/443) with clients back on TCP within a
+  second, previewed in dry-run; fail-static across the brain's death and a node
+  restart; honest degrade on the wrapped node beside a serving one; h3 vs h2
+  p50; MTU 1200 breaking h3 cleanly; the `advertise: false` canary. Needs
+  `kapkan`, Pebble and `h3probe` (from `engine/hack/h3probe`, its own module)
+  cross-compiled for the container:
+
+  ```sh
+  mkdir -p /tmp/lab
+  (cd engine && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/kapkan ./cmd/kapkan)
+  (cd engine/hack/h3probe && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/h3probe .)
+  git clone --depth 1 https://github.com/letsencrypt/pebble /tmp/pebble-src \
+    && (cd /tmp/pebble-src && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/pebble ./cmd/pebble)
+  docker run --privileged --rm -v /tmp/lab:/lab -v "$PWD:/w" -w /w debian:13-slim \
+    sh -c 'apt-get update -qq && apt-get install -y -qq \
+             iproute2 nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump >/dev/null \
+           && KAPKAN=/lab/kapkan PEBBLE=/lab/pebble H3PROBE=/lab/h3probe bash engine/scripts/labnet/edge-e5.sh'
+  ```
+
+  The run's logs, rendered configurations and the Retry pcap land in
+  `/tmp/lab/logs/`; the recorded h3-vs-h2 figures are the source of the §8
+  acceptance paragraph.
+
 ## VRF
 
 The return-path recipe is verified with **policy routing** (route-leaking:

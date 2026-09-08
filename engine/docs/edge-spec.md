@@ -531,6 +531,51 @@ headline and the long pole.
   the build's nginx core is reported as ADVICE, never a refusal — distributions backport fixes
   without moving the version, so only the operator can settle it. The probe is not repeated: an
   upgraded binary is reported after a restart.
+
+  *Passed 2026-09-08 (E5.8, `engine/scripts/labnet/edge-e5.sh`, 116/116 on stock Debian 13 nginx
+  1.26.3 with a Pebble-issued certificate and the brain's XDP data plane on the edge's own interface;
+  the first four runs caught nine rig bugs — none in the product — and taught the rig two data-plane
+  facts it now states):* a zone's `tls.h3: true` rendered ONE generation — `listen 443 quic
+  reuseport default_server` on the catch-all, `quic_retry on` and the host key once at the http
+  level, `listen 443 quic` in the zone — and `ss` showed UDP/443 held; stock curl reached the zone
+  over **HTTP/3** (200, `http_version 3`) with the origin echoing `X-Kapkan-Zone` and the rollup
+  counting it under `protocol="h3"`; the TCP answer announced `Alt-Svc: h3=":443"; ma=86400` and a
+  client with the alt-svc cache upgraded on its second request while the zone that did not ask
+  announced nothing and refused QUIC; a rate change on the h3 zone moved the accepted ETag and
+  **installed nothing**; `h3: false` was exactly one install after which the announcement was gone
+  and QUIC refused, `h3: true` one more; the fleet status named `serving: [edge-1]` and counted
+  `h3.requests`. Over `--http3-only` the decisions were the TCP ones: 429 with `Retry-After: 1`
+  above the ceiling, the clearance page (403) under `manual`, a browser's cookie honoured over h3
+  with `cleared` at the origin, a watch-only zone marking `would-deny:rate` — and none of it moved a
+  generation. **Retry** was on for every h3 zone at the http level and in no zone file; `h3probe`
+  reported `retry_seen: true` and tcpdump showed the server's first datagram as a long-header Retry
+  (109 bytes against the client's 1 280-byte Initial); a forced reload completed a fresh h3
+  handshake with the 32-byte `0600` host key unchanged, and `quic.retry: false` was one restart
+  generation with `quic_retry off` rendered and no Retry seen. The **Initial-rate cap** (`quic_initial`
+  ratelimit, 3 pps) shed 308 of a 300-Initial flood in-kernel — the edge's UDP `InDatagrams` grew by
+  20 during it, the legitimate h3 handshake alone — while that handshake completed over HTTP/3
+  DURING the flood, TCP was untouched and nginx's error log stayed silent; the same flood under the
+  brain's `dry_run: true` (re-attached, `dry_run ON` in `dataplane status`) was counted as
+  `dryrun_would_drop +297` beside the recorded verdict and reached the stack in full (300
+  datagrams). **0-RTT** is off and provably: no `ssl_early_data` rendered, `ssl_session_tickets off`
+  in every zone so no resumption ticket is ever issued, early data never accepted, and the node
+  reporting `early_data_capable: false` for 1.26.3 (OpenSSL 3.5 but nginx below 1.29.1). The **kill
+  lever** (`kill_quic`, drop UDP/443) put `--http3-only` into failure within the client's one-second
+  wait, TCP served throughout, `curl --http3` with a warm Alt-Svc cache raced and finished over h2,
+  `drop_static` grew and the brain logged the reload; under `dry_run` the same rule was previewed
+  (`dryrun_would_drop` counted, h3 served) and removing it brought h3 back. With the brain dead h3
+  was served; the node restarted from disk onto the same generation with the same host key; the
+  returned brain answered the poll without an install. A second node whose `nginx -V` hid the
+  module passed `nginx -t` on a render with **no QUIC at all**, said why in its zone file, served
+  TCP and refused h3, and the fleet status named it under `unsupported` beside `serving: [edge-1]`.
+  **Cost:** h3 p50 was +2.4 ms over h2 to the `mode: none` zone (2.07 → 4.44 ms) and +2.4 ms to the
+  decide zone (2.11 → 4.46 ms; 240 samples, every one a 200) — the QUIC handshake's price on a fresh
+  connection, the same for a zone that decides and one that does not, so not the decision's.
+  At MTU 1200 on the client's link `--http3-only` failed in milliseconds while TCP served, and h3
+  returned with the MTU. The canary (`advertise: false`) was one install with no `Alt-Svc`, an
+  explicit h3 client served and the browser path (two requests, alt-svc cache) staying on h2;
+  `advertise: true` with `ma: 300` one more install and `ma=300` on the wire. Shared ticket keys
+  (arm G) were not run: E5.6 was cut (§3).
 - **E6 — Fleet + product tail**: multi-tenant zones in console/API, per-node zone scoping via
   hostgroup-scoped agent tokens, analytics tables, deployment guide for operator-built
   anycast. **Candidate needing its own round:** self-steering — an edge node announcing zone
