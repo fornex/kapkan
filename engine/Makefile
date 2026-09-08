@@ -183,6 +183,9 @@ blockrate-fixtures:
 # cross a Docker Desktop bind mount) and are skipped on macOS. CI runs the
 # three supported images; pass EDGE_TERMINATOR_IMAGE=nginx:1.22 for the floor
 # or docker.angie.software/angie:latest for Angie.
+# The HTTP/3 arms (E5.4) build the hack/h3client curl image and cross-compile
+# hack/h3probe for the container's arch on first use, so this needs Docker and
+# a Go toolchain and nothing else pre-built.
 EDGE_TERMINATOR_IMAGE ?= nginx:stable
 edge-terminator-test:
 	KAPKAN_EDGE_TERMINATOR=require KAPKAN_EDGE_TERMINATOR_IMAGE=$(EDGE_TERMINATOR_IMAGE) \
