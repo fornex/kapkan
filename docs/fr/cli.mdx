@@ -352,13 +352,17 @@ acme:
 status_listen: 127.0.0.1:9102          # /healthz + /metrics; unauthenticated, keep it private
 omit_catch_all: false                  # true when nginx.conf has its own default_server
 disable_ipv6: false                    # true on hosts without an IPv6 stack
+quic:
+  h3: auto                             # auto (default) | off — may this box render HTTP/3 at all
+  # retry: true                        # nginx's quic_retry, node-wide (default on)
+  # omit_anchor: false                 # with omit_catch_all: your own server carries `listen 443 quic reuseport`
 ```
 
 | Clé | Signification |
 | --- | --- |
 | `dry_run` | Absent ou `true` : les décisions sont comptées et marquées (`X-Kapkan-Mark: would-deny:<reason>` atteint l'origine), aucune n'est appliquée. Mettez `false` pour refuser. |
 | `controller.url` / `token_env` / `name` | L'URL de base de l'API du cerveau (sans chemin, sans identifiants dans l'URL), la variable d'environnement contenant le token **agent**, et le nom de ce nœud — il doit être égal à une entrée `edge.nodes[]` sur le cerveau, sinon chaque interrogation renvoie un `404` retentissant. |
-| `state_dir` / `sockets_dir` | Les répertoires propres au rôle (par défaut `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — jamais les `/var/lib/kapkan` et `/run/kapkan` du cerveau, dont systemd changerait le propriétaire et qu'il supprimerait sous ses pieds sur un hôte partagé. Absolus, sans caractères que nginx pourrait mal interpréter. |
+| `state_dir` / `sockets_dir` | Les répertoires propres au rôle (par défaut `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — jamais les `/var/lib/kapkan` et `/run/kapkan` du cerveau, dont systemd changerait le propriétaire et qu'il supprimerait sous ses pieds sur un hôte partagé. Absolus, sans caractères que nginx pourrait mal interpréter. `state_dir/tls/quic_host.key` est la clé d'hôte QUIC du terminateur (32 octets aléatoires, `0600`), forgée une fois au premier démarrage du nœud et conservée d'un redémarrage à l'autre pour que les jetons de Retry et de stateless reset survivent à un rechargement ; supprimez-la pour en forger une nouvelle. |
 | `socket_group` | Le groupe des workers du terminateur. Les sockets de décision, de journal et de page de laissez-passer sont en `0660` pour lui ; le socket de challenge ACME est en `0666` (il répond à des tokens publics). Vide, les trois sockets restreints au groupe restent accessibles au seul propriétaire. |
 | `terminator.binary` / `main_conf` | Ce qu'il faut exécuter pour `-t` et les rechargements, et la configuration principale à passer en `-c`. Ce fichier doit contenir `include /var/lib/kapkan-edge/conf/live/*.conf;` une seule fois, à l'intérieur de `http {}`. |
 | `terminator.reload` | `exec` exécute `<binary> -s reload` (il doit pouvoir signaler le master de nginx — l'unité tourne en root) ; `signal` envoie `HUP` au pid de `pid_file` ; `command` exécute `terminator.command`, par exemple `[systemctl, reload, nginx]`. |
@@ -368,6 +372,9 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `acme.disabled` | N'émettre aucun certificat : les zones restent sur `:80` en répondant `503` (un laboratoire qui exerce tout sauf l'émission). Les certificats fournis par l'opérateur ne sont pas encore une fonctionnalité. |
 | `status_listen` | Sert `/healthz` et `/metrics` lorsqu'il est défini. Non authentifié — loopback ou une adresse privée. |
 | `omit_catch_all` / `disable_ipv6` | Supprimer le `default_server` fourre-tout de Kapkan (votre `nginx.conf` en déclare un) / supprimer les écouteurs `[::]` (pas de pile IPv6). |
+| `quic.h3` | `auto` (par défaut) ou `off`. Le nœud sonde le binaire au démarrage (`nginx -V`) : avec `auto`, HTTP/3 est généré pour les zones qui le demandent lorsque le build porte `--with-http_v3_module` ; `off` ne le génère jamais sur ce nœud — l'interrupteur pour un build dont vous ne faites pas confiance à l'HTTP/3, par exemple un build que la sonde signale avec un avis de sécurité CVE. Dans les deux cas, le rapport du nœud et `/healthz` portent un `h3.state` : `ready`, `no_module`, `node_off` ou `unknown` (la sonde a échoué ; le nœud ne génère alors aucun QUIC). Sur un nœud qui n'est pas `ready`, les zones demandant HTTP/3 sont servies en TCP. |
+| `quic.retry` | Le `quic_retry` de nginx, à l'échelle du nœud — nginx le décide depuis le serveur par défaut de l'adresse avant que le SNI ne nomme une zone : il ne peut donc pas être réglé par zone. `true` (par défaut) : chaque nouvelle adresse cliente prouve qu'elle peut recevoir avant que le handshake ne coûte quoi que ce soit au nœud (un Retry est plus petit que l'Initial auquel il répond, une source usurpée n'amplifie donc rien). `false` économise cet aller-retour. Le changer, c'est une nouvelle génération testée sur un nœud qui génère du QUIC pour au moins une zone ; sur un nœud sans zone en h3, la valeur attend simplement la première génération avec h3. |
+| `quic.omit_anchor` | Uniquement avec `omit_catch_all: true`. Le fourre-tout de Kapkan porte normalement l'unique `listen 443 quic reuseport` de l'adresse ; sans le fourre-tout, c'est un serveur *ancre* QUIC nu qui le porte. Mettez `true` quand votre propre serveur par défaut écoute déjà en `443 quic reuseport` — deux `reuseport` sur une même adresse font échouer `nginx -t` et la génération est refusée (la précédente continue de servir). |
 
 <Callout type="warning" title="Un nœud edge démarre en dry-run par défaut">
 `dry_run` vaut **true** par défaut pour un rôle distant — le nœud compte et marque ce qu'il
@@ -380,7 +387,7 @@ cerveau le compterait comme mort. Utilisez `https` en dehors d'un laboratoire �
 | Option | Défaut | Description |
 | --- | --- | --- |
 | `-config <path>` | `/etc/kapkan/edge.yaml` | La configuration du nœud edge. |
-| `-check` | désactivé | Valide le fichier et ce qu'il nomme sur cette machine — le groupe du socket doit exister et toute clé EAB être bien formée (problèmes) ; un token, un binaire de terminateur ou un `main_conf` absent n'est qu'un avertissement — puis se termine. |
+| `-check` | désactivé | Valide le fichier et ce qu'il nomme sur cette machine — le groupe du socket doit exister et toute clé EAB être bien formée (problèmes) ; un token, un binaire de terminateur ou un `main_conf` absent n'est qu'un avertissement — et, quand le binaire est dans le `PATH`, affiche ce que dit son `-V` : type, version, cœur nginx, bibliothèque TLS, s'il a le module HTTP/3 et pourrait faire du 0-RTT, la disponibilité HTTP/3 du nœud et le `quic.retry` effectif (un avis de sécurité CVE pour le cœur du build est un avertissement, sauf si `quic.h3: off` a déjà désactivé HTTP/3 ici) — puis se termine. |
 | `-log-format <fmt>` | `json` | `json` ou `text`. |
 | `-log-level <lvl>` | `info` | `debug`, `info`, `warn` ou `error`. |
 

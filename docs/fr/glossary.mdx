@@ -71,6 +71,17 @@ Ces termes ne comptent que si vous exécutez le plan de données optionnel de Ka
 | **bpffs** | Un petit système de fichiers, normalement monté sur `/sys/fs/bpf`, où les programmes et les maps peuvent être « épinglés » afin de survivre au processus qui les a créés. |
 | **BTF** | BPF Type Format — les informations de type que le noyau publie sur lui-même, afin qu'un programme compilé ailleurs puisse être chargé de façon portable d'une version de noyau à l'autre. |
 
+## TLS et HTTP/3
+
+| Terme | Signification |
+| --- | --- |
+| **QUIC** | Le transport sous HTTP/3 : chiffré, multiplexé, sur UDP (le port 443 pour le web). Son handshake est à l'intérieur de TLS 1.3 dès le premier paquet. |
+| **HTTP/3 (h3)** | HTTP sur QUIC. Une zone edge avec `tls.h3: true` est servie ainsi à côté de TLS sur TCP, sur les nœuds dont le nginx ou l'Angie porte le module HTTP/3. |
+| **QUIC Initial** | Le premier paquet d'un handshake QUIC — au moins 1200 octets, et la matière dont est fait un flood de handshakes QUIC ; la correspondance `quic_initial` du plan de données le compte par source. |
+| **Retry (QUIC)** | La réponse du serveur à un Initial venant d'une adresse qu'il n'a pas encore vue : un petit jeton que le client doit renvoyer, prouvant qu'il peut recevoir avant que le serveur ne dépense quoi que ce soit pour le handshake. Sur un nœud edge, il est toujours actif. |
+| **Alt-Svc** | L'en-tête de réponse, sur une réponse en TLS sur TCP, qui indique à un navigateur que l'origine est aussi joignable en HTTP/3, et pendant combien de temps s'en souvenir (`ma`). Le `tls.h3_options.advertise: false` d'une zone edge génère l'écouteur QUIC sans lui — le canari. |
+| **0-RTT** | Les données précoces de QUIC — une connexion reprise qui envoie une requête dans son premier paquet, avant la fin du handshake. Rejouables : un nœud edge les garde désactivées. |
+
 ## Concepts Kapkan
 
 | Terme | Signification |

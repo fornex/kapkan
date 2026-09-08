@@ -614,8 +614,11 @@ que el nodo trata como un fallo y ante el que espera antes de reintentar (1 s, d
 ```
 
 `acme_directory`, `acme_fallback`, `extra_directives_file` y `tls.h3` se omiten cuando no están
-definidos; un `acme_directory` ausente significa que el nodo pide a su propia CA por defecto (Let's
-Encrypt salvo que su `edge.yaml` diga otra cosa). La política lleva `dry_run` y las
+definidos; `tls.h3_options {advertise, alt_svc_max_age_seconds}` aparece solo allí donde una zona se
+aparta de los valores predeterminados (`advertise: false`, o un `ma` no predeterminado) — ausente
+significa anunciar y `86400` —, de modo que un archivo de zonas que solo activa `h3` deja por lo
+demás los bytes y el ETag del documento sin cambios. Un `acme_directory` ausente significa que el
+nodo pide a su propia CA por defecto (Let's Encrypt salvo que su `edge.yaml` diga otra cosa). La política lleva `dry_run` y las
 `challenge_options` que una zona fija; `clearance_keys` (no se muestran) son las claves de firma por
 zona del peldaño (la del día UTC actual y la del anterior, cada una honrada durante 48 h — el
 documento lleva secretos, y un nodo lo cachea en `0600`); una zona sobre la que un operador ha
@@ -628,12 +631,22 @@ una vez más cuando caduca.
 
 El autoinforme orientativo de un nodo — versión, dry-run del lado del nodo, el ETag del documento
 que ha **renderizado** (para que un operador pueda ver un nodo rezagado o que se niega), el tipo, la
-versión y la vitalidad del terminador, la generación activa y su resultado de `nginx -t`, y los
+versión y la vitalidad del terminador, su disponibilidad de HTTP/3 a partir de la sonda `nginx -V`
+del nodo (`terminator.h3 {state, module, tls_library, early_data_capable, advisory, serving,
+unsupported, listening}` — `state` es `ready`, `no_module`, `node_off` o `unknown`; `advisory`
+nombra un aviso de seguridad de QUIC publicado en cuyo rango cae el núcleo nginx de la build, como
+consejo: las distribuciones retroportan las correcciones sin mover la versión; `serving` enumera
+las zonas para las que la generación activa escucha por QUIC, y `unsupported` las zonas que lo
+pidieron y aquí se sirven por TCP; `listening` dice si algo en la máquina mantiene UDP 443 mientras
+hay listeners QUIC renderizados — la mitad local de «¿es alcanzable HTTP/3?», siendo el cortafuegos
+la otra, y ausente mientras aquí no se sirva ninguna zona por QUIC, así como en una máquina sin
+`/proc/net/udp`), la generación activa y su resultado de `nginx -t`, y los
 certificados que posee (solo metadatos públicos, nunca una clave; una lista larga se recorta al
 límite de 64 KiB del cuerpo con un recuento `certs_truncated`), y una **sección de zonas**: para
 cada zona que decide y que la generación activa sirve, la última ventana cerrada de diez segundos
 (`at`, `window_seconds`, `rps`, `requests`, `decided`, `denied`, `challenged`, `cleared`,
-`would_deny`, `would_challenge`, `status_2xx..5xx`), el modo de desafío de la zona tal como el nodo
+`would_deny`, `would_challenge`, `status_2xx..5xx`, `h3_requests` — las peticiones que llegaron por
+HTTP/3), el modo de desafío de la zona tal como el nodo
 lo aplica, si la zona está en solo observación en este nodo (`dry_run`) y si su peldaño ahí solo
 previsualiza (`rung_dry_run`: por el `dry_run` del nodo, el de la zona o el
 `challenge_options.dry_run` propio del peldaño), un desafío de zona completa en vigor
@@ -663,7 +676,16 @@ con la precisión de una ventana), el modo de desafío de la zona, los nodos en 
 observación (`watch_only`) y aquellos en los que su peldaño solo previsualiza (`rung_watch_only` —
 una zona `manual` o `auto` desafía de verdad en los nodos que no aparecen ahí), los nodos con un
 desafío de zona completa en vigor y si en cada uno actúa o previsualiza, la palanca en vigor
-(`override`), y el **conjunto de candidatos**: la unión de las fuentes para las que los nodos
+(`override`), el HTTP/3 de la zona en toda la flota (`h3 {enabled, serving, unsupported, requests}`
+— `enabled` es el `tls.h3` del archivo de zonas tal como lo tiene el cerebro, `serving` los nodos
+vivos cuya generación activa escucha por QUIC para la zona, `unsupported` aquellos donde lo pidió y
+se sirve por TCP, y `requests` la suma de las peticiones HTTP/3 de la última ventana de los nodos;
+ausente para una zona de la que nadie habla ni pide h3. Este estado se construye desde la sección
+de zonas de los informes, que enumera las zonas **que deciden**, así que el HTTP/3 de una zona con
+`mode: none` solo aparece en el `terminator.h3` de los nodos bajo
+[`GET /api/v1/edge/nodes`](#get-apiv1edgenodes); `enabled` aparece para cualquier zona a la que el
+archivo active h3 y que esté presente aquí — reportada por un nodo, o con una palanca puesta), y el
+**conjunto de candidatos**: la unión de las fuentes para las que los nodos
 previsualizaron un desafío o una denegación, conservando el estado más fuerte, las más activas
 primero, acotada a 20 por nodo que reporta (`would_be_truncated` cuenta el resto). `partial` indica
 que no todas las fuentes candidatas de un nodo cupieron — por su límite por ventana, o por un

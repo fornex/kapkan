@@ -354,13 +354,17 @@ acme:
 status_listen: 127.0.0.1:9102          # /healthz + /metrics; unauthenticated, keep it private
 omit_catch_all: false                  # true when nginx.conf has its own default_server
 disable_ipv6: false                    # true on hosts without an IPv6 stack
+quic:
+  h3: auto                             # auto (default) | off — may this box render HTTP/3 at all
+  # retry: true                        # nginx's quic_retry, node-wide (default on)
+  # omit_anchor: false                 # with omit_catch_all: your own server carries `listen 443 quic reuseport`
 ```
 
 | Schlüssel | Bedeutung |
 | --- | --- |
 | `dry_run` | Fehlt oder `true`: Entscheidungen werden gezählt und markiert (`X-Kapkan-Mark: would-deny:<reason>` erreicht den Origin), keine wird durchgesetzt. Setzen Sie `false`, um abzulehnen. |
 | `controller.url` / `token_env` / `name` | Die API-Basis des Gehirns (kein Pfad, keine Anmeldedaten in der URL), die Umgebungsvariable mit dem **agent**-Token und der Name dieses Knotens — er muss einem `edge.nodes[]`-Eintrag auf dem Gehirn entsprechen, sonst ist jeder Poll ein lautstarker `404`. |
-| `state_dir` / `sockets_dir` | Die eigenen Verzeichnisse der Rolle (Standard `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — niemals `/var/lib/kapkan` und `/run/kapkan` des Gehirns, die systemd auf einem gemeinsam genutzten Host unter ihr weg-chownen und entfernen würde. Absolut, ohne Zeichen, die nginx falsch lesen würde. |
+| `state_dir` / `sockets_dir` | Die eigenen Verzeichnisse der Rolle (Standard `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — niemals `/var/lib/kapkan` und `/run/kapkan` des Gehirns, die systemd auf einem gemeinsam genutzten Host unter ihr weg-chownen und entfernen würde. Absolut, ohne Zeichen, die nginx falsch lesen würde. `state_dir/tls/quic_host.key` ist der QUIC-Host-Schlüssel des Terminators (32 Zufallsbytes, `0600`), einmal beim ersten Start des Knotens erzeugt und über Neustarts hinweg behalten, damit Retry- und Stateless-Reset-Token einen Reload überleben; löschen Sie ihn, um einen neuen zu erzeugen. |
 | `socket_group` | Die Worker-Gruppe des Terminators. Der Entscheidungs-, der Log- und der Freigabeseiten-Socket sind für sie `0660`; der ACME-Challenge-Socket ist `0666` (er beantwortet öffentliche Tokens). Leer lässt die drei gruppenbeschränkten Sockets nur für den Eigentümer zugänglich. |
 | `terminator.binary` / `main_conf` | Was für `-t` und Reloads ausgeführt wird, und die Hauptkonfiguration, die als `-c` übergeben wird. Diese Datei muss einmal, innerhalb von `http {}`, `include /var/lib/kapkan-edge/conf/live/*.conf;` enthalten. |
 | `terminator.reload` | `exec` führt `<binary> -s reload` aus (muss den nginx-Master signalisieren — die Unit läuft als root); `signal` sendet `HUP` an die PID in `pid_file`; `command` führt `terminator.command` aus, z. B. `[systemctl, reload, nginx]`. |
@@ -370,6 +374,9 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `acme.disabled` | Nichts ausstellen: Zonen bleiben auf `:80` und antworten `503` (ein Labor, das alles außer der Ausstellung durchspielt). Vom Betreiber bereitgestellte Zertifikate sind noch keine Funktion. |
 | `status_listen` | Stellt `/healthz` und `/metrics` bereit, wenn gesetzt. Unauthentifiziert — Loopback oder eine private Adresse. |
 | `omit_catch_all` / `disable_ipv6` | Kapkans `default_server`-Catch-all weglassen (Ihre `nginx.conf` deklariert selbst einen) / die `[::]`-Listener weglassen (kein IPv6-Stack). |
+| `quic.h3` | `auto` (Standard) oder `off`. Der Knoten prüft die Binary beim Start (`nginx -V`): Mit `auto` wird HTTP/3 für Zonen gerendert, die es verlangen, wenn der Build `--with-http_v3_module` trägt; `off` rendert es auf diesem Knoten nie — der Schalter für einen Build, dessen HTTP/3 Sie nicht vertrauen, etwa einen, für den die Prüfung einen CVE-Sicherheitshinweis meldet. So oder so tragen der Report des Knotens und `/healthz` ein `h3.state`: `ready`, `no_module`, `node_off` oder `unknown` (die Prüfung ist fehlgeschlagen; der Knoten rendert dann kein QUIC). Zonen, die HTTP/3 verlangen, werden auf einem Knoten, der nicht `ready` ist, über TCP ausgeliefert. |
+| `quic.retry` | nginx' `quic_retry`, knotenweit — nginx entscheidet es am Default-Server der Adresse, bevor SNI eine Zone benennt, es kann also nicht pro Zone gelten. `true` (Standard): Jede neue Client-Adresse beweist, dass sie empfangen kann, bevor der Handshake den Knoten irgendetwas kostet (ein Retry ist kleiner als das Initial, das es beantwortet, eine gefälschte Quelle verstärkt also nichts). `false` spart diesen Roundtrip. Es zu ändern bedeutet eine neue getestete Generation auf einem Knoten, der für mindestens eine Zone QUIC rendert; auf einem Knoten ohne h3-Zone wartet der Wert einfach auf das erste h3-Rendern. |
+| `quic.omit_anchor` | Nur mit `omit_catch_all: true`. Normalerweise trägt Kapkans Catch-all das einzige `listen 443 quic reuseport` der Adresse; ohne den Catch-all trägt es ein nackter QUIC-*Anker*-Server. Setzen Sie `true`, wenn Ihr eigener Default-Server schon auf `443 quic reuseport` lauscht — zwei `reuseport` auf einer Adresse lassen `nginx -t` scheitern, und die Generation wird abgelehnt (die vorherige liefert weiter aus). |
 
 <Callout type="warning" title="Ein Edge-Knoten läuft standardmäßig im Dry-Run">
 `dry_run` hat für eine entfernte Rolle den Standardwert **true** — der Knoten zählt und markiert,
@@ -382,7 +389,7 @@ Klartext sendet das Token unverschlüsselt.
 | Flag | Standard | Beschreibung |
 | --- | --- | --- |
 | `-config <path>` | `/etc/kapkan/edge.yaml` | Die Edge-Knoten-Konfiguration. |
-| `-check` | aus | Die Datei und das, was sie auf dieser Box benennt, validieren — die Socket-Gruppe muss existieren und jeder EAB-Schlüssel wohlgeformt sein (Probleme); ein fehlendes Token, Terminator-Binary oder `main_conf` ist eine Warnung — und dann beenden. |
+| `-check` | aus | Die Datei und das, was sie auf dieser Box benennt, validieren — die Socket-Gruppe muss existieren und jeder EAB-Schlüssel wohlgeformt sein (Probleme); ein fehlendes Token, Terminator-Binary oder `main_conf` ist eine Warnung — und, wenn die Binary im `PATH` liegt, ausgeben, was ihr `-V` sagt: Art, Version, nginx-Kern, TLS-Bibliothek, ob sie das HTTP/3-Modul hat und 0-RTT könnte, die HTTP/3-Bereitschaft des Knotens und das wirksame `quic.retry` (ein CVE-Sicherheitshinweis für den Kern des Builds ist eine Warnung, es sei denn, `quic.h3: off` hat HTTP/3 hier schon abgeschaltet) — und dann beenden. |
 | `-log-format <fmt>` | `json` | `json` oder `text`. |
 | `-log-level <lvl>` | `info` | `debug`, `info`, `warn` oder `error`. |
 

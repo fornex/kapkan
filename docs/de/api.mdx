@@ -626,8 +626,12 @@ beantwortet (1 s, verdoppelt bis 30 s) — geben Sie jedem Knoten ein eigenes ag
 ```
 
 `acme_directory`, `acme_fallback`, `extra_directives_file` und `tls.h3` werden weggelassen, wenn sie
-nicht gesetzt sind; ein fehlendes `acme_directory` bedeutet, dass der Knoten bei seiner eigenen
-Standard-CA bestellt (Let's Encrypt, sofern seine `edge.yaml` nichts anderes sagt). Die Richtlinie
+nicht gesetzt sind; `tls.h3_options {advertise, alt_svc_max_age_seconds}` erscheint nur dort, wo
+eine Zone von den Standards abweicht (`advertise: false`, oder ein `ma` abseits des Standards) —
+fehlt es, heißt das ankündigen und `86400` —, sodass eine Zonendatei, die `h3` nur einschaltet, die
+Bytes und das ETag des Dokuments im Übrigen unverändert lässt. Ein fehlendes `acme_directory`
+bedeutet, dass der Knoten bei seiner eigenen Standard-CA bestellt (Let's Encrypt, sofern seine
+`edge.yaml` nichts anderes sagt). Die Richtlinie
 trägt `dry_run` und die `challenge_options`, die eine Zone setzt; `clearance_keys` (nicht gezeigt)
 sind die Signaturschlüssel der Stufe pro Zone (der des aktuellen und der des vorherigen UTC-Tages, jeder
 48 h anerkannt — das Dokument trägt Geheimnisse, und ein Knoten speichert es mit `0600` zwischen);
@@ -639,13 +643,24 @@ des Dokuments genau dann bewegen, wenn der Betreiber handelt, und noch einmal, w
 
 Der beratende Selbstreport eines Knotens — Version, knotenseitiger Dry-Run, das ETag des
 Dokuments, das er **gerendert** hat (damit ein Betreiber einen hinterherhinkenden oder
-verweigernden Knoten erkennt), Art, Version und Lebendigkeit des Terminators, die aktive
+verweigernden Knoten erkennt), Art, Version und Lebendigkeit des Terminators, seine
+HTTP/3-Bereitschaft aus der `nginx -V`-Prüfung des Knotens (`terminator.h3 {state, module,
+tls_library, early_data_capable, advisory, serving, unsupported, listening}` — `state` ist `ready`,
+`no_module`, `node_off` oder `unknown`; `advisory` benennt einen veröffentlichten
+QUIC-Sicherheitshinweis, in dessen Bereich der nginx-Kern des Builds fällt, als Hinweis:
+Distributionen backporten Fixes, ohne die Version zu bewegen; `serving` listet die Zonen, für die
+die aktive Generation über QUIC lauscht, `unsupported` die Zonen, die danach verlangt haben und
+hier über TCP ausgeliefert werden; `listening` sagt, ob irgendetwas auf der Box UDP 443 hält,
+während QUIC-Listener gerendert sind — die lokale Hälfte von „ist HTTP/3 erreichbar?“, die andere
+ist die Firewall, und es fehlt, solange hier keine Zone über QUIC ausgeliefert wird, sowie auf
+einer Box ohne `/proc/net/udp`), die aktive
 Generation und ihr `nginx -t`-Ergebnis, die Zertifikate, die er hält (nur öffentliche Metadaten,
 niemals ein Schlüssel; eine lange Liste wird auf die Body-Grenze von 64 KiB gekürzt, mit einem
 `certs_truncated`-Zähler), und ein **Zonenabschnitt**: für jede entscheidende Zone, die die aktive
 Generation bedient, das letzte abgeschlossene Zehn-Sekunden-Fenster (`at`, `window_seconds`,
 `rps`, `requests`, `decided`, `denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`,
-`status_2xx..5xx`), der Challenge-Modus der Zone, so wie der Knoten ihn anwendet, ob die Zone auf
+`status_2xx..5xx`, `h3_requests` — die Anfragen, die über HTTP/3 ankamen), der Challenge-Modus der
+Zone, so wie der Knoten ihn anwendet, ob die Zone auf
 diesem Knoten nur beobachtend ist (`dry_run`) und ob ihre Stufe dort nur eine Vorschau zeigt
 (`rung_dry_run`: der `dry_run` des Knotens, der der Zone oder der eigene `challenge_options.dry_run`
 der Stufe), eine wirksame zonenweite Challenge (`challenge_active {reason, until, dry_run}` —
@@ -675,7 +690,17 @@ flottenweite Rate auf das nächste Fenster genau), der Challenge-Modus der Zone,
 denen sie nur beobachtend ist (`watch_only`), und die, auf denen ihre Stufe nur eine Vorschau zeigt
 (`rung_watch_only` — eine `manual`- oder `auto`-Zone fordert auf den dort nicht genannten Knoten
 wirklich heraus), die Knoten mit einer wirksamen zonenweiten Challenge und ob diese jeweils greift
-oder nur eine Vorschau ist, der wirksame Hebel (`override`) und die **Kandidatenmenge**: die
+oder nur eine Vorschau ist, der wirksame Hebel (`override`), das HTTP/3 der Zone über die Flotte
+hinweg (`h3 {enabled, serving, unsupported, requests}` — `enabled` ist das `tls.h3` der Zonendatei,
+so wie das Gehirn es hält, `serving` die lebendigen Knoten, deren aktive Generation für die Zone
+über QUIC lauscht, `unsupported` die, auf denen sie danach verlangt hat und über TCP ausgeliefert
+wird, `requests` die HTTP/3-Anfragen der Knoten im letzten Fenster, summiert; es fehlt bei einer
+Zone, für die niemand h3 spricht oder verlangt. Dieser Status wird aus dem Zonenabschnitt der
+Reports gebaut, und der listet **entscheidende** Zonen — das HTTP/3 einer Zone mit `mode: none`
+erscheint deshalb nur im `terminator.h3` der Knoten unter
+[`GET /api/v1/edge/nodes`](#get-apiv1edgenodes); `enabled` erscheint für jede Zone, für die die
+Datei h3 einschaltet und die hier vorhanden ist — von einem Knoten gemeldet, oder mit einem Hebel),
+und die **Kandidatenmenge**: die
 Vereinigung der Quellen, für die die Knoten eine Challenge oder eine Sperre als Vorschau gezeigt
 haben, der stärkere Zustand behalten, die aktivsten zuerst, begrenzt auf 20 pro meldendem Knoten
 (`would_be_truncated` zählt den Rest). `partial` sagt, dass die Kandidaten eines Knotens nicht

@@ -80,7 +80,17 @@ Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher
   die die Knoten eine Challenge oder eine Sperre als Vorschau gezeigt haben, die aktivsten zuerst,
   mit den Knoten, die jede gesehen haben. Lesen Sie es, bevor die Stufe einer Zone in den
   Echtbetrieb geht; die Ansicht sagt *unvollständig*, wenn ein Knoten einen Teil dieser Menge
-  wegschneiden musste, und warnt, wenn Knoten ganze Zonen aus ihren Reports geschnitten haben.
+  wegschneiden musste, und warnt, wenn Knoten ganze Zonen aus ihren Reports geschnitten haben. Eine
+  Spalte **HTTP/3** liest den [HTTP/3](/docs/zones)-Zustand der Zone: *aus*, wenn die Zone es weder
+  verlangt noch darüber ausgeliefert wird; *ein · 42% · 3/3*, wenn jeder Knoten, der die Zone
+  meldet, sie darüber ausliefert, mit dem Anteil des letzten Fensters, der über HTTP/3 ankam (der
+  Prozentwert fällt weg, wenn das Fenster keine Anfragen hatte); *ein · 2/3 bereit* in der
+  Nur-beobachten-Darstellung, wenn die Zone es verlangt und ein Knoten sie nicht ausliefern kann —
+  fahren Sie über die Zelle, um zu sehen, welche Knoten sie über TCP ausliefern und warum (*ohne
+  HTTP/3-Modul gebaut*, *HTTP/3 auf dem Knoten abgeschaltet* oder *die Bereitschaftsprüfung ist
+  fehlgeschlagen*), samt jedem Hinweis, den die Prüfung dieses Knotens gemeldet hat; und
+  *aus · 2 Knoten bedienen weiter*, wenn die Zonendatei kein HTTP/3 mehr verlangt, ein Knoten aber
+  noch einen QUIC-Listener hält, weil Datei und Flotte bis zur nächsten Generation auseinandergehen.
 - **Sperrtabelle** — jede Sperre, aktiv und historisch (mit der Scrubbing-Knoten-Spalte, wenn
   Knoten konfiguriert sind).
 - **Traffic / Reports** — Live-Diagramme für ein- und ausgehenden Verkehr, die aus den

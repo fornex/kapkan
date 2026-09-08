@@ -247,6 +247,133 @@ conjunto de candidatos por zona. Pasa a producción una capa a la vez: `dry_run:
 cuando los recuentos de would-deny tengan buena pinta, `challenge_options.dry_run: false` en una
 zona cuando su conjunto de candidatos nombre a los clientes correctos.
 
+## HTTP/3 (QUIC)
+
+Una zona con `tls.h3: true` en el [archivo de zonas](/docs/zones) se sirve por **HTTP/3** — QUIC
+sobre UDP 443 — junto a TLS sobre TCP, en todo nodo cuyo nginx o Angie pueda hacerlo. Nada cambia
+en lo que Kapkan decide: el mismo `auth_request`, el mismo servicio de decisión, el mismo peldaño y
+los mismos techos por h3 que por TCP; el access log gana un campo `proto` (`HTTP/3.0`), así que los
+rollups y `kapkan_edge_requests_total{protocol="h3"}` muestran cuánto tráfico de una zona se ha
+mudado.
+
+**Dónde se renderiza y dónde, honestamente, no.** Al arrancar, el nodo pregunta a su binario con
+`nginx -V` y reporta una disponibilidad en `terminator.h3.state` (el inventario, `/healthz`,
+`kapkan edge -check`):
+
+| Estado | Significado | Lo que obtiene en este nodo una zona con `h3: true` |
+| --- | --- | --- |
+| `ready` | La build lleva `--with-http_v3_module` y `edge.yaml` dice `quic.h3: auto` (el valor predeterminado) | `listen 443 quic` y un anuncio `Alt-Svc` |
+| `no_module` | La build no tiene módulo HTTP/3 (el nginx 1.22 de Debian 12, por ejemplo) | solo TLS sobre TCP; la zona se lista bajo `terminator.h3.unsupported` |
+| `node_off` | `edge.yaml` dice `quic.h3: off` | lo mismo |
+| `unknown` | La sonda falló; el nodo nunca adivina nada sobre un binario al que no pudo preguntar | lo mismo |
+
+Una zona nunca queda rehén del paquete de un solo nodo: el documento se acepta en todas partes, los
+nodos que saben servir h3 lo hacen, los demás lo dicen, y
+`GET /api/v1/edge/zones/status` muestra el `h3 {enabled, serving, unsupported, requests}` de la zona
+en toda la flota (la vista Edge de la consola tiene una celda para ello). Activar o desactivar `h3`
+es un cambio de **ruta lenta** — una nueva generación probada, una recarga en cada nodo — como un
+origen o un certificado; cada mando de la ruta rápida (tasas, el peldaño, la palanca, solo
+observación) sigue sin cambiar ni un byte renderizado en una zona con h3.
+
+**Qué vale para todo el nodo, y por qué.** nginx ata una conexión QUIC al servidor *predeterminado*
+de la dirección antes de que el SNI nombre una zona, así que tres cosas no pueden ser por zona, y
+Kapkan no pretende que lo sean:
+
+- **Retry está siempre activo** (`quic_retry`, en el nivel `http` del archivo común;
+  `quic.retry: false` en `edge.yaml` lo desactiva en todo el nodo). Una dirección de cliente nueva
+  demuestra que puede recibir antes de que el handshake le cueste algo al nodo, y un Retry es más
+  pequeño que el Initial al que responde, así que un origen suplantado no amplifica nada. El precio
+  es una ida y vuelta en una conexión nueva y no verificada. No existe un «Retry bajo carga»: la
+  protección frente a la carga es el techo de tasa de Initials del plano de datos, más abajo.
+- **0-RTT está desactivado**, sin mando: `ssl_early_data` en nginx vale para toda la dirección, y
+  la mayoría de las builds no podrían usarlo de todos modos (el suelo es OpenSSL ≥ 3.5.1 con nginx
+  ≥ 1.29.1 — el inventario anota `early_data_capable` por nodo, para el día en que una política lo
+  quiera). Datos tempranos reproducibles delante de un peldaño que emite pases no es un trato que
+  Kapkan haga por ti.
+- **La clave de host** (`state_dir/tls/quic_host.key`, acuñada una vez por nodo, `0600`) mantiene
+  válidos los tokens de Retry y de stateless reset entre recargas; el comportamiento predeterminado
+  de nginx — una clave aleatoria nueva en cada recarga — los invalidaría justo cuando un nodo
+  recarga bajo carga, y un cliente puede no aceptar un segundo Retry.
+
+**El despliegue.** Un transporte no tiene modo de solo observación, así que el sustituto honesto es
+el control del *descubrimiento*, en este orden:
+
+1. **Los nodos primero.** Actualiza cada nodo antes de que una zona diga `h3: true`: un nodo
+   anterior a E5 rechaza un documento que lleve esa clave y se queda en su generación previa con
+   `converged: false`. Comprueba `terminator.h3.state` en el inventario.
+2. **UDP 443 y MTU.** Abre UDP 443 en la máquina, en el grupo de seguridad y en la ACL de aguas
+   arriba; `terminator.h3.listening` dice que la mitad de la máquina está a la escucha, y un
+   `curl --http3-only` externo dice el resto. Anunciar h3 mientras UDP está bloqueado aguas arriba
+   le cuesta a cada navegador una carrera y un tiempo de espera antes de caer a TCP. QUIC nunca
+   fragmenta: una MTU de ruta por debajo de 1280 bytes (un desvío GRE/IPIP, una superposición)
+   rompe h3 mientras TCP sobrevive gracias al recorte de MSS — ver
+   [integración de red](/docs/network-integration#desvío-off-path-sobre-gre-o-ipip).
+3. **El canario:** `tls.h3_options.advertise: false` renderiza el listener QUIC sin el anuncio
+   `Alt-Svc`, así que solo llegan a él los clientes que ya hablan HTTP/3 con ese nombre
+   (`curl --http3-only`); los navegadores se quedan en TCP.
+4. **Memoria corta:** `advertise: true` con `alt_svc_max_age_seconds: 300`, para que una vuelta
+   atrás se olvide en minutos, y luego el valor predeterminado (`86400`).
+5. **La vuelta atrás** es `h3: false`: una generación probada por nodo; los clientes que
+   recordaron el anuncio caen a TCP en su siguiente conexión y marcan h3 como roto para ese origen
+   durante un rato.
+
+**Builds y avisos de seguridad.** nginx sigue llamando experimental a HTTP/3, y el módulo ha tenido
+avisos de seguridad propios. La sonda compara el núcleo nginx de la build con los rangos publicados
+y reporta un `advisory` — *un consejo, no un veredicto*: las distribuciones retroportan las
+correcciones sin mover la versión, así que un `1.26.3` puede llevar la corrección o no, y solo el
+changelog del paquete lo sabe. CVE-2026-40460 (núcleos 1.25.0–1.30.0) le importa a Kapkan en
+particular: después de que una conexión QUIC migra, los flujos nuevos llevan una dirección de
+cliente no verificada, y esa dirección es la clave de contabilidad sobre la que se toma cada
+decisión. El `1.26.3-3+deb13u7` de Debian 13 lleva la corrección y sigue reportando `1.26.3`; el
+stable 1.30.4 de nginx.org y Angie 1.12.1 (núcleo 1.31.2) quedan más allá de los rangos. Lee el
+aviso antes de poner `h3: true`, o deja `quic.h3: off` en el nodo hasta que lo hayas hecho.
+
+**Las dos palancas, en el plano de datos.** Ambas viven en el
+[plano de datos XDP](/docs/dataplane) delante del nodo (o en la misma máquina), nunca en nginx: una
+recarga a velocidad de ataque es exactamente lo que la carta del edge prohíbe:
+
+```yaml
+# kapkan.yaml on the data-plane box
+dataplane:
+  ratelimit_profiles:
+    - { name: quic_handshake_cap, pps: 20 }
+  static_rules:
+    - name: cap_quic                       # per-source ceiling on QUIC Initials
+      match: { proto: udp, dst_port: 443, payload: quic_initial }
+      action: ratelimit
+      profile: quic_handshake_cap
+    # - name: kill_quic                    # the "kill QUIC" lever: clients fall back to TCP
+    #   match: { proto: udp, dst_port: 443 }
+    #   action: drop
+```
+
+Ambas se recargan en caliente (`kapkan -s reload`) y se previsualizan bajo el `dry_run` del plano
+de datos; el techo es [el techo de handshakes](/docs/dataplane-tuning#coincidir-con-handshakes-quic),
+y la regla de corte descarta UDP 443 por completo y cada cliente vuelve a TCP en una ida y vuelta
+— la respuesta de incidente a un problema exclusivo de QUIC. Un PoP sin un plano de datos de Kapkan
+delante solo tiene la palanca lenta: `h3: false` en el archivo de zonas, o el cortafuegos de la
+máquina.
+
+**Lo que nginx no puede hacer, y las topologías que Kapkan admite.** nginx enruta una conexión QUIC
+por el socket en el que llegó, no por el identificador de conexión (connection ID), así que:
+
+- *Admitido:* un nodo por dirección; varios nodos detrás de un ECMP o un hash anycast por la
+  cuádrupla — un cliente cuya dirección cambia (Wi-Fi a LTE, una revinculación de NAT) aterriza en
+  un nodo que no conoce la conexión y se reconecta; nada se rompe, bastan claves de host por nodo;
+  un plano de datos de Kapkan delante del nodo o en él mismo, para el techo y el corte.
+- *No admitido:* el direccionamiento consciente del identificador de conexión y la migración de
+  conexión **entre** nodos (`quic_bpf on`, una línea que el operador escribe él mismo en el
+  contexto `main` de nginx, solo lleva una conexión entre los workers de una misma máquina); **la
+  reanudación de sesión TLS entre nodos** — nginx ata una sesión al certificado del nodo mediante
+  el contexto del identificador de sesión, y los certificados de Kapkan son por nodo, así que un
+  cliente que cambia de nodo hace un handshake completo (raro con un hash por la cuádrupla; se
+  investigaron las claves de ticket compartidas y aquí no ayudan); WebSocket sobre HTTP/3 (nginx no
+  implementa la RFC 9220 — se queda en TCP); 0-RTT.
+
+Dos cosas más que tener en cuenta: los flujos UDP necesitan tiempos de conntrack que un cortafuegos
+puede no darles de forma predeterminada, y `quic_gso` (el contexto `http`) es cosa tuya en
+`nginx.conf` si lo quieres — Kapkan no renderiza ninguno de los dos.
+
 ## Qué hace el nodo cuando algo falla
 
 | Fallo | Comportamiento |
@@ -271,7 +398,10 @@ zona cuando su conjunto de candidatos nombre a los clientes correctos.
   página de pase, si hay un desafío de zona completa activo — ver [métricas](/docs/metrics#nodos-edge).
 - **El inventario del cerebro**, `GET /api/v1/edge/nodes`, une la vitalidad de cada nodo
   configurado con su último autoinforme: versión, dry-run, ETag renderizado, tipo y versión del
-  terminador, generación y resultado de prueba, certificados (nunca una clave), y la **sección de
+  terminador, su disponibilidad de HTTP/3 (`terminator.h3.state`: `ready`, `no_module`, `node_off`,
+  `unknown`, con un aviso cuando el núcleo nginx de la build cae en el rango de un aviso de
+  seguridad de QUIC publicado),
+  generación y resultado de prueba, certificados (nunca una clave), y la **sección de
   zonas** — la última ventana de diez segundos de cada zona, las fuentes que rechazó, desafió o
   habría rechazado o desafiado, y si su peldaño ahí actúa o previsualiza. Ver
   [la API](/docs/api#el-canal-edge).
@@ -304,8 +434,10 @@ zona cuando su conjunto de candidatos nombre a los clientes correctos.
   reinicio del cerebro la olvida, y los nodos la descartan con el primer documento que sirve el
   cerebro reiniciado — acciónala de nuevo. Un cerebro que sigue caído es distinto: la palanca del
   documento en caché termina en su `until` (ver la tabla de fallos).
-- **Comodines y HTTP/3 son hitos posteriores.** `tls.h3` se rechaza hoy; cada nombre se enumera
-  explícitamente.
+- **Los comodines son un hito posterior.** Cada nombre se enumera explícitamente.
+- **HTTP/3 es por zona y se renderiza donde el nodo puede**, y vale para todo el nodo en lo que
+  nginx decide antes del SNI (Retry activo, 0-RTT desactivado), sin migración de conexión ni
+  reanudación de sesión entre nodos — ver [HTTP/3 (QUIC)](#http3-quic).
 - **Límites de certificados duplicados.** Certificados por nodo significa que N nodos en una zona
   son N pedidos; Let's Encrypt limita un nombre a unos cinco por semana. El turno de emisión del
   cerebro y el jitter de renovación los reparten; `acme.fallback` (ZeroSSL, Google Trust Services
