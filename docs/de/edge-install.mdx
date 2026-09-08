@@ -12,9 +12,10 @@ Anfrage bedient. Lesen Sie zuerst die Konzeptseite, falls die Begriffe *Zone*,
 *Entscheidungsdienst* oder *Fast/Slow-Trennung* neu für Sie sind.
 
 Sie benötigen: ein Gehirn (den `kapkan`-Daemon), das von der Box über HTTPS erreichbar ist, ein
-`agent`-Token darauf, eine Linux-Box mit installiertem nginx ≥ 1.22 oder Angie, die Ports 80 und
-443 offen zur Welt, und DNS für die Zonen, das auf die Box zeigt (oder auf die Anycast-/VIP-Adresse,
-die sich die Boxen teilen).
+`agent`-Token darauf, eine Linux-Box mit installiertem nginx ≥ 1.22 oder Angie, TCP 80 und 443
+offen zur Welt — und UDP 443 dazu, auf der Box, in der Security Group und in der ACL des
+Vorgelagerten, falls eine Zone [HTTP/3](/docs/edge#http3-quic) sprechen wird —, und DNS für die
+Zonen, das auf die Box zeigt (oder auf die Anycast-/VIP-Adresse, die sich die Boxen teilen).
 
 ## 1. Auf dem Gehirn: Zonen und Knoten
 
@@ -92,6 +93,22 @@ Ermitteln Sie die **Gruppe des Workers** — `nginx` für nginx.org-Pakete und d
 `www-data` für Debians eigenes Paket, `angie` für Angie. Der Entscheidungs- und der Log-Socket
 werden mit `0660` für diese Gruppe angelegt.
 
+**Für HTTP/3** muss der Build das Modul tragen und die Adresse UDP annehmen:
+
+```sh
+nginx -V 2>&1 | grep -o -- --with-http_v3_module     # Angie: angie -V
+```
+
+Debian 12s nginx 1.22 hat keines (Zonen, die h3 verlangen, werden dort über TCP ausgeliefert, und
+der Knoten sagt es); Debian 13s nginx 1.26.3, die Pakete von nginx.org ab 1.25 und Angie haben es.
+Öffnen Sie UDP 443 überall, wo TCP 443 offen ist, geben Sie UDP-Flows auf jeder zustandsbehafteten
+Firewall im Pfad ein Conntrack-Timeout, und halten Sie die Pfad-MTU auf 1280 Byte oder mehr — QUIC
+fragmentiert nie, eine GRE/IPIP-Umleitung mit kleinerer MTU bricht also h3, während TCP durch
+[MSS-Clamping](/docs/network-integration#off-path-umleitung-über-gre-oder-ipip) überlebt. Wenn Ihre
+`nginx.conf` `ssl_protocols` auf `http`-Ebene setzt, muss `TLSv1.3` darin vorkommen — QUIC spricht
+nichts anderes (Kapkans eigene QUIC-Listener sagen es selbst). `kapkan edge -check` gibt die
+HTTP/3-Bereitschaft des Knotens aus, sobald die `edge.yaml` an Ort und Stelle ist.
+
 ## 3. Der Knoten: `edge.yaml`, das Token, die Unit
 
 Installieren Sie dasselbe `kapkan`-Binary wie auf dem Gehirn, dann die eigene Konfiguration des
@@ -129,7 +146,14 @@ kapkan edge -config /etc/kapkan/edge.yaml -check
 `-check` validiert die Datei und das, was sie auf dieser Box benennt: Die Socket-Gruppe muss
 existieren, und ein etwaiger External-Account-Binding-Schlüssel muss wohlgeformt sein (Probleme),
 während ein fehlendes Token, ein fehlendes Binary oder eine fehlende `main_conf` eine Warnung ist —
-die Prüfung darf laufen, bevor die Umgebungsdatei oder der Terminator an Ort und Stelle ist.
+die Prüfung darf laufen, bevor die Umgebungsdatei oder der Terminator an Ort und Stelle ist. Liegt
+das Binary im `PATH`, gibt sie außerdem aus, was `nginx -V` sagt — Art, Version, nginx-Kern,
+TLS-Bibliothek, ob der Build das HTTP/3-Modul hat — und die HTTP/3-Bereitschaft des Knotens; ein
+Build, dessen nginx-Kern in den Bereich eines veröffentlichten QUIC-Sicherheitshinweises fällt,
+bekommt eine Warnung, die die CVE benennt (prüfen Sie das Changelog Ihrer Distribution: Backports
+bewegen die Version nicht). Setzen Sie `quic.h3: off` in der `edge.yaml`, um HTTP/3 auf diesem
+Knoten abzuschalten; `-check` nennt die Bereitschaft dann `node_off` und wiederholt den Hinweis
+nicht mehr, während der Report des Knotens ihn weiterhin als Tatsache über den Build trägt.
 
 Installieren Sie die mitgelieferte Unit, `deploy/kapkan-edge.service`, und starten Sie sie:
 
@@ -183,6 +207,12 @@ Prozess mit diesem Fehler, und systemd startet ihn neu.
   `X-Kapkan-Mark: would-challenge:table:flood` erreicht. Nehmen Sie Ihre Health-Checks,
   API-Clients und Webhooks unter `challenge_options.exempt_paths` auf, bevor die Stufe in den
   Echtbetrieb geht.
+- HTTP/3: Das `terminator.h3.state` des Inventars ist `ready` auf den Knoten, auf denen Sie es
+  erwarten; mit einer Zone auf `tls.h3: true` benennt sie `terminator.h3.serving` und `listening`
+  ist `true`, und `curl --http3-only https://<zone>/` von außen antwortet `200` — dann beginnt
+  `kapkan_edge_requests_total{protocol="h3"}` zu steigen, sobald `advertise` an ist. Ein Knoten in
+  `no_module`, `node_off` oder `unknown` führt die Zone unter `unsupported` und liefert sie über
+  TCP aus.
 
 ## 5. Echtbetrieb
 
@@ -233,6 +263,11 @@ selbstständig.
 | `would-challenge`-Markierungen, aber niemand wird je herausgefordert | Eine der drei Nur-beobachten-Schichten ist aktiv: der `dry_run` des Knotens (`edge.yaml`), der `policy.dry_run` der Zone oder der eigene `challenge_options.dry_run` der Stufe — standardmäßig `true`. `GET /api/v1/edge/zones/status` nennt die Knoten, auf denen eine Zone nur beobachtend ist, und ob eine zonenweite Challenge nur eine Vorschau ist (`dry_run: true`). |
 | Jede Anfrage an eine Zone erhält die Freigabeseite | Die Zone steht unter Challenge: `policy.challenge: manual` in der Datei, ein Hebel (`override` in `GET /api/v1/edge/zones/status`) oder der zonenweite Auslöser (`challenge_active` mit `reason: zone-rps`). Ein Client, der sie überwindet, wird für `cookie_ttl_seconds` nicht erneut gefragt; Clients, die keine Cookies behalten können, sehen sie jedes Mal. |
 | Clients sehen `503` (oder passieren unherausgefordert) auf einer Zone, deren Stufe aktiv ist | nginx konnte die Freigabeseite nicht erreichen und ist dem `failure_mode` gefolgt. Suchen Sie im Error-Log von nginx nach `connect() to unix:/run/kapkan-edge/edge-clearance.sock failed`: Der Socket ist wie der Entscheidungs-Socket `0660` für `socket_group`, und der Knoten protokolliert `clearance page listening`, wenn er bereit ist. |
+| `nginx -t` schlägt fehl mit *duplicate listen options for 0.0.0.0:443* | Ihre `nginx.conf` (mit `omit_catch_all: true`) hat schon ein `listen 443 quic` mit Socket-Optionen (`reuseport`, `rcvbuf`, …), und Kapkans QUIC-Anker trägt sein eigenes `reuseport`. Setzen Sie `quic.omit_anchor: true` und geben Sie Ihrem Server `reuseport` und `ssl_protocols TLSv1.3` selbst. |
+| Eine Zone mit `tls.h3: true` wird auf einem Knoten nur über TCP ausgeliefert | Das `terminator.h3.state` dieses Knotens ist nicht `ready`: `no_module` (dem Build fehlt `--with-http_v3_module`), `node_off` (`quic.h3: off`) oder `unknown` (die Prüfung ist fehlgeschlagen — lesen Sie das Journal). Die Zone steht unter `terminator.h3.unsupported`; die anderen Knoten liefern sie über h3 aus. |
+| Browser laden eine Zone nach `h3: true` langsam | UDP 443 ist weiter oben blockiert, während `Alt-Svc` h3 ankündigt: Jeder Browser lässt den QUIC-Versuch mitlaufen und wartet den Timeout ab, bevor er zurückfällt. Reparieren Sie die Firewall — oder setzen Sie `tls.h3_options.advertise: false`, bis Sie es getan haben; `terminator.h3.listening` sagt Ihnen nur die Hälfte auf der Box. |
+| `curl --http3-only` schlägt fehl, während TCP funktioniert, mit einem Tunnel oder Overlay im Pfad | Pfad-MTU unter 1280 Byte: QUIC fragmentiert nie. Erhöhen Sie die MTU oder lassen Sie die Zone auf TCP (MSS-Clamping rettet TCP, nicht QUIC). |
+| Jeder QUIC-Handshake schlägt fehl, während `nginx -t` besteht und `Alt-Svc` gesendet wird | Ein `ssl_protocols` auf `http`-Ebene in Ihrer `nginx.conf` ohne `TLSv1.3`, unter `omit_catch_all` mit `quic.omit_anchor: true` (Kapkans eigener Catch-all und der Anker pinnen `TLSv1.3`; Ihr Default-Server muss das auch). Suchen Sie im Error-Log von nginx nach `SSL_do_handshake() failed … unsupported protocol`. |
 
 ## Verwandte Themen
 

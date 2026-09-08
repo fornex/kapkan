@@ -71,6 +71,17 @@ Diese Begriffe sind nur relevant, wenn Sie Kapkans optionale Datenebene im Kerne
 | **bpffs** | Ein kleines Dateisystem, üblicherweise unter `/sys/fs/bpf` eingehängt, in dem Programme und Maps „gepinnt“ werden können, sodass sie den Prozess überdauern, der sie erzeugt hat. |
 | **BTF** | BPF Type Format — Typinformationen, die der Kernel über sich selbst veröffentlicht, sodass ein anderswo kompiliertes Programm portabel über Kernel-Versionen hinweg geladen werden kann. |
 
+## TLS und HTTP/3
+
+| Begriff | Bedeutung |
+| --- | --- |
+| **QUIC** | Der Transport unter HTTP/3: verschlüsselt, multiplexiert, über UDP (Port 443 fürs Web). Sein Handshake liegt vom ersten Paket an innerhalb von TLS 1.3. |
+| **HTTP/3 (h3)** | HTTP über QUIC. Eine Edge-Zone mit `tls.h3: true` wird darüber neben TLS über TCP ausgeliefert, auf den Knoten, deren nginx oder Angie das HTTP/3-Modul trägt. |
+| **QUIC Initial** | Das erste Paket eines QUIC-Handshakes — mindestens 1200 Byte, und das, woraus ein QUIC-Handshake-Flood besteht; der `quic_initial`-Match der Datenebene zählt es pro Quelle. |
+| **Retry (QUIC)** | Die Antwort des Servers auf ein Initial von einer Adresse, die er noch nicht gesehen hat: ein kleines Token, das der Client zurückschicken muss, womit er beweist, dass er empfangen kann, bevor der Server irgendetwas für den Handshake aufwendet. Auf einem Edge-Knoten ist es immer an. |
+| **Alt-Svc** | Der Response-Header auf einer TLS-über-TCP-Antwort, der einem Browser sagt, dass der Origin auch über HTTP/3 erreichbar ist — und wie lange er sich das merken soll (`ma`). `tls.h3_options.advertise: false` einer Edge-Zone rendert den QUIC-Listener ohne ihn — der Kanarienvogel. |
+| **0-RTT** | Die Early Data von QUIC — eine wiederaufgenommene Verbindung, die ihre Anfrage im ersten Paket sendet, bevor der Handshake fertig ist. Wiederholbar, deshalb hält ein Edge-Knoten es aus. |
+
 ## Kapkan-Konzepte
 
 | Begriff | Bedeutung |

@@ -253,6 +253,136 @@ Kandidatenmenge pro Zone. Gehen Sie Schicht für Schicht in den Echtbetrieb: `dr
 dem Knoten, wenn die would-deny-Zahlen stimmen, `challenge_options.dry_run: false` auf einer Zone,
 wenn ihre Kandidatenmenge die richtigen Clients benennt.
 
+## HTTP/3 (QUIC)
+
+Eine Zone mit `tls.h3: true` in der [Zonendatei](/docs/zones) wird über **HTTP/3** ausgeliefert —
+QUIC auf UDP 443 — neben TLS über TCP, auf jedem Knoten, dessen nginx oder Angie das kann. An dem,
+was Kapkan entscheidet, ändert sich nichts: derselbe `auth_request`, derselbe Entscheidungsdienst,
+dieselbe Stufe und dieselben Obergrenzen über h3 wie über TCP; das Zugriffsprotokoll erhält ein
+Feld `proto` (`HTTP/3.0`), sodass die Rollups und
+`kapkan_edge_requests_total{protocol="h3"}` zeigen, wie viel vom Verkehr einer Zone umgezogen ist.
+
+**Wo es gerendert wird — und wo ehrlicherweise nicht.** Beim Start fragt der Knoten seine Binary
+mit `nginx -V` und meldet eine Bereitschaft in `terminator.h3.state` (das Inventar, `/healthz`,
+`kapkan edge -check`):
+
+| Zustand | Bedeutung | Was eine Zone mit `h3: true` auf diesem Knoten bekommt |
+| --- | --- | --- |
+| `ready` | Der Build trägt `--with-http_v3_module` und `edge.yaml` sagt `quic.h3: auto` (der Standard) | `listen 443 quic` und eine `Alt-Svc`-Ankündigung |
+| `no_module` | Der Build hat kein HTTP/3-Modul (etwa nginx 1.22 aus Debian 12) | nur TLS über TCP; die Zone steht unter `terminator.h3.unsupported` |
+| `node_off` | `edge.yaml` sagt `quic.h3: off` | dasselbe |
+| `unknown` | Die Prüfung ist fehlgeschlagen; über eine Binary, die er nicht fragen konnte, rät der Knoten nie | dasselbe |
+
+Eine Zone wird nie zur Geisel des Pakets eines einzelnen Knotens: Das Dokument wird überall
+angenommen, die Knoten, die h3 ausliefern können, tun es, die anderen sagen es, und
+`GET /api/v1/edge/zones/status` zeigt das `h3 {enabled, serving, unsupported, requests}` der Zone
+über die Flotte hinweg (die Edge-Ansicht der Konsole hat eine Zelle dafür). `h3` ein- oder
+auszuschalten ist eine **langsame** Änderung — eine neue getestete Generation, ein Reload auf jedem
+Knoten — wie ein Origin oder ein Zertifikat; jeder Regler des schnellen Pfads (Raten, die Stufe,
+der Hebel, nur beobachten) ändert auf einer h3-Zone weiterhin kein gerendertes Byte.
+
+**Was knotenweit gilt, und warum.** nginx bindet eine QUIC-Verbindung an den *Default Server* der
+Adresse, bevor SNI eine Zone benennt, deshalb können drei Dinge nicht pro Zone gelten, und Kapkan
+tut nicht so, als wären sie es:
+
+- **Retry ist immer an** (`quic_retry`, auf `http`-Ebene der gemeinsamen Datei; `quic.retry: false`
+  in `edge.yaml` schaltet es knotenweit ab). Eine neue Client-Adresse beweist, dass sie empfangen
+  kann, bevor der Handshake den Knoten irgendetwas kostet, und ein Retry ist kleiner als das
+  Initial, das es beantwortet — eine gefälschte Quelle verstärkt also nichts. Der Preis ist ein
+  Roundtrip auf einer neuen, unverifizierten Verbindung. Ein „Retry unter Last“ gibt es nicht:
+  Lastschutz ist die Initial-Ratenobergrenze der Datenebene, weiter unten.
+- **0-RTT ist aus**, ohne Regler: `ssl_early_data` gilt bei nginx adressweit, und die meisten
+  Builds könnten es ohnehin nicht nutzen (die Untergrenze ist OpenSSL ≥ 3.5.1 mit nginx ≥ 1.29.1 —
+  das Inventar hält `early_data_capable` pro Knoten fest, für den Tag, an dem eine Policy es will).
+  Wiederholbare Early Data vor einer Stufe, die Freigaben ausstellt, ist kein Handel, den Kapkan
+  für Sie eingeht.
+- **Der Host-Schlüssel** (`state_dir/tls/quic_host.key`, einmal pro Knoten erzeugt, `0600`) hält
+  Retry- und Stateless-Reset-Token über Reloads hinweg gültig; nginx' Standard — ein frischer
+  Zufallsschlüssel bei jedem Reload — würde sie genau dann entwerten, wenn ein Knoten unter Last
+  neu lädt, und ein Client nimmt ein zweites Retry vielleicht nicht an.
+
+**Der Rollout.** Ein Transport hat keinen Beobachtungsmodus, der ehrliche Ersatz ist deshalb die
+Kontrolle über die *Entdeckung*, in dieser Reihenfolge:
+
+1. **Zuerst die Knoten.** Aktualisieren Sie jeden Knoten, bevor eine Zone `h3: true` sagt: Ein
+   Knoten älter als E5 lehnt ein Dokument mit diesem Schlüssel ab und bleibt mit
+   `converged: false` auf seiner vorherigen Generation. Prüfen Sie `terminator.h3.state` im
+   Inventar.
+2. **UDP 443 und MTU.** Öffnen Sie UDP 443 auf der Maschine, in der Security Group und in der ACL
+   des Vorgelagerten; `terminator.h3.listening` sagt, dass die Hälfte auf der Maschine gebunden
+   ist, ein externes `curl --http3-only` sagt den Rest. h3 anzukündigen, während UDP weiter oben
+   blockiert ist, kostet jeden Browser ein Rennen und einen Timeout, bevor er auf TCP zurückfällt.
+   QUIC fragmentiert nie: Eine Pfad-MTU unter 1280 Byte (eine GRE/IPIP-Umleitung, ein Overlay)
+   bricht h3, während TCP durch MSS-Clamping überlebt — siehe
+   [Netzwerkintegration](/docs/network-integration#off-path-umleitung-über-gre-oder-ipip).
+3. **Der Kanarienvogel:** `tls.h3_options.advertise: false` rendert den QUIC-Listener ohne die
+   `Alt-Svc`-Ankündigung, sodass ihn nur Clients erreichen, die mit dem Namen schon HTTP/3 sprechen
+   (`curl --http3-only`); Browser bleiben auf TCP.
+4. **Ein kurzes Gedächtnis:** `advertise: true` mit `alt_svc_max_age_seconds: 300`, sodass ein
+   Rollback in Minuten vergessen ist — dann der Standard (`86400`).
+5. **Rollback** ist `h3: false` — eine getestete Generation pro Knoten; Clients, die sich die
+   Ankündigung gemerkt haben, fallen bei ihrer nächsten Verbindung zurück und merken sich h3 für
+   diesen Origin eine Weile als kaputt.
+
+**Builds und Sicherheitshinweise.** nginx nennt HTTP/3 weiterhin experimentell, und das Modul hatte
+eigene Sicherheitshinweise. Die Prüfung vergleicht den nginx-Kern des Builds mit den
+veröffentlichten Bereichen und meldet ein `advisory` — *ein Hinweis, kein Urteil*: Distributionen
+backporten Fixes, ohne die Version zu bewegen, ein `1.26.3` kann den Fix also tragen oder nicht,
+und nur das Changelog des Pakets weiß es. CVE-2026-40460 (Kerne 1.25.0–1.30.0) betrifft Kapkan
+besonders: Nachdem eine QUIC-Verbindung migriert ist, tragen neue Streams eine unverifizierte
+Client-Adresse — und genau diese Adresse ist der Buchungsschlüssel, auf dem jede Entscheidung
+beruht. Debian 13s `1.26.3-3+deb13u7` trägt den Fix und meldet weiterhin `1.26.3`; das stable
+1.30.4 von nginx.org und Angie 1.12.1 (Kern 1.31.2) liegen jenseits der Bereiche. Lesen Sie den
+Hinweis, bevor Sie `h3: true` setzen — oder setzen Sie auf dem Knoten `quic.h3: off`, bis Sie es
+getan haben.
+
+**Die zwei Hebel, auf der Datenebene.** Beide leben in der
+[XDP-Datenebene](/docs/dataplane) vor dem Knoten (oder auf derselben Maschine), niemals in nginx —
+ein Reload in Angriffsgeschwindigkeit ist genau das, was die Edge-Charta verbietet:
+
+```yaml
+# kapkan.yaml on the data-plane box
+dataplane:
+  ratelimit_profiles:
+    - { name: quic_handshake_cap, pps: 20 }
+  static_rules:
+    - name: cap_quic                       # per-source ceiling on QUIC Initials
+      match: { proto: udp, dst_port: 443, payload: quic_initial }
+      action: ratelimit
+      profile: quic_handshake_cap
+    # - name: kill_quic                    # the "kill QUIC" lever: clients fall back to TCP
+    #   match: { proto: udp, dst_port: 443 }
+    #   action: drop
+```
+
+Beide laden im Betrieb neu (`kapkan -s reload`) und lassen sich unter dem `dry_run` der Datenebene
+in der Vorschau ansehen; die Obergrenze ist
+[die Handshake-Obergrenze](/docs/dataplane-tuning#quic-handshakes-matchen), die Kill-Regel verwirft
+UDP 443 vollständig und jeder Client ist innerhalb eines Roundtrips zurück auf TCP — die
+Incident-Antwort auf ein Problem, das nur QUIC hat. Ein PoP ohne eine Kapkan-Datenebene davor hat
+nur den langsamen Hebel: `h3: false` in der Zonendatei, oder die Firewall der Maschine.
+
+**Was nginx nicht kann, und die Topologien, die Kapkan unterstützt.** nginx routet eine
+QUIC-Verbindung über den Socket, auf dem sie ankam, nicht über die Connection ID, deshalb:
+
+- *Unterstützt:* ein Knoten pro Adresse; mehrere Knoten hinter einem 4-Tuple-ECMP oder einem
+  Anycast-Hash — ein Client, dessen Adresse sich ändert (WLAN zu LTE, ein NAT-Rebinding), landet
+  auf einem Knoten, der die Verbindung nicht kennt, und verbindet sich neu; nichts bricht,
+  Host-Schlüssel pro Knoten genügen; eine Kapkan-Datenebene vor dem Knoten oder auf ihm, für die
+  Obergrenze und den Kill.
+- *Nicht unterstützt:* Connection-ID-bewusstes Steering und Verbindungsmigration **zwischen**
+  Knoten (`quic_bpf on`, eine eigene Zeile des Betreibers im `main`-Kontext von nginx, trägt eine
+  Verbindung nur zwischen den Workern einer Maschine); **TLS-Session-Resumption zwischen Knoten** —
+  nginx bindet eine Session über den Session-ID-Kontext an das Zertifikat des Knotens, und Kapkans
+  Zertifikate gelten pro Knoten, ein Client, der den Knoten wechselt, macht also einen vollen
+  Handshake (selten unter einem 4-Tuple-Hash; gemeinsame Ticket-Keys wurden untersucht und helfen
+  hier nicht); WebSocket über HTTP/3 (nginx implementiert RFC 9220 nicht — es bleibt auf TCP);
+  0-RTT.
+
+Zwei Dinge zum Mitdenken: UDP-Flows brauchen Conntrack-Timeouts, die eine Firewall ihnen
+standardmäßig vielleicht nicht gibt, und `quic_gso` (der `http`-Kontext) ist Ihre Sache in
+`nginx.conf`, wenn Sie es wollen — Kapkan rendert beides nicht.
+
 ## Was der Knoten bei Ausfällen tut
 
 | Ausfall | Verhalten |
@@ -278,7 +408,10 @@ wenn ihre Kandidatenmenge die richtigen Clients benennt.
   [Metriken](/docs/metrics#edge-knoten).
 - **Das Inventar des Gehirns**, `GET /api/v1/edge/nodes`, verbindet die Lebendigkeit jedes
   konfigurierten Knotens mit seinem letzten Selbstreport: Version, Dry-Run, gerenderter ETag, Art
-  und Version des Terminators, Generation und Testergebnis, Zertifikate (niemals ein Schlüssel)
+  und Version des Terminators, seine HTTP/3-Bereitschaft (`terminator.h3.state`: `ready`,
+  `no_module`, `node_off`, `unknown`, mit einem Hinweis, wenn der nginx-Kern des Builds in den
+  Bereich eines veröffentlichten QUIC-Sicherheitshinweises fällt),
+  Generation und Testergebnis, Zertifikate (niemals ein Schlüssel)
   und den **Zonenabschnitt** — das letzte Zehn-Sekunden-Fenster jeder Zone, die Quellen, die sie
   abgewiesen oder herausgefordert hat oder hätte, und ob ihre Stufe dort greift oder nur eine
   Vorschau zeigt. Siehe [die API](/docs/api#der-edge-kanal).
@@ -313,8 +446,10 @@ wenn ihre Kandidatenmenge die richtigen Clients benennt.
   das neu gestartete Gehirn ausliefert — ziehen Sie ihn erneut. Ein Gehirn, das ausgefallen
   bleibt, ist etwas anderes: Der Hebel im zwischengespeicherten Dokument endet zu seinem `until`
   (siehe die Ausfalltabelle).
-- **Wildcards und HTTP/3 sind spätere Meilensteine.** `tls.h3` wird heute abgelehnt; jeder Name
-  wird explizit aufgeführt.
+- **Wildcards sind ein späterer Meilenstein.** Jeder Name wird explizit aufgeführt.
+- **HTTP/3 gilt pro Zone und wird gerendert, wo der Knoten es kann**, knotenweit in dem, was nginx
+  vor SNI entscheidet (Retry an, 0-RTT aus), ohne Verbindungsmigration oder Session-Resumption
+  zwischen Knoten — siehe [HTTP/3 (QUIC)](#http3-quic).
 - **Obergrenzen für Duplikat-Zertifikate.** Zertifikate pro Knoten bedeuten, dass N Knoten auf
   einer Zone N Bestellungen sind; Let's Encrypt begrenzt einen Namen auf etwa fünf pro Woche. Der
   Ausstellungs-Slot des Gehirns und der Erneuerungs-Jitter verteilen sie; `acme.fallback` (ZeroSSL,
