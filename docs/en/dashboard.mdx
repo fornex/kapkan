@@ -72,7 +72,16 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
   challenge with its reason (the node's `zone-rps` trigger) — plus a **Who would be challenged** panel: the sources the
   nodes previewed a challenge or a deny for, the busiest first, with the nodes that saw each. Read
   it before a zone's rung goes live; the view says *partial* when a node had to cut part of that
-  set, and warns when nodes cut whole zones from their reports.
+  set, and warns when nodes cut whole zones from their reports. An **HTTP/3** column reads the
+  zone's [HTTP/3](/docs/zones) state: *off* when the zone neither asks for it nor is served over
+  it; *on · 42% · 3/3* when every node reporting the zone serves it, with the share of the last
+  window that arrived over HTTP/3 (the percentage is dropped when the window had no requests);
+  *on · 2/3 ready* in the watch-only treatment when the zone asks and a node cannot serve it —
+  hover the cell to see which nodes serve it over TCP and why (*built without the HTTP/3 module*,
+  *HTTP/3 switched off on the node*, or *the readiness probe failed*), together with any advisory
+  that node's probe raised; and *off · 2 nodes still serving* when the zones file no longer asks
+  for HTTP/3 but a node still holds a QUIC listener, because the file and the fleet disagree until
+  the next generation lands.
 - **Ban table** — every ban, active and historical (with the scrubbing node column when nodes
   are configured).
 - **Traffic / Reports** — live ingress/egress charts built from the in-memory rate
