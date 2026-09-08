@@ -342,13 +342,17 @@ acme:
 status_listen: 127.0.0.1:9102          # /healthz + /metrics; unauthenticated, keep it private
 omit_catch_all: false                  # true when nginx.conf has its own default_server
 disable_ipv6: false                    # true on hosts without an IPv6 stack
+quic:
+  h3: auto                             # auto (default) | off — may this box render HTTP/3 at all
+  # retry: true                        # nginx's quic_retry, node-wide (default on)
+  # omit_anchor: false                 # with omit_catch_all: your own server carries `listen 443 quic reuseport`
 ```
 
 | Clave | Significado |
 | --- | --- |
 | `dry_run` | Ausente o `true`: las decisiones se cuentan y se marcan (`X-Kapkan-Mark: would-deny:<reason>` llega al origen), pero ninguna se aplica. Ponlo en `false` para rechazar. |
 | `controller.url` / `token_env` / `name` | La base de la API del cerebro (sin ruta, sin credenciales en la URL), la variable de entorno que contiene el token **agent**, y el nombre de este nodo — debe coincidir con una entrada `edge.nodes[]` en el cerebro, o cada sondeo será un sonoro `404`. |
-| `state_dir` / `sockets_dir` | Los directorios propios del rol (por defecto `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — nunca los `/var/lib/kapkan` y `/run/kapkan` del cerebro, a los que systemd les cambiaría el propietario y que eliminaría bajo sus pies en un host compartido. Absolutos, sin caracteres que nginx pudiera malinterpretar. |
+| `state_dir` / `sockets_dir` | Los directorios propios del rol (por defecto `/var/lib/kapkan-edge`, `/run/kapkan-edge`) — nunca los `/var/lib/kapkan` y `/run/kapkan` del cerebro, a los que systemd les cambiaría el propietario y que eliminaría bajo sus pies en un host compartido. Absolutos, sin caracteres que nginx pudiera malinterpretar. `state_dir/tls/quic_host.key` es la clave de host QUIC del terminador (32 bytes aleatorios, `0600`), acuñada una vez en el primer arranque del nodo y conservada entre reinicios para que los tokens de Retry y de stateless reset sobrevivan a una recarga; bórrala para acuñar una nueva. |
 | `socket_group` | El grupo de los workers del terminador. Los sockets de decisión, de log y de la página de pase son `0660` para él; el socket de challenge ACME es `0666` (responde tokens públicos). Vacío deja los tres sockets restringidos por grupo accesibles solo para el propietario. |
 | `terminator.binary` / `main_conf` | Qué ejecutar para `-t` y las recargas, y la configuración principal que pasar como `-c`. Ese archivo debe hacer `include /var/lib/kapkan-edge/conf/live/*.conf;` una sola vez, dentro de `http {}`. |
 | `terminator.reload` | `exec` ejecuta `<binary> -s reload` (necesita enviar una señal al master de nginx — la unidad se ejecuta como root); `signal` envía `HUP` al pid de `pid_file`; `command` ejecuta `terminator.command`, p. ej. `[systemctl, reload, nginx]`. |
@@ -358,6 +362,9 @@ disable_ipv6: false                    # true on hosts without an IPv6 stack
 | `acme.disabled` | No emitir nada: las zonas se quedan en `:80` respondiendo `503` (un laboratorio que ejercita todo salvo la emisión). Los certificados aportados por el operador aún no son una funcionalidad. |
 | `status_listen` | Sirve `/healthz` y `/metrics` cuando está definido. Sin autenticación — loopback o una dirección privada. |
 | `omit_catch_all` / `disable_ipv6` | Omite el `default_server` comodín de Kapkan (tu `nginx.conf` ya declara uno) / omite los listeners `[::]` (sin pila IPv6). |
+| `quic.h3` | `auto` (predeterminado) u `off`. El nodo sondea el binario al arrancar (`nginx -V`): con `auto`, HTTP/3 se renderiza para las zonas que lo piden cuando la build lleva `--with-http_v3_module`; `off` no lo renderiza nunca en este nodo — el interruptor para una build cuyo HTTP/3 no te fías, por ejemplo una que la sonda marca con un aviso de seguridad CVE. En cualquier caso, el informe del nodo y `/healthz` llevan un `h3.state`: `ready`, `no_module`, `node_off` o `unknown` (la sonda falló; el nodo no renderiza QUIC entonces). En un nodo que no está `ready`, las zonas que piden HTTP/3 se sirven por TCP. |
+| `quic.retry` | El `quic_retry` de nginx, para todo el nodo — nginx lo decide desde el servidor predeterminado de la dirección antes de que el SNI nombre una zona, así que no puede ser por zona. `true` (predeterminado): cada dirección de cliente nueva demuestra que puede recibir antes de que el handshake le cueste algo al nodo (un Retry es más pequeño que el Initial al que responde, así que un origen suplantado no amplifica nada). `false` ahorra esa ida y vuelta. Cambiarlo es una nueva generación probada en un nodo que renderiza QUIC para al menos una zona; en un nodo sin zonas en h3, el valor simplemente espera al primer renderizado con h3. |
+| `quic.omit_anchor` | Solo con `omit_catch_all: true`. Normalmente el comodín de Kapkan lleva el único `listen 443 quic reuseport` de la dirección; sin el comodín lo lleva un servidor *ancla* QUIC pelado. Ponlo en `true` cuando tu propio servidor predeterminado ya escuche en `443 quic reuseport` — dos `reuseport` en una misma dirección hacen fallar `nginx -t` y la generación se rechaza (la anterior sigue sirviendo). |
 
 <Callout type="warning" title="Un nodo edge arranca en dry-run">
 `dry_run` toma por defecto **true** para un rol remoto — el nodo cuenta y marca lo que
@@ -369,7 +376,7 @@ token agent real: sin uno sus sondeos no llevan identidad y el cerebro lo contar
 | Flag | Por defecto | Descripción |
 | --- | --- | --- |
 | `-config <path>` | `/etc/kapkan/edge.yaml` | La configuración del nodo edge. |
-| `-check` | desactivado | Valida el archivo y lo que nombra en esta máquina — el grupo del socket debe existir y cualquier clave EAB debe estar bien formada (problemas); un token, un binario del terminador o un `main_conf` ausentes son una advertencia — y termina. |
+| `-check` | desactivado | Valida el archivo y lo que nombra en esta máquina — el grupo del socket debe existir y cualquier clave EAB debe estar bien formada (problemas); un token, un binario del terminador o un `main_conf` ausentes son una advertencia — y, cuando el binario está en el `PATH`, imprime lo que dice su `-V`: tipo, versión, núcleo nginx, biblioteca TLS, si tiene el módulo HTTP/3 y podría hacer 0-RTT, la disponibilidad de HTTP/3 del nodo y el `quic.retry` efectivo (un aviso de seguridad CVE para el núcleo de la build es una advertencia, salvo que `quic.h3: off` ya haya desactivado HTTP/3 aquí) — y termina. |
 | `-log-format <fmt>` | `json` | `json` o `text`. |
 | `-log-level <lvl>` | `info` | `debug`, `info`, `warn` o `error`. |
 

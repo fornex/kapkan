@@ -74,7 +74,17 @@ El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea e
   nodos previsualizaron un desafío o una denegación, las más activas primero, con los nodos que
   vieron a cada una. Léelo antes de que el peldaño de una zona pase a producción; la vista dice
   *parcial* cuando un nodo tuvo que recortar parte de ese conjunto, y avisa cuando los nodos
-  recortaron zonas enteras de sus reportes.
+  recortaron zonas enteras de sus reportes. Una columna **HTTP/3** lee el estado de
+  [HTTP/3](/docs/zones) de la zona: *apagado* cuando la zona no lo pide ni se sirve por él;
+  *activo · 42% · 3/3* cuando todos los nodos que informan de la zona la sirven así, con la
+  proporción de la última ventana que llegó por HTTP/3 (el porcentaje se omite si la ventana no
+  tuvo peticiones); *activo · 2/3 listos* con el tratamiento de solo observación cuando la zona lo
+  pide y algún nodo no puede servirla — pasa el cursor por la celda para ver qué nodos la sirven por
+  TCP y por qué (*compilado sin el módulo HTTP/3*, *HTTP/3 desactivado en el nodo* o *la
+  comprobación de disponibilidad falló*), junto con cualquier aviso que haya levantado la sonda de
+  ese nodo; y *apagado · 2 nodos siguen sirviendo* cuando el archivo de zonas ya no pide HTTP/3 pero
+  algún nodo mantiene todavía una escucha QUIC, porque el archivo y la flota discrepan hasta que
+  aterrice la siguiente generación.
 - **Tabla de bloqueos** — todos los bloqueos, activos e históricos (con la columna de nodo de
   scrubbing cuando hay nodos configurados).
 - **Tráfico / Informes** — gráficas de ingress/egress en vivo construidas a partir de los búferes
