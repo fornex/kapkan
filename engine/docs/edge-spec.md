@@ -94,7 +94,7 @@ what keep layers 4–5 reachable.
 ```
 ┌─────────────────────────────── edge box ────────────────────────────────┐
 │  nginx / Angie (systemd unit, operator-installed package)               │
-│   · terminates TLS (:443), later h3 — serves zones from rendered conf   │
+│   · terminates TLS (:443) and, where the build can, HTTP/3 (QUIC UDP/443) │
 │   · auth_request → unix socket (protected zones only)                   │
 │   · access_log → syslog JSON → unix socket                              │
 │                          │            │                                 │
@@ -257,10 +257,17 @@ The channel is the one the scrub node already uses, with a second document famil
   to, GET/HEAD only. `kapkan_edge_cert_not_after_seconds{zone}` is the T−30 d alarm's source;
   the series is dropped when a zone leaves the document.
 - **Wildcard = DNS-01 = a DNS-provider integration:** deferred, v1 issues explicit names only.
-- **Session resumption across a multi-node PoP:** ticket keys must be shared or resumption
-  breaks under anycast; single-node PoPs (v1) skip this. Rotating a shared ticket key via the
-  channel is an E5 design item (short-lived keys make transit acceptable; key material still
-  never includes certificate keys).
+- **Session resumption across a multi-node PoP:** NOT offered, and the E5 design round found
+  it cannot be with per-node ACME. nginx binds a TLS session to the node's certificate through
+  the session id context (SHA-1 over the sess_ctx string, each server certificate's digest, and
+  the client CA names — `ngx_ssl_session_id_context`), and OpenSSL refuses a resumption whose
+  context differs; two nodes with the same shared ticket key but different certificates resume
+  nothing (verified on nginx 1.30.4). Shared ticket keys were built and discarded in E5. Under
+  a 4-tuple ECMP/anycast hash a client rarely changes node, so the cost — one full handshake
+  when it does — is small; a fleet that needs cross-node resumption would render
+  `ssl_certificate` from a variable (identical directive text on every node, at a per-handshake
+  file read) — an E6+ item, not E5. Per-node ticket keys and `ssl_session_cache` cover the
+  common case unchanged.
 
 ---
 

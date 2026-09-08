@@ -70,6 +70,17 @@ These matter only if you run Kapkan's optional in-kernel data plane.
 | **bpffs** | A small filesystem, normally mounted at `/sys/fs/bpf`, where programs and maps can be "pinned" so they outlive the process that created them. |
 | **BTF** | BPF Type Format — type information the kernel publishes about itself, so a program compiled elsewhere can be loaded portably across kernel versions. |
 
+## TLS and HTTP/3
+
+| Term | Meaning |
+| --- | --- |
+| **QUIC** | The transport under HTTP/3: encrypted, multiplexed, over UDP (port 443 for the web). Its handshake is inside TLS 1.3 from the first packet. |
+| **HTTP/3 (h3)** | HTTP over QUIC. An edge zone with `tls.h3: true` is served over it beside TLS-over-TCP, on the nodes whose nginx or Angie carries the HTTP/3 module. |
+| **QUIC Initial** | The first packet of a QUIC handshake — at least 1200 bytes, and what a QUIC handshake flood is made of; the data plane's `quic_initial` match meters it per source. |
+| **Retry (QUIC)** | The server's answer to an Initial from an address it has not seen: a small token the client must echo, proving it can receive before the server spends anything on the handshake. On an edge node it is always on. |
+| **Alt-Svc** | The response header on a TLS-over-TCP answer that tells a browser the origin is also reachable over HTTP/3, and for how long to remember it (`ma`). An edge zone's `tls.h3_options.advertise: false` renders the QUIC listener without it — the canary. |
+| **0-RTT** | QUIC's early data — a resumed connection sending a request in its first packet, before the handshake finishes. Replayable, so an edge node keeps it off. |
+
 ## Kapkan concepts
 
 | Term | Meaning |
