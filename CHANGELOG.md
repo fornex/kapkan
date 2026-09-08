@@ -366,7 +366,23 @@ security-relevant.
   kapkan binary's module graph, and `internal/edge/render/deps_guard_test.go` fails if a
   `quic-go` requirement ever appears in `engine/go.mod` — or if h3probe stops holding one, so
   the guard cannot pass vacuously. Both tools are test-only; `make h3probe` builds the probe.
-  Wiring them into the terminator harness comes with the rest of E5.
+- Edge track, E5.4 (arms) — the HTTP/3 clients drive the real-terminator matrix (edge-spec §8,
+  E5). `TestRealTerminator` gains `serve/h3/*`: on `nginx:stable` and Angie, stock curl reaches a
+  decide zone and a `mode: none` zone over **HTTP/3** (`--http3-only`, status 200, the origin echoes
+  the zone); a first request over TCP negotiates h2 and carries `Alt-Svc`, and a second one with
+  curl's alt-svc cache is h3 (the browser path); the `advertise: false` canary is reachable by a
+  client that asks for h3 explicitly; QUIC to a zone without `tls.h3` is refused while TCP serves
+  it; an unknown SNI over QUIC is refused by the catch-all and, under `omit_catch_all`, by the
+  QUIC anchor; h3probe sees a **Retry** with the default `quic_retry` and none under
+  `quic.retry: false` (the http-level placement takes effect); and, on Linux, the same decisions
+  over h3 as over TCP — a 403 denies, a rate denial is 429 + `Retry-After`, a 200's mark reaches
+  the origin, a 401 lands on the clearance page, the subrequest carries the kapkan headers, and
+  the access log's `proto` is `HTTP/3.0` (what `kapkan_edge_requests_total{protocol="h3"}` counts).
+  On `nginx:1.22` the zone that asked is served over TCP, `--http3-only` fails and the rendered
+  zone file says why. The clients run in containers on the terminator's Docker bridge
+  (`--add-host` per zone), so UDP/443 is never published and the arms behave the same on Docker
+  Desktop and a Linux runner; the harness builds the curl image and cross-compiles h3probe once per
+  run and fails — never skips — when either cannot be had. Test-only; no product change.
 - Edge track, E5.1 — the terminator capability probe and HTTP/3 readiness (edge-spec §8, E5).
   The node now asks its binary `nginx -V` (was `-v`) and learns, beside kind and version, the
   nginx core an Angie build derives from, the TLS library it runs with, whether it was built
