@@ -239,6 +239,7 @@ Go runtime's:
 | `kapkan_edge_cert_not_after_seconds` | gauge | `zone` | Expiry of the zone's certificate as a Unix timestamp — the **T−30 d alarm**: alert when it is less than 30 days away. Dropped when a zone leaves the document. |
 | `kapkan_edge_acme_attempts_total` | counter | `zone`, `result` | Certificate orders: `issued`, `renewed`, `failed` (on either CA), and `fallback` — a certificate obtained from the fallback CA, counted alongside its `issued`/`renewed` entry, so sum `issued+renewed+failed` for attempts. |
 | `kapkan_edge_h3_ready` | gauge | — | `1` when this node may render HTTP/3: its `nginx -V` probe found `--with-http_v3_module` and `edge.yaml`'s `quic.h3` is not `off`. `0` otherwise — the reason (`no_module`, `node_off`, `unknown`) is `terminator.h3.state` in the node's report and `h3.state` on `/healthz`, not a label. The probe runs once at start, so the gauge stays where that probe left it until the node restarts. |
+| `kapkan_edge_requests_total` | counter | `zone`, `protocol` | Requests seen in the terminator's access log, by zone and protocol: `h1`, `h2`, `h3` (the log's `proto` field, `$server_protocol`), `other` (absent — a node whose render predates the field — or unexpected). The share of `h3` is the rollout's progress; the zone label is bounded by the document. |
 
 The brain adds nothing per edge node to its own `/metrics`; a node's liveness and last report
 are read from [`GET /api/v1/edge/nodes`](/docs/api#the-edge-channel), and the zones' rates and

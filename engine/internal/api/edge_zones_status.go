@@ -69,6 +69,22 @@ type EdgeZoneStatus struct {
 	WouldBe          []EdgeZoneWouldBe `json:"would_be,omitempty"`
 	WouldBeTruncated int               `json:"would_be_truncated,omitempty"`
 	Partial          bool              `json:"partial,omitempty"`
+	// H3 is the zone's HTTP/3 across the alive nodes (E5): present when the
+	// zones file asks for it or a node reports it.
+	H3 *EdgeZoneH3 `json:"h3,omitempty"`
+}
+
+// EdgeZoneH3 is one zone's HTTP/3 across the alive nodes.
+type EdgeZoneH3 struct {
+	// Enabled is the zones file's tls.h3 as the brain holds it now.
+	Enabled bool `json:"enabled"`
+	// Serving names the alive nodes whose live generation listens over QUIC
+	// for the zone; Unsupported those where the zone asked and is served over
+	// TCP (the node's terminator.h3.state says why).
+	Serving     []string `json:"serving,omitempty"`
+	Unsupported []string `json:"unsupported,omitempty"`
+	// Requests sums the nodes' last-window requests that arrived over HTTP/3.
+	Requests uint64 `json:"requests,omitempty"`
 }
 
 // EdgeZoneChallengeNode is one node's zone-wide challenge. DryRun says the
@@ -133,6 +149,22 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 		c := o
 		doc.Zones = append(doc.Zones, EdgeZoneStatus{Zone: zone, Override: &c})
 	}
+	// Whether a zone ASKS for HTTP/3 is the zones file's word, brain state;
+	// which nodes serve it is theirs. After the lever pass, so a zone present
+	// only through a lever (no node has reported it) still shows h3.enabled.
+	if cfg.ZonesCfg != nil {
+		for i := range doc.Zones {
+			zs := &doc.Zones[i]
+			for j := range cfg.ZonesCfg.Zones {
+				if z := &cfg.ZonesCfg.Zones[j]; z.Name == zs.Zone && z.TLS.H3 {
+					if zs.H3 == nil {
+						zs.H3 = &EdgeZoneH3{}
+					}
+					zs.H3.Enabled = true
+				}
+			}
+		}
+	}
 	sort.Slice(doc.Zones, func(i, j int) bool { return doc.Zones[i].Zone < doc.Zones[j].Zone })
 	writeJSON(w, http.StatusOK, doc)
 }
@@ -154,6 +186,24 @@ func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
 	}
 	zones := make(map[string]*EdgeZoneStatus)
 	sets := make(map[string]map[string]*wouldBe)
+	// h3 lists a node's serving/unsupported zones by zone, so a zone the node
+	// reports can be marked as it is looped over below.
+	h3 := func(rep EdgeReport, zone string) (serving, unsupported bool) {
+		if rep.Terminator == nil || rep.Terminator.H3 == nil {
+			return false, false
+		}
+		for _, z := range rep.Terminator.H3.Serving {
+			if z == zone {
+				serving = true
+			}
+		}
+		for _, z := range rep.Terminator.H3.Unsupported {
+			if z == zone {
+				unsupported = true
+			}
+		}
+		return serving, unsupported
+	}
 	for _, name := range names {
 		rep := reports[name]
 		doc.ZonesTruncated += rep.ZonesTruncated
@@ -169,6 +219,18 @@ func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
 				sets[z.Zone] = make(map[string]*wouldBe)
 			}
 			zs.Nodes++
+			if serving, unsupported := h3(rep, z.Zone); serving || unsupported || z.H3Requests > 0 {
+				if zs.H3 == nil {
+					zs.H3 = &EdgeZoneH3{}
+				}
+				if serving {
+					zs.H3.Serving = append(zs.H3.Serving, name)
+				}
+				if unsupported {
+					zs.H3.Unsupported = append(zs.H3.Unsupported, name)
+				}
+				zs.H3.Requests += z.H3Requests
+			}
 			if zs.Challenge == "" {
 				zs.Challenge = z.Challenge
 			}

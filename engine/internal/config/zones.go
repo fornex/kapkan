@@ -17,9 +17,9 @@ package config
 // for SHAPE here and for existence on the node that renders it — the brain may
 // not even have that file.
 //
-// E3 scope is deliberately narrow: h3 is refused (E5), and challenge modes are
-// refused (E4). Both are keys already, so a file written for E3 keeps parsing
-// unchanged when those milestones land — they only widen the accepted values.
+// The keys were all present from E3; E4 widened the challenge modes and E5
+// (E5.3) the tls.h3 switch, so a file written for an earlier milestone keeps
+// parsing unchanged — the milestones only widen the accepted values.
 
 import (
 	"errors"
@@ -73,9 +73,29 @@ type Zone struct {
 type ZoneTLS struct {
 	// MinVersion is the lowest TLS version offered: "1.2" (default) or "1.3".
 	MinVersion string `yaml:"min_version"`
-	// H3 enables HTTP/3 for the zone. NOT YET SUPPORTED: QUIC/HTTP3 in earnest
-	// is milestone E5, so E3 refuses true rather than silently ignoring it.
+	// H3 serves the zone over HTTP/3 (QUIC) beside TLS-over-TCP (edge-spec §8,
+	// E5) — on the nodes whose terminator carries the HTTP/3 module and whose
+	// edge.yaml does not switch it off; elsewhere the zone stays on TCP and
+	// the node's report says so. Default false. Turning it on or off is a new
+	// tested generation on every node (a reload); nothing else about a zone is.
 	H3 bool `yaml:"h3"`
+	// H3Options tunes HTTP/3; refused without H3.
+	H3Options ZoneH3Options `yaml:"h3_options"`
+}
+
+// ZoneH3Options is what a zone may tune about its HTTP/3. Both act after SNI
+// has named the zone, which is why they are per zone — Retry, 0-RTT and the
+// host key are node-wide by nginx's design and live in the node's edge.yaml.
+type ZoneH3Options struct {
+	// Advertise controls the Alt-Svc header on TLS-over-TCP responses: true
+	// (default) announces h3; false renders the QUIC listener without
+	// announcing it — the canary reachable only by clients that already speak
+	// HTTP/3 to the name, since a transport has no watch-only mode.
+	Advertise *bool `yaml:"advertise"`
+	// AltSvcMaxAgeSeconds is Alt-Svc's ma — how long a client may remember the
+	// alternative: 60..604800, default 86400. A short value is the rollout
+	// step between the silent canary and the default.
+	AltSvcMaxAgeSeconds int `yaml:"alt_svc_max_age_seconds"`
 }
 
 // ZoneACME selects the zone's certificate authority.
@@ -275,8 +295,23 @@ func (zone *Zone) validate() error {
 	default:
 		return fmt.Errorf("%s: tls.min_version must be %q or %q, got %q", zone.Name, ZoneTLS12, ZoneTLS13, zone.TLS.MinVersion)
 	}
-	if zone.TLS.H3 {
-		return fmt.Errorf("%s: tls.h3 is not supported yet (HTTP/3 is a later milestone); remove the key or set false", zone.Name)
+	if o := &zone.TLS.H3Options; !zone.TLS.H3 {
+		// Options on a zone that does not speak h3 would be a silent no-op;
+		// refusing them tells the author which key they forgot.
+		if o.Advertise != nil || o.AltSvcMaxAgeSeconds != 0 {
+			return fmt.Errorf("%s: tls.h3_options needs tls.h3: true", zone.Name)
+		}
+	} else {
+		if o.Advertise == nil {
+			adv := true
+			o.Advertise = &adv
+		}
+		switch ma := o.AltSvcMaxAgeSeconds; {
+		case ma == 0:
+			o.AltSvcMaxAgeSeconds = edgedoc.DefaultAltSvcMaxAge
+		case ma < edgedoc.MinAltSvcMaxAge || ma > edgedoc.MaxAltSvcMaxAge:
+			return fmt.Errorf("%s: tls.h3_options.alt_svc_max_age_seconds must be %d..%d, got %d", zone.Name, edgedoc.MinAltSvcMaxAge, edgedoc.MaxAltSvcMaxAge, ma)
+		}
 	}
 
 	for _, d := range []struct{ key, url string }{{"acme.directory", zone.ACME.Directory}, {"acme.fallback", zone.ACME.Fallback}} {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -128,11 +129,13 @@ func checkH3(t *testing.T, where string, got *api.EdgeReportH3, want api.EdgeRep
 	if got == nil {
 		t.Fatalf("%s: no h3 section", where)
 	}
-	// The whole object, so a field added to it later cannot go unchecked;
-	// the advisory is long and is matched as a substring below.
+	// The whole object, so a field added to it later cannot go unchecked; the
+	// advisory is long and is matched as a substring below. DeepEqual because
+	// the struct carries slices (serving/unsupported), nil here — these cases
+	// serve a document with no h3 zone.
 	bare := *got
 	bare.Advisory = ""
-	if bare != want {
+	if !reflect.DeepEqual(bare, want) {
 		t.Errorf("%s: h3 = %+v, want %+v (advisory aside)", where, bare, want)
 	}
 	switch {

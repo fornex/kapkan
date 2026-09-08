@@ -67,7 +67,7 @@ func TestNodeReportsRollups(t *testing.T) {
 	start := time.Now().Add(-10 * time.Second).Truncate(time.Second)
 	w := rollup.WindowStats{
 		Zone: "example.com", Start: start, Elapsed: 10 * time.Second, Requests: 300, Decided: 290, Denied: 40, Challenged: 20, Cleared: 5,
-		WouldDeny: 3, WouldChallenge: 7, Status2xx: 230, Status4xx: 60, RPS: 30, WouldBeTruncated: 3,
+		WouldDeny: 3, WouldChallenge: 7, Status2xx: 230, Status4xx: 60, RPS: 30, WouldBeTruncated: 3, H3Requests: 120,
 		Sources: []rollup.SourceStats{
 			{Src: netip.MustParseAddr("203.0.113.1"), Requests: 100, Decided: 100, Denied: 40, DeniedTable: 40, RPS: 10},
 			{Src: netip.MustParseAddr("203.0.113.2"), Requests: 80, Decided: 80, Challenged: 20, RPS: 8},
@@ -85,7 +85,7 @@ func TestNodeReportsRollups(t *testing.T) {
 	rep = n.report()
 	z := rep.Zones[0]
 	if !z.At.Equal(start.Add(10*time.Second)) || z.WindowSeconds != 10 || z.RPS != 30 || z.Requests != 300 || z.Decided != 290 || z.Denied != 40 ||
-		z.Challenged != 20 || z.Cleared != 5 || z.WouldDeny != 3 || z.WouldChallenge != 7 || z.Status2xx != 230 || z.Status4xx != 60 || z.SourcesTruncated != 3 {
+		z.Challenged != 20 || z.Cleared != 5 || z.WouldDeny != 3 || z.WouldChallenge != 7 || z.Status2xx != 230 || z.Status4xx != 60 || z.SourcesTruncated != 3 || z.H3Requests != 120 {
 		t.Fatalf("zone figures (the aggregator's would-be cut must reach sources_truncated): %+v", z)
 	}
 	// The flip bites here: the rung is enforced (challenge_options.dry_run
@@ -270,6 +270,43 @@ func TestTrimReportOrder(t *testing.T) {
 	rep = trimReport(raw)
 	if rep.ZonesTruncated == 0 || shedByLimit(raw, rep) != len(rep.Zones) {
 		t.Fatalf("dropped zones: zones_truncated=%d kept=%d shed=%d", rep.ZonesTruncated, len(rep.Zones), shedByLimit(raw, rep))
+	}
+
+	// The terminator's h3 name lists are shed before the certificates, from the
+	// tail, counted — and the caller's report stays whole, the property the
+	// copy-on-write in trimReport has to get right.
+	raw = api.EdgeReport{
+		Terminator: &api.EdgeReportTerminator{Kind: "nginx"},
+		Certs:      big(0, 0, 40).Certs,
+	}
+	longName := func(prefix string, i int) string {
+		return prefix + strings.Repeat("z", 60) + string(rune('a'+i%26)) + string(rune('a'+i/26))
+	}
+	raw.Terminator.H3 = &api.EdgeReportH3{State: "ready"}
+	for i := 0; i < 1500; i++ {
+		raw.Terminator.H3.Serving = append(raw.Terminator.H3.Serving, longName("serve.", i))
+	}
+	for i := 0; i < 1500; i++ {
+		raw.Terminator.H3.Unsupported = append(raw.Terminator.H3.Unsupported, longName("tcp.", i))
+	}
+	if size(raw) <= maxReportBytes {
+		t.Fatalf("the fixture must exceed the limit to exercise the shed: size=%d", size(raw))
+	}
+	rep = trimReport(raw)
+	h3 := rep.Terminator.H3
+	if size(rep) > maxReportBytes {
+		t.Fatalf("h3 lists not shed enough: size=%d", size(rep))
+	}
+	if h3.ServingTruncated == 0 && h3.UnsupportedTruncated == 0 {
+		t.Fatalf("nothing counted as shed: %+v", h3)
+	}
+	if len(h3.Serving)+h3.ServingTruncated != 1500 || len(h3.Unsupported)+h3.UnsupportedTruncated != 1500 {
+		t.Fatalf("shed count does not add up: serving %d+%d, unsupported %d+%d", len(h3.Serving), h3.ServingTruncated, len(h3.Unsupported), h3.UnsupportedTruncated)
+	}
+	// The certificates were the next tier and stay whole here (the h3 lists were
+	// enough); the caller's H3 is untouched.
+	if len(raw.Terminator.H3.Serving) != 1500 || raw.Terminator.H3.ServingTruncated != 0 {
+		t.Fatalf("trimReport mutated the caller's h3 lists: %+v", raw.Terminator.H3)
 	}
 }
 

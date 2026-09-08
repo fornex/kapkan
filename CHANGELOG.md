@@ -414,6 +414,27 @@ security-relevant.
   TCP and the `proto` field in the access log.
   The node does not pass its readiness to the renderer yet and `tls.h3` is still refused by the
   zones file — both are E5.3.
+- Edge track, E5.3 — the switch is real (edge-spec §8, E5). The zones file accepts `tls.h3:
+  true` and `tls.h3_options {advertise (default true), alt_svc_max_age_seconds 60..604800
+  (default 86400)}` (refused without `h3`); the document carries the options only where they
+  depart from the defaults, so a zones file that merely turns h3 on adds one flag and nothing
+  else. `edge.yaml` gains `quic.retry` (node-wide `quic_retry`, default on) and
+  `quic.omit_anchor` (only with `omit_catch_all`). The node renders QUIC when its readiness is
+  `ready` — module present, `quic.h3` not `off`; a failed probe renders none — passes
+  `quic.retry` and the host-key path through, and mints the key once at its first start
+  (`state_dir/tls/quic_host.key`, 32 random bytes, `0600`, kept across restarts so Retry and
+  stateless-reset tokens survive a reload). Zones asking for h3 on a node that cannot are served
+  over TCP and named: `terminator.h3.serving` / `unsupported` in the report and `/healthz` (one
+  warning per change of the set), plus `terminator.h3.listening` — whether something on the box
+  holds UDP 443 while QUIC listeners are rendered, from `/proc/net/udp`. The rollups count HTTP/3
+  requests from the log's `proto` field: `zones[].h3_requests` in the report, the counter
+  `kapkan_edge_requests_total{zone,protocol=h1|h2|h3|other}` on the node. `GET
+  /api/v1/edge/zones/status` gains `h3 {enabled, serving[], unsupported[], requests}` (`enabled`
+  is the zones file's word, the lists are the alive nodes'). The zones schema is regenerated.
+  Not rendered, still: `ssl_early_data`. Upgrade nodes before zones: a node older than E5
+  refuses a document that carries `h3`, stays on its previous generation with
+  `converged: false`, and installs nothing more — renewed certificates included — until `h3` is
+  removed or the node upgraded; upgrade every node first.
 
 ## [1.7.0] - 2026-09-02
 

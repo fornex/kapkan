@@ -105,6 +105,16 @@ var (
 		Help:      "1 when the node may render HTTP/3 (module present, quic.h3 not off), 0 otherwise.",
 	})
 
+	// EdgeRequestsTotal counts access-log records by zone (bounded by the
+	// document) and protocol: h1, h2, h3 (the log's proto field, E5), other
+	// (an unexpected or absent value).
+	EdgeRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "requests_total",
+		Help:      "Requests seen in the terminator's access log, by zone and protocol (h1, h2, h3, other).",
+	}, []string{"zone", "protocol"})
+
 	// EdgeACMEAttemptsTotal counts issuance attempts by zone and result:
 	// issued, renewed, failed, fallback (the fallback CA was used).
 	EdgeACMEAttemptsTotal = promauto.NewCounterVec(prometheus.CounterOpts{

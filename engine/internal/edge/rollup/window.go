@@ -90,8 +90,11 @@ type WindowStats struct {
 	Status3xx uint64
 	Status4xx uint64
 	Status5xx uint64
-	Bytes     uint64
-	RPS       float64
+	// H3Requests counts the requests that arrived over HTTP/3 (the log's
+	// proto field, E5); the rest came over TCP.
+	H3Requests uint64
+	Bytes      uint64
+	RPS        float64
 	// AdmittedRPS is the rate of decided requests the node did not refuse —
 	// nor WOULD have refused under enforcement — what reached the origin or
 	// the clearance page (a would-challenge preview included, like the 401
@@ -181,6 +184,21 @@ func (a *Aggregator) SetZones(names []string) {
 	a.mu.Unlock()
 }
 
+// protoLabel maps the log's $server_protocol onto the metric's bounded label
+// set: h1 (HTTP/1.x), h2, h3, other (absent — a node whose render predates
+// the field — or unexpected).
+func protoLabel(proto string) string {
+	switch {
+	case len(proto) >= 7 && proto[:7] == "HTTP/1.":
+		return "h1"
+	case proto == "HTTP/2.0", proto == "HTTP/2":
+		return "h2"
+	case proto == "HTTP/3.0", proto == "HTTP/3":
+		return "h3"
+	}
+	return "other"
+}
+
 // Observe folds one record in, closing the current window first if it is
 // over.
 func (a *Aggregator) Observe(r Record) {
@@ -209,6 +227,18 @@ func (a *Aggregator) Observe(r Record) {
 	zs := &zw.stats
 	zs.Requests++
 	zs.Bytes += r.Bytes
+	proto := protoLabel(r.Proto)
+	if proto == "h3" {
+		zs.H3Requests++
+	}
+	// The per-zone counter series is created only once a document is known, so
+	// its `zone` label stays bounded by the document (the docs' guarantee): a
+	// record seen before the first SetZones is still folded into the window
+	// (pruned when the document lands) but does not open a Prometheus series
+	// for an unvetted name.
+	if a.known != nil {
+		metrics.EdgeRequestsTotal.WithLabelValues(r.Zone, proto).Inc()
+	}
 	switch r.Status / 100 {
 	case 2:
 		zs.Status2xx++
