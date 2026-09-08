@@ -76,7 +76,17 @@ Le tableau de bord interroge l'API JSON et restitue tout ce que Kapkan suit en m
   pour lesquelles les nœuds ont prévisualisé un défi ou un refus, les plus actives d'abord, avec les
   nœuds qui ont vu chacune. Lisez-le avant que le palier d'une zone ne passe en production ; la vue
   indique *partiel* quand un nœud a dû couper une partie de cet ensemble, et avertit quand des nœuds
-  ont coupé des zones entières de leurs rapports.
+  ont coupé des zones entières de leurs rapports. Une colonne **HTTP/3** lit l'état
+  [HTTP/3](/docs/zones) de la zone : *arrêt* quand la zone ne le demande pas et n'est pas servie
+  ainsi ; *actif · 42% · 3/3* quand tous les nœuds qui remontent la zone la servent en HTTP/3, avec
+  la part de la dernière fenêtre arrivée en HTTP/3 (le pourcentage disparaît si la fenêtre n'a eu
+  aucune requête) ; *actif · 2/3 prêts* dans le traitement observation seule quand la zone le
+  demande et qu'un nœud ne peut pas la servir — survolez la cellule pour voir quels nœuds la
+  servent en TCP et pourquoi (*compilé sans le module HTTP/3*, *HTTP/3 désactivé sur le nœud* ou
+  *le test de disponibilité a échoué*), avec tout avis remonté par la sonde de ce nœud ; et
+  *arrêt · 2 nœuds servent encore* quand le fichier de zones ne demande plus HTTP/3 mais qu'un nœud
+  garde encore un écouteur QUIC, parce que le fichier et la flotte divergent jusqu'à la génération
+  suivante.
 - **Table de bannissement** — chaque bannissement, actif et historique (avec la colonne du nœud de
   scrubbing lorsque des nœuds sont configurés).
 - **Trafic / Rapports** — des graphiques de trafic entrant/sortant en direct construits à partir des

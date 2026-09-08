@@ -629,8 +629,12 @@ jeton agent.
 ```
 
 `acme_directory`, `acme_fallback`, `extra_directives_file` et `tls.h3` sont omis lorsqu'ils ne sont
-pas définis ; un `acme_directory` absent signifie que le nœud commande auprès de sa propre CA par
-défaut (Let's Encrypt sauf si son `edge.yaml` en dit autrement). La politique porte `dry_run` et les
+pas définis ; `tls.h3_options {advertise, alt_svc_max_age_seconds}` n'apparaît que là où une zone
+s'écarte des valeurs par défaut (`advertise: false`, ou un `ma` non par défaut) — absent signifie
+annoncer, et `86400` — de sorte qu'un fichier de zones qui se contente d'activer `h3` laisse par
+ailleurs les octets et l'ETag du document inchangés. Un `acme_directory` absent signifie que le
+nœud commande auprès de sa propre CA par défaut (Let's Encrypt sauf si son `edge.yaml` en dit
+autrement). La politique porte `dry_run` et les
 `challenge_options` qu'une zone définit ; `clearance_keys` (non montrées) sont les clés de signature
 par zone du palier (celle du jour UTC courant et celle de la veille, chacune honorée 48 h — le
 document porte des secrets, et un nœud le met en cache en `0600`) ; une zone sur laquelle un
@@ -643,12 +647,22 @@ une fois de plus quand il expire.
 
 Le rapport consultatif d'un nœud sur lui-même — version, dry-run côté nœud, l'ETag du document
 qu'il a **rendu** (afin qu'un opérateur puisse repérer un nœud en retard ou qui refuse), le type,
-la version et la vivacité du terminateur, la génération active et son résultat `nginx -t`, les
+la version et la vivacité du terminateur, sa disponibilité HTTP/3 issue de la sonde `nginx -V` du
+nœud (`terminator.h3 {state, module, tls_library, early_data_capable, advisory, serving,
+unsupported, listening}` — `state` vaut `ready`, `no_module`, `node_off` ou `unknown` ; `advisory`
+nomme un avis de sécurité QUIC publié dont la plage contient le cœur nginx du build, à titre
+d'avis : les distributions rétroportent les correctifs sans bouger la version ; `serving` liste les
+zones pour lesquelles la génération active écoute en QUIC, `unsupported` les zones qui l'ont
+demandé et sont servies en TCP ici ; `listening` dit si quelque chose sur la machine tient UDP 443
+alors que des écouteurs QUIC sont générés — la moitié locale de « HTTP/3 est-il joignable ? »,
+l'autre étant le pare-feu, et absent tant qu'aucune zone n'est servie en QUIC ici, ainsi que sur
+une machine sans `/proc/net/udp`), la génération active et son résultat `nginx -t`, les
 certificats qu'il détient (métadonnées publiques uniquement, jamais une clé ; une longue liste est
 tronquée à la limite de 64 KiB du corps, avec un compteur `certs_truncated`), et une **section
 zones** : pour chaque zone qui décide et que la génération active sert, la dernière fenêtre de dix
 secondes close (`at`, `window_seconds`, `rps`, `requests`, `decided`, `denied`, `challenged`,
-`cleared`, `would_deny`, `would_challenge`, `status_2xx..5xx`), le mode de défi de la zone tel que
+`cleared`, `would_deny`, `would_challenge`, `status_2xx..5xx`, `h3_requests` — les requêtes arrivées
+en HTTP/3), le mode de défi de la zone tel que
 le nœud l'applique, si la zone est en observation seule sur ce nœud (`dry_run`) et si son palier n'y
 fait que prévisualiser (`rung_dry_run` : le `dry_run` du nœud, celui de la zone ou le
 `challenge_options.dry_run` propre au palier), un défi global de zone en vigueur
@@ -679,7 +693,16 @@ flotte à la fenêtre près), le mode de défi de la zone, les nœuds sur lesque
 observation seule (`watch_only`) et ceux sur lesquels son palier ne fait que prévisualiser
 (`rung_watch_only` — une zone `manual` ou `auto` met réellement au défi sur les nœuds qui n'y sont
 pas nommés), les nœuds où un défi global de zone est en vigueur et si chacun s'applique ou n'est
-qu'un aperçu, le levier en vigueur (`override`), et **l'ensemble des candidats** : l'union des
+qu'un aperçu, le levier en vigueur (`override`), l'HTTP/3 de la zone sur toute la flotte
+(`h3 {enabled, serving, unsupported, requests}` — `enabled` est le `tls.h3` du fichier de zones tel
+que le cerveau le détient, `serving` les nœuds vivants dont la génération active écoute en QUIC
+pour la zone, `unsupported` ceux où elle l'a demandé et est servie en TCP, `requests` la somme des
+requêtes HTTP/3 de la dernière fenêtre des nœuds ; absent pour une zone dont personne ne parle ni
+ne demande h3. Cet état est construit à partir de la section zones des rapports, qui liste les
+zones **qui décident** : l'HTTP/3 d'une zone en `mode: none` n'apparaît donc que dans le
+`terminator.h3` des nœuds sous [`GET /api/v1/edge/nodes`](#get-apiv1edgenodes) ; `enabled` apparaît
+pour toute zone à laquelle le fichier active h3 et qui est présente ici — remontée par un nœud, ou
+porteuse d'un levier), et **l'ensemble des candidats** : l'union des
 sources pour lesquelles les nœuds ont prévisualisé un défi ou un refus, l'état le plus fort
 conservé, les plus actives d'abord, bornée à 20 par nœud rapporteur (`would_be_truncated` compte le
 reste). `partial` indique que les sources candidates d'un nœud n'ont pas toutes tenu — sa borne par
