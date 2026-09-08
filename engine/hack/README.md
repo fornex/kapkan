@@ -45,6 +45,15 @@ documented: `internal/edge/render/deps_guard_test.go` fails if a `quic-go`
 requirement ever appears in `engine/go.mod` — and fails, too, if `h3probe`
 stops requiring one, so the guard can never pass vacuously.
 
+### Where they run
+
+`internal/edge/render/terminator_test.go`'s HTTP/3 arms (`serve/h3/*`, in
+`terminator_h3_test.go`) build the `h3client` image and cross-compile `h3probe`
+for the container's architecture on first use, once per run, and run both in
+containers on the terminator's Docker bridge — so nothing here needs to be built
+by hand before `make edge-terminator-test`, and a client that cannot speak h3
+fails the run rather than skipping it.
+
 ## h3probe
 
 ```sh
