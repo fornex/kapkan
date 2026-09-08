@@ -351,6 +351,31 @@ security-relevant.
   p50, every sample checked for its status). 108/108; the first run caught three rig bugs and its
   review ten more weaknesses of the rig, none in the product; the results are recorded in
   edge-spec §8.
+- Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
+  rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
+  with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data
+  plane on the edge's interface in front of nginx's UDP/443, a Pebble CA, `h3probe` and tcpdump as
+  witnesses, and a second node whose `nginx -V` is wrapped to hide the module. Arms A–M of the E5
+  plan's acceptance table (G, shared ticket keys, is absent — E5.6 was cut): per-zone h3 is one
+  install and a rate change installs nothing, curl reaches the zone over HTTP/3 and the origin sees
+  it, the TCP answer announces `Alt-Svc` and a client with the cache upgrades, the zone that did not
+  ask refuses QUIC; 429 + `Retry-After`, the clearance page, a cleared cookie and a watch-only
+  zone's `would-deny` mark all over h3; **Retry** seen by `h3probe` and on the wire (the server's
+  first datagram is a long-header Retry shorter than the Initial), the host key unchanged across a
+  reload and a restart, `quic.retry: false` observed; the **Initial-rate cap** sheds a 300-Initial
+  flood in-kernel — the stack sees none of it — while a legitimate h3 handshake completes during
+  it, and the same flood under the brain's dry-run is counted and reaches the stack; 0-RTT provably
+  off (no `ssl_early_data`, `ssl_session_tickets off`, early data never accepted,
+  `early_data_capable: false` reported); the **kill lever** puts every client back on TCP within a
+  second and is previewed under dry-run; h3 survives the brain's death and a node restart from disk;
+  the wrapped node degrades to TCP, says why, and the fleet status names it under `unsupported`
+  beside the serving node; h3 versus h2 p50 recorded for a `mode: none` and a decide zone; MTU 1200
+  breaks h3 cleanly and fast while TCP survives; the `advertise: false` canary announces nothing to
+  the browser path while an explicit client is served, then a short `ma`. Test-only; no product
+  change. The first runs caught nine rig bugs and none in the product; the data-plane facts the rig
+  had to learn — dry-run takes effect at attach and records the would-be verdict beside
+  `dryrun_would_drop`, so "not dropped" is proven at the stack (`Udp InDatagrams`) — are in the
+  script's comments.
 - Edge track, E5.4 (tools) — the two HTTP/3 test clients the E5 arms will be written against.
   `engine/hack/h3client` is stock Debian 13 curl in a container, the ordinary-client half: its
   build ends in `curl -V | grep -q HTTP3`, because `curl --http3` falls back to HTTP/2 rather
