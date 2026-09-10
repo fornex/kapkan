@@ -104,10 +104,11 @@ domains); several tokens may bind the same node, which is how a token is rotated
 
 Without `node` an agent token is a **fleet-wide credential**: it may poll as any node and report as
 any node — the reason a stolen token used to mean rotating it for the whole fleet. What `node`
-changes is impersonation and the rotation radius, not the set of zones: until zones are placed on
-nodes (a later E6 change) every node serves every zone, so a bound token acting as its own node can
-still publish an ACME key authorization for any zone the fleet serves — treat a node compromise as
-a certificate exposure for every zone, and rotate that node's token. An unbound token keeps working
+changes is impersonation and the rotation radius; what limits the set of zones a stolen bound token
+can issue for is the node's [placement scope](/docs/edge#placing-zones-on-nodes): acting as its
+own node it can take the issuance slot and publish an ACME key authorization only for the zones
+that scope covers — every zone on a fleet without scopes. Treat a node compromise as a certificate
+exposure for its node's zones, and rotate that node's token. An unbound token keeps working
 exactly as before, so a fleet migrates one node at a time, and it is named until it is bound: by
 `kapkan -check-config` (a WARNING), in the daemon's log at start and on every reload, and in the
 edge inventory (`unbound_agent_tokens`; per node, `tokens` lists the bound token names and

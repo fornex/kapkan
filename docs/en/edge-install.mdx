@@ -47,6 +47,13 @@ api:
     - { name: edge-2, token_env: KAPKAN_EDGE_2_TOKEN, role: agent, node: edge-2 }
 ```
 
+**Scope zones to nodes** when the fleet has PoPs: give each node the hostgroups whose zones it
+serves (`edge.nodes[].hostgroups: [edge-us]`, with the literal `global` for the fleet-wide
+zones) and each zone its `hostgroup`; a node without a scope serves the global zones only, a
+zone without a hostgroup is global. The rule, the `global` literal, the duplicate-certificate
+arithmetic and the runbook are in [Placing zones on nodes](/docs/edge#placing-zones-on-nodes).
+Scoping any node requires every agent token to be bound, as above.
+
 `kapkan -check-config /etc/kapkan/config.yaml` validates both files (it follows
 `edge.zones_file`), and `kapkan -dump-zones-schema` prints the zones file's JSON schema for
 your editor. Give each node **its own `agent` token, bound to it with `node`**: a bound token is

@@ -655,6 +655,22 @@ headline and the long pole.
   them too); `querier == nil` ⇒ `{available:false}`, a failed query 502. Scope by
   `visibleZone` from the live file (D12, never a column): one uniform 403 for any zone not the
   caller's, counted and logged like the lever's refusal.
+  *Decided in E6.3 (`config.EdgeNode.Hostgroups`, `config.Zone.Hostgroup`, `EdgeNode.Serves`,
+  `buildEdgeDocServed`, `edgeSnapshotFor`):* the placement axis is the hostgroup (D8): a zone's
+  group is `hostgroup | global`, a node's scope `hostgroups | [global]`, and a node serves a zone
+  ⇔ the group ∈ the scope — strict (a label alone narrows), `global` a literal a node may list
+  beside its PoP's group, pre-E6 fleets byte-identical (golden test). Ownership and placement are
+  orthogonal (D9): no inheritance, a shared tenant must agree. `validateEdgeScope` (after
+  hostgroups, before tokens): names exist or are `global`, no duplicates, any scope ⇒ every agent
+  token bound (hard error). `BindZones` checks the zone's group exists and the tenants agree.
+  Each node polls its own document — `edgeSnapshotFor(node)` filters the zones and the four
+  `fill()`s already key on `doc.Zones`, so grants, challenges, keys and levers reach exactly the
+  serving nodes and the ETag is per node for free; the operator's bare GET is the whole file.
+  ACME slot/publish outside the node's scope ⇒ the byte-identical `404 unknown zone`. Status:
+  `placement {hostgroup, nodes, alive}` + `unserved` per file zone, claims outside a node's scope
+  not merged; lever nodes = placement; inventory `hostgroups`/`zones_placed`; `-check-config`
+  prints the matrix and warns about zones nobody covers. Node side: no code, no edge.yaml, no
+  edgedoc field.
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and
@@ -684,12 +700,12 @@ protects layer 3 of the table in §1.
    slot required, logged). *Narrowed in E6.1:* `api.tokens[].node` binds an agent token to one
    node and the brain refuses it as any other on every node-identified route before any side
    effect, so a stolen bound token can no longer impersonate another node (presence, report,
-   slot, publication) and only that node's token needs rotating, not the fleet's. The residual
-   as it stands: acting as its own node, the stolen token still takes the issuance slot and
-   publishes a key authorization for ANY zone the fleet serves, because every node serves every
-   zone until E6.3 places zones on nodes — so until E6.3 the runbook still treats a node
-   compromise as a certificate exposure for every zone (rotate the node's token, then revoke and
-   reissue). An unbound token keeps working through the migration and is named by -check-config,
+   slot, publication) and only that node's token needs rotating, not the fleet's. *Closed in
+   E6.3:* with zones placed on nodes, a stolen bound token acting as its own node takes the
+   issuance slot and publishes a key authorization only for the zones its node's scope covers —
+   the residual is that node's zones, which is the per-node blast radius the design wanted; a
+   fleet that never sets a scope keeps the fleet-wide exposure by its own choice (rotate the
+   node's token, then revoke and reissue for its zones). An unbound token keeps working through the migration and is named by -check-config,
    the log and the inventory until it is bound; the hard requirement is a MAJOR-release item.
 7. **The second metric family bloats the engine** → L7 counters enter through the same
    hostgroup/threshold/baseline machinery, not a parallel engine; review holds that line.

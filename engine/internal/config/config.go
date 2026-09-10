@@ -876,6 +876,75 @@ type Edge struct {
 type EdgeNode struct {
 	// Name identifies the node and must match the name its agent presents.
 	Name string `yaml:"name"`
+	// Hostgroups is the node's placement scope (E6.3, edge-spec D8): the
+	// hostgroups whose zones this node serves, by name, with the literal
+	// "global" for the zones that name no hostgroup. Empty means the global
+	// group alone — so a hostgroup on a zone by itself takes the zone off
+	// every node that does not list that group (isolation and the CA's
+	// duplicate-certificate budget follow the placement by default), and a
+	// fleet without scopes gets byte-identical documents. A scope on any node
+	// requires every agent token to be bound (api.tokens[].node): a scope
+	// enforced against a shared token would be a promise nothing keeps.
+	Hostgroups []string `yaml:"hostgroups"`
+}
+
+// Scope is the node's effective placement scope: its hostgroups, or the
+// global group alone when it lists none.
+func (n *EdgeNode) Scope() []string {
+	if len(n.Hostgroups) == 0 {
+		return []string{GlobalGroup}
+	}
+	return n.Hostgroups
+}
+
+// Serves reports whether the node serves the zone: the zone's placement is in
+// the node's scope.
+func (n *EdgeNode) Serves(z *Zone) bool {
+	p := EdgePlacement(z)
+	for _, hg := range n.Scope() {
+		if hg == p {
+			return true
+		}
+	}
+	return false
+}
+
+// EdgePlacement is the hostgroup a zone is placed in: its `hostgroup`, or the
+// global group when it names none.
+func EdgePlacement(z *Zone) string {
+	if z.Hostgroup == "" {
+		return GlobalGroup
+	}
+	return z.Hostgroup
+}
+
+// EdgeNodesServing names the configured edge nodes that serve the zone, in
+// configuration order; empty when no node's scope covers its placement.
+func (c *Config) EdgeNodesServing(z *Zone) []string {
+	if c.Edge == nil {
+		return nil
+	}
+	var out []string
+	for i := range c.Edge.Nodes {
+		if c.Edge.Nodes[i].Serves(z) {
+			out = append(out, c.Edge.Nodes[i].Name)
+		}
+	}
+	return out
+}
+
+// EdgeNodeServes reports whether the named node serves the zone; an unknown
+// node serves nothing.
+func (c *Config) EdgeNodeServes(node string, z *Zone) bool {
+	if c.Edge == nil {
+		return false
+	}
+	for i := range c.Edge.Nodes {
+		if c.Edge.Nodes[i].Name == node {
+			return c.Edge.Nodes[i].Serves(z)
+		}
+	}
+	return false
 }
 
 // Dataplane configures the in-kernel XDP filter. Everything here is policy the
@@ -1363,9 +1432,29 @@ func (c *Config) tenantLabelsInUse() map[string]bool {
 func (c *Config) BindZones(z *Zones) error {
 	tenants := c.tenantLabelsInUse()
 	if z != nil {
+		groups := make(map[string]Group, len(c.Groups))
+		for _, g := range c.Groups {
+			groups[g.Name] = g
+		}
 		for i := range z.Zones {
-			if t := z.Zones[i].Tenant; t != "" {
+			zn := &z.Zones[i]
+			if t := zn.Tenant; t != "" {
 				tenants[t] = true
+			}
+			// Placement (E6.3): the hostgroup must exist — a typo would place
+			// the zone on no node and serve it nowhere, silently — and when
+			// both the group and the zone carry a tenant they must agree:
+			// ownership and placement are two axes, nothing is inherited, and
+			// a zone owned by one tenant served from another's group is a
+			// mistake, not a policy.
+			if zn.Hostgroup != "" && zn.Hostgroup != GlobalGroup {
+				g, ok := groups[zn.Hostgroup]
+				if !ok {
+					return fmt.Errorf("zones[%q]: hostgroup %q is not a hostgroup of this configuration", zn.Name, zn.Hostgroup)
+				}
+				if g.Tenant != "" && zn.Tenant != "" && g.Tenant != zn.Tenant {
+					return fmt.Errorf("zones[%q]: tenant %q differs from hostgroup %q's tenant %q; ownership and placement must agree (nothing is inherited)", zn.Name, zn.Tenant, zn.Hostgroup, g.Tenant)
+				}
 			}
 		}
 	}
@@ -1375,6 +1464,49 @@ func (c *Config) BindZones(z *Zones) error {
 		}
 	}
 	c.ZonesCfg = z
+	return nil
+}
+
+// validateEdgeScope checks the nodes' placement scopes (E6.3) once the
+// hostgroups are resolved: every name is a hostgroup or the literal global, a
+// node lists each once, and a fleet that scopes any node has every agent token
+// bound to its node — a scope enforced against a shared token would be a
+// confidentiality promise nothing keeps. Files without scopes are untouched.
+// Runs before validateAPITokens (which resolves TokenSpecs), so it reads the
+// raw token list.
+func (c *Config) validateEdgeScope() error {
+	if c.Edge == nil {
+		return nil
+	}
+	groups := make(map[string]bool, len(c.Groups)+1)
+	for _, g := range c.Groups {
+		groups[g.Name] = true
+	}
+	groups[GlobalGroup] = true
+	scoped := false
+	for i := range c.Edge.Nodes {
+		n := &c.Edge.Nodes[i]
+		seen := make(map[string]bool, len(n.Hostgroups))
+		for j, hg := range n.Hostgroups {
+			if !groups[hg] {
+				return fmt.Errorf("edge.nodes[%q].hostgroups[%d]: %q is not a hostgroup of this configuration (nor the literal %q)", n.Name, j, hg, GlobalGroup)
+			}
+			if seen[hg] {
+				return fmt.Errorf("edge.nodes[%q].hostgroups: %q is listed twice", n.Name, hg)
+			}
+			seen[hg] = true
+		}
+		if len(n.Hostgroups) > 0 {
+			scoped = true
+		}
+	}
+	if scoped {
+		for _, tk := range c.API.Tokens {
+			if Role(tk.Role) == RoleAgent && tk.Node == "" {
+				return fmt.Errorf("edge.nodes[].hostgroups scopes zones to nodes, but api.tokens[%q] is an agent token bound to no node; bind every agent token (api.tokens[].node) before scoping — a scope enforced against a shared token is a promise nothing keeps", tk.Name)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1577,6 +1709,9 @@ func (c *Config) validate() error {
 	}
 	if _, err := netip.ParseAddrPort(normalizeListen(c.API.Listen)); err != nil {
 		return fmt.Errorf("api.listen: invalid address %q: %w", c.API.Listen, err)
+	}
+	if err := c.validateEdgeScope(); err != nil {
+		return err
 	}
 	if err := c.validateAPITokens(); err != nil {
 		return err

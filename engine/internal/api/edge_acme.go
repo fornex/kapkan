@@ -242,18 +242,16 @@ func (c *issuanceCoordinator) sweepLocked(now time.Time) {
 	}
 }
 
-// edgeACMEZoneKnown reports whether the zones document has this zone.
-func (s *Server) edgeACMEZoneKnown(zone string) bool {
-	z := s.store.Get().ZonesCfg
-	if z == nil {
-		return false
-	}
-	for _, zz := range z.Zones {
-		if zz.Name == zone {
-			return true
-		}
-	}
-	return false
+// edgeACMEZoneServed reports whether the node's document has this zone: it is
+// in the zones file AND the node's placement scope covers it (E6.3). A zone
+// the node does not serve is, for it, no different from a zone that does not
+// exist — the same "unknown zone" 404, so a node (or a leaked bound token)
+// cannot take the issuance slot or publish a key authorization for a zone it
+// was never placed on.
+func (s *Server) edgeACMEZoneServed(node, zone string) bool {
+	cfg := s.store.Get()
+	z := zoneInFile(cfg, zone)
+	return z != nil && cfg.EdgeNodeServes(node, z)
 }
 
 // EdgeSlotRequest is the body of POST /api/v1/edge/nodes/{name}/acme/slot.
@@ -292,7 +290,7 @@ func (s *Server) handleEdgeACMESlot(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if !s.edgeACMEZoneKnown(req.Zone) {
+	if !s.edgeACMEZoneServed(name, req.Zone) {
 		writeError(w, http.StatusNotFound, "unknown zone")
 		return
 	}
@@ -334,7 +332,7 @@ func (s *Server) handleEdgeACMEChallenge(w http.ResponseWriter, r *http.Request)
 	if !decodeEdgeACMEBody(w, r, &req) {
 		return
 	}
-	if !s.edgeACMEZoneKnown(req.Zone) {
+	if !s.edgeACMEZoneServed(name, req.Zone) {
 		writeError(w, http.StatusNotFound, "unknown zone")
 		return
 	}

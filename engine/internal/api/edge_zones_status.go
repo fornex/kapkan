@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 )
 
@@ -93,6 +94,21 @@ type EdgeZoneStatus struct {
 	// its report (E6.2) — the zone's expiry without the inventory. Public
 	// metadata only, never a key: the report type forbids it.
 	Certs []EdgeZoneCert `json:"certs,omitempty"`
+	// Placement is where the zones file puts the zone (E6.3): its hostgroup
+	// (global when it names none), the configured nodes whose scope covers it
+	// and which of them are alive. Present for every zone of the file;
+	// Unserved says the zone has nodes but none alive — the operator's alarm
+	// (a zone with no node at all shows nodes: [] and is a -check-config
+	// warning, not an alarm here).
+	Placement *EdgeZonePlacement `json:"placement,omitempty"`
+	Unserved  bool               `json:"unserved,omitempty"`
+}
+
+// EdgeZonePlacement is a zone's placement across the fleet.
+type EdgeZonePlacement struct {
+	Hostgroup string   `json:"hostgroup"`
+	Nodes     []string `json:"nodes"`
+	Alive     []string `json:"alive"`
 }
 
 // EdgeZoneH3 is one zone's HTTP/3 across the alive nodes.
@@ -149,8 +165,17 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 	c := callerFrom(r)
 	cfg := s.store.Get()
 	visible := func(zone string) bool { return visibleZone(c, cfg, zone) }
+	// A node's claims about a zone its placement does not cover are not
+	// merged (E6.3): the report is stored verbatim for the inventory, but the
+	// zone's status is the word of the nodes that serve it. A zone outside the
+	// file has no placement and is shown as before.
+	serves := func(node, zone string) bool {
+		z := zoneInFile(cfg, zone)
+		return z == nil || cfg.EdgeNodeServes(node, z)
+	}
 	staleAfter := edgeStaleAfter(cfg)
 	reports := make(map[string]EdgeReport)
+	aliveNodes := make(map[string]bool)
 	alive := 0
 	if cfg.Edge != nil {
 		for i := range cfg.Edge.Nodes {
@@ -159,12 +184,13 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			alive++
+			aliveNodes[name] = true
 			if rep, _, ok := s.edgeReports.get(name); ok {
 				reports[name] = rep
 			}
 		}
 	}
-	doc := mergeEdgeZonesVisible(reports, visible)
+	doc := mergeEdgeZonesServed(reports, visible, serves)
 	doc.NodesAlive = alive
 	rows := make(map[string]int, len(doc.Zones))
 	for i := range doc.Zones {
@@ -213,6 +239,17 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 				}
 				zs.H3.Enabled = true
 			}
+			// Placement (E6.3): the nodes the file puts the zone on and which
+			// of them are alive. Node names are visible to a tenant (D3).
+			pl := &EdgeZonePlacement{Hostgroup: config.EdgePlacement(z), Nodes: []string{}, Alive: []string{}}
+			for _, name := range cfg.EdgeNodesServing(z) {
+				pl.Nodes = append(pl.Nodes, name)
+				if aliveNodes[name] {
+					pl.Alive = append(pl.Alive, name)
+				}
+			}
+			zs.Placement = pl
+			zs.Unserved = len(pl.Nodes) > 0 && len(pl.Alive) == 0
 		}
 	}
 	// Two more passes over the alive reports, nodes in name order, for the
@@ -232,13 +269,13 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 		doc.CertsTruncated += rep.CertsTruncated
 		if rep.Terminator != nil && rep.Terminator.H3 != nil {
 			for _, zone := range rep.Terminator.H3.Serving {
-				if i, ok := rows[zone]; ok {
+				if i, ok := rows[zone]; ok && serves(name, zone) {
 					h3 := rowH3(&doc.Zones[i])
 					h3.Serving = appendUnique(h3.Serving, name)
 				}
 			}
 			for _, zone := range rep.Terminator.H3.Unsupported {
-				if i, ok := rows[zone]; ok {
+				if i, ok := rows[zone]; ok && serves(name, zone) {
 					h3 := rowH3(&doc.Zones[i])
 					h3.Unsupported = appendUnique(h3.Unsupported, name)
 				}
@@ -246,7 +283,7 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, cert := range rep.Certs {
 			i, ok := rows[cert.Zone]
-			if !ok {
+			if !ok || !serves(name, cert.Zone) {
 				continue
 			}
 			doc.Zones[i].Certs = append(doc.Zones[i].Certs, EdgeZoneCert{Node: name, NotAfter: cert.NotAfter, Issuer: cert.Issuer})
@@ -276,16 +313,17 @@ func appendUnique(list []string, s string) []string {
 }
 
 // mergeEdgeZones folds the alive nodes' reports into one status per zone,
-// every zone visible.
+// every zone visible and every node's claim taken.
 func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
-	return mergeEdgeZonesVisible(reports, func(string) bool { return true })
+	return mergeEdgeZonesServed(reports, func(string) bool { return true }, func(string, string) bool { return true })
 }
 
-// mergeEdgeZonesVisible is mergeEdgeZones over the zones visible says so
-// for: a zone it refuses reaches no row, no would-be set and no h3 list.
-// Deterministic: zones by name, nodes by name, the would-be set by requests
-// then source.
-func mergeEdgeZonesVisible(reports map[string]EdgeReport, visible func(zone string) bool) EdgeZonesStatusDoc {
+// mergeEdgeZonesServed is the merge under both predicates: visible per zone
+// (the caller's tenant, E6.2) and serves per (node, zone) (the node's
+// placement, E6.3) — a node's claim about a zone it does not serve is not
+// merged. Deterministic: zones by name, nodes by name, the would-be set by
+// requests then source.
+func mergeEdgeZonesServed(reports map[string]EdgeReport, visible func(zone string) bool, serves func(node, zone string) bool) EdgeZonesStatusDoc {
 	doc := EdgeZonesStatusDoc{Zones: []EdgeZoneStatus{}}
 	names := make([]string, 0, len(reports))
 	for name := range reports {
@@ -325,7 +363,7 @@ func mergeEdgeZonesVisible(reports map[string]EdgeReport, visible func(zone stri
 		}
 		doc.NodesReporting++
 		for _, z := range rep.Zones {
-			if !visible(z.Zone) {
+			if !visible(z.Zone) || !serves(name, z.Zone) {
 				continue
 			}
 			zs := zones[z.Zone]

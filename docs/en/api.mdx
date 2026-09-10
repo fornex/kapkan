@@ -590,9 +590,11 @@ any of these calls.
 
 #### GET /api/v1/edge/zones
 
-The zone document a node renders and enforces: every zone of the [zones file](/docs/zones)
-with its origins, TLS floor, ACME directories and policy, plus the live issuance grants and
-fanned-out ACME challenges. A plain `GET` returns the document with a content-hash `ETag`; a
+The zone document a node renders and enforces: the zones of the [zones file](/docs/zones) the
+node's [placement scope](/docs/edge#placing-zones-on-nodes) covers — every zone for an
+operator's bare `GET`, or for a fleet that never set a scope — with their origins, TLS floor,
+ACME directories and policy, plus the live issuance grants, fanned-out ACME challenges,
+clearance keys and levers of those zones; the `ETag` is the node's own. A plain `GET` returns the document with a content-hash `ETag`; a
 `GET` whose `If-None-Match` names that ETag is **held** until the document changes — a
 successful reload of the zones file, a certificate challenge published by a node — or up to
 25 s, then answered `304`. A node identifies itself with `?node=<name>`, and **that poll is the
@@ -675,7 +677,8 @@ after the report is stored and without the answer ever waiting for it. Never a l
 #### GET /api/v1/edge/nodes
 
 The node inventory: each configured edge node with its poll liveness joined with its last
-report, plus `tokens` (the agent token names bound to it with `api.tokens[].node`) and
+report, its placement scope (`hostgroups` — the effective scope, `["global"]` for a node
+without one — and `zones_placed`, the zones of the file it covers), plus `tokens` (the agent token names bound to it with `api.tokens[].node`) and
 `last_token` (the name of the token that last polled as it — never a secret); the document carries
 `unbound_agent_tokens` while any agent token is unbound and nodes exist to bind it to (absent
 otherwise) — the migration view of
@@ -708,7 +711,11 @@ file has a row as well — `mode` (its `policy.mode`) and `file_challenge` (its
 the certificate each alive node holds for the zone (`node`, `not_after`, `issuer` — the last
 omitted when the node reports none; metadata only, from the reports; `certs_truncated` on the
 document sums the entries the nodes cut from their reports to fit the size limit, so a short list
-is what survived, not what is held). A `viewer`-rank read. An unscoped token sees every zone,
+is what survived, not what is held). Every file zone also carries its `placement {hostgroup,
+nodes, alive}` — the group the file puts it in, the configured nodes whose scope covers it and
+which of them are alive — and `unserved: true` when it has nodes but none is alive (a zone no
+node's scope covers shows `nodes: []` and is a `-check-config` warning instead). A node's
+claims about a zone outside its scope are stored in its report but not merged here. A `viewer`-rank read. An unscoped token sees every zone,
 labelled ones with their `tenant` (the key is absent on an unlabelled zone); a
 [tenant-scoped](/docs/multi-tenancy) token exactly its own zones — no other tenant's hostname
 in any row, would-be set or HTTP/3 list, and no `tenant` field. Node names are visible to a
@@ -808,7 +815,9 @@ document for ten minutes so every node answers it — the CA's validation may la
 behind a shared address. A live challenge is never overwritten by a different key authorization
 (`409`), a node may hold 16 live challenges, and every call is logged with the node, the zone
 and the token's prefix: an agent token is a certificate-issuing credential, rotate it on any
-node compromise.
+node compromise. Both take only the zones the node's [placement scope](/docs/edge#placing-zones-on-nodes)
+covers: a zone the node does not serve is `404 unknown zone` for it, byte for byte the answer a
+nonexistent zone gets.
 
 #### POST /api/v1/edge/zones/\{name\}/challenge and DELETE
 
