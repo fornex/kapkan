@@ -190,11 +190,17 @@ func edgeDocBytes(doc EdgeDoc) (body []byte, etag string, err error) {
 // placement scope covers (E6.3), and — because every fill below keys on
 // doc.Zones — only the issuance grants, fanned-out challenges, clearance keys
 // and levers of those zones; the ETag is per node for free. An empty node
-// (an operator's bare GET) is the whole document.
+// (an operator's bare GET) is the whole document. A NAMED node the
+// configuration does not have serves nothing — an empty document, never the
+// whole file: a node a reload has just removed may still be parked in a
+// hold, and the answer that ends its service must not hand it every zone's
+// keys (the hold re-checks the name and answers 404; this is the floor
+// under it).
 func (s *Server) edgeSnapshotFor(node string) ([]byte, string, error) {
 	cfg := s.store.Get()
 	var serves func(*config.Zone) bool
 	if node != "" {
+		serves = func(*config.Zone) bool { return false }
 		if n := configuredEdgeNode(cfg, node); n != nil {
 			serves = n.Serves
 		}
@@ -233,9 +239,10 @@ func edgeStaleAfter(cfg *config.Config) time.Duration {
 }
 
 // handleEdgeZones serves the zone document, long-polling per the protocol
-// described in rules.go. Unscoped tokens only: the document lists every
-// tenant's zones (per-node zone scoping is the fleet milestone), so a scoped
-// operator would otherwise learn every other tenant's hostnames from one GET.
+// described in rules.go. Unscoped tokens only: a node's document lists every
+// tenant's zones its placement covers (E6.3) and the bare GET the whole file,
+// so a scoped operator would otherwise learn other tenants' hostnames from
+// one GET.
 func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 	c := callerFrom(r)
 	if !c.unscoped() {
@@ -308,6 +315,13 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		acmeChanged := s.edgeIssuance.Changed()
 		keysChanged := s.edgeClearance.Changed()
 		leverChanged := s.edgeLever.Changed()
+		// A reload may have removed this node (E6.3): the answer that ends
+		// its service is the 404 a first poll would get, never a document —
+		// the whole file least of all.
+		if node != "" && configuredEdgeNode(s.store.Get(), node) == nil {
+			writeError(w, http.StatusNotFound, "unknown edge node")
+			return
+		}
 		body, cur, err := s.edgeSnapshotFor(node)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "encoding zones document failed")
@@ -363,6 +377,10 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 // final look at the store, for the same reason endHold does: "nothing changed"
 // is verified, so a 304 never names a superseded ETag.
 func (s *Server) endEdgeHold(w http.ResponseWriter, node, etag string) {
+	if node != "" && configuredEdgeNode(s.store.Get(), node) == nil {
+		writeError(w, http.StatusNotFound, "unknown edge node")
+		return
+	}
 	if body, cur, err := s.edgeSnapshotFor(node); err == nil && cur != etag {
 		writeRuleDoc(w, body, cur)
 		return

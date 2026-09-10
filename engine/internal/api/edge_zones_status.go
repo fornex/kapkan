@@ -104,9 +104,11 @@ type EdgeZoneStatus struct {
 	Unserved  bool               `json:"unserved,omitempty"`
 }
 
-// EdgeZonePlacement is a zone's placement across the fleet.
+// EdgeZonePlacement is a zone's placement across the fleet. Hostgroup — the
+// operator's topology label — is present for unscoped readers only; a tenant
+// sees the node names (D3) and nothing of how the operator groups them.
 type EdgeZonePlacement struct {
-	Hostgroup string   `json:"hostgroup"`
+	Hostgroup string   `json:"hostgroup,omitempty"`
 	Nodes     []string `json:"nodes"`
 	Alive     []string `json:"alive"`
 }
@@ -240,8 +242,13 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 				zs.H3.Enabled = true
 			}
 			// Placement (E6.3): the nodes the file puts the zone on and which
-			// of them are alive. Node names are visible to a tenant (D3).
-			pl := &EdgeZonePlacement{Hostgroup: config.EdgePlacement(z), Nodes: []string{}, Alive: []string{}}
+			// of them are alive. Node names are visible to a tenant (D3); the
+			// hostgroup is the operator's topology label and stays with the
+			// unscoped reader, like the inventory.
+			pl := &EdgeZonePlacement{Nodes: []string{}, Alive: []string{}}
+			if c.unscoped() {
+				pl.Hostgroup = config.EdgePlacement(z)
+			}
 			for _, name := range cfg.EdgeNodesServing(z) {
 				pl.Nodes = append(pl.Nodes, name)
 				if aliveNodes[name] {
