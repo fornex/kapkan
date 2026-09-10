@@ -402,6 +402,50 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
 
+  storage-clickhouse:
+    name: storage (real ClickHouse)
+    runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        # Pinned to a minor release on purpose: a `latest` that moved under us
+        # would turn a ClickHouse behaviour change into an unrelated red CI.
+        # Bump deliberately, with the storage docs.
+        image: clickhouse/clickhouse-server:25.8
+        ports:
+          - 8123:8123
+        env:
+          # The image restricts a password-less `default` user to localhost;
+          # the runner reaches the service over the bridge. This keeps the
+          # package's stock users.xml (default user, no password, any network).
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 24
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache: true
+          cache-dependency-path: engine/go.sum
+      # The recorder tests pin what the package SENDS; this job pins what a
+      # real ClickHouse DOES with it: the DDL parses, a dropped column comes
+      # back, every table takes rows, the TTL drops a stale row, readonly=2
+      # holds, the edge queries answer in shape. `require` turns the suite's
+      # no-server skip into a failure, so a job that cannot reach the service
+      # fails loudly instead of passing on a skip.
+      - name: Real-ClickHouse suite
+        run: >
+          KAPKAN_CLICKHOUSE=require
+          KAPKAN_CLICKHOUSE_URL=http://127.0.0.1:8123
+          go test -count=1 -v -run TestRealClickHouse ./internal/storage/
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest

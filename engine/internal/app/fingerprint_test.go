@@ -19,6 +19,10 @@ func (f *fakeAuditWriter) WriteAudit(r storage.AuditRow)     { f.rows = append(f
 func (f *fakeAuditWriter) Start(context.Context)             {}
 func (f *fakeAuditWriter) Stop()                             {}
 
+func (f *fakeAuditWriter) WriteEdgeWindows([]storage.EdgeWindowRow) {}
+func (f *fakeAuditWriter) WriteEdgeSources([]storage.EdgeSourceRow) {}
+func (f *fakeAuditWriter) WriteEdgeEvent(storage.EdgeEventRow)      {}
+
 var (
 	fpTestSource = netip.MustParseAddr("198.51.100.7")
 	fpTestVictim = netip.MustParseAddr("203.0.113.9")
