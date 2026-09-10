@@ -183,6 +183,17 @@ func TestLocaleParityRegistered(t *testing.T) {
 // report, and the five ed.h3.tip.* tooltips (324 + 12 = 336) — plus two plural
 // keys, edgeH3ReadyNodes and edgeH3StillServing (10 + 2 = 12 keys; in en, 20 +
 // 4 = 24 forms).
+//
+// The Edge view's zone-history card (E6.7) added 35 strings — the nineteen
+// ed.hist.* of the card itself (its title, the three range ids, the chart and
+// stats labels, and its loading / error / gone / empty / storage-off states),
+// the six ed.srcs.* of the "who would have been challenged over the period"
+// table, ed.state.{denied,challenged} (the two states the stored history has
+// and a ten-second window does not), and the eight ed.ev.* of the fleet-events
+// card (336 + 35 = 371) — plus a NINTH enum group, edgeEventKind, whose
+// sixteen members are the event kinds the write path emits (43 + 16 = 59): an
+// enum rather than sixteen strings so a newer kapkan's seventeenth kind
+// renders as its raw name instead of vanishing.
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -193,9 +204,9 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		{"units", 0, 4},
 		{"plurals", 1, 12},
 		{"plurals", 0, 24},  // 12 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5)
-		{"strings", 0, 336}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5)
-		{"enums", 1, 8},
-		{"enums", 0, 43},
+		{"strings", 0, 371}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +35: ed.hist/srcs/ev/state (E6.7)
+		{"enums", 1, 9},
+		{"enums", 0, 59}, // +16: edgeEventKind (E6.7)
 		{"enumsShort", 1, 1},
 		{"enumsShort", 0, 5},
 	} {

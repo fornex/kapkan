@@ -326,6 +326,61 @@
         return res.json().then(function (r) { return { ok: true, nodes: r.nodes || [] }; });
       }).catch(function () { return { ok: false, nodes: [] }; });
     },
+    /* ---- edge history (E6.6 reads; the Edge view's zone card) ----
+       All three are on-demand reads with a freshness guard in app.js, never
+       part of the 3s poll: they hit ClickHouse, and the windows they read are
+       ten seconds long.
+
+       Three answers are distinct and must stay so:
+         available:false — storage is off. NOT an error and NOT an empty
+           period: the engine never looked at the zone, so the view shows the
+           same "enable storage" ghost the Traffic view uses.
+         forbidden — 403. A tenant-scoped token on another tenant's zone, or
+           on /edge/events at all (the events name nodes). The element is
+           hidden rather than shown as an error: the answer is deliberately
+           uninformative, so there is nothing to report.
+         ok:false — a real failure (502, a dropped connection). Said out loud,
+           because a zone WITH storage on and no answer is not a quiet zone.
+       notFound is the fourth: a zone gone from the zones file (a lever kept
+       its row). Nothing to read, and not a fault. */
+    getEdgeHistory: function (zone, fromISO, toISO, step) {
+      var qs = "zone=" + encodeURIComponent(zone) +
+        "&from=" + encodeURIComponent(fromISO) + "&to=" + encodeURIComponent(toISO) + "&step=" + step;
+      return request("/api/v1/edge/history?" + qs).then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, available: false, points: [] };
+        if (res.status === 404) return { ok: false, notFound: true, available: false, points: [] };
+        if (!res.ok) throw new Error("edge history -> " + res.status);
+        return res.json().then(function (r) {
+          return { ok: true, available: !!r.available, zone: r.zone || zone,
+            /* the brain may raise or cap the step it was asked for — the
+               response's own value is the one the buckets were built with */
+            stepSeconds: r.step_seconds || step, points: r.points || [] };
+        });
+      }).catch(function () { return { ok: false, available: false, points: [] }; });
+    },
+    getEdgeHistorySources: function (zone, fromISO, toISO, state) {
+      var qs = "zone=" + encodeURIComponent(zone) +
+        "&from=" + encodeURIComponent(fromISO) + "&to=" + encodeURIComponent(toISO);
+      if (state) qs += "&state=" + encodeURIComponent(state);
+      return request("/api/v1/edge/history/sources?" + qs).then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, available: false, sources: [] };
+        if (res.status === 404) return { ok: false, notFound: true, available: false, sources: [] };
+        if (!res.ok) throw new Error("edge history sources -> " + res.status);
+        return res.json().then(function (r) {
+          return { ok: true, available: !!r.available, sources: r.sources || [] };
+        });
+      }).catch(function () { return { ok: false, available: false, sources: [] }; });
+    },
+    getEdgeEvents: function (fromISO, toISO) {
+      var qs = "from=" + encodeURIComponent(fromISO) + "&to=" + encodeURIComponent(toISO);
+      return request("/api/v1/edge/events?" + qs).then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, available: false, events: [] };
+        if (!res.ok) throw new Error("edge events -> " + res.status);
+        return res.json().then(function (r) {
+          return { ok: true, available: !!r.available, events: r.events || [] };
+        });
+      }).catch(function () { return { ok: false, available: false, events: [] }; });
+    },
     getTraffic: function (key, fromISO, toISO, step) {
       var qs = "key=" + encodeURIComponent(key);
       if (fromISO) qs += "&from=" + encodeURIComponent(fromISO);
