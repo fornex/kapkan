@@ -59,7 +59,15 @@
 #      200, and a restarted brain has them back within `stale_after`;
 #   G. the two cross-node facts a shared address exposes: a TLS session is
 #      not resumable on the other node (spec §3, sid_ctx), while a clearance
-#      cookie IS honoured there (fleet-wide clearance keys);
+#      cookie IS honoured there (fleet-wide clearance keys). This arm also
+#      records a PRODUCT FINDING it stumbled on: as rendered today a TLS 1.2
+#      session resumes on NO node, its own included, because nginx looks a
+#      session up on the SSL context of the address's default server and
+#      kapkan's catch-all carries no `ssl_session_cache` — the same family as
+#      the `ssl_protocols` behaviour the shared file already documents. The
+#      arm proves the cause with a supported knob (`omit_catch_all`) rather
+#      than asserting it, and only then tests the cross-node claim, so that
+#      claim is not vacuous;
 #   H. MTU: 1200 on ONE leg breaks HTTP/3 for the share of clients hashed to
 #      that node while TCP is untouched;
 #   I. (stretch, ANYCAST_BGP=1, OUTSIDE the acceptance path) the same
@@ -105,6 +113,7 @@ VIP=198.51.100.7
 E1=10.0.1.2;  R1=10.0.1.1          # edge-1's unicast, rtr's end of its leg
 E2=10.0.2.2;  R2=10.0.2.1          # edge-2's unicast, rtr's end of its leg
 CLI=10.1.0.2; RC=10.1.0.1          # the client behind the router
+BURST=10.1.0.50                    # arm C's own source: it gets laddered, the client must not
 BRAIN=203.0.113.20; ORIGIN=203.0.113.30; CA=203.0.113.40; RSVC=203.0.113.1
 ZONE=shop.test                     # global: both nodes serve it, through the VIP
 ZONEB=nodeb.test                   # placed on pop-b: only edge-2 serves it
@@ -126,6 +135,12 @@ cleanup() {
   if [ -d /lab ]; then
     mkdir -p /lab/logs && cp -f /tmp/*.log /tmp/*.out /tmp/*.txt /lab/logs/ 2>/dev/null
     cp -f /tmp/zones.yaml /tmp/brain.yaml /tmp/edge1.yaml /tmp/edge2.yaml /tmp/extra-node.conf /lab/logs/ 2>/dev/null
+    # The rendered configurations too: half of a diagnosis is what nginx was
+    # actually given.
+    for n in 1 2; do
+      d=/lab/logs/render-edge$n; mkdir -p "$d"
+      cp -f /var/lib/kapkan-edge$n/conf/live/*.conf "$d/" 2>/dev/null
+    done
   fi
   kill "$(cat /tmp/brain.pid 2>/dev/null)" 2>/dev/null
   pkill -f "^$KAPKAN " 2>/dev/null; pkill -f "^$PEBBLE " 2>/dev/null
@@ -155,6 +170,12 @@ leg() { # NS IFNAME IP/CIDR PEERNAME PEERIP/CIDR  (peer end lands in rtr)
 leg edge1 e1-r  $E1/30  r-e1  $R1/30
 leg edge2 e2-r  $E2/30  r-e2  $R2/30
 leg cli   cli-r $CLI/24 r-cli $RC/24
+# A second address on the client, for arm C's burst alone. It must NOT be the
+# address every other arm uses: a source that spends a window over its ceiling
+# is promoted by the rollup's flood rule to a table denial for a minute or
+# more, and a 403 from that ladder is indistinguishable, at the client, from
+# the node being gone (run 1 spent four arms on exactly that confusion).
+ip netns exec cli ip addr add $BURST/24 dev cli-r
 # The service network (brain, origin, CA) hangs off the router on a bridge:
 # the nodes reach the brain by UNICAST, over the same router, and the CA
 # reaches the zone through the VIP — so validation crosses the hash.
@@ -321,6 +342,9 @@ node_f() { api op "$B/edge/nodes" | jx "(lambda n: $2)(([n for n in d.get('nodes
 inv_f()  { api op "$B/edge/nodes" | jx "$1"; }
 zst()    { api op "$B/edge/zones/status" | jx "(lambda z: $2)(([z for z in d.get('zones',[]) if z.get('zone')=='$1']+[{}])[0])"; }
 lever()  { code op "$1" "$B/edge/zones/$2/challenge" "${3:-}"; }
+# etag TOKEN NODE -> the ETag of that node's document, unquoted; doc -> its body
+etag()   { ip netns exec cli curl -s -o /dev/null -D - -m5 -H "Authorization: Bearer $(tok "$1")" "$B/edge/zones?node=$2" 2>/dev/null | grep -i '^etag:' | awk '{print $2}' | tr -d '\r"'; }
+doc()    { api "$1" "$B/edge/zones?node=$2"; }
 wait_eq() { local n=$(( $1 * 5 )) want=$2 i; shift 2; for i in $(seq 1 "$n"); do [ "$("$@")" = "$want" ] && return 0; sleep 0.2; done; return 1; }
 wait_ne() { local n=$(( $1 * 5 )) not=$2 i; shift 2; for i in $(seq 1 "$n"); do [ "$("$@")" != "$not" ] && return 0; sleep 0.2; done; return 1; }
 : > /tmp/brain.log
@@ -356,7 +380,7 @@ sleep 0.6
 [ "$(pgrep -fc 'nginx: master')" = "2" ] && ok "two nginx masters are up ($(nginx -v 2>&1 | grep -oE '[0-9.]+$'))" || bad "nginx masters: $(pgrep -fc 'nginx: master')"
 
 # ---------------------------------------------------------------- kapkan edge on both nodes
-edge_yaml() { # N STATE SOCKS
+edge_yaml() { # N STATE SOCKS [OMIT_CATCH_ALL]
 cat > /tmp/edge$1.yaml <<YAML
 dry_run: false
 controller: { url: "http://$BRAIN:8080", token_env: KAPKAN_EDGE_TOKEN, name: edge-$1, report_interval_seconds: 1 }
@@ -366,6 +390,7 @@ socket_group: www-data
 terminator: { binary: nginx, main_conf: /tmp/edge$1-nginx.conf, reload: signal, pid_file: /tmp/edge$1-nginx.pid }
 acme: { contact: ["mailto:lab@example.test"] }
 quic: { h3: auto, retry: true }
+omit_catch_all: ${4:-false}
 status_listen: 127.0.0.1:910$1
 YAML
 }
@@ -379,8 +404,14 @@ start_edge() { # N
     ip netns exec "$(ns_of "$1")" "$KAPKAN" edge -config /tmp/edge$1.yaml -log-format text -log-level info >>/tmp/edge$1.log 2>&1 &
 }
 kill_node() { # N — the whole node at once, as a power cut would (arm D)
-  kill -9 "$(cat /tmp/edge$1-nginx.pid 2>/dev/null)" 2>/dev/null
-  pkill -9 -f "^$KAPKAN edge -config /tmp/edge$1.yaml" 2>/dev/null
+  # Everything in the node's netns, not just the nginx master: SIGKILL on the
+  # master leaves its WORKERS holding the listening sockets and serving
+  # happily (run 1 believed a node was dead while it answered 200s, and the
+  # replacement master could then never bind). `ip netns pids` is the exact
+  # membership list.
+  ip netns pids "$(ns_of "$1")" 2>/dev/null | xargs -r kill -9 2>/dev/null
+  for i in $(seq 1 50); do [ -z "$(ip netns pids "$(ns_of "$1")" 2>/dev/null)" ] && return 0; sleep 0.1; done
+  bad "edge-$1 still has processes in its netns after SIGKILL: $(ip netns pids "$(ns_of "$1")" | tr '\n' ' ')"
 }
 sfield()  { ip netns exec "$(ns_of "$1")" curl -s -m2 "http://127.0.0.1:910$1/healthz" 2>/dev/null | jx "d.get('$2','')"; }
 hcode()   { ip netns exec "$(ns_of "$1")" curl -s -o /dev/null -w '%{http_code}' -m2 "http://127.0.0.1:910$1/healthz" 2>/dev/null; }
@@ -396,18 +427,18 @@ settle() { local i g; for i in $(seq 1 30); do g=$(sfield "$1" generation); slee
 W_TCP='%{http_code} %header{x-kapkan-node}\n'
 W_H3='%{http_code} %{http_version} %header{x-kapkan-node}\n'
 H3TMO=5   # arm H shortens it: a QUIC handshake into a small-MTU path can only time out
-vget()   { ip netns exec cli curl -s -o /dev/null -w "$W_TCP" -m5 --cacert /tmp/pebble-root.crt "https://$ZONE/${1:-$RANDOM}" 2>/dev/null; }
-vh3get() { ip netns exec cli curl -s -o /dev/null -w "$W_H3" -m"$H3TMO" --http3-only --cacert /tmp/pebble-root.crt "https://$ZONE/${1:-$RANDOM}" 2>/dev/null; }
+vget()   { local p=$1; shift; ip netns exec cli curl -s -o /dev/null -w "$W_TCP" -m5 --cacert /tmp/pebble-root.crt "$@" "https://$ZONE/$p" 2>/dev/null; }
+vh3get() { local p=$1; shift; ip netns exec cli curl -s -o /dev/null -w "$W_H3" -m"$H3TMO" --http3-only --cacert /tmp/pebble-root.crt "$@" "https://$ZONE/$p" 2>/dev/null; }
 uget()   { local n=$1; shift; ip netns exec cli curl -s -o /dev/null -w "$W_TCP" -m5 --cacert /tmp/pebble-root.crt --resolve "$ZONE:443:$(ip_of "$n")" "$@" "https://$ZONE/${RANDOM}" 2>/dev/null; }
 ubody()  { local n=$1; shift; ip netns exec cli curl -s -m5 --cacert /tmp/pebble-root.crt --resolve "$ZONE:443:$(ip_of "$n")" "$@" "https://$ZONE/${RANDOM}" 2>/dev/null; }
 # batch N tcp|h3 FILE — N fresh connections through the VIP, one "code node"
 # line each (h3 lines drop the version column once asserted).
 batch() {
-  local n=$1 mode=$2 out=$3 i
+  local n=$1 mode=$2 out=$3 i; shift 3
   : > "$out"
   for i in $(seq 1 "$n"); do
-    if [ "$mode" = h3 ]; then vh3get "b$i-$RANDOM" | awk '{print $1, $3}' >> "$out"
-    else vget "b$i-$RANDOM" >> "$out"; fi
+    if [ "$mode" = h3 ]; then vh3get "b$i-$RANDOM" "$@" | awk '{print $1, $3}' >> "$out"
+    else vget "b$i-$RANDOM" "$@" >> "$out"; fi
   done
 }
 served()  { awk -v n="$1" '$2==n' "$2" 2>/dev/null | wc -l | tr -d ' '; }   # requests attributed to node n
@@ -431,9 +462,15 @@ cat > /tmp/browser.py <<'PY'
 import http.client, ssl, socket, sys, json, re, hashlib, urllib.parse
 zone, ip, count, cookiefile = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 ctx = ssl.create_default_context(cafile="/tmp/pebble-root.crt")
+# connect() is overridden whole, not _create_connection: which internal
+# http.client uses to open the socket varies by version, and when the hook
+# misses, the connection silently goes to the name — which on this rig is the
+# VIP, i.e. whichever node the hash picks. An arm about one named node would
+# then be testing the hash.
 class C(http.client.HTTPSConnection):
-    def _create_connection(self, address, timeout, source_address):
-        return socket.create_connection((ip, 443), timeout, source_address)
+    def connect(self):
+        raw = socket.create_connection((ip, 443), self.timeout)
+        self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
 def conn(): return C(zone, 443, context=ctx, timeout=6)
 def bits(nonce, sol):
     h = hashlib.sha256((nonce + sol).encode()).digest()
@@ -462,32 +499,49 @@ for n in range(count):
         codes["err"] = codes.get("err", 0) + 1
 print(json.dumps({"codes": codes, "solved": solved, "pages": pages, "cookie": bool(cookie)}))
 PY
-# keepalive.py: one connection to each node, a request on each, then it waits
-# for /tmp/ka-go before repeating them — so arm D can kill a node BETWEEN the
-# two rounds and see which connection survived.
+# keepalive.py: one connection to each node, kept WARM with a request every
+# half second, so that when arm D kills a node the only thing that can have
+# broken a connection is the kill — an idle server-side close would otherwise
+# look identical. It reports each connection's status, whether the server
+# asked to close, and how many TCP connections it actually opened, so a
+# silent reconnect cannot pass for a surviving connection.
 cat > /tmp/keepalive.py <<'PY'
 import http.client, ssl, socket, sys, json, os, time
 zone, ip1, ip2 = sys.argv[1], sys.argv[2], sys.argv[3]
 ctx = ssl.create_default_context(cafile="/tmp/pebble-root.crt")
-def mk(ip):
-    class C(http.client.HTTPSConnection):
-        def _create_connection(self, address, timeout, source_address):
-            return socket.create_connection((ip, 443), timeout, source_address)
-    return C(zone, 443, context=ctx, timeout=5)
-def once(c, path):
-    try:
-        c.request("GET", path); r = c.getresponse(); r.read(); return r.status
-    except Exception as e:
-        return type(e).__name__
-c1, c2 = mk(ip1), mk(ip2)
-first = [once(c1, "/ka-1a"), once(c2, "/ka-2a")]
+class Conn:
+    def __init__(self, ip):
+        self.ip, self.opens, self.closed_by_server = ip, 0, 0
+        outer = self
+        # connect() overridden whole: see browser.py. `opens` counts real TCP
+        # opens, so a silent reconnect can never pass for a survivor.
+        class C(http.client.HTTPSConnection):
+            def connect(self):
+                outer.opens += 1
+                raw = socket.create_connection((outer.ip, 443), self.timeout)
+                self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+        self.c = C(zone, 443, context=ctx, timeout=5)
+    def get(self, path):
+        try:
+            self.c.request("GET", path)
+            r = self.c.getresponse(); r.read()
+            if (r.getheader("Connection") or "").lower() == "close" or self.c.sock is None:
+                self.closed_by_server += 1
+            return r.status
+        except Exception as e:
+            return type(e).__name__
+a, b = Conn(ip1), Conn(ip2)
+first = [a.get("/ka-1a"), b.get("/ka-2a")]
 open("/tmp/ka-ready", "w").write("1")
-for _ in range(600):
+warm = []
+for _ in range(1200):
     if os.path.exists("/tmp/ka-go"):
         break
-    time.sleep(0.1)
-second = [once(c1, "/ka-1b"), once(c2, "/ka-2b")]
-print(json.dumps({"first": first, "second": second}))
+    time.sleep(0.5)
+    warm = [a.get("/ka-1w"), b.get("/ka-2w")]
+second = [a.get("/ka-1b"), b.get("/ka-2b")]
+print(json.dumps({"first": first, "warm": warm, "second": second,
+                  "opens": [a.opens, b.opens], "server_closed": [a.closed_by_server, b.closed_by_server]}))
 PY
 
 # ================================================================ ARM A
@@ -508,7 +562,18 @@ for i in $(seq 1 900); do [ "$(certs_seen 1)" -ge 1 ] && [ "$(certs_seen 2)" -ge
 [ "$(certs_seen 1)" -ge 1 ] && ok "edge-1 has a certificate for $ZONE — validated on edge-2, through the fan-out" || { bad "edge-1 issued nothing in 180 s"; grep -i 'acme\|certif' /tmp/edge1.log | tail -3; }
 [ "$(certs_seen 2)" -ge 2 ] && ok "edge-2 has its own certificates ($(certs_seen 2): $ZONE and the placed $ZONEB)" || { bad "edge-2 certificates: $(certs_seen 2)"; grep -i 'acme\|certif' /tmp/edge2.log | tail -3; }
 grep -q 'edge acme challenge published.*node=edge-1' /tmp/brain.log && grep -q 'edge acme challenge published.*node=edge-2' /tmp/brain.log && ok "the brain fanned out a challenge published by each node" || bad "challenge publications: $(grep -c 'challenge published' /tmp/brain.log) lines, nodes $(grep -oE 'challenge published.*node=[a-z0-9-]+' /tmp/brain.log | grep -oE 'node=.*' | sort -u | tr '\n' ' ')"
-grep -q 'slot requested.*granted=false' /tmp/brain.log && ok "at least one issuance slot was refused: the two nodes serialised on the zone ($(grep -c 'granted=false' /tmp/brain.log) refusals)" || bad "no refused slot in the brain log — the nodes never contended"
+# Whether the two nodes happened to collide on one zone at startup is a race —
+# in run 1 they did not, because each took a different zone's slot in the same
+# millisecond and the work was naturally staggered. The serialisation itself is
+# not a race, so it is asserted directly on the route both nodes use: hold the
+# zone's slot as edge-1, then ask for it as edge-2.
+echo "  (natural startup contention: $(grep -c 'granted=false' /tmp/brain.log) refused slot request(s) — a race, so the assertion below does not depend on it)"
+api a1 "$B/edge/nodes/edge-1/acme/slot" -X POST -H 'Content-Type: application/json' -d "{\"zone\":\"$ZONE\"}" > /tmp/slot-hold.json
+[ "$(jx "d['granted']" < /tmp/slot-hold.json)" = "true" ] && ok "edge-1 takes $ZONE's issuance slot on demand" || bad "slot for edge-1: $(cat /tmp/slot-hold.json)"
+api a2 "$B/edge/nodes/edge-2/acme/slot" -X POST -H 'Content-Type: application/json' -d "{\"zone\":\"$ZONE\"}" > /tmp/slot-refused.json
+[ "$(jx "d['granted']" < /tmp/slot-refused.json)" = "false" ] && [ "$(jx "d['holder']" < /tmp/slot-refused.json)" = "edge-1" ] && ok "edge-2 asking for the same zone is refused, and told who holds it (granted:false, holder edge-1, retry_after_seconds $(jx "d.get('retry_after_seconds')" < /tmp/slot-refused.json)) — N nodes on one name are N duplicate orders, so the brain serialises them" || bad "second slot request: $(cat /tmp/slot-refused.json)"
+grep -q 'slot requested.*node=edge-2.*granted=false' /tmp/brain.log && ok "…and the refusal is in the brain's log with the node, the zone and the holder" || bad "no granted=false line naming edge-2: $(grep 'slot requested' /tmp/brain.log | tail -2)"
+api a1 "$B/edge/nodes/edge-1/acme/slot" -X POST -H 'Content-Type: application/json' -d "{\"zone\":\"$ZONE\",\"release\":true}" >/dev/null
 ip netns exec cli curl -sk -m3 https://$CA:15000/roots/0 > /tmp/pebble-root.crt 2>/dev/null
 grep -q 'BEGIN CERTIFICATE' /tmp/pebble-root.crt && ok "fetched Pebble's root for the clients" || bad "could not fetch Pebble's root"
 route_both
@@ -517,7 +582,19 @@ fp() { ip netns exec cli sh -c "openssl s_client -connect $1:443 -servername $ZO
 FP1=$(fp $E1); FP2=$(fp $E2)
 [ -n "$FP1" ] && [ -n "$FP2" ] && [ "$FP1" != "$FP2" ] && ok "the two nodes serve DIFFERENT leaf certificates for one name (per-node ACME: ${FP1:0:17}… vs ${FP2:0:17}…)" || bad "leaf fingerprints: '$FP1' / '$FP2'"
 [ "$(inv_f "d['nodes_total']")" = "2" ] && [ "$(node_f edge-1 "n['alive']")" = "true" ] && [ "$(node_f edge-2 "n['alive']")" = "true" ] && ok "inventory: two nodes, both alive" || bad "inventory: $(inv_f "d['nodes_total']") nodes, alive $(node_f edge-1 "n['alive']")/$(node_f edge-2 "n['alive']")"
-[ -n "$(node_f edge-1 "n['report']['zones_etag']")" ] && [ "$(node_f edge-1 "n['report']['zones_etag']")" = "$(node_f edge-2 "n['report']['zones_etag']")" ] && ok "both nodes report the same zones_etag ($(node_f edge-1 "n['report']['zones_etag']")) — one document, one fleet" || bad "zones_etag: $(node_f edge-1 "n['report']['zones_etag']") vs $(node_f edge-2 "n['report']['zones_etag']")"
+# Each node reports the ETag of the document it was actually handed. Under
+# placement those documents differ (edge-2 also serves the placed zone), so a
+# shared zones_etag is NOT the fleet-health signal an operator might expect —
+# what must hold is that each node's reported ETag is its own document's, and
+# that the zone they share is identical in both.
+# A report carries the ETag verbatim, quotes included, so both sides are
+# compared unquoted.
+ET1R=$(node_f edge-1 "n['report']['zones_etag']" | tr -d '"'); ET2R=$(node_f edge-2 "n['report']['zones_etag']" | tr -d '"')
+[ -n "$ET1R" ] && [ -n "$ET2R" ] && [ "$ET1R" = "$(etag op edge-1)" ] && [ "$ET2R" = "$(etag op edge-2)" ] && ok "each node reports the ETag of its OWN document ($ET1R, $ET2R)" || bad "reported vs served ETag: edge-1 $ET1R/$(etag op edge-1), edge-2 $ET2R/$(etag op edge-2)"
+[ "$ET1R" != "$ET2R" ] && ok "…and the two differ, because edge-2 also serves the placed zone: on a fleet with placement a shared zones_etag is not a health signal" || bad "the two documents have the same ETag despite placement"
+doc op edge-1 | jx "[z for z in d['zones'] if z['name']=='$ZONE']" > /tmp/zone-e1.json
+doc op edge-2 | jx "[z for z in d['zones'] if z['name']=='$ZONE']" > /tmp/zone-e2.json
+cmp -s /tmp/zone-e1.json /tmp/zone-e2.json && [ -s /tmp/zone-e1.json ] && ok "the shared zone's entry is byte-identical in both documents ($(wc -c < /tmp/zone-e1.json) bytes): one name, one policy, whichever node the hash picks" || bad "the shared zone differs between documents: $(cat /tmp/zone-e1.json | cut -c1-120) / $(cat /tmp/zone-e2.json | cut -c1-120)"
 api op "$B/edge/nodes" > /tmp/inventory.json
 grep -qE 'PRIVATE KEY|BEGIN CERTIFICATE|privkey' /tmp/inventory.json && bad "the inventory carries key or certificate bytes" || ok "no key bytes anywhere in the reports ($(wc -c < /tmp/inventory.json) bytes of inventory, certificates named by zone/not_after/issuer only)"
 r=$(vget hello); [ "${r%% *}" = "200" ] && ok "the zone is served through the VIP ($(awk '{print $2}' <<< "$r"))" || bad "the VIP does not serve: '$r'"
@@ -565,13 +642,13 @@ wait_ne 15 "$ET1" sfield 1 accepted_etag && ok "the low ceiling (rps 5) reached 
 sleep 1.5
 dr() { nmetric "$1" 'kapkan_edge_decisions_total{result="deny_rate"'; }
 hashpol 0
-D1_0=$(dr 1); D2_0=$(dr 2); batch 40 tcp /tmp/c-l3.txt
+D1_0=$(dr 1); D2_0=$(dr 2); batch 40 tcp /tmp/c-l3.txt --interface $BURST
 C3_429=$(ncode 429 /tmp/c-l3.txt); C3_200=$(ncode 200 /tmp/c-l3.txt); D1_3=$(( $(dr 1) - D1_0 )); D2_3=$(( $(dr 2) - D2_0 ))
 [ "$C3_429" -ge 1 ] && ok "under L3 the burst is refused: $C3_429 of 40 answered 429, $C3_200 served" || bad "no 429 under L3 at rps 5: $(mix /tmp/c-l3.txt)"
 [ $(( D1_3 * D2_3 )) -eq 0 ] && [ $(( D1_3 + D2_3 )) -ge 1 ] && ok "every rate denial came from ONE node (deny_rate: edge-1 +$D1_3, edge-2 +$D2_3) — one ceiling, as configured" || bad "rate denials on both nodes under L3: edge-1 +$D1_3, edge-2 +$D2_3"
 sleep 2
 hashpol 1
-D1_0=$(dr 1); D2_0=$(dr 2); batch 40 tcp /tmp/c-l4.txt
+D1_0=$(dr 1); D2_0=$(dr 2); batch 40 tcp /tmp/c-l4.txt --interface $BURST
 C4_429=$(ncode 429 /tmp/c-l4.txt); C4_200=$(ncode 200 /tmp/c-l4.txt); D1_4=$(( $(dr 1) - D1_0 )); D2_4=$(( $(dr 2) - D2_0 ))
 [ "$C4_429" -ge 1 ] && [ "$D1_4" -ge 1 ] && [ "$D2_4" -ge 1 ] && ok "under L4 BOTH nodes refused ($C4_429 of 40 were 429, deny_rate edge-1 +$D1_4, edge-2 +$D2_4): the ceiling is per node, and the source met two of them" || bad "L4 ceilings: 429s $C4_429, deny_rate edge-1 +$D1_4, edge-2 +$D2_4"
 python3 - "$C3_200" "$C4_200" "$C3_429" "$C4_429" "$D1_3" "$D2_3" "$D1_4" "$D2_4" > /tmp/arm-c.txt <<'PY'
@@ -598,6 +675,11 @@ ZONE_RPS=1000; zones_yaml; reload_brain; sleep 1.5
 # ================================================================ ARM D
 say "ARM D — a node dies and nobody withdraws: the route still points at it"
 ROUTE0=$(vip_route)
+# A clean-client pre-check, so that a client the ladder has promoted (arm C's
+# burst source is a different address for exactly this reason) can never be
+# mistaken for a node that is gone.
+batch_until 20 tcp /tmp/d-pre.txt 40 20
+[ "$(n200 /tmp/d-pre.txt)" = "20" ] && [ "$(served edge-1 /tmp/d-pre.txt)" -ge 1 ] && [ "$(served edge-2 /tmp/d-pre.txt)" -ge 1 ] && ok "before the kill: 20 of 20 served, both nodes ($(served edge-1 /tmp/d-pre.txt)/$(served edge-2 /tmp/d-pre.txt)) — the client is clean, arm C's burst rode its own address" || bad "the client is not clean before arm D: $(mix /tmp/d-pre.txt)"
 rm -f /tmp/ka-ready /tmp/ka-go
 ip netns exec cli python3 /tmp/keepalive.py $ZONE $E1 $E2 > /tmp/keepalive.out 2>&1 &
 KA_PID=$!
@@ -607,12 +689,18 @@ KILL0=$(date +%s%N)
 kill_node 2
 sleep 0.5; touch /tmp/ka-go
 batch 40 tcp /tmp/d-dead.txt
-D_FAIL=$(nfail /tmp/d-dead.txt); D_OK=$(n200 /tmp/d-dead.txt)
-[ "$D_FAIL" -ge 1 ] && [ "$D_OK" -ge 1 ] && ok "with the route untouched $D_FAIL of 40 requests failed and $D_OK were served — the hash keeps sending a share to a dead node ($(mix /tmp/d-dead.txt))" || bad "dead-node batch: $(mix /tmp/d-dead.txt)"
+D_FAIL=$(ncode 000 /tmp/d-dead.txt); D_OK=$(n200 /tmp/d-dead.txt)
+# The failures must be CONNECTION failures (curl's 000), not a refusal: a 403
+# or a 429 would mean a live node decided something, which is a different
+# story altogether.
+[ "$D_FAIL" -ge 1 ] && [ "$D_OK" -ge 1 ] && [ $((D_FAIL + D_OK)) -eq 40 ] && ok "with the route untouched $D_FAIL of 40 requests failed to connect at all and $D_OK were served — the hash keeps sending a share to a dead node ($(mix /tmp/d-dead.txt))" || bad "dead-node batch: $(mix /tmp/d-dead.txt) (failures must be 000, a connection failure, not a refusal)"
 [ "$(served edge-2 /tmp/d-dead.txt)" = "0" ] && ok "nothing was served BY edge-2 (every success names edge-1)" || bad "edge-2 served after the kill"
 wait "$KA_PID" 2>/dev/null
 KA=$(cat /tmp/keepalive.out)
-[ "$(jx "d['second'][0]" <<< "$KA")" = "200" ] && [ "$(jx "d['second'][1]" <<< "$KA")" != "200" ] && ok "the keepalive connection to edge-1 survived and the one to edge-2 broke ($KA)" || bad "keepalive across the kill: $KA"
+# One TCP connection each, never reopened, and no server-side close: without
+# this the next assertion could pass on a silent reconnect.
+[ "$(jx "d['opens']" <<< "$KA")" = "[1, 1]" ] && [ "$(jx "sum(d['server_closed'])" <<< "$KA")" = "0" ] && ok "each connection was opened once and the server never asked to close it: these are genuinely established connections" || bad "keepalive bookkeeping: $KA"
+[ "$(jx "d['second'][0]" <<< "$KA")" = "200" ] && [ "$(jx "d['second'][1]" <<< "$KA")" != "200" ] && ok "across the kill the connection to edge-1 still answers 200 and the one to edge-2 is gone ($(jx "d['second']" <<< "$KA")) — an anycast address gives an established connection no protection" || bad "keepalive across the kill: $KA"
 wait_eq 20 false node_f edge-2 "n['alive']" && D_LOST_MS=$(( ($(date +%s%N) - KILL0) / 1000000 )) && ok "the inventory marks edge-2 alive:false ${D_LOST_MS} ms after the kill (stale_after_seconds $STALE)" || { D_LOST_MS=0; bad "edge-2 still alive: $(node_f edge-2 "n['alive']")"; }
 [ "$(node_f edge-1 "n['alive']")" = "true" ] && ok "edge-1 is untouched by its neighbour's death" || bad "edge-1 alive: $(node_f edge-1 "n['alive']")"
 [ "$(vip_route)" = "$ROUTE0" ] && ok "the router's VIP route is byte-identical: the brain never touches routing for a zone address ($ROUTE0)" || bad "the VIP route changed by itself: '$ROUTE0' -> '$(vip_route)'"
@@ -632,7 +720,7 @@ batch 40 tcp /tmp/d2-linkdown.txt
 ip netns exec rtr ip link set r-e2 up
 sleep 1
 batch 20 tcp /tmp/d2-back.txt
-[ "$(n200 /tmp/d2-back.txt)" -lt 20 ] && ok "the link back up and the node still dead: the failures return ($(mix /tmp/d2-back.txt)) — link state is not health" || bad "no failures with the link up and the node dead: $(mix /tmp/d2-back.txt)"
+[ "$(ncode 000 /tmp/d2-back.txt)" -ge 1 ] && ok "the link back up and the node still dead: the connection failures return ($(mix /tmp/d2-back.txt)) — link state is not health" || bad "no failures with the link up and the node dead: $(mix /tmp/d2-back.txt)"
 T0=$(date +%s%N); route_one $E1 r-e1
 for i in $(seq 1 100); do batch 5 tcp /tmp/d2-probe.txt; [ "$(n200 /tmp/d2-probe.txt)" = "5" ] && break; done
 D2_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
@@ -697,17 +785,42 @@ fi
 
 # ================================================================ ARM G
 say "ARM G — the two cross-node facts a shared address exposes"
-# A TLS session is bound to the node's own certificate through the session id
-# context (spec §3), so it is not resumable on the other node. TLS 1.3 has no
-# session ids and kapkan renders `ssl_session_tickets off`, so there is nothing
-# to resume there at all (E5 asserts that); 1.2 with the shared cache is the
-# form where a resumption CAN be offered — and is refused across nodes.
-ip netns exec cli sh -c "printf 'GET /g HTTP/1.1\r\nHost: $ZONE\r\nConnection: close\r\n\r\n' | openssl s_client -connect $E1:443 -servername $ZONE -CAfile /tmp/pebble-root.crt -tls1_2 -sess_out /tmp/g.sess -ign_eof" >/tmp/g-out1.txt 2>&1
-[ -s /tmp/g.sess ] && ok "a TLS 1.2 session was saved from edge-1" || bad "no session saved from edge-1: $(grep -iE 'session|error' /tmp/g-out1.txt | head -2 | tr '\n' ' ')"
-ip netns exec cli openssl s_client -connect $E1:443 -servername $ZONE -CAfile /tmp/pebble-root.crt -tls1_2 -sess_in /tmp/g.sess </dev/null >/tmp/g-same.txt 2>&1
-ip netns exec cli openssl s_client -connect $E2:443 -servername $ZONE -CAfile /tmp/pebble-root.crt -tls1_2 -sess_in /tmp/g.sess </dev/null >/tmp/g-other.txt 2>&1
-grep -q 'Reused, TLSv1.2' /tmp/g-same.txt && ok "offered back to edge-1 it is Reused" || bad "resumption on the same node: $(grep -oE 'New|Reused, TLS[^,]*' /tmp/g-same.txt | head -1)"
-grep -q 'Reused' /tmp/g-other.txt && bad "edge-2 RESUMED a session from edge-1 — the sid_ctx binding is not holding" || ok "offered to edge-2 it is New ($(grep -oE 'New, TLS[^,]*' /tmp/g-other.txt | head -1)): one full handshake is the whole price of changing node"
+# A TLS session must not resume on the other node: nginx binds it to the
+# node's own certificate through the session id context (spec §3). TLS 1.3 has
+# no session ids and kapkan renders `ssl_session_tickets off`, so 1.3 has
+# nothing to resume at all (E5 asserts that); TLS 1.2 with the rendered
+# `ssl_session_cache` is the only form in which a resumption can be OFFERED,
+# so it is the form that can test the claim.
+sess() { # SRCNODE DSTNODE FILE — save a session from SRC, offer it to DST
+  local s=$1 d=$2 f=$3
+  ip netns exec cli sh -c "printf 'GET /g HTTP/1.1\r\nHost: $ZONE\r\nConnection: close\r\n\r\n' | openssl s_client -connect $(ip_of "$s"):443 -servername $ZONE -CAfile /tmp/pebble-root.crt -tls1_2 -sess_out /tmp/g-$s.sess -ign_eof" >/tmp/g-save-$s.txt 2>&1
+  ip netns exec cli openssl s_client -connect "$(ip_of "$d")":443 -servername $ZONE -CAfile /tmp/pebble-root.crt -tls1_2 -sess_in "/tmp/g-$s.sess" </dev/null >"$f" 2>&1
+  grep -oE '^(New|Reused)' "$f" | head -1
+}
+r=$(sess 1 1 /tmp/g-default.txt)
+[ -s /tmp/g-1.sess ] && ok "a TLS 1.2 session is issued and saved from edge-1 (the render does carry ssl_session_cache and a session id)" || bad "no session saved from edge-1: $(grep -iE 'session|error' /tmp/g-save-1.txt | head -2 | tr '\n' ' ')"
+# FINDING (product, not rig): as rendered, that session resumes NOWHERE — not
+# even on the node that issued it. nginx looks the session up on the SSL
+# context of the address's DEFAULT server, and kapkan's catch-all default
+# server carries no ssl_session_cache, so the per-zone cache is never
+# consulted. Same family as the ssl_protocols behaviour the shared file
+# already documents. The next two assertions prove it with a supported knob
+# rather than a claim: omit_catch_all makes the zone's own server the
+# address's default, and resumption starts working.
+[ "$r" = "New" ] && ok "as rendered it does NOT resume even on edge-1 ('$r') — see the note above: the catch-all default server has no ssl_session_cache, so no zone on any node resumes a TLS 1.2 session" || bad "expected New on the same node with the catch-all in place, got '$r'"
+edge_yaml 1 $STATE1 $SOCKS1 true; edge_yaml 2 $STATE2 $SOCKS2 true
+kill_node 1; kill_node 2
+node_nginx 1 edge1 $STATE1; node_nginx 2 edge2 $STATE2; sleep 0.8; start_edge 1; start_edge 2
+wait_healthy 1 40 && wait_healthy 2 40 && ok "both nodes restarted with omit_catch_all: their own servers are now the address's default (the QUIC anchor still carries the one reuseport listener)" || bad "a node did not come back under omit_catch_all: $(sfield 1 healthy)/$(sfield 2 healthy)"
+[ "$(cat $STATE1/conf/live/kapkan_00_common.conf | grep -c ssl_reject_handshake)" = "1" ] && ok "edge-1's shared file now holds only the QUIC anchor, no TCP catch-all" || bad "catch-all servers in the shared file: $(grep -c ssl_reject_handshake $STATE1/conf/live/kapkan_00_common.conf)"
+r=$(sess 1 1 /tmp/g-same.txt)
+[ "$r" = "Reused" ] && ok "with the catch-all omitted the same session is Reused on edge-1 — the cache and the code path work; the default server was suppressing them" || bad "resumption on its own node under omit_catch_all: '$r'"
+r=$(sess 1 2 /tmp/g-other.txt)
+[ "$r" = "New" ] && ok "and offered to edge-2, whose cache demonstrably works too, it is New: a session does not cross nodes (spec §3 — the session id context is the node's own certificate)" || bad "edge-2 resumed a session from edge-1: '$r'"
+edge_yaml 1 $STATE1 $SOCKS1; edge_yaml 2 $STATE2 $SOCKS2
+kill_node 1; kill_node 2
+node_nginx 1 edge1 $STATE1; node_nginx 2 edge2 $STATE2; sleep 0.8; start_edge 1; start_edge 2
+wait_healthy 1 40 && wait_healthy 2 40 && ok "the catch-all restored on both nodes" || bad "a node did not come back with the catch-all: $(sfield 1 healthy)/$(sfield 2 healthy)"
 # The clearance cookie is the opposite case, and deliberately so: the keys are
 # the fleet's, so a visitor cleared on one node is cleared on all of them.
 ET1=$(sfield 1 accepted_etag); ET2=$(sfield 2 accepted_etag)
@@ -734,13 +847,35 @@ H3TMO=2   # a QUIC handshake into a 1200-byte path cannot complete; it can only 
 batch 40 h3 /tmp/h-h3.txt; H3TMO=5
 batch 40 tcp /tmp/h-tcp.txt
 H_FAIL=$(nfail /tmp/h-h3.txt)
-[ "$H_FAIL" -ge 1 ] && [ "$H_FAIL" -lt 40 ] && ok "$H_FAIL of 40 --http3-only requests failed — the share hashed to the small-MTU leg (QUIC's floor is 1280 and no client goes below it) ($(mix /tmp/h-h3.txt))" || bad "h3 under a 1200-byte leg: $(mix /tmp/h-h3.txt)"
-[ "$(awk '$1=="200" && $2=="edge-2"' /tmp/h-h3.txt | wc -l | tr -d ' ')" = "0" ] && ok "every h3 success came from the untouched node" || bad "edge-2 served h3 over a 1200-byte path"
+# It is not a share. Whichever of the first requests reaches the small-MTU
+# node teaches this client a 1200-byte path MTU for the VIP, and from then on
+# every HTTP/3 request fails — to either node. So a handful may get through
+# before the lesson lands (how many is the hash's coin toss), and then nothing
+# does; the categorical statement is the poisoned batch below.
+[ "$H_FAIL" -ge 30 ] && ok "$H_FAIL of 40 --http3-only requests failed ($(mix /tmp/h-h3.txt)): QUIC's floor is 1280, and one node below it takes HTTP/3 away for the whole shared address, not for its share of it" || bad "h3 under a 1200-byte leg: $(mix /tmp/h-h3.txt) (expected the great majority to fail)"
+[ "$(awk '$1=="200" && $2=="edge-2"' /tmp/h-h3.txt | wc -l | tr -d ' ')" = "0" ] && ok "no h3 answer ever came from the node behind the small MTU" || bad "edge-2 served h3 over a 1200-byte path"
 [ "$(n200 /tmp/h-tcp.txt)" = "40" ] && [ "$(served edge-2 /tmp/h-tcp.txt)" -ge 1 ] && ok "40 of 40 TCP requests served, edge-2 among them ($(served edge-1 /tmp/h-tcp.txt)/$(served edge-2 /tmp/h-tcp.txt)): TCP clamps its MSS, QUIC has a floor" || bad "TCP under a 1200-byte leg: $(mix /tmp/h-tcp.txt), edge-2 $(served edge-2 /tmp/h-tcp.txt)"
+# The failure does not stay on the bad leg. A path MTU is cached per
+# DESTINATION address, and the destination is the address every node shares —
+# so once the router's ICMP has taught this client that 198.51.100.7 is a
+# 1200-byte path, its HTTP/3 breaks toward the HEALTHY node too. One node's
+# small MTU takes HTTP/3 away from a client for the whole VIP; TCP, which
+# clamps per connection, never notices. Recorded here because it belongs in
+# the guide's failure table.
+ip netns exec cli ip route get $VIP > /tmp/h-pmtu.txt 2>&1
+grep -qE 'mtu 12[0-9][0-9]' /tmp/h-pmtu.txt && ok "the client has cached a 1200-byte path MTU for the VIP itself ($(grep -oE 'mtu [0-9]+' /tmp/h-pmtu.txt | head -1))" || bad "no cached PMTU exception for the VIP: $(tr -s ' \n' ' ' < /tmp/h-pmtu.txt)"
+H3TMO=2; batch 20 h3 /tmp/h-poisoned.txt; H3TMO=5
+[ "$(n200 /tmp/h-poisoned.txt)" = "0" ] && ok "with that cache in place NO HTTP/3 request succeeds, not even to the untouched node ($(mix /tmp/h-poisoned.txt)) — a shared address shares its path MTU" || bad "h3 with a poisoned PMTU cache: $(mix /tmp/h-poisoned.txt)"
 ip netns exec rtr ip link set r-e2 mtu 1500; ip netns exec edge2 ip link set e2-r mtu 1500
+# Restoring the link does not undo the client's cache: the exception has to
+# expire or be flushed. An operator watching only the link will call this a
+# ghost.
+H3TMO=2; batch 10 h3 /tmp/h-stale.txt; H3TMO=5
+[ "$(n200 /tmp/h-stale.txt)" = "0" ] && ok "the link is 1500 again and HTTP/3 is STILL broken ($(mix /tmp/h-stale.txt)): the cached exception outlives the fault that caused it" || bad "h3 recovered without a cache flush: $(mix /tmp/h-stale.txt)"
+ip netns exec cli ip route flush cache
 sleep 0.5
 batch 20 h3 /tmp/h-back.txt
-[ "$(n200 /tmp/h-back.txt)" = "20" ] && [ "$(served edge-2 /tmp/h-back.txt)" -ge 1 ] && ok "the MTU restored: 20 of 20 over HTTP/3, both nodes serving again" || bad "h3 after the MTU restore: $(mix /tmp/h-back.txt), edge-2 $(served edge-2 /tmp/h-back.txt)"
+[ "$(n200 /tmp/h-back.txt)" = "20" ] && [ "$(served edge-2 /tmp/h-back.txt)" -ge 1 ] && ok "after \`ip route flush cache\` on the client: 20 of 20 over HTTP/3, both nodes serving again" || bad "h3 after the MTU restore and flush: $(mix /tmp/h-back.txt), edge-2 $(served edge-2 /tmp/h-back.txt)"
 
 # ================================================================ ARM I (stretch)
 say "ARM I — the withdrawal contract driven by a real speaker (stretch, ANYCAST_BGP=$ANYCAST_BGP, outside the acceptance path)"
@@ -837,7 +972,9 @@ fi
   echo "       so what bounds recovery is the client's next request, not any Kapkan timer"
   echo "arm E  (the node's own signal): /healthz turned 503 ${E_MS} ms after nginx died"
   echo "arm F  (the brain's return): both nodes alive again ${F_MS} ms after it came back (the node's poll backoff)"
-  echo "arm H  (MTU 1200 on one leg): $H_FAIL of 40 h3 requests failed, 40/40 TCP served"
+  echo "arm H  (MTU 1200 on one leg): $H_FAIL of 40 h3 requests failed while TCP was 40/40 — not a share:"
+  echo "       the client caches that path MTU for the VIP itself, so HTTP/3 fails toward the healthy"
+  echo "       node too, and stays broken after the link is repaired until the cache is flushed"
   [ -f /tmp/arm-i.txt ] && cat /tmp/arm-i.txt
 } > /tmp/numbers.txt
 echo
