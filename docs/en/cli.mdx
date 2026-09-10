@@ -31,7 +31,7 @@ of them.
 | `-config <path>` | `configs/dev.yaml` | Path to the YAML [configuration file](/docs/configuration). |
 | `-log-format <fmt>` | `json` | Log output format: `json` (structured, for log collectors) or `text` (human-readable, for local runs). Any value other than `text` is treated as `json`. |
 | `-log-level <lvl>` | `info` | Minimum log level: `debug`, `info`, `warn`, `error`. An unrecognized value falls back to `info`. |
-| `-check-config <path>` | — | Validate the config file at `<path>` and exit — does **not** start the daemon. See [below](#validating-a-config). |
+| `-check-config <path>` | — | Validate the config file at `<path>` and exit — does **not** start the daemon. After the `OK` line it prints warnings for legal but unwise config: static rules that can never fire, and `agent` tokens not bound to a node (`api.tokens[].node`). See [below](#validating-a-config). |
 | `-dump-schema` | `false` | Print the configuration JSON schema to stdout and exit. See [below](#dumping-the-schema). |
 | `-dump-zones-schema` | `false` | Print the JSON schema of the [zones file](/docs/zones) an edge brain serves (`edge.zones_file`) to stdout and exit. |
 | `-version` | `false` | Print the build version and exit. The same version is exposed at runtime via `/api/v1/status` and the `kapkan_build_info` [metric](/docs/metrics). |

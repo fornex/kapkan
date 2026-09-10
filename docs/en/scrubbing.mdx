@@ -126,7 +126,7 @@ scrubbing:
 
 | Key | Meaning |
 | --- | --- |
-| `nodes[].name` | Node identity. **Must equal** the `controller.name` the node's agent presents when it polls, or every poll is a loud `404`. |
+| `nodes[].name` | Node identity. **Must equal** the `controller.name` the node's agent presents when it polls, or every poll is a loud `404`. Bind the node's `agent` token to it with `api.tokens[].node` (see [authentication](/docs/authentication#binding-an-agent-token-to-its-node)): a bound token is refused as any other node, on the rules poll and the report alike. |
 | `nodes[].next_hop` / `next_hop6` | The node's BGP next-hop(s). `next_hop` is required; `next_hop6` is required to divert IPv6 victims to that node. |
 | `nodes[].capacity_mbps` | The node's scrubbing capacity, shown in the console and used by `least_loaded`. `0` means unknown. |
 | `nodes[].hostgroups` | Restricts which [hostgroups](/docs/hostgroups) this node serves. Empty means it accepts any group. A group whose ladder diverts must have a node that serves it, or the scalar `next_hop` as a fallback. |

@@ -536,7 +536,10 @@ document with a content-hash `ETag`; a `GET` whose `If-None-Match` names that ET
 until the table changes or up to 30 s, then answered `304` — a long-poll that gives sub-second
 rule updates over ordinary HTTP. A node identifies itself with `?node=<name>`, and **that poll is
 the node's liveness signal** — so the name must be a configured node (an unknown name is `404`)
-and, outside token-less local mode, the request must carry a real token.
+and, outside token-less local mode, the request must carry a real token. A token bound to a node
+(`api.tokens[].node`) may only poll as that node: another name, or no name, is a uniform `403`
+before any presence is recorded. Presence is stamped only by `agent` tokens — an operator's
+`?node=X` is a preview of X's document and moves no liveness.
 
 ```json
 {
@@ -587,8 +590,13 @@ fanned-out ACME challenges. A plain `GET` returns the document with a content-ha
 successful reload of the zones file, a certificate challenge published by a node — or up to
 25 s, then answered `304`. A node identifies itself with `?node=<name>`, and **that poll is the
 node's liveness signal**, so the name must be a configured `edge.nodes[]` entry (an unknown
-name is `404`) and the request must carry a real token. At most 4 polls per token name and 8 in
-total may be parked at once; a further matching poll is answered `429` with `Retry-After: 1`
+name is `404`) and the request must carry a real token. A token bound to a node
+(`api.tokens[].node`) may only poll, report and coordinate ACME as that node — another node's
+name, or a poll without `?node=`, is a uniform `403` that never names the bound node, refused
+before any presence is stamped or anything stored; only `agent` tokens stamp presence, so an
+operator's `?node=X` is a presence-free preview of X's document. At most 4 polls per token name
+and `max(8, 2 × the number of edge nodes)` in total may be parked at once; a further matching
+poll is answered `429` with `Retry-After: 1`
 (`too many concurrent zone holds`), which the node treats as a failure and backs off from (1 s
 doubling to 30 s) — give each node its own agent token.
 

@@ -43,22 +43,28 @@ edge:
   stale_after_seconds: 15              # a node unheard-from this long counts as lost
 api:
   tokens:
-    - { name: edge-agent, token_env: KAPKAN_EDGE_AGENT_TOKEN, role: agent }
+    - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
+    - { name: edge-2, token_env: KAPKAN_EDGE_2_TOKEN, role: agent, node: edge-2 }
 ```
 
 `kapkan -check-config /etc/kapkan/config.yaml` validates both files (it follows
 `edge.zones_file`), and `kapkan -dump-zones-schema` prints the zones file's JSON schema for
-your editor. Give each node its own `agent` token: the brain parks at most 4 polls per token
-name (8 in total) and answers a further one `429`, which a node treats as a failure and backs
-off from. A zones file that fails to read or validate on a reload **keeps the previous zones
-live** — the brain never serves a half-broken document. Every key is in the
+your editor. Give each node **its own `agent` token, bound to it with `node`**: a bound token is
+refused as any other node before the brain does anything with the name, so a token stolen from
+one box is one box's problem. A zones file that fails to read or validate on a reload **keeps the
+previous zones live** — the brain never serves a half-broken document. Every key is in the
 [zones reference](/docs/zones).
 
-<Callout type="info" title="The agent token is a certificate-issuing credential">
+<Callout type="info" title="The agent token is a certificate-issuing credential — bind it">
 An edge node authenticates with an `agent` token (see [authentication](/docs/authentication)).
 Besides polling the document, it uses that token to coordinate certificate issuance through the
-brain. Keep it in the node's environment file, never in `edge.yaml`, and rotate it if a node is
-compromised.
+brain — so an **unbound** token is a credential for every zone in the fleet, and rotating it on a
+compromise means rotating the whole fleet's. Bind each token to its node (`api.tokens[].node`);
+until every agent token is bound, `-check-config`, the daemon's log and the inventory's
+`unbound_agent_tokens` say so. Migrating a fleet from one shared token: add a bound token per
+node, switch each node's environment file and watch the inventory's `last_token` flip, then
+remove the shared entry last — an unbound token keeps working meanwhile. Keep the token in the
+node's environment file, never in `edge.yaml`.
 </Callout>
 
 ## 2. On the box: nginx or Angie

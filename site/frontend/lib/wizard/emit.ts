@@ -51,7 +51,7 @@ export type StaticRule = {
   action: string;
   profile: string;
 };
-export type ApiToken = { name: string; token_env: string; role: string; tenant: string };
+export type ApiToken = { name: string; token_env: string; role: string; tenant: string; node: string };
 export type Hostgroup = {
   name: string;
   networks: string; // comma-separated CIDRs
@@ -668,6 +668,7 @@ export function emitConfig(s: WizardState): string {
       const parts = [`name: ${tk.name.trim()}`, `token_env: ${q(tk.token_env.trim())}`];
       if (tk.role) parts.push(`role: ${tk.role}`);
       if (tk.tenant.trim()) parts.push(`tenant: ${q(tk.tenant.trim())}`);
+      if (tk.node.trim()) parts.push(`node: ${q(tk.node.trim())}`);
       L.push(`    - {${parts.join(", ")}}`);
     }
   } else if (s.api_token_env.trim()) {

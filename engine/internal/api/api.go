@@ -138,6 +138,9 @@ type Server struct {
 	edgeClearance *clearanceKeyring
 	// edgeLever is the operator's challenge override per zone (edge_lever.go).
 	edgeLever *challengeLever
+	// bindingState rate-limits the token↔node binding refusal log
+	// (node_binding.go).
+	bindingState
 
 	mu     sync.Mutex
 	active map[string]*Attack // keyed by attackKey
@@ -488,25 +491,25 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (caller, b
 			switch {
 			case !matched:
 				match, matched = tk, true
-			case tk.Role != match.Role || tk.Tenant != match.Tenant:
-				// The same bearer matches tokens of DIFFERENT role or
-				// tenant (a reused secret): which principal is this?
-				// Fail closed rather than pick one — a reuse must never
-				// silently widen access. Checked against ALL matches, so
-				// a higher-rank token cannot clear the ambiguity.
+			case tk.Role != match.Role || tk.Tenant != match.Tenant || tk.Node != match.Node:
+				// The same bearer matches tokens of DIFFERENT role, tenant
+				// or node binding (a reused secret): which principal is
+				// this? Fail closed rather than pick one — a reuse must
+				// never silently widen access. Checked against ALL matches,
+				// so a higher-rank token cannot clear the ambiguity.
 				ambiguous = true
 			}
 		}
 	}
 	if !matched || ambiguous {
 		if ambiguous {
-			s.log.Error("ambiguous API token: one secret matches tokens of differing role/tenant; refusing")
+			s.log.Error("ambiguous API token: one secret matches tokens of differing role/tenant/node; refusing")
 		}
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 		return caller{}, false
 	}
-	return caller{role: match.Role, tenant: match.Tenant, token: match.Name}, true
+	return caller{role: match.Role, tenant: match.Tenant, token: match.Name, node: match.Node}, true
 }
 
 // caller is the authenticated principal for a request: its role and its tenant
@@ -520,6 +523,9 @@ type caller struct {
 	// token is the matched API token's Name (for audit attribution); "" in
 	// open/token-less mode.
 	token string
+	// node is the one node this (agent) token is bound to (api.tokens[].node);
+	// "" = unbound. nodeActor enforces it on every node-identified route.
+	node string
 }
 
 // unscoped reports whether the caller sees and may act on every tenant.

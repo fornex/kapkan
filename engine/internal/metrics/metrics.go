@@ -203,6 +203,18 @@ var (
 		Help:      "Rules installed in the local XDP data plane by active bans, by mode (real|dry_run).",
 	}, []string{"mode"})
 
+	// APINodeBindingRefused counts requests refused because an agent token
+	// bound to one node (api.tokens[].node) named another node, by route
+	// (edge_zones, edge_report, edge_acme, dataplane_rules, scrub_report). A
+	// rising count is a misconfigured or leaked token; the log names it, once a
+	// minute per token.
+	APINodeBindingRefused = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "api",
+		Name:      "node_binding_refused_total",
+		Help:      "Requests refused because a node-bound agent token named another node, by route.",
+	}, []string{"route"})
+
 	// MitigateSourceBlocks counts live operator/API source blocks (the
 	// source→victim pairs installed via POST /api/v1/dataplane/sources), by the
 	// pair's frozen dry-run flag. Same mode semantics as the gauges above:

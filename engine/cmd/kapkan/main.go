@@ -111,7 +111,26 @@ func checkConfigFile(path string) int {
 		fmt.Printf("    - %-20s calc=%-8s ban=%-5t  %s\n", g.Name, g.Calc, g.BanEnabled, ladderString(g.Escalation))
 	}
 	printDataplaneWarnings(cfg)
+	printEdgeWarnings(cfg)
 	return 0
+}
+
+// printEdgeWarnings reports the node-channel smells that are legal config but
+// weaken the fleet's trust posture, foremost an agent token bound to no node
+// (edge-spec §9 risk 6): such a token may poll as any node, report as any node
+// and publish an ACME key authorization for any fleet zone. Printed after the
+// OK line, exit code unchanged — the daemon runs it; a MAJOR release is where it
+// becomes an error.
+func printEdgeWarnings(cfg *config.Config) {
+	unbound := cfg.UnboundAgentTokens()
+	if len(unbound) == 0 {
+		return
+	}
+	fmt.Printf("  WARNING: %d agent token(s) are not bound to a node and may act as ANY configured\n"+
+		"           node (poll, report, ACME). Give each node its own token and set api.tokens[].node:\n", len(unbound))
+	for _, name := range unbound {
+		fmt.Printf("    - %s\n", name)
+	}
 }
 
 // printDataplaneWarnings reports the data-plane defects that are legal config
@@ -201,6 +220,9 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	store := config.NewStore(configPath, cfg)
+	// Said at start as well as on every reload (ApplyReload), so an unbound
+	// agent token is never a warning only -check-config would have shown.
+	app.WarnUnboundAgentTokens(log, cfg)
 
 	// Record our pid so `kapkan -s reload|stop` can find us. A failure here is
 	// not fatal — the daemon runs fine, only the CLI signalling shortcut is
