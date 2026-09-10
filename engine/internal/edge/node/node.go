@@ -47,6 +47,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -969,9 +970,13 @@ func (n *Node) postReport(ctx context.Context) {
 		}
 		return
 	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		n.log.Warn("self-report refused", "status", resp.StatusCode)
+		// The brain's error body says why (a 403 names a token bound to
+		// another node — api.tokens[].node); the operator should not have to
+		// guess from a status code.
+		n.log.Warn("self-report refused", "status", resp.StatusCode, "body", strings.TrimSpace(string(respBody)))
 	}
 }
 

@@ -168,7 +168,14 @@ func (s *Server) handleDataplaneRules(w http.ResponseWriter, r *http.Request) {
 	// agent's controller.name must fail loudly here, not leave a node that
 	// polls diligently while the brain counts it dead and re-announces its
 	// victims elsewhere. Optional, so an operator's bare curl still works.
-	if node := r.URL.Query().Get("node"); node != "" {
+	node := r.URL.Query().Get("node")
+	// The token↔node binding, before any side effect: a token bound to one node
+	// may only poll as that node (node_binding.go; the same helper guards the
+	// report path and the edge channel).
+	if _, ok := s.nodeActor(w, r, node, "dataplane_rules"); !ok {
+		return
+	}
+	if node != "" {
 		// A sighting requires a REAL credential. This is the API's one
 		// side-effectful GET, which the POST-only CSRF gate (see guard) does
 		// not cover: in token-less open mode, any browser on the operator's
@@ -184,13 +191,13 @@ func (s *Server) handleDataplaneRules(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "unknown scrubbing node")
 			return
 		}
-		// Token↔node binding is deliberately NOT enforced yet: any agent (or
-		// unscoped operator) token may assert any configured node's presence.
-		// The fleet milestone's per-node token binding must cover BOTH
-		// surfaces — this poll identity and the report path — not reports
-		// alone; whoever implements it, start here.
-		s.mit.NodePollStarted(node)
-		defer s.mit.NodePollEnded(node)
+		// Presence is an AGENT's to stamp: an operator polling with ?node= is
+		// previewing what that node sees and must not make a dead node look
+		// alive (E6.1).
+		if stampsPresence(c) {
+			s.mit.NodePollStarted(node)
+			defer s.mit.NodePollEnded(node)
+		}
 	}
 	body, etag, err := s.ruleSnapshot()
 	if err != nil {
@@ -297,6 +304,16 @@ type holdGate struct {
 
 func newHoldGate(perToken, total int) *holdGate {
 	return &holdGate{perToken: perToken, total: total, byToken: make(map[string]int)}
+}
+
+// setTotal resizes the overall cap (the edge channel scales it with the fleet:
+// once every node polls on its own token, a fixed total would be the visible
+// ceiling on fleet size). Holds already parked are never evicted; a total below
+// the current count simply refuses new holds until releases catch up.
+func (g *holdGate) setTotal(total int) {
+	g.mu.Lock()
+	g.total = total
+	g.mu.Unlock()
 }
 
 // acquire reserves a hold slot for the given token name ("" in token-less

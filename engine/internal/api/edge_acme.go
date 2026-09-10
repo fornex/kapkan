@@ -375,13 +375,18 @@ func (p publishResult) String() string {
 }
 
 // edgeACMECaller applies the edge channel's rules to an ACME request: unscoped
-// token, configured node. It returns the node name.
+// token, the token↔node binding (a bound token may only coordinate as its own
+// node — a leaked token must not acquire a slot or publish a key authorization
+// as another; node_binding.go), configured node. It returns the node name.
 func (s *Server) edgeACMECaller(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if c := callerFrom(r); !c.unscoped() {
 		writeError(w, http.StatusForbidden, "edge ACME coordination is restricted to unscoped tokens")
 		return "", false
 	}
 	name := r.PathValue("name")
+	if _, ok := s.nodeActor(w, r, name, "edge_acme"); !ok {
+		return "", false
+	}
 	if configuredEdgeNode(s.store.Get(), name) == nil {
 		writeError(w, http.StatusNotFound, "unknown edge node")
 		return "", false

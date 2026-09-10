@@ -62,6 +62,20 @@ func startDataplane(cfg *config.Config, log *slog.Logger) (*dataplane.Manager, e
 	return m, nil
 }
 
+// WarnUnboundAgentTokens logs, once per call, the agent tokens that carry no
+// api.tokens[].node while nodes are configured — a fleet-wide credential each
+// (a holder may poll as any node, report as any node and publish a key
+// authorization for any fleet zone). Called at startup and on every reload so
+// the smell is never only in a -check-config a human forgot to run; a hard
+// requirement is scheduled for a MAJOR release.
+func WarnUnboundAgentTokens(log *slog.Logger, cfg *config.Config) {
+	if unbound := cfg.UnboundAgentTokens(); len(unbound) > 0 {
+		log.Warn("agent token(s) not bound to a node: each may act as ANY configured node; "+
+			"set api.tokens[].node on each (one token per node), see the authentication guide",
+			"tokens", unbound)
+	}
+}
+
 // ApplyReload pushes a freshly loaded configuration into the components that
 // cannot simply re-read the store on their next tick.
 //
@@ -75,6 +89,10 @@ func startDataplane(cfg *config.Config, log *slog.Logger) (*dataplane.Manager, e
 // worse than a loud failure to apply one part of it. The restart-required cases
 // are rejected by the store before this is reached.
 func (a *App) ApplyReload(cfg *config.Config) {
+	// Every reload path (SIGHUP, POST /config/reload) lands here: the one
+	// place to re-state a configuration smell that is legal but should not
+	// stay — an agent token nothing binds to a node (edge-spec §9 risk 6).
+	WarnUnboundAgentTokens(a.log, cfg)
 	if a.Dataplane == nil {
 		if cfg.DataplaneEnabled() {
 			a.log.Warn("dataplane.enabled was turned on in the configuration file, but attaching " +

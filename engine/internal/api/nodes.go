@@ -203,6 +203,11 @@ func (s *Server) handleNodeReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
+	// The token↔node binding first: a bound token reporting as another node is
+	// refused before anything is stored (node_binding.go).
+	if _, ok := s.nodeActor(w, r, name, "scrub_report"); !ok {
+		return
+	}
 	if configuredNode(s.store.Get(), name) == nil {
 		writeError(w, http.StatusNotFound, "unknown scrubbing node")
 		return

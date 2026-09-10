@@ -1259,6 +1259,18 @@ type APIToken struct {
 	// Tenant optionally scopes this token: it then sees and may mutate only
 	// data whose hostgroup carries this tenant. Empty = unscoped (all tenants).
 	Tenant string `yaml:"tenant"`
+	// Node binds an AGENT token to one node (edge-spec §9 risk 6, milestone
+	// E6): it names exactly one entry of edge.nodes[] or scrubbing.nodes[], and
+	// the brain then refuses that token on every node-identified route — the
+	// zones/rules poll (?node=), the self-report, the ACME slot and challenge
+	// publication — when the name presented is another node's. Without it an
+	// agent token is a fleet-wide credential: it may assert any node's
+	// presence, report as any node and publish a key authorization for any
+	// fleet zone. Empty keeps today's behaviour (a warning names the token in
+	// -check-config, the log and the inventory; a hard requirement is scheduled
+	// for a MAJOR release). Several tokens may bind the same node — that is how
+	// a token is rotated without a gap.
+	Node string `yaml:"node"`
 }
 
 // Role is an API access level.
@@ -1305,6 +1317,27 @@ type TokenSpec struct {
 	Role Role
 	// Tenant scopes the token (empty = unscoped / all tenants).
 	Tenant string
+	// Node is the one node an agent token is bound to (empty = unbound).
+	Node string
+}
+
+// UnboundAgentTokens names the agent tokens that carry no `node` while the
+// configuration declares nodes for them to be bound to (edge.nodes[] or
+// scrubbing.nodes[]). Each is a fleet-wide credential the operator should bind
+// (edge-spec §9 risk 6); -check-config, the daemon's log and the edge inventory
+// all name them. Nil when nothing is amiss — no nodes, or every agent bound.
+func (c *Config) UnboundAgentTokens() []string {
+	hasNodes := (c.Edge != nil && len(c.Edge.Nodes) > 0) || len(c.Scrubbing.Nodes) > 0
+	if !hasNodes {
+		return nil
+	}
+	var out []string
+	for _, tk := range c.API.TokenSpecs {
+		if tk.Role == RoleAgent && tk.Node == "" {
+			out = append(out, tk.Name)
+		}
+	}
+	return out
 }
 
 // DashboardEnabled reports whether the embedded UI should be served.
@@ -2948,7 +2981,25 @@ func (c *Config) validateAPITokens() error {
 			if tk.Tenant != "" && !tenants[tk.Tenant] {
 				return fmt.Errorf("api.tokens[%q]: tenant %q is not used by any hostgroup", tk.Name, tk.Tenant)
 			}
-			a.TokenSpecs = append(a.TokenSpecs, TokenSpec{Name: tk.Name, Env: tk.TokenEnv, Role: role, Tenant: tk.Tenant})
+			// Token↔node binding (E6.1): agent tokens only, and the node must be
+			// exactly one configured node — an edge node OR a scrubbing node. A
+			// name that appears in both lists is refused as ambiguous rather than
+			// bound to both: the two channels are different trust domains, and a
+			// binding must say which one it means.
+			if tk.Node != "" {
+				if role != RoleAgent {
+					return fmt.Errorf("api.tokens[%q]: node %q may only be set on an agent token (role %q)", tk.Name, tk.Node, tk.Role)
+				}
+				isEdge := c.Edge != nil && edgeNodeNamed(c.Edge.Nodes, tk.Node)
+				isScrub := scrubNodeNamed(c.Scrubbing.Nodes, tk.Node)
+				switch {
+				case isEdge && isScrub:
+					return fmt.Errorf("api.tokens[%q]: node %q is both an edge.nodes[] and a scrubbing.nodes[] entry; rename one so the binding is unambiguous", tk.Name, tk.Node)
+				case !isEdge && !isScrub:
+					return fmt.Errorf("api.tokens[%q]: node %q is neither an edge.nodes[] nor a scrubbing.nodes[] entry", tk.Name, tk.Node)
+				}
+			}
+			a.TokenSpecs = append(a.TokenSpecs, TokenSpec{Name: tk.Name, Env: tk.TokenEnv, Role: role, Tenant: tk.Tenant, Node: tk.Node})
 		}
 		return nil
 	}
@@ -2960,6 +3011,26 @@ func (c *Config) validateAPITokens() error {
 		a.TokenSpecs = []TokenSpec{{Name: "default", Env: a.TokenEnv, Role: RoleOperator}}
 	}
 	return nil
+}
+
+// edgeNodeNamed reports whether an edge.nodes[] entry has this name.
+func edgeNodeNamed(nodes []EdgeNode, name string) bool {
+	for i := range nodes {
+		if nodes[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// scrubNodeNamed reports whether a scrubbing.nodes[] entry has this name.
+func scrubNodeNamed(nodes []ScrubNode, name string) bool {
+	for i := range nodes {
+		if nodes[i].Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // validateNotify checks the optional notification channels and applies the

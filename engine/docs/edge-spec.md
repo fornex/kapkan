@@ -583,6 +583,21 @@ headline and the long pole.
   that makes "build your own network" concrete. Do not start it casually; it is mitigation
   machinery pointed at service routing.
 
+  *Decided in the E6 design round (2026-09-09):* E6 is the fleet and product tail; self-steering
+  is its own milestone (E7) with a recorded design note, and E6 ships the interim — the anycast
+  deployment guide with an external-speaker recipe driven by the node's `/healthz` and a local
+  TLS probe. *Decided in E6.1 (`internal/api/node_binding.go`, `config.APIToken.Node`):* an agent
+  token belongs to one node — `api.tokens[].node` names exactly one `edge.nodes[]` or
+  `scrubbing.nodes[]` entry (a name in both lists is refused; several tokens may bind one node
+  for rotation; the key is agent-only) and one helper checks it on all six node-identified
+  routes (both polls, both reports, the ACME slot and challenge publication) BEFORE any side
+  effect, answering a uniform 403 that never names the bound node, a rate-limited Warn and a
+  counter, never an audit row. Presence is stamped only by agent tokens; an operator's `?node=`
+  is a presence-free preview. Unbound agent tokens keep working (grace) and are named in
+  -check-config, the log at start and reload, and the inventory (`unbound_agent_tokens`, per-node
+  `tokens` and `last_token`); the hard requirement is a MAJOR-release item and there is no knob.
+  The zones document is untouched — a fleet without bindings gets byte-identical documents.
+
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and
 protects layer 3 of the table in §1.
@@ -606,10 +621,14 @@ protects layer 3 of the table in §1.
    exactly as the data-plane charter is for `bpf/`.
 6. **Key theft from a node** → per-node blast radius by design; runbook: revoke via ACME,
    reissue, rotate clearance keys; document that the brain holds nothing to steal. The agent
-   token is the exception to "one node": until tokens are bound to nodes (E6) it is a
-   certificate-issuing credential — a holder can publish a key authorization for any fleet zone
-   through the coordinator (visible: slot required, logged) — so the runbook also rotates the
-   agent token on any node compromise.
+   token was the exception to "one node": unbound, it is a certificate-issuing credential — a
+   holder can publish a key authorization for any fleet zone through the coordinator (visible:
+   slot required, logged). *Closed in E6.1:* `api.tokens[].node` binds an agent token to one
+   node and the brain refuses it as any other on every node-identified route before any side
+   effect; the residual is that a stolen **bound** token still polls, reports and issues for
+   that one node's zones — so the runbook rotates that node's token on its compromise, not the
+   fleet's. An unbound token keeps working through the migration and is named by -check-config,
+   the log and the inventory until it is bound; the hard requirement is a MAJOR-release item.
 7. **The second metric family bloats the engine** → L7 counters enter through the same
    hostgroup/threshold/baseline machinery, not a parallel engine; review holds that line.
 

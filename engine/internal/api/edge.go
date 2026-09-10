@@ -221,14 +221,19 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// ?node=<name> is the agent's identity and THIS REQUEST is its liveness
-	// signal — the one and only one (a self-report never is). Same three rules
-	// as the scrub channel: a sighting needs a real credential (this is a
+	// signal — the one and only one (a self-report never is). Same rules as the
+	// scrub channel: a sighting needs a real credential (this is a
 	// side-effectful GET outside the POST-only CSRF gate), the name must be a
 	// configured edge node (a typo must fail loudly, not leave a node polling
-	// diligently while the brain counts it dead), and token↔node binding is
-	// deliberately not enforced yet (fleet milestone — bind BOTH the poll and
-	// the report path when it lands).
-	if node := r.URL.Query().Get("node"); node != "" {
+	// diligently while the brain counts it dead), a token bound to a node may
+	// only act as that node (node_binding.go — checked BEFORE any side effect),
+	// and presence is stamped only by AGENT tokens: an operator's ?node= is a
+	// preview of that node's document and moves no liveness.
+	node := r.URL.Query().Get("node")
+	if _, ok := s.nodeActor(w, r, node, "edge_zones"); !ok {
+		return
+	}
+	if node != "" {
 		if c.token == "" {
 			writeError(w, http.StatusForbidden, "node identity requires an API token (configure api.tokens)")
 			return
@@ -237,8 +242,16 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "unknown edge node")
 			return
 		}
-		s.edgePresence.pollStarted(node)
-		defer s.edgePresence.pollEnded(node)
+		if stampsPresence(c) {
+			s.edgePresence.pollStarted(node, c.token)
+			defer s.edgePresence.pollEnded(node)
+		}
+	}
+	// The hold gate's total scales with the fleet: every node polls on its own
+	// token once bound, so the fixed total the scrub channel uses would become
+	// the visible ceiling of an edge fleet.
+	if cfg := s.store.Get(); cfg.Edge != nil {
+		s.edgeHolds.setTotal(max(maxRuleHoldsTotal, 2*len(cfg.Edge.Nodes)))
 	}
 	body, etag, err := s.edgeSnapshot()
 	if err != nil {
@@ -568,6 +581,11 @@ func (s *Server) handleEdgeNodeReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
+	// The binding first: a bound token reporting as another node is refused
+	// before anything is stored (node_binding.go).
+	if _, ok := s.nodeActor(w, r, name, "edge_report"); !ok {
+		return
+	}
 	if configuredEdgeNode(s.store.Get(), name) == nil {
 		writeError(w, http.StatusNotFound, "unknown edge node")
 		return
@@ -599,6 +617,10 @@ type edgePresence struct {
 type edgeNodeState struct {
 	lastSeen time.Time
 	holding  int
+	// lastToken is the NAME of the token that last polled as this node — the
+	// inventory shows it so an operator migrating a fleet from a shared token
+	// to bound ones can see which node has switched (E6.1).
+	lastToken string
 }
 
 func (p *edgePresence) state(name string) *edgeNodeState {
@@ -613,12 +635,25 @@ func (p *edgePresence) state(name string) *edgeNodeState {
 	return st
 }
 
-func (p *edgePresence) pollStarted(name string) {
+// pollStarted stamps a sighting by the named token (an agent's; see
+// stampsPresence) and opens a hold.
+func (p *edgePresence) pollStarted(name, token string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	st := p.state(name)
 	st.holding++
 	st.lastSeen = time.Now()
+	st.lastToken = token
+}
+
+// lastToken returns the name of the token that last polled as the node.
+func (p *edgePresence) lastTokenOf(name string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if st, ok := p.nodes[name]; ok {
+		return st.lastToken
+	}
+	return ""
 }
 
 func (p *edgePresence) pollEnded(name string) {
@@ -658,6 +693,10 @@ type EdgeNodesDoc struct {
 	NodesTotal        int              `json:"nodes_total"`
 	StaleAfterSeconds int              `json:"stale_after_seconds"`
 	Nodes             []EdgeNodeStatus `json:"nodes"`
+	// UnboundAgentTokens names the agent tokens without api.tokens[].node
+	// while nodes are configured — each a fleet-wide credential the operator
+	// should bind (edge-spec §9 risk 6). Absent when every agent is bound.
+	UnboundAgentTokens []string `json:"unbound_agent_tokens,omitempty"`
 }
 
 // EdgeNodeStatus is one node in EdgeNodesDoc.
@@ -668,6 +707,11 @@ type EdgeNodeStatus struct {
 	Alive    bool   `json:"alive"`
 	Holding  bool   `json:"holding"`
 	LastSeen string `json:"last_seen,omitempty"`
+	// Tokens names the agent tokens bound to this node (api.tokens[].node);
+	// LastToken the token that last polled as it — together they show a
+	// fleet's migration from a shared token node by node.
+	Tokens    []string `json:"tokens,omitempty"`
+	LastToken string   `json:"last_token,omitempty"`
 	// Report is the node's last self-report, VERBATIM and advisory.
 	Report     *EdgeReport `json:"report,omitempty"`
 	ReportedAt string      `json:"reported_at,omitempty"`
@@ -685,13 +729,20 @@ func (s *Server) handleEdgeNodes(w http.ResponseWriter, r *http.Request) {
 	doc := EdgeNodesDoc{StaleAfterSeconds: int(staleAfter / time.Second), Nodes: []EdgeNodeStatus{}}
 	if cfg.Edge != nil {
 		doc.NodesTotal = len(cfg.Edge.Nodes)
+		doc.UnboundAgentTokens = cfg.UnboundAgentTokens()
 		for i := range cfg.Edge.Nodes {
 			n := &cfg.Edge.Nodes[i]
 			lastSeen, holding := s.edgePresence.seen(n.Name)
 			ns := EdgeNodeStatus{
-				Name:    n.Name,
-				Alive:   s.edgePresence.alive(n.Name, staleAfter),
-				Holding: holding,
+				Name:      n.Name,
+				Alive:     s.edgePresence.alive(n.Name, staleAfter),
+				Holding:   holding,
+				LastToken: s.edgePresence.lastTokenOf(n.Name),
+			}
+			for _, tk := range cfg.API.TokenSpecs {
+				if tk.Node == n.Name {
+					ns.Tokens = append(ns.Tokens, tk.Name)
+				}
 			}
 			if !lastSeen.IsZero() {
 				ns.LastSeen = lastSeen.UTC().Format(time.RFC3339)
