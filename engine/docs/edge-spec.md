@@ -622,7 +622,24 @@ headline and the long pole.
   writer credential keeps what it had; `ts` is the node's gated clock and `received_at` the
   brain's (D11). Reads bind through `param_*` under `readonly=2` with time and row caps. A
   real-ClickHouse suite gates the DDL, the column upgrade, the TTL and the read-only client in
-  CI (`storage-clickhouse`, pinned server image). The write path is E6.5, the read API E6.6.
+  CI (`storage-clickhouse`, pinned server image). The read API is E6.6.
+  *Decided in E6.5 (`internal/api/edge_history.go`):* the write path is map work and
+  non-blocking enqueues in the report handler, after the store and before the 204 — never I/O,
+  never an answer that depends on storage. Rules, each counted in
+  `kapkan_edge_history_dropped_total{reason}`: zone ∈ the live file (`unknown_zone`), a close
+  time (`no_at`), one row per (node, zone, at) (`duplicate` — a re-sent report is one row), the
+  D11 clock gate (−10 min … +60 s, else `ts` = brain clock, `received_at` always, one
+  `clock_skew` event per transition), telling sources only that parse as an address
+  (`bad_source`), ≤20 per window (`source_cap`). Events are the diff of a node's two reports
+  (version, dry_run, document_rendered, generation_installed/refused, terminator_alive,
+  h3_state, cert_issued/renewed/gone, challenge_started/ended, report_truncated), once per
+  change; the first report after a brain start is a silent baseline (no fleet-wide
+  `cert_issued`). The presence ticker (`min(stale_after/2, 5 s)`, unconditional) writes
+  `node_alive`/`node_lost` on transitions — `node_lost` stamped `lastSeen + stale_after` — and
+  logs both at INFO. Import direction gated by test: no package under `internal/edge` or
+  `internal/mitigate` imports `internal/storage` (the transitive path through
+  `internal/edge/node → internal/api` for the shared report types is known and accepted; the
+  gate is on node-side code naming storage itself).
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and

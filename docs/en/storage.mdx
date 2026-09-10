@@ -115,6 +115,18 @@ path's contract.
   visitors and are never written.
 - **Nothing for quiet zones.** A zone in `policy.mode: none`, or a deciding zone that saw no
   request in a window, writes no row.
+- **One row per window.** A report the node re-sends — the same node, zone and close time — is
+  written once. A window for a zone the zones file does not have, or without a close time, is
+  skipped; every skipped part counts in `kapkan_edge_history_dropped_total{reason}`
+  (`unknown_zone`, `no_at`, `duplicate`, `bad_source`, `source_cap`). The report itself is
+  still accepted and shown live; only the history skips the part.
+- **Transitions as events.** `edge_events` records what changed between two reports of a node —
+  its version, dry-run, the rendered document, a generation installed or refused, the terminator
+  alive or not, its HTTP/3 state, a certificate issued, renewed or gone, a zone-wide challenge
+  started or ended, a clock skew found or recovered, a report that had to shrink — each once per
+  change, and, from the polls, `node_alive` / `node_lost` (the loss stamped when it happened: the
+  last poll plus `stale_after`). The first report after a brain start is the baseline and writes
+  no events. The presence transitions are also logged at INFO, storage or no storage.
 
 Volume, per day: `edge_windows` grows by **8 640 × (deciding zones with traffic × alive
 nodes)** rows (one ten-second window each), `edge_sources` by at most 20 times that, and

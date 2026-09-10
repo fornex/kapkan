@@ -425,8 +425,28 @@ security-relevant.
   into, and the strongest source state won by rank. Schema init now attempts every statement
   and reports the first failure instead of stopping at it, so a credential that may INSERT but
   not CREATE still gets the column upgrades and the new tables tried. No new configuration key:
-  storage on means history on, `ttl_days` keeps it. The brain's write path and the read API
-  follow (E6.5, E6.6).
+  storage on means history on, `ttl_days` keeps it. The read API
+  follows (E6.6).
+- Edge track, E6.5 — the brain writes the edge history (milestone E6, analytics). Every accepted
+  node report now becomes rows: one `edge_windows` row per node, zone and closed window for the
+  zones the zones file has — a window the node re-sends is written once (six copies of one report
+  are one row), a window without a close time or for an unknown zone is skipped — and
+  `edge_sources` rows for its telling sources (denied, challenged, would-deny, would-challenge;
+  parsed as an address; at most 20 per window). `ts` is the node's window close when it is within
+  ten minutes behind or a minute ahead of the brain's clock; otherwise the brain's clock is written
+  and one `clock_skew` event marks the transition (and one the recovery); `received_at` is always
+  the brain's. What changed between a node's two reports becomes `edge_events` — `version`,
+  `dry_run`, `document_rendered`, `generation_installed`, `generation_refused`,
+  `terminator_alive`, `h3_state`, `cert_issued`/`cert_renewed`/`cert_gone`,
+  `challenge_started`/`challenge_ended`, `report_truncated` — each once per change; the first
+  report after a brain start is a silent baseline. A presence ticker (period `min(stale_after/2,
+  5 s)`) writes `node_alive`/`node_lost` on every transition — `node_lost` stamped at the last poll
+  plus `stale_after` — and logs the same at INFO whether or not storage is on: **a lost edge node
+  now reaches the brain's log.** All of it is map work and non-blocking enqueues after the report
+  is stored and before the `204`; the answer never waits for storage, a full queue drops and
+  counts. Skipped parts count in `kapkan_edge_history_dropped_total{reason}`. Two gates:
+  node-side packages (`internal/edge`, `internal/mitigate`) never import `internal/storage`, and
+  the history's row types carry no key material (the report's rule, extended).
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data
