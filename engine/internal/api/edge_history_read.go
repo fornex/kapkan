@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/storage"
@@ -43,6 +44,10 @@ const (
 	// maxHistoryBuckets bounds a bucketed read: a wide range with a tiny step
 	// raises the step rather than the row count.
 	maxHistoryBuckets = 5000
+	// maxHistoryStep is the widest bucket, a day — the storage query clamps
+	// to the same, so the step the response reports is the step the buckets
+	// were built with.
+	maxHistoryStep = 86400
 	// historyQueryTimeout bounds one storage read.
 	historyQueryTimeout = 10 * time.Second
 )
@@ -76,8 +81,9 @@ func parseRange(q url.Values, now time.Time) (from, to time.Time, errMsg string)
 	return from, to, ""
 }
 
-// parseStep reads step (positive integer seconds, 60 by default) and raises
-// it so the range holds at most maxHistoryBuckets buckets.
+// parseStep reads step (positive integer seconds, 60 by default), raises it
+// so the range holds at most maxHistoryBuckets buckets, and caps it at a day.
+// The result is the step the query runs with, so a response may echo it.
 func parseStep(q url.Values, from, to time.Time) (int, string) {
 	step := 60
 	if v := q.Get("step"); v != "" {
@@ -90,10 +96,16 @@ func parseStep(q url.Values, from, to time.Time) (int, string) {
 	if span := int(to.Sub(from).Seconds()); span/step > maxHistoryBuckets {
 		step = (span + maxHistoryBuckets - 1) / maxHistoryBuckets
 	}
+	if step > maxHistoryStep {
+		step = maxHistoryStep
+	}
 	return step, ""
 }
 
-// EdgeHistoryDoc is the GET /api/v1/edge/history response.
+// EdgeHistoryDoc is the GET /api/v1/edge/history response. Zone and Node
+// echo the request (Node only when the filter was given); StepSeconds is the
+// step the buckets were built with, after the raise and the cap. With
+// storage off only Available and an empty Points are present.
 type EdgeHistoryDoc struct {
 	Available   bool                       `json:"available"`
 	Zone        string                     `json:"zone,omitempty"`
@@ -103,6 +115,8 @@ type EdgeHistoryDoc struct {
 }
 
 // EdgeHistorySourcesDoc is the GET /api/v1/edge/history/sources response.
+// State echoes the state= filter and is absent without one; each source
+// carries its own state.
 type EdgeHistorySourcesDoc struct {
 	Available bool                    `json:"available"`
 	Zone      string                  `json:"zone,omitempty"`
@@ -118,10 +132,12 @@ type EdgeEventsDoc struct {
 
 // historyZone resolves the zone parameter under the caller's scope: 400
 // without one; for an unscoped caller 404 when the file lacks it; for a
-// scoped caller one uniform 403 for anything but its own zones. It returns
-// false after writing the error.
+// scoped caller one uniform 403 for anything but its own zones. The name is
+// folded like the file folds its own (lower case, trimmed) and like the
+// lever folds its path — so a tenant's own `A.example` is its zone, not a
+// counted refusal. It returns false after writing the error.
 func (s *Server) historyZone(w http.ResponseWriter, r *http.Request) (zone string, ok bool) {
-	zone = r.URL.Query().Get("zone")
+	zone = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("zone")))
 	if zone == "" {
 		writeError(w, http.StatusBadRequest, "missing zone")
 		return "", false
@@ -227,13 +243,23 @@ func (s *Server) handleEdgeHistorySources(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, EdgeHistorySourcesDoc{Available: true, Zone: zone, State: state, Sources: srcs})
 }
 
-// edgeEventKinds is the closed set a kind filter may name.
-var edgeEventKinds = map[string]bool{
-	EventNodeAlive: true, EventNodeLost: true, EventVersion: true, EventDryRun: true, EventDocumentRendered: true,
-	EventGenerationInstalled: true, EventGenerationRefused: true, EventTerminatorAlive: true, EventH3State: true,
-	EventCertIssued: true, EventCertRenewed: true, EventCertGone: true, EventChallengeStarted: true, EventChallengeEnded: true,
-	EventClockSkew: true, EventReportTruncated: true,
+// edgeEventKindList is the closed set of kinds the write path emits
+// (edge_history.go) and a kind filter may name — the sixteen api.mdx lists,
+// in the order it lists them. The test pins the count against the docs.
+var edgeEventKindList = []string{
+	EventNodeAlive, EventNodeLost, EventVersion, EventDryRun, EventDocumentRendered,
+	EventGenerationInstalled, EventGenerationRefused, EventTerminatorAlive, EventH3State,
+	EventCertIssued, EventCertRenewed, EventCertGone, EventChallengeStarted, EventChallengeEnded,
+	EventClockSkew, EventReportTruncated,
 }
+
+var edgeEventKinds = func() map[string]bool {
+	m := make(map[string]bool, len(edgeEventKindList))
+	for _, k := range edgeEventKindList {
+		m[k] = true
+	}
+	return m
+}()
 
 // handleEdgeEvents serves the transitions, newest first. Unscoped tokens
 // only: the events name nodes and the fleet's changes.

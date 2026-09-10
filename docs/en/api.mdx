@@ -579,9 +579,10 @@ role, so a console can decide whether to show node affordances without this call
 These endpoints exist for [edge nodes](/docs/edge) — boxes running [`kapkan edge`](/docs/cli#edge).
 Like the scrub-node channel, the node-facing endpoints take the `agent` role or an unscoped
 `operator` token, never a `viewer` or a tenant-scoped token: the zones document spans every
-tenant. The human-facing ones differ: the node inventory is a `viewer`-rank read for unscoped
-tokens; the zone status (`viewer` rank) and the lever (`operator` rank) admit a
-[tenant-scoped](/docs/multi-tenancy) token for its own zones. **The brain
+tenant. The human-facing ones differ: the node inventory and the fleet's events
+(`GET /api/v1/edge/events`) are `viewer`-rank reads for unscoped tokens; the zone status, the
+[edge history](#get-apiv1edgehistory) with its telling sources (`viewer` rank) and the lever
+(`operator` rank) admit a [tenant-scoped](/docs/multi-tenancy) token for its own zones. **The brain
 distributes policy, never verdicts** — no per-request call exists here or anywhere; a node
 answers requests alone. The count of configured edge nodes (`edge_nodes_total`) rides on
 `/api/v1/status` for every role, so a console can decide whether to show the Edge view without
@@ -757,29 +758,33 @@ zero; `nodes` and `rps` are always present.
 
 A zone's [edge history](/docs/storage#edge-history): the nodes' ten-second windows summed into
 `step`-second buckets between `from` and `to` (RFC 3339; the last hour by default; at most
-31 days; `step` defaults to 60 s and is raised so a range holds at most 5 000 buckets) —
-`{available, zone, node, step_seconds, points: [{ts, nodes, window_seconds, requests, decided,
-denied, challenged, cleared, would_deny, would_challenge, status_2xx, status_3xx, status_4xx,
-status_5xx, h3_requests}]}`. `nodes` counts the distinct nodes that reported in the bucket;
-derive the rate as `requests / window_seconds` and the HTTP/3 share as `h3_requests / requests`.
-`zone` is required and must be in the zones file (`404 unknown zone` otherwise); `node=<name>`
-narrows to one configured node (`404 unknown edge node`). `viewer` rank. A
-[tenant-scoped](/docs/multi-tenancy) token reads its own zones; any other zone — another tenant's,
-unlabelled, gone from the file or nonexistent — is one uniform `403` (`zone is outside your
-tenant`), counted in `kapkan_api_zone_refused_total{route="edge_history"}` and logged once a
-minute per token, and `node=` is for unscoped tokens only (a tenant gets `nodes` as a count,
-never one node's history). Storage off: `{available: false, points: []}`, never an error; a
-failed query is `502`.
+31 days; `step` defaults to 60 s, is raised so a range holds at most 5 000 buckets, and is at
+most 86 400 s — a day) — `{available, zone, node, step_seconds, points: [{ts, nodes,
+window_seconds, requests, decided, denied, challenged, cleared, would_deny, would_challenge,
+status_2xx, status_3xx, status_4xx, status_5xx, h3_requests}]}`. `nodes` counts the distinct
+nodes that reported in the bucket; `step_seconds` is the step actually applied; `zone` and
+`node` echo the request, `node` only when the filter was given; derive the rate as
+`requests / window_seconds` and the HTTP/3 share as `h3_requests / requests`. `zone` is
+required, folded to lower case like the file's names, and must be in the zones file
+(`404 unknown zone` otherwise); `node=<name>` narrows to one configured node
+(`404 unknown edge node`). `viewer` rank. A [tenant-scoped](/docs/multi-tenancy) token reads its
+own zones; any other zone — another tenant's, unlabelled, gone from the file or nonexistent — is
+one uniform `403` (`zone is outside your tenant`), counted in
+`kapkan_api_zone_refused_total{route="edge_history"}` and logged once a minute per token, and
+`node=` is for unscoped tokens only (a tenant gets `nodes` as a count, never one node's
+history). Storage off: `{available: false, points: []}`, never an error — the zone is not looked
+at, so every token gets that answer for any zone and nothing is counted or logged; a failed
+query is `502`.
 
 #### GET /api/v1/edge/history/sources
 
 The zone's telling sources over the range — edge-spec's *who would have been challenged*, asked
 over a period rather than a ten-second window: `{available, zone, state, sources: [{source,
 state, requests, windows, nodes, first_seen, last_seen}]}`, the busiest first, at most 1 001
-rows. `state` is the strongest thing any node did to the source over the range (`denied` over
-`challenged` over `would-deny` over `would-challenge`); `state=` filters to one of those four
-(`400` for anything else — visitors are never stored). Same `zone`, range and scope rules as the
-history above.
+rows. Each source's `state` is the strongest thing any node did to it over the range (`denied`
+over `challenged` over `would-deny` over `would-challenge`); `state=` filters to one of those
+four (`400` for anything else — visitors are never stored), and the top-level `state` echoes
+that filter, absent without one. Same `zone`, range and scope rules as the history above.
 
 #### GET /api/v1/edge/events
 
