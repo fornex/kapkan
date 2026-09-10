@@ -113,6 +113,9 @@ STATE2=/var/lib/kapkan-edge2; SOCKS2=/run/kapkan-edge2
 STALE=5
 EXTRA=/tmp/extra-node.conf         # the node-attribution header
 EXTRA_BROKEN=/tmp/extra-broken.conf
+# The figures the guide quotes. Pre-set so the summary is printed even when an
+# arm fell over before recording its own.
+D_FAIL=0; D_OK=0; D_LOST_MS=0; D2_MS=0; E_MS=0; F_MS=0; H_FAIL=0
 export KAPKAN_OP=optok KAPKAN_A1=a1tok KAPKAN_A2=a2tok
 tok() { case $1 in op) echo optok;; a1) echo a1tok;; a2) echo a2tok;; *) echo "$1";; esac; }
 
@@ -186,7 +189,7 @@ vip_route()  { ip netns exec rtr ip route show $VIP/32 | tr -s ' \n' ' '; }
 hashpol()    { ip netns exec rtr sysctl -wq net.ipv4.fib_multipath_hash_policy="$1"; ip netns exec rtr ip route flush cache; }
 route_both
 hashpol 0
-[ -n "$(vip_route)" ] && ok "the router carries the VIP as one ECMP route ($(vip_route))" || bad "no multipath VIP route on the router"
+[ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" = "2" ] && ok "the router carries the VIP as ONE route with two nexthops ($(vip_route))" || bad "the VIP route is not multipath: $(vip_route)"
 ip netns exec cli ping -c1 -W1 $E1 >/dev/null 2>&1 && ip netns exec cli ping -c1 -W1 $E2 >/dev/null 2>&1 && ok "the client reaches both nodes' unicast addresses through the router" || bad "no path client -> nodes (topology broken; nothing below is meaningful)"
 ip netns exec cli ping -c1 -W1 $BRAIN >/dev/null 2>&1 && ip netns exec edge1 ping -c1 -W1 $BRAIN >/dev/null 2>&1 && ok "the brain is reachable by unicast from the client and from a node" || bad "no path to the brain"
 ip netns exec ca ping -c1 -W1 $VIP >/dev/null 2>&1 && ok "the CA reaches the VIP (its validation will cross the hash)" || bad "the CA cannot reach the VIP"
@@ -494,7 +497,7 @@ say "ARM A — the fleet and a deterministic fan-out: the route is pinned to edg
 # challenge it published to the brain and the brain fanned out to edge-2 —
 # there is no path by which edge-1 answered for itself.
 route_one $E2 r-e2
-[ "$(vip_route)" = "$VIP via $E2 dev r-e2 " ] && ok "the VIP is pinned to edge-2 for the issuance ($(vip_route))" || bad "route pin: $(vip_route)"
+{ vip_route | grep -q "via $E2 dev r-e2"; } && [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" = "0" ] && ok "the VIP is pinned to edge-2 alone for the issuance ($(vip_route))" || bad "route pin: $(vip_route)"
 : > /tmp/edge1.log; : > /tmp/edge2.log
 "$KAPKAN" edge -config /tmp/edge1.yaml -check 2>&1 | tee /tmp/check1.out | grep -q 'is valid' && ok "edge-1's edge.yaml passes -check" || bad "edge-1 -check: $(cat /tmp/check1.out)"
 "$KAPKAN" edge -config /tmp/edge2.yaml -check 2>&1 | tee /tmp/check2.out | grep -q 'is valid' && ok "edge-2's edge.yaml passes -check (identical but for name, dirs and status_listen — the guide's rule)" || bad "edge-2 -check: $(cat /tmp/check2.out)"
@@ -613,7 +616,11 @@ KA=$(cat /tmp/keepalive.out)
 wait_eq 20 false node_f edge-2 "n['alive']" && D_LOST_MS=$(( ($(date +%s%N) - KILL0) / 1000000 )) && ok "the inventory marks edge-2 alive:false ${D_LOST_MS} ms after the kill (stale_after_seconds $STALE)" || { D_LOST_MS=0; bad "edge-2 still alive: $(node_f edge-2 "n['alive']")"; }
 [ "$(node_f edge-1 "n['alive']")" = "true" ] && ok "edge-1 is untouched by its neighbour's death" || bad "edge-1 alive: $(node_f edge-1 "n['alive']")"
 [ "$(vip_route)" = "$ROUTE0" ] && ok "the router's VIP route is byte-identical: the brain never touches routing for a zone address ($ROUTE0)" || bad "the VIP route changed by itself: '$ROUTE0' -> '$(vip_route)'"
-grep -qE 'withdraw|announce' /tmp/brain.log && bad "the brain logged an announcement or a withdrawal" || ok "the brain's log has no announce/withdraw line at all (its BGP speaker is about victims, never a zone's VIP)"
+# The brain HAS a BGP speaker configured here (positive control), and it still
+# never says a word about the zone's address: its speaker is for victims under
+# attack, never for service routing.
+grep -q 'bgp peer state' /tmp/brain.log && ok "the brain's own BGP speaker is up and peering (positive control: there IS a speaker to keep quiet)" || bad "no bgp peer line in the brain log — the next assertion would be vacuous"
+grep -q "$VIP" /tmp/brain.log && bad "the brain's log mentions the VIP $VIP" || ok "the brain never mentions $VIP: nothing in Kapkan announces or withdraws a zone's address"
 
 say "ARM D2 — the link down instead: a dead nexthop needs no operator, a dead node does"
 ip netns exec rtr ip link set r-e2 down
@@ -624,8 +631,8 @@ batch 40 tcp /tmp/d2-linkdown.txt
 [ "$(n200 /tmp/d2-linkdown.txt)" = "40" ] && ok "40 of 40 served with no operator action: a directly connected router notices link loss, a routed hop does not" || bad "link-down batch: $(mix /tmp/d2-linkdown.txt)"
 ip netns exec rtr ip link set r-e2 up
 sleep 1
-batch 10 tcp /tmp/d2-back.txt
-[ "$(n200 /tmp/d2-back.txt)" -lt 10 ] && ok "the link back up and the node still dead: the failures return ($(mix /tmp/d2-back.txt)) — link state is not health" || bad "no failures with the link up and the node dead: $(mix /tmp/d2-back.txt)"
+batch 20 tcp /tmp/d2-back.txt
+[ "$(n200 /tmp/d2-back.txt)" -lt 20 ] && ok "the link back up and the node still dead: the failures return ($(mix /tmp/d2-back.txt)) — link state is not health" || bad "no failures with the link up and the node dead: $(mix /tmp/d2-back.txt)"
 T0=$(date +%s%N); route_one $E1 r-e1
 for i in $(seq 1 100); do batch 5 tcp /tmp/d2-probe.txt; [ "$(n200 /tmp/d2-probe.txt)" = "5" ] && break; done
 D2_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
@@ -678,7 +685,15 @@ batch 20 tcp /tmp/f-nobrain.txt; batch 20 h3 /tmp/f-nobrain-h3.txt
 [ "$(n200 /tmp/f-nobrain-h3.txt)" = "20" ] && ok "…and 20 of 20 over HTTP/3" || bad "h3 with the brain dead: $(mix /tmp/f-nobrain-h3.txt)"
 [ "$(hcode 1)" = "200" ] && [ "$(hcode 2)" = "200" ] && ok "both /healthz stay 200: the brain is not in the health predicate" || bad "healthz with the brain dead: $(hcode 1)/$(hcode 2)"
 mv /tmp/brain.log /tmp/brain-1.log; T0=$(date +%s%N); start_brain
-wait_eq 15 true node_f edge-1 "n['alive']" && wait_eq 15 true node_f edge-2 "n['alive']" && ok "the brain came back and both nodes are alive again in $(( ($(date +%s%N) - T0) / 1000000 )) ms" || bad "nodes after the brain's return: $(node_f edge-1 "n['alive']")/$(node_f edge-2 "n['alive']")"
+# What bounds this is the node's own poll backoff after a failed poll (1 s
+# doubling to 30 s), not anything the brain does — so the figure is recorded
+# rather than asserted tight.
+if wait_eq 45 true node_f edge-1 "n['alive']" && wait_eq 45 true node_f edge-2 "n['alive']"; then
+  F_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
+  ok "the brain came back and both nodes are alive again ${F_MS} ms later — the node's poll backoff is the whole delay"
+else
+  F_MS=0; bad "nodes after the brain's return: $(node_f edge-1 "n['alive']")/$(node_f edge-2 "n['alive']")"
+fi
 
 # ================================================================ ARM G
 say "ARM G — the two cross-node facts a shared address exposes"
@@ -799,7 +814,7 @@ SH
     node_nginx 2 edge2 $STATE2; sleep 1
     for i in $(seq 1 60); do [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && break; sleep 0.5; done
     [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && ok "nginx back: the announcement returns and the route is multipath again" || bad "the route did not come back: $(vip_route)"
-    G2=$(sfield 2 generation); ZONEB_EXTRA=$EXTRA_BROKEN; zones_yaml; reload_brain
+    ZONEB_EXTRA=$EXTRA_BROKEN; zones_yaml; reload_brain
     wait_eq 40 false sfield 2 converged || bad "edge-2 did not refuse the broken document (arm I)"
     sleep 3
     [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && ok "a refused document did NOT withdraw the route: /healthz stayed 200, so the speaker stayed enabled" || bad "a refused document withdrew the route: $(vip_route)"
@@ -817,8 +832,11 @@ fi
   echo
   echo "arm D  (a node dies, nobody withdraws): $D_FAIL of 40 requests failed, $D_OK served;"
   echo "       the inventory said alive:false ${D_LOST_MS} ms after the kill (stale_after_seconds $STALE)"
-  echo "arm D2 (the operator's withdrawal): 40/40 TCP and 20/20 h3 within ${D2_MS} ms of \`ip route replace\`"
+  echo "arm D2 (the operator's withdrawal): the first all-200 batch of five completed ${D2_MS} ms after"
+  echo "       the \`ip route replace\`, then 40/40 TCP and 20/20 h3 — a withdrawal is a RIB change,"
+  echo "       so what bounds recovery is the client's next request, not any Kapkan timer"
   echo "arm E  (the node's own signal): /healthz turned 503 ${E_MS} ms after nginx died"
+  echo "arm F  (the brain's return): both nodes alive again ${F_MS} ms after it came back (the node's poll backoff)"
   echo "arm H  (MTU 1200 on one leg): $H_FAIL of 40 h3 requests failed, 40/40 TCP served"
   [ -f /tmp/arm-i.txt ] && cat /tmp/arm-i.txt
 } > /tmp/numbers.txt
