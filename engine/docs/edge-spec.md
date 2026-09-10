@@ -634,8 +634,8 @@ headline and the long pole.
   per report (`extra_window`), the D11 clock gate (−10 min … +60 s, else `ts` = brain clock,
   `received_at` always, one `clock_skew` event per transition — the one kind a first report
   may write), telling sources only that parse as an address (`bad_source`), ≤20 per window
-  (`source_cap`); `challenge` is narrowed to the document's three modes (else `other`) and
-  free text is clipped. Events are the diff of a node's two reports (version, dry_run,
+  (`source_cap`); `challenge` is narrowed to the document's three modes (`other` for a mode a
+  node actually sent, empty for a report that carries none) and free text is clipped. Events are the diff of a node's two reports (version, dry_run,
   document_rendered, generation_installed/refused, terminator_alive, h3_state,
   cert_issued/renewed/gone, challenge_started/ended, report_truncated), once per change; the
   first report after a brain start is a silent baseline (no fleet-wide `cert_issued`); a report
