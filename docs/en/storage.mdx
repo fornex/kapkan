@@ -114,7 +114,8 @@ it. The rules below are the write path's contract.
   visitors and are never written.
 - **Nothing for quiet zones.** A zone in `policy.mode: none`, or a deciding zone that closed no
   window lately (the report carries it with no close time and nothing counted), writes no row
-  and counts as nothing.
+  and counts as nothing. A certificate issuance leaves a trace even on an idle zone: the CA's
+  HTTP-01 probes are requests the node counts (a few `2xx` per validation, `decided` 0).
 - **One row per window.** A report the node re-sends — the same node, zone and close time — is
   written once, and a report carries one window per zone. A window for a zone the zones file
   does not have, a window (or a certificate, a challenge) for a zone the reporting node's
