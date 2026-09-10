@@ -18,16 +18,17 @@ func getEdgeZonesStatus(h http.Handler, bearer string) (EdgeZonesStatusDoc, int)
 	return doc, rec.Code
 }
 
-// TestEdgeZonesStatus pins the endpoint: unscoped tokens only; only ALIVE
-// nodes' reports count (a report is never presence); the report's zones come
-// back merged with their would-be set.
+// TestEdgeZonesStatus pins the endpoint: a scoped token sees only its own
+// zones (none here — a.example carries no label, E6.2); only ALIVE nodes'
+// reports count (a report is never presence); the report's zones come back
+// merged with their would-be set; every zone of the file has a row.
 func TestEdgeZonesStatus(t *testing.T) {
 	store, _ := edgeStore(t, edgeZonesOne)
 	s := testServer(t, store)
 	h := s.Handler()
 
-	if _, code := getEdgeZonesStatus(h, "scoped-secret"); code != http.StatusForbidden {
-		t.Fatalf("scoped token = %d, want 403", code)
+	if doc, code := getEdgeZonesStatus(h, "scoped-secret"); code != http.StatusOK || len(doc.Zones) != 0 {
+		t.Fatalf("scoped token = %d %+v, want 200 with no rows (a house zone is not its own)", code, doc)
 	}
 	body := `{"version":"1.8.0","zones":[{"zone":"a.example","at":"2026-09-06T12:00:10Z","window_seconds":10,"rps":42.5,"requests":425,"decided":420,` +
 		`"denied":30,"challenged":5,"would_challenge":12,"would_deny":3,"dry_run":true,"challenge":"auto",` +
@@ -36,8 +37,10 @@ func TestEdgeZonesStatus(t *testing.T) {
 	if rec := postEdgeReport(h, "e1", body, "agent-secret"); rec.Code != http.StatusNoContent {
 		t.Fatalf("report = %d (%s)", rec.Code, rec.Body.String())
 	}
-	// Reported, never polled: not alive, so nothing is merged.
-	if doc, code := getEdgeZonesStatus(h, "op-secret"); code != http.StatusOK || doc.NodesAlive != 0 || doc.NodesReporting != 0 || len(doc.Zones) != 0 {
+	// Reported, never polled: not alive, so nothing is merged — the zone's row
+	// is the file's (nodes: 0, its mode), with no figures.
+	if doc, code := getEdgeZonesStatus(h, "op-secret"); code != http.StatusOK || doc.NodesAlive != 0 || doc.NodesReporting != 0 ||
+		len(doc.Zones) != 1 || doc.Zones[0].Zone != "a.example" || doc.Zones[0].Nodes != 0 || doc.Zones[0].Requests != 0 || doc.Zones[0].Mode != "decide" {
 		t.Fatalf("before a poll: %d %+v", code, doc)
 	}
 	// The zones poll is presence.
@@ -51,6 +54,13 @@ func TestEdgeZonesStatus(t *testing.T) {
 	z := doc.Zones[0]
 	if z.Zone != "a.example" || z.Nodes != 1 || z.RPS != 42.5 || z.Requests != 425 || z.Challenged != 5 || z.WouldChallenge != 12 || z.WouldDeny != 3 || z.Challenge != "auto" || z.Partial {
 		t.Fatalf("zone figures: %+v", z)
+	}
+	if z.Mode != "decide" || z.FileChallenge != "off" || z.Tenant != "" {
+		t.Fatalf("the file's word on the zone: %+v", z)
+	}
+	// Still nothing for the scoped token: the reported zone is a house zone.
+	if sd, code := getEdgeZonesStatus(h, "scoped-secret"); code != http.StatusOK || len(sd.Zones) != 0 || sd.NodesAlive != 1 {
+		t.Fatalf("scoped token after the poll = %d %+v, want 200, no rows, nodes_alive 1", code, sd)
 	}
 	if len(z.ChallengeActive) != 1 || !z.ChallengeActive[0].DryRun {
 		t.Fatalf("the flip's preview flag did not travel: %+v", z.ChallengeActive)
