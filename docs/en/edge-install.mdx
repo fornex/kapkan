@@ -51,20 +51,25 @@ api:
 `edge.zones_file`), and `kapkan -dump-zones-schema` prints the zones file's JSON schema for
 your editor. Give each node **its own `agent` token, bound to it with `node`**: a bound token is
 refused as any other node before the brain does anything with the name, so a token stolen from
-one box is one box's problem. A zones file that fails to read or validate on a reload **keeps the
+one box can no longer speak for any other node — its presence, reports and ACME slots stay its
+own — and only that one token needs rotating. A zones file that fails to read or validate on a reload **keeps the
 previous zones live** — the brain never serves a half-broken document. Every key is in the
 [zones reference](/docs/zones).
 
 <Callout type="info" title="The agent token is a certificate-issuing credential — bind it">
 An edge node authenticates with an `agent` token (see [authentication](/docs/authentication)).
 Besides polling the document, it uses that token to coordinate certificate issuance through the
-brain — so an **unbound** token is a credential for every zone in the fleet, and rotating it on a
-compromise means rotating the whole fleet's. Bind each token to its node (`api.tokens[].node`);
-until every agent token is bound, `-check-config`, the daemon's log and the inventory's
-`unbound_agent_tokens` say so. Migrating a fleet from one shared token: add a bound token per
-node, switch each node's environment file and watch the inventory's `last_token` flip, then
-remove the shared entry last — an unbound token keeps working meanwhile. Keep the token in the
-node's environment file, never in `edge.yaml`.
+brain — so an **unbound** token can act as any node, and rotating it on a compromise means
+rotating the whole fleet's. Bind each token to its node (`api.tokens[].node`); until every agent
+token is bound, `-check-config`, the daemon's log and the inventory's `unbound_agent_tokens` say
+so. What binding buys is impersonation and the rotation radius, not the set of zones: until zones
+are placed on nodes (a later E6 change) a bound token, acting as its own node, still publishes an
+ACME key authorization for any zone the fleet serves — so still treat a node compromise as a
+certificate exposure for every zone. Migrating a fleet from one shared token: add a bound token
+per node **with its own secret** (a value shared with the unbound entry is ambiguous and refused
+with `401` for every node presenting it), switch each node's environment file and watch the
+inventory's `last_token` flip, then remove the shared entry last — an unbound token keeps working
+meanwhile. Keep the token in the node's environment file, never in `edge.yaml`.
 </Callout>
 
 ## 2. On the box: nginx or Angie

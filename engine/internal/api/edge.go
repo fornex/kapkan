@@ -727,9 +727,11 @@ func (s *Server) handleEdgeNodes(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Get()
 	staleAfter := edgeStaleAfter(cfg)
 	doc := EdgeNodesDoc{StaleAfterSeconds: int(staleAfter / time.Second), Nodes: []EdgeNodeStatus{}}
+	// Named whenever there are nodes to bind to — scrubbing ones included, so a
+	// scrub-only fleet reads it here too, as the authentication guide promises.
+	doc.UnboundAgentTokens = cfg.UnboundAgentTokens()
 	if cfg.Edge != nil {
 		doc.NodesTotal = len(cfg.Edge.Nodes)
-		doc.UnboundAgentTokens = cfg.UnboundAgentTokens()
 		for i := range cfg.Edge.Nodes {
 			n := &cfg.Edge.Nodes[i]
 			lastSeen, holding := s.edgePresence.seen(n.Name)

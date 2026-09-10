@@ -412,10 +412,13 @@ Kapkan renders neither.
   orders; Let's Encrypt caps a name at about five per week. The brain's issuance slot and
   renewal jitter spread them; `acme.fallback` (ZeroSSL, Google Trust Services — both need an
   External Account Binding) is the escape hatch. Plan CA accounts for large fleets.
-- **The agent token issues certificates.** Until tokens are bound to nodes, a holder of the
-  agent token can publish a challenge answer for any zone through the brain (only from a node
-  that holds the zone's issuance slot, and every call is logged). Rotate the token if a node is
-  compromised.
+- **The agent token issues certificates.** Bind each agent token to its node
+  (`api.tokens[].node`, see [authentication](/docs/authentication#binding-an-agent-token-to-its-node))
+  so a stolen token cannot act as another node and only that node's token needs rotating. A bound
+  token can still publish a challenge answer for any zone through the brain as its own node (only
+  while it holds the zone's issuance slot, and every call is logged) until zones are placed on
+  nodes in a later E6 change — so a node compromise is still a certificate exposure for every
+  zone until then.
 
 ## Related
 

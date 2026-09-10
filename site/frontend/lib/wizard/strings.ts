@@ -1474,7 +1474,7 @@ export const wizardHelp: Partial<Record<Locale, Record<string, string>>> = {
     "geoip.asn_database": "Путь к файлу GeoLite2-ASN.mmdb на хосте движка.",
     "geoip.country_database": "Путь к файлу GeoLite2-Country.mmdb на хосте движка.",
     "api.dashboard": "Отдавать встроенный веб-интерфейс на слушателе API.",
-    "api.tokens.role": "viewer — только чтение; operator — чтение + бан/разбан/перезагрузка конфига; agent — учётка узла очистки: лента правил data plane (и, в будущем релизе, отчёты его узла) — больше ничего.",
+    "api.tokens.role": "viewer — только чтение; operator — чтение + бан/разбан/перезагрузка конфига; agent — учётка узла (очистки или edge): опросы правил и зон, собственный отчёт и ACME-маршруты edge — больше ничего; привяжите её к узлу полем node.",
     "api.tokens.node": "Привязывает agent-токен к одному узлу (запись edge.nodes[] или scrubbing.nodes[]): brain отказывает ему на каждом маршруте узла — poll, отчёт, ACME — если названо имя другого узла. Пусто — общий токен продолжает работать, но демон и -check-config предупреждают, пока все agent-токены не привязаны.",
   },
   de: {
@@ -1572,7 +1572,7 @@ export const wizardHelp: Partial<Record<Locale, Record<string, string>>> = {
     "geoip.asn_database": "Pfad zu einer GeoLite2-ASN.mmdb auf dem Engine-Host.",
     "geoip.country_database": "Pfad zu einer GeoLite2-Country.mmdb auf dem Engine-Host.",
     "api.dashboard": "Die eingebettete Web-UI auf dem API-Listener ausliefern.",
-    "api.tokens.role": "viewer (nur lesen), operator (lesen + Ban/Unban/Reload) oder agent (Credential eines Scrub-Knotens: der Regel-Feed der Data Plane — sonst nichts).",
+    "api.tokens.role": "viewer (nur lesen), operator (lesen + Ban/Unban/Reload) oder agent (Credential eines Knotens, Scrub oder Edge: die Regel- und Zonen-Polls, sein eigener Report und die Edge-ACME-Routen — sonst nichts; mit node an seinen Knoten binden).",
     "api.tokens.node": "Bindet ein Agent-Token an einen Knoten (ein edge.nodes[]- oder scrubbing.nodes[]-Eintrag): das Brain weist es auf jeder Knoten-Route — Poll, Report, ACME — ab, wenn ein anderer Knotenname präsentiert wird. Leer lassen, damit ein gemeinsames Token während der Migration weiterläuft; Daemon und -check-config warnen, bis jedes Agent-Token gebunden ist.",
   },
   fr: {
@@ -1670,7 +1670,7 @@ export const wizardHelp: Partial<Record<Locale, Record<string, string>>> = {
     "geoip.asn_database": "Chemin d'un fichier GeoLite2-ASN.mmdb sur l'hôte du moteur.",
     "geoip.country_database": "Chemin d'un fichier GeoLite2-Country.mmdb sur l'hôte du moteur.",
     "api.dashboard": "Servir l'interface web intégrée sur l'écouteur de l'API.",
-    "api.tokens.role": "viewer (lecture seule), operator (lecture + ban/unban/reload) ou agent (identifiant d'un nœud de nettoyage : le flux de règles de la data plane — rien d'autre).",
+    "api.tokens.role": "viewer (lecture seule), operator (lecture + ban/unban/reload) ou agent (identifiant d'un nœud, nettoyage ou edge : les polls de règles et de zones, son propre rapport et les routes ACME edge — rien d'autre ; à lier à son nœud avec node).",
     "api.tokens.node": "Lie un jeton agent à un seul nœud (une entrée edge.nodes[] ou scrubbing.nodes[]) : le brain le refuse sur chaque route de nœud — poll, rapport, ACME — quand un autre nom de nœud est présenté. Vide, un jeton partagé continue de fonctionner pendant la migration ; le démon et -check-config avertissent tant que chaque jeton agent n'est pas lié.",
   },
   es: {
@@ -1768,7 +1768,7 @@ export const wizardHelp: Partial<Record<Locale, Record<string, string>>> = {
     "geoip.asn_database": "Ruta a un archivo GeoLite2-ASN.mmdb en el host del motor.",
     "geoip.country_database": "Ruta a un archivo GeoLite2-Country.mmdb en el host del motor.",
     "api.dashboard": "Servir la interfaz web integrada en el listener de la API.",
-    "api.tokens.role": "viewer (solo lectura), operator (lectura + ban/unban/reload) o agent (credencial de un nodo de limpieza: el feed de reglas de la data plane — nada más).",
+    "api.tokens.role": "viewer (solo lectura), operator (lectura + ban/unban/reload) o agent (credencial de un nodo, de limpieza o edge: los sondeos de reglas y zonas, su propio informe y las rutas ACME de edge — nada más; vincúlala a su nodo con node).",
     "api.tokens.node": "Vincula un token agent a un solo nodo (una entrada edge.nodes[] o scrubbing.nodes[]): el brain lo rechaza en cada ruta de nodo — poll, informe, ACME — cuando se presenta el nombre de otro nodo. Vacío, un token compartido sigue funcionando durante la migración; el daemon y -check-config avisan hasta que todos los tokens agent estén vinculados.",
   },
 };

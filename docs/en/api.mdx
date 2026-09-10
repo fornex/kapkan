@@ -665,7 +665,12 @@ liveness signal (the poll is). An unknown `{name}` is `404`; success is `204 No 
 #### GET /api/v1/edge/nodes
 
 The node inventory: each configured edge node with its poll liveness joined with its last
-report. A `viewer`-rank read, unscoped tokens only.
+report, plus `tokens` (the agent token names bound to it with `api.tokens[].node`) and
+`last_token` (the name of the token that last polled as it — never a secret); the document carries
+`unbound_agent_tokens` while any agent token is unbound and nodes exist to bind it to (absent
+otherwise) — the migration view of
+[Binding an agent token to its node](/docs/authentication#binding-an-agent-token-to-its-node).
+All three are omitted when empty. A `viewer`-rank read, unscoped tokens only.
 
 #### GET /api/v1/edge/zones/status
 

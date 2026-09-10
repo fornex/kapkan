@@ -120,9 +120,11 @@ The clean 0/1 split drops straight into CI or a pre-deploy gate. See
 [Validating the configuration](/docs/configuration#validating-the-configuration).
 
 A valid config can still print a `WARNING` block after the `OK` line — legal config that the
-daemon will run, but almost certainly not what you meant. Today there is one: a
+daemon will run, but almost certainly not what you meant. Today there are two: a
 [static rule that can never fire](/docs/dataplane-tuning#rules-that-can-never-fire), naming the
-rule and what takes its packets. The exit code stays `0`, so an existing gate is unaffected; if
+rule and what takes its packets; and an `agent` token not
+[bound to a node](/docs/authentication#binding-an-agent-token-to-its-node) (`api.tokens[].node`),
+naming each such token. The exit code stays `0`, so an existing gate is unaffected; if
 you want warnings to fail the build too, check the output for `WARNING` as well as the code.
 
 ### Dumping the schema

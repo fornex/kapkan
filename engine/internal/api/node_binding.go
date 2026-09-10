@@ -8,10 +8,10 @@ package api
 // channels: the edge zones poll (?node=), the edge report, the ACME slot and
 // challenge publication, the dataplane rules poll (?node=) and the scrub
 // report. A refusal is uniform and quiet — 403 that never names the bound node
-// (an existence oracle for the topology otherwise), a rate-limited Warn so a
-// misconfigured fleet is one line a minute per token and not a flood, and a
-// counter the operator can alert on; never an audit row, which is for actions
-// taken, not refused.
+// (an existence oracle for the topology otherwise), a Warn rate-limited per
+// TOKEN so a misconfigured or leaked token is one line a minute and never a
+// flood, whatever names it presents, and a counter the operator can alert on;
+// never an audit row, which is for actions taken, not refused.
 //
 // Presence is stamped only by AGENT tokens. An operator who polls with ?node=X
 // is previewing X's document — useful, and the dry-run of a placement change —
@@ -28,14 +28,26 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/metrics"
 )
 
-// bindingRefusalLogInterval bounds the Warn log to one line per (token,
-// presented node) per interval.
-const bindingRefusalLogInterval = time.Minute
+const (
+	// bindingRefusalLogInterval bounds the Warn log to one line per token per
+	// interval. The key is the token — a configured, bounded set — and never
+	// the presented name, which the request chooses: a leaked token varying
+	// the name must not turn the log into a flood or the limiter into a sink.
+	bindingRefusalLogInterval = time.Minute
+	// maxBindingWarnedTokens is the limiter map's hard ceiling. The key set is
+	// the configured tokens', so it is not reached in practice; it is here so
+	// nothing about this map is unbounded.
+	maxBindingWarnedTokens = 256
+	// maxLoggedNodeName truncates the presented name in the Warn line: node
+	// names are short identifiers, and the request's is untrusted input.
+	maxLoggedNodeName = 64
+)
 
 // nodeActor applies the binding to a request that names node `name` on route
 // `route` (a short label for the log and the metric). It returns the caller and
@@ -72,33 +84,54 @@ func stampsPresence(c caller) bool {
 	return c.role == config.RoleAgent && c.token != ""
 }
 
-// logBindingRefusal is the rate-limited Warn plus the counter.
+// logBindingRefusal is the counter plus the per-token rate-limited Warn. The
+// line says which of the two refusals it was (reason no_node / other_node) and
+// carries the presented name truncated.
 func (s *Server) logBindingRefusal(c caller, presented, route string, r *http.Request) {
 	metrics.APINodeBindingRefused.WithLabelValues(route).Inc()
-	key := c.token + "\x00" + presented
 	now := time.Now()
 	s.bindingMu.Lock()
 	if s.bindingWarned == nil {
 		s.bindingWarned = make(map[string]time.Time)
 	}
-	last, seen := s.bindingWarned[key]
+	last, seen := s.bindingWarned[c.token]
 	if seen && now.Sub(last) < bindingRefusalLogInterval {
 		s.bindingMu.Unlock()
 		return
 	}
-	s.bindingWarned[key] = now
-	// Keep the map from accruing a key per probing attempt: drop entries older
-	// than the interval whenever it grows past a modest size.
-	if len(s.bindingWarned) > 256 {
+	if !seen && len(s.bindingWarned) >= maxBindingWarnedTokens {
+		// At the ceiling: drop the entries past their interval, and the oldest
+		// one if none is, so the map never grows past the cap.
+		var oldestKey string
+		oldest := now
 		for k, t := range s.bindingWarned {
 			if now.Sub(t) >= bindingRefusalLogInterval {
 				delete(s.bindingWarned, k)
+				continue
+			}
+			if t.Before(oldest) {
+				oldest, oldestKey = t, k
 			}
 		}
+		if len(s.bindingWarned) >= maxBindingWarnedTokens && oldestKey != "" {
+			delete(s.bindingWarned, oldestKey)
+		}
 	}
+	s.bindingWarned[c.token] = now
 	s.bindingMu.Unlock()
-	s.log.Warn("node binding refused: the token is bound to another node",
-		"token", c.token, "bound", c.node, "presented", presented, "route", route, "remote", r.RemoteAddr)
+
+	msg, reason := "node binding refused: the token is bound to another node", "other_node"
+	if presented == "" {
+		msg, reason = "node binding refused: the bound token polled without a node name", "no_node"
+	}
+	if len(presented) > maxLoggedNodeName {
+		cut := maxLoggedNodeName
+		for cut > 0 && !utf8.RuneStart(presented[cut]) {
+			cut--
+		}
+		presented = presented[:cut] + "…"
+	}
+	s.log.Warn(msg, "token", c.token, "bound", c.node, "presented", presented, "reason", reason, "route", route, "remote", r.RemoteAddr)
 }
 
 // bindingState is the Server's rate-limiter state for refusal logs.

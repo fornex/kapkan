@@ -65,7 +65,7 @@ startup, not a silent default.
 | --- | --- |
 | `viewer` | Read only: status, attacks, hosts, bans, metrics. |
 | `operator` | Everything a viewer can, plus manual ban/unban, [source blocks](/docs/api#the-source-block-channel) and config reload (reload is admin-only — see below). |
-| `agent` | A [scrub node](/docs/scrubbing#managed-scrubbing-nodes)'s credential: the dataplane rule feed and its own report, and **nothing else**. |
+| `agent` | A node's credential — a [scrub node](/docs/scrubbing#managed-scrubbing-nodes)'s or an [edge node](/docs/edge)'s: the rules and zones polls, its own report and the edge ACME coordination, and **nothing else**. Bind it to its node with `node` (below). |
 
 There is no separate `admin` role to assign — an *admin* is simply an operator token with no `tenant` set. The role values the engine accepts are `viewer`, `operator` and `agent`; the admin/scoped distinction is the [Multi-tenancy](/docs/multi-tenancy) axis, covered below.
 
@@ -102,9 +102,12 @@ Rules: `node` is allowed on `agent` tokens only; the name must exist in exactly 
 lists (a name present in both is refused as ambiguous — the two channels are different trust
 domains); several tokens may bind the same node, which is how a token is rotated without a gap.
 
-Without `node` an agent token is a **fleet-wide credential**: it may poll as any node, report as any
-node and, on the edge channel, publish an ACME key authorization for any zone in the fleet — the
-reason a stolen token used to mean rotating it for the whole fleet. An unbound token keeps working
+Without `node` an agent token is a **fleet-wide credential**: it may poll as any node and report as
+any node — the reason a stolen token used to mean rotating it for the whole fleet. What `node`
+changes is impersonation and the rotation radius, not the set of zones: until zones are placed on
+nodes (a later E6 change) every node serves every zone, so a bound token acting as its own node can
+still publish an ACME key authorization for any zone the fleet serves — treat a node compromise as
+a certificate exposure for every zone, and rotate that node's token. An unbound token keeps working
 exactly as before, so a fleet migrates one node at a time, and it is named until it is bound: by
 `kapkan -check-config` (a WARNING), in the daemon's log at start and on every reload, and in the
 edge inventory (`unbound_agent_tokens`; per node, `tokens` lists the bound token names and
@@ -121,8 +124,9 @@ refused with `403 Forbidden`; a request with no valid token is `401 Unauthorized
 empty or unset env var never matches, so a misconfigured secret fails closed.
 
 Give every token a distinct secret — if one secret value is configured for two tokens with
-different roles or tenants, the request is refused (`401 Unauthorized`) rather than guessing
-which one you meant. The daemon logs `ambiguous API token` when this happens.
+different roles, tenants or node bindings (an unbound entry and a bound one included), the
+request is refused (`401 Unauthorized`) rather than guessing which one you meant. The daemon logs
+`ambiguous API token` when this happens.
 
 A token's secret *value* is read from the environment on every request, so rotating it
 takes effect on the next request. Adding or removing token *entries* in the YAML changes the
