@@ -1179,7 +1179,7 @@ func TestAuditEmittedOnMutations(t *testing.T) {
 	t.Setenv("K_B", "b-secret")
 	s := testServer(t, storeFromYAML(t, tenantAPIYAML()))
 	aw := &fakeAuditWriter{}
-	s.SetAuditWriter(aw)
+	s.SetStorageWriter(aw)
 	h := s.Handler()
 
 	const bIP = "203.0.113.70" // custB
