@@ -69,6 +69,11 @@ func TestZonesSchemaEnumsAndBoundsPresent(t *testing.T) {
 		}
 		return cur
 	}
+	// The ownership label's charset is what (*Zone).validate enforces; the
+	// schema must say so, not merely be regenerated (E6.2).
+	if got := node("zones.tenant")["pattern"]; got != groupNameRe.String() {
+		t.Fatalf("zones.tenant pattern = %v, want %s", got, groupNameRe)
+	}
 	for path, values := range zoneEnumValues {
 		n := node(path)
 		if len(values) == 0 {

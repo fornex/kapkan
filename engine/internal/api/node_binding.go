@@ -89,15 +89,32 @@ func stampsPresence(c caller) bool {
 // carries the presented name truncated.
 func (s *Server) logBindingRefusal(c caller, presented, route string, r *http.Request) {
 	metrics.APINodeBindingRefused.WithLabelValues(route).Inc()
+	if !s.warnOncePerToken(c.token) {
+		return
+	}
+	msg, reason := "node binding refused: the token is bound to another node", "other_node"
+	if presented == "" {
+		msg, reason = "node binding refused: the bound token polled without a node name", "no_node"
+	}
+	s.log.Warn(msg, "token", c.token, "bound", c.node, "presented", truncateForLog(presented), "reason", reason, "route", route, "remote", r.RemoteAddr)
+}
+
+// warnOncePerToken reports whether a refusal Warn for token may be logged now:
+// one per token per bindingRefusalLogInterval, whatever the token presents,
+// in a map hard-capped at maxBindingWarnedTokens. Shared by every refusal the
+// API rate-limits — the binding (agent tokens) and the tenant-scoped lever
+// (operator tokens): a token is one or the other, so the shared key set never
+// makes one refusal silence the other.
+func (s *Server) warnOncePerToken(token string) bool {
 	now := time.Now()
 	s.bindingMu.Lock()
+	defer s.bindingMu.Unlock()
 	if s.bindingWarned == nil {
 		s.bindingWarned = make(map[string]time.Time)
 	}
-	last, seen := s.bindingWarned[c.token]
+	last, seen := s.bindingWarned[token]
 	if seen && now.Sub(last) < bindingRefusalLogInterval {
-		s.bindingMu.Unlock()
-		return
+		return false
 	}
 	if !seen && len(s.bindingWarned) >= maxBindingWarnedTokens {
 		// At the ceiling: drop the entries past their interval, and the oldest
@@ -117,21 +134,21 @@ func (s *Server) logBindingRefusal(c caller, presented, route string, r *http.Re
 			delete(s.bindingWarned, oldestKey)
 		}
 	}
-	s.bindingWarned[c.token] = now
-	s.bindingMu.Unlock()
+	s.bindingWarned[token] = now
+	return true
+}
 
-	msg, reason := "node binding refused: the token is bound to another node", "other_node"
-	if presented == "" {
-		msg, reason = "node binding refused: the bound token polled without a node name", "no_node"
+// truncateForLog cuts an untrusted, caller-chosen name to maxLoggedNodeName
+// bytes at a rune boundary before it reaches the log.
+func truncateForLog(s string) string {
+	if len(s) <= maxLoggedNodeName {
+		return s
 	}
-	if len(presented) > maxLoggedNodeName {
-		cut := maxLoggedNodeName
-		for cut > 0 && !utf8.RuneStart(presented[cut]) {
-			cut--
-		}
-		presented = presented[:cut] + "…"
+	cut := maxLoggedNodeName
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	s.log.Warn(msg, "token", c.token, "bound", c.node, "presented", presented, "reason", reason, "route", route, "remote", r.RemoteAddr)
+	return s[:cut] + "…"
 }
 
 // bindingState is the Server's rate-limiter state for refusal logs.

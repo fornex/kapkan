@@ -197,24 +197,29 @@ type EdgeLeverNode struct {
 }
 
 // handleEdgeChallengeLever serves POST (set or, with mode off, clear) and
-// DELETE (clear). Operator rank by the route; unscoped tokens only, since the
-// zones file spans every tenant's zones.
+// DELETE (clear). Operator rank by the route. An unscoped token pulls it on
+// any zone; a tenant-scoped operator (E6.2) on its own zones only — any other
+// zone (another tenant's, unlabelled, or gone from the file: a lever left on
+// a removed zone is the unscoped tokens' to clear) is "unknown zone" for it,
+// byte for byte what an unknown name answers, so the lever is no existence
+// oracle across tenants. Decided before the body is read, so validation order
+// tells nothing about a foreign zone either.
 func (s *Server) handleEdgeChallengeLever(w http.ResponseWriter, r *http.Request) {
 	c := callerFrom(r)
-	if !c.unscoped() {
-		writeError(w, http.StatusForbidden, "the challenge lever is restricted to unscoped tokens")
-		return
-	}
 	zone := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
 	cfg := s.store.Get()
-	var fileZone *edgedocZoneView
-	if cfg.ZonesCfg != nil {
-		for i := range cfg.ZonesCfg.Zones {
-			if z := &cfg.ZonesCfg.Zones[i]; z.Name == zone {
-				fileZone = &edgedocZoneView{mode: z.Policy.Mode, challenge: z.Policy.Challenge, zoneDry: z.Policy.DryRun, rungDry: z.Policy.ChallengeOptions.DryRun == nil || *z.Policy.ChallengeOptions.DryRun}
-				break
-			}
+	if !visibleZone(c, cfg, zone) {
+		// Only a scoped caller gets here (an unscoped one sees every zone):
+		// the operator's trace of the refusal, never the caller's.
+		if !c.unscoped() {
+			s.logZoneRefusal(c, zone, "edge_lever", r)
 		}
+		writeError(w, http.StatusNotFound, "unknown zone")
+		return
+	}
+	var fileZone *edgedocZoneView
+	if z := zoneInFile(cfg, zone); z != nil {
+		fileZone = &edgedocZoneView{mode: z.Policy.Mode, challenge: z.Policy.Challenge, zoneDry: z.Policy.DryRun, rungDry: z.Policy.ChallengeOptions.DryRun == nil || *z.Policy.ChallengeOptions.DryRun}
 	}
 	now := time.Now()
 	var req EdgeChallengeLeverRequest
