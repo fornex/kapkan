@@ -499,12 +499,13 @@ for n in range(count):
         codes["err"] = codes.get("err", 0) + 1
 print(json.dumps({"codes": codes, "solved": solved, "pages": pages, "cookie": bool(cookie)}))
 PY
-# keepalive.py: one connection to each node, kept WARM with a request every
-# half second, so that when arm D kills a node the only thing that can have
-# broken a connection is the kill — an idle server-side close would otherwise
-# look identical. It reports each connection's status, whether the server
-# asked to close, and how many TCP connections it actually opened, so a
-# silent reconnect cannot pass for a surviving connection.
+# keepalive.py: one connection to each node, a request on each, then a second
+# request on each the moment the rig says the node has been killed. The gap is
+# the kill itself — a few hundred milliseconds — so no idle timeout can be
+# mistaken for it, and nothing needs to keep the connections warm (an earlier
+# version warmed them every half second and its rounds raced the kill). It
+# counts its own TCP opens, so a silent reconnect can never pass for a
+# surviving connection.
 cat > /tmp/keepalive.py <<'PY'
 import http.client, ssl, socket, sys, json, os, time
 zone, ip1, ip2 = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -532,15 +533,14 @@ class Conn:
             return type(e).__name__
 a, b = Conn(ip1), Conn(ip2)
 first = [a.get("/ka-1a"), b.get("/ka-2a")]
+opens_before = [a.opens, b.opens]
 open("/tmp/ka-ready", "w").write("1")
-warm = []
 for _ in range(1200):
     if os.path.exists("/tmp/ka-go"):
         break
-    time.sleep(0.5)
-    warm = [a.get("/ka-1w"), b.get("/ka-2w")]
+    time.sleep(0.05)
 second = [a.get("/ka-1b"), b.get("/ka-2b")]
-print(json.dumps({"first": first, "warm": warm, "second": second,
+print(json.dumps({"first": first, "second": second, "opens_before": opens_before,
                   "opens": [a.opens, b.opens], "server_closed": [a.closed_by_server, b.closed_by_server]}))
 PY
 
@@ -687,7 +687,7 @@ for i in $(seq 1 60); do [ -f /tmp/ka-ready ] && break; sleep 0.2; done
 [ -f /tmp/ka-ready ] && ok "a keepalive connection is open to each node" || bad "keepalive.py never got its first round through: $(cat /tmp/keepalive.out)"
 KILL0=$(date +%s%N)
 kill_node 2
-sleep 0.5; touch /tmp/ka-go
+touch /tmp/ka-go
 batch 40 tcp /tmp/d-dead.txt
 D_FAIL=$(ncode 000 /tmp/d-dead.txt); D_OK=$(n200 /tmp/d-dead.txt)
 # The failures must be CONNECTION failures (curl's 000), not a refusal: a 403
@@ -697,10 +697,13 @@ D_FAIL=$(ncode 000 /tmp/d-dead.txt); D_OK=$(n200 /tmp/d-dead.txt)
 [ "$(served edge-2 /tmp/d-dead.txt)" = "0" ] && ok "nothing was served BY edge-2 (every success names edge-1)" || bad "edge-2 served after the kill"
 wait "$KA_PID" 2>/dev/null
 KA=$(cat /tmp/keepalive.out)
-# One TCP connection each, never reopened, and no server-side close: without
-# this the next assertion could pass on a silent reconnect.
-[ "$(jx "d['opens']" <<< "$KA")" = "[1, 1]" ] && [ "$(jx "sum(d['server_closed'])" <<< "$KA")" = "0" ] && ok "each connection was opened once and the server never asked to close it: these are genuinely established connections" || bad "keepalive bookkeeping: $KA"
-[ "$(jx "d['second'][0]" <<< "$KA")" = "200" ] && [ "$(jx "d['second'][1]" <<< "$KA")" != "200" ] && ok "across the kill the connection to edge-1 still answers 200 and the one to edge-2 is gone ($(jx "d['second']" <<< "$KA")) — an anycast address gives an established connection no protection" || bad "keepalive across the kill: $KA"
+# One TCP connection each before the kill, and no server-side close: without
+# this the assertion below could pass on a silent reconnect. After the kill
+# edge-1 must still be on its ORIGINAL connection (opens still 1); edge-2's
+# count is not asserted, since a client that finds its node gone may well try
+# to reopen — and be refused.
+[ "$(jx "d['opens_before']" <<< "$KA")" = "[1, 1]" ] && [ "$(jx "d['first']" <<< "$KA")" = "[200, 200]" ] && [ "$(jx "sum(d['server_closed'])" <<< "$KA")" = "0" ] && ok "one TCP connection to each node, both answering 200, neither closed by the server: genuinely established connections" || bad "keepalive bookkeeping: $KA"
+[ "$(jx "d['second'][0]" <<< "$KA")" = "200" ] && [ "$(jx "d['opens'][0]" <<< "$KA")" = "1" ] && [ "$(jx "d['second'][1]" <<< "$KA")" != "200" ] && ok "across the kill the connection to edge-1 answers 200 on that same connection and the one to edge-2 is gone ($(jx "d['second']" <<< "$KA")) — a shared address gives an established connection no protection whatever" || bad "keepalive across the kill: $KA"
 wait_eq 20 false node_f edge-2 "n['alive']" && D_LOST_MS=$(( ($(date +%s%N) - KILL0) / 1000000 )) && ok "the inventory marks edge-2 alive:false ${D_LOST_MS} ms after the kill (stale_after_seconds $STALE)" || { D_LOST_MS=0; bad "edge-2 still alive: $(node_f edge-2 "n['alive']")"; }
 [ "$(node_f edge-1 "n['alive']")" = "true" ] && ok "edge-1 is untouched by its neighbour's death" || bad "edge-1 alive: $(node_f edge-1 "n['alive']")"
 [ "$(vip_route)" = "$ROUTE0" ] && ok "the router's VIP route is byte-identical: the brain never touches routing for a zone address ($ROUTE0)" || bad "the VIP route changed by itself: '$ROUTE0' -> '$(vip_route)'"
