@@ -202,8 +202,8 @@ func TestEdgePlacementHoldIsPerNode(t *testing.T) {
 		if elapsed := time.Since(start); elapsed > s.rulesHold/2 {
 			t.Fatalf("e2's hold took %v to answer its zone's coordination; want a prompt wake", elapsed)
 		}
-		if rec.Code != http.StatusOK || rec.Header().Get("ETag") == e2.Header().Get("ETag") ||
-			!(strings.Contains(rec.Body.String(), validKeyAuth) || strings.Contains(rec.Body.String(), `"zone":"eu.example","node":"e2"`)) {
+		news := strings.Contains(rec.Body.String(), validKeyAuth) || strings.Contains(rec.Body.String(), `"zone":"eu.example","node":"e2"`)
+		if rec.Code != http.StatusOK || rec.Header().Get("ETag") == e2.Header().Get("ETag") || !news {
 			t.Fatalf("e2's woken hold = %d, etag %s: %s", rec.Code, rec.Header().Get("ETag"), rec.Body.String())
 		}
 	case <-time.After(s.rulesHold):
@@ -453,5 +453,49 @@ func TestEdgePlacementHistoryIgnoresClaimsOutsideScope(t *testing.T) {
 	}
 	if got := dropped("outside_scope") - before; got != 3 {
 		t.Fatalf("dropped{outside_scope} moved by %v, want 3 (two windows, one certificate)", got)
+	}
+}
+
+// TestEdgePlacementHoldFollowsTheBinding: a poll parked when a reload moves
+// its token to another node, or removes the token, ends with the refusal a
+// first poll would now get — 403 or 401 — promptly, never a document.
+func TestEdgePlacementHoldFollowsTheBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tokens string
+		want   int
+	}{
+		{"token rebound to another node", strings.Replace(placementTokens, "role: agent, node: e1", "role: agent, node: e2", 1), http.StatusForbidden},
+		{"token removed", strings.Replace(placementTokens, "    - { name: a1, token_env: TEST_PL_A1, role: agent, node: e1 }\n", "", 1), http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, zonesPath := placementStore(t, true)
+			cfgPath := filepath.Join(filepath.Dir(zonesPath), "kapkan.yaml")
+			s := testServer(t, store)
+			s.rulesHold = 3 * time.Second
+			h := s.Handler()
+			e1 := getZones(h, "", "a1-secret", "e1")
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- getZones(h, e1.Header().Get("ETag"), "a1-secret", "e1") }()
+			waitEdgeHolds(t, s, 1)
+			if err := os.WriteFile(cfgPath, []byte(placementConfig(zonesPath, tc.tokens, placementNodes)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			if _, err := store.Reload(); err != nil {
+				t.Fatalf("Reload: %v", err)
+			}
+			select {
+			case rec := <-done:
+				if rec.Code != tc.want || strings.Contains(rec.Body.String(), "us.example") {
+					t.Fatalf("the parked poll ended with %d %s, want %d and no document", rec.Code, rec.Body.String(), tc.want)
+				}
+				if elapsed := time.Since(start); elapsed > s.rulesHold/2 {
+					t.Fatalf("the parked poll took %v to end after the reload; want the wake, not the deadline", elapsed)
+				}
+			case <-time.After(2 * s.rulesHold):
+				t.Fatal("the parked poll did not end after the reload")
+			}
+		})
 	}
 }
