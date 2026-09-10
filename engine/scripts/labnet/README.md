@@ -125,6 +125,67 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   `/tmp/lab/logs/`; the recorded h3-vs-h2 figures are the source of the §8
   acceptance paragraph.
 
+- **`edge-e6-anycast.sh`** — the edge track's E6.9 acceptance ("one address,
+  many nodes", [`engine/docs/edge-spec.md`](../../docs/edge-spec.md) §8) and the
+  transcript behind every command and number in the anycast/ECMP guide. This is
+  the first rig with a **real router hop**, because the kernel's
+  `fib_multipath_hash_policy` is itself the subject: a `rtr` netns forwards one
+  VIP `/32` to two nodes as an ECMP route over two point-to-point legs, and the
+  policy is switched per arm. Each node holds the VIP on `lo`, runs stock nginx
+  under `unshare -u` so its `$hostname` names the node, and runs its own
+  `kapkan edge` with its own state, sockets, pid file and **its own agent token
+  bound with `api.tokens[].node`** — the guide asks for one token per node, so
+  the rig models exactly that. The brain lives in its own netns and is reached
+  only by unicast; the Pebble CA resolves the zone to the VIP, so every HTTP-01
+  validation crosses the hash. There is no XDP here — routing and per-node
+  ceilings are the subject, not the data plane.
+
+  A request is attributed to the node that served it two ways, each used where
+  it is honest: per-node `/metrics`, and `add_header X-Kapkan-Node $hostname
+  always;` injected through the zone's `extra_directives_file` (an operator's
+  debugging trick, never a product header — and one that does not ride a 429,
+  since the render's `@kapkan_denied` declares an `add_header` of its own).
+
+  The arms are the guide's claims: a deterministic **fan-out** (the route pinned
+  to one node for the whole issuance, so the other's certificate can only have
+  been validated through the challenge the brain fanned out); the two **hash
+  forms** (layer 3 pins one client to one node, layer 4 spreads it over both —
+  over TCP and over HTTP/3, since the same policy hashes the UDP 4-tuple); the
+  **per-node ceilings**, whose L3-vs-L4 shares are recorded because they are the
+  guide's "up to N× the ceiling"; a node **dying with nobody withdrawing**, then
+  the same node behind a downed link (a dead nexthop needs no operator, a dead
+  node does) and the withdrawal as the RIB effect it is, timed; the
+  **withdrawal signal** — `/healthz` 503 yes, `converged:false` no, the
+  inventory's `alive` no; the brain dead; the two **cross-node facts** (a TLS
+  session is not resumable on the other node, a clearance cookie is honoured
+  there); and **MTU** 1200 on one leg breaking HTTP/3 for that node's share
+  while TCP is untouched. Needs `kapkan` and Pebble cross-compiled for the
+  container:
+
+  ```sh
+  mkdir -p /tmp/lab
+  (cd engine && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/kapkan ./cmd/kapkan)
+  git clone --depth 1 https://github.com/letsencrypt/pebble /tmp/pebble-src \
+    && (cd /tmp/pebble-src && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/pebble ./cmd/pebble)
+  docker run --privileged --rm -v /tmp/lab:/lab -v "$PWD:/w" -w /w debian:13-slim \
+    sh -c 'apt-get update -qq && apt-get install -y -qq \
+             iproute2 nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump util-linux >/dev/null \
+           && KAPKAN=/lab/kapkan PEBBLE=/lab/pebble bash engine/scripts/labnet/edge-e6-anycast.sh'
+  ```
+
+  `ANYCAST_BGP=1` adds a stretch arm, **outside** the acceptance path, that
+  installs bird2 and drives the same withdrawal contract with a real speaker on
+  each node, enabled and disabled by a once-a-second `/healthz` probe. The run's
+  logs and the recorded numbers land in `/tmp/lab/logs/` (`numbers.txt` and
+  `arm-c.txt` are what the guide quotes).
+
+## Never two rigs at once
+
+Each of these scripts owns the whole container's network namespaces, `/etc/hosts`
+and its `/tmp`, and several bind privileged ports. Check `docker ps` for a
+running privileged `debian:13-slim` before starting one — another session may be
+part-way through `edge-e6.sh` — and wait for it to finish.
+
 ## VRF
 
 The return-path recipe is verified with **policy routing** (route-leaking:
