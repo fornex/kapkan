@@ -597,6 +597,23 @@ headline and the long pole.
   -check-config, the log at start and reload, and the inventory (`unbound_agent_tokens`, per-node
   `tokens` and `last_token`); the hard requirement is a MAJOR-release item and there is no knob.
   The zones document is untouched — a fleet without bindings gets byte-identical documents.
+  *Decided in E6.2 (`config.Zone.Tenant`, `(*Config).BindZones`, `internal/api/edge_tenant.go`):*
+  a zone carries an optional ownership label on the hostgroups' tenant axis — never inherited,
+  never in the document (a labelled file yields the bytes and ETag the unlabelled one did). The
+  "a token's tenant exists" rule becomes hostgroups ∪ zones and runs in `Load` when an edge
+  block is present (Parse stays pure and decides hostgroup-only, as before, without one), so an
+  edge-only customer can own hostnames and no prefixes; a zone label nobody holds a token for
+  is legal. `GET /edge/zones/status` admits scoped tokens and shows them exactly their own zones
+  (no foreign hostname in a row, a would-be set or an h3 list; no `tenant` field), and every
+  zone of the file now has a row (`mode`, `file_challenge`, `certs` per alive node; `tenant` for
+  unscoped callers). A scoped operator pulls the lever on its own zones only; any other zone —
+  another tenant's, unlabelled, or gone from the file — is the byte-identical `404 unknown zone`,
+  decided before the body is read. Node names stay visible to a tenant (D3); the document, both
+  reports, ACME, both inventories and `config/reload` stay unscoped. `edge_challenge` joins the
+  audit filter. A scoped refusal counts in `kapkan_api_zone_refused_total{route}` and logs once a
+  minute per token (the E6.1 limiter, shared — D10's trace for the operator); `h3.serving/
+  unsupported` come from `terminator.h3` for every row, `mode: none` included, and
+  `certs_truncated` is summed on the document like `zones_truncated`.
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and

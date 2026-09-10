@@ -9,8 +9,8 @@ export const metadata = {
 One Kapkan instance can serve many customers (a managed service provider (MSP) or internet
 data center (IDC) use case) and give each a token
 that sees and touches **only their own** attacks, bans and hosts. A tenant is just an optional
-label on a [hostgroup](/docs/hostgroups) — there is no new top-level object, no separate tenant
-registry, and the detection hot path is untouched.
+label on a [hostgroup](/docs/hostgroups) — or, on an edge brain, on a [zone](/docs/zones) — there
+is no new top-level object, no separate tenant registry, and the detection hot path is untouched.
 
 ```yaml
 tenant: "house"                 # optional: label the global/fallback group
@@ -39,7 +39,7 @@ api:
 
 Three steps map directly to the YAML above:
 
-1. **Tag each customer's hostgroup(s)** with `tenant: "customerA"` (the same label can repeat across several groups — a customer's web and DNS groups, say).
+1. **Tag each customer's hostgroup(s)** with `tenant: "customerA"` (the same label can repeat across several groups — a customer's web and DNS groups, say), or its [edge zones](/docs/zones) with `zones[].tenant` for a customer with hostnames and no prefixes.
 2. **Add an API token** under `api.tokens` carrying that same `tenant:` plus a `role:` — `viewer` is read-only, `operator` can also ban/unban.
 3. **Hand the customer that token.** They now see and touch only their own prefixes; everything else (other tenants, untagged groups) is invisible to them.
 
@@ -50,7 +50,9 @@ That's the whole workflow. The rest of this page explains how ownership is resol
 "Which tenant owns this IP" is answered by the **same** longest-prefix hostgroup lookup the
 engine and mitigator already use to attribute traffic — when prefixes overlap, the most specific
 matching hostgroup wins ([longest-prefix match](/docs/glossary)). A tenant can span
-several hostgroups (a customer with separate web and DNS groups).
+several hostgroups (a customer with separate web and DNS groups). An [edge zone](/docs/zones)
+carries the same label (`zones[].tenant`), so a customer may own hostnames and no prefixes at
+all.
 
 Any IP that falls outside every named hostgroup is handled by the implicit **global/fallback
 group** (the catch-all). That global group can carry a top-level `tenant` so this catch-all
@@ -72,8 +74,10 @@ An [API token](/docs/authentication) gains an optional `tenant`, building on its
 | `tenant: customerA`, `role: operator` | only customerA | only customerA |
 
 An unscoped token is an admin — the default, fully backward-compatible behavior. A token
-scoped to a tenant that no hostgroup uses is rejected at config load (a typo would otherwise
-silently see nothing).
+scoped to a tenant that no hostgroup — and, with an `edge` block, no [zone](/docs/zones) — uses
+is rejected at config load (a typo would otherwise silently see nothing). With an edge block
+that check needs both files, so it runs when the daemon loads them; the browser-side validator
+sees only `kapkan.yaml`, and `kapkan -check-config` on the host is the real check.
 
 <Callout type="info" title="The agent role sits outside this axis">
 A [scrub node](/docs/scrubbing#managed-scrubbing-nodes)'s `agent` token is **not** a lesser
@@ -105,6 +109,14 @@ another tenant's data.
   victims, and an out-of-tenant victim gets the same uniform `403` on both block and unblock.
   `POST /api/v1/config/reload` is **admin-only** — a reload rewrites every tenant's policy and
   the token set itself.
+- **Edge zones** — a zone in the [zones file](/docs/zones) carries an optional `tenant` too.
+  `GET /api/v1/edge/zones/status` returns a scoped token only its own zones — another tenant's
+  hostname appears in no row, no would-be set and no HTTP/3 list, and the `tenant` field is left
+  out — and a scoped operator pulls the [lever](/docs/edge#the-lever) only on its own zones: any
+  other zone, another tenant's, unlabelled or gone from the file, answers the same `404 unknown
+  zone` an unknown name gets. The names of the nodes a zone is served on are visible to its
+  tenant; the zones document, the node reports, the ACME coordination, the node inventory and
+  `config/reload` stay unscoped.
 - **Ambiguity fails closed** — if one bearer secret matches tokens of different role or tenant
   (a reused secret), the request is refused rather than resolved to the wider scope.
 

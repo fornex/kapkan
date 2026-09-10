@@ -52,6 +52,15 @@ type Zone struct {
 	// certificate's subject and the zone's identity in every API and report,
 	// so it is normalised to lowercase and must be unique within the file.
 	Name string `yaml:"name"`
+	// Tenant is the zone's optional ownership label (E6.2), on the same axis
+	// as a hostgroup's tenant: an API token scoped to it sees the zone in the
+	// edge status and may pull its lever; a zone without a label is a house
+	// zone, visible to unscoped tokens only. Ownership, not placement, and
+	// never inherited — not from a placement group, not from kapkan.yaml's
+	// top-level tenant — so an upgrade hands nothing to anyone. The label
+	// never enters the document the nodes render: a labelled file yields the
+	// bytes and ETag the unlabelled one did.
+	Tenant string `yaml:"tenant"`
 	// Origins are the upstreams the terminator proxies to, as host:port, at
 	// least one. The edge never forwards client bytes itself (edge-spec §0):
 	// these are rendered into the terminator's upstream block.
@@ -268,6 +277,12 @@ func (zone *Zone) validate() error {
 		return fmt.Errorf("name: %w", err)
 	}
 	zone.Name = name
+
+	// The label travels into JSON, logs and authorization decisions: the
+	// same log/JSON/header-safe charset as hostgroup names and tenants.
+	if zone.Tenant != "" && !groupNameRe.MatchString(zone.Tenant) {
+		return fmt.Errorf("%s: tenant %q must match %s", zone.Name, zone.Tenant, groupNameRe)
+	}
 
 	if len(zone.Origins) == 0 {
 		return fmt.Errorf("%s: origins: at least one host:port upstream is required", zone.Name)

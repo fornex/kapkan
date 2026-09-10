@@ -377,6 +377,33 @@ security-relevant.
   scheduled for a MAJOR release; there is deliberately no switch to make it one today. The zones
   document is untouched: a fleet without bindings gets byte-identical documents and ETags, so the
   upgrade reloads nothing. Config surface: `api.tokens[].node` (schema, overlay, config builder).
+- Edge track, E6.2 — a zone belongs to a tenant (milestone E6, fleet). `zones[].tenant` is an
+  optional ownership label on the hostgroups' tenant axis — never inherited (not from
+  kapkan.yaml's top-level `tenant`), never in the document the nodes render (a labelled zones
+  file yields byte-identical bytes and ETag, so labelling a fleet's zones reloads nothing). The
+  rule "a token's tenant is in use" now counts zones as well as hostgroups, so an **edge-only
+  customer** — hostnames, no prefixes — can hold a scoped token; with an `edge` block that check
+  runs when the daemon loads both files (`kapkan -check-config`, start, reload), since the
+  browser-side validator sees only `kapkan.yaml`; a reload that would orphan a scoped token
+  fails as a whole and keeps the previous zones. `GET /api/v1/edge/zones/status` now admits
+  **tenant-scoped tokens** and shows them exactly their own zones — no other tenant's hostname in
+  any row, would-be set or HTTP/3 list, no `tenant` field — and every zone of the zones file has
+  a row (a `mode: none` or unreported zone with `nodes: 0`) carrying the file's `mode` and
+  `file_challenge`, the alive nodes' `certs` for it and, for unscoped callers, its `tenant`. A
+  scoped operator pulls the lever (`POST`/`DELETE /api/v1/edge/zones/{name}/challenge`) on its
+  own zones only; any other zone — another tenant's, unlabelled, or gone from the file — is the
+  byte-identical `404 unknown zone`, decided before the body is read, so the lever is no
+  cross-tenant existence oracle. Node names stay visible to a tenant; the zones document, both
+  reports, the ACME coordination, both inventories and `config/reload` stay unscoped.
+  `edge_challenge` joins `GET /api/v1/audit?action=`. Each refusal counts in
+  `kapkan_api_zone_refused_total{route}` and is logged once a minute per token — the caller learns
+  nothing more, the operator sees a leaked scoped token walking hostnames. Every zone of the file
+  that turns h3 on shows `h3.enabled`, with `serving`/`unsupported` from the alive nodes'
+  `terminator.h3` — a `mode: none` zone included — and the document sums the nodes'
+  `certs_truncated` beside `zones_truncated`. The shipped console renders a zone no alive node
+  reports yet with `nodes: 0` and no challenge; the Edge view's cells for those rows are a later E6
+  change. Config surface: `zones[].tenant` (zones schema), `api.tokens.tenant` overlay entry marked
+  server-verified.
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data

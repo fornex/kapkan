@@ -353,13 +353,14 @@ func (s *Server) Handler() http.Handler {
 	handle("POST /api/v1/edge/nodes/{name}/acme/challenges",
 		s.requireAnyRole([]config.Role{config.RoleAgent, config.RoleOperator}, s.handleEdgeACMEChallenge))
 	read("GET /api/v1/edge/nodes", s.handleEdgeNodes)
-	// The zones the alive edge nodes report, merged (edge_zones_status.go):
-	// the console's Edge view and the "who would be challenged" set. Viewer
-	// rank, unscoped tokens only, like the inventory.
+	// The zones of the file and the alive edge nodes' reports, merged
+	// (edge_zones_status.go): the console's Edge view and the "who would be
+	// challenged" set. Viewer rank; a tenant-scoped token sees its own zones
+	// (edge_tenant.go, E6.2).
 	read("GET /api/v1/edge/zones/status", s.handleEdgeZonesStatus)
 	// The operator's lever on a zone's rung (edge_lever.go): set a challenge
-	// mode for a bounded time, or clear it. Operator rank, unscoped tokens
-	// only — the zones file spans every tenant's zones.
+	// mode for a bounded time, or clear it. Operator rank; a scoped operator
+	// on its own zones only — any other zone is the uniform 404 (E6.2).
 	write("POST /api/v1/edge/zones/{name}/challenge", s.handleEdgeChallengeLever)
 	write("DELETE /api/v1/edge/zones/{name}/challenge", s.handleEdgeChallengeLever)
 	mux.Handle("GET /metrics", promhttp.Handler())
@@ -979,11 +980,11 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	f := storage.AuditFilter{From: from, To: to}
 	if a := q.Get("action"); a != "" {
 		switch a {
-		case "ban", "unban", "config_reload", "source_block", "source_unblock":
+		case "ban", "unban", "config_reload", "source_block", "source_unblock", "edge_challenge":
 			f.Action = a
 		default:
 			writeError(w, http.StatusBadRequest,
-				"invalid action (ban|unban|config_reload|source_block|source_unblock)")
+				"invalid action (ban|unban|config_reload|source_block|source_unblock|edge_challenge)")
 			return
 		}
 	}

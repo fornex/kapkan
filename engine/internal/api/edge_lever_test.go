@@ -51,14 +51,17 @@ func TestEdgeChallengeLever(t *testing.T) {
 		t.Fatalf("report = %d", rec.Code)
 	}
 
-	if rec := lever(h, http.MethodPost, "a.example", set, "scoped-secret"); rec.Code != http.StatusForbidden {
-		t.Fatalf("scoped operator = %d, want 403", rec.Code)
-	}
 	if rec := lever(h, http.MethodPost, "a.example", set, "agent-secret"); rec.Code != http.StatusForbidden {
 		t.Fatalf("agent = %d, want 403", rec.Code)
 	}
-	if rec := lever(h, http.MethodPost, "nobody.example", set, "op-secret"); rec.Code != http.StatusNotFound {
-		t.Fatalf("unknown zone = %d, want 404", rec.Code)
+	unknown := lever(h, http.MethodPost, "nobody.example", set, "op-secret")
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown zone = %d, want 404", unknown.Code)
+	}
+	// a.example carries no tenant label: a house zone, which a scoped operator
+	// does not own — for it the zone does not exist, byte for byte (E6.2).
+	if rec := lever(h, http.MethodPost, "a.example", set, "scoped-secret"); rec.Code != http.StatusNotFound || rec.Body.String() != unknown.Body.String() {
+		t.Fatalf("scoped operator on a house zone = %d %q, want the unknown-zone answer %q", rec.Code, rec.Body.String(), unknown.Body.String())
 	}
 	for name, body := range map[string]string{
 		"bad mode":        `{"mode":"sometimes","ttl_seconds":600}`,
@@ -245,8 +248,11 @@ func TestEdgeChallengeLeverOnARemovedZone(t *testing.T) {
 	if _, err := store.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	// The lever is still brain state and still shown.
-	if st, code := getEdgeZonesStatus(h, "op-secret"); code != http.StatusOK || len(st.Zones) != 1 || st.Zones[0].Zone != "a.example" || st.Zones[0].Override == nil {
+	// The lever is still brain state and still shown, beside the row every
+	// zone of the file has (E6.2): b.example, unreported, with its mode.
+	if st, code := getEdgeZonesStatus(h, "op-secret"); code != http.StatusOK || len(st.Zones) != 2 ||
+		st.Zones[0].Zone != "a.example" || st.Zones[0].Override == nil || st.Zones[0].Mode != "" ||
+		st.Zones[1].Zone != "b.example" || st.Zones[1].Override != nil || st.Zones[1].Mode != "decide" || st.Zones[1].Nodes != 0 {
 		t.Fatalf("zone status after the zone left the file: %d %+v", code, st)
 	}
 	// Setting needs the zone; clearing does not.
@@ -264,7 +270,8 @@ func TestEdgeChallengeLeverOnARemovedZone(t *testing.T) {
 	if resp.Zone != "a.example" || resp.Mode != "" || resp.FileMode != "" {
 		t.Fatalf("clear response on a removed zone: %+v", resp)
 	}
-	if st, _ := getEdgeZonesStatus(h, "op-secret"); len(st.Zones) != 0 {
+	// Only the file's row is left: the removed zone's went with its lever.
+	if st, _ := getEdgeZonesStatus(h, "op-secret"); len(st.Zones) != 1 || st.Zones[0].Zone != "b.example" || st.Zones[0].Override != nil {
 		t.Fatalf("zone status after the clear: %+v", st)
 	}
 	// Nothing left to clear: unknown zone.
