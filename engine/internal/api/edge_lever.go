@@ -298,7 +298,14 @@ func (s *Server) leverResponse(zone string, fz *edgedocZoneView, now time.Time) 
 	cfg := s.store.Get()
 	if cfg.Edge != nil {
 		staleAfter := edgeStaleAfter(cfg)
+		// The nodes that matter are the zone's placement (E6.3): where the
+		// lever bites. A zone gone from the file has no placement — every
+		// node is listed, as before, for the operator clearing it.
+		fileZone := zoneInFile(cfg, zone)
 		for i := range cfg.Edge.Nodes {
+			if fileZone != nil && !cfg.Edge.Nodes[i].Serves(fileZone) {
+				continue
+			}
 			name := cfg.Edge.Nodes[i].Name
 			n := EdgeLeverNode{Name: name, Alive: s.edgePresence.alive(name, staleAfter)}
 			if rep, _, ok := s.edgeReports.get(name); ok {
