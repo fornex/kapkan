@@ -234,8 +234,12 @@ func (noop) WriteEdgeEvent(EdgeEventRow)      {}
 // edgeReadParams is the read-path hardening every edge query carries: the
 // protocol-level read-only flag (the shared credential cannot write or DDL
 // through this client), a server-side time cap, a row cap that throws rather
-// than truncates, and 64-bit integers as JSON numbers (ClickHouse quotes them
-// by default, which the uint64 fields above would refuse).
+// than truncates, 64-bit integers as JSON numbers (ClickHouse quotes them by
+// default, which the uint64 fields above would refuse), and the alias rule
+// the queries are written for: a SELECT alias wins over a column of the same
+// name (the server default, pinned here because it is a per-user profile
+// setting — under the other value the bucket GROUP BY ts would group by the
+// raw column and hand back one row per window, silently unbucketed).
 func edgeReadParams(limit int) url.Values {
 	params := url.Values{}
 	params.Set("readonly", "2")
@@ -243,6 +247,7 @@ func edgeReadParams(limit int) url.Values {
 	params.Set("max_result_rows", fmt.Sprintf("%d", limit))
 	params.Set("result_overflow_mode", "throw")
 	params.Set("output_format_json_quote_64bit_integers", "0")
+	params.Set("prefer_column_name_to_alias", "0")
 	return params
 }
 
@@ -280,13 +285,20 @@ func (c *ClickHouse) QueryEdgeHistory(ctx context.Context, zone, node string, fr
 		where += " AND node = {node:String}"
 		params.Set("param_node", node)
 	}
+	// The range and zone filters sit on the base rows in a subquery: the outer
+	// SELECT aliases the bucket `ts`, and a `ts BETWEEN` in the same SELECT
+	// would be read as the BUCKET start — dropping every window of a partly
+	// covered first bucket and admitting windows past `to` (the real suite
+	// pins both edges). The outer GROUP BY ts is the alias, by the pinned rule.
 	sql := fmt.Sprintf("SELECT toStartOfInterval(ts, INTERVAL %d SECOND) AS ts, uniqExact(node) AS nodes, "+
 		"sum(window_seconds) AS window_seconds, sum(requests) AS requests, sum(decided) AS decided, "+
 		"sum(denied) AS denied, sum(challenged) AS challenged, sum(cleared) AS cleared, "+
 		"sum(would_deny) AS would_deny, sum(would_challenge) AS would_challenge, "+
 		"sum(status_2xx) AS status_2xx, sum(status_3xx) AS status_3xx, sum(status_4xx) AS status_4xx, sum(status_5xx) AS status_5xx, "+
 		"sum(h3_requests) AS h3_requests "+
-		"FROM %s.%s WHERE %s GROUP BY ts ORDER BY ts LIMIT %d FORMAT JSONEachRow",
+		"FROM (SELECT ts, node, window_seconds, requests, decided, denied, challenged, cleared, would_deny, would_challenge, "+
+		"status_2xx, status_3xx, status_4xx, status_5xx, h3_requests FROM %s.%s WHERE %s) "+
+		"GROUP BY ts ORDER BY ts LIMIT %d FORMAT JSONEachRow",
 		stepSec, c.cfg.Database, tableEdgeWindows, where, maxEdgeHistoryRows)
 	body, err := c.queryRaw(ctx, sql, params)
 	if err != nil {
