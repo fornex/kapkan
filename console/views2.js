@@ -337,9 +337,15 @@
       historyBlock
     ]);
   }
-  function ghostChart() {
+  /* The placeholder's shape is drawn ONCE, not per render: every view here is
+     re-rendered on the 3s poll, and re-rolling the noise each time made the
+     ghost twitch as if it were live data. */
+  var GHOST_PTS = (function () {
     var pts = []; for (var i = 0; i < 40; i++) pts.push(40 + Math.sin(i / 3) * 18 + Math.random() * 14);
-    var c = K.areaChart(pts, { color: "var(--muted)", height: 200 });
+    return pts;
+  })();
+  function ghostChart() {
+    var c = K.areaChart(GHOST_PTS, { color: "var(--muted)", height: 200 });
     c.style.width = "100%"; c.style.height = "100%";
     return c;
   }
@@ -705,6 +711,253 @@
     if (serving + unsup < nodes) why.push(I.t("ed.h3.tip.silent"));
     return K.badge("badge--dry", I.t("ed.h3.on") + " · " + I.plural(serving, "edgeH3ReadyNodes", { n: I.num(nodes) }), null, why.join("\n"));
   }
+  /* ===== EDGE: one zone's STORED history (E6.7) =====
+     The live table above is one ten-second window; this is the same zone over
+     an hour, a day or a week, read from ClickHouse. */
+
+  /* The state badge for a source, shared by the live would-be table and the
+     history's sources table so one source cannot read differently in the two.
+     A lookup with a muted fallback, not a ternary: the four states below are
+     the ones the brain stores, and a newer kapkan that stores a fifth must
+     render it as an unknown badge rather than as one of these. */
+  var SOURCE_STATE_BADGE = {
+    "denied": "badge--active",
+    "challenged": "badge--elev",
+    "would-deny": "badge--dry",
+    "would-challenge": "badge--muted"
+  };
+  function edgeStateBadge(state) {
+    return K.badge(SOURCE_STATE_BADGE[state] || "badge--muted", I.t("ed.state." + state));
+  }
+
+  /* ClickHouse hands back "2026-09-10 15:04:05" — UTC, with no zone marker.
+     `new Date()` reads that shape as LOCAL time, which would shift every
+     timestamp in this card by the operator's offset, so the marker is added
+     before parsing. A value that already carries one (an ISO string from a
+     newer engine) is parsed as it stands. */
+  function edgeTime(s) {
+    if (!s) return null;
+    var str = String(s);
+    if (!/([Zz]|[+-]\d\d:?\d\d)$/.test(str)) str = str.replace(" ", "T") + "Z";
+    var d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function edgeTimeCell(s) {
+    var d = edgeTime(s);
+    return h("td", { class: "td-muted", text: d ? I.datetime(d) : "—" });
+  }
+
+  /* The three ids of the range switch. app.js owns what each means in seconds
+     and in bucket width; an id it does not know falls back to the hour. */
+  var HIST_RANGES = ["1h", "24h", "7d"];
+
+  /* The storage-off ghost, the Traffic view's own treatment: `available:
+     false` is not an empty period and not an error — the engine never looked,
+     so the honest answer is the panel that says how to make it look. */
+  function edgeGhost(titleKey, subKey) {
+    return h("div", { class: "ext-point" }, [
+      h("span", { class: "ext-point__badge" }, K.badge("badge--elev", I.t("tr.history.endpoint"), "history")),
+      h("div", { class: "section-label", style: { fontSize: "var(--t-md)", color: "var(--text)" } },
+        [w.icon("chart"), h("span", { text: I.t(titleKey) })]),
+      h("p", { class: "td-muted", style: { maxWidth: "72ch", marginBottom: "var(--s-4)" }, text: I.t(subKey) }),
+      h("div", { class: "ext-ghost" }, ghostChart())
+    ]);
+  }
+
+  /* `head` is the one number in the chart's own unit. It is deliberately NOT
+     the period's total: the totals are in the stats row below, and repeating
+     one of them beside a per-second axis read as "the rate is 46.4k". */
+  function histChart(labelKey, values, head, color, tag) {
+    return h("div", { class: "tcard" }, [
+      h("div", { class: "tcard__head" }, [
+        h("div", { class: "tcard__label" }, [
+          (function () { var d = h("span", { class: "tcard__dir" }); d.style.background = color; return d; })(),
+          h("span", { text: I.t(labelKey) }),
+          tag || null
+        ]),
+        h("div", { class: "tcard__now", text: head })
+      ]),
+      h("div", { class: "tcard__chart", style: { height: "150px" } },
+        K.areaChart(values.length ? values : [0, 0], { color: color, height: 150 }))
+    ]);
+  }
+
+  /* The card under the zones table. `z` is the zone's live row when it still
+     has one — it is what knows whether the rung bites anywhere — and may be
+     absent if a reload dropped the zone while the card was open, in which case
+     the counters are labelled without that claim rather than with a guess. */
+  function edgeHistoryCard(ctx, zone, z) {
+    var st = ctx.state.edgeHist;
+    var body;
+    var nodes = (z && z.nodes) || 0, rungWatch = (z && (z.rung_watch_only || []).length) || 0;
+    /* watch-only for the purposes of these counters means the rung bites on NO
+       node, so nothing in the refused series can be a real refusal. With a
+       zone nobody reports (nodes: 0) there is no such claim to make: the
+       period may well contain real denials from when its nodes were up. */
+    var watchOnly = nodes > 0 && rungWatch >= nodes;
+    var refusedKey = watchOnly ? "ed.hist.wouldbe" : "ed.hist.refused";
+
+    if (st.forbidden) return null;              /* another tenant's zone: nothing to say */
+    if (st.notFound) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.gone") }));
+    } else if (!st.fetchedAt) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.loading") }));
+    } else if (!st.ok) {
+      body = h("div", { class: "card__body" }, h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.hist.error") })]));
+    } else if (!st.available) {
+      body = h("div", { class: "card__body" }, edgeGhost("ed.hist.off.title", "ed.hist.off.sub"));
+    } else if (!st.points.length) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.empty") }));
+    } else {
+      var rps = [], refused = [], h3 = [];
+      var sumReq = 0, sumRefused = 0, sumH3 = 0, sumErr = 0, maxNodes = 0, anyH3 = false;
+      st.points.forEach(function (p) {
+        var req = p.requests || 0;
+        /* the API's own formula: requests over the real length of the windows
+           that fell in the bucket (they are not aligned across nodes, so this
+           is a rate to the nearest window, never an exact one) */
+        rps.push(p.window_seconds > 0 ? req / p.window_seconds : 0);
+        var ref = (p.denied || 0) + (p.challenged || 0) + (p.would_deny || 0) + (p.would_challenge || 0);
+        refused.push(ref);
+        if (p.h3_requests) anyH3 = true;
+        h3.push(req > 0 ? (p.h3_requests || 0) / req * 100 : 0);
+        sumReq += req; sumRefused += ref; sumH3 += p.h3_requests || 0;
+        sumErr += (p.status_4xx || 0) + (p.status_5xx || 0);
+        maxNodes = Math.max(maxNodes, p.nodes || 0);
+      });
+      var peak = function (vals) { return I.t("ac.peak") + " " + I.abbr(Math.max.apply(null, vals)); };
+      var charts = [
+        histChart("ed.hist.rps", rps, peak(rps), "var(--chart-in)", null),
+        histChart(refusedKey, refused, peak(refused), watchOnly ? "var(--elev)" : "var(--active)",
+          watchOnly ? K.badge("badge--dry", I.t("ed.challenge.preview")) : null)
+      ];
+      /* the HTTP/3 line is drawn only where there is HTTP/3 to draw: a flat
+         zero line under a zone nobody reaches over QUIC would read as a
+         measurement of nothing */
+      if (anyH3) {
+        charts.push(histChart("ed.hist.h3", h3, I.pct(sumReq > 0 ? sumH3 / sumReq : 0), "var(--chart-out)", null));
+      }
+      var stats = [
+        [I.t("ed.hist.nodes"), I.num(maxNodes)],
+        [I.t("ed.requests"), I.num(sumReq)],
+        [I.t(refusedKey), I.num(sumRefused)],
+        [I.t("ed.hist.errors"), I.num(sumErr)],
+        [I.t("ed.hist.bucket"), I.duration(st.stepSeconds)]
+      ];
+      body = h("div", { class: "card__body" }, [
+        h("div", { class: "hist-charts" }, charts),
+        h("div", { class: "hist-stats" }, stats.map(function (s) {
+          return h("div", { class: "hist-stat" }, [
+            h("div", { class: "hist-stat__lbl", text: s[0] }),
+            h("div", { class: "hist-stat__val mono", text: s[1] })
+          ]);
+        }))
+      ]);
+    }
+
+    var seg = h("div", { class: "seg" }, HIST_RANGES.map(function (r) {
+      return h("button", { class: "seg__btn" + (st.range === r ? " is-on" : ""), text: I.t("ed.hist.range." + r),
+        onclick: function () { ctx.actions.setEdgeHistRange(r); } });
+    }));
+    return h("div", { class: "card mt-4" }, [
+      h("div", { class: "card__head" }, [
+        h("div", { class: "card__title" }, [w.icon("history"), h("span", { text: I.t("ed.hist.title") }), K.badge("badge--accent", zone)]),
+        h("div", { class: "row", style: { gap: "var(--s-2)" } }, [
+          seg,
+          h("button", { class: "btn btn--ghost btn--sm", onclick: function () { ctx.actions.toggleEdgeZone(zone); } },
+            [w.icon("x"), h("span", { text: I.t("ed.hist.close") })])
+        ])
+      ]),
+      body
+    ]);
+  }
+
+  /* "Who would have been challenged — over {period}": the same question the
+     live table asks of one window, asked of the whole period. */
+  function edgeHistorySourcesCard(ctx, zone) {
+    var st = ctx.state.edgeHist;
+    if (st.forbidden || st.notFound) return null;
+    /* the charts' own card already carries the storage-off ghost and the
+       loading and error states for the pair of reads; repeating either here
+       would say the same thing twice */
+    if (!st.fetchedAt || !st.available || !st.srcOk || !st.srcAvailable) return null;
+    var period = I.t("ed.hist.range." + st.range);
+    var rows = st.sources.map(function (s) {
+      return h("tr", {}, [
+        h("td", { class: "mono", text: s.source }),
+        h("td", {}, edgeStateBadge(s.state)),
+        h("td", { class: "num mono", text: I.abbr(s.requests || 0) }),
+        h("td", { class: "num mono", text: I.num(s.windows || 0) }),
+        h("td", { class: "num mono", text: I.num(s.nodes || 0) }),
+        edgeTimeCell(s.first_seen),
+        edgeTimeCell(s.last_seen)
+      ]);
+    });
+    return h("div", { class: "card mt-4" }, [
+      h("div", { class: "card__head" }, [
+        h("div", { class: "card__title" }, [w.icon("shield-alert"), h("span", { text: I.t("ed.srcs.title", { t: period }) }),
+          K.badge("badge--muted", String(st.sources.length))]),
+        h("span", { class: "td-muted", text: I.t("ed.srcs.sub") })
+      ]),
+      st.sources.length
+        ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+            h("thead", {}, h("tr", {}, [V.th("ed.source"), V.th("col.state"), V.thNum("ed.requests"),
+              V.thNum("ed.srcs.windows"), V.thNum("ed.nodes"), V.th("ed.srcs.firstseen"), V.th("ed.srcs.lastseen")])),
+            h("tbody", {}, rows)
+          ]))
+        : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.srcs.empty") }))
+    ]);
+  }
+
+  /* The fleet's events, last 24 hours. The kinds are an enum so a kapkan
+     newer than this console renders its seventeenth kind as its raw name
+     (I.label falls back to the key) instead of dropping it. */
+  var EVENT_KIND_BADGE = {
+    node_alive: "badge--calm", terminator_alive: "badge--calm", generation_installed: "badge--calm",
+    cert_issued: "badge--calm", cert_renewed: "badge--calm", challenge_ended: "badge--calm",
+    node_lost: "badge--active", generation_refused: "badge--active", cert_gone: "badge--active",
+    clock_skew: "badge--active", report_truncated: "badge--elev", challenge_started: "badge--elev",
+    dry_run: "badge--dry"
+  };
+  function edgeEventsCard(ctx) {
+    var st = ctx.state.edgeEvents;
+    if (st.forbidden) return null;              /* a tenant-scoped token: the events name nodes */
+    var body;
+    if (!st.fetchedAt) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.loading") }));
+    } else if (!st.ok) {
+      body = h("div", { class: "card__body" }, h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.ev.error") })]));
+    } else if (!st.available) {
+      body = h("div", { class: "card__body" }, edgeGhost("ed.hist.off.title", "ed.ev.off.sub"));
+    } else if (!st.events.length) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.ev.empty") }));
+    } else {
+      var rows = st.events.map(function (e) {
+        return h("tr", {}, [
+          edgeTimeCell(e.event_time),
+          h("td", {}, K.badge(EVENT_KIND_BADGE[e.kind] || "badge--muted", I.label("edgeEventKind", e.kind))),
+          h("td", { class: "mono", text: e.node || "—" }),
+          h("td", { class: "mono td-muted", text: e.zone || "—" }),
+          h("td", { class: "td-muted", text: e.detail || "" })
+        ]);
+      });
+      body = h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+        h("thead", {}, h("tr", {}, [V.th("ed.ev.when"), V.th("ed.ev.kind"), V.th("col.node"), V.th("ed.zone"), V.th("ed.ev.detail")])),
+        h("tbody", {}, rows)
+      ]));
+    }
+    return h("div", { class: "card mt-6" }, [
+      h("div", { class: "card__head" }, [
+        h("div", { class: "card__title" }, [w.icon("clock"), h("span", { text: I.t("ed.ev.title") }),
+          st.available && st.events.length ? K.badge("badge--muted", String(st.events.length)) : null]),
+        h("span", { class: "td-muted", text: I.t("ed.ev.sub") })
+      ]),
+      body
+    ]);
+  }
+
   function edge(root, ctx) {
     ctx.actions.loadEdge();
     var st = ctx.state.edge;
@@ -725,11 +978,17 @@
       children.push(h("div", { class: "card" }, K.empty("shield-check", I.t("ed.nozones.title"), I.plural(st.nodesAlive, "edgeNodesUp") + " " + I.t("ed.nozones.sub"), "muted")));
     } else {
       var inv = st.inv || [];
+      var openZone = ctx.state.edgeHist.zone;
       var rows = st.zones.map(function (z) {
         var watch = z.watch_only || [];
-        return h("tr", {}, [
+        var open = openZone === z.zone;
+        var toggle = function () { ctx.actions.toggleEdgeZone(z.zone); };
+        return h("tr", { class: "is-clickable" + (open ? " is-open" : ""), tabindex: "0", role: "button",
+          attrs: { title: I.t("ed.hist.open") }, dataset: { edgeZone: z.zone },
+          onclick: toggle, onkeydown: function (e) { hgKey(e, toggle); } }, [
           h("td", { class: "target-cell" }, [
-            h("div", { class: "mono", text: z.zone }),
+            h("div", { class: "row", style: { gap: "8px" } },
+              [w.icon(open ? "chevron-down" : "chevron-right"), h("span", { class: "mono", text: z.zone })]),
             watch.length ? h("div", { class: "td-muted", text: I.plural(watch.length, "edgeWatchOnlyNodes") }) : null
           ]),
           h("td", { class: "num mono", text: I.num(z.nodes || 0) }),
@@ -747,12 +1006,23 @@
           h("div", { class: "card__title" }, [w.icon("shield-check"), h("span", { text: I.t("ed.zones") }), K.badge("badge--muted", String(st.zones.length))]),
           h("span", { class: "td-muted", text: I.plural(st.nodesReporting, "edgeReportingNodes") })
         ]),
-        h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+        h("div", { class: "tablewrap" }, h("table", { class: "tbl edge-tbl" }, [
           h("thead", {}, h("tr", {}, [V.th("ed.zone"), V.thNum("ed.nodes"), V.thNum("ed.rps"), V.thNum("ed.challenged"), V.thNum("ed.cleared"),
             V.thNum("ed.wouldchallenge"), V.thNum("ed.woulddeny"), V.th("ed.challenge"), V.th("ed.h3")])),
           h("tbody", {}, rows)
         ]))
       ]));
+
+      /* the stored history of the zone whose row is open, under the table it
+         was opened from. The reads are on demand — asked for here, once the
+         operator has actually opened a zone, never by the 3s poll. */
+      if (openZone) {
+        ctx.actions.loadEdgeHistory();
+        var openRow = null;
+        st.zones.forEach(function (z) { if (z.zone === openZone) openRow = z; });
+        children.push(edgeHistoryCard(ctx, openZone, openRow));
+        children.push(edgeHistorySourcesCard(ctx, openZone));
+      }
 
       /* zone entries the nodes cut from their reports to fit: those zones are
          missing or undercounted above, and the table must not read as whole */
@@ -770,7 +1040,7 @@
         return h("tr", {}, [
           h("td", { class: "mono", text: e.s.source }),
           h("td", { class: "mono td-muted", text: e.zone }),
-          h("td", {}, K.badge(e.s.state === "would-deny" ? "badge--dry" : "badge--muted", I.t("ed.state." + e.s.state))),
+          h("td", {}, edgeStateBadge(e.s.state)),
           h("td", { class: "num mono", text: I.abbr(e.s.requests || 0) }),
           h("td", {}, h("span", { class: "row wrap", style: { gap: "4px" } }, (e.s.nodes || []).map(function (n) { return K.badge("badge--muted", n); })))
         ]);
@@ -787,6 +1057,16 @@
           ]))
           : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t(partial ? "ed.wouldbe.shed" : "ed.wouldbe.empty") }))
       ]));
+    }
+
+    /* The fleet's events belong to the fleet, not to a zone, so they are shown
+       whatever the zone table came back with — as long as there are edge nodes
+       at all and the token can see node names. `unscoped` rides on /status for
+       every role; without it (a kapkan older than the events endpoint) the
+       card is not rendered rather than fetched and refused. */
+    if (ctx.status.edge_nodes_total && ctx.status.unscoped) {
+      ctx.actions.loadEdgeEvents();
+      children.push(edgeEventsCard(ctx));
     }
     K.mount(root, children);
   }

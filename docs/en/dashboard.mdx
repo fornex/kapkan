@@ -81,7 +81,8 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
   *HTTP/3 switched off on the node*, or *the readiness probe failed*), together with any advisory
   that node's probe raised; and *off · 2 nodes still serving* when the zones file no longer asks
   for HTTP/3 but a node still holds a QUIC listener, because the file and the fleet disagree until
-  the next generation lands.
+  the next generation lands. **Click a zone's row** to open its stored history under the table —
+  see [Zone history](#zone-history) below.
 - **Ban table** — every ban, active and historical (with the scrubbing node column when nodes
   are configured).
 - **Traffic / Reports** — live ingress/egress charts built from the in-memory rate
@@ -97,6 +98,51 @@ otherwise renders a labeled placeholder explaining how to turn it on.
 <Callout type="success" title="No database required">
 The dashboard is built entirely from the engine's in-memory state. Historical flow storage
 is a separate, optional feature — it is not needed to see live attacks, top talkers or bans.
+</Callout>
+
+## Zone history
+
+Everything else on the **Edge** view is the last ten seconds. Clicking a zone's row opens that
+zone's stored history under the table, over **1 h**, **24 h** or **7 d** — the same question asked
+of a period instead of a window. It reads the [edge history](/docs/api#get-apiv1edgehistory), so
+it needs [ClickHouse storage](/docs/storage#edge-history); with storage off the card shows the
+same labelled placeholder the Traffic view does, never an error. Clicking the row again, or
+**Close**, shuts it.
+
+The card carries two charts, and a third when there is HTTP/3 to draw:
+
+- **Requests / s** — the nodes' windows summed into buckets (one minute, ten minutes or an hour,
+  matching the range) and divided by the real length of the windows that fell in each.
+- **Refused or would be** — denied plus challenged plus would-deny plus would-challenge, so a rung
+  that only previews and one that bites are counted on the same axis. When the rung bites on no
+  node the chart is titled **Would be refused** and carries the *preview* tag: nothing in it can
+  be a real refusal.
+- **HTTP/3 share** — shown only when some bucket actually saw HTTP/3 requests, because a flat zero
+  line under a zone nobody reaches over QUIC would read as a measurement rather than as an absence.
+
+Under the charts, the period's totals: the most nodes seen reporting in any one bucket, the
+requests, the refusals (real or previewed), the 4xx/5xx count and the bucket width the engine
+actually used — it **raises** the step it was asked for when a range would otherwise hold more than
+5 000 buckets, so the figure names the buckets you are looking at.
+
+Below the card, **Who would have been challenged — over 24 h** lists the period's telling sources,
+busiest first: the strongest thing any node did to each (*denied*, *challenged*, *would deny*,
+*would challenge*, with the same badges the live table uses), its requests, how many windows and
+nodes saw it, and when it was first and last seen. This is the question to ask before a zone's rung
+goes live, over a day rather than over ten seconds.
+
+A **Fleet events** card closes the view for unscoped tokens: what the brain saw change in the last
+24 hours, newest first — a node lost or back, a version, a generation installed or refused, a
+terminator's liveness, an HTTP/3 state, a certificate issued, renewed or gone, a zone-wide
+challenge starting or ending, a node's clock drifting out of the gate, a report that had to be cut.
+A [tenant-scoped](/docs/multi-tenancy) token does not see the card at all: the events name nodes.
+The history and its sources, by contrast, are readable by a tenant for its own zones — another
+tenant's zone is refused and the card simply does not appear.
+
+<Callout type="info" title="Read on demand, not on the poll">
+These three reads are issued when you open a zone (or switch its range) and at most every ten
+seconds after that — they are deliberately not part of the console's three-second poll, because
+they query ClickHouse and the windows behind them are ten seconds long.
 </Callout>
 
 ## Attack detail

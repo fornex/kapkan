@@ -507,6 +507,28 @@ security-relevant.
   certificates stay on disk and stop renewing (runbook, not automation). Config surface: both
   schemas, the overlay, docs (zones, configuration, edge *Placing zones on nodes* + Limits,
   edge-install, api, authentication).
+- Edge track, E6.7 (history half) — the operator console reads the edge history (milestone E6).
+  Clicking a zone's row in the Edge view opens that zone's stored history under the table over
+  **1 h / 24 h / 7 d** (`step` 60 / 600 / 3600): requests per second per bucket, "refused or would
+  be" (denied + challenged + would-deny + would-challenge, titled **Would be refused** and tagged
+  *preview* when the rung bites on no node, because nothing in that series can then be real), an
+  HTTP/3 share line only where some bucket actually saw HTTP/3, and the period's totals — nodes
+  seen, requests, refusals, 4xx/5xx and the bucket width the engine **actually applied**
+  (`step_seconds`, which the brain may raise or cap, not the step asked for). Under it, **Who
+  would have been challenged — over {period}** from `/edge/history/sources`, busiest first, with
+  the live table's own state badges (now one shared lookup, so a source cannot read differently in
+  the two tables, and `denied` / `challenged` — states a ten-second window never carries — have
+  their own tones). For unscoped tokens a **Fleet events** card closes the view: the last 24 h of
+  `/edge/events`, newest first, the sixteen kinds as a locale enum so a newer kapkan's
+  seventeenth renders as its raw name instead of vanishing. Storage off (`available: false`)
+  renders the Traffic view's labelled ghost, never an error; a `403` (a tenant on another
+  tenant's zone, or on the events at all) hides the element rather than reporting a fault; a zone
+  a reload has dropped from the zones file says so instead of showing a failure. All three reads
+  are on demand with a ten-second freshness guard and are **not** in the console's three-second
+  poll, a late answer for a zone or range the operator has since left is discarded, and the
+  storage-off placeholder's noise is now drawn once instead of being re-rolled on every poll
+  (which made the Traffic view's ghost twitch as if it were live). 35 strings and the
+  sixteen-member `edgeEventKind` enum in all five locales; the dashboard page documents the card.
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data

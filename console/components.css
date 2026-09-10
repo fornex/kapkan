@@ -90,6 +90,25 @@
 .attacks-tbl .attack-detail-row td { padding: 0; background: var(--inset); border-bottom: 1px solid var(--border); }
 .attacks-tbl .attack-detail-row:hover td { background: var(--inset); }
 
+/* Edge zones table — a row opens that zone's stored history below the table,
+   so the rows carry the same affordance the attacks table does. */
+.edge-tbl tr.is-clickable { cursor: pointer; }
+.edge-tbl .target-cell { line-height: 1.35; }
+.edge-tbl .target-cell .ico { width: 14px; height: 14px; color: var(--muted); }
+.edge-tbl tr.is-open { background: var(--surface-2); }
+.edge-tbl tr.is-open td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* One zone's history card: the charts side by side (they share an x-axis, so
+   they read as one period) and the period's totals under them. */
+.hist-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s-4); }
+.hist-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--s-3); margin-top: var(--s-4);
+  background: var(--inset); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-4);
+}
+.hist-stat__lbl { font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+.hist-stat__val { font-size: var(--t-lg); font-weight: 700; color: var(--text-strong); font-variant-numeric: tabular-nums; margin-top: 2px; }
+
 /* Hosts: aggregate traffic summary above the top-talkers list */
 .host-agg { display: flex; align-items: center; gap: var(--s-5); }
 .host-agg__label { font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
