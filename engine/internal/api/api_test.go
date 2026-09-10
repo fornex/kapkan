@@ -116,6 +116,18 @@ func (f *fakeQuerier) QueryAudit(_ context.Context, filter storage.AuditFilter) 
 	return f.auditRows, f.auditErr
 }
 
+// The edge history reads (E6.4) have no API consumer yet (E6.6); the fake
+// satisfies the interface with empty answers.
+func (f *fakeQuerier) QueryEdgeHistory(context.Context, string, string, time.Time, time.Time, int) ([]storage.EdgeHistoryPoint, error) {
+	return nil, nil
+}
+func (f *fakeQuerier) QueryEdgeSources(context.Context, storage.EdgeSourceFilter) ([]storage.EdgeSourceAgg, error) {
+	return nil, nil
+}
+func (f *fakeQuerier) QueryEdgeEvents(context.Context, storage.EdgeEventFilter) ([]storage.EdgeEventRow, error) {
+	return nil, nil
+}
+
 func TestTrafficEndpoint(t *testing.T) {
 	s := testServer(t, storeFromYAML(t, apiYAML))
 
@@ -1154,6 +1166,10 @@ func (f *fakeAuditWriter) WriteTraffic([]storage.TrafficRow) {}
 func (f *fakeAuditWriter) WriteAudit(r storage.AuditRow)     { f.rows = append(f.rows, r) }
 func (f *fakeAuditWriter) Start(context.Context)             {}
 func (f *fakeAuditWriter) Stop()                             {}
+
+func (f *fakeAuditWriter) WriteEdgeWindows([]storage.EdgeWindowRow) {}
+func (f *fakeAuditWriter) WriteEdgeSources([]storage.EdgeSourceRow) {}
+func (f *fakeAuditWriter) WriteEdgeEvent(storage.EdgeEventRow)      {}
 
 // TestAuditEmittedOnMutations: ban/unban/reload each emit one audit record
 // stamped with the operator's token name and tenant.

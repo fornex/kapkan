@@ -31,16 +31,24 @@ type Writer interface {
 	WriteAttack(AttackRow)
 	WriteTraffic([]TrafficRow)
 	WriteAudit(AuditRow)
+	// The edge history (E6.4, edge_rows.go).
+	WriteEdgeWindows([]EdgeWindowRow)
+	WriteEdgeSources([]EdgeSourceRow)
+	WriteEdgeEvent(EdgeEventRow)
 	Start(ctx context.Context)
 	Stop()
 }
 
-// Querier reads persisted history for the dashboard's Traffic/Reports view and
-// the audit trail. It is nil when storage is disabled (the API then reports
-// history as unavailable rather than failing).
+// Querier reads persisted history for the dashboard's Traffic/Reports view,
+// the audit trail and the edge history. It is nil when storage is disabled
+// (the API then reports history as unavailable rather than failing).
 type Querier interface {
 	QueryTraffic(ctx context.Context, key string, from, to time.Time, stepSec int) ([]TrafficPoint, error)
 	QueryAudit(ctx context.Context, f AuditFilter) ([]AuditRow, error)
+	// The edge history (E6.4, edge_rows.go).
+	QueryEdgeHistory(ctx context.Context, zone, node string, from, to time.Time, stepSec int) ([]EdgeHistoryPoint, error)
+	QueryEdgeSources(ctx context.Context, f EdgeSourceFilter) ([]EdgeSourceAgg, error)
+	QueryEdgeEvents(ctx context.Context, f EdgeEventFilter) ([]EdgeEventRow, error)
 }
 
 // AuditFilter scopes an audit query. Tenant is bound server-side from the
@@ -260,13 +268,17 @@ func (c *ClickHouse) run(ctx context.Context) {
 	defer ticker.Stop()
 	batch := make(map[string][][]byte)
 	n := 0
+	// Every flush sends on its own bounded context, never on the run context:
+	// that one is the STOP signal, and a cancel arriving while a batch is in
+	// flight (or a size-triggered flush racing the shutdown) would otherwise
+	// abort the POST with "context canceled" and lose rows that are already
+	// ours — the real-ClickHouse suite caught exactly that. The HTTP client's
+	// own timeout still bounds a hung server.
 	flush := func() {
 		if n == 0 {
 			return
 		}
-		for table, rows := range batch {
-			c.send(ctx, table, rows)
-		}
+		c.flushFinal(batch)
 		batch = make(map[string][][]byte)
 		n = 0
 	}
@@ -297,8 +309,9 @@ func (c *ClickHouse) run(ctx context.Context) {
 	}
 }
 
-// flushFinal sends remaining batches during shutdown with a fresh bounded
-// context (the run context is already cancelled).
+// flushFinal sends a set of batches on a fresh bounded context — every flush
+// goes through here, so a cancelled run context (shutdown) never aborts a POST
+// that is already carrying rows.
 func (c *ClickHouse) flushFinal(batch map[string][][]byte) {
 	if len(batch) == 0 {
 		return
@@ -367,19 +380,39 @@ func (c *ClickHouse) ensureSchema(ctx context.Context) error {
 			return fmt.Errorf("ddl: %w", err)
 		}
 	}
-	// Best-effort upgrade: add top_asns to an attack_events table created before
-	// GeoIP/ASN enrichment existed (CREATE ... IF NOT EXISTS never alters an
-	// existing table). Run AFTER the CREATEs and outside the fail-fast loop:
-	// fresh installs already have the column, so a failure here — e.g. a writer
-	// credential without ALTER rights — must not fail schema init or block the
-	// (unrelated) traffic table above.
-	for _, col := range []string{"top_asns String", "reason String", "method LowCardinality(String)"} {
-		alter := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s", c.cfg.Database, tableAttacks, col)
-		if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(alter)); err != nil {
-			c.log.Warn("clickhouse: attack_events column upgrade skipped (fresh installs already have it)", "column", col, "err", err)
+	// The edge history's tables (E6.4) come AFTER the core loop and each on
+	// its own: a writer credential from before them may lack CREATE, and the
+	// three tables a deployment always had must not be held hostage by the
+	// three new ones — so a failure here is logged, never returned.
+	for _, t := range edgeSchema(c.cfg.Database, c.cfg.TTLDays) {
+		if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(t.ddl)); err != nil {
+			c.log.Warn("clickhouse: edge history table not created (the core tables are unaffected; grant CREATE or create it by hand)", "table", t.table, "err", err)
+		}
+	}
+	// Best-effort upgrades: the columns a release added to a table an earlier
+	// release created (CREATE ... IF NOT EXISTS never alters an existing
+	// table). Outside the fail-fast loop for the same reason: fresh installs
+	// already have them, so a failure here — e.g. a writer credential without
+	// ALTER rights — must not fail schema init or block the other tables.
+	for _, up := range schemaUpgrades {
+		for _, col := range up.cols {
+			alter := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s", c.cfg.Database, up.table, col)
+			if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(alter)); err != nil {
+				c.log.Warn("clickhouse: column upgrade skipped (fresh installs already have it)", "table", up.table, "column", col, "err", err)
+			}
 		}
 	}
 	return nil
+}
+
+// schemaUpgrades lists, per table, the columns added after the table's first
+// release — applied with ADD COLUMN IF NOT EXISTS on every start. A new
+// column on any table goes here as well as into its CREATE.
+var schemaUpgrades = []struct {
+	table string
+	cols  []string
+}{
+	{tableAttacks, []string{"top_asns String", "reason String", "method LowCardinality(String)"}},
 }
 
 // post sends one request to ClickHouse and treats non-2xx as an error,
