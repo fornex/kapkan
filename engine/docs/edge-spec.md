@@ -663,9 +663,16 @@ headline and the long pole.
   orthogonal (D9): no inheritance, a shared tenant must agree. `validateEdgeScope` (after
   hostgroups, before tokens): names exist or are `global`, no duplicates, any scope ⇒ every agent
   token bound (hard error). `BindZones` checks the zone's group exists and the tenants agree.
-  Each node polls its own document — `edgeSnapshotFor(node)` filters the zones and the four
-  `fill()`s already key on `doc.Zones`, so grants, challenges, keys and levers reach exactly the
-  serving nodes and the ETag is per node for free; the operator's bare GET is the whole file.
+  Each node polls its own document — `edgeSnapshotFor(node)` filters the zones and the three
+  `fill()`s (issuance: grants and challenges; clearance keys; levers) already key on
+  `doc.Zones`, so grants, challenges, keys and levers reach exactly the serving nodes and the
+  ETag is per node for free; the operator's bare GET is the whole file; a NAMED node the
+  configuration no longer has gets an empty document and, parked in a hold, the 404 a first
+  poll would get (the review's find: the hold re-snapshots on every reload, so a node cut out
+  of the fleet must not be handed the whole file as its parting answer). The history is the
+  durable merge: a node's claim about a zone outside its scope is written nowhere
+  (`outside_scope`), like the status ignores it. `placement.hostgroup` is for unscoped readers;
+  a tenant sees node names (D3), not the operator's grouping.
   ACME slot/publish outside the node's scope ⇒ the byte-identical `404 unknown zone`. Status:
   `placement {hostgroup, nodes, alive}` + `unserved` per file zone, claims outside a node's scope
   not merged; lever nodes = placement; inventory `hostgroups`/`zones_placed`; `-check-config`

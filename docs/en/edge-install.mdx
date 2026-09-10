@@ -50,9 +50,10 @@ api:
 **Scope zones to nodes** when the fleet has PoPs: give each node the hostgroups whose zones it
 serves (`edge.nodes[].hostgroups: [edge-us]`, with the literal `global` for the fleet-wide
 zones) and each zone its `hostgroup`; a node without a scope serves the global zones only, a
-zone without a hostgroup is global. The rule, the `global` literal, the duplicate-certificate
-arithmetic and the runbook are in [Placing zones on nodes](/docs/edge#placing-zones-on-nodes).
-Scoping any node requires every agent token to be bound, as above.
+zone without a hostgroup is global. The rule, the `global` literal and the runbook are in
+[Placing zones on nodes](/docs/edge#placing-zones-on-nodes); the duplicate-certificate ceiling
+is counted per placement, not per fleet (see [Limits](/docs/edge#limits-to-know)). Scoping any
+node requires every agent token to be bound, as above.
 
 `kapkan -check-config /etc/kapkan/config.yaml` validates both files (it follows
 `edge.zones_file`), and `kapkan -dump-zones-schema` prints the zones file's JSON schema for
@@ -69,10 +70,11 @@ Besides polling the document, it uses that token to coordinate certificate issua
 brain — so an **unbound** token can act as any node, and rotating it on a compromise means
 rotating the whole fleet's. Bind each token to its node (`api.tokens[].node`); until every agent
 token is bound, `-check-config`, the daemon's log and the inventory's `unbound_agent_tokens` say
-so. What binding buys is impersonation and the rotation radius, not the set of zones: until zones
-are placed on nodes (a later E6 change) a bound token, acting as its own node, still publishes an
-ACME key authorization for any zone the fleet serves — so still treat a node compromise as a
-certificate exposure for every zone. Migrating a fleet from one shared token: add a bound token
+so. What binding buys is impersonation and the rotation radius; what limits the set of zones a
+stolen bound token can issue for is the node's [placement scope](/docs/edge#placing-zones-on-nodes):
+acting as its own node it can take the issuance slot and publish an ACME key authorization only
+for the zones that scope covers (every zone on a fleet without scopes) — treat a node compromise
+as a certificate exposure for its node's zones. Migrating a fleet from one shared token: add a bound token
 per node **with its own secret** (a value shared with the unbound entry is ambiguous and refused
 with `401` for every node presenting it), switch each node's environment file and watch the
 inventory's `last_token` flip, then remove the shared entry last — an unbound token keeps working
@@ -247,10 +249,13 @@ its siblings enforce.
 
 ## Several nodes and a shared address
 
-Point every node's `controller.name` at its own `edge.nodes[]` entry and put the same zones
-document in front of all of them. Under anycast or a shared VIP the CA's HTTP-01 validation may
-land on any node: the ordering node publishes its challenge answer to the brain, which fans it
-out in the document, and **every** node answers it. Issuance is serialised per zone through the
+Point every node's `controller.name` at its own `edge.nodes[]` entry and put the same zones in
+front of all of them — every node behind one shared address must serve the zone, that is, list
+its hostgroup in `edge.nodes[].hostgroups` (or leave the zone global on unscoped nodes). Under
+anycast or a shared VIP the CA's HTTP-01 validation may land on any node behind that address:
+the ordering node publishes its challenge answer to the brain, which fans it out in the document
+of **every node that serves the zone**, and each of them answers it; a node the zone is not
+placed on refuses the Host and cannot answer. Issuance is serialised per zone through the
 brain's slot so a fleet does not burn a CA's duplicate-certificate ceiling in one afternoon,
 and renewal is jittered per node. All of it is advisory: with the brain gone each node still
 renews on its own.

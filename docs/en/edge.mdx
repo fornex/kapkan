@@ -81,8 +81,8 @@ and now [`kapkan edge`](/docs/cli#edge). Installing it end to end is the
   or asked, and who *would* have been.
 - **ACME** runs on each node: account keys and certificates are generated on the box and never
   leave it. The brain only serialises issuance per zone (one node orders at a time) and fans a
-  pending HTTP-01 challenge out to every node, so the CA's validation may land on any of them.
-  Both are advisory: a node renews with the brain gone.
+  pending HTTP-01 challenge out to every node that serves the zone, so the CA's validation may
+  land on any of them. Both are advisory: a node renews with the brain gone.
 
 ### The fast/slow split
 
@@ -383,7 +383,9 @@ of how often they bite:
 
 - **A label by itself is strict.** Putting `hostgroup: edge-us` on a zone takes it off every
   node that does not list `edge-us` — `any-1` above stops serving it. Isolation and the CA's
-  duplicate-certificate budget follow the placement by default; nothing is opened by accident.
+  duplicate-certificate budget follow the placement by default; nothing is opened by accident. A
+  zone placed on a group of N nodes is N orders per issuance, not the fleet's — the ceiling in
+  [Limits](#limits-to-know) is counted per placement.
 - **`global` is a literal.** A node that must serve its PoP's zones *and* the fleet-wide ones
   lists both: `[edge-eu, global]`. A node with only `[edge-eu]` gets no global zone.
 - **The scope follows the addressing.** A hostgroup needs at least one prefix inside `networks`
@@ -401,7 +403,9 @@ of how often they bite:
 - **Ownership and placement are two axes.** `tenant` says who may see the zone,
   `hostgroup` where it is served; when both the zone and its hostgroup carry a tenant they must
   agree, and nothing is inherited — a zone in a labelled group is still a house zone unless it
-  says otherwise. A hostgroup that does not exist fails the reload (the previous zones stay
+  says otherwise. The rule is for named hostgroups: the global group is the fleet's catch-all,
+  not a tenant's PoP, so a labelled zone may stay global whatever `kapkan.yaml`'s top-level
+  `tenant` says. A hostgroup that does not exist fails the reload (the previous zones stay
   live), like any broken zones file.
 - **Never at attack speed.** Placement is a slow change like origins or TLS: moving a zone
   re-renders the nodes it leaves and joins and reloads their terminators. The [fast/slow
@@ -480,8 +484,9 @@ the node no longer serves.
 - **HTTP/3 is per zone, rendered where the node can**, node-wide in what nginx decides before
   SNI (Retry on, 0-RTT off), with no connection migration or session resumption between nodes
   — see [HTTP/3 (QUIC)](#http3-quic).
-- **Duplicate-certificate ceilings.** Per-node certificates mean N nodes on one zone are N
-  orders; Let's Encrypt caps a name at about five per week. The brain's issuance slot and
+- **Duplicate-certificate ceilings.** Per-node certificates mean the N nodes a zone is
+  [placed on](#placing-zones-on-nodes) are N orders (the whole fleet for a global zone); Let's
+  Encrypt caps a name at about five per week. The brain's issuance slot and
   renewal jitter spread them; `acme.fallback` (ZeroSSL, Google Trust Services — both need an
   External Account Binding) is the escape hatch. Plan CA accounts for large fleets.
 - **The agent token issues certificates — for its node's zones.** Bind each agent token to its

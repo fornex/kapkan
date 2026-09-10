@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -68,8 +70,10 @@ func TestEdgeScopePredicates(t *testing.T) {
 
 func TestEdgeScopeValidation(t *testing.T) {
 	bad := []struct{ name, yaml, want string }{
-		{"unknown group in a scope", scopeYAML(boundTokens, "    - name: e1\n      hostgroups: [edge-asia]\n    - name: e2\n    - name: e3\n"),
-			`edge.nodes["e1"].hostgroups[0]: "edge-asia" is not a hostgroup`},
+		// The bad name is SECOND, so the index in the message is the loop's,
+		// not a constant; the whole message is pinned, hint included.
+		{"unknown group in a scope", scopeYAML(boundTokens, "    - name: e1\n      hostgroups: [edge-us, edge-asia]\n    - name: e2\n    - name: e3\n"),
+			`edge.nodes["e1"].hostgroups[1]: "edge-asia" is not a hostgroup of this configuration (nor the literal "global")`},
 		{"a group listed twice", scopeYAML(boundTokens, "    - name: e1\n      hostgroups: [edge-us, edge-us]\n    - name: e2\n    - name: e3\n"),
 			`edge.nodes["e1"].hostgroups: "edge-us" is listed twice`},
 		{"a scope with an unbound agent token",
@@ -106,14 +110,19 @@ func TestBindZonesPlacement(t *testing.T) {
 		}
 		return z
 	}
-	cases := []struct{ name, body, want string }{
+	cases := []struct{ name, body, want, tenant string }{
 		{"typo in the hostgroup", "  - name: us.example\n    hostgroup: edge-uss\n    origins: [\"10.0.0.1:8080\"]\n",
-			`zones["us.example"]: hostgroup "edge-uss" is not a hostgroup`},
+			`zones["us.example"]: hostgroup "edge-uss" is not a hostgroup`, ""},
 		{"tenant disagrees with the group's", "  - name: eu.example\n    hostgroup: edge-eu\n    tenant: acme\n    origins: [\"10.0.0.2:8080\"]\n",
-			`zones["eu.example"]: tenant "acme" differs from hostgroup "edge-eu"'s tenant "eu"`},
-		{"tenant agrees", "  - name: eu.example\n    hostgroup: edge-eu\n    tenant: eu\n    origins: [\"10.0.0.2:8080\"]\n", ""},
-		{"no inheritance: an unlabelled zone in a labelled group stays a house zone", "  - name: eu.example\n    hostgroup: edge-eu\n    origins: [\"10.0.0.2:8080\"]\n", ""},
-		{"literal global", "  - name: g.example\n    hostgroup: global\n    origins: [\"10.0.0.3:8080\"]\n", ""},
+			`zones["eu.example"]: tenant "acme" differs from hostgroup "edge-eu"'s tenant "eu"`, ""},
+		{"tenant agrees", "  - name: eu.example\n    hostgroup: edge-eu\n    tenant: eu\n    origins: [\"10.0.0.2:8080\"]\n", "", "eu"},
+		{"no inheritance: an unlabelled zone in a labelled group stays a house zone", "  - name: eu.example\n    hostgroup: edge-eu\n    origins: [\"10.0.0.2:8080\"]\n", "", ""},
+		{"literal global", "  - name: g.example\n    hostgroup: global\n    origins: [\"10.0.0.3:8080\"]\n", "", ""},
+		// The global group is the fleet's catch-all, not a tenant's PoP: the
+		// agreement rule is for named hostgroups, so a labelled zone may be
+		// global whatever kapkan.yaml's top-level tenant says.
+		{"literal global with a tenant", "  - name: g.example\n    hostgroup: global\n    tenant: acme\n    origins: [\"10.0.0.3:8080\"]\n", "", "acme"},
+		{"implicit global with a tenant", "  - name: g.example\n    tenant: acme\n    origins: [\"10.0.0.3:8080\"]\n", "", "acme"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,16 +133,62 @@ func TestBindZonesPlacement(t *testing.T) {
 				t.Fatalf("BindZones: %v", err)
 			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
 				t.Fatalf("BindZones err = %v, want %q", err, tc.want)
-			case tc.want == "" && z.Zones[0].Tenant != "" && z.Zones[0].Tenant != "eu":
-				t.Fatalf("tenant changed by binding: %q", z.Zones[0].Tenant)
-			}
-			if strings.Contains(tc.name, "no inheritance") && z.Zones[0].Tenant != "" {
-				t.Fatalf("the zone inherited a tenant: %q", z.Zones[0].Tenant)
+			case tc.want == "" && z.Zones[0].Tenant != tc.tenant:
+				t.Fatalf("tenant after binding = %q, want %q (binding never labels or relabels)", z.Zones[0].Tenant, tc.tenant)
 			}
 		})
 	}
 	// The label's form is the zones file's business, like tenant's.
 	if _, err := ParseZones([]byte("zones:\n  - name: a.example\n    hostgroup: \"bad group!\"\n    origins: [\"10.0.0.1:8080\"]\n")); err == nil || !strings.Contains(err.Error(), "a.example: hostgroup") {
 		t.Fatalf("bad hostgroup form: err = %v", err)
+	}
+}
+
+// TestReloadRefusesUnknownZoneHostgroup is the Store-level half of the rule:
+// a zones[].hostgroup typo fails the reload — the previous zones, with their
+// placement, stay live — and fails a fresh Load the same way (the
+// -check-config path).
+func TestReloadRefusesUnknownZoneHostgroup(t *testing.T) {
+	for _, k := range []string{"K_A1", "K_A2", "K_A3", "K_O"} {
+		t.Setenv(k, k+"-secret")
+	}
+	dir := t.TempDir()
+	zonesPath := filepath.Join(dir, "zones.yaml")
+	cfgPath := filepath.Join(dir, "kapkan.yaml")
+	good := "zones:\n  - name: us.example\n    hostgroup: edge-us\n    origins: [\"10.0.0.1:8080\"]\n"
+	typo := strings.Replace(good, "edge-us", "edge-uss", 1)
+	if err := os.WriteFile(zonesPath, []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(strings.Replace(scopeYAML(boundTokens, scopedNodes), "/etc/kapkan/zones.yaml", zonesPath, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	store := NewStore(cfgPath, cfg)
+	if err := os.WriteFile(zonesPath, []byte(typo), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const want = `zones["us.example"]: hostgroup "edge-uss" is not a hostgroup`
+	if _, err := store.Reload(); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Reload with the typo: err = %v, want %q", err, want)
+	}
+	if got := store.Get().ZonesCfg; got == nil || len(got.Zones) != 1 || got.Zones[0].Hostgroup != "edge-us" {
+		t.Fatalf("after the refused reload the previous placement must be live: %+v", got)
+	}
+	if _, err := Load(cfgPath); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Load of the typo'd pair: err = %v, want %q", err, want)
+	}
+	// Fixed: the reload applies.
+	if err := os.WriteFile(zonesPath, []byte(good+"  - name: g.example\n    origins: [\"10.0.0.3:8080\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reload(); err != nil {
+		t.Fatalf("Reload after the fix: %v", err)
+	}
+	if got := store.Get().ZonesCfg; got == nil || len(got.Zones) != 2 {
+		t.Fatalf("after the fixed reload zones = %+v, want 2", got)
 	}
 }

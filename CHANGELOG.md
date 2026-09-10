@@ -492,9 +492,15 @@ security-relevant.
   in a labelled hostgroup inherits nothing, and when both carry a tenant they must agree. Scoping
   any node requires every `agent` token to be bound. `GET /api/v1/edge/zones/status` carries each
   file zone's `placement {hostgroup, nodes, alive}` and `unserved`; a node's claims about a zone
-  outside its scope are stored but not merged; the lever lists the zone's nodes; the inventory
-  shows `hostgroups` and `zones_placed`; `kapkan -check-config` prints the node → scope → zones
-  matrix with each token binding (or `SHARED`) and warns about a zone no node's scope covers.
+  outside its scope are stored but neither merged nor written to the edge history
+  (`kapkan_edge_history_dropped_total{reason="outside_scope"}`); `placement.hostgroup` is for
+  unscoped tokens (a tenant sees node names, not the operator's grouping); the lever lists the
+  zone's nodes; the inventory shows `hostgroups` and `zones_placed`; `kapkan -check-config`
+  prints the node → scope → zones matrix with each token binding (or `SHARED`) and warns about a
+  zone no node's scope covers, an edge block without nodes included. A node the configuration no
+  longer has gets an empty document, and a poll of its parked in a hold across that reload is
+  answered `404 unknown edge node` — never the whole file. The tenant-agreement rule applies to
+  named hostgroups; the global group is the fleet's catch-all, not a tenant's PoP.
   Node side: no change — a zone leaving a node's document is an ordinary slow reload; its
   certificates stay on disk and stop renewing (runbook, not automation). Config surface: both
   schemas, the overlay, docs (zones, configuration, edge *Placing zones on nodes* + Limits,

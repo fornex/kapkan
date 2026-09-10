@@ -109,11 +109,14 @@ can issue for is the node's [placement scope](/docs/edge#placing-zones-on-nodes)
 own node it can take the issuance slot and publish an ACME key authorization only for the zones
 that scope covers — every zone on a fleet without scopes. Treat a node compromise as a certificate
 exposure for its node's zones, and rotate that node's token. An unbound token keeps working
-exactly as before, so a fleet migrates one node at a time, and it is named until it is bound: by
+exactly as before, so a fleet migrates one node at a time — unless any node has a
+[placement scope](/docs/edge#placing-zones-on-nodes) (`edge.nodes[].hostgroups`): then every
+`agent` token must carry `node`, a hard validation error, because a scope enforced against a
+shared token is a promise nothing keeps — and it is named until it is bound: by
 `kapkan -check-config` (a WARNING), in the daemon's log at start and on every reload, and in the
 edge inventory (`unbound_agent_tokens`; per node, `tokens` lists the bound token names and
 `last_token` the token that last polled as it — watch it flip during a migration). Making an unbound
-agent token an error is scheduled for a MAJOR release.
+agent token an error on unscoped fleets too is scheduled for a MAJOR release.
 
 Presence is stamped only by agent tokens: an operator polling with `?node=X` receives X's document
 as a **preview** and does not make X look alive.

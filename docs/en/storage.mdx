@@ -117,10 +117,11 @@ it. The rules below are the write path's contract.
   and counts as nothing.
 - **One row per window.** A report the node re-sends — the same node, zone and close time — is
   written once, and a report carries one window per zone. A window for a zone the zones file
-  does not have, a window with counters but no close time, or a second window for one zone in
-  one report is skipped; every skipped part counts in
-  `kapkan_edge_history_dropped_total{reason}` (`unknown_zone`, `no_at`, `duplicate`,
-  `extra_window`, `bad_source`, `source_cap`) — while storage is on; with it off nothing is
+  does not have, a window (or a certificate, a challenge) for a zone the reporting node's
+  [placement](/docs/edge#placing-zones-on-nodes) does not cover, a window with counters but no
+  close time, or a second window for one zone in one report is skipped; every skipped part
+  counts in `kapkan_edge_history_dropped_total{reason}` (`unknown_zone`, `outside_scope`,
+  `no_at`, `duplicate`, `extra_window`, `bad_source`, `source_cap`) — while storage is on; with it off nothing is
   written and nothing is counted. The report itself is still accepted and shown live; only the
   history skips the part. `duplicate` is expected once per burst end when a node reports more
   often than its windows close.

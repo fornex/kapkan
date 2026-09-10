@@ -1441,13 +1441,17 @@ func (c *Config) BindZones(z *Zones) error {
 			if t := zn.Tenant; t != "" {
 				tenants[t] = true
 			}
-			// Placement (E6.3): the hostgroup must exist — a typo would place
-			// the zone on no node and serve it nowhere, silently — and when
-			// both the group and the zone carry a tenant they must agree:
-			// ownership and placement are two axes, nothing is inherited, and
-			// a zone owned by one tenant served from another's group is a
-			// mistake, not a policy.
-			if zn.Hostgroup != "" && zn.Hostgroup != GlobalGroup {
+			// Placement (E6.3): a NAMED hostgroup must exist — a typo would
+			// place the zone on no node and serve it nowhere, silently — and
+			// when both the group and the zone carry a tenant they must
+			// agree: ownership and placement are two axes, nothing is
+			// inherited, and a zone owned by one tenant served from another's
+			// group is a mistake, not a policy. The global group is exempt
+			// from the agreement rule on purpose: it is the fleet's
+			// catch-all, not a tenant's PoP, and kapkan.yaml's top-level
+			// tenant labels the deployment, not the zones placed nowhere in
+			// particular.
+			if named := zn.Hostgroup != "" && zn.Hostgroup != GlobalGroup; named {
 				g, ok := groups[zn.Hostgroup]
 				if !ok {
 					return fmt.Errorf("zones[%q]: hostgroup %q is not a hostgroup of this configuration", zn.Name, zn.Hostgroup)

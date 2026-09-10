@@ -134,11 +134,14 @@ func checkConfigTo(w io.Writer, path string) int {
 // the OK line, exit code unchanged — the daemon runs it; a MAJOR release is
 // where the unbound token becomes an error.
 func printEdgeWarnings(w io.Writer, cfg *config.Config) {
-	if cfg.Edge != nil && len(cfg.Edge.Nodes) > 0 {
+	if cfg.Edge != nil {
 		zones := 0
 		if cfg.ZonesCfg != nil {
 			zones = len(cfg.ZonesCfg.Zones)
 		}
+		// The header and the orphan WARNING print for any edge block — a
+		// block with no nodes serves every zone nowhere, which is exactly
+		// what the WARNING is for.
 		_, _ = fmt.Fprintf(w, "  edge:      %d node(s), %d zone(s)\n", len(cfg.Edge.Nodes), zones)
 		for i := range cfg.Edge.Nodes {
 			n := &cfg.Edge.Nodes[i]
