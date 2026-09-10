@@ -195,8 +195,9 @@ time, brain or no brain**, and a zone-wide flip it made inert is retired with it
 says where the lever bites: the file's own mode, the zone's watch-only flags (`policy.dry_run`
 and `challenge_options.dry_run` — on either, the lever *previews* rather than bites) and every
 configured node with its liveness and reported `dry_run` — a node that only counts must be seen
-before the lever is trusted. It is an operator's action (`operator` rank, unscoped tokens),
-audited as `edge_challenge`, named `override` by [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus)
+before the lever is trusted. It is an operator's action (`operator` rank; a
+[tenant-scoped](/docs/multi-tenancy) operator may pull it on its own zones only — any other zone is
+`404 unknown zone` for it), audited as `edge_challenge`, named `override` by [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus)
 — the console's Edge view shows the mode the nodes apply under it (`manual`, `auto`), not the
 lever itself — and held in the brain's memory like the issuance coordinator: an incident's tool,
 gone after a brain restart (the nodes drop it with the first document the restarted brain serves;
@@ -377,8 +378,9 @@ Kapkan renders neither.
   generation and test result, certificates (never a key), and the **zones section** — each
   zone's last ten-second window, the sources it refused, asked or would have, and whether its
   rung bites or previews there. See [the API](/docs/api#the-edge-channel).
-- **The zones across the fleet**, `GET /api/v1/edge/zones/status`, merges the alive nodes'
-  zones: rates summed, the nodes on which a zone is watch-only or under a zone-wide challenge
+- **The zones across the fleet**, `GET /api/v1/edge/zones/status`, lists every zone of the zones
+  file and merges the alive nodes' reports into it (a [tenant-scoped](/docs/multi-tenancy) token
+  gets its own zones): rates summed, the nodes on which a zone is watch-only or under a zone-wide challenge
   (biting or previewing), the lever in force, and the would-be set. The console's **Edge**
   view — shown once `edge.nodes[]` is configured — renders it; see [the dashboard](/docs/dashboard).
 

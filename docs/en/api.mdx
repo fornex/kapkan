@@ -576,8 +576,9 @@ role, so a console can decide whether to show node affordances without this call
 These endpoints exist for [edge nodes](/docs/edge) — boxes running [`kapkan edge`](/docs/cli#edge).
 Like the scrub-node channel, the node-facing endpoints take the `agent` role or an unscoped
 `operator` token, never a `viewer` or a tenant-scoped token: the zones document spans every
-tenant. The two human-facing ones — the zone status and the lever — differ: `viewer` rank for
-the status, and a [tenant-scoped](/docs/multi-tenancy) token reaches both for its own zones. **The brain
+tenant. The human-facing ones differ: the node inventory is a `viewer`-rank read for unscoped
+tokens; the zone status (`viewer` rank) and the lever (`operator` rank) admit a
+[tenant-scoped](/docs/multi-tenancy) token for its own zones. **The brain
 distributes policy, never verdicts** — no per-request call exists here or anywhere; a node
 answers requests alone. The count of configured edge nodes (`edge_nodes_total`) rides on
 `/api/v1/status` for every role, so a console can decide whether to show the Edge view without
@@ -685,11 +686,11 @@ previews, the lever in force (`override`), the zone's HTTP/3 across the fleet (`
 serving, unsupported, requests}` — `enabled` is the zones file's `tls.h3` as the brain holds it,
 `serving` the alive nodes whose live generation listens over QUIC for the zone, `unsupported`
 those where it asked and is served over TCP, `requests` the nodes' last-window HTTP/3 requests
-summed; absent for a zone nobody speaks or asks h3 for. This status is built from the reports'
-zones section, which lists **deciding** zones, so a `mode: none` zone's HTTP/3 shows only in the
-nodes' `terminator.h3` under [`GET /api/v1/edge/nodes`](#get-apiv1edgenodes); `enabled` appears
-for any zone the file turns h3 on that is present here — reported by a node, or carrying a lever),
-and the **would-be set**: the union of the sources the
+summed; absent for a zone nobody speaks or asks h3 for. `enabled` appears for every zone of the
+file that turns h3 on — a `mode: none` zone included — and `serving`/`unsupported` name the alive
+nodes' live QUIC listeners for the zone from their `terminator.h3`, deciding zone or not;
+`requests` comes from the reports' zones section, which lists **deciding** zones only), and the
+**would-be set**: the union of the sources the
 nodes previewed a challenge or a deny for, the stronger state kept, the busiest first, bounded to
 20 per reporting node (`would_be_truncated` counts the rest). `partial` says a node's would-be
 sources did not all fit — its per-window bound, or a report that had to shrink — so the set is
@@ -697,12 +698,15 @@ what survived, not everyone; `zones_truncated` on the document sums the zone ent
 cut from their reports, zones that are missing or undercounted here. Every zone of the zones
 file has a row as well — `mode` (its `policy.mode`) and `file_challenge` (its
 `policy.challenge`) are the brain's word, `challenge` what the nodes apply — and `certs` lists
-the certificate each alive node holds for the zone (`node`, `not_after`, `issuer`; metadata
-only, from the reports). A `viewer`-rank read. An unscoped token sees every zone with its
-`tenant`; a [tenant-scoped](/docs/multi-tenancy) token exactly its own zones — no other
-tenant's hostname in any row, would-be set or HTTP/3 list, and no `tenant` field. Node names
-are visible to a tenant; the inventory is not. This is edge-spec's *who would have been
-challenged*: read it before a zone's rung goes live.
+the certificate each alive node holds for the zone (`node`, `not_after`, `issuer` — the last
+omitted when the node reports none; metadata only, from the reports; `certs_truncated` on the
+document sums the entries the nodes cut from their reports to fit the size limit, so a short list
+is what survived, not what is held). A `viewer`-rank read. An unscoped token sees every zone,
+labelled ones with their `tenant` (the key is absent on an unlabelled zone); a
+[tenant-scoped](/docs/multi-tenancy) token exactly its own zones — no other tenant's hostname
+in any row, would-be set or HTTP/3 list, and no `tenant` field. Node names are visible to a
+tenant; the inventory is not. This is edge-spec's *who would have been challenged*: read it
+before a zone's rung goes live.
 
 ```json
 {
@@ -763,6 +767,9 @@ node compromise.
 zones file says. `operator` rank. A [tenant-scoped](/docs/multi-tenancy) operator may pull it on
 its own zones only; any other zone — another tenant's, unlabelled, or gone from the file — is
 `404 unknown zone` for it, the same answer an unknown name gets, decided before the body is read.
+The caller learns nothing more; the operator does: each such refusal counts in
+`kapkan_api_zone_refused_total{route="edge_lever"}` and is logged once a minute per token, and
+no audit row is written.
 
 ```json
 { "mode": "manual", "ttl_seconds": 1800, "reason": "credential stuffing from residential proxies" }

@@ -28,7 +28,9 @@ Every mutation is logged at `INFO` level regardless of storage. The queryable hi
 ## What is recorded
 
 Six actions are audited. `ban`, `config_reload` and `source_block` are recorded on both
-success and failure; `unban`, `source_unblock` and `edge_challenge` are recorded only on success — a failed or
+success and failure; `edge_challenge` on every `200` — clearing a lever that was not live still
+records `cleared`, only a refused lever (`404`, `400`, `409`) is left out; `unban` and
+`source_unblock` are recorded only on success — a failed or
 no-op removal returns an error and is not written to the trail, though it is still logged (a
 failed unban is a `404 "no active ban"`, not a policy decision, so there is nothing to
 attribute):
@@ -40,7 +42,7 @@ attribute):
 | `config_reload` | `POST /api/v1/config/reload` | `ok` on success; `error` when the new config fails to parse or validate. |
 | `source_block` | `POST /api/v1/dataplane/sources` | `blocked` on success; `rejected` when policy refuses it. A refused block is itself an operator action, so it is attributed like a refused ban. The [fingerprint plane](/docs/fingerprinting) also writes `source_block` records — `source: "auto"`, success only — when it blocks a JA4. |
 | `source_unblock` | `POST /api/v1/dataplane/sources/unblock` | `removed` on success. |
-| `edge_challenge` | `POST`/`DELETE /api/v1/edge/zones/{name}/challenge` | `set` when the [lever](/docs/edge#the-lever) is pulled, `cleared` when it is released (`DELETE` or `mode: off`); `reason` carries the mode, its end and the operator's reason. A refused lever — an unknown or out-of-tenant zone, a bad TTL, a zone in `mode: none` — is not written. |
+| `edge_challenge` | `POST`/`DELETE /api/v1/edge/zones/{name}/challenge` | `set` when the [lever](/docs/edge#the-lever) is pulled, `cleared` when it is released (`DELETE` or `mode: off`, whether or not a lever was live); `reason` is `<mode> until <RFC 3339>; <operator's reason>` on `set`, the operator's reason (`mode: off`) or empty (`DELETE`) on `cleared`. A refused lever — an unknown or out-of-tenant zone, a bad TTL, a zone in `mode: none` — is not written. |
 
 `config_reload` is restricted to unscoped (admin) tokens. A tenant-scoped operator is refused
 with `403` *before* the reload runs, and **no audit record is written** — that refusal appears
@@ -123,10 +125,10 @@ Each record carries these fields:
 | `tenant` | The caller's tenant scope; empty for an unscoped (admin) caller. |
 | `target` | The IP for `ban`/`unban`; `source->victim` for `source_block`/`source_unblock`; the zone for `edge_challenge`; empty for `config_reload`. |
 | `target_type` | `host` for `ban`/`unban`; `source` for `source_block`/`source_unblock`; `zone` for `edge_challenge`; `global` for `config_reload`. |
-| `reason` | Refusal or error detail; empty on success — except for `edge_challenge`, where it is the mode, its end and the operator's reason. |
+| `reason` | Refusal or error detail; empty on success — except for `edge_challenge`: on `set` the mode, its end and the operator's reason, on `cleared` the operator's reason or empty. |
 | `source` | `api` for an operator action, or `auto` for an engine-initiated one. Today the [fingerprint plane](/docs/fingerprinting) writes `source_block` records with `source: "auto"` — and no operator, role or tenant — when a client's JA4 is on the blocklist. |
 | `ban_state` | The final ban state for `ban`/`unban`; empty for `config_reload`, the source-block actions and `edge_challenge`. |
-| `dry_run` | `1` when the deployment is in [dry-run](/docs/safety). |
+| `dry_run` | `1` when the action ran under [dry-run](/docs/safety) (`ban`/`unban`, the source-block actions); always `0` for `config_reload` and `edge_challenge`, which dry-run does not gate. |
 
 A query against an out-of-range window returns `400`; an unknown `action` value returns `400`;
 a malformed `target` returns `400`. With storage disabled the response is

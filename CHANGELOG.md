@@ -395,8 +395,15 @@ security-relevant.
   byte-identical `404 unknown zone`, decided before the body is read, so the lever is no
   cross-tenant existence oracle. Node names stay visible to a tenant; the zones document, both
   reports, the ACME coordination, both inventories and `config/reload` stay unscoped.
-  `edge_challenge` joins `GET /api/v1/audit?action=`. Config surface: `zones[].tenant` (zones
-  schema), `api.tokens.tenant` overlay entry marked server-verified.
+  `edge_challenge` joins `GET /api/v1/audit?action=`. Each refusal counts in
+  `kapkan_api_zone_refused_total{route}` and is logged once a minute per token — the caller learns
+  nothing more, the operator sees a leaked scoped token walking hostnames. Every zone of the file
+  that turns h3 on shows `h3.enabled`, with `serving`/`unsupported` from the alive nodes'
+  `terminator.h3` — a `mode: none` zone included — and the document sums the nodes'
+  `certs_truncated` beside `zones_truncated`. The shipped console renders a zone no alive node
+  reports yet with `nodes: 0` and no challenge; the Edge view's cells for those rows are a later E6
+  change. Config surface: `zones[].tenant` (zones schema), `api.tokens.tenant` overlay entry marked
+  server-verified.
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data

@@ -9,8 +9,8 @@ export const metadata = {
 One Kapkan instance can serve many customers (a managed service provider (MSP) or internet
 data center (IDC) use case) and give each a token
 that sees and touches **only their own** attacks, bans and hosts. A tenant is just an optional
-label on a [hostgroup](/docs/hostgroups) — there is no new top-level object, no separate tenant
-registry, and the detection hot path is untouched.
+label on a [hostgroup](/docs/hostgroups) — or, on an edge brain, on a [zone](/docs/zones) — there
+is no new top-level object, no separate tenant registry, and the detection hot path is untouched.
 
 ```yaml
 tenant: "house"                 # optional: label the global/fallback group
@@ -39,7 +39,7 @@ api:
 
 Three steps map directly to the YAML above:
 
-1. **Tag each customer's hostgroup(s)** with `tenant: "customerA"` (the same label can repeat across several groups — a customer's web and DNS groups, say).
+1. **Tag each customer's hostgroup(s)** with `tenant: "customerA"` (the same label can repeat across several groups — a customer's web and DNS groups, say), or its [edge zones](/docs/zones) with `zones[].tenant` for a customer with hostnames and no prefixes.
 2. **Add an API token** under `api.tokens` carrying that same `tenant:` plus a `role:` — `viewer` is read-only, `operator` can also ban/unban.
 3. **Hand the customer that token.** They now see and touch only their own prefixes; everything else (other tenants, untagged groups) is invisible to them.
 
