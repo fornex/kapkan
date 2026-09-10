@@ -153,7 +153,11 @@ func TestRealClickHouse(t *testing.T) {
 	// Fresh timestamps everywhere a row must survive: ClickHouse filters rows
 	// whose TTL has already expired while writing the part, so the fixtures'
 	// June dates would land as nothing (and did, on the first run of this
-	// suite).
+	// suite). The windows sit at half past the previous hour — away from
+	// every hour boundary, so the 3600 s bucket assertions below never depend
+	// on when the suite runs.
+	mid := now.Add(-time.Hour).Truncate(time.Hour).Add(30 * time.Minute)
+	e1At, e2At := mid, mid.Add(-10*time.Second)
 	attack := sampleAttack()
 	attack.EventTime = at
 	w.WriteAttack(attack)
@@ -163,14 +167,17 @@ func TestRealClickHouse(t *testing.T) {
 	w.WriteAudit(audit)
 	stale := now.Add(-time.Duration(cfg.TTLDays+1) * 24 * time.Hour).Format(chDateTime)
 	w.WriteEdgeWindows([]EdgeWindowRow{
-		{TS: at, ReceivedAt: at, WindowSeconds: 10, Zone: "shop.example", Node: "e1", Challenge: "auto", Requests: 400, Decided: 400, WouldDeny: 3, WouldChallenge: 12, Status2xx: 380, H3Requests: 7},
-		{TS: now.Add(-10 * time.Second).Format(chDateTime), ReceivedAt: at, WindowSeconds: 10, Zone: "shop.example", Node: "e2", Challenge: "auto", Requests: 100, Decided: 100, Status2xx: 100},
+		{TS: e1At.Format(chDateTime), ReceivedAt: at, WindowSeconds: 10, Zone: "shop.example", Node: "e1", Challenge: "auto", Requests: 400, Decided: 400, WouldDeny: 3, WouldChallenge: 12, Status2xx: 380, H3Requests: 7},
+		{TS: e2At.Format(chDateTime), ReceivedAt: at, WindowSeconds: 10, Zone: "shop.example", Node: "e2", Challenge: "auto", Requests: 100, Decided: 100, Status2xx: 100},
 		{TS: stale, ReceivedAt: at, WindowSeconds: 10, Zone: "shop.example", Node: "e1", Requests: 1},
 	})
+	// The strongest state must win by RANK, not by requests, time or string
+	// order: the `denied` row is the earlier, smaller and lexicographically
+	// lesser one.
 	w.WriteEdgeSources([]EdgeSourceRow{
-		{TS: at, Zone: "shop.example", Node: "e1", Source: "203.0.113.9", State: "would-deny", Requests: 200, RPS: 20},
-		{TS: now.Add(-10 * time.Second).Format(chDateTime), Zone: "shop.example", Node: "e2", Source: "203.0.113.9", State: "would-challenge", Requests: 50, RPS: 5},
-		{TS: at, Zone: "shop.example", Node: "e1", Source: "198.51.100.7", State: "denied", Requests: 10, RPS: 1},
+		{TS: e1At.Format(chDateTime), Zone: "shop.example", Node: "e1", Source: "203.0.113.9", State: "would-deny", Requests: 200, RPS: 20},
+		{TS: e2At.Format(chDateTime), Zone: "shop.example", Node: "e2", Source: "203.0.113.9", State: "denied", Requests: 5, RPS: 0.5},
+		{TS: e1At.Format(chDateTime), Zone: "shop.example", Node: "e1", Source: "198.51.100.7", State: "denied", Requests: 10, RPS: 1},
 	})
 	w.WriteEdgeEvent(EdgeEventRow{EventTime: now.Add(-time.Minute).Format(chDateTime), Node: "e1", Kind: "node_alive"})
 	w.WriteEdgeEvent(EdgeEventRow{EventTime: at, Node: "e1", Zone: "shop.example", Kind: "cert_renewed", Detail: "not_after=2026-12-01T00:00:00Z"})
@@ -197,15 +204,15 @@ func TestRealClickHouse(t *testing.T) {
 	// 5. The read client cannot write: readonly=2 is enforced by the server.
 	q := NewQuerier(cfg, log).(*ClickHouse)
 	params := edgeReadParams(10)
-	if _, err := q.queryRaw(ctx, fmt.Sprintf("INSERT INTO %s.%s FORMAT JSONEachRow {\"event_time\":\"%s\",\"node\":\"x\",\"kind\":\"node_alive\"}", db, tableEdgeEvents, at), params); err == nil {
-		t.Fatal("an INSERT through the read client succeeded; readonly=2 is not enforced")
+	if _, err := q.queryRaw(ctx, fmt.Sprintf("INSERT INTO %s.%s FORMAT JSONEachRow {\"event_time\":\"%s\",\"node\":\"x\",\"kind\":\"node_alive\"}", db, tableEdgeEvents, at), params); err == nil || !strings.Contains(err.Error(), "Code: 164") {
+		t.Fatalf("an INSERT through the read client: %v, want the READONLY refusal (Code: 164)", err)
 	}
 	if got := chCount(t, base, db, tableEdgeEvents); got != 2 {
 		t.Fatalf("edge_events after the refused insert = %d, want 2", got)
 	}
 
 	// 6. The three queries answer in the documented shapes.
-	from, to := now.Add(-time.Hour), now.Add(time.Minute)
+	from, to := e1At.Add(-time.Hour), now.Add(time.Minute)
 	hist, err := q.QueryEdgeHistory(ctx, "shop.example", "", from, to, 3600)
 	if err != nil {
 		t.Fatalf("QueryEdgeHistory: %v", err)
@@ -217,17 +224,29 @@ func TestRealClickHouse(t *testing.T) {
 	if err != nil || len(one) != 1 || one[0].Nodes != 1 || one[0].Requests != 100 {
 		t.Fatalf("history for e2: %+v %v", one, err)
 	}
+	// The range applies to the WINDOWS, not to the bucket they fall into: a
+	// range that starts inside the hour still counts both windows, and one
+	// that ends between them counts only the earlier — the bucket start (the
+	// hour) is before `from` either way.
+	edge, err := q.QueryEdgeHistory(ctx, "shop.example", "", e2At.Add(-time.Second), e1At.Add(time.Second), 3600)
+	if err != nil || len(edge) != 1 || edge[0].Requests != 500 || edge[0].Nodes != 2 {
+		t.Fatalf("history with a range inside the bucket: %+v %v (want both windows)", edge, err)
+	}
+	half, err := q.QueryEdgeHistory(ctx, "shop.example", "", e2At.Add(-time.Second), e1At.Add(-5*time.Second), 3600)
+	if err != nil || len(half) != 1 || half[0].Requests != 100 || half[0].Nodes != 1 {
+		t.Fatalf("history with a range ending between the windows: %+v %v (want e2's alone)", half, err)
+	}
 	srcs, err := q.QueryEdgeSources(ctx, EdgeSourceFilter{Zone: "shop.example", From: from, To: to})
 	if err != nil {
 		t.Fatalf("QueryEdgeSources: %v", err)
 	}
-	if len(srcs) != 2 || srcs[0].Source != "203.0.113.9" || srcs[0].State != "would-deny" || srcs[0].Requests != 250 || srcs[0].Windows != 2 || srcs[0].Nodes != 2 ||
-		srcs[1].Source != "198.51.100.7" || srcs[1].State != "denied" || srcs[0].FirstSeen == "" || srcs[0].LastSeen < srcs[0].FirstSeen {
-		t.Fatalf("sources: %+v", srcs)
+	if len(srcs) != 2 || srcs[0].Source != "203.0.113.9" || srcs[0].State != "denied" || srcs[0].Requests != 205 || srcs[0].Windows != 2 || srcs[0].Nodes != 2 ||
+		srcs[1].Source != "198.51.100.7" || srcs[1].State != "denied" || srcs[1].Requests != 10 || srcs[0].FirstSeen != e2At.Format(chDateTime) || srcs[0].LastSeen != e1At.Format(chDateTime) {
+		t.Fatalf("sources (strongest state by rank, busiest first): %+v", srcs)
 	}
 	denied, err := q.QueryEdgeSources(ctx, EdgeSourceFilter{Zone: "shop.example", State: "denied", From: from, To: to})
-	if err != nil || len(denied) != 1 || denied[0].Source != "198.51.100.7" {
-		t.Fatalf("denied sources: %+v %v", denied, err)
+	if err != nil || len(denied) != 2 || denied[0].Source != "198.51.100.7" || denied[0].Requests != 10 || denied[1].Source != "203.0.113.9" || denied[1].Requests != 5 {
+		t.Fatalf("denied sources (the filter is on the rows, the order on the filtered sums): %+v %v", denied, err)
 	}
 	evs, err := q.QueryEdgeEvents(ctx, EdgeEventFilter{From: from, To: to})
 	if err != nil {

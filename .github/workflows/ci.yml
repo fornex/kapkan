@@ -440,11 +440,13 @@ jobs:
       # holds, the edge queries answer in shape. `require` turns the suite's
       # no-server skip into a failure, so a job that cannot reach the service
       # fails loudly instead of passing on a skip.
+      # `go test -run` exits 0 when the pattern matches nothing, so the job
+      # also requires the PASS line: a renamed or gated-out suite is red here.
       - name: Real-ClickHouse suite
-        run: >
-          KAPKAN_CLICKHOUSE=require
-          KAPKAN_CLICKHOUSE_URL=http://127.0.0.1:8123
-          go test -count=1 -v -run TestRealClickHouse ./internal/storage/
+        run: |
+          KAPKAN_CLICKHOUSE=require KAPKAN_CLICKHOUSE_URL=http://127.0.0.1:8123 \
+            go test -count=1 -v -run '^TestRealClickHouse$' ./internal/storage/ | tee real-clickhouse.log
+          grep -q '^--- PASS: TestRealClickHouse' real-clickhouse.log
 
   govulncheck:
     name: govulncheck
