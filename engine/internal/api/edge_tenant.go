@@ -19,8 +19,9 @@ import (
 )
 
 // logZoneRefusal is the trace a scoped caller's refusal on a zone it does not
-// own leaves for the OPERATOR (D10): the caller sees the uniform 404 and no
-// audit row is written, but the counter moves and one Warn a minute per token
+// own leaves for the OPERATOR (D10): the caller sees the route's one uniform
+// refusal (the lever's 404, the history reads' 403) and no audit row is
+// written, but the counter moves and one Warn a minute per token
 // names the token, its tenant, the route and what it asked for — so a leaked
 // scoped token walking a hostname list is visible in the log and in
 // Prometheus without the caller learning whether the zone exists.

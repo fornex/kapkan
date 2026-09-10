@@ -466,8 +466,10 @@ security-relevant.
   in one place; storage off answers `{available:false}` like `/api/v1/traffic`, a failed query
   `502`. Scope: a tenant-scoped token reads its own zones (ownership from the live zones file) and
   gets one uniform `403` for any zone that is not its own — another tenant's, unlabelled, gone
-  from the file or nonexistent — counted in `kapkan_api_zone_refused_total{route="edge_history"}`;
-  `node=` and `/edge/events` name nodes and stay unscoped.
+  from the file or nonexistent — counted in `kapkan_api_zone_refused_total{route="edge_history"}`
+  (while storage is on; with it off no zone is looked at); `node=` and `/edge/events` name nodes
+  and stay unscoped. Zone names are folded like the file's; `step` is capped at a day, the
+  query's own clamp, and `step_seconds` is the step the buckets were built with.
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data
