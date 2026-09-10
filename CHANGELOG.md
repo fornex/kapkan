@@ -404,6 +404,29 @@ security-relevant.
   reports yet with `nodes: 0` and no challenge; the Edge view's cells for those rows are a later E6
   change. Config surface: `zones[].tenant` (zones schema), `api.tokens.tenant` overlay entry marked
   server-verified.
+- Edge track, E6.4 — the edge history's storage (milestone E6, analytics). Three ClickHouse
+  tables beside the three the brain always had: `edge_windows` (one row per edge node, zone and
+  closed ten-second window — the report's counters, response statuses, HTTP/3 requests and the
+  rung's state; `ts` is the node's clock as the brain accepted it, `received_at` the brain's; no
+  `rps` column — it is `sum(requests)/sum(window_seconds)` — and no tenant column: ownership is
+  read from the live zones file), `edge_sources` (only the **telling** sources — denied,
+  challenged, would-deny, would-challenge — at most 20 per node, zone and window; visitors are
+  never stored) and `edge_events` (the transitions the brain saw). Flat MergeTree with the
+  `ttl_days` TTL and `LowCardinality(String)` (never an Enum), created **after** the core tables
+  and each logged on its own, so a writer credential from before this release keeps the tables it
+  had; the column upgrades are one table-keyed list now. The writer grows
+  `WriteEdgeWindows/Sources/Event`, the querier `QueryEdgeHistory/Sources/Events` (`param_*`
+  bindings, `readonly=2`, time and row caps, 64-bit integers unquoted). A real-ClickHouse suite
+  (`KAPKAN_CLICKHOUSE=require`) runs in CI on a pinned `clickhouse/clickhouse-server:25.8`:
+  schema idempotent twice, a dropped column comes back, every table takes rows, a row already
+  past `ttl_days` never lands (ClickHouse drops expired rows as the part is written) and
+  `OPTIMIZE … FINAL` keeps it so, the read client's INSERT is refused as read-only, the three
+  queries answer in shape — the time range applied to the windows, not to the buckets they fall
+  into, and the strongest source state won by rank. Schema init now attempts every statement
+  and reports the first failure instead of stopping at it, so a credential that may INSERT but
+  not CREATE still gets the column upgrades and the new tables tried. No new configuration key:
+  storage on means history on, `ttl_days` keeps it. The brain's write path and the read API
+  follow (E6.5, E6.6).
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data
@@ -558,6 +581,21 @@ security-relevant.
   have reported no readiness at all rather than guessed about. Twelve new locale strings and two
   plural keys in all five catalogs; `i18n.plural()` now interpolates `{vars}` as `t()` does, so a
   form carrying a second number keeps its whole phrase, word order included, in the translation.
+
+### Fixed
+
+- Storage: rows enqueued just before shutdown were lost when they filled a batch — the
+  size-triggered flush sent on the run context, which the shutdown had just cancelled, so the
+  POST failed with `context canceled` and the rows were counted as errors. Every flush now sends
+  each table on its own bounded context (10 s); the run context is only the stop signal. Found by
+  the new real-ClickHouse suite (E6.4).
+- Storage: `GET /api/v1/traffic` applied its time range to the **bucket** a snapshot fell into
+  rather than to the snapshot itself — ClickHouse read the `ts BETWEEN` beside the bucket's
+  `AS ts` alias as the alias — so the first partly covered bucket lost every point and points
+  just past `to` in the last bucket were counted. The range now filters the rows in a subquery,
+  and the reads pin the alias rule they are written for (`prefer_column_name_to_alias=0`) so a
+  per-user server profile cannot turn a bucketed history into one row per snapshot. Found by the
+  E6.4 review on the edge twin of the query.
 
 ## [1.7.0] - 2026-09-02
 

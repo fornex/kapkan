@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,16 +32,24 @@ type Writer interface {
 	WriteAttack(AttackRow)
 	WriteTraffic([]TrafficRow)
 	WriteAudit(AuditRow)
+	// The edge history (E6.4, edge_rows.go).
+	WriteEdgeWindows([]EdgeWindowRow)
+	WriteEdgeSources([]EdgeSourceRow)
+	WriteEdgeEvent(EdgeEventRow)
 	Start(ctx context.Context)
 	Stop()
 }
 
-// Querier reads persisted history for the dashboard's Traffic/Reports view and
-// the audit trail. It is nil when storage is disabled (the API then reports
-// history as unavailable rather than failing).
+// Querier reads persisted history for the dashboard's Traffic/Reports view,
+// the audit trail and the edge history. It is nil when storage is disabled
+// (the API then reports history as unavailable rather than failing).
 type Querier interface {
 	QueryTraffic(ctx context.Context, key string, from, to time.Time, stepSec int) ([]TrafficPoint, error)
 	QueryAudit(ctx context.Context, f AuditFilter) ([]AuditRow, error)
+	// The edge history (E6.4, edge_rows.go).
+	QueryEdgeHistory(ctx context.Context, zone, node string, from, to time.Time, stepSec int) ([]EdgeHistoryPoint, error)
+	QueryEdgeSources(ctx context.Context, f EdgeSourceFilter) ([]EdgeSourceAgg, error)
+	QueryEdgeEvents(ctx context.Context, f EdgeEventFilter) ([]EdgeEventRow, error)
 }
 
 // AuditFilter scopes an audit query. Tenant is bound server-side from the
@@ -260,13 +269,18 @@ func (c *ClickHouse) run(ctx context.Context) {
 	defer ticker.Stop()
 	batch := make(map[string][][]byte)
 	n := 0
+	// Every flush sends on bounded contexts of its own, never on the run
+	// context: that one is the STOP signal, and a cancel arriving while a batch
+	// is in flight (or a size-triggered flush racing the shutdown) would
+	// otherwise abort the POST with "context canceled" and lose rows that are
+	// already ours — the real-ClickHouse suite caught exactly that. A hung
+	// server costs this loop at most flushSendTimeout per table of a batch
+	// (enqueue stays non-blocking and drops meanwhile, counted).
 	flush := func() {
 		if n == 0 {
 			return
 		}
-		for table, rows := range batch {
-			c.send(ctx, table, rows)
-		}
+		c.flushFinal(batch)
 		batch = make(map[string][][]byte)
 		n = 0
 	}
@@ -297,16 +311,18 @@ func (c *ClickHouse) run(ctx context.Context) {
 	}
 }
 
-// flushFinal sends remaining batches during shutdown with a fresh bounded
-// context (the run context is already cancelled).
+// flushSendTimeout bounds one table's INSERT; each table of a batch gets its
+// own, so a slow first table never starves the later ones of their budget.
+const flushSendTimeout = 10 * time.Second
+
+// flushFinal sends a set of batches, each table on a fresh bounded context —
+// every flush goes through here, so a cancelled run context (shutdown) never
+// aborts a POST that is already carrying rows.
 func (c *ClickHouse) flushFinal(batch map[string][][]byte) {
-	if len(batch) == 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	for table, rows := range batch {
+		ctx, cancel := context.WithTimeout(context.Background(), flushSendTimeout)
 		c.send(ctx, table, rows)
+		cancel()
 	}
 }
 
@@ -362,24 +378,61 @@ func (c *ClickHouse) ensureSchema(ctx context.Context) error {
 			") ENGINE = MergeTree() ORDER BY (event_time, tenant) "+
 			"TTL event_time + INTERVAL %d DAY", c.cfg.Database, tableAudit, c.cfg.TTLDays),
 	}
+	// Every statement is attempted: a credential that may INSERT but not
+	// CREATE (the usual state after the first run) is refused on each CREATE
+	// even when the object exists, and stopping at the first refusal would
+	// skip the tables and column upgrades below that the same start could
+	// still complete. The first failure is what the caller logs.
+	var firstErr error
 	for _, s := range stmts {
 		if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(s)); err != nil {
-			return fmt.Errorf("ddl: %w", err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("ddl: %w", err)
+			}
+			c.log.Warn("clickhouse: core DDL statement refused (a credential that may INSERT but not CREATE sees this on every start; harmless once the tables exist)", "ddl", ddlHead(s), "err", err)
 		}
 	}
-	// Best-effort upgrade: add top_asns to an attack_events table created before
-	// GeoIP/ASN enrichment existed (CREATE ... IF NOT EXISTS never alters an
-	// existing table). Run AFTER the CREATEs and outside the fail-fast loop:
-	// fresh installs already have the column, so a failure here — e.g. a writer
-	// credential without ALTER rights — must not fail schema init or block the
-	// (unrelated) traffic table above.
-	for _, col := range []string{"top_asns String", "reason String", "method LowCardinality(String)"} {
-		alter := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s", c.cfg.Database, tableAttacks, col)
-		if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(alter)); err != nil {
-			c.log.Warn("clickhouse: attack_events column upgrade skipped (fresh installs already have it)", "column", col, "err", err)
+	// The edge history's tables (E6.4) come AFTER the core loop and each on
+	// its own: a writer credential from before them may lack CREATE, and the
+	// three tables a deployment always had must not be held hostage by the
+	// three new ones — so a failure here is logged, never returned.
+	for _, t := range edgeSchema(c.cfg.Database, c.cfg.TTLDays) {
+		if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(t.ddl)); err != nil {
+			c.log.Warn("clickhouse: edge history table not created (the core tables are unaffected; grant CREATE or create it by hand)", "table", t.table, "err", err)
 		}
 	}
-	return nil
+	// Best-effort upgrades: the columns a release added to a table an earlier
+	// release created (CREATE ... IF NOT EXISTS never alters an existing
+	// table). Outside the fail-fast loop for the same reason: fresh installs
+	// already have them, so a failure here — e.g. a writer credential without
+	// ALTER rights — must not fail schema init or block the other tables.
+	for _, up := range schemaUpgrades {
+		for _, col := range up.cols {
+			alter := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s", c.cfg.Database, up.table, col)
+			if err := c.post(ctx, c.cfg.URL+"/", bytes.NewBufferString(alter)); err != nil {
+				c.log.Warn("clickhouse: column upgrade skipped (fresh installs already have it)", "table", up.table, "column", col, "err", err)
+			}
+		}
+	}
+	return firstErr
+}
+
+// ddlHead is the statement up to its column list, for a log line.
+func ddlHead(s string) string {
+	if i := strings.IndexByte(s, '('); i > 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
+// schemaUpgrades lists, per table, the columns added after the table's first
+// release — applied with ADD COLUMN IF NOT EXISTS on every start. A new
+// column on any table goes here as well as into its CREATE.
+var schemaUpgrades = []struct {
+	table string
+	cols  []string
+}{
+	{tableAttacks, []string{"top_asns String", "reason String", "method LowCardinality(String)"}},
 }
 
 // post sends one request to ClickHouse and treats non-2xx as an error,
@@ -417,10 +470,16 @@ func (c *ClickHouse) QueryTraffic(ctx context.Context, key string, from, to time
 	if stepSec > 86400 {
 		stepSec = 86400
 	}
+	// The key and range filters sit on the base rows in a subquery: the outer
+	// SELECT aliases the bucket `ts`, and a `ts BETWEEN` beside it would be
+	// read as the bucket start (the E6.4 review found this on the edge twin of
+	// this query: the first partly covered bucket lost every row, the last
+	// admitted rows past `to`). GROUP BY ts is the alias, by the pinned rule.
 	sql := fmt.Sprintf("SELECT toStartOfInterval(ts, INTERVAL %d SECOND) AS ts, "+
 		"avg(pps) AS pps, avg(mbps) AS mbps, avg(flows_per_sec) AS flows_per_sec, "+
 		"max(in_attack) AS in_attack, avg(baseline_pps) AS baseline_pps "+
-		"FROM %s.%s WHERE `key` = {key:String} AND ts BETWEEN {from:DateTime} AND {to:DateTime} "+
+		"FROM (SELECT ts, pps, mbps, flows_per_sec, in_attack, baseline_pps FROM %s.%s "+
+		"WHERE `key` = {key:String} AND ts BETWEEN {from:DateTime} AND {to:DateTime}) "+
 		"GROUP BY ts ORDER BY ts LIMIT %d FORMAT JSONEachRow",
 		stepSec, c.cfg.Database, tableTraffic, maxTrafficRows)
 	params := url.Values{}
@@ -428,11 +487,13 @@ func (c *ClickHouse) QueryTraffic(ctx context.Context, key string, from, to time
 	params.Set("param_from", from.UTC().Format(chDateTime))
 	params.Set("param_to", to.UTC().Format(chDateTime))
 	// Read-path hardening: enforce read-only at the protocol level (the shared
-	// credential cannot write/DDL through this client) and cap server-side cost.
+	// credential cannot write/DDL through this client), cap server-side cost,
+	// and pin the alias rule the GROUP BY is written for (see edgeReadParams).
 	params.Set("readonly", "2")
 	params.Set("max_execution_time", "10")
 	params.Set("max_result_rows", fmt.Sprintf("%d", maxTrafficRows))
 	params.Set("result_overflow_mode", "throw")
+	params.Set("prefer_column_name_to_alias", "0")
 	body, err := c.queryRaw(ctx, sql, params)
 	if err != nil {
 		return nil, err

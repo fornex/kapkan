@@ -808,12 +808,14 @@ storage:
 
 kapkan talks to ClickHouse's **HTTP interface** with the standard library — no driver
 dependency; the only external dependency is the ClickHouse server itself. On start it
-creates three MergeTree tables (idempotently): `attack_events` (every start/end with type,
+creates six MergeTree tables (idempotently): `attack_events` (every start/end with type,
 direction, rates, sample top-sources, top-ASNs when GeoIP is enabled, ban state),
-`traffic` (periodic per-host rate and baseline snapshots), and `audit_events` (who did
+`traffic` (periodic per-host rate and baseline snapshots), `audit_events` (who did
 what, with which role and tenant, to which target, and how it turned out — served back on
-`/api/v1/audit`). All three carry a `ttl_days` TTL so retention is bounded without
-operator intervention.
+`/api/v1/audit`), and the edge history — `edge_windows` (one row per edge node, zone and
+closed ten-second window), `edge_sources` (only the telling sources of each window: denied,
+challenged, would-deny, would-challenge) and `edge_events` (the transitions the brain saw).
+All six carry a `ttl_days` TTL so retention is bounded without operator intervention.
 
 Persistence is **best-effort and never blocks detection**: rows go onto a bounded queue
 (`queue_size`) with a non-blocking send and are flushed in batches (`batch_size` /

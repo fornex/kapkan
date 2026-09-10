@@ -614,6 +614,15 @@ headline and the long pole.
   minute per token (the E6.1 limiter, shared — D10's trace for the operator); `h3.serving/
   unsupported` come from `terminator.h3` for every row, `mode: none` included, and
   `certs_truncated` is summed on the document like `zones_truncated`.
+  *Decided in E6.4 (`internal/storage/edge_rows.go`):* three flat MergeTree tables —
+  `edge_windows` (raw 10 s windows, `ORDER BY (zone, ts, node)`, no rps and no tenant column:
+  D12/D13), `edge_sources` (telling sources only, ≤20 per node/zone/window: D14, `ORDER BY (zone,
+  ts, source)`) and `edge_events` (`ORDER BY (event_time, node)`) — with the `ttl_days` TTL,
+  `LowCardinality(String)` never Enum, created best-effort after the core tables so an old
+  writer credential keeps what it had; `ts` is the node's gated clock and `received_at` the
+  brain's (D11). Reads bind through `param_*` under `readonly=2` with time and row caps. A
+  real-ClickHouse suite gates the DDL, the column upgrade, the TTL and the read-only client in
+  CI (`storage-clickhouse`, pinned server image). The write path is E6.5, the read API E6.6.
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and

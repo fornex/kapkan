@@ -1,13 +1,13 @@
 export const metadata = {
   title: "Storage (ClickHouse)",
   description:
-    "Optional ClickHouse persistence for attack and traffic history — forensics and dashboard graphs, never blocking detection.",
+    "Optional ClickHouse persistence for attack, traffic, audit and edge history — forensics and dashboard graphs, never blocking detection.",
 };
 
 # Storage (ClickHouse)
 
-Point Kapkan at a ClickHouse server to keep attack and traffic history — the answer to
-"what hit us last Tuesday". Without it, Kapkan runs entirely in-process on live data.
+Point Kapkan at a ClickHouse server to keep attack, traffic, audit and edge history — the
+answer to "what hit us last Tuesday". Without it, Kapkan runs entirely in-process on live data.
 
 You need a running ClickHouse server (any recent version) for this. Kapkan talks to its
 HTTP interface, which listens on port `8123` by default — that is the port in the example
@@ -63,24 +63,73 @@ counts stay at zero.
 Kapkan talks to ClickHouse's **HTTP interface** with the Go standard library — no driver
 dependency. The only external dependency is the ClickHouse server itself.
 
-On start it idempotently creates three MergeTree tables:
+On start it idempotently creates six MergeTree tables:
 
 | Table | Contents |
 | --- | --- |
 | `attack_events` | Every attack start and end: type, direction, rates, the sample's top sources, ban state, and the detection `reason`. |
 | `traffic` | Periodic per-host rate and baseline snapshots (every `traffic_interval_seconds`). |
-| `audit_events` | Operator-attributed mutations: who issued each ban/unban/config-reload, when, and the outcome. See [Audit log](/docs/audit). |
+| `audit_events` | Operator-attributed mutations: who issued each ban/unban/config-reload/edge lever, when, and the outcome. See [Audit log](/docs/audit). |
+| `edge_windows` | One row per [edge node](/docs/edge), zone and closed ten-second window: what the node saw and did — requests, verdicts, would-be counts, response statuses, HTTP/3 requests, the rung's state. See [Edge history](#edge-history). |
+| `edge_sources` | The **telling** sources of each window — denied, challenged, would-deny, would-challenge — at most 20 per node, zone and window. Ordinary visitors are never stored. |
+| `edge_events` | Transitions the brain saw in a node's reports and presence: a node alive or lost, its version, dry-run, the document it rendered, a generation installed or refused, the terminator alive or not and its HTTP/3 state, a certificate issued, renewed or gone, a zone-wide challenge started or ended, a clock skew found or recovered, a report that had to shrink. |
 
 Each carries a `ttl_days` per-row TTL, so retention is bounded without operator intervention.
 
-The writer credential needs `CREATE` (database + tables) and `INSERT` rights on first run;
-thereafter `INSERT` is enough. Schema-creation failures are logged at startup, not fatal.
+The writer credential needs `CREATE` (database + tables) and `INSERT` rights on first run — and
+again on the first start of a release that adds tables (this one adds the three `edge_*`
+tables); between those, `INSERT` is enough. Schema init attempts every statement and logs each
+refusal on its own (a credential that may `INSERT` but not `CREATE` sees those lines on every
+start; they are harmless once the tables exist), so the three edge tables and the column upgrades
+below are tried even when an earlier statement was refused, and an upgrade whose credential can
+no longer `CREATE` keeps the tables it always had. If `edge history table not created` appears
+at start, run one start with a credential that may `CREATE`, or create the table yourself with
+the statement in `engine/internal/storage/edge_rows.go`.
 
 The `attack_events` table's `reason` column holds the compact JSON of the detection
 [reason](/docs/detection) — why the attack fired (threshold provenance,
 warm-up, protocol shares) — and is empty on the attack-ended row. Existing deployments gain the
 column automatically: schema init runs an `ADD COLUMN IF NOT EXISTS`, skipped silently if the
 writer credential lacks `ALTER` rights (fresh installs already have it).
+
+## Edge history
+
+The three `edge_*` tables keep what the [edge zone status](/docs/api#get-apiv1edgezonesstatus)
+shows for ten seconds — per zone, over time. They are filled from the edge nodes' advisory
+reports by the brain's write path (which lands in the same release, one change after the tables),
+so every row is a node's claim; the brain sums, never acts on it. The rules below are the write
+path's contract.
+
+- **Raw windows, bucketed on read.** `edge_windows` holds the nodes' ten-second windows as they
+  came (`ORDER BY (zone, ts, node)`); a history query sums them into buckets with
+  `toStartOfInterval`, exactly like `traffic`. There is no `rps` column — it is
+  `sum(requests) / sum(window_seconds)` — and no compaction on the brain.
+- **Two clocks.** `ts` is the window's close by the **node's** clock when it is within ten
+  minutes behind or a minute ahead of the brain's; otherwise the brain's clock is written instead
+  and one `clock_skew` event records the finding. `received_at` is always the brain's clock.
+- **No tenant column.** Which tenant owns a zone is read from the live [zones file](/docs/zones)
+  at query time (`zones[].tenant`) — one truth, so re-labelling a zone leaves no stale rows.
+- **Only the telling sources.** `edge_sources` stores a source only when a node denied it,
+  challenged it, or previewed either (`would-deny`, `would-challenge`) — at most 20 per node,
+  zone and window, the busiest first. Sources that were allowed, cleared or merely marked are
+  visitors and are never written.
+- **Nothing for quiet zones.** A zone in `policy.mode: none`, or a deciding zone that saw no
+  request in a window, writes no row.
+
+Volume, per day: `edge_windows` grows by **8 640 × (deciding zones with traffic × alive
+nodes)** rows (one ten-second window each), `edge_sources` by at most 20 times that, and
+`edge_events` by the handful of transitions a fleet has. Measure what that costs on your server
+rather than guessing — compressed row sizes depend on your zone and node names:
+
+```sql
+SELECT table, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS on_disk
+FROM system.parts
+WHERE database = 'kapkan' AND active
+GROUP BY table ORDER BY table
+```
+
+Retention is `ttl_days`, like every other table. The history is read through
+`GET /api/v1/edge/history` (a later E6 change); until then the tables are yours to query.
 
 ## Backpressure
 
