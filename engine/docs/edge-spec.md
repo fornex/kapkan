@@ -648,6 +648,13 @@ headline and the long pole.
   `internal/mitigate` imports `internal/storage` (the transitive path through
   `internal/edge/node → internal/api` for the shared report types is known and accepted; the
   gate is on node-side code naming storage itself).
+  *Decided in E6.6 (`internal/api/edge_history_read.go`):* three viewer-rank reads —
+  `/edge/history` (buckets; `node=` unscoped-only), `/edge/history/sources` (the §8 question over
+  a period: strongest state per source, busiest first) and `/edge/events` (unscoped-only: node
+  names are topology) — over the shared `parseRange`/`parseStep` (traffic and audit now use
+  them too); `querier == nil` ⇒ `{available:false}`, a failed query 502. Scope by
+  `visibleZone` from the live file (D12, never a column): one uniform 403 for any zone not the
+  caller's, counted and logged like the lever's refusal.
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and

@@ -114,9 +114,11 @@ another tenant's data.
   hostname appears in no row, no would-be set and no HTTP/3 list, and the `tenant` field is left
   out — and a scoped operator pulls the [lever](/docs/edge#the-lever) only on its own zones: any
   other zone, another tenant's, unlabelled or gone from the file, answers the same `404 unknown
-  zone` an unknown name gets. The names of the nodes a zone is served on are visible to its
-  tenant; the zones document, the node reports, the ACME coordination, the node inventory and
-  `config/reload` stay unscoped.
+  zone` an unknown name gets. The [edge history](/docs/api#get-apiv1edgehistory) follows the same
+  line: a scoped token reads the history and the telling sources of its own zones, any other zone
+  is one uniform `403`, and the per-node filter and the fleet's events stay unscoped. The names
+  of the nodes a zone is served on are visible to its tenant; the zones document, the node
+  reports, the ACME coordination, the node inventory and `config/reload` stay unscoped.
 - **Ambiguity fails closed** — if one bearer secret matches tokens of different role or tenant
   (a reused secret), the request is refused rather than resolved to the wider scope.
 

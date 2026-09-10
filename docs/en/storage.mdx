@@ -151,7 +151,9 @@ GROUP BY table ORDER BY table
 ```
 
 Retention is `ttl_days`, like every other table. The history is read through
-`GET /api/v1/edge/history` (a later E6 change); until then the tables are yours to query.
+[`GET /api/v1/edge/history`](/docs/api#get-apiv1edgehistory) (buckets), `…/edge/history/sources`
+(who was denied, challenged or would have been, over a period) and `GET /api/v1/edge/events` (the
+transitions) — and the tables are yours to query directly too.
 
 ## Backpressure
 
