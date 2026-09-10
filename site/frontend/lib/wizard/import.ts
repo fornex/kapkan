@@ -276,6 +276,7 @@ export function docToState(doc: unknown): WizardState {
       token_env: str(tk.token_env),
       role: str(tk.role),
       tenant: str(tk.tenant),
+      node: str(tk.node),
     }));
   }
 

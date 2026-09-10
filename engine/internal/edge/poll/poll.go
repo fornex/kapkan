@@ -216,7 +216,7 @@ func (p *Poller) Once(ctx context.Context) bool {
 		p.mu.Unlock()
 		return true
 	case http.StatusUnauthorized, http.StatusForbidden:
-		p.log.Error("the brain refused this node's credentials; check the agent token and its role", "status", resp.StatusCode)
+		p.log.Error("the brain refused this node's credentials; check the agent token and its role — or the token is bound to another node (api.tokens[].node on the brain)", "status", resp.StatusCode, "node", p.opt.Node)
 		return false
 	case http.StatusNotFound:
 		p.log.Error("the brain does not know this node — controller.name must equal an edge.nodes[] entry", "node", p.opt.Node)

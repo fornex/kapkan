@@ -26,6 +26,13 @@ security-relevant.
   `edge.stale_after_seconds` (default 15). A config without an `edge` block behaves exactly
   as before; the zones file is loaded and validated alongside `kapkan.yaml` and a broken one
   keeps the previous zones on reload.
+- **Added** `api.tokens[].node` (optional; `agent` tokens only): binds the token to exactly one
+  `edge.nodes[]` or `scrubbing.nodes[]` entry, refused on every node-identified route when another
+  node's name is presented. Absent by default: the token keeps acting as any node, named as
+  unbound by `-check-config`, the daemon log and the edge inventory; making it required is a
+  MAJOR-release item. One behaviour change rides with the release regardless of the key: node
+  presence is now stamped only by `agent` tokens, so a node polling on an `operator` token shows as
+  lost while it keeps serving — give it an agent token.
 
 ### Added
 
@@ -351,6 +358,25 @@ security-relevant.
   p50, every sample checked for its status). 108/108; the first run caught three rig bugs and its
   review ten more weaknesses of the rig, none in the product; the results are recorded in
   edge-spec §8.
+- Edge track, E6.1 — an agent token belongs to one node (edge-spec §9 risk 6; milestone E6, fleet).
+  `api.tokens[].node` binds an `agent` token to exactly one `edge.nodes[]` or `scrubbing.nodes[]`
+  entry (a name present in both lists is refused as ambiguous; several tokens may bind one node for
+  a gap-free rotation; `node` on a viewer or operator token is an error). The brain then refuses the
+  token on every node-identified route — the zones and rules polls (`?node=`), both self-reports,
+  the ACME slot and challenge publication — when another node's name is presented, **before** any
+  side effect: no presence stamped, nothing stored, granted or published. The refusal is a uniform
+  `403` that never names the bound node, a Warn once a minute per token, and
+  `kapkan_api_node_binding_refused_total{route}`. A bound token polling without `?node=` is refused
+  too. **Presence is now stamped only by agent tokens**: an operator's `?node=X` returns X's document
+  as a preview and moves no liveness (behaviour change — a node configured with an operator token
+  shows as lost while it keeps serving). An **unbound** agent token keeps working exactly as before,
+  so a fleet migrates one node at a time, and is named in four places until it is bound:
+  `kapkan -check-config` (WARNING), the daemon's log at start and on every reload, the edge
+  inventory (`unbound_agent_tokens`, and per node `tokens` and `last_token` — the token that last
+  polled as it), and the console (a later E6 change). Making an unbound agent token an error is
+  scheduled for a MAJOR release; there is deliberately no switch to make it one today. The zones
+  document is untouched: a fleet without bindings gets byte-identical documents and ETags, so the
+  upgrade reloads nothing. Config surface: `api.tokens[].node` (schema, overlay, config builder).
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data

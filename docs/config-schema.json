@@ -24,6 +24,9 @@
               "name": {
                 "type": "string"
               },
+              "node": {
+                "type": "string"
+              },
               "role": {
                 "enum": [
                   "viewer",

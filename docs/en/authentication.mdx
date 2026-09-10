@@ -65,19 +65,57 @@ startup, not a silent default.
 | --- | --- |
 | `viewer` | Read only: status, attacks, hosts, bans, metrics. |
 | `operator` | Everything a viewer can, plus manual ban/unban, [source blocks](/docs/api#the-source-block-channel) and config reload (reload is admin-only — see below). |
-| `agent` | A [scrub node](/docs/scrubbing#managed-scrubbing-nodes)'s credential: the dataplane rule feed and its own report, and **nothing else**. |
+| `agent` | A node's credential — a [scrub node](/docs/scrubbing#managed-scrubbing-nodes)'s or an [edge node](/docs/edge)'s: the rules and zones polls, its own report and the edge ACME coordination, and **nothing else**. Bind it to its node with `node` (below). |
 
 There is no separate `admin` role to assign — an *admin* is simply an operator token with no `tenant` set. The role values the engine accepts are `viewer`, `operator` and `agent`; the admin/scoped distinction is the [Multi-tenancy](/docs/multi-tenancy) axis, covered below.
 
 <Callout type="info" title="The agent role is not a lesser viewer">
-`agent` sits **off** the privilege ladder, below `viewer`: it grants exactly two routes
-(`GET /api/v1/dataplane/rules` and `POST /api/v1/dataplane/nodes/{name}/report`) and is denied
-every other endpoint — including the source-block channel, which installs kernel rules and so
-stays operator-only — a compromised agent token, which lives on a remote scrub box, must not
-become a read-everything key. It also cannot be tenant-scoped: the rule feed is deployment-wide,
-so a `tenant` on an agent token is a hard validation error. Give a scrub node its own agent
-token, never an operator one.
+`agent` sits **off** the privilege ladder, below `viewer`: it grants exactly the node routes
+(the rules and zones polls, the two self-reports, the edge ACME slot and challenge publication)
+and is denied every other endpoint — including the source-block channel, which installs kernel
+rules and so stays operator-only — a compromised agent token, which lives on a remote box, must
+not become a read-everything key. It also cannot be tenant-scoped: the rule feed is
+deployment-wide, so a `tenant` on an agent token is a hard validation error. Give every node its
+own agent token, never an operator one, and **bind it to the node** (below).
 </Callout>
+
+### Binding an agent token to its node
+
+An agent token carries `node`: the name of exactly one `edge.nodes[]` or `scrubbing.nodes[]` entry.
+The brain then refuses that token on every route where a node names itself — the polls
+(`?node=<name>`), the self-reports, the ACME slot and challenge publication — when the name presented
+is another node's, and it refuses **before** doing anything with the name: no presence is stamped,
+no report stored, no slot granted, no key authorization published. The refusal is a uniform `403`
+that does not name the bound node, one warning a minute per token in the brain's log, and a count
+in `kapkan_api_node_binding_refused_total{route}`. A bound token that polls without `?node=` is
+refused as well: its binding says which node it is.
+
+```yaml
+api:
+  tokens:
+    - { name: edge-fra1, token_env: KAPKAN_EDGE_FRA1, role: agent, node: edge-fra1 }
+    - { name: edge-nyc1, token_env: KAPKAN_EDGE_NYC1, role: agent, node: edge-nyc1 }
+    - { name: scrub-1,   token_env: KAPKAN_SCRUB_1,   role: agent, node: fra1 }
+```
+
+Rules: `node` is allowed on `agent` tokens only; the name must exist in exactly one of the two node
+lists (a name present in both is refused as ambiguous — the two channels are different trust
+domains); several tokens may bind the same node, which is how a token is rotated without a gap.
+
+Without `node` an agent token is a **fleet-wide credential**: it may poll as any node and report as
+any node — the reason a stolen token used to mean rotating it for the whole fleet. What `node`
+changes is impersonation and the rotation radius, not the set of zones: until zones are placed on
+nodes (a later E6 change) every node serves every zone, so a bound token acting as its own node can
+still publish an ACME key authorization for any zone the fleet serves — treat a node compromise as
+a certificate exposure for every zone, and rotate that node's token. An unbound token keeps working
+exactly as before, so a fleet migrates one node at a time, and it is named until it is bound: by
+`kapkan -check-config` (a WARNING), in the daemon's log at start and on every reload, and in the
+edge inventory (`unbound_agent_tokens`; per node, `tokens` lists the bound token names and
+`last_token` the token that last polled as it — watch it flip during a migration). Making an unbound
+agent token an error is scheduled for a MAJOR release.
+
+Presence is stamped only by agent tokens: an operator polling with `?node=X` receives X's document
+as a **preview** and does not make X look alive.
 
 `token_env` and `tokens` are **mutually exclusive** — `token_env` is exactly one operator
 token. A request is matched against every configured token (in constant time); the highest
@@ -86,8 +124,9 @@ refused with `403 Forbidden`; a request with no valid token is `401 Unauthorized
 empty or unset env var never matches, so a misconfigured secret fails closed.
 
 Give every token a distinct secret — if one secret value is configured for two tokens with
-different roles or tenants, the request is refused (`401 Unauthorized`) rather than guessing
-which one you meant. The daemon logs `ambiguous API token` when this happens.
+different roles, tenants or node bindings (an unbound entry and a bound one included), the
+request is refused (`401 Unauthorized`) rather than guessing which one you meant. The daemon logs
+`ambiguous API token` when this happens.
 
 A token's secret *value* is read from the environment on every request, so rotating it
 takes effect on the next request. Adding or removing token *entries* in the YAML changes the

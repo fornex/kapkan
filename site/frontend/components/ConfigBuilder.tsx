@@ -1691,6 +1691,7 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
                 {rowInput({ value: tk.token_env, placeholder: "token_env", width: "w-44 grow", onChange: (v) => updRow(i, { token_env: v }) })}
                 {rowSelect({ value: tk.role, path: "api.tokens.role", width: "w-28", onChange: (v) => updRow(i, { role: v }) })}
                 {rowInput({ value: tk.tenant, placeholder: "tenant", width: "w-28", onChange: (v) => updRow(i, { tenant: v }) })}
+                {rowInput({ value: tk.node, placeholder: "node", width: "w-28", onChange: (v) => updRow(i, { node: v }) })}
               </>,
               () => set("api_tokens", s.api_tokens.filter((_, j) => j !== i)),
               i,
@@ -1701,7 +1702,7 @@ export function ConfigBuilder({ lang }: { lang: Locale }) {
             type="button"
             className={miniBtnCls}
             onClick={() =>
-              set("api_tokens", [...s.api_tokens, { name: "", token_env: "", role: "", tenant: "" }])
+              set("api_tokens", [...s.api_tokens, { name: "", token_env: "", role: "", tenant: "", node: "" }])
             }
           >
             {t.addItem}

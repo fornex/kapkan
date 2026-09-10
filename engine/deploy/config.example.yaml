@@ -435,6 +435,12 @@ api:
   #   - {name: automation, token_env: "KAPKAN_API_RW", role: operator}
   #   # add `tenant: "<name>"` to scope a token to one tenant (multi-tenancy):
   #   - {name: custA, token_env: "KAPKAN_API_CUSTA", role: viewer, tenant: "customerA"}
+  #   # an agent token belongs to ONE node: `node` names an edge.nodes[] or
+  #   # scrubbing.nodes[] entry (scrub-fra1 is declared under `scrubbing:`
+  #   # below), and the brain refuses the token as any other node. Each bound
+  #   # token needs its own secret. Unbound agent tokens keep working but are
+  #   # warned about.
+  #   - {name: scrub-fra1-agent, token_env: "KAPKAN_SCRUB_FRA1", role: agent, node: "scrub-fra1"}
 
 # Optional, opt-in check for a newer kapkan release. OFF by default: kapkan never
 # phones home unless you enable this. The running version is always exposed

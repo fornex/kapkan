@@ -24,6 +24,10 @@ import (
 // may still answer 400/404/409 on the test's minimal inputs — that is its
 // business logic, not this matrix's.
 func TestRoleMatrix(t *testing.T) {
+	// n1 is an edge node so the bound identity has something to bind to; the
+	// zones file is never read by Parse. The scrub routes below still name n1
+	// — for them it is an unknown scrub node, which is business logic (404),
+	// not authorization.
 	const matrixYAML = apiYAML + `  tokens:
     - name: v
       token_env: TEST_MATRIX_VIEWER
@@ -34,14 +38,26 @@ func TestRoleMatrix(t *testing.T) {
     - name: a
       token_env: TEST_MATRIX_AGENT
       role: agent
+    - name: ab
+      token_env: TEST_MATRIX_AGENT_BOUND
+      role: agent
+      node: n1
+edge:
+  zones_file: /etc/kapkan/zones.yaml
+  nodes:
+    - name: n1
 `
 	t.Setenv("TEST_MATRIX_VIEWER", "v-secret")
 	t.Setenv("TEST_MATRIX_OP", "o-secret")
 	t.Setenv("TEST_MATRIX_AGENT", "a-secret")
+	t.Setenv("TEST_MATRIX_AGENT_BOUND", "ab-secret")
 	s := testServer(t, storeFromYAML(t, matrixYAML))
 	h := s.Handler()
 
-	// Identity name → bearer value ("" = no Authorization header).
+	// Identity name → bearer value ("" = no Authorization header). agent-bound
+	// is an agent token bound to node n1 (E6.1): it reaches the agent's routes
+	// only as n1, so the two bare polls (no ?node=) are DENIED for it while the
+	// n1-named routes pass authorization.
 	idents := []struct {
 		name   string
 		bearer string
@@ -50,6 +66,7 @@ func TestRoleMatrix(t *testing.T) {
 		{"viewer", "v-secret"},
 		{"operator", "o-secret"},
 		{"agent", "a-secret"},
+		{"agent-bound", "ab-secret"},
 	}
 
 	routes := []struct {
@@ -83,9 +100,12 @@ func TestRoleMatrix(t *testing.T) {
 		// can curl what the agent sees/sends. Viewer is denied on purpose —
 		// the rules document spans every tenant while viewer reads are
 		// scopable, and a report is a write.
+		// A bound agent polling without ?node= is refused (403): its binding
+		// says which node it is, and a nameless poll from it is a
+		// misconfiguration — so "agent-bound" is absent from the bare polls.
 		{"GET", "/api/v1/dataplane/rules", "", "", map[string]bool{"operator": true, "agent": true}},
 		{"POST", "/api/v1/dataplane/nodes/n1/report", `{}`, "POST /api/v1/dataplane/nodes/{name}/report",
-			map[string]bool{"operator": true, "agent": true}},
+			map[string]bool{"operator": true, "agent": true, "agent-bound": true}},
 		// The node inventory: viewer rank (the console's Nodes view), agent
 		// DENIED — an agent needs its rules, not the whole fleet topology.
 		{"GET", "/api/v1/dataplane/nodes", "", "", map[string]bool{"viewer": true, "operator": true}},
@@ -95,12 +115,12 @@ func TestRoleMatrix(t *testing.T) {
 		// agent denied.
 		{"GET", "/api/v1/edge/zones", "", "", map[string]bool{"operator": true, "agent": true}},
 		{"POST", "/api/v1/edge/nodes/n1/report", `{}`, "POST /api/v1/edge/nodes/{name}/report",
-			map[string]bool{"operator": true, "agent": true}},
+			map[string]bool{"operator": true, "agent": true, "agent-bound": true}},
 		// ACME coordination: the node's own business, same rank as its report.
 		{"POST", "/api/v1/edge/nodes/n1/acme/slot", `{"zone":"example.com"}`, "POST /api/v1/edge/nodes/{name}/acme/slot",
-			map[string]bool{"operator": true, "agent": true}},
+			map[string]bool{"operator": true, "agent": true, "agent-bound": true}},
 		{"POST", "/api/v1/edge/nodes/n1/acme/challenges", `{"zone":"example.com","token":"tok","key_authorization":"tok.thumb"}`,
-			"POST /api/v1/edge/nodes/{name}/acme/challenges", map[string]bool{"operator": true, "agent": true}},
+			"POST /api/v1/edge/nodes/{name}/acme/challenges", map[string]bool{"operator": true, "agent": true, "agent-bound": true}},
 		{"GET", "/api/v1/edge/nodes", "", "", map[string]bool{"viewer": true, "operator": true}},
 		{"GET", "/api/v1/edge/zones/status", "", "", map[string]bool{"viewer": true, "operator": true}},
 		{"POST", "/api/v1/edge/zones/a.example/challenge", `{"mode":"manual","ttl_seconds":600}`, "POST /api/v1/edge/zones/{name}/challenge", map[string]bool{"operator": true}},
