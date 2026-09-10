@@ -16,11 +16,21 @@
     /* likewise gated on edge_nodes_total: the Edge view (E4.5) exists only
        where edge nodes front zones */
     { id: "edge", icon: "shield-check", key: "nav.edge", section: "monitor", whenEdge: true },
+    /* the fleet's own inventory beside its zones (E6.7): same gate */
+    { id: "edgenodes", icon: "globe", key: "nav.edgenodes", section: "monitor", whenEdge: true },
     { id: "hostgroups", icon: "layers", key: "nav.hostgroups", section: "config" },
     { id: "traffic", icon: "chart", key: "nav.traffic", section: "config" },
     { id: "settings", icon: "settings", key: "nav.settings", section: "config" }
   ];
   var WINDOW = 60;
+
+  /* The Edge view's tenant filter survives a reload of the page but not the
+     browser session: it narrows what an operator is LOOKING at, and a filter
+     silently still in force a week later is how a zone goes unwatched.
+     sessionStorage may throw (a locked-down profile), so every access is
+     guarded and an unreadable store simply means "no filter". */
+  var TENANT_KEY = "kapkan.edgeTenant";
+  function savedTenant() { try { return sessionStorage.getItem(TENANT_KEY) || ""; } catch (e) { return ""; } }
 
   var state = {
     view: "overview",
@@ -40,9 +50,14 @@
     /* edge zones status (E4.5) — the same on-demand + freshness-guard shape:
        it merges the nodes' last ten-second windows, so a 10s refresh is the
        data's own pace */
-    /* inv is the edge-node inventory that rides along with the zone status:
-       the nodes' own reports, read for per-node HTTP/3 detail (E5.5) */
-    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [], inv: [] },
+    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] },
+    /* the edge-node inventory (E6.7), fetched on its own guard and read by
+       BOTH edge views: the Edge nodes table renders all of it, the Edge
+       view's HTTP/3 cell only each node's terminator.h3. Unscoped-only, so
+       `forbidden` is a first-class state rather than an error. */
+    edgeInv: { loading: false, fetchedAt: 0, ok: false, forbidden: false, total: 0, staleAfter: 15, list: [], unbound: [] },
+    /* which tenant's zones the Edge view shows; "" is every tenant */
+    edgeTenant: savedTenant(),
     last: { rung: -1 }
   };
 
@@ -337,24 +352,48 @@
       });
     },
     /* edge zones status — the nodes' last windows merged; 10s freshness, the
-       window's own length. The inventory is fetched with it because only a
+       window's own length. The inventory is fetched alongside because only a
        node's own report says WHY it serves a zone over TCP (E5.5); the status
        alone decides whether the view renders, so an inventory that fails or is
-       refused leaves the table intact and only the tooltip poorer. Both
-       fetches resolve — neither rejects — so one is never lost to the other. */
+       refused leaves the table intact and only the tooltip poorer. Each
+       fetch carries its own freshness guard, so neither is ever lost to the
+       other's timing. */
     loadEdge: function () {
+      actions.loadEdgeInv();
       var e = state.edge;
       if (e.loading) return;
       if (e.fetchedAt && Date.now() - e.fetchedAt < 10000) return;
       e.loading = true;
-      Promise.all([API.getEdgeZones(), API.getEdgeNodes()]).then(function (res) {
-        var r = res[0];
+      API.getEdgeZones().then(function (r) {
         e.loading = false; e.fetchedAt = Date.now();
         e.ok = r.ok; e.forbidden = !!r.forbidden;
         e.nodesAlive = r.nodesAlive; e.nodesReporting = r.nodesReporting; e.zonesTruncated = r.zonesTruncated || 0; e.zones = r.zones;
-        e.inv = (res[1] && res[1].nodes) || [];
         if (state.view === "edge") renderView();
       });
+    },
+    /* edge-node inventory (E6.7) — the loadNodes shape again: on demand, half
+       a stale_after capped at 10s, so a node the brain has given up on is
+       never shown as up for longer than the API itself would claim. A 403 is
+       a state, not a failure: the inventory is unscoped-only. */
+    loadEdgeInv: function () {
+      var n = state.edgeInv;
+      if (n.loading) return;
+      var fresh = Math.min(10000, (n.staleAfter || 15) * 500);
+      if (n.fetchedAt && Date.now() - n.fetchedAt < fresh) return;
+      n.loading = true;
+      API.getEdgeNodes().then(function (r) {
+        n.loading = false; n.fetchedAt = Date.now();
+        n.ok = r.ok; n.forbidden = !!r.forbidden;
+        n.total = r.total; n.staleAfter = r.staleAfter;
+        n.list = r.nodes; n.unbound = r.unbound || [];
+        if (state.view === "edgenodes" || state.view === "edge") renderView();
+      });
+    },
+    /* the Edge view's tenant chips; "" is every tenant */
+    setEdgeTenant: function (t) {
+      state.edgeTenant = t;
+      try { sessionStorage.setItem(TENANT_KEY, t); } catch (e) {}
+      renderView();
     },
     openDrawer: openDrawer, closeDrawer: closeDrawer,
     withdraw: function (anchor, target) {
