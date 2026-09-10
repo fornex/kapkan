@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -235,8 +236,8 @@ func (a *Agent) pollOnce(ctx context.Context) bool {
 	case http.StatusNotModified:
 		return true
 	case http.StatusUnauthorized, http.StatusForbidden:
-		a.log.Error("the brain refused this node's credentials; check the agent token and its role",
-			"status", resp.StatusCode)
+		a.log.Error("the brain refused this node's credentials; check the agent token and its role — or the token is bound to another node (api.tokens[].node on the brain)",
+			"status", resp.StatusCode, "node", a.opt.Node)
 		return false
 	case http.StatusNotFound:
 		a.log.Error("the brain does not know this node name — controller.name must equal a scrubbing.nodes[] entry",
@@ -398,9 +399,12 @@ func (a *Agent) reportOnce(ctx context.Context) {
 		}
 		return
 	}
+	// The brain's body says why (a token bound to another node, an unknown
+	// node name); a bounded read of it makes the line actionable.
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		a.log.Warn("self-report refused", "status", resp.StatusCode)
+		a.log.Warn("self-report refused", "status", resp.StatusCode, "node", a.opt.Node, "body", strings.TrimSpace(string(respBody)))
 	}
 }
