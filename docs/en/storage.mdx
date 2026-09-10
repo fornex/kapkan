@@ -110,8 +110,9 @@ it. The rules below are the write path's contract.
   at query time (`zones[].tenant`) — one truth, so re-labelling a zone leaves no stale rows.
 - **Only the telling sources.** `edge_sources` stores a source only when a node denied it,
   challenged it, or previewed either (`would-deny`, `would-challenge`) — at most 20 per node,
-  zone and window, the busiest first. Sources that were allowed, cleared or merely marked are
-  visitors and are never written.
+  zone and window: the would-be sources first, then the refused and challenged ones, the busiest
+  within each tier. Sources that were allowed, cleared or merely marked are visitors and are
+  never written.
 - **Nothing for quiet zones.** A zone in `policy.mode: none`, or a deciding zone that closed no
   window lately (the report carries it with no close time and nothing counted), writes no row
   and counts as nothing. A certificate issuance leaves a trace even on an idle zone: the CA's
