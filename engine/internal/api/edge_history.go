@@ -13,9 +13,18 @@ package api
 //
 //   - a window's zone must be in the live zones file (unknown_zone) — the
 //     history is keyed by the file's zones, and a node cannot make it grow;
-//   - a window needs a close time (no_at);
+//     the same gate holds for the certificates and challenges events name;
+//   - a quiet deciding zone — the report's shape for "no window closed
+//     lately": no close time, no counters, no sources — is nothing to write,
+//     silently; a window that carries counters but no close time is a broken
+//     one (no_at);
 //   - a window is written once: the same (node, zone, at) again is a report
-//     the node re-sent (duplicate) — six copies of one report are one row;
+//     the node re-sent (duplicate) — six copies of one report are one row —
+//     and a report may carry one window per zone (extra_window for the
+//     rest), so one report is bounded to the file's zones × 21 rows. The
+//     rule is equality, not "later than the last": a node whose clock ran
+//     ahead and was then corrected closes windows the brain already saw
+//     later ones from, and those are new, not replays;
 //   - `ts` is the node's `at` when it is within historyClockBehind behind or
 //     historyClockAhead ahead of the brain's clock (D11); otherwise the brain's
 //     clock is written instead, `received_at` is always the brain's, and one
@@ -41,6 +50,7 @@ import (
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 	"github.com/kapkan-io/kapkan/internal/metrics"
 	"github.com/kapkan-io/kapkan/internal/storage"
 )
@@ -84,13 +94,16 @@ const (
 
 // edgeHistory is the Server's write-path state: the writer, the last window
 // close written per (node, zone) for the dedup rule, each node's clock-skew
-// state, and the presence the ticker last observed per node.
+// state, and the presence the ticker last observed per node (with the tick
+// the ticker started at, so a node nobody has heard from yet is not
+// baselined as lost before it had a chance to poll).
 type edgeHistory struct {
-	mu     sync.Mutex
-	w      storage.Writer
-	lastAt map[string]map[string]time.Time
-	skewed map[string]bool
-	alive  map[string]bool
+	mu        sync.Mutex
+	w         storage.Writer
+	lastAt    map[string]map[string]time.Time
+	skewed    map[string]bool
+	alive     map[string]bool
+	startedAt time.Time
 }
 
 func (h *edgeHistory) setWriter(w storage.Writer) {
@@ -140,6 +153,24 @@ func clip(s string) string {
 	return s[:maxEventDetail]
 }
 
+// challengeMode narrows the report's challenge mode to the three values the
+// document defines; anything else a node sends is "other". The column is
+// LowCardinality, and its cardinality is the document's, not a node's.
+func challengeMode(s string) string {
+	switch s {
+	case edgedoc.ChallengeOff, edgedoc.ChallengeManual, edgedoc.ChallengeAuto:
+		return s
+	}
+	return "other"
+}
+
+// quietZone is the report's shape for a deciding zone that closed no window
+// lately: no close time, nothing counted, no sources. Nothing to write.
+func quietZone(z EdgeReportZone) bool {
+	return z.At.IsZero() && z.Requests == 0 && z.Decided == 0 && z.Denied == 0 && z.Challenged == 0 &&
+		z.Cleared == 0 && z.WouldDeny == 0 && z.WouldChallenge == 0 && len(z.TopSources) == 0
+}
+
 func historyEvent(at time.Time, node, zone, kind, detail string) storage.EdgeEventRow {
 	return storage.EdgeEventRow{EventTime: historyTime(at), Node: node, Zone: zone, Kind: kind, Detail: clip(detail)}
 }
@@ -173,15 +204,24 @@ func (h *edgeHistory) observe(cfg *config.Config, node string, prev *EdgeReport,
 		byZone = make(map[string]time.Time)
 		h.lastAt[node] = byZone
 	}
+	inThisReport := make(map[string]bool, len(rep.Zones))
 	for _, z := range rep.Zones {
 		if zoneInFile(cfg, z.Zone) == nil {
 			historyDrop("unknown_zone")
+			continue
+		}
+		if quietZone(z) {
 			continue
 		}
 		if z.At.IsZero() {
 			historyDrop("no_at")
 			continue
 		}
+		if inThisReport[z.Zone] {
+			historyDrop("extra_window")
+			continue
+		}
+		inThisReport[z.Zone] = true
 		if last, ok := byZone[z.Zone]; ok && last.Equal(z.At) {
 			historyDrop("duplicate")
 			continue
@@ -204,15 +244,15 @@ func (h *edgeHistory) observe(cfg *config.Config, node string, prev *EdgeReport,
 		tsStr := historyTime(ts)
 		row := storage.EdgeWindowRow{
 			TS: tsStr, ReceivedAt: received, WindowSeconds: z.WindowSeconds, Zone: z.Zone, Node: node,
-			Challenge: z.Challenge, DryRun: b2u8(z.DryRun), RungDryRun: b2u8(z.RungDryRun),
+			Challenge: challengeMode(z.Challenge), DryRun: b2u8(z.DryRun), RungDryRun: b2u8(z.RungDryRun),
 			Requests: z.Requests, Decided: z.Decided, Denied: z.Denied, Challenged: z.Challenged, Cleared: z.Cleared,
 			WouldDeny: z.WouldDeny, WouldChallenge: z.WouldChallenge,
 			Status2xx: z.Status2xx, Status3xx: z.Status3xx, Status4xx: z.Status4xx, Status5xx: z.Status5xx,
-			H3Requests: z.H3Requests, SourcesTruncated: uint32(min(z.SourcesTruncated, 1<<31-1)),
+			H3Requests: z.H3Requests, SourcesTruncated: uint32(max(0, min(z.SourcesTruncated, 1<<31-1))),
 		}
 		if z.ChallengeActive != nil {
 			row.ChallengeActive = 1
-			row.ChallengeReason = z.ChallengeActive.Reason
+			row.ChallengeReason = clip(z.ChallengeActive.Reason)
 		}
 		windows = append(windows, row)
 		kept := 0
@@ -243,7 +283,7 @@ func (h *edgeHistory) observe(cfg *config.Config, node string, prev *EdgeReport,
 	h.mu.Unlock()
 
 	if prev != nil {
-		events = append(events, diffReports(node, *prev, rep, now)...)
+		events = append(events, diffReports(cfg, node, *prev, rep, now)...)
 	}
 	if len(windows) > 0 {
 		w.WriteEdgeWindows(windows)
@@ -258,11 +298,24 @@ func (h *edgeHistory) observe(cfg *config.Config, node string, prev *EdgeReport,
 
 // diffReports lists the transitions between a node's previous report and its
 // new one, each exactly once per change and never for an identical repeat.
-// Deterministic: zones in name order.
-func diffReports(node string, prev, rep EdgeReport, now time.Time) []storage.EdgeEventRow {
+// Deterministic: zones in name order. The zone-scoped kinds are gated by the
+// live zones file like the windows (a node cannot grow the history with
+// names of its own; the drop is counted as unknown_zone), and the
+// absence-driven kinds — a certificate or a challenge gone — are not read
+// from a report that had to shed its tail (CertsTruncated / ZonesTruncated):
+// absence from a truncated list is unknown, not gone; report_truncated says
+// why the gap is there.
+func diffReports(cfg *config.Config, node string, prev, rep EdgeReport, now time.Time) []storage.EdgeEventRow {
 	var out []storage.EdgeEventRow
 	ev := func(zone, kind, detail string) {
 		out = append(out, historyEvent(now, node, zone, kind, detail))
+	}
+	known := func(zone string) bool {
+		if zoneInFile(cfg, zone) != nil {
+			return true
+		}
+		historyDrop("unknown_zone")
+		return false
 	}
 	if rep.Version != "" && rep.Version != prev.Version {
 		ev("", EventVersion, rep.Version)
@@ -299,21 +352,27 @@ func diffReports(node string, prev, rep EdgeReport, now time.Time) []storage.Edg
 	}
 	for _, zone := range sortedKeys(newCerts) {
 		c := newCerts[zone]
+		if !known(zone) {
+			continue
+		}
 		detail := "not_after=" + c.NotAfter.UTC().Format(time.RFC3339)
 		if c.Issuer != "" {
 			detail += " issuer=" + c.Issuer
 		}
 		p, had := prevCerts[zone]
 		switch {
-		case !had:
+		case !had && prev.CertsTruncated == 0:
+			// Absent from a previous list that was cut is unknown, not new.
 			ev(zone, EventCertIssued, detail)
-		case !p.NotAfter.Equal(c.NotAfter):
+		case had && !p.NotAfter.Equal(c.NotAfter):
 			ev(zone, EventCertRenewed, detail)
 		}
 	}
-	for _, zone := range sortedKeys(prevCerts) {
-		if _, still := newCerts[zone]; !still {
-			ev(zone, EventCertGone, "")
+	if rep.CertsTruncated == 0 {
+		for _, zone := range sortedKeys(prevCerts) {
+			if _, still := newCerts[zone]; !still && zoneInFile(cfg, zone) != nil {
+				ev(zone, EventCertGone, "")
+			}
 		}
 	}
 	// Zone-wide challenges by zone.
@@ -328,11 +387,17 @@ func diffReports(node string, prev, rep EdgeReport, now time.Time) []storage.Edg
 	for _, zone := range sortedKeys(newChal) {
 		c := newChal[zone]
 		p := prevChal[zone]
+		if c == nil && p == nil {
+			continue
+		}
+		if !known(zone) {
+			continue
+		}
 		switch {
 		case c != nil && p == nil:
 			detail := "until " + c.Until.UTC().Format(time.RFC3339)
 			if c.Reason != "" {
-				detail = c.Reason + "; " + detail
+				detail = clip(c.Reason) + "; " + detail
 			}
 			if c.DryRun {
 				detail += " (preview)"
@@ -342,12 +407,17 @@ func diffReports(node string, prev, rep EdgeReport, now time.Time) []storage.Edg
 			ev(zone, EventChallengeEnded, "")
 		}
 	}
-	for _, zone := range sortedKeys(prevChal) {
-		if _, still := newChal[zone]; !still && prevChal[zone] != nil {
-			ev(zone, EventChallengeEnded, "zone left the report")
+	if rep.ZonesTruncated == 0 {
+		for _, zone := range sortedKeys(prevChal) {
+			if _, still := newChal[zone]; !still && prevChal[zone] != nil && zoneInFile(cfg, zone) != nil {
+				ev(zone, EventChallengeEnded, "zone left the report")
+			}
 		}
 	}
-	// Truncation: a report that had to shrink, once per transition into it.
+	// Truncation: a report that had to shed its tail to fit the body limit,
+	// once per transition into it. The per-window would-be shortfall
+	// (sources_truncated) is the flood's size, not a fault, and rides on the
+	// window row itself.
 	if t := truncation(rep); t != "" && truncation(prev) == "" {
 		ev("", EventReportTruncated, t)
 	}
@@ -357,14 +427,10 @@ func diffReports(node string, prev, rep EdgeReport, now time.Time) []storage.Edg
 // truncation summarises what a report cut to fit the body limit, "" when
 // nothing was cut.
 func truncation(r EdgeReport) string {
-	srcs := 0
-	for _, z := range r.Zones {
-		srcs += z.SourcesTruncated
-	}
-	if r.ZonesTruncated == 0 && r.CertsTruncated == 0 && srcs == 0 {
+	if r.ZonesTruncated <= 0 && r.CertsTruncated <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("zones=%d certs=%d sources=%d", r.ZonesTruncated, r.CertsTruncated, srcs)
+	return fmt.Sprintf("zones=%d certs=%d", max(0, r.ZonesTruncated), max(0, r.CertsTruncated))
 }
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -399,7 +465,12 @@ func (s *Server) runEdgePresence(ctx context.Context) {
 
 // edgePresenceTick is one tick of the presence ticker at now. The first
 // observation of a node is its baseline (recorded, not announced); from then
-// on every change is one event and one log line. A lost node's event is
+// on every change is one event and one log line. A node nobody has heard
+// from is not baselined until stale_after has passed since the ticker
+// started — at a brain start every node is unheard-from for a moment, and
+// baselining that as "lost" would turn every node's first poll into a
+// node_alive burst for the whole fleet; after stale_after an unheard-from
+// node is genuinely lost, and that is the baseline. A lost node's event is
 // stamped when it was lost — lastSeen + stale_after — not when the tick
 // noticed it.
 func (s *Server) edgePresenceTick(cfg *config.Config, now time.Time) {
@@ -408,6 +479,12 @@ func (s *Server) edgePresenceTick(cfg *config.Config, now time.Time) {
 	}
 	stale := edgeStaleAfter(cfg)
 	w := s.edgeHist.writer()
+	s.edgeHist.mu.Lock()
+	if s.edgeHist.startedAt.IsZero() {
+		s.edgeHist.startedAt = now
+	}
+	started := s.edgeHist.startedAt
+	s.edgeHist.mu.Unlock()
 	for i := range cfg.Edge.Nodes {
 		name := cfg.Edge.Nodes[i].Name
 		last, holding := s.edgePresence.seen(name)
@@ -417,6 +494,12 @@ func (s *Server) edgePresenceTick(cfg *config.Config, now time.Time) {
 			s.edgeHist.alive = make(map[string]bool)
 		}
 		prev, known := s.edgeHist.alive[name]
+		if !known && !alive && last.IsZero() && now.Sub(started) < stale {
+			// Unheard-from since the ticker started, and not for long: not a
+			// baseline yet.
+			s.edgeHist.mu.Unlock()
+			continue
+		}
 		s.edgeHist.alive[name] = alive
 		s.edgeHist.mu.Unlock()
 		if !known || prev == alive {
