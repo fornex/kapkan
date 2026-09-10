@@ -661,6 +661,43 @@ security-relevant.
   have reported no readiness at all rather than guessed about. Twelve new locale strings and two
   plural keys in all five catalogs; `i18n.plural()` now interpolates `{vars}` as `t()` does, so a
   form carrying a second number keeps its whole phrase, word order included, in the translation.
+- Edge track, E6.9 (rig) — the anycast/ECMP acceptance rig,
+  `engine/scripts/labnet/edge-e6-anycast.sh` (edge-spec §8, E6): the first rig with a **real
+  router hop**, so that the kernel's `fib_multipath_hash_policy` is itself under test. A `rtr`
+  netns forwards one VIP `/32` to two nodes as an ECMP route over two point-to-point legs; each
+  node holds the VIP on `lo`, runs stock nginx under `unshare -u` so its `$hostname` names it,
+  and runs its own `kapkan edge` with its own state and its **own agent token bound with
+  `api.tokens[].node`** — one token per node, as the guide will require. The brain sits in its
+  own netns reached only by unicast, and the Pebble CA resolves the zone to the VIP, so every
+  HTTP-01 validation crosses the hash. No XDP. Requests are attributed to a node two ways —
+  per-node `/metrics` and `add_header X-Kapkan-Node $hostname always;` through the zone's
+  `extra_directives_file`, an operator's debugging trick and never a product header. Arms:
+  with the route pinned to one node for the whole issuance, the other node's certificate can
+  only have come from the **fan-out** (both issued, both published, a slot refused, two
+  different leaves for one name, one document and one ETag for the fleet, no key bytes in the
+  inventory); the two **hash forms** (layer 3 pins one client's 40 connections to one node,
+  layer 4 spreads them over both — over TCP and over `--http3-only` alike, the same policy
+  hashing the UDP 4-tuple); the **per-node ceilings**, whose L3-versus-L4 shares are recorded
+  because they are the guide's "up to N× the ceiling" (a rate-refused source carries no node
+  header — the render's `@kapkan_denied` declares its own `add_header` — so refusals are
+  counted at the decider's metric, and the source shows up in *both* nodes' `top_sources`); a
+  **node dying with nobody withdrawing** (a share of requests fails, the keepalive to the dead
+  node breaks and to the live one survives, the inventory says `alive:false` within
+  `stale_after`, and the router's route is byte-identical throughout — the brain touches no
+  routing for a zone address), then the same node reached over a **downed link** (the nexthop
+  goes `dead` and every request is served with no operator action, "a directly connected router
+  notices link loss, a routed hop does not") and the withdrawal as what it really is, one `ip
+  route replace`, timed; the **withdrawal signal** without a BGP daemon — a refused document is
+  *not* one (`converged:false`, `/healthz` 200, the VIP still serving from that node) while a
+  dead terminator *is* (`/healthz` 503 within a second of nginx dying, with the brain's
+  inventory still saying `alive:true`); the brain dead (both nodes serve TCP and h3 through the
+  VIP, `/healthz` 200, alive again within `stale_after` of its return); the two **cross-node
+  facts** a shared address exposes (a TLS session from one node is `New` on the other — spec §3
+  — while a clearance cookie solved on one is honoured, and marked `cleared` at the origin, by
+  the other); and **MTU** 1200 on one leg alone, which breaks HTTP/3 for that node's share of
+  clients while TCP is untouched. A stretch arm behind `ANYCAST_BGP=1`, outside the acceptance
+  path, drives the same withdrawal contract with a real bird2 speaker on each node enabled and
+  disabled by a once-a-second `/healthz` probe. Test-only; no product change.
 
 ### Fixed
 
