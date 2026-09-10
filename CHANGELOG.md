@@ -499,8 +499,10 @@ security-relevant.
   prints the node → scope → zones matrix with each token binding (or `SHARED`) and warns about a
   zone no node's scope covers, an edge block without nodes included. A node the configuration no
   longer has gets an empty document, and a poll of its parked in a hold across that reload is
-  answered `404 unknown edge node` — never the whole file. The tenant-agreement rule applies to
-  named hostgroups; the global group is the fleet's catch-all, not a tenant's PoP.
+  answered `404 unknown edge node` — never the whole file; likewise a token the reload removed
+  or rebound ends its parked poll with `401` / `403`, on the edge channel and the scrub channel
+  alike. The tenant-agreement rule applies to named hostgroups; the global group is the fleet's
+  catch-all, not a tenant's PoP.
   Node side: no change — a zone leaving a node's document is an ordinary slow reload; its
   certificates stay on disk and stop renewing (runbook, not automation). Config surface: both
   schemas, the overlay, docs (zones, configuration, edge *Placing zones on nodes* + Limits,

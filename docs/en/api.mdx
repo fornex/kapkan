@@ -598,7 +598,9 @@ ACME directories and policy, plus the live issuance grants, fanned-out ACME chal
 clearance keys and levers of those zones; the `ETag` is the node's own. A plain `GET` returns the document with a content-hash `ETag`; a
 `GET` whose `If-None-Match` names that ETag is **held** until the document changes — a
 successful reload of the zones file, a certificate challenge published by a node — or up to
-25 s, then answered `304`. A node identifies itself with `?node=<name>`, and **that poll is the
+25 s, then answered `304`. A reload that removes the node, removes the token or moves the
+token's binding ends a parked poll with the answer a first poll would now get (`404`, `401`,
+`403`), never a document. A node identifies itself with `?node=<name>`, and **that poll is the
 node's liveness signal**, so the name must be a configured `edge.nodes[]` entry (an unknown
 name is `404`) and the request must carry a real token. A token bound to a node
 (`api.tokens[].node`) may only poll, report and coordinate ACME as that node — another node's

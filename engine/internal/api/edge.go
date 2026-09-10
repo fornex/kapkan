@@ -315,11 +315,12 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		acmeChanged := s.edgeIssuance.Changed()
 		keysChanged := s.edgeClearance.Changed()
 		leverChanged := s.edgeLever.Changed()
-		// A reload may have removed this node (E6.3): the answer that ends
-		// its service is the 404 a first poll would get, never a document —
-		// the whole file least of all.
-		if node != "" && configuredEdgeNode(s.store.Get(), node) == nil {
-			writeError(w, http.StatusNotFound, "unknown edge node")
+		// A reload may have removed this node (E6.3), removed the token or
+		// moved its binding (E6.1) while the poll was parked: the answer that
+		// ends the hold is the one a first poll would now get — never a
+		// document, the whole file least of all.
+		if code, msg := s.edgeHoldStillValid(c, node); code != 0 {
+			writeError(w, code, msg)
 			return
 		}
 		body, cur, err := s.edgeSnapshotFor(node)
@@ -346,11 +347,11 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 			// Shutting down: answer NOW so Shutdown is not stalled behind a
 			// parked poll. Verified, not assumed — a reload may have landed.
 			rotate.Stop()
-			s.endEdgeHold(w, node, etag)
+			s.endEdgeHold(w, c, node, etag)
 			return
 		case <-deadline.C:
 			rotate.Stop()
-			s.endEdgeHold(w, node, etag)
+			s.endEdgeHold(w, c, node, etag)
 			return
 		case <-changed:
 			// Woken by a reload; loop to rebuild and compare.
@@ -373,12 +374,23 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// edgeHoldStillValid is what a parked edge poll re-checks before it answers:
+// the node it named still exists (a reload may have cut it out of the fleet —
+// 404, as a first poll would get) and the token may still act as it
+// (holdStillAuthorized: removed → 401, rebound → 403).
+func (s *Server) edgeHoldStillValid(c caller, node string) (int, string) {
+	if node != "" && configuredEdgeNode(s.store.Get(), node) == nil {
+		return http.StatusNotFound, "unknown edge node"
+	}
+	return s.holdStillAuthorized(c, node)
+}
+
 // endEdgeHold answers a hold that ended on the deadline or on shutdown with one
 // final look at the store, for the same reason endHold does: "nothing changed"
 // is verified, so a 304 never names a superseded ETag.
-func (s *Server) endEdgeHold(w http.ResponseWriter, node, etag string) {
-	if node != "" && configuredEdgeNode(s.store.Get(), node) == nil {
-		writeError(w, http.StatusNotFound, "unknown edge node")
+func (s *Server) endEdgeHold(w http.ResponseWriter, c caller, node, etag string) {
+	if code, msg := s.edgeHoldStillValid(c, node); code != 0 {
+		writeError(w, code, msg)
 		return
 	}
 	if body, cur, err := s.edgeSnapshotFor(node); err == nil && cur != etag {

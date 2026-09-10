@@ -290,7 +290,7 @@ func TestEndHoldRechecksTable(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	s.endHold(rec, before) // table changed since this ETag: must serve the doc
+	s.endHold(rec, caller{}, "", before) // table changed since this ETag: must serve the doc
 	if rec.Code != http.StatusOK {
 		t.Fatalf("endHold with a stale ETag = %d, want 200", rec.Code)
 	}
@@ -302,7 +302,7 @@ func TestEndHoldRechecksTable(t *testing.T) {
 
 	_, cur, _ := s.ruleSnapshot()
 	rec = httptest.NewRecorder()
-	s.endHold(rec, cur) // genuinely unchanged: 304
+	s.endHold(rec, caller{}, "", cur) // genuinely unchanged: 304
 	if rec.Code != http.StatusNotModified {
 		t.Fatalf("endHold with the current ETag = %d, want 304", rec.Code)
 	}

@@ -979,6 +979,11 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "audit query failed")
 		return
 	}
+	if rows == nil {
+		// An empty answer is an empty array, never null: a tenant with no
+		// rows of its own must not break a client's loop.
+		rows = []storage.AuditRow{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"available": true, "events": rows})
 }
 

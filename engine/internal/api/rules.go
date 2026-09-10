@@ -224,6 +224,13 @@ func (s *Server) handleDataplaneRules(w http.ResponseWriter, r *http.Request) {
 		// between the read and the select must find us already subscribed, or
 		// it would sleep here for a full hold despite having news.
 		changed := s.mit.RulesChanged()
+		// A reload may have removed the node, the token, or moved the
+		// token's binding while the poll was parked (E6.1): end the hold the
+		// way a first poll would now be answered.
+		if code, msg := s.rulesHoldStillValid(c, node); code != 0 {
+			writeError(w, code, msg)
+			return
+		}
 		body, cur, err := s.ruleSnapshot()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "encoding rules document failed")
@@ -241,10 +248,10 @@ func (s *Server) handleDataplaneRules(w http.ResponseWriter, r *http.Request) {
 			// Server shutting down: answer NOW so Shutdown is not stalled
 			// behind a parked poll. The agent's normal re-poll lands on
 			// whoever is up next.
-			s.endHold(w, etag)
+			s.endHold(w, c, node, etag)
 			return
 		case <-deadline.C:
-			s.endHold(w, etag)
+			s.endHold(w, c, node, etag)
 			return
 		case <-changed:
 			// Woken; loop to rebuild. The new table may still hash identically
@@ -263,12 +270,26 @@ func (s *Server) handleDataplaneRules(w http.ResponseWriter, r *http.Request) {
 // deadline fires — and a 304 naming a superseded ETag would cost the agent a
 // wasted extra round trip to discover it. On a snapshot error 304 is the safe
 // answer: the client re-polls and hits the normal error path.
-func (s *Server) endHold(w http.ResponseWriter, etag string) {
+func (s *Server) endHold(w http.ResponseWriter, c caller, node, etag string) {
+	if code, msg := s.rulesHoldStillValid(c, node); code != 0 {
+		writeError(w, code, msg)
+		return
+	}
 	if body, cur, err := s.ruleSnapshot(); err == nil && cur != etag {
 		writeRuleDoc(w, body, cur)
 		return
 	}
 	writeRuleNotModified(w, etag)
+}
+
+// rulesHoldStillValid is what a parked rules poll re-checks before it answers:
+// the scrubbing node it named still exists and the token may still act as it
+// (node_binding.go's holdStillAuthorized).
+func (s *Server) rulesHoldStillValid(c caller, node string) (int, string) {
+	if node != "" && configuredNode(s.store.Get(), node) == nil {
+		return http.StatusNotFound, "unknown scrubbing node"
+	}
+	return s.holdStillAuthorized(c, node)
 }
 
 func writeRuleDoc(w http.ResponseWriter, body []byte, etag string) {
