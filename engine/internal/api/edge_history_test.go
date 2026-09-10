@@ -533,9 +533,13 @@ func TestEdgePresenceTick(t *testing.T) {
 
 // TestRunEdgePresence: the ticker loop itself — started, it observes the
 // polls on its own clock, announces the transitions, and stops with its
-// context.
+// context. stale_after is two seconds against the one-second tick floor, so
+// the tick after the poll always finds the node alive (the baseline) and the
+// one after stale_after finds it lost; with stale_after equal to the period
+// the first observation could already be "lost" — a legitimate baseline the
+// test could not tell from a missed transition.
 func TestRunEdgePresence(t *testing.T) {
-	store, _ := edgeStoreWith(t, edgeZonesOne, 1) // stale_after 1 s → a tick every second
+	store, _ := edgeStoreWith(t, edgeZonesOne, 2) // stale_after 2 s → a tick every second (the floor)
 	s := testServer(t, store)
 	h := s.Handler()
 	hw := &histWriter{}
@@ -548,7 +552,7 @@ func TestRunEdgePresence(t *testing.T) {
 	}()
 	waitKinds := func(want []string) {
 		t.Helper()
-		deadline := time.Now().Add(6 * time.Second)
+		deadline := time.Now().Add(8 * time.Second)
 		for time.Now().Before(deadline) {
 			if k := hw.kinds(); len(k) >= len(want) {
 				if len(k) != len(want) {
@@ -563,7 +567,7 @@ func TestRunEdgePresence(t *testing.T) {
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		t.Fatalf("events = %v after 6 s, want %v", hw.kinds(), want)
+		t.Fatalf("events = %v after 8 s, want %v", hw.kinds(), want)
 	}
 	// One poll, then silence: the node is baselined alive at the next tick
 	// (silently) and lost once stale_after has passed.
