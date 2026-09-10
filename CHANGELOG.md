@@ -695,9 +695,20 @@ security-relevant.
   facts** a shared address exposes (a TLS session from one node is `New` on the other — spec §3
   — while a clearance cookie solved on one is honoured, and marked `cleared` at the origin, by
   the other); and **MTU** 1200 on one leg alone, which breaks HTTP/3 for that node's share of
-  clients while TCP is untouched. A stretch arm behind `ANYCAST_BGP=1`, outside the acceptance
-  path, drives the same withdrawal contract with a real bird2 speaker on each node enabled and
-  disabled by a once-a-second `/healthz` probe. Test-only; no product change.
+  clients while TCP is untouched — and not for its *share* of them: a path MTU is cached per
+  destination address, the destination is the address every node shares, so HTTP/3 fails toward
+  the healthy node too and stays broken after the link is repaired until the client's cache is
+  flushed. A stretch arm behind `ANYCAST_BGP=1`, outside the acceptance path, drives the same
+  withdrawal contract with a real bird2 speaker on each node enabled and disabled by a
+  once-a-second `/healthz` probe. Test-only; no product change — but the runs caught seven rig
+  bugs and **one product finding, not fixed here**: as rendered, a TLS 1.2 session resumes on no
+  node, its own included, because nginx looks a session up on the SSL context of the address's
+  default server and kapkan's catch-all declares no `ssl_session_cache`, so every zone's
+  `ssl_session_cache`/`ssl_session_timeout` are dead configuration and every returning client
+  pays a full handshake (the same family as the `ssl_protocols` behaviour the shared file already
+  documents). Arm G proves the cause with the supported `omit_catch_all` knob — with the
+  catch-all omitted the session is `Reused` on its own node and still `New` on the other — which
+  is what keeps the cross-node guarantee of edge-spec §3 from being accidentally true.
 
 ### Fixed
 

@@ -158,9 +158,15 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   **withdrawal signal** — `/healthz` 503 yes, `converged:false` no, the
   inventory's `alive` no; the brain dead; the two **cross-node facts** (a TLS
   session is not resumable on the other node, a clearance cookie is honoured
-  there); and **MTU** 1200 on one leg breaking HTTP/3 for that node's share
-  while TCP is untouched. Needs `kapkan` and Pebble cross-compiled for the
-  container:
+  there); and **MTU** 1200 on one leg, which takes HTTP/3 away from a client
+  for the *whole* shared address rather than for that node's share of it,
+  because a path MTU is cached per destination. Arm G also records the one
+  product finding these runs turned up: as rendered, a TLS 1.2 session resumes
+  on no node at all, because nginx looks a session up on the SSL context of
+  the address's default server and kapkan's catch-all carries no
+  `ssl_session_cache`. The arm proves that with the supported
+  `omit_catch_all`, so the cross-node claim above is not accidentally true.
+  Needs `kapkan` and Pebble cross-compiled for the container:
 
   ```sh
   mkdir -p /tmp/lab
