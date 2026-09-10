@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -28,21 +29,26 @@ func TestNodeSidePackagesNeverImportStorage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tree := range []string{"./internal/edge/...", "./internal/mitigate/..."} {
-		cmd := exec.Command("go", "list", "-f", `{{.ImportPath}} {{join .Imports " "}}`, tree)
-		cmd.Dir = strings.TrimSpace(string(root))
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("go list %s: %v", tree, err)
-		}
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) == 0 {
-				continue
+	// Both GOOS the Makefile lints for: a build-tagged file is invisible to
+	// the other one.
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, tree := range []string{"./internal/edge/...", "./internal/mitigate/..."} {
+			cmd := exec.Command("go", "list", "-f", `{{.ImportPath}} {{join .Imports " "}}`, tree)
+			cmd.Dir = strings.TrimSpace(string(root))
+			cmd.Env = append(os.Environ(), "GOOS="+goos)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("go list %s (GOOS=%s): %v", tree, goos, err)
 			}
-			for _, imp := range fields[1:] {
-				if strings.HasSuffix(imp, "/internal/storage") {
-					t.Fatalf("%s imports internal/storage — node-side code must never know about the brain's storage", fields[0])
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) == 0 {
+					continue
+				}
+				for _, imp := range fields[1:] {
+					if strings.HasSuffix(imp, "/internal/storage") || strings.Contains(imp, "/internal/storage/") {
+						t.Fatalf("%s imports %s (GOOS=%s) — node-side code must never know about the brain's storage", fields[0], imp, goos)
+					}
 				}
 			}
 		}

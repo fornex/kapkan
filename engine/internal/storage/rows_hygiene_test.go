@@ -16,9 +16,12 @@ func TestEdgeRowsCarryNoKeyMaterial(t *testing.T) {
 		for i := 0; i < rt.NumField(); i++ {
 			f := rt.Field(i)
 			tag := strings.Split(f.Tag.Get("json"), ",")[0]
+			if tag == "" {
+				t.Errorf("%s.%s has no json tag — every row column is named explicitly (an untagged field is still written, under its Go name)", rt.Name(), f.Name)
+			}
 			for _, b := range bad {
-				if strings.Contains(strings.ToLower(tag), b) {
-					t.Errorf("%s.%s has json key %q — a history row must never carry key material", rt.Name(), f.Name, tag)
+				if strings.Contains(strings.ToLower(tag+" "+f.Name), b) {
+					t.Errorf("%s.%s (json %q) — a history row must never carry key material", rt.Name(), f.Name, tag)
 				}
 			}
 			switch f.Type.Kind() {
