@@ -22,14 +22,18 @@ package api
 // TRUST, STATED PLAINLY. An agent token is a certificate-issuing credential:
 // a holder can publish a key authorization for any zone the fleet serves,
 // and every node will answer it, so the holder's own ACME account can
-// validate HTTP-01 for that zone. Binding tokens to nodes is the fleet
-// milestone (E6); until then the coordinator narrows what one token can do
-// and makes every use visible: a challenge is published only by the node
-// that holds the zone's slot, an existing live challenge is never overwritten
-// by a different key authorization (first writer wins), each node has a small
-// quota of live challenges, and every slot and challenge call is logged with
-// the node, the zone and the token's prefix. Rotate the agent token on any
-// node compromise.
+// validate HTTP-01 for that zone. Since E6.1 a token may be bound to one node
+// (api.tokens[].node; edgeACMECaller refuses it as any other node), which
+// takes impersonation and the fleet-wide rotation off the table — but a
+// holder of a bound token still publishes a key authorization for ANY zone
+// the fleet serves AS ITS OWN NODE until zones are placed on nodes (E6.3), so
+// the coordinator keeps narrowing what one token can do and makes every use
+// visible: a challenge is published only by the node that holds the zone's
+// slot, an existing live challenge is never overwritten by a different key
+// authorization (first writer wins), each node has a small quota of live
+// challenges, and every slot and challenge call is logged with the node, the
+// zone and the token's prefix. Rotate the node's agent token on any node
+// compromise, and treat it as a certificate exposure for every zone until E6.3.
 
 import (
 	"encoding/json"

@@ -623,11 +623,15 @@ protects layer 3 of the table in §1.
    reissue, rotate clearance keys; document that the brain holds nothing to steal. The agent
    token was the exception to "one node": unbound, it is a certificate-issuing credential — a
    holder can publish a key authorization for any fleet zone through the coordinator (visible:
-   slot required, logged). *Closed in E6.1:* `api.tokens[].node` binds an agent token to one
+   slot required, logged). *Narrowed in E6.1:* `api.tokens[].node` binds an agent token to one
    node and the brain refuses it as any other on every node-identified route before any side
-   effect; the residual is that a stolen **bound** token still polls, reports and issues for
-   that one node's zones — so the runbook rotates that node's token on its compromise, not the
-   fleet's. An unbound token keeps working through the migration and is named by -check-config,
+   effect, so a stolen bound token can no longer impersonate another node (presence, report,
+   slot, publication) and only that node's token needs rotating, not the fleet's. The residual
+   as it stands: acting as its own node, the stolen token still takes the issuance slot and
+   publishes a key authorization for ANY zone the fleet serves, because every node serves every
+   zone until E6.3 places zones on nodes — so until E6.3 the runbook still treats a node
+   compromise as a certificate exposure for every zone (rotate the node's token, then revoke and
+   reissue). An unbound token keeps working through the migration and is named by -check-config,
    the log and the inventory until it is bound; the hard requirement is a MAJOR-release item.
 7. **The second metric family bloats the engine** → L7 counters enter through the same
    hostgroup/threshold/baseline machinery, not a parallel engine; review holds that line.

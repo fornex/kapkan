@@ -120,4 +120,9 @@ func TestUnboundAgentTokens(t *testing.T) {
 	if got := withTokens("    - {name: a1, token_env: K_A1, role: agent, node: e1}\n", edge).UnboundAgentTokens(); got != nil {
 		t.Errorf("every agent bound, yet unbound = %v", got)
 	}
+	// A scrub-only fleet has nodes to bind to as well.
+	scrub := "\nscrubbing:\n  next_hop: \"192.0.2.9\"\n  nodes:\n    - name: fra1\n      next_hop: \"192.0.2.10\"\n"
+	if got := withTokens("    - {name: a0, token_env: K_A0, role: agent}\n    - {name: s1, token_env: K_S1, role: agent, node: fra1}\n", scrub).UnboundAgentTokens(); strings.Join(got, ",") != "a0" {
+		t.Errorf("scrub-only fleet: unbound = %v, want [a0]", got)
+	}
 }

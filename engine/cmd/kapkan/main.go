@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -93,6 +94,12 @@ func main() {
 // operator's own binary. The resolved per-group mitigation is shown so an
 // inherited flowspec/divert that silently degrades on a total group is visible.
 func checkConfigFile(path string) int {
+	return checkConfigTo(os.Stdout, path)
+}
+
+// checkConfigTo is checkConfigFile writing its report to w, so a test can
+// read the OK line and the WARNING block that follows it.
+func checkConfigTo(w io.Writer, path string) int {
 	cfg, err := config.Load(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "INVALID  %s\n  %v\n", path, err)
@@ -102,16 +109,18 @@ func checkConfigFile(path string) int {
 	if !cfg.DryRun {
 		mode = "LIVE (announcements WILL be sent)"
 	}
-	fmt.Printf("OK  %s\n", path)
-	fmt.Printf("  mode:      %s\n", mode)
-	fmt.Printf("  networks:  %s\n", strings.Join(cfg.Networks, ", "))
-	fmt.Printf("  listeners: sflow=%q netflow=%q\n", cfg.Listen.SFlow, cfg.Listen.NetFlow)
-	fmt.Printf("  groups:    %d (including the implicit global group)\n", len(cfg.Groups))
+	// A report to a terminal or a test buffer: a failed write has nowhere to go.
+	p := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
+	p("OK  %s\n", path)
+	p("  mode:      %s\n", mode)
+	p("  networks:  %s\n", strings.Join(cfg.Networks, ", "))
+	p("  listeners: sflow=%q netflow=%q\n", cfg.Listen.SFlow, cfg.Listen.NetFlow)
+	p("  groups:    %d (including the implicit global group)\n", len(cfg.Groups))
 	for _, g := range cfg.Groups {
-		fmt.Printf("    - %-20s calc=%-8s ban=%-5t  %s\n", g.Name, g.Calc, g.BanEnabled, ladderString(g.Escalation))
+		p("    - %-20s calc=%-8s ban=%-5t  %s\n", g.Name, g.Calc, g.BanEnabled, ladderString(g.Escalation))
 	}
 	printDataplaneWarnings(cfg)
-	printEdgeWarnings(cfg)
+	printEdgeWarnings(w, cfg)
 	return 0
 }
 
@@ -121,15 +130,15 @@ func checkConfigFile(path string) int {
 // and publish an ACME key authorization for any fleet zone. Printed after the
 // OK line, exit code unchanged — the daemon runs it; a MAJOR release is where it
 // becomes an error.
-func printEdgeWarnings(cfg *config.Config) {
+func printEdgeWarnings(w io.Writer, cfg *config.Config) {
 	unbound := cfg.UnboundAgentTokens()
 	if len(unbound) == 0 {
 		return
 	}
-	fmt.Printf("  WARNING: %d agent token(s) are not bound to a node and may act as ANY configured\n"+
+	_, _ = fmt.Fprintf(w, "  WARNING: %d agent token(s) are not bound to a node and may act as ANY configured\n"+
 		"           node (poll, report, ACME). Give each node its own token and set api.tokens[].node:\n", len(unbound))
 	for _, name := range unbound {
-		fmt.Printf("    - %s\n", name)
+		_, _ = fmt.Fprintf(w, "    - %s\n", name)
 	}
 }
 

@@ -26,6 +26,13 @@ security-relevant.
   `edge.stale_after_seconds` (default 15). A config without an `edge` block behaves exactly
   as before; the zones file is loaded and validated alongside `kapkan.yaml` and a broken one
   keeps the previous zones on reload.
+- **Added** `api.tokens[].node` (optional; `agent` tokens only): binds the token to exactly one
+  `edge.nodes[]` or `scrubbing.nodes[]` entry, refused on every node-identified route when another
+  node's name is presented. Absent by default: the token keeps acting as any node, named as
+  unbound by `-check-config`, the daemon log and the edge inventory; making it required is a
+  MAJOR-release item. One behaviour change rides with the release regardless of the key: node
+  presence is now stamped only by `agent` tokens, so a node polling on an `operator` token shows as
+  lost while it keeps serving — give it an agent token.
 
 ### Added
 
