@@ -125,6 +125,44 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   `/tmp/lab/logs/`; the recorded h3-vs-h2 figures are the source of the §8
   acceptance paragraph.
 
+- **`edge-e6.sh`** — the edge track's E6 acceptance ("the fleet as a product",
+  [`engine/docs/edge-spec.md`](../../docs/edge-spec.md) §8): tenancy,
+  token↔node binding, placement and the edge history on the E5 topology, with
+  a **real ClickHouse** beside the brain (its binary extracted from the image
+  CI's `storage-clickhouse` job pins) and no XDP. Two nodes, five zones under
+  three hostgroups and two tenants, six tokens. The arms follow the E6 plan's
+  acceptance map: byte-identity of an unscoped fleet's documents; migration
+  from one shared agent token to one bound token per node with no install and
+  fail-static in between; binding refusing another node's name on every route
+  and saving nothing; the operator's presence-free preview; tenancy as a
+  non-event for the nodes; default-deny tenant views, the tenant's lever with
+  its audit rows, no existence oracle, relabel semantics and a zone removed
+  under a live token; rows landing once with quiet zones writing nothing,
+  telling sources only, the read API equal to SQL and default-deny, the node's
+  chronology as events, forged reports re-stamped/dropped/capped, ClickHouse
+  dead under report load (204 in under 50 ms), retention, storage off
+  byte-identical; placement rendering a zone only where placed, fan-out only
+  to the serving nodes, `unserved`, the lever by placement, impossible
+  configurations never going live, fail-static under a wrong rebind, moving a
+  zone, the brain dead and back, and nothing to steal in the three tables.
+  Needs `kapkan`, Pebble and the ClickHouse binary in `/tmp/lab`:
+
+  ```sh
+  mkdir -p /tmp/lab
+  (cd engine && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/kapkan ./cmd/kapkan)
+  git clone --depth 1 https://github.com/letsencrypt/pebble /tmp/pebble-src \
+    && (cd /tmp/pebble-src && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/pebble ./cmd/pebble)
+  c=$(docker create clickhouse/clickhouse-server:25.8) && docker cp "$c:/usr/bin/clickhouse" /tmp/lab/clickhouse && docker rm "$c"
+  docker run --privileged --rm -v /tmp/lab:/lab -v "$PWD:/w" -w /w debian:13-slim \
+    sh -c 'apt-get update -qq && apt-get install -y -qq \
+             iproute2 nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump >/dev/null \
+           && KAPKAN=/lab/kapkan PEBBLE=/lab/pebble CLICKHOUSE=/lab/clickhouse bash engine/scripts/labnet/edge-e6.sh'
+  ```
+
+  The rig prints the ClickHouse version it ran against and the bytes per row
+  from `system.parts`; logs, the rendered configurations and the table dumps
+  land in `/tmp/lab/logs/`.
+
 ## VRF
 
 The return-path recipe is verified with **policy routing** (route-leaking:
