@@ -574,8 +574,10 @@ role, so a console can decide whether to show node affordances without this call
 ### The edge channel
 
 These endpoints exist for [edge nodes](/docs/edge) — boxes running [`kapkan edge`](/docs/cli#edge).
-Like the scrub-node channel they take the `agent` role or an unscoped `operator` token, never a
-`viewer` or a tenant-scoped token: the zones document spans every tenant. **The brain
+Like the scrub-node channel, the node-facing endpoints take the `agent` role or an unscoped
+`operator` token, never a `viewer` or a tenant-scoped token: the zones document spans every
+tenant. The two human-facing ones — the zone status and the lever — differ: `viewer` rank for
+the status, and a [tenant-scoped](/docs/multi-tenancy) token reaches both for its own zones. **The brain
 distributes policy, never verdicts** — no per-request call exists here or anywhere; a node
 answers requests alone. The count of configured edge nodes (`edge_nodes_total`) rides on
 `/api/v1/status` for every role, so a console can decide whether to show the Edge view without
@@ -692,9 +694,15 @@ nodes previewed a challenge or a deny for, the stronger state kept, the busiest 
 20 per reporting node (`would_be_truncated` counts the rest). `partial` says a node's would-be
 sources did not all fit — its per-window bound, or a report that had to shrink — so the set is
 what survived, not everyone; `zones_truncated` on the document sums the zone entries the alive nodes
-cut from their reports, zones that are missing or undercounted here. A `viewer`-rank read,
-unscoped tokens only, like the inventory. This is edge-spec's *who would have been challenged*:
-read it before a zone's rung goes live.
+cut from their reports, zones that are missing or undercounted here. Every zone of the zones
+file has a row as well — `mode` (its `policy.mode`) and `file_challenge` (its
+`policy.challenge`) are the brain's word, `challenge` what the nodes apply — and `certs` lists
+the certificate each alive node holds for the zone (`node`, `not_after`, `issuer`; metadata
+only, from the reports). A `viewer`-rank read. An unscoped token sees every zone with its
+`tenant`; a [tenant-scoped](/docs/multi-tenancy) token exactly its own zones — no other
+tenant's hostname in any row, would-be set or HTTP/3 list, and no `tenant` field. Node names
+are visible to a tenant; the inventory is not. This is edge-spec's *who would have been
+challenged*: read it before a zone's rung goes live.
 
 ```json
 {
@@ -703,6 +711,9 @@ read it before a zone's rung goes live.
   "zones": [
     {
       "zone": "shop.example.com",
+      "tenant": "shop",
+      "mode": "decide",
+      "file_challenge": "auto",
       "nodes": 2,
       "challenge": "auto",
       "rps": 812.4,
@@ -715,16 +726,22 @@ read it before a zone's rung goes live.
       "would_be": [
         { "source": "203.0.113.7", "state": "would-deny", "requests": 1210, "nodes": ["edge-1", "edge-2"] },
         { "source": "198.51.100.23", "state": "would-challenge", "requests": 640, "nodes": ["edge-1"] }
+      ],
+      "certs": [
+        { "node": "edge-1", "not_after": "2026-11-20T09:12:00Z", "issuer": "R11" },
+        { "node": "edge-2", "not_after": "2026-11-20T09:12:00Z", "issuer": "R11" }
       ]
     }
   ]
 }
 ```
 
-A zone no alive node has reported yet still appears when a lever is set on it: `nodes: 0`,
-`rps: 0` and `override`, no mode. The request counters (`requests`, `decided`, `denied`,
-`challenged`, `cleared`, `would_deny`, `would_challenge`) are omitted when zero; `nodes` and
-`rps` are always present.
+A zone no alive node has reported yet — one in `policy.mode: none`, or one whose nodes are not
+up — still has its row: `nodes: 0`, `rps: 0`, its `mode` and `file_challenge`, and `override`
+when a lever is set. A lever on a zone a reload has since removed from the file keeps a row too,
+without `mode` (unscoped callers only — it is theirs to clear). The request counters (`requests`,
+`decided`, `denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`) are omitted when
+zero; `nodes` and `rps` are always present.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot and …/acme/challenges
 
@@ -743,7 +760,9 @@ node compromise.
 #### POST /api/v1/edge/zones/\{name\}/challenge and DELETE
 
 [The lever](/docs/edge#the-lever): set a zone's challenge mode for a bounded time, whatever the
-zones file says. `operator` rank, unscoped tokens only.
+zones file says. `operator` rank. A [tenant-scoped](/docs/multi-tenancy) operator may pull it on
+its own zones only; any other zone — another tenant's, unlabelled, or gone from the file — is
+`404 unknown zone` for it, the same answer an unknown name gets, decided before the body is read.
 
 ```json
 { "mode": "manual", "ttl_seconds": 1800, "reason": "credential stuffing from residential proxies" }

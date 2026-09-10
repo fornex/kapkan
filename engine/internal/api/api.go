@@ -979,11 +979,11 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	f := storage.AuditFilter{From: from, To: to}
 	if a := q.Get("action"); a != "" {
 		switch a {
-		case "ban", "unban", "config_reload", "source_block", "source_unblock":
+		case "ban", "unban", "config_reload", "source_block", "source_unblock", "edge_challenge":
 			f.Action = a
 		default:
 			writeError(w, http.StatusBadRequest,
-				"invalid action (ban|unban|config_reload|source_block|source_unblock)")
+				"invalid action (ban|unban|config_reload|source_block|source_unblock|edge_challenge)")
 			return
 		}
 	}

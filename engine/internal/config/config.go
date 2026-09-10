@@ -1340,6 +1340,44 @@ func (c *Config) UnboundAgentTokens() []string {
 	return out
 }
 
+// tenantLabelsInUse is the set of tenant labels the hostgroups carry — what a
+// token may be scoped to before the zones file is consulted.
+func (c *Config) tenantLabelsInUse() map[string]bool {
+	tenants := make(map[string]bool)
+	for _, g := range c.Groups {
+		if g.Tenant != "" {
+			tenants[g.Tenant] = true
+		}
+	}
+	return tenants
+}
+
+// BindZones cross-checks a validated zones file against this configuration and
+// attaches it as ZonesCfg (E6.2). Pure — no I/O — and exported so Load and the
+// tests share the one rule: every tenant a token is scoped to must be in use,
+// by a hostgroup or by a zone, since an edge-only customer owns hostnames and
+// no prefixes. The reverse is not required: a zone label nobody holds a token
+// for is legal — label first, like a hostgroup's — or a token would need its
+// zone and the zone its token. Without an edge block Parse already made the
+// hostgroup-only decision, byte for byte as before; z may then be nil.
+func (c *Config) BindZones(z *Zones) error {
+	tenants := c.tenantLabelsInUse()
+	if z != nil {
+		for i := range z.Zones {
+			if t := z.Zones[i].Tenant; t != "" {
+				tenants[t] = true
+			}
+		}
+	}
+	for _, tk := range c.API.TokenSpecs {
+		if tk.Tenant != "" && !tenants[tk.Tenant] {
+			return fmt.Errorf("api.tokens[%q]: tenant %q is not used by any hostgroup or zone", tk.Name, tk.Tenant)
+		}
+	}
+	c.ZonesCfg = z
+	return nil
+}
+
 // DashboardEnabled reports whether the embedded UI should be served.
 func (a API) DashboardEnabled() bool { return a.Dashboard == nil || *a.Dashboard }
 
@@ -1356,13 +1394,17 @@ func Load(path string) (*Config, error) {
 	// edge.zones_file is a SECOND file, followed here and not in Parse: Parse
 	// must stay pure (it is what the browser-side validator compiles), and a
 	// reload that cannot read or validate the zones file must fail as a whole
-	// so the previous configuration — zones included — stays live.
+	// so the previous configuration — zones included — stays live. The
+	// cross-file rule (a token's tenant is in use by a hostgroup or a zone)
+	// runs here for the same reason: it needs both files.
 	if cfg.Edge != nil {
 		z, err := LoadZones(cfg.Edge.ZonesFile)
 		if err != nil {
 			return nil, fmt.Errorf("edge.zones_file %q: %w", cfg.Edge.ZonesFile, err)
 		}
-		cfg.ZonesCfg = z
+		if err := cfg.BindZones(z); err != nil {
+			return nil, err
+		}
 	}
 	return cfg, nil
 }
@@ -2947,13 +2989,12 @@ func (c *Config) validateAPITokens() error {
 			return fmt.Errorf("api: set either token_env (single token) or tokens (role-based list), not both")
 		}
 		// Tenant labels actually in use, to reject a token scoped to a tenant
-		// that owns no prefixes (a typo would silently see nothing).
-		tenants := make(map[string]bool)
-		for _, g := range c.Groups {
-			if g.Tenant != "" {
-				tenants[g.Tenant] = true
-			}
-		}
+		// that owns nothing (a typo would silently see nothing). With an edge
+		// block the zones file is a second source of labels (E6.2) that Parse
+		// never reads — it must stay pure, the browser-side validator compiles
+		// it — so there the decision moves to Load, which runs BindZones over
+		// both files; without one Parse decides here, byte for byte as before.
+		tenants := c.tenantLabelsInUse()
 		names := make(map[string]bool, len(a.Tokens))
 		for i, tk := range a.Tokens {
 			if tk.Name == "" {
@@ -2978,7 +3019,7 @@ func (c *Config) validateAPITokens() error {
 			if role == RoleAgent && tk.Tenant != "" {
 				return fmt.Errorf("api.tokens[%q]: an agent token cannot be tenant-scoped (the rules feed is deployment-wide)", tk.Name)
 			}
-			if tk.Tenant != "" && !tenants[tk.Tenant] {
+			if tk.Tenant != "" && !tenants[tk.Tenant] && c.Edge == nil {
 				return fmt.Errorf("api.tokens[%q]: tenant %q is not used by any hostgroup", tk.Name, tk.Tenant)
 			}
 			// Token↔node binding (E6.1): agent tokens only, and the node must be

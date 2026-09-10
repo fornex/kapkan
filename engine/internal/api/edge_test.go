@@ -191,6 +191,33 @@ func TestEdgeDocETagChangesWithContent(t *testing.T) {
 	}
 }
 
+// TestEdgeDocIgnoresZoneTenant (E6.2): the ownership label never enters the
+// document — a labelled zones file yields the bytes and ETag the unlabelled
+// one does, so labelling a fleet's zones reloads no node and a tenant's label
+// is never shipped to the boxes.
+func TestEdgeDocIgnoresZoneTenant(t *testing.T) {
+	plain, err := config.ParseZones([]byte(edgeZonesTwo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	labelled, err := config.ParseZones([]byte(strings.Replace(edgeZonesTwo,
+		"origins: [\"10.0.0.1:8080\"]\n", "origins: [\"10.0.0.1:8080\"]\n    tenant: acme-corp\n", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if labelled.Zones[0].Tenant != "acme-corp" {
+		t.Fatalf("fixture did not label the zone: %+v", labelled.Zones[0])
+	}
+	bp, ep, _ := edgeDocBytes(buildEdgeDoc(plain))
+	bl, el, _ := edgeDocBytes(buildEdgeDoc(labelled))
+	if string(bp) != string(bl) || ep != el {
+		t.Fatalf("a zone label changed the document:\n%s\n%s", bp, bl)
+	}
+	if strings.Contains(string(bl), "acme-corp") || strings.Contains(string(bl), "tenant") {
+		t.Fatalf("the label leaked into the document: %s", bl)
+	}
+}
+
 func TestEdgeZonesServesDocument(t *testing.T) {
 	store, _ := edgeStore(t, edgeZonesOne)
 	s := testServer(t, store)

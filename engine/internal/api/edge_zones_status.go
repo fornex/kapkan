@@ -13,7 +13,10 @@ import (
 // rig's "who would be challenged" set (edge-spec §8: a dry-run pass must show
 // who would have been challenged before any zone turns the rung on). Built
 // from the nodes' advisory self-reports, so it is what the nodes claim; the
-// brain sums and unions, never acts on it.
+// brain sums and unions, never acts on it. Since E6.2 every zone of the zones
+// file has a row too (the brain's word: its mode and file challenge, its
+// certificates as the alive nodes report them), and a tenant-scoped token
+// gets exactly its own zones (edge_tenant.go).
 
 // EdgeZonesStatusDoc is the response.
 type EdgeZonesStatusDoc struct {
@@ -32,6 +35,16 @@ type EdgeZonesStatusDoc struct {
 // EdgeZoneStatus is one zone across the alive nodes.
 type EdgeZoneStatus struct {
 	Zone string `json:"zone"`
+	// Tenant is the zone's ownership label from the zones file (E6.2), for
+	// unscoped callers only: a scoped caller's rows are all its own, and the
+	// label would say nothing it does not know.
+	Tenant string `json:"tenant,omitempty"`
+	// Mode is the zones file's policy.mode (decide or none) and FileChallenge
+	// its policy.challenge — the brain's word, present for every zone in the
+	// file, while Challenge below is what the nodes report they apply. A zone
+	// reported or levered but gone from the file has neither.
+	Mode          string `json:"mode,omitempty"`
+	FileChallenge string `json:"file_challenge,omitempty"`
 	// Nodes counts the alive nodes reporting the zone.
 	Nodes int `json:"nodes"`
 	// Challenge is the zone's challenge mode as the nodes apply it (off,
@@ -72,6 +85,10 @@ type EdgeZoneStatus struct {
 	// H3 is the zone's HTTP/3 across the alive nodes (E5): present when the
 	// zones file asks for it or a node reports it.
 	H3 *EdgeZoneH3 `json:"h3,omitempty"`
+	// Certs lists the certificate each alive node holds for the zone, from
+	// its report (E6.2) — the zone's expiry without the inventory. Public
+	// metadata only, never a key: the report type forbids it.
+	Certs []EdgeZoneCert `json:"certs,omitempty"`
 }
 
 // EdgeZoneH3 is one zone's HTTP/3 across the alive nodes.
@@ -106,18 +123,28 @@ type EdgeZoneWouldBe struct {
 	Nodes    []string `json:"nodes"`
 }
 
+// EdgeZoneCert is one alive node's certificate for the zone, as reported.
+type EdgeZoneCert struct {
+	Node     string    `json:"node"`
+	NotAfter time.Time `json:"not_after"`
+	Issuer   string    `json:"issuer,omitempty"`
+}
+
 // wouldBePerNode bounds the would-be set: the aggregator names at most this
 // many sources per window, so more than this per node cannot be known.
 const wouldBePerNode = 20
 
-// handleEdgeZonesStatus serves the merged zone status. Unscoped tokens only,
-// like the inventory: node names are topology.
+// handleEdgeZonesStatus serves the merged zone status at viewer rank. An
+// unscoped token sees every zone; a tenant-scoped one (E6.2) exactly the
+// file's zones labelled with its tenant — another tenant's hostname appears
+// in no row, no would-be set and no HTTP/3 list, and the tenant field is left
+// out. Node names are visible to a tenant (edge-spec §8, D3): where its zones
+// are served is its business; the addresses and hostgroups stay in the
+// inventory, which stays unscoped.
 func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
-	if c := callerFrom(r); !c.unscoped() {
-		writeError(w, http.StatusForbidden, "the edge zone status names nodes and is restricted to unscoped tokens")
-		return
-	}
+	c := callerFrom(r)
 	cfg := s.store.Get()
+	visible := func(zone string) bool { return visibleZone(c, cfg, zone) }
 	staleAfter := edgeStaleAfter(cfg)
 	reports := make(map[string]EdgeReport)
 	alive := 0
@@ -133,46 +160,89 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	doc := mergeEdgeZones(reports)
+	doc := mergeEdgeZonesVisible(reports, visible)
 	doc.NodesAlive = alive
-	// The operator's lever is brain state: it shows for its zone whether or
-	// not a node has reported the zone yet.
-	live := s.edgeLever.live(time.Now())
+	rows := make(map[string]int, len(doc.Zones))
 	for i := range doc.Zones {
-		if o, ok := live[doc.Zones[i].Zone]; ok {
-			c := o
-			doc.Zones[i].Override = &c
-			delete(live, doc.Zones[i].Zone)
+		rows[doc.Zones[i].Zone] = i
+	}
+	// row returns the zone's row, adding an empty one (nodes: 0) when no
+	// alive node reported it. Indices stay valid across appends; a returned
+	// pointer is used before the next append.
+	row := func(zone string) *EdgeZoneStatus {
+		if i, ok := rows[zone]; ok {
+			return &doc.Zones[i]
+		}
+		doc.Zones = append(doc.Zones, EdgeZoneStatus{Zone: zone})
+		rows[zone] = len(doc.Zones) - 1
+		return &doc.Zones[len(doc.Zones)-1]
+	}
+	// The operator's lever is brain state: it shows for its zone whether or
+	// not a node has reported the zone yet — on a zone a reload has since
+	// removed from the file too, for the unscoped tokens that can clear it.
+	for zone, o := range s.edgeLever.live(time.Now()) {
+		if !visible(zone) {
+			continue
+		}
+		ov := o
+		row(zone).Override = &ov
+	}
+	// The zones file's word, brain state: every zone in it has a row — a
+	// mode: none zone, or one no alive node has reported yet, with nodes: 0 —
+	// carrying its mode and file challenge, whether it asks for HTTP/3 (which
+	// nodes serve it is theirs) and, for unscoped callers, its tenant.
+	if cfg.ZonesCfg != nil {
+		for j := range cfg.ZonesCfg.Zones {
+			z := &cfg.ZonesCfg.Zones[j]
+			if !visible(z.Name) {
+				continue
+			}
+			zs := row(z.Name)
+			zs.Mode = z.Policy.Mode
+			zs.FileChallenge = z.Policy.Challenge
+			if c.unscoped() {
+				zs.Tenant = z.Tenant
+			}
+			if z.TLS.H3 {
+				if zs.H3 == nil {
+					zs.H3 = &EdgeZoneH3{}
+				}
+				zs.H3.Enabled = true
+			}
 		}
 	}
-	for zone, o := range live {
-		c := o
-		doc.Zones = append(doc.Zones, EdgeZoneStatus{Zone: zone, Override: &c})
+	// The certificates the alive nodes hold for the rows, from their reports,
+	// nodes in name order. A certificate for a zone without a row (gone from
+	// the file, reported by nobody, no lever) is not a zone to show.
+	names := make([]string, 0, len(reports))
+	for name := range reports {
+		names = append(names, name)
 	}
-	// Whether a zone ASKS for HTTP/3 is the zones file's word, brain state;
-	// which nodes serve it is theirs. After the lever pass, so a zone present
-	// only through a lever (no node has reported it) still shows h3.enabled.
-	if cfg.ZonesCfg != nil {
-		for i := range doc.Zones {
-			zs := &doc.Zones[i]
-			for j := range cfg.ZonesCfg.Zones {
-				if z := &cfg.ZonesCfg.Zones[j]; z.Name == zs.Zone && z.TLS.H3 {
-					if zs.H3 == nil {
-						zs.H3 = &EdgeZoneH3{}
-					}
-					zs.H3.Enabled = true
-				}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, cert := range reports[name].Certs {
+			i, ok := rows[cert.Zone]
+			if !ok {
+				continue
 			}
+			doc.Zones[i].Certs = append(doc.Zones[i].Certs, EdgeZoneCert{Node: name, NotAfter: cert.NotAfter, Issuer: cert.Issuer})
 		}
 	}
 	sort.Slice(doc.Zones, func(i, j int) bool { return doc.Zones[i].Zone < doc.Zones[j].Zone })
 	writeJSON(w, http.StatusOK, doc)
 }
 
-// mergeEdgeZones folds the alive nodes' reports into one status per zone.
+// mergeEdgeZones folds the alive nodes' reports into one status per zone,
+// every zone visible.
+func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
+	return mergeEdgeZonesVisible(reports, func(string) bool { return true })
+}
+
+// mergeEdgeZonesVisible is mergeEdgeZones over the zones visible says so
+// for: a zone it refuses reaches no row, no would-be set and no h3 list.
 // Deterministic: zones by name, nodes by name, the would-be set by requests
 // then source.
-func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
+func mergeEdgeZonesVisible(reports map[string]EdgeReport, visible func(zone string) bool) EdgeZonesStatusDoc {
 	doc := EdgeZonesStatusDoc{Zones: []EdgeZoneStatus{}}
 	names := make([]string, 0, len(reports))
 	for name := range reports {
@@ -212,6 +282,9 @@ func mergeEdgeZones(reports map[string]EdgeReport) EdgeZonesStatusDoc {
 		}
 		doc.NodesReporting++
 		for _, z := range rep.Zones {
+			if !visible(z.Zone) {
+				continue
+			}
 			zs := zones[z.Zone]
 			if zs == nil {
 				zs = &EdgeZoneStatus{Zone: z.Zone}
