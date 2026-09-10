@@ -610,7 +610,10 @@ headline and the long pole.
   another tenant's, unlabelled, or gone from the file — is the byte-identical `404 unknown zone`,
   decided before the body is read. Node names stay visible to a tenant (D3); the document, both
   reports, ACME, both inventories and `config/reload` stay unscoped. `edge_challenge` joins the
-  audit filter.
+  audit filter. A scoped refusal counts in `kapkan_api_zone_refused_total{route}` and logs once a
+  minute per token (the E6.1 limiter, shared — D10's trace for the operator); `h3.serving/
+  unsupported` come from `terminator.h3` for every row, `mode: none` included, and
+  `certs_truncated` is summed on the document like `zones_truncated`.
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and

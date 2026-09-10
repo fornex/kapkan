@@ -1,13 +1,20 @@
 package api
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/engine"
+	"github.com/kapkan-io/kapkan/internal/metrics"
+	"github.com/kapkan-io/kapkan/internal/mitigate"
 )
 
 // E6.2: a zone's tenant label scopes the two human-facing edge reads. The
@@ -27,6 +34,7 @@ zones:
     tls: {h3: true}
   - name: h.example
     origins: ["10.0.0.3:8080"]
+    tls: {h3: true}
     policy: {mode: none}
 `
 
@@ -70,8 +78,8 @@ func TestEdgeZonesStatusTenantScoped(t *testing.T) {
 	store, _ := tenantStore(t)
 	s := testServer(t, store)
 	h := s.Handler()
-	report := `{"version":"1.8.0","terminator":{"kind":"nginx","h3":{"state":"ready","module":true,"serving":["s.example"]}},` +
-		`"certs":[{"zone":"a.example","not_after":"2026-12-01T00:00:00Z","issuer":"R11"},{"zone":"s.example","not_after":"2026-12-02T00:00:00Z","issuer":"R11"},{"zone":"ghost.example","not_after":"2026-12-03T00:00:00Z"}],` +
+	report := `{"version":"1.8.0","terminator":{"kind":"nginx","h3":{"state":"ready","module":true,"serving":["s.example","h.example"]}},` +
+		`"certs":[{"zone":"a.example","not_after":"2026-12-01T00:00:00Z","issuer":"R11"},{"zone":"s.example","not_after":"2026-12-02T00:00:00Z","issuer":"R11"},{"zone":"ghost.example","not_after":"2026-12-03T00:00:00Z"}],"certs_truncated":1,` +
 		`"zones":[{"zone":"a.example","rps":10,"requests":100,"top_sources":[{"source":"203.0.113.9","requests":50,"state":"would-deny"}]},` +
 		`{"zone":"s.example","rps":20,"requests":200,"h3_requests":7,"top_sources":[{"source":"198.51.100.7","requests":60,"state":"would-challenge"}]},` +
 		`{"zone":"ghost.example","rps":1,"requests":1}]}`
@@ -83,8 +91,8 @@ func TestEdgeZonesStatusTenantScoped(t *testing.T) {
 	}
 
 	doc, code := getEdgeZonesStatus(h, "op-secret")
-	if code != http.StatusOK || doc.NodesAlive != 1 || len(doc.Zones) != 4 {
-		t.Fatalf("unscoped status = %d %+v, want four rows", code, doc)
+	if code != http.StatusOK || doc.NodesAlive != 1 || len(doc.Zones) != 4 || doc.CertsTruncated != 1 {
+		t.Fatalf("unscoped status = %d %+v, want four rows and certs_truncated 1", code, doc)
 	}
 	byName := map[string]EdgeZoneStatus{}
 	for _, z := range doc.Zones {
@@ -99,8 +107,11 @@ func TestEdgeZonesStatusTenantScoped(t *testing.T) {
 	if sz.Tenant != "shop" || sz.H3 == nil || !sz.H3.Enabled || len(sz.H3.Serving) != 1 || sz.H3.Serving[0] != "e1" || sz.H3.Requests != 7 || len(sz.Certs) != 1 {
 		t.Fatalf("s.example unscoped: %+v", sz)
 	}
-	if hz := byName["h.example"]; hz.Tenant != "" || hz.Mode != "none" || hz.Nodes != 0 || hz.Requests != 0 || len(hz.Certs) != 0 {
-		t.Fatalf("h.example (house, mode none, unreported) unscoped: %+v", hz)
+	// A mode: none zone is in no report's zones section, yet its QUIC listener
+	// is the node's terminator.h3 word — the row carries it.
+	if hz := byName["h.example"]; hz.Tenant != "" || hz.Mode != "none" || hz.Nodes != 0 || hz.Requests != 0 || len(hz.Certs) != 0 ||
+		hz.H3 == nil || !hz.H3.Enabled || len(hz.H3.Serving) != 1 || hz.H3.Serving[0] != "e1" {
+		t.Fatalf("h.example (house, mode none, unreported, h3) unscoped: %+v", hz)
 	}
 	// A zone the node reports but the file no longer has: shown to the
 	// unscoped token with no mode (nothing is known about it but the claim).
@@ -147,27 +158,45 @@ func TestEdgeLeverTenantScoped(t *testing.T) {
 	s := testServer(t, store)
 	aw := &fakeAuditWriter{}
 	s.SetAuditWriter(aw)
+	fq := &fakeQuerier{}
+	s.SetQuerier(fq)
 	h := s.Handler()
 	set := `{"mode":"manual","ttl_seconds":600,"reason":"credential stuffing"}`
+	refused := testutil.ToFloat64(metrics.APIZoneRefused.WithLabelValues("edge_lever"))
 
-	unknown := lever(h, http.MethodPost, "nope.example", set, "acme-op-secret")
-	if unknown.Code != http.StatusNotFound {
-		t.Fatalf("unknown zone = %d, want 404", unknown.Code)
+	// The baseline is the GENUINE unknown-zone answer — an unscoped operator on
+	// a name the file does not have — pinned literally; every scoped refusal
+	// below must be that, byte for byte.
+	unknown := lever(h, http.MethodPost, "nope.example", set, "op-secret")
+	if unknown.Code != http.StatusNotFound || strings.TrimSpace(unknown.Body.String()) != `{"error":"unknown zone"}` {
+		t.Fatalf("unknown zone = %d %q, want 404 {\"error\":\"unknown zone\"}", unknown.Code, unknown.Body.String())
 	}
-	for _, zone := range []string{"s.example", "h.example", "ghost.example"} {
-		for _, method := range []string{http.MethodPost, http.MethodDelete} {
-			body := set
-			if method == http.MethodDelete {
-				body = ""
-			}
-			rec := lever(h, method, zone, body, "acme-op-secret")
+	// Decided before the body is read: a body the handler would refuse on the
+	// caller's own zone (bad TTL, bad mode, not JSON, over the size limit) is
+	// still the same 404 on a zone that is not its own.
+	bodies := []string{set, `{"mode":"manual","ttl_seconds":1}`, `{"mode":"bogus","ttl_seconds":600}`, `not json`,
+		`{"mode":"manual","ttl_seconds":600,"reason":"` + strings.Repeat("x", 5000) + `"}`}
+	n := 0
+	for _, zone := range []string{"s.example", "h.example", "ghost.example", "nope.example"} {
+		for _, body := range bodies {
+			rec := lever(h, http.MethodPost, zone, body, "acme-op-secret")
+			n++
 			if rec.Code != http.StatusNotFound || rec.Body.String() != unknown.Body.String() {
-				t.Fatalf("%s %s as acme = %d %q, want the unknown-zone answer %q", method, zone, rec.Code, rec.Body.String(), unknown.Body.String())
+				t.Fatalf("POST %s as acme with body %.40q = %d %q, want the unknown-zone answer", zone, body, rec.Code, rec.Body.String())
 			}
+		}
+		rec := lever(h, http.MethodDelete, zone, "", "acme-op-secret")
+		n++
+		if rec.Code != http.StatusNotFound || rec.Body.String() != unknown.Body.String() {
+			t.Fatalf("DELETE %s as acme = %d %q, want the unknown-zone answer", zone, rec.Code, rec.Body.String())
 		}
 	}
 	if len(aw.rows) != 0 {
 		t.Fatalf("refusals wrote %d audit rows", len(aw.rows))
+	}
+	// The operator's trace: every scoped refusal counted, the unscoped 404 not.
+	if got := testutil.ToFloat64(metrics.APIZoneRefused.WithLabelValues("edge_lever")) - refused; got != float64(n) {
+		t.Fatalf("zone refusals counted = %v, want %d", got, n)
 	}
 	if rec := lever(h, http.MethodPost, "a.example", set, "acme-view-secret"); rec.Code != http.StatusForbidden {
 		t.Fatalf("scoped viewer = %d, want 403 (rank)", rec.Code)
@@ -185,10 +214,10 @@ func TestEdgeLeverTenantScoped(t *testing.T) {
 	if rec := getWith(h, "/api/v1/edge/zones/status", "shop-op-secret"); strings.Contains(rec.Body.String(), "a.example") || strings.Contains(rec.Body.String(), "stuffing") {
 		t.Fatalf("shop sees acme's lever: %s", rec.Body.String())
 	}
-	// The audit filter takes the action (the allowlist is checked only once a
-	// store is configured, so the bogus-action 400 is not reachable here).
-	if rec := getWith(h, "/api/v1/audit?action=edge_challenge", "acme-op-secret"); rec.Code == http.StatusBadRequest {
-		t.Fatalf("audit?action=edge_challenge = 400: %s", rec.Body.String())
+	// The audit filter takes the action and binds the caller's tenant to the
+	// query (a querier is attached, so the allowlist is really consulted).
+	if rec := getWith(h, "/api/v1/audit?action=edge_challenge", "acme-op-secret"); rec.Code != http.StatusOK || fq.gotAudit.Action != "edge_challenge" || fq.gotAudit.Tenant != "acme" {
+		t.Fatalf("audit?action=edge_challenge = %d, filter %+v; want 200 with action edge_challenge and tenant acme", rec.Code, fq.gotAudit)
 	}
 
 	// A lever on a zone a reload has since removed from the file is the
@@ -210,6 +239,57 @@ func TestEdgeLeverTenantScoped(t *testing.T) {
 	}
 	if rec := lever(h, http.MethodDelete, "a.example", "", "op-secret"); rec.Code != http.StatusOK {
 		t.Fatalf("clear on a removed zone as unscoped = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestEdgeLeverRefusalLogAndMetric: a scoped token probing zones it does not
+// own leaves the operator one Warn a minute per token (the E6.1 limiter,
+// shared) naming the token, its tenant, the route and the zone asked for —
+// and a count per refusal — while the caller sees nothing but the 404.
+func TestEdgeLeverRefusalLogAndMetric(t *testing.T) {
+	store, _ := tenantStore(t)
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	eng := engine.New(store, engine.WithLogger(log))
+	mit, err := mitigate.New(store, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(store, eng, mit, log)
+	h := s.Handler()
+	before := testutil.ToFloat64(metrics.APIZoneRefused.WithLabelValues("edge_lever"))
+	set := `{"mode":"manual","ttl_seconds":600}`
+	for _, zone := range []string{"s.example", "s.example", "h.example", "ghost.example", strings.Repeat("z", 300) + ".example"} {
+		if rec := lever(h, http.MethodPost, zone, set, "acme-op-secret"); rec.Code != http.StatusNotFound {
+			t.Fatalf("acme on %.20s = %d, want 404", zone, rec.Code)
+		}
+	}
+	if got := testutil.ToFloat64(metrics.APIZoneRefused.WithLabelValues("edge_lever")) - before; got != 5 {
+		t.Fatalf("refusals counted = %v, want 5", got)
+	}
+	logged := buf.String()
+	if n := strings.Count(logged, "zone refused"); n != 1 {
+		t.Fatalf("Warn lines = %d, want one per token per minute:\n%s", n, logged)
+	}
+	if !strings.Contains(logged, "token=acme-op") || !strings.Contains(logged, "tenant=acme") || !strings.Contains(logged, "zone=s.example") || !strings.Contains(logged, "route=edge_lever") {
+		t.Fatalf("the Warn line lacks its attributes:\n%s", logged)
+	}
+	if strings.Contains(logged, strings.Repeat("z", 300)) {
+		t.Fatalf("a presented zone was logged untruncated:\n%s", logged)
+	}
+	// Another tenant's token gets its own line.
+	if rec := lever(h, http.MethodDelete, "a.example", "", "shop-op-secret"); rec.Code != http.StatusNotFound {
+		t.Fatalf("shop on a.example = %d, want 404", rec.Code)
+	}
+	if n := strings.Count(buf.String(), "zone refused"); n != 2 || !strings.Contains(buf.String(), "token=shop-op") {
+		t.Fatalf("second token's refusal not logged as its own line:\n%s", buf.String())
+	}
+	// The unscoped operator's unknown zone is a plain 404: nothing to warn about.
+	if rec := lever(h, http.MethodPost, "nope.example", set, "op-secret"); rec.Code != http.StatusNotFound {
+		t.Fatalf("op on nope.example = %d", rec.Code)
+	}
+	if n := strings.Count(buf.String(), "zone refused"); n != 2 {
+		t.Fatalf("an unscoped 404 was logged as a zone refusal:\n%s", buf.String())
 	}
 }
 

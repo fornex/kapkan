@@ -209,6 +209,11 @@ func (s *Server) handleEdgeChallengeLever(w http.ResponseWriter, r *http.Request
 	zone := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
 	cfg := s.store.Get()
 	if !visibleZone(c, cfg, zone) {
+		// Only a scoped caller gets here (an unscoped one sees every zone):
+		// the operator's trace of the refusal, never the caller's.
+		if !c.unscoped() {
+			s.logZoneRefusal(c, zone, "edge_lever", r)
+		}
 		writeError(w, http.StatusNotFound, "unknown zone")
 		return
 	}

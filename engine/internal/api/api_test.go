@@ -1241,6 +1241,7 @@ func TestAuditEndpointParamValidation(t *testing.T) {
 		{"from=notatime", http.StatusBadRequest},
 		{"target=notanip", http.StatusBadRequest},
 		{"action=ban", http.StatusOK},
+		{"action=edge_challenge", http.StatusOK},
 	} {
 		if rec := do(t, h, http.MethodGet, "/api/v1/audit?"+tc.q, ""); rec.Code != tc.want {
 			t.Errorf("audit?%s = %d, want %d", tc.q, rec.Code, tc.want)

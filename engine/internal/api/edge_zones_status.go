@@ -29,7 +29,11 @@ type EdgeZonesStatusDoc struct {
 	// ZonesTruncated sums the zone entries the alive nodes cut from their
 	// reports to fit the size limit: those zones are missing or undercounted
 	// here, and a consumer must say so rather than show a shorter fleet.
+	// CertsTruncated does the same for the certificates behind the rows'
+	// certs (E6.2): a short list is "what survived the node's cap", not
+	// "nothing held".
 	ZonesTruncated int `json:"zones_truncated,omitempty"`
+	CertsTruncated int `json:"certs_truncated,omitempty"`
 }
 
 // EdgeZoneStatus is one zone across the alive nodes.
@@ -211,16 +215,36 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// The certificates the alive nodes hold for the rows, from their reports,
-	// nodes in name order. A certificate for a zone without a row (gone from
-	// the file, reported by nobody, no lever) is not a zone to show.
+	// Two more passes over the alive reports, nodes in name order, for the
+	// rows that exist (rows hold visible zones only, so nothing foreign can
+	// enter here). First the live QUIC listeners from terminator.h3: a
+	// mode: none zone is not in a report's zones section, so the merge could
+	// not mark it as serving/unsupported — this can. Then the certificates
+	// the nodes hold for the rows; a certificate for a zone without a row
+	// (gone from the file, reported by nobody, no lever) is not a zone to show.
 	names := make([]string, 0, len(reports))
 	for name := range reports {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		for _, cert := range reports[name].Certs {
+		rep := reports[name]
+		doc.CertsTruncated += rep.CertsTruncated
+		if rep.Terminator != nil && rep.Terminator.H3 != nil {
+			for _, zone := range rep.Terminator.H3.Serving {
+				if i, ok := rows[zone]; ok {
+					h3 := rowH3(&doc.Zones[i])
+					h3.Serving = appendUnique(h3.Serving, name)
+				}
+			}
+			for _, zone := range rep.Terminator.H3.Unsupported {
+				if i, ok := rows[zone]; ok {
+					h3 := rowH3(&doc.Zones[i])
+					h3.Unsupported = appendUnique(h3.Unsupported, name)
+				}
+			}
+		}
+		for _, cert := range rep.Certs {
 			i, ok := rows[cert.Zone]
 			if !ok {
 				continue
@@ -230,6 +254,25 @@ func (s *Server) handleEdgeZonesStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(doc.Zones, func(i, j int) bool { return doc.Zones[i].Zone < doc.Zones[j].Zone })
 	writeJSON(w, http.StatusOK, doc)
+}
+
+// rowH3 returns the row's h3 block, creating it.
+func rowH3(zs *EdgeZoneStatus) *EdgeZoneH3 {
+	if zs.H3 == nil {
+		zs.H3 = &EdgeZoneH3{}
+	}
+	return zs.H3
+}
+
+// appendUnique appends s unless the list already holds it (the merge may have
+// named the node for a deciding zone before the terminator pass runs).
+func appendUnique(list []string, s string) []string {
+	for _, have := range list {
+		if have == s {
+			return list
+		}
+	}
+	return append(list, s)
 }
 
 // mergeEdgeZones folds the alive nodes' reports into one status per zone,
