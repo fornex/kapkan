@@ -151,22 +151,40 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   been validated through the challenge the brain fanned out); the two **hash
   forms** (layer 3 pins one client to one node, layer 4 spreads it over both —
   over TCP and over HTTP/3, since the same policy hashes the UDP 4-tuple); the
-  **per-node ceilings**, whose L3-vs-L4 shares are recorded because they are the
-  guide's "up to N× the ceiling"; a node **dying with nobody withdrawing**, then
-  the same node behind a downed link (a dead nexthop needs no operator, a dead
-  node does) and the withdrawal as the RIB effect it is, timed; the
-  **withdrawal signal** — `/healthz` 503 yes, `converged:false` no, the
-  inventory's `alive` no; the brain dead; the two **cross-node facts** (a TLS
-  session is not resumable on the other node, a clearance cookie is honoured
-  there); and **MTU** 1200 on one leg, which takes HTTP/3 away from a client
-  for the *whole* shared address rather than for that node's share of it,
-  because a path MTU is cached per destination. Arm G also records the one
+  **per-node ceilings**, whose L3-vs-L4 shares are recorded with each batch's
+  duration beside them (the bucket admits `rps + rps·T` over a batch of `T`
+  seconds, so the ratio is a range and is asserted as one) because they are
+  the guide's "up to N× the ceiling" — and because the two hash forms differ
+  in kind, not only in degree: under L4 the refusals are diluted and the
+  source is still reported `allow`, while under L3 they all land on one node,
+  cross the rollup's flood rule there and promote that source to a **table
+  denial** for `DenyTTL`, which anyone choosing a low per-node `rps` under the
+  recommended L3 hash has to know; a node **dying with nobody withdrawing**,
+  then the same node behind a downed link (a dead nexthop needs no operator, a
+  dead node does) and the withdrawal as the RIB effect it is, timed; the
+  **withdrawal signal** — `/healthz` 503 yes (within one
+  `controller.report_interval_seconds`, the tick that check rides: 1 s in this
+  rig, 10 s by default, so it is the knob an operator withdrawing on
+  `/healthz` sets to their probe period), `converged:false` no, the
+  inventory's `alive` no; the brain dead, and back at the nodes' next poll —
+  bounded by the poll's own backoff, 1 s doubling to 30 s, never by
+  `stale_after`; the two **cross-node facts** (a TLS session is not resumable
+  on the other node, whose own cache is shown to resume first so the claim is
+  not vacuous; a clearance cookie is honoured there); and **MTU** 1200 on one
+  leg, which takes HTTP/3 away from a client for the *whole* shared address
+  rather than for that node's share of it, because a path MTU is cached per
+  destination. Arm G also records the one
   product finding these runs turned up: as rendered, a TLS 1.2 session resumes
   on no node at all, because nginx looks a session up on the SSL context of
   the address's default server and kapkan's catch-all carries no
-  `ssl_session_cache`. The arm proves that with the supported
-  `omit_catch_all`, so the cross-node claim above is not accidentally true.
-  Needs `kapkan` and Pebble cross-compiled for the container:
+  `ssl_session_cache`. TLS 1.3 is in the same position rather than a different
+  one — with `ssl_session_tickets off` nginx issues stateful tickets looked up
+  in that same cache — so it too resumes nowhere today, and will resume on its
+  own node once the catch-all carries a cache, never across nodes. The arm
+  proves the cause with the supported `omit_catch_all`, so the cross-node
+  claim above is not accidentally true.
+  Needs `kapkan` and Pebble cross-compiled for the container (from the repo
+  root):
 
   ```sh
   mkdir -p /tmp/lab
@@ -190,7 +208,8 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
 Each of these scripts owns the whole container's network namespaces, `/etc/hosts`
 and its `/tmp`, and several bind privileged ports. Check `docker ps` for a
 running privileged `debian:13-slim` before starting one — another session may be
-part-way through `edge-e6.sh` — and wait for it to finish.
+part-way through one of them (`edge-e5.sh`, `edge-e6-anycast.sh`, and
+`edge-e6.sh` once the E6.10 rig lands) — and wait for it to finish.
 
 ## VRF
 
