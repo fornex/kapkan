@@ -45,8 +45,8 @@
 #   G.  an impossible or broken configuration never goes live;
 #   H.  fail-static under a wrong rebind, ended by the reload itself;
 #   I.  moving a zone;  J. the brain dead and restarted under placement;
-#   S6. the report is not trusted;  S7. never blocks — ClickHouse dead under
-#       a report burst;  S9. retention;
+#   S6. the report is not trusted;  S7. never blocks — ClickHouse stalled,
+#       then dead, under a report burst;  S9. retention;
 #   S8. storage off is byte-identical;  S10. nothing to steal, fail-static.
 #
 # Three rows are met differently from the plan's wording, for product reasons
@@ -102,7 +102,9 @@ tok() { case $1 in op) echo optok;; acme-view) echo acmeviewtok;; acme-op) echo 
 
 # hosts_drop NAME removes NAME's lines from /etc/hosts in place — the file is
 # a Docker bind mount, so `sed -i` (rename over it) fails silently.
-hosts_drop() { local tmp; tmp=$(grep -v " $1\$" /etc/hosts); printf '%s\n' "$tmp" > /etc/hosts; }
+# (An empty result would be a /etc/hosts with nothing but NAME in it: keep the
+# file rather than truncate it.)
+hosts_drop() { local tmp; tmp=$(grep -v " $1\$" /etc/hosts); [ -n "$tmp" ] && printf '%s\n' "$tmp" > /etc/hosts; }
 cleanup() {
   rm -f /tmp/s10-keys # the clearance keys S10 harvested never leave the box
   if [ -d /lab ]; then
@@ -548,7 +550,10 @@ stop_edge 1; start_edge 1 t1
 wait_eq 15 true node_f edge-1 "n['alive']" && ok "edge-1 restarted on t1 is alive again" || bad "edge-1 alive after t1: $(node_f edge-1 "n['alive']")"
 sleep 2
 [ "$(sfield 1 generation)" = "$G1_0" ] && [ "$(installs 1)" = "$I1_0" ] && ok "…with the same generation and no install (the document never changed; a 304 is asserted through its consequence — the node logs nothing on 304)" || bad "edge-1 after rebinding: gen $(sfield 1 generation), installs $(installs 1)"
-[ "$(inv_f "d.get('unbound_agent_tokens')")" = "None" ] && ok "inventory: no unbound agent tokens left" || bad "unbound_agent_tokens: $(inv_f "d['unbound_agent_tokens']")"
+# The field is omitempty, so "None" is also what an unanswered read would give:
+# the node count (the inventory always lists every configured node) says the
+# read happened.
+[ "$(inv_f "d.get('unbound_agent_tokens')")" = "None" ] && [ "$(inv_f "len(d.get('nodes',[]))")" = "2" ] && ok "inventory: no unbound agent tokens left (both nodes still listed)" || bad "unbound_agent_tokens: $(inv_f "d.get('unbound_agent_tokens')"), nodes $(inv_f "len(d.get('nodes',[]))")"
 rc=$(check_config); [ "$rc" = "0" ] && ! grep -q 'WARNING.*agent token' /tmp/check.out && ok "-check-config: OK, the unbound-token WARNING is gone" || bad "-check-config after binding: rc=$rc $(grep -i 'warning' /tmp/check.out | head -1)"
 
 # ================================================================ ARM A
@@ -566,8 +571,10 @@ LS2=$(node_f edge-2 "n['last_seen']"); REF0=$(brain_metric 'kapkan_api_node_bind
 [ "$(code t1 GET "$B/dataplane/rules?node=edge-2")" = "403" ] && ok "t1 polling the scrub rules as edge-2: 403" || bad "scrub rules as edge-2: $(code t1 GET "$B/dataplane/rules?node=edge-2")"
 [ "$(code t1 POST "$B/dataplane/nodes/edge-2/report" '{"version":"rig"}')" = "403" ] && ok "t1 reporting on the scrub channel as edge-2: 403" || bad "scrub report as edge-2: $(code t1 POST "$B/dataplane/nodes/edge-2/report" '{"version":"rig"}')"
 [ "$(node_f edge-2 "n['last_seen']")" = "$LS2" ] && [ "$(node_f edge-2 "n['alive']")" = "true" ] && [ "$(node_f edge-2 "n['tokens']")" = "['t2']" ] && ok "edge-2's last_seen did not move ($LS2), it stays alive on its own token, t1 never enters its token list" || bad "edge-2 after the forgeries: last_seen $LS2 -> $(node_f edge-2 "n['last_seen']"), alive $(node_f edge-2 "n['alive']"), tokens $(node_f edge-2 "n['tokens']")"
-[ "$(node_f edge-2 "n['report']['version']")" != "rig" ] && ok "the forged report was not stored for edge-2 (report.version $(node_f edge-2 "n['report']['version']"))" || bad "a forged report was stored for edge-2"
-grep -q '"token":"rig"\|rig.rig' <<< "$(doc op edge-1)$(doc op edge-2)" && bad "the forged challenge was published into a document" || ok "the forged challenge reached no document"
+RV2=$(node_f edge-2 "n['report']['version']") # non-empty: edge-2's OWN report is there, and it is not the forgery
+[ -n "$RV2" ] && [ "$RV2" != "rig" ] && ok "the forged report was not stored for edge-2 (report.version $RV2, the node's own)" || bad "edge-2's stored report.version: '$RV2'"
+DOCS="$(doc op edge-1)$(doc op edge-2)"
+[ -n "$DOCS" ] && ! grep -q '"token":"rig"\|rig.rig' <<< "$DOCS" && ok "the forged challenge reached no document" || bad "the forged challenge was published into a document (or the documents could not be read: ${#DOCS} bytes)"
 REF=$(brain_metric 'kapkan_api_node_binding_refused_total'); [ "$(python3 -c "print(int($REF - $REF0) >= 7)")" = "True" ] && ok "kapkan_api_node_binding_refused_total grew by $(python3 -c "print(int($REF - $REF0))") (seven refusals)" || bad "binding refusals metric: $REF0 -> $REF"
 [ "$(node_f edge-1 "n['alive']")" = "true" ] && [ "$(sfield 1 converged)" = "true" ] && ok "edge-1 stays alive and converged through it" || bad "edge-1 after the refusals: alive $(node_f edge-1 "n['alive']")"
 
@@ -591,7 +598,7 @@ brain_yaml "$AG_T1
 $AG_T2" "$NODES_PLAIN" on; reload_brain; sleep 2
 [ "$(etag t1 edge-1)" = "$ET1" ] && [ "$(etag t2 edge-2)" = "$ET2" ] && ok "three labels added: the agents' ETags are unchanged" || bad "labels moved an ETag: $ET1 -> $(etag t1 edge-1), $ET2 -> $(etag t2 edge-2)"
 [ "$(sfield 1 generation)" = "$G1" ] && [ "$(sfield 2 generation)" = "$G2" ] && [ "$(installs 1)" = "$I1" ] && [ "$(installs 2)" = "$I2" ] && ok "no generation, no install on either node" || bad "labels installed something"
-[ "$(pgrep -f 'nginx: worker' | sort | tr '\n' ' ')" = "$W1" ] && ok "nginx worker pids unchanged (no reload)" || bad "nginx workers changed"
+[ -n "$W1" ] && [ "$(pgrep -f 'nginx: worker' | sort | tr '\n' ' ')" = "$W1" ] && ok "nginx worker pids unchanged (no reload): $W1" || bad "nginx workers changed ('$W1' -> '$(pgrep -f 'nginx: worker' | sort | tr '\n' ' ')')"
 [ "$(wc -l < /tmp/edge1-nginx-error.log)" = "$E1" ] && ok "nginx's error log is quiet" || bad "nginx error log grew"
 [ "$(zst op $SHOP "z['tenant']")" = "acme" ] && ok "status for op shows tenant acme on $SHOP" || bad "tenant on $SHOP: $(zst op $SHOP "z['tenant']")"
 
@@ -599,7 +606,8 @@ $AG_T2" "$NODES_PLAIN" on; reload_brain; sleep 2
 say "ARM T2 — default-deny: a tenant sees exactly its zones, no foreign hostname, no tenant field"
 [ "$(zlist acme-view)" = "$API $SHOP" ] && ok "acme-view sees exactly $API + $SHOP" || bad "acme-view sees: $(zlist acme-view)"
 [ "$(zst acme-view $API "z['mode']")" = "none" ] && [ "$(zst acme-view $API "z['nodes']")" = "0" ] && ok "$API row: mode none, nodes 0 (a file-seeded row)" || bad "$API row: $(zst acme-view $API "z")"
-[ "$(api acme-view "$B/edge/zones/status" | grep -c "$STATIC\|$HOUSE\|$US\|\"tenant\"")" = "0" ] && ok "no foreign hostname and no tenant field in the tenant's body" || bad "the tenant's body leaks: $(api acme-view "$B/edge/zones/status" | grep -oE "$STATIC|$HOUSE|$US|\"tenant\"" | sort -u | tr '\n' ' ')"
+TB=$(api acme-view "$B/edge/zones/status") # read once: an empty body must not pass as "leaks nothing"
+[ -n "$TB" ] && [ "$(grep -c "$STATIC\|$HOUSE\|$US\|\"tenant\"" <<< "$TB")" = "0" ] && ok "no foreign hostname and no tenant field in the tenant's body (${#TB} bytes)" || bad "the tenant's body leaks: $(grep -oE "$STATIC|$HOUSE|$US|\"tenant\"" <<< "$TB" | sort -u | tr '\n' ' ')"
 [ "$(zlist globex-op)" = "$STATIC" ] && ok "globex-op (a tenant that exists only through a zone) sees exactly $STATIC" || bad "globex-op sees: $(zlist globex-op)"
 [ "$(zlist op)" = "$API $HOUSE $SHOP $STATIC $US" ] && ok "op sees all five" || bad "op sees: $(zlist op)"
 NA=$(api op "$B/edge/zones/status" | jx "d['nodes_alive']")
@@ -961,7 +969,7 @@ ip netns exec edge iptables -A OUTPUT -p tcp --dport 8123 -j DROP
 slowbad=0; worst="";
 for i in $(seq 1 8); do
   r=$(ip netns exec edge curl -s -o /dev/null -w '%{http_code} %{time_total}' -m5 -X POST -H "Authorization: Bearer t1tok" -H 'Content-Type: application/json' -d "{\"version\":\"1.8.0\",\"zones\":[{\"zone\":\"$SHOP\",\"at\":\"$(date -u -d "-$i sec" +%Y-%m-%dT%H:%M:%SZ)\",\"window_seconds\":10,\"requests\":$i,\"top_sources\":[{\"source\":\"198.51.200.7\",\"requests\":$i,\"state\":\"would-deny\"}]}]}" "$B/edge/nodes/edge-1/report")
-  python3 -c "import sys; c,t=sys.argv[1].split(); sys.exit(0 if c=='204' and float(t) < 0.05 else 1)" "$r" || { slowbad=$((slowbad+1)); worst="$worst[$r]"; }
+  python3 -c "import sys; c,t=sys.argv[1].split(); sys.exit(0 if c=='204' and float(t) < 0.05 else 1)" "$r" || { slowbad=$((slowbad+1)); worst="${worst}[$r]"; }
   sleep 0.5
 done
 [ "$slowbad" = "0" ] && ok "eight paced reports: every one a 204 in under 50 ms with the sink stalled" || bad "$slowbad of 8 reports were not a 204 under 50 ms: $worst"
@@ -996,7 +1004,10 @@ stop_ch; ip netns exec edge iptables -D OUTPUT -p tcp --dport 8123 -j DROP
 [ -z "$(chq 'SELECT 1')" ] && ok "ClickHouse stopped (:8123 refuses)" || bad "ClickHouse still answers after stop"
 for i in $(seq 1 40); do E=$(brain_metric 'kapkan_storage_rows_total{.*result="error"'); [ "$(python3 -c "print(($E - $E0) > 0)")" = "True" ] && break; sleep 0.5; done
 [ "$(python3 -c "print(($E - $E0) > 0)")" = "True" ] && ok "kapkan_storage_rows_total{result=error} grew (+$(python3 -c "print(int($E - $E0))")): the flushes failed against the dead server" || bad "no error rows counted: $E0 -> $E"
-grep -qi 'clickhouse.*\(fail\|error\|refused\)\|insert.*fail' /tmp/brain.log && ok "the brain logged the failed insert" || bad "no insert failure in the brain log"
+# The writer's own line (internal/storage/storage.go, "clickhouse insert
+# failed"), not any clickhouse-shaped warning: a schema-init or DDL warning at
+# start must not stand in for a failed insert.
+grep -q 'clickhouse insert failed' /tmp/brain.log && ok "the brain logged the failed insert" || bad "no 'clickhouse insert failed' line in the brain log: $(grep -ci clickhouse /tmp/brain.log) clickhouse line(s)"
 [ "$(code op GET "$B/edge/zones/status")" = "200" ] && [ "$(zst op $SHOP "z['nodes'] >= 1")" = "true" ] && ok "the zone status is untouched" || bad "zone status with storage down: $(code op GET "$B/edge/zones/status")"
 start_ch; wait_ch && ok "ClickHouse restarted" || bad "ClickHouse did not come back"
 W1=$(chq "SELECT count() FROM kapkan.edge_windows"); for i in $(seq 1 10); do get legit $SHOP $EDGE >/dev/null; sleep 0.3; done
@@ -1029,7 +1040,8 @@ wait_eq 30 true node_f edge-2 "n['alive']" || bad "edge-2 did not poll the stora
 [ "$(etag t1 edge-1)" = "$ET1" ] && [ "$(etag t2 edge-2)" = "$ET2" ] && [ "$(installs 1)" = "$I1" ] && [ "$(installs 2)" = "$I2" ] && [ "$(sfield 1 generation)" = "$G1" ] && [ "$(sfield 2 generation)" = "$G2" ] && ok "storage off: the same documents (ETags $ET1 / $ET2), no install, no generation moved" || bad "storage off changed a document: etags $ET1 -> $(etag t1 edge-1), $ET2 -> $(etag t2 edge-2); installs $I1 -> $(installs 1), $I2 -> $(installs 2)"
 [ "$(hist op "zone=$SHOP" | jx "d['available']")" = "false" ] && [ "$(hist op "zone=$SHOP" | jx "d['points']")" = "[]" ] && ok "/edge/history answers {available:false, points:[]}" || bad "history without storage: $(hist op "zone=$SHOP" | cut -c1-120)"
 [ "$(hist acme-view "zone=$STATIC" | jx "d['available']")" = "false" ] && ok "…for every token, no zone looked at (acme-view on another tenant's zone: available:false, not 403)" || bad "scoped history without storage: $(hist acme-view "zone=$STATIC" | cut -c1-120)"
-[ -z "$(ip netns exec edge curl -s -m3 http://$BRAIN:8080/metrics | grep '^kapkan_storage_rows_total')" ] && ok "/metrics carries no kapkan_storage_rows_total series" || bad "storage metrics present without storage"
+MET=$(ip netns exec edge curl -s -m3 "http://$BRAIN:8080/metrics") # an unanswered /metrics carries no series either: require a body
+[ -n "$MET" ] && ! grep -q '^kapkan_storage_rows_total' <<< "$MET" && ok "/metrics answers ($(grep -c '^kapkan_' <<< "$MET") kapkan series) and carries no kapkan_storage_rows_total" || bad "storage metrics present without storage (or /metrics unanswered: ${#MET} bytes)"
 # The negative, deterministic: the same forged report during a capture — with
 # storage on it was flushed within a second; now nothing must reach :8123.
 timeout 5 ip netns exec edge tcpdump -i lo -nn -c 1 'tcp port 8123' >/tmp/tcpdump-8123-off.log 2>&1 &

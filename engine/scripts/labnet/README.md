@@ -144,12 +144,12 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   writing no decided window (only the CA's undecided probe windows), telling
   sources only, the read API equal to SQL and default-deny, the node's
   chronology as events, forged reports re-stamped/dropped/capped, ClickHouse
-  dead under a report burst (`204` in under 50 ms, drops counted, no
-  back-fill), retention, storage off byte-identical (same documents, no
-  install, no packet to ClickHouse); placement rendering a zone only where
-  placed, fan-out only to the serving nodes, `unserved`, the lever by
-  placement, impossible configurations never going live, fail-static under a
-  wrong rebind, moving a zone, the brain dead and back, and nothing to steal
+  stalled and then dead under a report burst (`204` in under 50 ms, drops and
+  errors both counted, no back-fill), retention, storage off byte-identical
+  (same documents, no install, no packet to ClickHouse); placement rendering a
+  zone only where placed, fan-out only to the serving nodes, `unserved`, the
+  lever by placement, impossible configurations never going live, fail-static
+  under a wrong rebind, moving a zone, the brain dead and back, nothing to steal
   in the three tables. Three rows of the plan's table are met differently
   from their wording, for product reasons the script comments state: a
   relabel to an unused tenant is accepted (a tenant is made by its zones), the
