@@ -1,8 +1,11 @@
 /* locales/fr.js — French catalog. Mirrors en.js key-for-key. Technical tokens
    (FlowSpec, RTBH, BGP, NTP/DNS/SYN…, pps, Mb/s, IPs, routes) stay verbatim.
-   One word per concept, as in docs/fr: an API credential is a « token » (never
-   « jeton »), and a scope — a token's tenant or a node's placement — is a
-   « périmètre » (never « portée »). */
+   One word per concept, as in docs/fr/authentication.mdx (the page the console
+   links to; the other French pages are still being aligned with it): an API
+   credential is a « token » (never « jeton »), and the scope of a token (its
+   tenant) or of a node (its placement) is a « périmètre » (never « portée »).
+   The rules engine's host/group scope is a different concept and keeps
+   « portée », as docs/fr/api.mdx does. */
 (function (w) {
   w.KAPKAN_LOCALES = w.KAPKAN_LOCALES || {};
   w.KAPKAN_LOCALES.fr = {
