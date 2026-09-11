@@ -183,6 +183,12 @@ func TestLocaleParityRegistered(t *testing.T) {
 // report, and the five ed.h3.tip.* tooltips (324 + 12 = 336) — plus two plural
 // keys, edgeH3ReadyNodes and edgeH3StillServing (10 + 2 = 12 keys; in en, 20 +
 // 4 = 24 forms).
+//
+// The fleet console (E6.7) added 34 strings: nine ed.* for the zones table's
+// tenant chips, its placement cell and the three readings a file-seeded row
+// can carry where a rung cannot be read off, plus nav.edgenodes and 24 en.*
+// for the Edge nodes view (336 + 34 = 370), and one plural key,
+// edgeUnboundTokens (12 + 1 = 13 keys; in en, 24 + 2 = 26 forms).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -191,9 +197,9 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		want   int
 	}{
 		{"units", 0, 4},
-		{"plurals", 1, 12},
-		{"plurals", 0, 24},  // 12 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5)
-		{"strings", 0, 336}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5)
+		{"plurals", 1, 13},
+		{"plurals", 0, 26},  // 13 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5) + edgeUnboundTokens (E6.7)
+		{"strings", 0, 370}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7)
 		{"enums", 1, 8},
 		{"enums", 0, 43},
 		{"enumsShort", 1, 1},
