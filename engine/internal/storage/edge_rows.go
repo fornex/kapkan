@@ -39,8 +39,8 @@ const (
 	tableEdgeEvents  = "edge_events"
 
 	// The read caps: history buckets like traffic's, the source and event
-	// lists like audit's (one over the documented limit, so a consumer can
-	// tell "full" from "more").
+	// lists like audit's — every row under the cap is returned, so a full
+	// 1 001 rows means the range hit the cap.
 	maxEdgeHistoryRows = 5001
 	maxEdgeSourceRows  = 1001
 	maxEdgeEventRows   = 1001

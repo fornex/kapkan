@@ -541,8 +541,10 @@ rule updates over ordinary HTTP. A node identifies itself with `?node=<name>`, a
 the node's liveness signal** — so the name must be a configured node (an unknown name is `404`)
 and, outside token-less local mode, the request must carry a real token. A token bound to a node
 (`api.tokens[].node`) may only poll as that node: another name, or no name, is a uniform `403`
-before any presence is recorded. Presence is stamped only by `agent` tokens — an operator's
-`?node=X` is a preview of X's document and moves no liveness.
+before any presence is recorded. A reload that removes the node, removes the token or moves the
+token's binding ends a parked poll with the answer a first poll would now get (`404`, `401`,
+`403`). Presence is stamped only by `agent` tokens — an operator's `?node=X` is a preview of X's
+document and moves no liveness.
 
 ```json
 {
@@ -591,24 +593,23 @@ any of these calls.
 #### GET /api/v1/edge/zones
 
 The zone document a node renders and enforces: the zones of the [zones file](/docs/zones) the
-node's [placement scope](/docs/edge#placing-zones-on-nodes) covers — every zone for an
-operator's bare `GET`, or for a fleet whose zones carry no `hostgroup` (a labelled zone is
-served only by nodes that list its group) — with their origins, TLS floor,
-ACME directories and policy, plus the live issuance grants, fanned-out ACME challenges,
-clearance keys and levers of those zones; the `ETag` is the node's own. A plain `GET` returns the document with a content-hash `ETag`; a
-`GET` whose `If-None-Match` names that ETag is **held** until the document changes — a
-successful reload of the zones file, a certificate challenge published by a node — or up to
-25 s, then answered `304`. A reload that removes the node, removes the token or moves the
-token's binding ends a parked poll with the answer a first poll would now get (`404`, `401`,
-`403`), never a document. A node identifies itself with `?node=<name>`, and **that poll is the
-node's liveness signal**, so the name must be a configured `edge.nodes[]` entry (an unknown
-name is `404`) and the request must carry a real token. A token bound to a node
-(`api.tokens[].node`) may only poll, report and coordinate ACME as that node — another node's
-name, or a poll without `?node=`, is a uniform `403` that never names the bound node, refused
-before any presence is stamped or anything stored; only `agent` tokens stamp presence, so an
-operator's `?node=X` is a presence-free preview of X's document. At most 4 polls per token name
-and `max(8, 2 × the number of edge nodes)` in total may be parked at once; a further matching
-poll is answered `429` with `Retry-After: 1`
+node's [placement scope](/docs/edge#placing-zones-on-nodes) covers — every zone for an operator's
+bare `GET`, or for a fleet whose zones carry no `hostgroup` (a labelled zone is served only by
+nodes that list its group) — with their origins, TLS floor, ACME directories and policy, plus the
+live issuance grants, fanned-out ACME challenges, clearance keys and levers of those zones; the
+`ETag` is the node's own. A plain `GET` returns the document with a content-hash `ETag`; a `GET`
+whose `If-None-Match` names that ETag is **held** until the document changes — a successful
+reload of the zones file, a certificate challenge published by a node — or up to 25 s, then
+answered `304`. A reload that removes the node, removes the token or moves the token's binding
+ends a parked poll with the answer a first poll would now get (`404`, `401`, `403`), never a
+document. A node identifies itself with `?node=<name>`, and **that poll is the node's liveness
+signal**, so the name must be a configured `edge.nodes[]` entry (an unknown name is `404`) and
+the request must carry a real token. A token bound to a node (`api.tokens[].node`) may only poll,
+report and coordinate ACME as that node — another node's name, or a poll without `?node=`, is a
+uniform `403` that never names the bound node, refused before any presence is stamped or anything
+stored; only `agent` tokens stamp presence, so an operator's `?node=X` is a presence-free preview
+of X's document. At most 4 polls per token name and `max(8, 2 × the number of edge nodes)` in
+total may be parked at once; a further matching poll is answered `429` with `Retry-After: 1`
 (`too many concurrent zone holds`), which the node treats as a failure and backs off from (1 s
 doubling to 30 s) — give each node its own agent token.
 
@@ -644,24 +645,23 @@ the operator acts and once more when it lapses.
 #### POST /api/v1/edge/nodes/\{name\}/report
 
 A node's advisory self-report — version, node-side dry-run, the ETag of the document it has
-**rendered** (so an operator can see a node lagging or refusing), the terminator's kind,
-version and liveness, its HTTP/3 readiness from the node's `nginx -V` probe (`terminator.h3
-{state, module, tls_library, early_data_capable, advisory, serving, unsupported, listening}` —
-`state` is `ready`, `no_module`, `node_off` or `unknown`; `advisory` names a published QUIC
-advisory whose range holds the build's nginx core, as advice: distributions backport fixes
-without moving the version; `serving` lists the zones the live generation listens over QUIC
-for, `unsupported` the zones that asked and are served over TCP here; `listening` says whether
-something on the box holds UDP 443 while QUIC listeners are rendered — the local half of "is
-HTTP/3 reachable?", the firewall being the other, and absent while no zone is served over QUIC
-here or on a box without `/proc/net/udp`), the
-live generation and its `nginx -t` result, and the certificates it
-holds (public metadata only, never a key; a long list is cut to the 64 KiB body limit with a
+**rendered** (so an operator can see a node lagging or refusing), the terminator's kind, version
+and liveness, its HTTP/3 readiness from the node's `nginx -V` probe (`terminator.h3 {state,
+module, tls_library, early_data_capable, advisory, serving, unsupported, listening}` — `state` is
+`ready`, `no_module`, `node_off` or `unknown`; `advisory` names a published QUIC advisory whose
+range holds the build's nginx core, as advice: distributions backport fixes without moving the
+version; `serving` lists the zones the live generation listens over QUIC for, `unsupported` the
+zones that asked and are served over TCP here; `listening` says whether something on the box
+holds UDP 443 while QUIC listeners are rendered — the local half of "is HTTP/3 reachable?", the
+firewall being the other, and absent while no zone is served over QUIC here or on a box without
+`/proc/net/udp`), the live generation and its `nginx -t` result, and the certificates it holds
+(public metadata only, never a key; a long list is cut to the 64 KiB body limit with a
 `certs_truncated` count), and a **zones section**: for every deciding zone the live generation
 serves, the last closed ten-second window (`at`, `window_seconds`, `rps`, `requests`, `decided`,
-`denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`, `status_2xx..5xx`, `h3_requests` —
-the requests that arrived over HTTP/3), the zone's
-challenge mode as the node applies it, whether the zone is watch-only on this node (`dry_run`) and
-whether its rung only previews there (`rung_dry_run`: the node's, the zone's or the rung's own
+`denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`, `status_2xx..5xx`,
+`h3_requests` — the requests that arrived over HTTP/3), the zone's challenge mode as the node
+applies it, whether the zone is watch-only on this node (`dry_run`) and whether its rung only
+previews there (`rung_dry_run`: the node's, the zone's or the rung's own
 `challenge_options.dry_run`), a zone-wide challenge in force (`challenge_active {reason, until,
 dry_run}` — `dry_run` says the flip previews there), and the window's sources — the would-be ones
 first (a challenge or a deny previewed), then the refused and challenged, then the busiest of the
@@ -679,15 +679,15 @@ after the report is stored and without the answer ever waiting for it. Never a l
 
 #### GET /api/v1/edge/nodes
 
-The node inventory: each configured edge node with its poll liveness joined with its last
-report, its placement scope (`hostgroups` — the effective scope, `["global"]` for a node
-without one — and `zones_placed`, the zones of the file it covers), plus `tokens` (the agent token names bound to it with `api.tokens[].node`) and
-`last_token` (the name of the token that last polled as it — never a secret); the document carries
-`unbound_agent_tokens` while any agent token is unbound and nodes exist to bind it to (absent
-otherwise) — the migration view of
-[Binding an agent token to its node](/docs/authentication#binding-an-agent-token-to-its-node).
-`hostgroups` and `zones_placed` are always present; `tokens`, `last_token` and
-`unbound_agent_tokens` are omitted when empty. A `viewer`-rank read, unscoped tokens only.
+The node inventory: each configured edge node with its poll liveness joined with its last report,
+its placement scope (`hostgroups` — the effective scope, `["global"]` for a node without one —
+and `zones_placed`, the zones of the file it covers), plus `tokens` (the agent token names bound
+to it with `api.tokens[].node`) and `last_token` (the name of the token that last polled as it —
+never a secret); the document carries `unbound_agent_tokens` while any agent token is unbound and
+nodes exist to bind it to (absent otherwise) — the migration view of [Binding an agent token to
+its node](/docs/authentication#binding-an-agent-token-to-its-node). `hostgroups` and
+`zones_placed` are always present; `tokens`, `last_token` and `unbound_agent_tokens` are omitted
+when empty. A `viewer`-rank read, unscoped tokens only.
 
 #### GET /api/v1/edge/zones/status
 
@@ -704,27 +704,31 @@ summed; absent for a zone nobody speaks or asks h3 for. `enabled` appears for ev
 file that turns h3 on — a `mode: none` zone included — and `serving`/`unsupported` name the alive
 nodes' live QUIC listeners for the zone from their `terminator.h3`, deciding zone or not;
 `requests` comes from the reports' zones section, which lists **deciding** zones only), and the
-**would-be set**: the union of the sources the
-nodes previewed a challenge or a deny for, the stronger state kept, the busiest first, bounded to
-20 per reporting node (`would_be_truncated` counts the rest). `partial` says a node's would-be
-sources did not all fit — its per-window bound, or a report that had to shrink — so the set is
-what survived, not everyone; `zones_truncated` on the document sums the zone entries the alive nodes
-cut from their reports, zones that are missing or undercounted here. Every zone of the zones
-file has a row as well — `mode` (its `policy.mode`) and `file_challenge` (its
-`policy.challenge`) are the brain's word, `challenge` what the nodes apply — and `certs` lists
-the certificate each alive node holds for the zone (`node`, `not_after`, `issuer` — the last
-omitted when the node reports none; metadata only, from the reports; `certs_truncated` on the
-document sums the entries the nodes cut from their reports to fit the size limit, so a short list
-is what survived, not what is held). Every file zone also carries its `placement {hostgroup,
-nodes, alive}` — the group the file puts it in, the configured nodes whose scope covers it and
-which of them are alive — and `unserved: true` when it has nodes but none is alive (a zone no
-node's scope covers shows `nodes: []` and is a `-check-config` warning instead). A node's
-claims about a zone outside its scope are stored in its report, and neither merged here nor written to the [edge history](#get-apiv1edgehistory) (`kapkan_edge_history_dropped_total{reason="outside_scope"}`). `placement.hostgroup` is present for unscoped tokens only: a tenant sees the node names its zone is served on, not how the operator groups them. A `viewer`-rank read. An unscoped token sees every zone,
-labelled ones with their `tenant` (the key is absent on an unlabelled zone); a
-[tenant-scoped](/docs/multi-tenancy) token exactly its own zones — no other tenant's hostname
-in any row, would-be set or HTTP/3 list, and no `tenant` field. Node names are visible to a
-tenant; the inventory is not. This is edge-spec's *who would have been challenged*: read it
-before a zone's rung goes live.
+**would-be set**: the union of the sources the nodes previewed a challenge or a deny for, the
+stronger state kept, the busiest first, bounded to 20 per reporting node (`would_be_truncated`
+counts the rest). `partial` says a node's would-be sources did not all fit — its per-window
+bound, or a report that had to shrink — so the set is what survived, not everyone;
+`zones_truncated` on the document sums the zone entries the alive nodes cut from their reports,
+zones that are missing or undercounted here — a fleet-wide count, taken before the tenant filter,
+so a scoped caller may see a number that covers zones it cannot see. Every zone of the zones file
+has a row as well — `mode` (its `policy.mode`) and `file_challenge` (its `policy.challenge`) are
+the brain's word, `challenge` what the nodes apply — and `certs` lists the certificate each alive
+node holds for the zone (`node`, `not_after`, `issuer` — the last omitted when the node reports
+none; metadata only, from the reports; `certs_truncated` on the document sums the entries the
+nodes cut from their reports to fit the size limit — fleet-wide, like `zones_truncated` — so a
+short list is what survived, not what is held). Every file zone also carries its `placement
+{hostgroup, nodes, alive}` — the group the file puts it in, the configured nodes whose scope
+covers it and which of them are alive — and `unserved: true` when it has nodes but none is alive
+(a zone no node's scope covers shows `nodes: []` and is a `-check-config` warning instead). A
+node's claims about a zone outside its scope are stored in its report, and neither merged here
+nor written to the [edge history](#get-apiv1edgehistory)
+(`kapkan_edge_history_dropped_total{reason="outside_scope"}`). `placement.hostgroup` is present
+for unscoped tokens only: a tenant sees the node names its zone is served on, not how the
+operator groups them. A `viewer`-rank read. An unscoped token sees every zone, labelled ones with
+their `tenant` (the key is absent on an unlabelled zone); a [tenant-scoped](/docs/multi-tenancy)
+token exactly its own zones — no other tenant's hostname in any row, would-be set or HTTP/3 list,
+and no `tenant` field. Node names are visible to a tenant; the inventory is not. This is
+edge-spec's *who would have been challenged*: read it before a zone's rung goes live.
 
 ```json
 {
@@ -841,12 +845,13 @@ no audit row is written.
 
 `mode` is `manual`, `auto` or `off` (`off` clears the override, as `DELETE` does); `ttl_seconds`
 is `60..86400` and required unless `mode` is `off`; `reason` is for the log, the audit row and
-the API's answers — `override.reason` in `GET /api/v1/edge/zones/status` and this endpoint's
-own response (at most 200 characters). An unknown zone is `404`; a zone in `policy.mode: none` is
+the API's answers — `override.reason` in `GET /api/v1/edge/zones/status` and this endpoint's own
+response (at most 200 characters). An unknown zone is `404`; a zone in `policy.mode: none` is
 `409` — nothing challenges there. The override travels in the zones document as
-`challenge_override` (parked polls are woken at once) and every node that serves the zone
-applies the effective mode on its fast path, so it ends at `until` brain or no brain. Audited as `edge_challenge` `set` /
-`cleared`. Both methods answer `200` with the rung as it now stands and where the lever bites:
+`challenge_override` (parked polls are woken at once) and every node that serves the zone applies
+the effective mode on its fast path, so it ends at `until` brain or no brain. Audited as
+`edge_challenge` `set` / `cleared`. Both methods answer `200` with the rung as it now stands and
+where the lever bites:
 
 ```json
 {
@@ -864,17 +869,17 @@ applies the effective mode on its fast path, so it ends at `until` brain or no b
 }
 ```
 
-`file_mode` is `policy.challenge` as the file has it; `zone_watch_only` and `rung_watch_only`
-are the zone's `policy.dry_run` and `challenge_options.dry_run` — on either the lever previews
-rather than bites, on every node; `nodes[]` lists the nodes the zone is
-[placed on](/docs/edge#placing-zones-on-nodes) — every configured node for a zone a reload has
-since removed from the file — with its liveness and its reported `dry_run` (absent until it has
-reported) — a node that only counts must be seen before the lever is trusted. `mode`, `until` and `reason` are absent when the zone follows its
-file, and `file_mode` is empty for a zone a reload has since removed from the file — such a
-lever can still be cleared, never set. The lever is held in the brain's memory, like the
-issuance coordinator; it is not gated by the brain's own `dry_run`. A node running a version
-from before the lever does not know `challenge_override` and follows its file while `nodes[]`
-still lists it: upgrade the nodes first.
+`file_mode` is `policy.challenge` as the file has it; `zone_watch_only` and `rung_watch_only` are
+the zone's `policy.dry_run` and `challenge_options.dry_run` — on either the lever previews rather
+than bites, on every node; `nodes[]` lists the nodes the zone is [placed
+on](/docs/edge#placing-zones-on-nodes) — every configured node for a zone a reload has since
+removed from the file — with its liveness and its reported `dry_run` (absent until it has
+reported) — a node that only counts must be seen before the lever is trusted. `mode`, `until` and
+`reason` are absent when the zone follows its file, and `file_mode` is empty for a zone a reload
+has since removed from the file — such a lever can still be cleared, never set. The lever is held
+in the brain's memory, like the issuance coordinator; it is not gated by the brain's own
+`dry_run`. A node running a version from before the lever does not know `challenge_override` and
+follows its file while `nodes[]` still lists it: upgrade the nodes first.
 
 ### GET /metrics
 

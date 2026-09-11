@@ -212,6 +212,17 @@ func TestEdgeHistoryWindowsAndSources(t *testing.T) {
 	dropDelta(t, before, nil)
 }
 
+// TestChallengeModeColumn: the document's three modes pass, a mode a node
+// invented is "other", and a report that says nothing stays empty — an old
+// node is not a node speaking a dialect.
+func TestChallengeModeColumn(t *testing.T) {
+	for in, want := range map[string]string{"off": "off", "manual": "manual", "auto": "auto", "weird": "other", "": ""} {
+		if got := challengeMode(in); got != want {
+			t.Errorf("challengeMode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestEdgeHistoryClockSkew (D11): a window close outside the gate is stamped
 // with the brain's clock, received_at is always the brain's, and clock_skew
 // is written once per transition — into skew and back.

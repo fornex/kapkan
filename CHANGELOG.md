@@ -507,6 +507,27 @@ security-relevant.
   certificates stay on disk and stop renewing (runbook, not automation). Config surface: both
   schemas, the overlay, docs (zones, configuration, edge *Placing zones on nodes* + Limits,
   edge-install, api, authentication).
+- Edge track, E6.10 — the fleet acceptance rig, `engine/scripts/labnet/edge-e6.sh` (edge-spec §8,
+  E6): the E5 topology on Debian 13 with a **real ClickHouse** beside the brain (the binary of the
+  image CI pins; the rig prints the version it ran against) and no XDP — two nodes, five zones
+  under four hostgroups (one that no node lists, one carrying a tenant) and two tenants, seven
+  token names with six configured at a time — proving the E6 plan's acceptance map end to end: an
+  unscoped fleet's documents byte-identical; the migration from one shared agent token to one
+  bound token per node with no install, and fail-static (TLS, h3 and local 429s) in between;
+  binding refusing another node's name on every route of both channels and saving nothing; the
+  operator's presence-free preview; labels as a non-event for the nodes; default-deny tenant
+  views, the tenant's lever and its audit rows, no existence oracle, a relabel following the file
+  (a tenant is made by its zones), a zone/hostgroup tenant mismatch and a zone removed under a
+  live token refused; history rows landing once, an idle deciding zone writing no decided window
+  (only the CA's undecided probe windows), telling sources only, the read API equal to SQL and
+  default-deny, the node's chronology as events, forged reports re-stamped, dropped and capped,
+  ClickHouse stalled and then dead under a report burst answered `204` in under 50 ms with drops
+  and errors both counted and no back-fill, retention by TTL, storage off byte-identical (same
+  documents, no install, no packet to ClickHouse); placement rendering a zone only where placed,
+  fan-out only to the serving nodes, `unserved` and the lever by placement, impossible
+  configurations never going live, fail-static under a wrong rebind, a zone moved between groups,
+  the brain dead and back, and nothing to steal in the three tables. The rig records the
+  ClickHouse version and the bytes per row of a short run.
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data
