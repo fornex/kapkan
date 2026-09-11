@@ -39,7 +39,7 @@ sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"   # RHEL/Fedora: dnf instal
 Le service est installé mais **laissé arrêté** — un démon de mitigation ne devrait pas démarrer
 avant que vous n'ayez examiné sa configuration. Le `config.yaml` fourni a `dry_run: true` (Kapkan
 calcule les routes blackhole mais ne les annonce pas à votre routeur). Examinez-le, (recommandé)
-[définissez un jeton d'API](#secrets) dans `/etc/kapkan/kapkan.env`, puis démarrez-le au boot et
+[définissez un token d'API](#secrets) dans `/etc/kapkan/kapkan.env`, puis démarrez-le au boot et
 maintenant :
 
 ```sh
@@ -70,10 +70,10 @@ sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
 ```
 
-Le fichier d'environnement ci-dessus ne renseigne que `KAPKAN_API_TOKEN`, car un jeton d'API
+Le fichier d'environnement ci-dessus ne renseigne que `KAPKAN_API_TOKEN`, car un token d'API
 est recommandé avant d'exposer l'écouteur (voir [Authentification](/docs/authentication)).
 Renseigner le fichier d'environnement n'active pas l'authentification à lui seul : la configuration
-fournie lie `127.0.0.1` avec `api.token_env` mis en commentaire, de sorte que le jeton reste inerte.
+fournie lie `127.0.0.1` avec `api.token_env` mis en commentaire, de sorte que le token reste inerte.
 Décommentez `api.token_env` (ou ajoutez une liste `api.tokens`) pour activer l'authentification.
 Tous les canaux de notification sont optionnels — n'ajoutez `KAPKAN_TG_TOKEN`, les identifiants SMTP
 ou ClickHouse que si vous utilisez réellement ces fonctionnalités. La liste complète des clés
@@ -113,7 +113,7 @@ sudo journalctl -u kapkan -f
 | --- | --- | --- |
 | `/usr/local/bin/kapkan` | `0755` | Le binaire unique et statique du démon. |
 | `/etc/kapkan/config.yaml` | `0640` | La configuration YAML, appartenant à `kapkan:kapkan`. |
-| `/etc/kapkan/kapkan.env` | `0600` | Fichier d'environnement des secrets (jetons, identifiants SMTP). |
+| `/etc/kapkan/kapkan.env` | `0600` | Fichier d'environnement des secrets (tokens, identifiants SMTP). |
 | `/etc/systemd/system/kapkan.service` | `0644` | L'unité systemd renforcée. Le `.deb`/`.rpm` l'installe plutôt dans `/usr/lib/systemd/system/kapkan.service` (emplacement fournisseur). |
 | `/var/lib/kapkan/` | `0700` | Répertoire d'état accessible en écriture (`StateDirectory=kapkan`) ; contient `ban.state_file` lorsque la persistance des bans est activée. |
 | `/run/kapkan/` | `0755` | Répertoire d'exécution (`RuntimeDirectory=kapkan`), créé au démarrage et supprimé à l'arrêt ; contient `kapkan.pid` pour que [`kapkan -s reload`](/docs/cli#contrôler-un-démon-en-cours-dexécution) puisse trouver le démon. |
@@ -130,9 +130,9 @@ via `EnvironmentFile=-/etc/kapkan/kapkan.env`. Conservez ce fichier en mode `060
 
 Les clés de configuration qui lisent depuis l'environnement sont les clés `*_env` :
 
-- `notify.telegram.token_env` — par ex. `KAPKAN_TG_TOKEN`, le jeton du bot Telegram.
+- `notify.telegram.token_env` — par ex. `KAPKAN_TG_TOKEN`, le token du bot Telegram.
 - `notify.email.username_env` / `notify.email.password_env` — identifiants SMTP.
-- `api.token_env` — le jeton bearer de l'API (voir [Authentification](/docs/authentication)).
+- `api.token_env` — le token bearer de l'API (voir [Authentification](/docs/authentication)).
 - `storage.clickhouse.username_env` / `password_env` — identifiants ClickHouse, si vous
   activez le magasin d'historique optionnel.
 
@@ -187,8 +187,8 @@ curl -s -X POST localhost:8080/api/v1/config/reload \
 ```
 
 `Content-Type: application/json` est obligatoire sur chaque `POST` qui modifie l'état (le serveur
-renvoie `415` sinon), et lorsque l'authentification est activée le rechargement nécessite un jeton
-Bearer non restreint (admin) — un [jeton restreint à un locataire (tenant)](/docs/multi-tenancy) reçoit `403`.
+renvoie `415` sinon), et lorsque l'authentification est activée le rechargement nécessite un token
+Bearer non restreint (admin) — un [token restreint à un locataire (tenant)](/docs/multi-tenancy) reçoit `403`.
 
 La plupart des clés se rechargent à chaud, notamment `dry_run`, les seuils, `networks`, les
 hostgroups, les références (baselines), les paramètres de notification et `sampling.default_rate`.
@@ -227,7 +227,7 @@ jamais contacté.
 
 <Callout type="warning" title="Avant d'exposer Kapkan">
 Conservez `dry_run: true` jusqu'à ce que vous ayez validé la détection face à de la télémétrie en
-direct — voir [Mise en production](/docs/going-live). Et définissez un jeton d'API avant de lier
+direct — voir [Mise en production](/docs/going-live). Et définissez un token d'API avant de lier
 l'écouteur au-delà de `127.0.0.1`, faute de quoi l'API et le tableau de bord seront accessibles sans
 authentification — voir [Authentification](/docs/authentication).
 </Callout>
@@ -235,5 +235,5 @@ authentification — voir [Authentification](/docs/authentication).
 ## Voir aussi
 
 - [Référence de configuration](/docs/configuration) — chaque clé du fichier YAML.
-- [Authentification](/docs/authentication) — définissez un jeton bearer avant d'exposer l'API.
+- [Authentification](/docs/authentication) — définissez un token bearer avant d'exposer l'API.
 - [Mise en production](/docs/going-live) — validez la détection, puis désactivez le dry-run.

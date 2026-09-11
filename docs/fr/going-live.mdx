@@ -35,8 +35,8 @@ sessions BGP. Vous validez le pipeline réel, pas une simulation.
    curl -s localhost:8080/api/v1/attacks | jq
    ```
 
-   <Callout type="info" title="Si vous avez configuré des jetons d'API">
-   Ces commandes supposent l'API par défaut sans jeton, sur un bind `127.0.0.1` de confiance. Si
+   <Callout type="info" title="Si vous avez configuré des tokens d'API">
+   Ces commandes supposent l'API par défaut sans token, sur un bind `127.0.0.1` de confiance. Si
    vous avez configuré `api.tokens` ou `api.token_env`, ajoutez `-H 'Authorization: Bearer <token>'`
    à chaque curl — sinon vous obtiendrez une erreur `401`/`403`.
    </Callout>

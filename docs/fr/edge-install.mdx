@@ -49,7 +49,7 @@ api:
 
 **Cadrez les zones sur les nœuds** lorsque la flotte a des PoP : donnez à chaque nœud les
 hostgroups dont il sert les zones (`edge.nodes[].hostgroups: [edge-us]`, avec le littéral `global`
-pour les zones valables sur toute la flotte) et à chaque zone son `hostgroup` ; un nœud sans portée
+pour les zones valables sur toute la flotte) et à chaque zone son `hostgroup` ; un nœud sans périmètre
 ne sert que les zones globales, une zone sans hostgroup est globale. La règle, le littéral `global`
 et le mode opératoire sont dans [Placer les zones sur les
 nœuds](/docs/edge#placer-les-zones-sur-les-nœuds) ; le plafond de certificats en double se compte
@@ -74,10 +74,10 @@ renouveler après une compromission revient à renouveler celui de toute la flot
 à son nœud (`api.tokens[].node`) ; tant que chaque token agent n'est pas lié, `-check-config`, le
 journal du démon et l'`unbound_agent_tokens` de l'inventaire le disent. Ce que la liaison apporte,
 c'est l'usurpation d'identité et le rayon de rotation ; ce qui limite l'ensemble des zones pour
-lesquelles un token lié volé peut émettre, c'est la [portée de
+lesquelles un token lié volé peut émettre, c'est le [périmètre de
 placement](/docs/edge#placer-les-zones-sur-les-nœuds) du nœud : agissant sous l'identité de son
 propre nœud, il ne peut prendre le créneau d'émission et publier une autorisation de clé ACME que
-pour les zones que cette portée couvre (toutes les zones sur une flotte sans portées) — traitez la
+pour les zones que ce périmètre couvre (toutes les zones sur une flotte sans périmètres) — traitez la
 compromission d'un nœud comme une exposition de certificat pour les zones de ce nœud. Pour migrer
 une flotte depuis un unique token partagé : ajoutez un token lié par nœud **avec son propre
 secret** (une valeur partagée avec l'entrée non liée est ambiguë et refusée par un `401` pour chaque
@@ -265,7 +265,7 @@ observation seule sur chaque nœud pendant que ses voisines appliquent.
 Faites pointer le `controller.name` de chaque nœud vers sa propre entrée `edge.nodes[]` et placez
 les mêmes zones devant tous — chaque nœud derrière une même adresse partagée doit servir la zone,
 c'est-à-dire lister son hostgroup dans `edge.nodes[].hostgroups` (ou laisser la zone globale sur des
-nœuds sans portée). Sous anycast ou une VIP partagée, la validation HTTP-01 de la CA peut atterrir
+nœuds sans périmètre). Sous anycast ou une VIP partagée, la validation HTTP-01 de la CA peut atterrir
 sur n'importe quel nœud derrière cette adresse : le nœud qui commande publie sa réponse au défi
 auprès du cerveau, qui la diffuse dans le document de **chaque nœud qui sert la zone**, et chacun
 d'eux y répond ; un nœud sur lequel la zone n'est pas placée refuse le Host et ne peut pas

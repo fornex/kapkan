@@ -141,7 +141,7 @@ viole un est rejetée avec un HTTP `409` plutôt qu'annoncée silencieusement :
 | Bannir la cible dépasserait `max_banned_fraction` | `409` — si activé |
 | Bannir la cible dépasserait `max_bans_per_window` | `409` — si activé |
 
-Avec des jetons d'API délimités par tenant, il y a une vérification antérieure : une cible
+Avec des tokens d'API délimités par tenant, il y a une vérification antérieure : une cible
 appartenant à un autre tenant renvoie `403` (« target is outside your tenant ») avant que ces
 garde-fous ne s'exécutent. Les déploiements à opérateur unique (le cas courant) n'atteignent jamais
 ce point.

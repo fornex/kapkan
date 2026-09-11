@@ -14,7 +14,7 @@ afin que vous puissiez collecter le débit, la latence, les attaques actives et 
 dans votre supervision existante.
 
 <Callout type="info" title="/metrics reste ouvert">
-Le point de terminaison `/metrics` n'est jamais authentifié, même lorsque vous définissez un jeton
+Le point de terminaison `/metrics` n'est jamais authentifié, même lorsque vous définissez un token
 d'API avec `api.token_env`. Seuls les points de terminaison de données `/api/v1` exigent
 `Authorization: Bearer <token>`. Configurez l'écouteur en conséquence — voir
 [Authentification](/docs/authentication).
@@ -246,8 +246,8 @@ celles du runtime Go :
 | `kapkan_edge_log_records_total` | compteur | `result` | Datagrammes du journal d'accès envoyés par le terminateur : `ok`, `malformed`, `oversized`, `dropped` (le gestionnaire propre au nœud n'a pas suivi — sa file de 8192 enregistrements était pleine), `unknown_zone`. Les datagrammes que le noyau rejette n'atteignent jamais le nœud et ne sont pas comptés ici. |
 | `kapkan_edge_inflight_resets_total` | compteur | — | Compteurs de requêtes en cours que le service de décision a réinitialisés parce qu'une source active n'a vu aucune complétion pendant toute une période d'inactivité — son flux de journal était lacunaire ou mort. Un taux constant signifie que des datagrammes du journal d'accès se perdent avant d'atteindre le nœud : augmentez `net.unix.max_dgram_qlen` (le nœud avertit au démarrage lorsqu'il est inférieur à 512). |
 | `kapkan_edge_verdict_table_entries` | jauge | — | Entrées de refus, de défi et de marque actives dans la table de verdicts du nœud (un défi ou une marque masqué sous un refus actif compte, un expiré non). |
-| `kapkan_api_node_binding_refused_total` | compteur | `route` | Côté cerveau : requêtes refusées parce qu'un jeton `agent` [lié à un nœud](/docs/authentication#lier-un-token-agent-à-son-nœud) (`api.tokens[].node`) en a nommé un autre — ou, sur une interrogation, aucun — par route : `edge_zones`, `edge_report`, `edge_acme` (créneau et défis), `dataplane_rules`, `scrub_report`. Un compte qui monte signale un jeton mal configuré ou fuité ; le journal du cerveau le nomme, une fois par minute et par jeton. |
-| `kapkan_api_zone_refused_total` | compteur | `route` | Côté cerveau : requêtes qu'un jeton [rattaché à un tenant](/docs/multi-tenancy) a faites sur une zone qu'il ne possède pas — celle d'un autre tenant, non étiquetée, ou disparue du fichier de zones — par route : `edge_lever` (le levier), `edge_history` (l'historique et les lectures de sources). L'appelant reçoit un unique refus uniforme (`404 unknown zone` sur le levier, `403` sur les lectures — compté sur les lectures uniquement tant que le stockage est activé : sans lui, la zone n'est pas regardée) ; un compte qui monte signale un jeton cadré mal configuré ou fuité, et le journal du cerveau le nomme une fois par minute et par jeton. |
+| `kapkan_api_node_binding_refused_total` | compteur | `route` | Côté cerveau : requêtes refusées parce qu'un token `agent` [lié à un nœud](/docs/authentication#lier-un-token-agent-à-son-nœud) (`api.tokens[].node`) en a nommé un autre — ou, sur une interrogation, aucun — par route : `edge_zones`, `edge_report`, `edge_acme` (créneau et défis), `dataplane_rules`, `scrub_report`. Un compte qui monte signale un token mal configuré ou fuité ; le journal du cerveau le nomme, une fois par minute et par token. |
+| `kapkan_api_zone_refused_total` | compteur | `route` | Côté cerveau : requêtes qu'un token [rattaché à un tenant](/docs/multi-tenancy) a faites sur une zone qu'il ne possède pas — celle d'un autre tenant, non étiquetée, ou disparue du fichier de zones — par route : `edge_lever` (le levier), `edge_history` (l'historique et les lectures de sources). L'appelant reçoit un unique refus uniforme (`404 unknown zone` sur le levier, `403` sur les lectures — compté sur les lectures uniquement tant que le stockage est activé : sans lui, la zone n'est pas regardée) ; un compte qui monte signale un token cadré mal configuré ou fuité, et le journal du cerveau le nomme une fois par minute et par token. |
 | `kapkan_edge_cert_not_after_seconds` | jauge | `zone` | Expiration du certificat de la zone sous forme d'horodatage Unix — l'**alarme T−30 j** : alertez lorsqu'elle est à moins de 30 jours. Supprimée lorsqu'une zone quitte le document. |
 | `kapkan_edge_acme_attempts_total` | compteur | `zone`, `result` | Commandes de certificats : `issued`, `renewed`, `failed` (sur l'une ou l'autre CA), et `fallback` — un certificat obtenu auprès de la CA de repli, compté en plus de son entrée `issued`/`renewed` ; sommez donc `issued+renewed+failed` pour les tentatives. |
 | `kapkan_edge_h3_ready` | jauge | — | `1` quand ce nœud peut générer HTTP/3 : sa sonde `nginx -V` a trouvé `--with-http_v3_module` et le `quic.h3` de l'`edge.yaml` n'est pas `off`. `0` sinon — la raison (`no_module`, `node_off`, `unknown`) est `terminator.h3.state` dans le rapport du nœud et `h3.state` sur `/healthz`, pas un label. La sonde ne tourne qu'une fois, au démarrage : la jauge reste donc là où cette sonde l'a laissée jusqu'au redémarrage du nœud. |
@@ -272,7 +272,7 @@ scrape_configs:
 ```
 
 Utilisez l'hôte et le port de votre valeur `api.listen` (par convention `127.0.0.1:8080`). Si vous exposez l'écouteur au-delà de
-localhost, définissez un jeton d'API — `/metrics` reste accessible sans celui-ci, de sorte que
+localhost, définissez un token d'API — `/metrics` reste accessible sans celui-ci, de sorte que
 votre collecteur n'a besoin d'aucun identifiant.
 
 Pour inspecter directement la sortie brute :
