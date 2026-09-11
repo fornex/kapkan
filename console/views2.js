@@ -782,20 +782,29 @@
     ]);
   }
 
+  /* The row the card was opened from, so focus can be put back on it when the
+     card that took it goes away. CSS.escape because a zone name is whatever
+     the zones file says it is. */
+  function edgeZoneRow(root, zone) {
+    return root.querySelector('tr[data-edge-zone="' + CSS.escape(zone) + '"]');
+  }
+
   /* The card under the zones table. `z` is the zone's live row when it still
      has one — it is what knows whether the rung bites anywhere — and may be
      absent if a reload dropped the zone while the card was open, in which case
      the counters are labelled without that claim rather than with a guess. */
-  function edgeHistoryCard(ctx, zone, z) {
+  function edgeHistoryCard(root, ctx, zone, z) {
     var st = ctx.state.edgeHist;
     var body;
     var nodes = (z && z.nodes) || 0, rungWatch = (z && (z.rung_watch_only || []).length) || 0;
-    /* watch-only for the purposes of these counters means the rung bites on NO
-       node, so nothing in the refused series can be a real refusal. With a
-       zone nobody reports (nodes: 0) there is no such claim to make: the
-       period may well contain real denials from when its nodes were up. */
-    var watchOnly = nodes > 0 && rungWatch >= nodes;
-    var refusedKey = watchOnly ? "ed.hist.wouldbe" : "ed.hist.refused";
+    /* The rung previewing on every node NOW says nothing about the hour, day
+       or week behind it: a rung switched to watch-only an hour ago leaves real
+       denials in the period it was still biting for. So the live state only
+       gets to title the series "would be refused" when the period ALSO holds
+       no real refusal — the buckets carry their own denied/challenged and are
+       asked below. With a zone nobody reports (nodes: 0) there is no live
+       claim to make at all. */
+    var liveWatchOnly = nodes > 0 && rungWatch >= nodes;
 
     if (st.forbidden) return null;              /* another tenant's zone: nothing to say */
     if (st.notFound) {
@@ -811,26 +820,32 @@
       body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.empty") }));
     } else {
       var rps = [], refused = [], h3 = [];
-      var sumReq = 0, sumRefused = 0, sumH3 = 0, sumErr = 0, maxNodes = 0, anyH3 = false;
+      var sumReq = 0, sumRefused = 0, sumReal = 0, sumH3 = 0, sumErr = 0, maxNodes = 0, anyH3 = false;
       st.points.forEach(function (p) {
         var req = p.requests || 0;
         /* the API's own formula: requests over the real length of the windows
            that fell in the bucket (they are not aligned across nodes, so this
            is a rate to the nearest window, never an exact one) */
         rps.push(p.window_seconds > 0 ? req / p.window_seconds : 0);
-        var ref = (p.denied || 0) + (p.challenged || 0) + (p.would_deny || 0) + (p.would_challenge || 0);
+        var real = (p.denied || 0) + (p.challenged || 0);
+        var ref = real + (p.would_deny || 0) + (p.would_challenge || 0);
         refused.push(ref);
         if (p.h3_requests) anyH3 = true;
         h3.push(req > 0 ? (p.h3_requests || 0) / req * 100 : 0);
-        sumReq += req; sumRefused += ref; sumH3 += p.h3_requests || 0;
+        sumReq += req; sumRefused += ref; sumReal += real; sumH3 += p.h3_requests || 0;
         sumErr += (p.status_4xx || 0) + (p.status_5xx || 0);
         maxNodes = Math.max(maxNodes, p.nodes || 0);
       });
+      /* "Would be refused" is a claim about the whole series, so it is made
+         only when the period bears it out; the preview tag is a claim about
+         NOW and rides on the live state either way. */
+      var watchOnly = liveWatchOnly && sumReal === 0;
+      var refusedKey = watchOnly ? "ed.hist.wouldbe" : "ed.hist.refused";
       var peak = function (vals) { return I.t("ac.peak") + " " + I.abbr(Math.max.apply(null, vals)); };
       var charts = [
         histChart("ed.hist.rps", rps, peak(rps), "var(--chart-in)", null),
         histChart(refusedKey, refused, peak(refused), watchOnly ? "var(--elev)" : "var(--active)",
-          watchOnly ? K.badge("badge--dry", I.t("ed.challenge.preview")) : null)
+          liveWatchOnly ? K.badge("badge--dry", I.t("ed.challenge.preview")) : null)
       ];
       /* the HTTP/3 line is drawn only where there is HTTP/3 to draw: a flat
          zero line under a zone nobody reaches over QUIC would read as a
@@ -865,8 +880,14 @@
         h("div", { class: "card__title" }, [w.icon("history"), h("span", { text: I.t("ed.hist.title") }), K.badge("badge--accent", zone)]),
         h("div", { class: "row", style: { gap: "var(--s-2)" } }, [
           seg,
-          h("button", { class: "btn btn--ghost btn--sm", onclick: function () { ctx.actions.toggleEdgeZone(zone); } },
-            [w.icon("x"), h("span", { text: I.t("ed.hist.close") })])
+          /* closing removes this button with the card, so the keyboard would
+             land on <body>; focus goes back to the row the card belongs to,
+             the drawer's own return-focus treatment */
+          h("button", { class: "btn btn--ghost btn--sm", onclick: function () {
+            ctx.actions.toggleEdgeZone(zone);
+            var row = edgeZoneRow(root, zone);
+            if (row) row.focus();
+          } }, [w.icon("x"), h("span", { text: I.t("ed.hist.close") })])
         ])
       ]),
       body
@@ -878,11 +899,29 @@
   function edgeHistorySourcesCard(ctx, zone) {
     var st = ctx.state.edgeHist;
     if (st.forbidden || st.notFound) return null;
-    /* the charts' own card already carries the storage-off ghost and the
-       loading and error states for the pair of reads; repeating either here
-       would say the same thing twice */
-    if (!st.fetchedAt || !st.available || !st.srcOk || !st.srcAvailable) return null;
+    /* the charts' own card carries the loading state, the storage-off ghost
+       and the failure of the HISTORY read for the pair, so none of those is
+       repeated here. The SOURCES read is this card's alone: the charts have
+       nothing to say about it, and a card that simply vanished would read as
+       "no source was telling in this period" rather than as a query that
+       never answered. */
+    if (!st.fetchedAt || !st.ok || !st.available) return null;
     var period = I.t("ed.hist.range." + st.range);
+    var head = function (count) {
+      return h("div", { class: "card__head" }, [
+        h("div", { class: "card__title" }, [w.icon("shield-alert"), h("span", { text: I.t("ed.srcs.title", { t: period }) }),
+          count === null ? null : K.badge("badge--muted", String(count))]),
+        h("span", { class: "td-muted", text: I.t("ed.srcs.sub") })
+      ]);
+    };
+    if (!st.srcOk) {
+      return h("div", { class: "card mt-4" }, [
+        head(null),
+        h("div", { class: "card__body" }, h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+          w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.srcs.error") })]))
+      ]);
+    }
+    if (!st.srcAvailable) return null;
     var rows = st.sources.map(function (s) {
       return h("tr", {}, [
         h("td", { class: "mono", text: s.source }),
@@ -895,11 +934,7 @@
       ]);
     });
     return h("div", { class: "card mt-4" }, [
-      h("div", { class: "card__head" }, [
-        h("div", { class: "card__title" }, [w.icon("shield-alert"), h("span", { text: I.t("ed.srcs.title", { t: period }) }),
-          K.badge("badge--muted", String(st.sources.length))]),
-        h("span", { class: "td-muted", text: I.t("ed.srcs.sub") })
-      ]),
+      head(st.sources.length),
       st.sources.length
         ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
             h("thead", {}, h("tr", {}, [V.th("ed.source"), V.th("col.state"), V.thNum("ed.requests"),
@@ -923,6 +958,7 @@
   function edgeEventsCard(ctx) {
     var st = ctx.state.edgeEvents;
     if (st.forbidden) return null;              /* a tenant-scoped token: the events name nodes */
+    if (st.absent) return null;                 /* a kapkan without the endpoint: no card, not a fault */
     var body;
     if (!st.fetchedAt) {
       body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.loading") }));
@@ -984,7 +1020,10 @@
         var open = openZone === z.zone;
         var toggle = function () { ctx.actions.toggleEdgeZone(z.zone); };
         return h("tr", { class: "is-clickable" + (open ? " is-open" : ""), tabindex: "0", role: "button",
-          attrs: { title: I.t("ed.hist.open") }, dataset: { edgeZone: z.zone },
+          /* the open row's own click closes the card, so it must not offer to
+             open it; aria-expanded is the same fact for a screen reader */
+          attrs: { title: I.t(open ? "ed.hist.close" : "ed.hist.open"), "aria-expanded": open ? "true" : "false" },
+          dataset: { edgeZone: z.zone },
           onclick: toggle, onkeydown: function (e) { hgKey(e, toggle); } }, [
           h("td", { class: "target-cell" }, [
             h("div", { class: "row", style: { gap: "8px" } },
@@ -1020,7 +1059,7 @@
         ctx.actions.loadEdgeHistory();
         var openRow = null;
         st.zones.forEach(function (z) { if (z.zone === openZone) openRow = z; });
-        children.push(edgeHistoryCard(ctx, openZone, openRow));
+        children.push(edgeHistoryCard(root, ctx, openZone, openRow));
         children.push(edgeHistorySourcesCard(ctx, openZone));
       }
 
@@ -1062,13 +1101,19 @@
     /* The fleet's events belong to the fleet, not to a zone, so they are shown
        whatever the zone table came back with — as long as there are edge nodes
        at all and the token can see node names. `unscoped` rides on /status for
-       every role; without it (a kapkan older than the events endpoint) the
-       card is not rendered rather than fetched and refused. */
+       every role and long predates the events endpoint, so it says nothing
+       about a kapkan older than E6.6; that one answers 404, which the api
+       layer reports as absent and this card drops in silence. */
     if (ctx.status.edge_nodes_total && ctx.status.unscoped) {
       ctx.actions.loadEdgeEvents();
       children.push(edgeEventsCard(ctx));
     }
+    /* keyboard focus lives on a zone row, and this view re-mounts on every
+       poll: keep it where the operator put it, the attacks table's treatment */
+    var af = document.activeElement;
+    var keepZone = (af && af.getAttribute) ? af.getAttribute("data-edge-zone") : null;
     K.mount(root, children);
+    if (keepZone) { var kr = edgeZoneRow(root, keepZone); if (kr) kr.focus(); }
   }
 
   V.hostgroups = hostgroups;

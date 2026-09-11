@@ -342,7 +342,9 @@
          ok:false — a real failure (502, a dropped connection). Said out loud,
            because a zone WITH storage on and no answer is not a quiet zone.
        notFound is the fourth: a zone gone from the zones file (a lever kept
-       its row). Nothing to read, and not a fault. */
+       its row). Nothing to read, and not a fault.
+       absent is the fifth, on /edge/events only: a kapkan older than the
+       endpoint itself. Also not a fault — see getEdgeEvents. */
     getEdgeHistory: function (zone, fromISO, toISO, step) {
       var qs = "zone=" + encodeURIComponent(zone) +
         "&from=" + encodeURIComponent(fromISO) + "&to=" + encodeURIComponent(toISO) + "&step=" + step;
@@ -375,6 +377,14 @@
       var qs = "from=" + encodeURIComponent(fromISO) + "&to=" + encodeURIComponent(toISO);
       return request("/api/v1/edge/events?" + qs).then(function (res) {
         if (res.status === 403) return { ok: false, forbidden: true, available: false, events: [] };
+        /* absent is the fifth answer, and only /events has it: a kapkan older
+           than the endpoint has no route to refuse or to serve, so its 404 is
+           "this kapkan has no fleet events", not a fault. The card is dropped
+           the way a 403 drops it — a loud banner re-read every ten seconds
+           would be the console shouting at a brain that is merely older. The
+           zone reads cannot use the same rule: there a 404 is an answer about
+           the ZONE (gone from the zones file), which the card does say. */
+        if (res.status === 404) return { ok: false, absent: true, available: false, events: [] };
         if (!res.ok) throw new Error("edge events -> " + res.status);
         return res.json().then(function (r) {
           return { ok: true, available: !!r.available, events: r.events || [] };
