@@ -81,8 +81,8 @@ and now [`kapkan edge`](/docs/cli#edge). Installing it end to end is the
   or asked, and who *would* have been.
 - **ACME** runs on each node: account keys and certificates are generated on the box and never
   leave it. The brain only serialises issuance per zone (one node orders at a time) and fans a
-  pending HTTP-01 challenge out to every node, so the CA's validation may land on any of them.
-  Both are advisory: a node renews with the brain gone.
+  pending HTTP-01 challenge out to every node that serves the zone, so the CA's validation may
+  land on any of them. Both are advisory: a node renews with the brain gone.
 
 ### The fast/slow split
 
@@ -350,6 +350,80 @@ Two things to keep in mind: UDP flows need conntrack timeouts a firewall may not
 default, and `quic_gso` (the `http` context) is yours to set in `nginx.conf` if you want it —
 Kapkan renders neither.
 
+## Placing zones on nodes
+
+By default every node serves every zone: one document, one fleet. A fleet with PoPs — a US
+site and an EU site, say — places zones on nodes along the axis Kapkan already has for
+prefixes, the **hostgroup**:
+
+```yaml
+# kapkan.yaml
+hostgroups:
+  - { name: edge-us, networks: ["198.51.100.0/26"] }   # the US PoP's VIP prefix
+  - { name: edge-eu, networks: ["198.51.100.64/26"] }  # the EU PoP's VIP prefix
+edge:
+  nodes:
+    - { name: us-1, hostgroups: [edge-us] }           # US zones only
+    - { name: eu-1, hostgroups: [edge-eu, global] }   # EU zones and the global ones
+    - { name: any-1 }                                 # no scope = the global group alone
+```
+
+```yaml
+# zones.yaml
+zones:
+  - { name: shop.example.com, hostgroup: edge-us, origins: ["10.0.0.10:8080"] }
+  - { name: shop.example.eu,  hostgroup: edge-eu, origins: ["10.0.1.10:8080"] }
+  - { name: www.example.com,  origins: ["10.0.2.10:8080"] }          # global
+```
+
+The rule is one sentence: **a node serves a zone when the zone's hostgroup is in the node's
+scope**. A zone's hostgroup is `zones[].hostgroup`, or `global` when it names none; a node's
+scope is `edge.nodes[].hostgroups`, or `[global]` when it lists none. Consequences, in order
+of how often they bite:
+
+- **A label by itself is strict.** Putting `hostgroup: edge-us` on a zone takes it off every
+  node that does not list `edge-us` — `any-1` above stops serving it. Isolation and the CA's
+  duplicate-certificate budget follow the placement by default; nothing is opened by accident. A
+  zone placed on a group of N nodes is N orders per issuance, not the fleet's — the ceiling in
+  [Limits](#limits-to-know) is counted per placement.
+- **`global` is a literal.** A node that must serve its PoP's zones *and* the fleet-wide ones
+  lists both: `[edge-eu, global]`. A node with only `[edge-eu]` gets no global zone.
+- **The scope follows the addressing.** A hostgroup needs at least one prefix inside `networks`
+  — the PoP's VIP prefix, which you protect anyway. Placement is not a second topology; it is
+  the one you already declared.
+- **Each node gets its own document** — exactly the zones its scope covers, with their
+  certificate grants, fanned-out ACME challenges, clearance keys and levers, and its own ETag.
+  A node asking for the issuance slot of, or publishing a challenge for, a zone it does not
+  serve gets the same `404 unknown zone` a nonexistent zone gets. The placement itself never
+  enters the document.
+- **Scoping requires bound tokens.** The moment any node has a scope, every `agent` token must
+  carry [`node`](/docs/authentication#binding-an-agent-token-to-its-node) — a scope enforced
+  against a shared token would be a promise nothing keeps. Fleets without scopes keep their
+  grace.
+- **Ownership and placement are two axes.** `tenant` says who may see the zone,
+  `hostgroup` where it is served; when both the zone and its hostgroup carry a tenant they must
+  agree, and nothing is inherited — a zone in a labelled group is still a house zone unless it
+  says otherwise. The rule is for named hostgroups: the global group is the fleet's catch-all,
+  not a tenant's PoP, so a labelled zone may stay global whatever `kapkan.yaml`'s top-level
+  `tenant` says. A hostgroup that does not exist fails the reload (the previous zones stay
+  live), like any broken zones file.
+- **Never at attack speed.** Placement is a slow change like origins or TLS: moving a zone
+  re-renders the nodes it leaves and joins and reloads their terminators. The [fast/slow
+  split](#the-fastslow-split) is untouched.
+
+`kapkan -check-config` prints the matrix — each node's scope, how many zones it covers, its
+token — and warns about a zone no node's scope covers (it is served nowhere until a node lists
+its group). `GET /api/v1/edge/zones/status` carries each zone's `placement {hostgroup, nodes,
+alive}` and flags `unserved` when its nodes exist but none is alive; the lever's response lists
+the zone's nodes, not the fleet's; the inventory shows each node's `hostgroups` and
+`zones_placed`. A node's claims about a zone outside its scope are stored in its report but not
+merged into the zone's status.
+
+**Runbook — a zone leaves a node.** Moving a zone off a node is an ordinary slow reload there:
+the terminator stops serving the name, the node's certificates for it stay on disk and stop
+renewing. Delete them when you are sure, or leave them; nothing renews a certificate for a zone
+the node no longer serves.
+
 ## What the node does when things fail
 
 | Failure | Behaviour |
@@ -410,17 +484,19 @@ Kapkan renders neither.
 - **HTTP/3 is per zone, rendered where the node can**, node-wide in what nginx decides before
   SNI (Retry on, 0-RTT off), with no connection migration or session resumption between nodes
   — see [HTTP/3 (QUIC)](#http3-quic).
-- **Duplicate-certificate ceilings.** Per-node certificates mean N nodes on one zone are N
-  orders; Let's Encrypt caps a name at about five per week. The brain's issuance slot and
+- **Duplicate-certificate ceilings.** Per-node certificates mean the N nodes a zone is
+  [placed on](#placing-zones-on-nodes) are N orders (the whole fleet for a global zone); Let's
+  Encrypt caps a name at about five per week. The brain's issuance slot and
   renewal jitter spread them; `acme.fallback` (ZeroSSL, Google Trust Services — both need an
   External Account Binding) is the escape hatch. Plan CA accounts for large fleets.
-- **The agent token issues certificates.** Bind each agent token to its node
-  (`api.tokens[].node`, see [authentication](/docs/authentication#binding-an-agent-token-to-its-node))
-  so a stolen token cannot act as another node and only that node's token needs rotating. A bound
-  token can still publish a challenge answer for any zone through the brain as its own node (only
-  while it holds the zone's issuance slot, and every call is logged) until zones are placed on
-  nodes in a later E6 change — so a node compromise is still a certificate exposure for every
-  zone until then.
+- **The agent token issues certificates — for its node's zones.** Bind each agent token to its
+  node (`api.tokens[].node`, see
+  [authentication](/docs/authentication#binding-an-agent-token-to-its-node)) so a stolen token
+  cannot act as another node, and [place zones on nodes](#placing-zones-on-nodes) so its node
+  serves only the zones it should: a stolen bound token can then take the issuance slot and
+  publish a challenge answer only for the zones its node's scope covers (every call logged), and
+  a node compromise is a certificate exposure for those zones, not the fleet's. Rotate that
+  node's token; the brain holds nothing to steal.
 
 ## Related
 

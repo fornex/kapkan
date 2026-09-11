@@ -110,17 +110,20 @@ it. The rules below are the write path's contract.
   at query time (`zones[].tenant`) — one truth, so re-labelling a zone leaves no stale rows.
 - **Only the telling sources.** `edge_sources` stores a source only when a node denied it,
   challenged it, or previewed either (`would-deny`, `would-challenge`) — at most 20 per node,
-  zone and window, the busiest first. Sources that were allowed, cleared or merely marked are
-  visitors and are never written.
+  zone and window: the would-be sources first, then the refused and challenged ones, the busiest
+  within each tier. Sources that were allowed, cleared or merely marked are visitors and are
+  never written.
 - **Nothing for quiet zones.** A zone in `policy.mode: none`, or a deciding zone that closed no
   window lately (the report carries it with no close time and nothing counted), writes no row
-  and counts as nothing.
+  and counts as nothing. A certificate issuance leaves a trace even on an idle zone: the CA's
+  HTTP-01 probes are requests the node counts (a few `2xx` per validation, `decided` 0).
 - **One row per window.** A report the node re-sends — the same node, zone and close time — is
   written once, and a report carries one window per zone. A window for a zone the zones file
-  does not have, a window with counters but no close time, or a second window for one zone in
-  one report is skipped; every skipped part counts in
-  `kapkan_edge_history_dropped_total{reason}` (`unknown_zone`, `no_at`, `duplicate`,
-  `extra_window`, `bad_source`, `source_cap`) — while storage is on; with it off nothing is
+  does not have, a window (or a certificate, a challenge) for a zone the reporting node's
+  [placement](/docs/edge#placing-zones-on-nodes) does not cover, a window with counters but no
+  close time, or a second window for one zone in one report is skipped; every skipped part
+  counts in `kapkan_edge_history_dropped_total{reason}` (`unknown_zone`, `outside_scope`,
+  `no_at`, `duplicate`, `extra_window`, `bad_source`, `source_cap`) — while storage is on; with it off nothing is
   written and nothing is counted. The report itself is still accepted and shown live; only the
   history skips the part. `duplicate` is expected once per burst end when a node reports more
   often than its windows close.

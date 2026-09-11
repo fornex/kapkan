@@ -21,19 +21,21 @@ package api
 //
 // TRUST, STATED PLAINLY. An agent token is a certificate-issuing credential:
 // a holder can publish a key authorization for any zone the fleet serves,
-// and every node will answer it, so the holder's own ACME account can
-// validate HTTP-01 for that zone. Since E6.1 a token may be bound to one node
-// (api.tokens[].node; edgeACMECaller refuses it as any other node), which
-// takes impersonation and the fleet-wide rotation off the table — but a
-// holder of a bound token still publishes a key authorization for ANY zone
-// the fleet serves AS ITS OWN NODE until zones are placed on nodes (E6.3), so
-// the coordinator keeps narrowing what one token can do and makes every use
-// visible: a challenge is published only by the node that holds the zone's
-// slot, an existing live challenge is never overwritten by a different key
-// authorization (first writer wins), each node has a small quota of live
-// challenges, and every slot and challenge call is logged with the node, the
-// zone and the token's prefix. Rotate the node's agent token on any node
-// compromise, and treat it as a certificate exposure for every zone until E6.3.
+// and every node that serves the zone will answer it, so the holder's own
+// ACME account can validate HTTP-01 for that zone. Since E6.1 a token may be
+// bound to one node (api.tokens[].node; edgeACMECaller refuses it as any
+// other node), which takes impersonation and the fleet-wide rotation off the
+// table, and since E6.3 both calls take only the zones the node's placement
+// scope covers (edgeACMEZoneServed: any other zone is the byte-identical
+// "unknown zone"), so a holder of a bound token publishes for its own node's
+// zones and no more. The coordinator still narrows what one token can do and
+// makes every use visible: a challenge is published only by the node that
+// holds the zone's slot, an existing live challenge is never overwritten by a
+// different key authorization (first writer wins), each node has a small
+// quota of live challenges, and every slot and challenge call is logged with
+// the node, the zone and the token's prefix. Rotate the node's agent token on
+// any node compromise, and treat it as a certificate exposure for that node's
+// zones.
 
 import (
 	"encoding/json"
@@ -242,18 +244,16 @@ func (c *issuanceCoordinator) sweepLocked(now time.Time) {
 	}
 }
 
-// edgeACMEZoneKnown reports whether the zones document has this zone.
-func (s *Server) edgeACMEZoneKnown(zone string) bool {
-	z := s.store.Get().ZonesCfg
-	if z == nil {
-		return false
-	}
-	for _, zz := range z.Zones {
-		if zz.Name == zone {
-			return true
-		}
-	}
-	return false
+// edgeACMEZoneServed reports whether the node's document has this zone: it is
+// in the zones file AND the node's placement scope covers it (E6.3). A zone
+// the node does not serve is, for it, no different from a zone that does not
+// exist — the same "unknown zone" 404, so a node (or a leaked bound token)
+// cannot take the issuance slot or publish a key authorization for a zone it
+// was never placed on.
+func (s *Server) edgeACMEZoneServed(node, zone string) bool {
+	cfg := s.store.Get()
+	z := zoneInFile(cfg, zone)
+	return z != nil && cfg.EdgeNodeServes(node, z)
 }
 
 // EdgeSlotRequest is the body of POST /api/v1/edge/nodes/{name}/acme/slot.
@@ -292,7 +292,7 @@ func (s *Server) handleEdgeACMESlot(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if !s.edgeACMEZoneKnown(req.Zone) {
+	if !s.edgeACMEZoneServed(name, req.Zone) {
 		writeError(w, http.StatusNotFound, "unknown zone")
 		return
 	}
@@ -334,7 +334,7 @@ func (s *Server) handleEdgeACMEChallenge(w http.ResponseWriter, r *http.Request)
 	if !decodeEdgeACMEBody(w, r, &req) {
 		return
 	}
-	if !s.edgeACMEZoneKnown(req.Zone) {
+	if !s.edgeACMEZoneServed(name, req.Zone) {
 		writeError(w, http.StatusNotFound, "unknown zone")
 		return
 	}

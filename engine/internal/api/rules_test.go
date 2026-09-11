@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -279,6 +281,95 @@ func TestRulesEndpointHoldTimesOut(t *testing.T) {
 // move the document WITHOUT a broadcast wake, so the deadline path must verify
 // "not modified" against the live table rather than assert it from the ETag the
 // request arrived with.
+// TestRulesHoldFollowsTheBinding: the scrub channel's twin of the edge test —
+// a rules poll parked when a reload moves its token to another scrub node,
+// or removes the token, ends with the refusal a first poll would now get,
+// promptly (the hold wakes for the reload), never a document; endHold's
+// deadline answer re-checks the same.
+func TestRulesHoldFollowsTheBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(string) string
+		want int
+	}{
+		{"token rebound to another scrub node", func(y string) string {
+			return strings.Replace(y, "role: agent, node: fra1 }", "role: agent, node: fra2 }", 1)
+		}, http.StatusForbidden},
+		{"token removed", func(y string) string {
+			var out []string
+			for _, l := range strings.Split(y, "\n") {
+				if !strings.Contains(l, "name: s1,") {
+					out = append(out, l)
+				}
+			}
+			return strings.Join(out, "\n")
+		}, http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cfgPath, _ := bindingStoreWith(t, bindingOpts{})
+			s := testServer(t, store)
+			s.rulesHold = 3 * time.Second
+			h := s.Handler()
+			poll := func(inm string) *httptest.ResponseRecorder {
+				r := httptest.NewRequest(http.MethodGet, "/api/v1/dataplane/rules?node=fra1", nil)
+				r.Header.Set("Authorization", "Bearer s1-secret")
+				if inm != "" {
+					r.Header.Set("If-None-Match", inm)
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, r)
+				return rec
+			}
+			first := poll("")
+			if first.Code != http.StatusOK {
+				t.Fatalf("s1 polling as fra1 = %d", first.Code)
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- poll(first.Header().Get("ETag")) }()
+			waitHolds(t, s, 1)
+			yaml, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited := tc.edit(string(yaml))
+			if edited == string(yaml) {
+				t.Fatal("the fixture edit changed nothing")
+			}
+			if err := os.WriteFile(cfgPath, []byte(edited), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			if _, err := store.Reload(); err != nil {
+				t.Fatalf("Reload: %v", err)
+			}
+			select {
+			case rec := <-done:
+				if rec.Code != tc.want || strings.Contains(rec.Body.String(), `"bans"`) {
+					t.Fatalf("the parked rules poll ended with %d %s, want %d and no document", rec.Code, rec.Body.String(), tc.want)
+				}
+				if elapsed := time.Since(start); elapsed > s.rulesHold/2 {
+					t.Fatalf("the parked poll took %v to end after the reload; want the wake, not the deadline", elapsed)
+				}
+			case <-time.After(2 * s.rulesHold):
+				t.Fatal("the parked rules poll did not end after the reload")
+			}
+			// The deadline answer re-checks the same: a rebound caller gets 403
+			// from endHold, a removed one 401, an unknown node 404.
+			_, cur, _ := s.ruleSnapshot()
+			rec := httptest.NewRecorder()
+			s.endHold(rec, caller{token: "s1", role: config.RoleAgent}, "fra1", cur)
+			if rec.Code != tc.want {
+				t.Fatalf("endHold for the changed token = %d, want %d", rec.Code, tc.want)
+			}
+			rec = httptest.NewRecorder()
+			s.endHold(rec, caller{token: "op", role: config.RoleOperator}, "ghost", cur)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("endHold for an unknown scrub node = %d, want 404", rec.Code)
+			}
+		})
+	}
+}
+
 func TestEndHoldRechecksTable(t *testing.T) {
 	s := testServer(t, storeFromYAML(t, divertYAML))
 	_, before, err := s.ruleSnapshot()
@@ -290,7 +381,7 @@ func TestEndHoldRechecksTable(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	s.endHold(rec, before) // table changed since this ETag: must serve the doc
+	s.endHold(rec, caller{}, "", before) // table changed since this ETag: must serve the doc
 	if rec.Code != http.StatusOK {
 		t.Fatalf("endHold with a stale ETag = %d, want 200", rec.Code)
 	}
@@ -302,7 +393,7 @@ func TestEndHoldRechecksTable(t *testing.T) {
 
 	_, cur, _ := s.ruleSnapshot()
 	rec = httptest.NewRecorder()
-	s.endHold(rec, cur) // genuinely unchanged: 304
+	s.endHold(rec, caller{}, "", cur) // genuinely unchanged: 304
 	if rec.Code != http.StatusNotModified {
 		t.Fatalf("endHold with the current ETag = %d, want 304", rec.Code)
 	}

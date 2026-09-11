@@ -466,6 +466,14 @@
           "items": {
             "additionalProperties": false,
             "properties": {
+              "hostgroups": {
+                "items": {
+                  "pattern": "^[A-Za-z0-9._-]{1,64}$",
+                  "type": "string"
+                },
+                "type": "array",
+                "x-optional": true
+              },
               "name": {
                 "pattern": "^[A-Za-z0-9._-]{1,64}$",
                 "type": "string"

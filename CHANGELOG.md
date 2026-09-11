@@ -33,6 +33,12 @@ security-relevant.
   MAJOR-release item. One behaviour change rides with the release regardless of the key: node
   presence is now stamped only by `agent` tokens, so a node polling on an `operator` token shows as
   lost while it keeps serving — give it an agent token.
+- **Added** `edge.nodes[].hostgroups` (optional) and, in the zones file, `zones[].hostgroup`
+  (optional): the placement axis. A node serves a zone when the zone's hostgroup (`global` when it
+  names none) is in the node's scope (`[global]` when it lists none). Absent everywhere, every node
+  serves every zone and the documents are byte-identical to before. Scoping any node requires
+  every `agent` token to carry `node`; a `zones[].hostgroup` that is not a hostgroup fails the
+  reload (the previous zones stay live).
 
 ### Added
 
@@ -470,6 +476,37 @@ security-relevant.
   (while storage is on; with it off no zone is looked at); `node=` and `/edge/events` name nodes
   and stay unscoped. Zone names are folded like the file's; `step` is capped at a day, the
   query's own clamp, and `step_seconds` is the step the buckets were built with.
+- Edge track, E6.3 — placing zones on nodes (milestone E6, fleet; edge-spec D8/D9). The
+  placement axis is the hostgroup Kapkan already has for prefixes: `zones[].hostgroup` places a
+  zone (`global` when absent), `edge.nodes[].hostgroups` is a node's scope (`[global]` when
+  absent, with `global` a literal a node may list beside its PoP's group), and **a node serves a
+  zone when the zone's group is in its scope**. Consequences: a label by itself is strict (it
+  takes the zone off every node not listing the group — isolation and the CA's
+  duplicate-certificate budget follow the placement by default); a fleet without scopes gets
+  byte-identical documents and ETags; **each node now receives its own document** — exactly its
+  zones with their issuance grants, fanned-out ACME challenges, clearance keys and levers, and its
+  own ETag — while an operator's bare `GET` is still the whole file; a node asking for the slot
+  of, or publishing a challenge for, a zone it does not serve gets the byte-identical `404
+  unknown zone` of a nonexistent zone, so a stolen bound token issues only for its node's zones
+  (edge-spec §9 risk 6 closed with that residual). Ownership and placement are two axes: a zone
+  in a labelled hostgroup inherits nothing, and when both carry a tenant they must agree. Scoping
+  any node requires every `agent` token to be bound. `GET /api/v1/edge/zones/status` carries each
+  file zone's `placement {hostgroup, nodes, alive}` and `unserved`; a node's claims about a zone
+  outside its scope are stored but neither merged nor written to the edge history
+  (`kapkan_edge_history_dropped_total{reason="outside_scope"}`); `placement.hostgroup` is for
+  unscoped tokens (a tenant sees node names, not the operator's grouping); the lever lists the
+  zone's nodes; the inventory shows `hostgroups` and `zones_placed`; `kapkan -check-config`
+  prints the node → scope → zones matrix with each token binding (or `SHARED`) and warns about a
+  zone no node's scope covers, an edge block without nodes included. A node the configuration no
+  longer has gets an empty document, and a poll of its parked in a hold across that reload is
+  answered `404 unknown edge node` — never the whole file; likewise a token the reload removed
+  or rebound ends its parked poll with `401` / `403`, on the edge channel and the scrub channel
+  alike. The tenant-agreement rule applies to named hostgroups; the global group is the fleet's
+  catch-all, not a tenant's PoP.
+  Node side: no change — a zone leaving a node's document is an ordinary slow reload; its
+  certificates stay on disk and stop renewing (runbook, not automation). Config surface: both
+  schemas, the overlay, docs (zones, configuration, edge *Placing zones on nodes* + Limits,
+  edge-install, api, authentication).
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data
