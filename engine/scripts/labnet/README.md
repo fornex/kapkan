@@ -129,23 +129,34 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   [`engine/docs/edge-spec.md`](../../docs/edge-spec.md) §8): tenancy,
   token↔node binding, placement and the edge history on the E5 topology, with
   a **real ClickHouse** beside the brain (its binary extracted from the image
-  CI's `storage-clickhouse` job pins) and no XDP. Two nodes, five zones under
-  three hostgroups and two tenants, six tokens. The arms follow the E6 plan's
-  acceptance map: byte-identity of an unscoped fleet's documents; migration
-  from one shared agent token to one bound token per node with no install and
-  fail-static in between; binding refusing another node's name on every route
-  and saving nothing; the operator's presence-free preview; tenancy as a
-  non-event for the nodes; default-deny tenant views, the tenant's lever with
-  its audit rows, no existence oracle, relabel semantics and a zone removed
-  under a live token; rows landing once with quiet zones writing nothing,
-  telling sources only, the read API equal to SQL and default-deny, the node's
+  CI's `storage-clickhouse` job pins; the rig prints the version it ran
+  against) and no XDP. Two nodes, five zones under four hostgroups (one no
+  node lists, one carrying a tenant) and two tenants, seven token names with
+  six configured at a time. The arms follow the E6 plan's acceptance map:
+  byte-identity of an unscoped fleet's documents; migration from one shared
+  agent token to one bound token per node with no install and fail-static
+  (TLS, h3, local 429s) in between; binding refusing another node's name on
+  every route of both channels and saving nothing; the operator's
+  presence-free preview; tenancy as a non-event for the nodes; default-deny
+  tenant views, the tenant's lever with its audit rows, no existence oracle, a
+  relabel following the file, a zone/hostgroup tenant mismatch and a zone
+  removed under a live token refused; rows landing once, an idle deciding zone
+  writing no decided window (only the CA's undecided probe windows), telling
+  sources only, the read API equal to SQL and default-deny, the node's
   chronology as events, forged reports re-stamped/dropped/capped, ClickHouse
-  dead under report load (204 in under 50 ms), retention, storage off
-  byte-identical; placement rendering a zone only where placed, fan-out only
-  to the serving nodes, `unserved`, the lever by placement, impossible
-  configurations never going live, fail-static under a wrong rebind, moving a
-  zone, the brain dead and back, and nothing to steal in the three tables.
-  Needs `kapkan`, Pebble and the ClickHouse binary in `/tmp/lab`:
+  dead under a report burst (`204` in under 50 ms, drops counted, no
+  back-fill), retention, storage off byte-identical (same documents, no
+  install, no packet to ClickHouse); placement rendering a zone only where
+  placed, fan-out only to the serving nodes, `unserved`, the lever by
+  placement, impossible configurations never going live, fail-static under a
+  wrong rebind, moving a zone, the brain dead and back, and nothing to steal
+  in the three tables. Three rows of the plan's table are met differently
+  from their wording, for product reasons the script comments state: a
+  relabel to an unused tenant is accepted (a tenant is made by its zones), the
+  source-cap proof uses 150 sources (1 000 exceed the 64 KiB report cap and
+  are `413`), and a node outside a zone's placement closes the connection on
+  :80 (`return 444`) rather than answering 404. Needs `kapkan`, Pebble and the
+  ClickHouse binary in `/tmp/lab`:
 
   ```sh
   mkdir -p /tmp/lab
@@ -155,13 +166,15 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   c=$(docker create clickhouse/clickhouse-server:25.8) && docker cp "$c:/usr/bin/clickhouse" /tmp/lab/clickhouse && docker rm "$c"
   docker run --privileged --rm -v /tmp/lab:/lab -v "$PWD:/w" -w /w debian:13-slim \
     sh -c 'apt-get update -qq && apt-get install -y -qq \
-             iproute2 nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump >/dev/null \
+             iproute2 iptables nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump >/dev/null \
            && KAPKAN=/lab/kapkan PEBBLE=/lab/pebble CLICKHOUSE=/lab/clickhouse bash engine/scripts/labnet/edge-e6.sh'
   ```
 
   The rig prints the ClickHouse version it ran against and the bytes per row
-  from `system.parts`; logs, the rendered configurations and the table dumps
-  land in `/tmp/lab/logs/`.
+  from `system.parts` (a short run's parts — an order of magnitude, not a
+  figure); logs, the rig's zones/brain/node yaml in their final state, both
+  nodes' live nginx renders, the per-node documents and the table dumps land in
+  `/tmp/lab/logs/`.
 
 ## VRF
 
