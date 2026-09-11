@@ -521,12 +521,13 @@ security-relevant.
   live token refused; history rows landing once, an idle deciding zone writing no decided window
   (only the CA's undecided probe windows), telling sources only, the read API equal to SQL and
   default-deny, the node's chronology as events, forged reports re-stamped, dropped and capped,
-  ClickHouse dead under a report burst answered `204` in under 50 ms with drops counted and no
-  back-fill, retention by TTL, storage off byte-identical (same documents, no install, no packet
-  to ClickHouse); placement rendering a zone only where placed, fan-out only to the serving nodes,
-  `unserved` and the lever by placement, impossible configurations never going live, fail-static
-  under a wrong rebind, a zone moved between groups, the brain dead and back, and nothing to steal
-  in the three tables. The rig records the ClickHouse version and the bytes per row of a short run.
+  ClickHouse stalled and then dead under a report burst answered `204` in under 50 ms with drops
+  and errors both counted and no back-fill, retention by TTL, storage off byte-identical (same
+  documents, no install, no packet to ClickHouse); placement rendering a zone only where placed,
+  fan-out only to the serving nodes, `unserved` and the lever by placement, impossible
+  configurations never going live, fail-static under a wrong rebind, a zone moved between groups,
+  the brain dead and back, and nothing to steal in the three tables. The rig records the
+  ClickHouse version and the bytes per row of a short run.
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data
