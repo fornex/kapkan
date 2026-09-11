@@ -662,8 +662,11 @@ sheds detail a little at a time — the sources that tell nothing first (uncount
 the would-be set), then every zone's list halved, then certificates, then zones — each cut
 counted: `sources_truncated` is the would-be sources missing from the list (the ones the node's
 per-window bound of 20 left out, and the ones a shrinking report shed), `certs_truncated` and
-`zones_truncated` the entries dropped. Stored and returned by `GET /api/v1/edge/nodes`. Never a
-liveness signal (the poll is). An unknown `{name}` is `404`; success is `204 No Content`.
+`zones_truncated` the entries dropped. Stored and returned by `GET /api/v1/edge/nodes`. With
+[storage](/docs/storage#edge-history) on, the report's windows and telling sources are also
+written to the edge history and what changed since the node's previous report becomes events —
+after the report is stored and without the answer ever waiting for it. Never a liveness signal
+(the poll is). An unknown `{name}` is `404`; success is `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 

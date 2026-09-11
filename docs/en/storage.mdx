@@ -96,9 +96,8 @@ writer credential lacks `ALTER` rights (fresh installs already have it).
 
 The three `edge_*` tables keep what the [edge zone status](/docs/api#get-apiv1edgezonesstatus)
 shows for ten seconds — per zone, over time. They are filled from the edge nodes' advisory
-reports by the brain's write path (which lands in the same release, one change after the tables),
-so every row is a node's claim; the brain sums, never acts on it. The rules below are the write
-path's contract.
+reports by the brain's write path, so every row is a node's claim; the brain sums, never acts on
+it. The rules below are the write path's contract.
 
 - **Raw windows, bucketed on read.** `edge_windows` holds the nodes' ten-second windows as they
   came (`ORDER BY (zone, ts, node)`); a history query sums them into buckets with
@@ -113,8 +112,31 @@ path's contract.
   challenged it, or previewed either (`would-deny`, `would-challenge`) — at most 20 per node,
   zone and window, the busiest first. Sources that were allowed, cleared or merely marked are
   visitors and are never written.
-- **Nothing for quiet zones.** A zone in `policy.mode: none`, or a deciding zone that saw no
-  request in a window, writes no row.
+- **Nothing for quiet zones.** A zone in `policy.mode: none`, or a deciding zone that closed no
+  window lately (the report carries it with no close time and nothing counted), writes no row
+  and counts as nothing.
+- **One row per window.** A report the node re-sends — the same node, zone and close time — is
+  written once, and a report carries one window per zone. A window for a zone the zones file
+  does not have, a window with counters but no close time, or a second window for one zone in
+  one report is skipped; every skipped part counts in
+  `kapkan_edge_history_dropped_total{reason}` (`unknown_zone`, `no_at`, `duplicate`,
+  `extra_window`, `bad_source`, `source_cap`) — while storage is on; with it off nothing is
+  written and nothing is counted. The report itself is still accepted and shown live; only the
+  history skips the part. `duplicate` is expected once per burst end when a node reports more
+  often than its windows close.
+- **Transitions as events.** `edge_events` records what changed between two reports of a node —
+  its version, dry-run, the rendered document, a generation installed or refused, the terminator
+  alive or not, its HTTP/3 state, a certificate issued, renewed or gone, a zone-wide challenge
+  started or ended, a clock skew found or recovered, a report that had to shrink — each once per
+  change, and, from the polls, `node_alive` / `node_lost` (the loss stamped when it happened: the
+  last poll plus `stale_after`). The first report after a brain start is the baseline and writes
+  no events — except `clock_skew`, which is about the window's clock and is written on a first
+  report too when that clock is off. A certificate or a challenge is recorded for a zone the
+  zones file has, and a report that had to shed its tail (`report_truncated`) is not read as
+  "gone" for what it no longer lists. The presence ticker runs every `min(stale_after/2, 5 s)`,
+  never under a second; after a brain start a node is baselined at its first poll (silently), or
+  as lost once `stale_after` has passed without one — a restart is never a fleet-wide
+  `node_alive` burst. The presence transitions are also logged at INFO, storage or no storage.
 
 Volume, per day: `edge_windows` grows by **8 640 × (deciding zones with traffic × alive
 nodes)** rows (one ten-second window each), `edge_sources` by at most 20 times that, and

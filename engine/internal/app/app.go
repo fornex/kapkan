@@ -143,7 +143,12 @@ func New(store *config.Store, log *slog.Logger) (*App, error) {
 	a.API = api.New(store, a.Engine, mit, log)
 	a.API.SetQuerier(storage.NewQuerier(store.Get().StorageCfg, log))
 	a.Storage = storage.NewWriter(store.Get().StorageCfg, log)
-	a.API.SetAuditWriter(a.Storage) // operator-attributed audit trail (no-op when storage off)
+	// The audit trail and the edge history write through the API only when
+	// storage is on: with it off nothing is persisted, and the history's
+	// drop counters must stay silent rather than count what nobody keeps.
+	if store.Get().StorageCfg.Enabled {
+		a.API.SetStorageWriter(a.Storage)
+	}
 	// /healthz reports the data plane's degraded state in its body, /api/v1/status
 	// renders it in full for an admin, and /metrics is fed from the same reading —
 	// see dataplaneReporter. An API or SIGHUP reload has to be pushed into the

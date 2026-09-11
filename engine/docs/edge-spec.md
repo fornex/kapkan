@@ -622,7 +622,32 @@ headline and the long pole.
   writer credential keeps what it had; `ts` is the node's gated clock and `received_at` the
   brain's (D11). Reads bind through `param_*` under `readonly=2` with time and row caps. A
   real-ClickHouse suite gates the DDL, the column upgrade, the TTL and the read-only client in
-  CI (`storage-clickhouse`, pinned server image). The write path is E6.5, the read API E6.6.
+  CI (`storage-clickhouse`, pinned server image). The read API is E6.6.
+  *Decided in E6.5 (`internal/api/edge_history.go`):* the write path is map work and
+  non-blocking enqueues in the report handler, after the store and before the 204 — never I/O,
+  never an answer that depends on storage. Rules, each counted in
+  `kapkan_edge_history_dropped_total{reason}` while storage is on: zone ∈ the live file
+  (`unknown_zone` — windows, certificates and challenges alike), a close time on a window that
+  carries counters (`no_at`; the quiet shape — no close time, nothing counted — is nothing to
+  write and not counted), one row per (node, zone, at) (`duplicate` — a re-sent report is one
+  row; equality, not "later than", so a corrected clock is not silenced), one window per zone
+  per report (`extra_window`), the D11 clock gate (−10 min … +60 s, else `ts` = brain clock,
+  `received_at` always, one `clock_skew` event per transition — the one kind a first report
+  may write), telling sources only that parse as an address (`bad_source`), ≤20 per window
+  (`source_cap`); `challenge` is narrowed to the document's three modes (`other` for a mode a
+  node actually sent, empty for a report that carries none) and free text is clipped. Events are the diff of a node's two reports (version, dry_run,
+  document_rendered, generation_installed/refused, terminator_alive, h3_state,
+  cert_issued/renewed/gone, challenge_started/ended, report_truncated), once per change; the
+  first report after a brain start is a silent baseline (no fleet-wide `cert_issued`); a report
+  that shed its tail (`certs_truncated`/`zones_truncated`) is never read as "gone"/"issued" for
+  what a cut list lacks — `report_truncated` says why the gap is there. The presence ticker
+  (`min(stale_after/2, 5 s)`, never under 1 s, unconditional) writes `node_alive`/`node_lost`
+  on transitions — `node_lost` stamped `lastSeen + stale_after`; a node is baselined silently
+  at its first poll after a start, or as lost once `stale_after` has passed unheard (no restart
+  burst) — and logs both at INFO. Import direction gated by test: no package under `internal/edge` or
+  `internal/mitigate` imports `internal/storage` (the transitive path through
+  `internal/edge/node → internal/api` for the shared report types is known and accepted; the
+  gate is on node-side code naming storage itself).
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and

@@ -138,6 +138,9 @@ type Server struct {
 	edgeClearance *clearanceKeyring
 	// edgeLever is the operator's challenge override per zone (edge_lever.go).
 	edgeLever *challengeLever
+	// edgeHist turns the nodes' reports and presence into edge history rows
+	// and events for storage (edge_history.go, E6.5).
+	edgeHist edgeHistory
 	// bindingState rate-limits the token↔node binding refusal log
 	// (node_binding.go).
 	bindingState
@@ -171,10 +174,15 @@ func New(store *config.Store, eng *engine.Engine, mit *mitigate.Mitigator, log *
 // history as unavailable rather than failing.
 func (s *Server) SetQuerier(q storage.Querier) { s.querier = q }
 
-// SetAuditWriter attaches the storage writer used to persist the audit trail
-// (operator-attributed mutations). A no-op writer (storage disabled) is fine;
-// handlers also nil-guard so an unset writer never panics.
-func (s *Server) SetAuditWriter(w storage.Writer) { s.auditW = w }
+// SetStorageWriter attaches the storage writer the API persists through: the
+// audit trail (operator-attributed mutations) and, since E6.5, the edge
+// history (the nodes' report windows, telling sources and transitions). A
+// no-op writer (storage disabled) is fine; handlers also nil-guard so an unset
+// writer never panics.
+func (s *Server) SetStorageWriter(w storage.Writer) {
+	s.auditW = w
+	s.edgeHist.setWriter(w)
+}
 
 // SetUpdateChecker attaches the opt-in update checker whose latest result feeds
 // the update_available/latest_version fields on /api/v1/status. Nil (the
@@ -602,6 +610,9 @@ func (s *Server) httpServer() *http.Server {
 // down gracefully.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	srv := s.httpServer()
+	// The edge presence ticker (edge_history.go) lives as long as the server:
+	// node_alive / node_lost into the log and, with storage, the history.
+	go s.runEdgePresence(ctx)
 	errc := make(chan error, 1)
 	go func() {
 		s.log.Info("api listening", "addr", srv.Addr)

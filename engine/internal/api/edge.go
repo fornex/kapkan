@@ -555,13 +555,17 @@ type storedEdgeReport struct {
 	at     time.Time
 }
 
-func (st *edgeReportStore) put(name string, r EdgeReport, at time.Time) {
+// put stores the node's report and returns the one it replaces (the history's
+// diff base, E6.5), with had false for the node's first report on this brain.
+func (st *edgeReportStore) put(name string, r EdgeReport, at time.Time) (prev EdgeReport, had bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.reports == nil {
 		st.reports = make(map[string]storedEdgeReport)
 	}
+	old, had := st.reports[name]
 	st.reports[name] = storedEdgeReport{report: r, at: at}
+	return old.report, had
 }
 
 func (st *edgeReportStore) get(name string) (EdgeReport, time.Time, bool) {
@@ -600,7 +604,16 @@ func (s *Server) handleEdgeNodeReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
-	s.edgeReports.put(name, rep, time.Now())
+	now := time.Now()
+	prev, had := s.edgeReports.put(name, rep, now)
+	// The history (edge_history.go): rows and events from this report, after
+	// it is stored and before the 204 — map work and non-blocking enqueues,
+	// never I/O, so the answer does not depend on storage.
+	var base *EdgeReport
+	if had {
+		base = &prev
+	}
+	s.edgeHist.observe(s.store.Get(), name, base, rep, now)
 	w.WriteHeader(http.StatusNoContent)
 }
 
