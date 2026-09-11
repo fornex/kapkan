@@ -383,10 +383,24 @@ wait_ne() { local n=$(( $1 * 5 )) not=$2 i; shift 2; for i in $(seq 1 "$n"); do 
 # by a sleep: the aggregator's 10 s window is phased by its own clock, not by
 # when a batch ran. zfield reads a field of that window, zat its close time as
 # epoch seconds, and wait_window waits until the window a batch fell into has
-# closed AND been reported — at most window + report_interval.
+# closed AND been reported — at most window + report_interval. Both stamps are
+# whole seconds, so the window is accepted when its close is AT or after the
+# batch's end: a strict "later" would skip the very window that holds the batch
+# whenever it closes in the same second the batch ended, and wait for the next
+# one — which holds nothing of it.
+#
+# align_window phases a batch: it waits (≤ 15 s) until BOTH nodes closed a
+# window within the last 5 s. The nodes' 10 s windows are not aligned with each
+# other, but their phases differ by at most 5 s one way round, so the moment
+# recurs every ten seconds — and a batch of ≤ 4 s started then falls inside ONE
+# open window on each node. Without it a boundary lands inside the burst on
+# some runs, splitting its records over two windows: a per-window assertion
+# (h3_requests, top_sources, the flood rule's threshold) then reads half a
+# burst and fails on a green product.
 zfield() { node_f "edge-$1" "([z for z in n.get('report',{}).get('zones',[]) if z['zone']=='$ZONE']+[{}])[0].get('$2',0)"; }
 zat() { local a; a=$(node_f "edge-$1" "([z for z in n.get('report',{}).get('zones',[]) if z['zone']=='$ZONE']+[{}])[0].get('at','')"); date -u -d "$a" +%s 2>/dev/null || echo 0; }
-wait_window() { local n=$1 after=$2 i; for i in $(seq 1 $(( $3 * 2 )) ); do [ "$(zat "$n")" -gt "$after" ] 2>/dev/null && return 0; sleep 0.5; done; return 1; }
+wait_window() { local n=$1 after=$2 i; for i in $(seq 1 $(( $3 * 2 )) ); do [ "$(zat "$n")" -ge "$after" ] 2>/dev/null && return 0; sleep 0.5; done; return 1; }
+align_window() { local i now a1 a2; for i in $(seq 1 30); do now=$(date -u +%s); a1=$(zat 1); a2=$(zat 2); [ $(( now - a1 )) -le 5 ] && [ $(( now - a2 )) -le 5 ] && return 0; sleep 0.5; done; echo "  WARN  align_window: the nodes' windows did not line up within 15 s (edge-1 at $a1, edge-2 at $a2, now $now)"; return 1; }
 : > /tmp/brain.log
 start_brain
 rc=$(check_config); [ "$rc" = "0" ] && ok "-check-config accepts the fleet (two bound agent tokens, two scopes)" || bad "-check-config: rc=$rc $(head -3 /tmp/check.out)"
@@ -691,7 +705,7 @@ batch 40 tcp /tmp/b-l4.txt
 B4_1=$(served edge-1 /tmp/b-l4.txt); B4_2=$(served edge-2 /tmp/b-l4.txt)
 [ "$(n200 /tmp/b-l4.txt)" = "40" ] && [ "$B4_1" -ge 1 ] && [ "$B4_2" -ge 1 ] && ok "under L4 one client's 40 TCP connections reached BOTH nodes (edge-1 $B4_1, edge-2 $B4_2)" || bad "L4 TCP spread: edge-1 $B4_1, edge-2 $B4_2, codes $(mix /tmp/b-l4.txt)"
 H1_0=$(nmetric 1 'kapkan_edge_requests_total{protocol="h3"'); H2_0=$(nmetric 2 'kapkan_edge_requests_total{protocol="h3"')
-batch 40 h3 /tmp/b-h3.txt
+align_window; batch 40 h3 /tmp/b-h3.txt; B_END=$(date -u +%s)
 H4_1=$(served edge-1 /tmp/b-h3.txt); H4_2=$(served edge-2 /tmp/b-h3.txt)
 [ "$(n200 /tmp/b-h3.txt)" = "40" ] && [ "$H4_1" -ge 1 ] && [ "$H4_2" -ge 1 ] && ok "…and so did 40 --http3-only requests (edge-1 $H4_1, edge-2 $H4_2): the same policy hashes the UDP 4-tuple" || bad "L4 h3 spread: edge-1 $H4_1, edge-2 $H4_2, codes $(mix /tmp/b-h3.txt)"
 # The metric is a per-RECORD counter — it moves as each access-log line
@@ -702,16 +716,14 @@ H1=$(nmetric 1 'kapkan_edge_requests_total{protocol="h3"'); H2=$(nmetric 2 'kapk
 [ "$H1" -gt "$H1_0" ] && [ "$H2" -gt "$H2_0" ] && ok "both nodes counted h3 requests of their own (kapkan_edge_requests_total protocol=h3: +$((H1-H1_0)) and +$((H2-H2_0)))" || bad "h3 counted on one node only: edge-1 $H1_0->$H1, edge-2 $H2_0->$H2"
 # And the report's own per-window field, which is what the guide quotes and
 # what a fleet-wide consumer reads — a different number from a different code
-# path, waited for by condition (the window closes on the aggregator's clock,
-# up to 10 s, and is reported one interval later).
-H3R1=0; H3R2=0
-for i in $(seq 1 40); do
-  [ "$H3R1" = "0" ] && H3R1=$(zfield 1 h3_requests)
-  [ "$H3R2" = "0" ] && H3R2=$(zfield 2 h3_requests)
-  [ "$H3R1" != "0" ] && [ "$H3R2" != "0" ] && break
-  sleep 0.5
-done
-[ "$H3R1" -ge 1 ] 2>/dev/null && [ "$H3R2" -ge 1 ] 2>/dev/null && ok "…and each node's report says so for the closed window too (h3_requests $H3R1 and $H3R2 for $ZONE)" || bad "report h3_requests: edge-1 '$H3R1', edge-2 '$H3R2'"
+# path. It is read from THE window the batch fell into (align_window put the
+# whole batch in one window per node; wait_window waits for that window to
+# close and be reported), not from the first window that happens to show a
+# non-zero — which, a run in five, was arm A's single h3 request in the
+# previous window.
+wait_window 1 "$B_END" 12; wait_window 2 "$B_END" 12
+H3R1=$(zfield 1 h3_requests); H3R2=$(zfield 2 h3_requests)
+[ "$H3R1" -ge 1 ] 2>/dev/null && [ "$H3R2" -ge 1 ] 2>/dev/null && [ "$H3R1" -le "$H4_1" ] 2>/dev/null && [ "$H3R2" -le "$H4_2" ] 2>/dev/null && ok "…and each node's report says so for the window the batch fell into (h3_requests $H3R1 and $H3R2 for $ZONE; the batch's shares were $H4_1 and $H4_2 — the field cannot exceed what the node served)" || bad "report h3_requests for the batch's window: edge-1 '$H3R1' (served $H4_1), edge-2 '$H3R2' (served $H4_2)"
 [ "$(zst $ZONE "sorted(z.get('h3',{}).get('serving',[]))")" = "['edge-1', 'edge-2']" ] && ok "the fleet status names both nodes under h3.serving" || bad "h3.serving: $(zst $ZONE "z.get('h3')")"
 
 # ================================================================ ARM C
@@ -738,11 +750,17 @@ dr_settled() { local n=$1 a b i; a=$(dr "$n"); for i in $(seq 1 20); do sleep 0.
 # failing anything. Hence BURST3 and BURST4, and hence the 200+429 = 40
 # assertions below: a 403 in either half is now a FAIL, not a silent skew.
 hashpol 0
+# align_window: the flood rule counts a source's refusals PER WINDOW, so the
+# promotion asserted below needs the whole burst inside one window on the node
+# it lands on — a boundary inside the burst would split its ~34 refusals so
+# that neither half crosses FloodMinDenied, and the 403 would never come.
+align_window
 D1_0=$(dr 1); D2_0=$(dr 2); T0=$(date +%s%N); batch 40 tcp /tmp/c-l3.txt --interface $BURST3; T3_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
 C3_429=$(ncode 429 /tmp/c-l3.txt); C3_200=$(ncode 200 /tmp/c-l3.txt); D1_3=$(( $(dr_settled 1) - D1_0 )); D2_3=$(( $(dr_settled 2) - D2_0 ))
 [ "$C3_429" -ge 1 ] && [ $((C3_200 + C3_429)) -eq 40 ] && ok "under L3 the burst is refused: $C3_429 of 40 answered 429, $C3_200 served, and nothing else ($(mix /tmp/c-l3.txt)) — every answer is the rate ceiling's, none a table verdict" || bad "L3 batch: $(mix /tmp/c-l3.txt) (429 + 200 must be all 40; a 403 would be the flood rule's ladder, not the ceiling)"
 [ $(( D1_3 * D2_3 )) -eq 0 ] && [ $(( D1_3 + D2_3 )) -ge 1 ] && ok "every rate denial came from ONE node (deny_rate: edge-1 +$D1_3, edge-2 +$D2_3) — one ceiling, as configured" || bad "rate denials on both nodes under L3: edge-1 +$D1_3, edge-2 +$D2_3"
 hashpol 1
+align_window
 D1_0=$(dr 1); D2_0=$(dr 2); T0=$(date +%s%N); batch 40 tcp /tmp/c-l4.txt --interface $BURST4; T4_MS=$(( ($(date +%s%N) - T0) / 1000000 )); C4_END=$(date -u +%s)
 C4_429=$(ncode 429 /tmp/c-l4.txt); C4_200=$(ncode 200 /tmp/c-l4.txt); D1_4=$(( $(dr_settled 1) - D1_0 )); D2_4=$(( $(dr_settled 2) - D2_0 ))
 [ "$C4_429" -ge 1 ] && [ $((C4_200 + C4_429)) -eq 40 ] && [ "$D1_4" -ge 1 ] && [ "$D2_4" -ge 1 ] && ok "under L4 BOTH nodes refused ($C4_429 of 40 were 429, $C4_200 served, nothing else; deny_rate edge-1 +$D1_4, edge-2 +$D2_4): the ceiling is per node, and the source met two of them" || bad "L4 ceilings: $(mix /tmp/c-l4.txt) (429 + 200 must be all 40), deny_rate edge-1 +$D1_4, edge-2 +$D2_4"
@@ -776,15 +794,17 @@ PY
 sed 's/^/  /' /tmp/arm-c.txt
 [ "$CV" = "ok" ] && ok "the L3-vs-L4 shares are recorded for the guide with the batch durations beside them, and the ratio is in the 1.5x-2.5x the bucket allows (/tmp/arm-c.txt)" || bad "arm C's recorded share: $CV"
 # top_sources rides a CLOSED 10 s window, so it is waited for by CONDITION:
-# the window the L4 batch fell into must have closed (its `at` later than the
-# batch's end) and been reported — at most 10 s plus one report interval. The
+# the window the L4 batch fell into must have closed (its `at` at or after the
+# batch's end — whole seconds, so "later" would skip a window closing in the
+# batch's last second) and been reported — at most 10 s plus one report
+# interval; align_window put the whole batch inside that one window. The
 # L4 source is the one to look for: under L4 both nodes saw it, while the L3
 # source, by design, only ever reached one.
 srcs() { api op "$B/edge/nodes" | jx "'\n'.join(s['source']+' '+s['state'] for z in ([n for n in d['nodes'] if n['name']=='edge-$1']+[{}])[0].get('report',{}).get('zones',[]) if z['zone']=='$ZONE' for s in z.get('top_sources',[]))"; }
 bsrc() { awk -v s="$BURST4" '$1==s {print $2}' "$1" 2>/dev/null | head -1; }
 for i in $(seq 1 60); do
   srcs 1 > /tmp/c-src-1.txt; srcs 2 > /tmp/c-src-2.txt
-  if [ "$(zat 1)" -gt "$C4_END" ] 2>/dev/null && [ "$(zat 2)" -gt "$C4_END" ] 2>/dev/null; then
+  if [ "$(zat 1)" -ge "$C4_END" ] 2>/dev/null && [ "$(zat 2)" -ge "$C4_END" ] 2>/dev/null; then
     [ -n "$(bsrc /tmp/c-src-1.txt)" ] && [ -n "$(bsrc /tmp/c-src-2.txt)" ] && break
   fi
   sleep 0.5
