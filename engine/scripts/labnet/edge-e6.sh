@@ -395,7 +395,7 @@ wait_sql() { # SECS WANT QUERY -> until chq QUERY == WANT
 }
 # settle_etag TOKEN NODE -> the node's document ETag once two reads a second
 # apart agree (grants expire and levers lapse on their own clock).
-settle_etag() { local a b i; for i in $(seq 1 15); do a=$(etag "$1" "$2"); sleep 1; b=$(etag "$1" "$2"); [ "$a" = "$b" ] && { echo "$a"; return 0; }; done; echo "$b"; }
+settle_etag() { local a b i; for i in $(seq 1 15); do a=$(etag "$1" "$2"); sleep 1; b=$(etag "$1" "$2"); [ "$a" = "$b" ] && { echo "$a"; return 0; }; done; echo "UNSETTLED:$b"; return 1; }
 # ev_count KIND [NODE] -> how many events of the kind (for the node);
 # ev_more KIND N [NODE] -> true once the count exceeds N; ev_newest KIND NODE
 # FIELD -> the newest event's field (the read is newest first).
@@ -701,7 +701,7 @@ wait_sql 40 1 "SELECT sum(requests) >= 30 FROM kapkan.edge_windows WHERE zone='$
 # has no decided window, no empty window, and its row count does not move
 # while its neighbour takes traffic.
 H1=$(chq "SELECT count() FROM kapkan.edge_windows WHERE zone='$HOUSE'")
-[ "$H1" = "$H0" ] && [ "$(chq "SELECT count() FROM kapkan.edge_windows WHERE zone='$HOUSE' AND (decided > 0 OR requests = 0)")" = "0" ] && [ "$(chq "SELECT sum(status_2xx) = sum(requests) FROM kapkan.edge_windows WHERE zone='$HOUSE'")" = "1" ] && ok "$HOUSE (deciding, idle) wrote nothing across $SHOP's traffic ($H0 rows before and after), has no decided and no empty window: its only rows are the CA's own HTTP-01 probes ($(chq "SELECT sum(requests) FROM kapkan.edge_windows WHERE zone='$HOUSE'") requests, all 2xx, decided 0)" || bad "$HOUSE rows $H0 -> $H1; decided/empty: $(chq "SELECT count() FROM kapkan.edge_windows WHERE zone='$HOUSE' AND (decided > 0 OR requests = 0)"); $(chq "SELECT ts, node, requests, decided, status_2xx FROM kapkan.edge_windows WHERE zone='$HOUSE' ORDER BY ts DESC LIMIT 3" | tr '\n\t' ' ,')"
+[ "${H0:-0}" -ge 1 ] && [ "$H1" = "$H0" ] && [ "$(chq "SELECT count() FROM kapkan.edge_windows WHERE zone='$HOUSE' AND (decided > 0 OR requests = 0)")" = "0" ] && [ "$(chq "SELECT sum(status_2xx) = sum(requests) FROM kapkan.edge_windows WHERE zone='$HOUSE'")" = "1" ] && ok "$HOUSE (deciding, idle) wrote nothing across $SHOP's traffic ($H0 rows before and after), has no decided and no empty window: its only rows are the CA's own HTTP-01 probes ($(chq "SELECT sum(requests) FROM kapkan.edge_windows WHERE zone='$HOUSE'") requests, all 2xx, decided 0)" || bad "$HOUSE rows $H0 -> $H1; decided/empty: $(chq "SELECT count() FROM kapkan.edge_windows WHERE zone='$HOUSE' AND (decided > 0 OR requests = 0)"); $(chq "SELECT ts, node, requests, decided, status_2xx FROM kapkan.edge_windows WHERE zone='$HOUSE' ORDER BY ts DESC LIMIT 3" | tr '\n\t' ' ,')"
 chq "SELECT table, sum(rows), sum(data_compressed_bytes), round(sum(data_compressed_bytes)/greatest(sum(rows),1),1) FROM system.parts WHERE database='kapkan' AND table LIKE 'edge_%' AND active GROUP BY table ORDER BY table" > /tmp/bytes-per-row.tsv
 echo "  (system.parts so far — table, rows, compressed bytes, bytes/row:)"; sed 's/^/    /' /tmp/bytes-per-row.tsv
 
@@ -726,7 +726,7 @@ FROM_SQL=$(date -u -d '-10 min' +'%Y-%m-%d %H:%M:%S'); TO_SQL=$(date -u -d '+1 m
 BOUND="ts >= toDateTime('$FROM_SQL') AND ts < toDateTime('$TO_SQL')"
 sum_api=$(hist op "zone=$SHOP&from=$from&to=$to&step=60" | jx "sum(p['requests'] for p in d['points'])")
 sum_sql=$(chq "SELECT sum(requests) FROM kapkan.edge_windows WHERE zone='$SHOP' AND $BOUND")
-[ -n "$sum_api" ] && [ "$sum_api" = "$sum_sql" ] && ok "history at step 60 sums to the SQL total over the same bounds ($sum_api)" || bad "history $sum_api vs SQL $sum_sql"
+[ -n "$sum_api" ] && [ "$sum_api" != "0" ] && [ "$sum_api" = "$sum_sql" ] && ok "history at step 60 sums to the SQL total over the same bounds ($sum_api, non-zero)" || bad "history $sum_api vs SQL $sum_sql"
 sum10=$(hist op "zone=$SHOP&from=$from&to=$to&step=10" | jx "sum(p['requests'] for p in d['points'])")
 [ -n "$sum10" ] && [ "$sum10" = "$sum_sql" ] && ok "…and at step 10" || bad "step 10: $sum10"
 n_api=$(hist op "zone=$SHOP&node=edge-1&from=$from&to=$to" | jx "d['available'] and d['node']=='edge-1' and sum(p['requests'] for p in d['points'])")
