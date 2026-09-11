@@ -29,8 +29,10 @@ d'audit dans le journal du processus.
 
 ## Ce qui est enregistré
 
-Cinq actions sont auditées. `ban`, `config_reload` et `source_block` sont enregistrées en cas de
-succès comme d'échec ; `unban` et `source_unblock` ne le sont qu'en cas de succès — une suppression en
+Six actions sont auditées. `ban`, `config_reload` et `source_block` sont enregistrées en cas de
+succès comme d'échec ; `edge_challenge` à chaque `200` — libérer un levier qui n'était pas actif
+enregistre tout de même `cleared`, seul un levier refusé (`404`, `400`, `409`) est laissé de côté ;
+`unban` et `source_unblock` ne le sont qu'en cas de succès — une suppression en
 échec ou sans effet renvoie une erreur et n'est pas écrite dans la piste, bien qu'elle soit tout de
 même journalisée (un unban en échec est un `404 "no active ban"`, et non une décision de politique,
 il n'y a donc rien à attribuer) :
@@ -42,6 +44,7 @@ il n'y a donc rien à attribuer) :
 | `config_reload` | `POST /api/v1/config/reload` | `ok` en cas de succès ; `error` lorsque la nouvelle configuration ne peut être analysée ou validée. |
 | `source_block` | `POST /api/v1/dataplane/sources` | `blocked` en cas de succès ; `rejected` lorsque la politique le refuse. Un blocage refusé est lui-même une action d'opérateur, il est donc attribué comme un bannissement refusé. Le [plan d'empreintes](/docs/fingerprinting) écrit lui aussi des enregistrements `source_block` — `source: "auto"`, uniquement en cas de succès — lorsqu'il bloque une JA4. |
 | `source_unblock` | `POST /api/v1/dataplane/sources/unblock` | `removed` en cas de succès. |
+| `edge_challenge` | `POST`/`DELETE /api/v1/edge/zones/{name}/challenge` | `set` lorsque le [levier](/docs/edge#le-levier) est tiré, `cleared` lorsqu'il est relâché (`DELETE` ou `mode: off`, qu'un levier ait été actif ou non) ; `reason` vaut `<mode> until <RFC 3339>; <raison de l'opérateur>` sur `set`, la raison de l'opérateur (`mode: off`) ou rien (`DELETE`) sur `cleared`. Un levier refusé — une zone inconnue ou hors du tenant, un TTL invalide, une zone en `mode: none` — n'est pas écrit. |
 
 `config_reload` est restreint aux tokens non limités (admin). Un opérateur limité à un tenant est refusé
 avec `403` *avant* l'exécution du rechargement, et **aucun enregistrement d'audit n'est écrit** — ce refus
@@ -79,7 +82,7 @@ Renvoie les enregistrements d'audit, du plus récent au plus ancien. Cela néces
 | --- | --- | --- |
 | `from` | now − 1h | Début RFC 3339 de la fenêtre. |
 | `to` | now | Fin RFC 3339 de la fenêtre. Doit être postérieure à `from` ; la fenêtre ne peut pas dépasser **31 days**. |
-| `action` | (toutes) | Filtre sur l'une des valeurs `ban`, `unban`, `config_reload`, `source_block`, `source_unblock`. |
+| `action` | (toutes) | Filtre sur l'une des valeurs `ban`, `unban`, `config_reload`, `source_block`, `source_unblock`, `edge_challenge`. |
 | `target` | (toutes) | Filtre sur une seule IP. Doit être visible par le tenant de l'appelant, sinon la requête renvoie `403`. |
 
 L'endpoint renvoie au maximum ~1000 enregistrements par requête, du plus récent au plus ancien. Si vous
@@ -118,17 +121,17 @@ Chaque enregistrement comporte ces champs :
 | Champ | Notes |
 | --- | --- |
 | `event_time` | UTC, `YYYY-MM-DD HH:MM:SS`. |
-| `action` | `ban`, `unban`, `config_reload`, `source_block` ou `source_unblock`. |
-| `result` | `active`, `rejected`, `withdrawn`, `ok`, `error`, `blocked` ou `removed`. |
+| `action` | `ban`, `unban`, `config_reload`, `source_block`, `source_unblock` ou `edge_challenge`. |
+| `result` | `active`, `rejected`, `withdrawn`, `ok`, `error`, `blocked`, `removed`, `set` ou `cleared`. |
 | `operator` | Le nom du token d'API correspondant ; vide en mode ouvert (sans token). |
 | `role` | Le rôle de l'appelant (`viewer` / `operator`). |
 | `tenant` | La portée tenant de l'appelant ; vide pour un appelant non limité (admin). |
-| `target` | L'IP pour `ban`/`unban` ; `source->victim` pour `source_block`/`source_unblock` ; vide pour `config_reload`. |
-| `target_type` | `host` pour `ban`/`unban` ; `source` pour `source_block`/`source_unblock` ; `global` pour `config_reload`. |
-| `reason` | Détail du refus ou de l'erreur ; vide en cas de succès. |
+| `target` | L'IP pour `ban`/`unban` ; `source->victim` pour `source_block`/`source_unblock` ; la zone pour `edge_challenge` ; vide pour `config_reload`. |
+| `target_type` | `host` pour `ban`/`unban` ; `source` pour `source_block`/`source_unblock` ; `zone` pour `edge_challenge` ; `global` pour `config_reload`. |
+| `reason` | Détail du refus ou de l'erreur ; vide en cas de succès — sauf pour `edge_challenge` : sur `set`, le mode, sa fin et la raison de l'opérateur, sur `cleared`, la raison de l'opérateur ou rien. |
 | `source` | `api` pour une action d'opérateur, ou `auto` pour une action initiée par le moteur. Aujourd'hui, le [plan d'empreintes](/docs/fingerprinting) écrit des enregistrements `source_block` avec `source: "auto"` — et sans opérateur, rôle ni tenant — lorsque la JA4 d'un client figure sur la liste de blocage. |
-| `ban_state` | L'état final du bannissement pour `ban`/`unban` ; vide pour `config_reload` et les actions de blocage de sources. |
-| `dry_run` | `1` lorsque le déploiement est en [dry-run](/docs/safety). |
+| `ban_state` | L'état final du bannissement pour `ban`/`unban` ; vide pour `config_reload`, les actions de blocage de sources et `edge_challenge`. |
+| `dry_run` | `1` lorsque l'action s'est exécutée en [dry-run](/docs/safety) (`ban`/`unban`, les actions de blocage de sources) ; toujours `0` pour `config_reload` et `edge_challenge`, que le dry-run ne contrôle pas. |
 
 Une requête portant sur une fenêtre hors limites renvoie `400` ; une valeur d'`action` inconnue
 renvoie `400` ; un `target` mal formé renvoie `400`. Avec le stockage désactivé, la réponse est

@@ -1,14 +1,14 @@
 export const metadata = {
   title: "Stockage (ClickHouse)",
   description:
-    "Persistance ClickHouse optionnelle pour l'historique des attaques et du trafic — analyse forensique et graphiques de tableau de bord, sans jamais bloquer la détection.",
+    "Persistance ClickHouse optionnelle pour l'historique des attaques, du trafic, de l'audit et de l'edge — analyse forensique et graphiques de tableau de bord, sans jamais bloquer la détection.",
 };
 
 # Stockage (ClickHouse)
 
-Pointez Kapkan vers un serveur ClickHouse pour conserver l'historique des attaques et du trafic
-— la réponse à « qu'est-ce qui nous a frappés mardi dernier ? ». Sans lui, Kapkan fonctionne
-entièrement en mémoire sur des données en temps réel.
+Pointez Kapkan vers un serveur ClickHouse pour conserver l'historique des attaques, du trafic, de
+l'audit et de l'edge — la réponse à « qu'est-ce qui nous a frappés mardi dernier ? ». Sans lui,
+Kapkan fonctionne entièrement en mémoire sur des données en temps réel.
 
 Vous avez besoin pour cela d'un serveur ClickHouse en cours d'exécution (toute version récente).
 Kapkan dialogue avec son interface HTTP, qui écoute par défaut sur le port `8123` — c'est le port
@@ -67,20 +67,31 @@ journaux si les compteurs restent à zéro.
 Kapkan dialogue avec l'**interface HTTP** de ClickHouse au moyen de la bibliothèque standard de
 Go — sans dépendance à un driver. La seule dépendance externe est le serveur ClickHouse lui-même.
 
-Au démarrage, il crée de manière idempotente trois tables MergeTree :
+Au démarrage, il crée de manière idempotente six tables MergeTree :
 
 | Table | Contenu |
 | --- | --- |
 | `attack_events` | Chaque début et fin d'attaque : type, direction, débits, les principales sources de l'échantillon, l'état de bannissement et le `reason` de la détection. |
 | `traffic` | Instantanés périodiques de débit et de référence par hôte (toutes les `traffic_interval_seconds`). |
-| `audit_events` | Mutations attribuées à un opérateur : qui a déclenché chaque ban/unban/rechargement de configuration, quand et le résultat. Voir [Journal d'audit](/docs/audit). |
+| `audit_events` | Mutations attribuées à un opérateur : qui a déclenché chaque ban/unban/rechargement de configuration/levier edge, quand et le résultat. Voir [Journal d'audit](/docs/audit). |
+| `edge_windows` | Une ligne par [nœud edge](/docs/edge), par zone et par fenêtre de dix secondes close : ce que le nœud a vu et fait — requêtes, verdicts, comptes de candidats, statuts de réponse, requêtes HTTP/3, l'état du palier. Voir [Historique edge](#historique-edge). |
+| `edge_sources` | Les sources **significatives** de chaque fenêtre — refusées, mises au défi, candidates au refus, candidates au défi — au plus 20 par nœud, par zone et par fenêtre. Les visiteurs ordinaires ne sont jamais stockés. |
+| `edge_events` | Les transitions que le cerveau a vues dans les rapports et la présence d'un nœud : un nœud vivant ou perdu, sa version, son dry-run, le document qu'il a généré, une génération installée ou refusée, le terminateur vivant ou non et son état HTTP/3, un certificat émis, renouvelé ou disparu, un défi global de zone démarré ou terminé, une dérive d'horloge trouvée ou rétablie, un rapport qui a dû rétrécir. |
 
 Chacune porte un TTL par ligne `ttl_days`, ce qui borne la rétention sans intervention de
 l'opérateur.
 
 L'identifiant d'écriture a besoin des droits `CREATE` (base de données + tables) et `INSERT` lors
-de la première exécution ; ensuite, `INSERT` suffit. Les échecs de création de schéma sont
-consignés au démarrage, mais ne sont pas fatals.
+de la première exécution — et de nouveau au premier démarrage d'une version qui ajoute des tables
+(celle-ci ajoute les trois tables `edge_*`) ; entre les deux, `INSERT` suffit. L'initialisation du
+schéma tente chaque instruction et consigne chaque refus séparément (un identifiant qui peut
+`INSERT` mais pas `CREATE` voit ces lignes à chaque démarrage ; elles sont inoffensives une fois
+les tables créées), de sorte que les trois tables edge et les ajouts de colonnes ci-dessous sont
+tentés même lorsqu'une instruction antérieure a été refusée, et qu'une mise à niveau dont
+l'identifiant ne peut plus `CREATE` conserve les tables qu'elle a toujours eues. Si
+`edge history table not created` apparaît au démarrage, faites un démarrage avec un identifiant
+qui peut `CREATE`, ou créez la table vous-même avec l'instruction de
+`engine/internal/storage/edge_rows.go`.
 
 La colonne `reason` de la table `attack_events` contient le JSON compact du
 [reason](/docs/detection) de la détection — pourquoi l'attaque s'est déclenchée (provenance du
@@ -88,6 +99,82 @@ seuil, montée en charge, parts de protocole) — et est vide sur la ligne de fi
 déploiements existants acquièrent la colonne automatiquement : l'initialisation du schéma exécute
 un `ADD COLUMN IF NOT EXISTS`, ignoré silencieusement si l'identifiant d'écriture ne dispose pas
 des droits `ALTER` (les installations neuves la possèdent déjà).
+
+## Historique edge
+
+Les trois tables `edge_*` conservent, par zone et dans la durée, ce que l'[état des zones
+edge](/docs/api#get-apiv1edgezonesstatus) montre pendant dix secondes. Elles sont remplies à partir
+des rapports consultatifs des nœuds edge par le chemin d'écriture du cerveau : chaque ligne est donc
+une affirmation d'un nœud ; le cerveau somme, il n'agit jamais dessus. Les règles ci-dessous sont le
+contrat du chemin d'écriture.
+
+- **Fenêtres brutes, regroupées à la lecture.** `edge_windows` conserve les fenêtres de dix secondes
+  des nœuds telles qu'elles sont arrivées (`ORDER BY (zone, ts, node)`) ; une requête d'historique
+  les somme en intervalles avec `toStartOfInterval`, exactement comme `traffic`. Il n'y a pas de
+  colonne `rps` — c'est `sum(requests) / sum(window_seconds)` — ni de compactage sur le cerveau.
+- **Deux horloges.** `ts` est la clôture de la fenêtre selon l'horloge du **nœud** lorsque celle-ci
+  est à moins de dix minutes de retard ou d'une minute d'avance sur celle du cerveau ; sinon c'est
+  l'horloge du cerveau qui est écrite à la place, et un unique événement `clock_skew` enregistre le
+  constat. `received_at` est toujours l'horloge du cerveau.
+- **Pas de colonne tenant.** Le tenant qui possède une zone est lu dans le [fichier de
+  zones](/docs/zones) en vigueur au moment de la requête (`zones[].tenant`) — une seule vérité, de
+  sorte que ré-étiqueter une zone ne laisse aucune ligne périmée.
+- **Seulement les sources significatives.** `edge_sources` ne stocke une source que lorsqu'un nœud
+  l'a refusée, mise au défi, ou a prévisualisé l'un ou l'autre (`would-deny`, `would-challenge`) —
+  au plus 20 par nœud, par zone et par fenêtre : d'abord les sources candidates, puis les
+  refusées et les mises au défi, les plus actives au sein de chaque rang. Les sources autorisées,
+  admises ou simplement marquées sont des visiteurs et ne sont jamais écrites.
+- **Rien pour les zones tranquilles.** Une zone en `policy.mode: none`, ou une zone qui décide mais
+  n'a clos aucune fenêtre récemment (le rapport la porte sans heure de clôture et sans rien de
+  compté), n'écrit aucune ligne et ne compte pour rien. Une émission de certificat laisse une trace
+  même sur une zone au repos : les sondes HTTP-01 de la CA sont des requêtes que le nœud compte
+  (quelques `2xx` par validation, `decided` à 0).
+- **Une ligne par fenêtre.** Un rapport que le nœud réémet — mêmes nœud, zone et heure de clôture —
+  n'est écrit qu'une fois, et un rapport porte une fenêtre par zone. Une fenêtre pour une zone que
+  le fichier de zones n'a pas, une fenêtre (ou un certificat, un défi) pour une zone que le
+  [placement](/docs/edge#placer-les-zones-sur-les-nœuds) du nœud rapporteur ne couvre pas, une
+  fenêtre avec des compteurs mais sans heure de clôture, ou une deuxième fenêtre pour une même zone
+  dans un même rapport sont ignorées ; chaque partie ignorée compte dans
+  `kapkan_edge_history_dropped_total{reason}` (`unknown_zone`, `outside_scope`, `no_at`,
+  `duplicate`, `extra_window`, `bad_source`, `source_cap`) — tant que le stockage est activé ; sans
+  lui, rien n'est écrit et rien n'est compté. Le rapport lui-même est tout de même accepté et
+  affiché en direct ; seul l'historique en ignore la partie. `duplicate` est attendu une fois par
+  fin de rafale lorsqu'un nœud rapporte plus souvent que ses fenêtres ne se ferment.
+- **Les transitions comme événements.** `edge_events` enregistre ce qui a changé entre deux rapports
+  d'un nœud — sa version, son dry-run, le document généré, une génération installée ou refusée, le
+  terminateur vivant ou non, son état HTTP/3, un certificat émis, renouvelé ou disparu, un défi
+  global de zone démarré ou terminé, une dérive d'horloge trouvée ou rétablie, un rapport qui a dû
+  rétrécir — chacun une fois par changement, et, à partir des interrogations, `node_alive` /
+  `node_lost` (la perte étant datée du moment où elle s'est produite : la dernière interrogation
+  plus `stale_after`). Le premier rapport après un démarrage du cerveau est la référence et n'écrit
+  aucun événement — sauf `clock_skew`, qui porte sur l'horloge de la fenêtre et est écrit dès un
+  premier rapport lorsque cette horloge est décalée. Un certificat ou un défi n'est enregistré que
+  pour une zone que le fichier de zones a, et un rapport qui a dû abandonner sa queue
+  (`report_truncated`) n'est pas lu comme un « disparu » pour ce qu'il ne liste plus. Le tic de
+  présence tourne toutes les `min(stale_after/2, 5 s)`, jamais en dessous d'une seconde ; après un
+  démarrage du cerveau, un nœud prend sa référence à sa première interrogation (silencieusement), ou
+  est déclaré perdu une fois `stale_after` écoulé sans aucune — un redémarrage n'est jamais une
+  rafale de `node_alive` sur toute la flotte. Les transitions de présence sont aussi journalisées en
+  INFO, avec ou sans stockage.
+
+Volume, par jour : `edge_windows` croît de **8 640 × (zones qui décident avec du trafic × nœuds
+vivants)** lignes (une fenêtre de dix secondes chacune), `edge_sources` d'au plus 20 fois cela, et
+`edge_events` de la poignée de transitions qu'a une flotte. Mesurez ce que cela coûte sur votre
+serveur plutôt que de le deviner — la taille compressée des lignes dépend de vos noms de zones et de
+nœuds :
+
+```sql
+SELECT table, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS on_disk
+FROM system.parts
+WHERE database = 'kapkan' AND active
+GROUP BY table ORDER BY table
+```
+
+La rétention se fait par `ttl_days`, comme pour toute autre table. L'historique se lit via
+[`GET /api/v1/edge/history`](/docs/api#get-apiv1edgehistory) (les intervalles),
+`…/edge/history/sources` (qui a été refusé, mis au défi ou l'aurait été, sur une période) et
+`GET /api/v1/edge/events` (les transitions) — et les tables sont aussi à vous d'interroger
+directement.
 
 ## Contre-pression
 

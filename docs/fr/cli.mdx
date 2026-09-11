@@ -32,7 +32,7 @@ plutôt que d'en honorer silencieusement une seule.
 | `-config <path>` | `configs/dev.yaml` | Chemin du [fichier de configuration](/docs/configuration) YAML. |
 | `-log-format <fmt>` | `json` | Format de sortie des journaux : `json` (structuré, pour les collecteurs de journaux) ou `text` (lisible par un humain, pour les exécutions locales). Toute valeur autre que `text` est traitée comme `json`. |
 | `-log-level <lvl>` | `info` | Niveau de journalisation minimal : `debug`, `info`, `warn`, `error`. Une valeur non reconnue retombe sur `info`. |
-| `-check-config <path>` | — | Valide le fichier de configuration situé à `<path>` puis se termine — ne démarre **pas** le démon. Voir [ci-dessous](#valider-une-configuration). |
+| `-check-config <path>` | — | Valide le fichier de configuration situé à `<path>` puis se termine — ne démarre **pas** le démon. Après la ligne `OK`, il affiche des avertissements pour une configuration légale mais peu avisée : des règles statiques qui ne peuvent jamais s'appliquer, des tokens `agent` non liés à un nœud (`api.tokens[].node`) et des zones qu'aucune portée de nœud edge ne couvre ; avec un bloc `edge`, il affiche aussi la portée, le nombre de zones et la liaison de token de chaque nœud. Voir [ci-dessous](#valider-une-configuration). |
 | `-dump-schema` | `false` | Affiche le schéma JSON de la configuration sur stdout puis se termine. Voir [ci-dessous](#exporter-le-schéma). |
 | `-dump-zones-schema` | `false` | Affiche sur stdout le schéma JSON du [fichier de zones](/docs/zones) qu'un cerveau edge sert (`edge.zones_file`) puis se termine. |
 | `-version` | `false` | Affiche la version de build puis se termine. La même version est exposée à l'exécution via `/api/v1/status` et la [métrique](/docs/metrics) `kapkan_build_info`. |
@@ -127,9 +127,15 @@ Voir [Valider la configuration](/docs/configuration#valider-la-configuration).
 
 Une configuration valide peut tout de même afficher un bloc `WARNING` après la ligne `OK` — une
 configuration légale que le démon exécutera, mais presque certainement pas ce que vous vouliez dire.
-Il en existe un aujourd'hui : une [règle statique qui ne peut jamais
+Il en existe trois aujourd'hui : une [règle statique qui ne peut jamais
 s'appliquer](/docs/dataplane-tuning#règles-qui-ne-peuvent-jamais-sappliquer), avec le nom de la règle
-et ce qui prend ses paquets. Le code de sortie reste `0`, une vérification existante n'est donc pas
+et ce qui prend ses paquets ; un token `agent` non
+[lié à un nœud](/docs/authentication#lier-un-token-agent-à-son-nœud) (`api.tokens[].node`), avec le
+nom de chacun de ces tokens ; et une zone du fichier de zones qu'aucune
+[portée de placement](/docs/edge#placer-les-zones-sur-les-nœuds) de nœud edge ne couvre, avec le nom
+de la zone et de son hostgroup. Avec un bloc `edge`, la section de configuration résolue liste aussi
+la portée de chaque nœud, le nombre de zones qu'il couvre et le token qui lui est lié (ou `SHARED`
+tant qu'il existe un token agent non lié). Le code de sortie reste `0`, une vérification existante n'est donc pas
 affectée ; si vous voulez que les avertissements fassent aussi échouer le build, cherchez `WARNING`
 dans la sortie en plus du code.
 
