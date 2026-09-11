@@ -134,7 +134,7 @@ scrubbing:
 
 | Schlüssel | Bedeutung |
 | --- | --- |
-| `nodes[].name` | Knotenidentität. **Muss** dem `controller.name` **entsprechen**, den der Agent des Knotens beim Pollen präsentiert, sonst ist jeder Poll ein lautstarker `404`. |
+| `nodes[].name` | Knotenidentität. **Muss** dem `controller.name` **entsprechen**, den der Agent des Knotens beim Pollen präsentiert, sonst ist jeder Poll ein lautstarker `404`. Binden Sie das `agent`-Token des Knotens mit `api.tokens[].node` an ihn (siehe [Authentifizierung](/docs/authentication#ein-agent-token-an-seinen-knoten-binden)): Ein gebundenes Token wird als jeder andere Knoten abgewiesen, beim Regel-Poll wie beim Report. |
 | `nodes[].next_hop` / `next_hop6` | Der/die BGP-Next-Hop(s) des Knotens. `next_hop` ist erforderlich; `next_hop6` ist erforderlich, um IPv6-Opfer zu diesem Knoten umzuleiten. |
 | `nodes[].capacity_mbps` | Die Scrubbing-Kapazität des Knotens, angezeigt in der Konsole und von `least_loaded` verwendet. `0` bedeutet unbekannt. |
 | `nodes[].hostgroups` | Schränkt ein, welche [Hostgruppen](/docs/hostgroups) dieser Knoten bedient. Leer bedeutet, er akzeptiert jede Gruppe. Eine Gruppe, deren Stufenleiter umleitet, muss einen Knoten haben, der sie bedient, oder den skalaren `next_hop` als Fallback. |

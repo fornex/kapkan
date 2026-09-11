@@ -67,7 +67,7 @@ ein harter Validierungsfehler, kein stiller Default.
 | --- | --- |
 | `viewer` | Nur lesen: Status, Angriffe, Hosts, Sperren, Metriken. |
 | `operator` | Alles, was ein viewer darf, plus manuelles Sperren/Entsperren, [Source-Blocks](/docs/api#der-source-block-kanal) und Neuladen der Konfiguration (das Neuladen ist nur für Admins — siehe unten). |
-| `agent` | Das Credential eines [Scrub-Knotens](/docs/scrubbing#verwaltete-scrubbing-knoten): der Data-Plane-Regel-Feed und sein eigener Report, und **sonst nichts**. |
+| `agent` | Das Credential eines Knotens — eines [Scrub-Knotens](/docs/scrubbing#verwaltete-scrubbing-knoten) oder eines [Edge-Knotens](/docs/edge): die Regel- und Zonen-Polls, sein eigener Report und die ACME-Koordination am Edge, und **sonst nichts**. Binden Sie es mit `node` an seinen Knoten (siehe unten). |
 
 Es gibt keine separate `admin`-Rolle zum Zuweisen — ein *Admin* ist schlicht ein Operator-Token
 ohne gesetzten `tenant`. Die Rollenwerte, die die Engine akzeptiert, sind `viewer`, `operator` und
@@ -75,15 +75,66 @@ ohne gesetzten `tenant`. Die Rollenwerte, die die Engine akzeptiert, sind `viewe
 die unten behandelt wird.
 
 <Callout type="info" title="Die agent-Rolle ist kein abgeschwächter viewer">
-`agent` steht **außerhalb** der Berechtigungsleiter, unterhalb von `viewer`: Es gewährt genau zwei
-Routen (`GET /api/v1/dataplane/rules` und `POST /api/v1/dataplane/nodes/{name}/report`) und wird
-für jeden anderen Endpunkt verweigert, einschließlich des Source-Block-Kanals, der Kernel-Regeln
-installiert und deshalb operator-only bleibt — ein kompromittiertes agent-Token, das auf einer entfernten
-Scrub-Box lebt, darf nicht zu einem Alles-lesen-Schlüssel werden. Es kann außerdem nicht
+`agent` steht **außerhalb** der Berechtigungsleiter, unterhalb von `viewer`: Es gewährt genau die
+Knoten-Routen (die Regel- und Zonen-Polls, die beiden Selbstreports, den ACME-Slot und das
+Veröffentlichen von Challenges am Edge) und wird für jeden anderen Endpunkt verweigert,
+einschließlich des Source-Block-Kanals, der Kernel-Regeln installiert und deshalb operator-only
+bleibt — ein kompromittiertes agent-Token, das auf einer entfernten Box lebt, darf nicht zu einem
+Alles-lesen-Schlüssel werden. Es kann außerdem nicht
 tenant-bezogen sein: Der Regel-Feed gilt deploymentweit, sodass ein `tenant` auf einem agent-Token
-ein harter Validierungsfehler ist. Geben Sie einem Scrub-Knoten sein eigenes agent-Token, niemals
-ein Operator-Token.
+ein harter Validierungsfehler ist. Geben Sie jedem Knoten sein eigenes agent-Token, niemals ein
+Operator-Token, und **binden Sie es an den Knoten** (siehe unten).
 </Callout>
+
+### Ein Agent-Token an seinen Knoten binden
+
+Ein agent-Token trägt `node`: den Namen genau eines `edge.nodes[]`- oder
+`scrubbing.nodes[]`-Eintrags. Das Gehirn weist dieses Token dann auf jeder Route ab, auf der ein
+Knoten sich selbst benennt — die Polls (`?node=<name>`), die Selbstreports, den ACME-Slot und das
+Veröffentlichen von Challenges —, wenn der präsentierte Name der eines anderen Knotens ist, und es
+weist **ab, bevor** es irgendetwas mit dem Namen tut: keine Präsenz gestempelt, kein Report
+gespeichert, kein Slot gewährt, keine Key-Authorization veröffentlicht. Die Abweisung ist ein
+einheitliches `403`, das den gebundenen Knoten nicht nennt, eine Warnung pro Minute und Token im
+Log des Gehirns und ein Zähler in `kapkan_api_node_binding_refused_total{route}`. Ein gebundenes
+Token, das ohne `?node=` pollt, wird ebenfalls abgewiesen: Seine Bindung sagt, welcher Knoten es
+ist.
+
+```yaml
+api:
+  tokens:
+    - { name: edge-fra1, token_env: KAPKAN_EDGE_FRA1, role: agent, node: edge-fra1 }
+    - { name: edge-nyc1, token_env: KAPKAN_EDGE_NYC1, role: agent, node: edge-nyc1 }
+    - { name: scrub-1,   token_env: KAPKAN_SCRUB_1,   role: agent, node: fra1 }
+```
+
+Regeln: `node` ist nur auf `agent`-Tokens erlaubt; der Name muss in genau einer der beiden
+Knotenlisten existieren (ein Name, der in beiden steht, wird als mehrdeutig abgelehnt — die beiden
+Kanäle sind unterschiedliche Vertrauensbereiche); mehrere Tokens dürfen denselben Knoten binden, und
+genau so wird ein Token ohne Lücke rotiert.
+
+Ohne `node` ist ein agent-Token ein **flottenweites Credential**: Es darf als jeder Knoten pollen
+und als jeder Knoten berichten — der Grund, warum ein gestohlenes Token früher bedeutete, es für die
+ganze Flotte zu rotieren. Was `node` ändert, sind Identitätsübernahme und Rotationsradius; was die
+Menge der Zonen begrenzt, für die ein gestohlenes gebundenes Token Zertifikate ausstellen kann, ist
+der [Platzierungs-Geltungsbereich](/docs/edge#zonen-auf-knoten-verteilen) des Knotens: Als sein
+eigener Knoten handelnd kann es den Ausstellungs-Slot nur für die Zonen nehmen und eine
+ACME-Key-Authorization nur für die Zonen veröffentlichen, die dieser Geltungsbereich abdeckt — in
+einer Flotte ohne Geltungsbereiche für jede Zone. Behandeln Sie die Kompromittierung eines Knotens
+als Zertifikats-Exposition für die Zonen seines Knotens und rotieren Sie das Token dieses Knotens.
+Ein ungebundenes Token funktioniert genau wie zuvor weiter, sodass eine Flotte Knoten für Knoten
+migriert — es sei denn, irgendein Knoten hat einen
+[Platzierungs-Geltungsbereich](/docs/edge#zonen-auf-knoten-verteilen)
+(`edge.nodes[].hostgroups`): Dann muss jedes `agent`-Token ein `node` tragen, ein harter
+Validierungsfehler, denn ein Geltungsbereich, der gegen ein geteiltes Token durchgesetzt wird, ist
+ein Versprechen, das nichts hält — und es wird benannt, bis es gebunden ist: von
+`kapkan -check-config` (als WARNING), im Log des Daemons beim Start und bei jedem Reload und im
+Edge-Inventar (`unbound_agent_tokens`; pro Knoten listet `tokens` die Namen der gebundenen Tokens
+und `last_token` das Token, das zuletzt als er gepollt hat — beobachten Sie, wie es während einer
+Migration umspringt). Ein ungebundenes agent-Token auch auf Flotten ohne Geltungsbereiche zu einem
+Fehler zu machen, ist für ein MAJOR-Release vorgesehen.
+
+Präsenz wird nur von agent-Tokens gestempelt: Ein Operator, der mit `?node=X` pollt, erhält das
+Dokument von X als **Vorschau** und lässt X nicht lebendig erscheinen.
 
 `token_env` und `tokens` schließen sich **gegenseitig aus** — `token_env` ist genau ein
 Operator-Token. Eine Anfrage wird gegen jedes konfigurierte Token abgeglichen (in konstanter
@@ -93,9 +144,9 @@ Anfrage ohne gültiges Token ergibt `401 Unauthorized`. Eine leere oder nicht ge
 Umgebungsvariable passt niemals, sodass ein fehlkonfiguriertes Geheimnis fail-closed ist.
 
 Geben Sie jedem Token ein eindeutiges Geheimnis — wenn ein Geheimniswert für zwei Tokens mit
-unterschiedlichen Rollen oder Mandanten konfiguriert ist, wird die Anfrage abgelehnt
-(`401 Unauthorized`), statt zu raten, welches Sie gemeint haben. Der Daemon protokolliert in
-diesem Fall `ambiguous API token`.
+unterschiedlichen Rollen, Mandanten oder Knoten-Bindungen konfiguriert ist (ein ungebundener und
+ein gebundener Eintrag eingeschlossen), wird die Anfrage abgelehnt (`401 Unauthorized`), statt zu
+raten, welches Sie gemeint haben. Der Daemon protokolliert in diesem Fall `ambiguous API token`.
 
 Der Geheimnis-*Wert* eines Tokens wird bei jeder Anfrage aus der Umgebung gelesen, sodass sein
 Rotieren bereits bei der nächsten Anfrage wirksam wird. Das Hinzufügen oder Entfernen von Token-*Einträgen*

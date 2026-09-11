@@ -43,23 +43,50 @@ edge:
   stale_after_seconds: 15              # a node unheard-from this long counts as lost
 api:
   tokens:
-    - { name: edge-agent, token_env: KAPKAN_EDGE_AGENT_TOKEN, role: agent }
+    - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
+    - { name: edge-2, token_env: KAPKAN_EDGE_2_TOKEN, role: agent, node: edge-2 }
 ```
+
+**Grenzen Sie Zonen auf Knoten ein**, wenn die Flotte PoPs hat: Geben Sie jedem Knoten die
+Hostgroups, deren Zonen er bedient (`edge.nodes[].hostgroups: [edge-us]`, mit dem wörtlichen
+`global` für die flottenweiten Zonen) und jeder Zone ihre `hostgroup`; ein Knoten ohne
+Geltungsbereich bedient nur die globalen Zonen, eine Zone ohne Hostgroup ist global. Die Regel, das
+Literal `global` und das Runbook stehen in
+[Zonen auf Knoten verteilen](/docs/edge#zonen-auf-knoten-verteilen); die Obergrenze für
+Duplikat-Zertifikate wird pro Platzierung gezählt, nicht pro Flotte (siehe
+[Grenzen](/docs/edge#grenzen-die-sie-kennen-sollten)). Sobald ein Knoten eingegrenzt ist, muss jedes
+agent-Token gebunden sein, wie oben.
 
 `kapkan -check-config /etc/kapkan/config.yaml` validiert beide Dateien (es folgt
 `edge.zones_file`), und `kapkan -dump-zones-schema` gibt das JSON-Schema der Zonen-Datei für Ihren
-Editor aus. Geben Sie jedem Knoten ein eigenes `agent`-Token: Das Gehirn parkt höchstens 4 Polls
-pro Token-Name (8 insgesamt) und beantwortet einen weiteren mit `429`, was ein Knoten als
-Fehlschlag wertet und mit Backoff beantwortet. Eine Zonen-Datei, die sich bei einem Reload nicht
+Editor aus. Geben Sie jedem Knoten **sein eigenes `agent`-Token, mit `node` an ihn gebunden**: Ein
+gebundenes Token wird als jeder andere Knoten abgewiesen, bevor das Gehirn irgendetwas mit dem
+Namen tut, sodass ein von einer Box gestohlenes Token nicht mehr für irgendeinen anderen Knoten
+sprechen kann — seine Präsenz, seine Reports und seine ACME-Slots bleiben die seinen — und nur
+dieses eine Token rotiert werden muss. Eine Zonen-Datei, die sich bei einem Reload nicht
 lesen oder validieren lässt, **hält die vorherigen Zonen live** — das Gehirn liefert niemals ein
 halb defektes Dokument aus. Jeder Schlüssel steht in der [Zonen-Referenz](/docs/zones).
 
-<Callout type="info" title="Das agent-Token ist ein Credential zum Ausstellen von Zertifikaten">
+<Callout type="info" title="Das agent-Token ist ein Credential zum Ausstellen von Zertifikaten — binden Sie es">
 Ein Edge-Knoten authentifiziert sich mit einem `agent`-Token (siehe
 [Authentifizierung](/docs/authentication)). Neben dem Pollen des Dokuments nutzt er dieses Token,
-um die Zertifikatsausstellung über das Gehirn zu koordinieren. Bewahren Sie es in der
-Umgebungsdatei des Knotens auf, niemals in der `edge.yaml`, und rotieren Sie es, wenn ein Knoten
-kompromittiert ist.
+um die Zertifikatsausstellung über das Gehirn zu koordinieren — ein **ungebundenes** Token kann
+also als jeder Knoten handeln, und es bei einer Kompromittierung zu rotieren heißt, das Token der
+ganzen Flotte zu rotieren. Binden Sie jedes Token an seinen Knoten (`api.tokens[].node`); bis jedes
+agent-Token gebunden ist, sagen `-check-config`, das Log des Daemons und das `unbound_agent_tokens`
+des Inventars es Ihnen. Was die Bindung bringt, sind Identitätsübernahme und Rotationsradius; was
+die Menge der Zonen begrenzt, für die ein gestohlenes gebundenes Token Zertifikate ausstellen kann,
+ist der [Platzierungs-Geltungsbereich](/docs/edge#zonen-auf-knoten-verteilen) des Knotens: Als sein
+eigener Knoten handelnd kann es den Ausstellungs-Slot nehmen und eine ACME-Key-Authorization nur
+für die Zonen veröffentlichen, die dieser Geltungsbereich abdeckt (in einer Flotte ohne
+Geltungsbereiche für jede Zone) — behandeln Sie die Kompromittierung eines Knotens als
+Zertifikats-Exposition für die Zonen seines Knotens. Eine Flotte von einem einzigen geteilten Token
+migrieren: ein gebundenes Token pro Knoten hinzufügen, **mit eigenem Geheimnis** (ein Wert, den
+sich der ungebundene Eintrag teilt, ist mehrdeutig und wird für jeden Knoten, der ihn präsentiert,
+mit `401` abgelehnt), die Umgebungsdatei jedes Knotens umstellen und beobachten, wie das
+`last_token` des Inventars umspringt, und den geteilten Eintrag zuletzt entfernen — ein ungebundenes
+Token funktioniert derweil weiter. Bewahren Sie das Token in der Umgebungsdatei des Knotens auf,
+niemals in der `edge.yaml`.
 </Callout>
 
 ## 2. Auf der Box: nginx oder Angie
@@ -240,10 +267,14 @@ nur beobachtend, während ihre Schwesterzonen durchsetzen.
 ## Mehrere Knoten und eine gemeinsame Adresse
 
 Richten Sie den `controller.name` jedes Knotens auf seinen eigenen `edge.nodes[]`-Eintrag und
-stellen Sie dasselbe Zonen-Dokument vor alle. Unter Anycast oder einer gemeinsamen VIP kann die
-HTTP-01-Validierung der CA auf jedem Knoten landen: Der bestellende Knoten veröffentlicht seine
-Challenge-Antwort an das Gehirn, das sie im Dokument verteilt, und **jeder** Knoten beantwortet
-sie. Die Ausstellung wird pro Zone über den Slot des Gehirns serialisiert, damit eine Flotte nicht
+stellen Sie dieselben Zonen vor alle — jeder Knoten hinter einer gemeinsamen Adresse muss die Zone
+bedienen, also ihre Hostgroup in `edge.nodes[].hostgroups` auflisten (oder die Zone auf
+uneingegrenzten Knoten global lassen). Unter Anycast oder einer gemeinsamen VIP kann die
+HTTP-01-Validierung der CA auf jedem Knoten hinter dieser Adresse landen: Der bestellende Knoten
+veröffentlicht seine Challenge-Antwort an das Gehirn, das sie im Dokument **jedes Knotens, der die
+Zone bedient**, verteilt, und jeder von ihnen beantwortet sie; ein Knoten, auf dem die Zone nicht
+platziert ist, weist den Host ab und kann nicht antworten. Die Ausstellung wird pro Zone über den
+Slot des Gehirns serialisiert, damit eine Flotte nicht
 an einem Nachmittag die Duplikat-Zertifikat-Obergrenze einer CA verbrennt, und die Erneuerung ist
 pro Knoten mit Jitter versehen. All das ist beratend: Ohne Gehirn erneuert jeder Knoten weiterhin
 selbstständig.
