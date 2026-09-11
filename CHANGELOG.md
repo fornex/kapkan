@@ -454,6 +454,22 @@ security-relevant.
   package (`internal/edge`, `internal/mitigate`) imports `internal/storage` directly (the
   transitive path through the shared report types in `internal/api` is known), and the history's
   row types carry no key material (the report's rule, extended).
+- Edge track, E6.6 — the edge history's read API (milestone E6, analytics). Three `viewer`-rank
+  endpoints over the tables: `GET /api/v1/edge/history?zone=[&node=]&from&to&step` (a zone's
+  windows summed into buckets — `nodes`, `window_seconds`, the counters, `status_2xx..5xx`,
+  `h3_requests`; the client derives the rate and the HTTP/3 share), `GET
+  /api/v1/edge/history/sources?zone=&from&to[&state=]` (the zone's telling sources over the
+  range, the strongest state each, the busiest first, at most 1 001 — *who would have been
+  challenged* over a period) and `GET /api/v1/edge/events?[node][zone][kind]&from&to` (the
+  transitions, newest first, at most 1 001). The range and step rules are the traffic and audit
+  endpoints' — RFC 3339, an hour by default, at most 31 days, at most 5 000 buckets — now shared
+  in one place; storage off answers `{available:false}` like `/api/v1/traffic`, a failed query
+  `502`. Scope: a tenant-scoped token reads its own zones (ownership from the live zones file) and
+  gets one uniform `403` for any zone that is not its own — another tenant's, unlabelled, gone
+  from the file or nonexistent — counted in `kapkan_api_zone_refused_total{route="edge_history"}`
+  (while storage is on; with it off no zone is looked at); `node=` and `/edge/events` name nodes
+  and stay unscoped. Zone names are folded like the file's; `step` is capped at a day, the
+  query's own clamp, and `step_seconds` is the step the buckets were built with.
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data
