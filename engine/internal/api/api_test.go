@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -892,29 +893,62 @@ func TestDashboardServing(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Kapkan") {
 		t.Error("index body does not look like the dashboard")
 	}
-	// Assets serve with their content type and hardening headers.
-	for _, a := range []struct{ path, ctype string }{
-		{"/app.js", "text/javascript"},
-		{"/style.css", "text/css"},
-	} {
-		rec := reqWith(h, http.MethodGet, a.path, "", "", "")
-		if rec.Code != http.StatusOK {
-			t.Errorf("%s status = %d, want 200", a.path, rec.Code)
+	// Every allowlisted asset serves with its content type and hardening
+	// headers. The loop is driven by the allowlist itself rather than by a
+	// hand-written pair, so a file added to dashboard.go is covered the day
+	// it lands — and a console-sync that missed one fails here instead of
+	// 404-ing a view in the browser.
+	paths := make([]string, 0, len(dashboardAssets))
+	for route := range dashboardAssets {
+		paths = append(paths, route)
+	}
+	sort.Strings(paths)
+	for _, route := range paths {
+		path := strings.TrimPrefix(route, "GET ")
+		if path == "/{$}" {
+			path = "/" // the index's exact-match pattern
 		}
-		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, a.ctype) {
-			t.Errorf("%s content-type = %q, want %s", a.path, ct, a.ctype)
+		ctype := dashboardAssets[route].contentType
+		rec := reqWith(h, http.MethodGet, path, "", "", "")
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s status = %d, want 200", path, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != ctype {
+			t.Errorf("%s content-type = %q, want %s", path, ct, ctype)
 		}
 		if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
-			t.Errorf("%s missing X-Content-Type-Options: nosniff", a.path)
+			t.Errorf("%s missing X-Content-Type-Options: nosniff", path)
 		}
 		if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
-			t.Errorf("%s missing strict CSP", a.path)
+			t.Errorf("%s missing strict CSP", path)
+		}
+		if rec.Body.Len() == 0 {
+			t.Errorf("%s served an empty body", path)
 		}
 	}
 
-	// The explicit 3-file allowlist (not an http.FileServer) means only the
-	// named routes exist: /index.html is NOT served (a FileServer would
-	// serve or redirect to it), and unknown paths 404.
+	// A 200 only says a file was embedded. index.html loads each script for
+	// its side effect — every view registers itself on window — so the
+	// registrations are named here: a truncated or stale console-sync copy
+	// would otherwise serve 200s and leave a nav entry rendering nothing.
+	for _, a := range []struct{ path, needle string }{
+		{"/views.js", "w.Views = {"},
+		{"/views.js", "overview: overview"},
+		{"/views2.js", "V.edge = edge;"},
+		{"/views2.js", "V.edgenodes = edgeNodes;"},
+		{"/views2.js", "V.nodes = nodes;"},
+		{"/locales/en.js", "w.KAPKAN_LOCALES.en ="},
+	} {
+		rec := reqWith(h, http.MethodGet, a.path, "", "", "")
+		if !strings.Contains(rec.Body.String(), a.needle) {
+			t.Errorf("%s does not contain %q — the console is not the tree this binary should embed", a.path, a.needle)
+		}
+	}
+
+	// The explicit allowlist (not an http.FileServer) means only the named
+	// routes exist: /index.html is NOT served (a FileServer would serve or
+	// redirect to it), and unknown paths 404.
 	if rec := reqWith(h, http.MethodGet, "/index.html", "", "", ""); rec.Code == http.StatusOK || rec.Code == http.StatusMovedPermanently {
 		t.Errorf("/index.html status = %d, want not served (allowlist, not FileServer)", rec.Code)
 	}

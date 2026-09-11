@@ -337,9 +337,15 @@
       historyBlock
     ]);
   }
-  function ghostChart() {
+  /* The placeholder's shape is drawn ONCE, not per render: every view here is
+     re-rendered on the 3s poll, and re-rolling the noise each time made the
+     ghost twitch as if it were live data. */
+  var GHOST_PTS = (function () {
     var pts = []; for (var i = 0; i < 40; i++) pts.push(40 + Math.sin(i / 3) * 18 + Math.random() * 14);
-    var c = K.areaChart(pts, { color: "var(--muted)", height: 200 });
+    return pts;
+  })();
+  function ghostChart() {
+    var c = K.areaChart(GHOST_PTS, { color: "var(--muted)", height: 200 });
     c.style.width = "100%"; c.style.height = "100%";
     return c;
   }
@@ -655,6 +661,15 @@
      still holds a QUIC listener: off, saying so — the file and the fleet
      disagree, and hiding that would read as a finished switch-off. */
   var h3States = { ready: 1, no_module: 1, node_off: 1, unknown: 1 };
+  /* The state is a NODE's word and reaches us unfiltered, so the "do we have a
+     string for it?" test has to be an own-property one: a report claiming
+     `"state": "constructor"` passes a bare `h3States[state]` lookup through
+     the prototype chain and the badge then renders the raw catalogue key. Both
+     the tooltip and the per-node cell read the state through here, so they can
+     never disagree about which readings are known. */
+  function edgeH3StateLabel(state) {
+    return Object.prototype.hasOwnProperty.call(h3States, state) ? I.t("ed.h3.state." + state) : state;
+  }
   function edgeH3Report(inv, name) {
     for (var i = 0; i < inv.length; i++) {
       if (inv[i].name === name) {
@@ -671,7 +686,7 @@
     return names.map(function (name) {
       var h3 = edgeH3Report(inv, name);
       if (!h3 || !h3.state) return name;
-      var line = name + " — " + (h3States[h3.state] ? I.t("ed.h3.state." + h3.state) : h3.state);
+      var line = name + " — " + edgeH3StateLabel(h3.state);
       return h3.advisory ? line + " · " + h3.advisory : line;
     }).join("\n");
   }
@@ -705,6 +720,414 @@
     if (serving + unsup < nodes) why.push(I.t("ed.h3.tip.silent"));
     return K.badge("badge--dry", I.t("ed.h3.on") + " · " + I.plural(serving, "edgeH3ReadyNodes", { n: I.num(nodes) }), null, why.join("\n"));
   }
+  /* ===== EDGE: one zone's STORED history (E6.7) =====
+     The live table above is one ten-second window; this is the same zone over
+     an hour, a day or a week, read from ClickHouse. */
+
+  /* The state badge for a source, shared by the live would-be table and the
+     history's sources table so one source cannot read differently in the two.
+     A lookup with a muted fallback, not a ternary: the four states below are
+     the ones the brain stores, and a newer kapkan that stores a fifth must
+     render it as an unknown badge rather than as one of these. */
+  var SOURCE_STATE_BADGE = {
+    "denied": "badge--active",
+    "challenged": "badge--elev",
+    "would-deny": "badge--dry",
+    "would-challenge": "badge--muted"
+  };
+  function edgeStateBadge(state) {
+    return K.badge(SOURCE_STATE_BADGE[state] || "badge--muted", I.t("ed.state." + state));
+  }
+
+  /* ClickHouse hands back "2026-09-10 15:04:05" — UTC, with no zone marker.
+     `new Date()` reads that shape as LOCAL time, which would shift every
+     timestamp in this card by the operator's offset, so the marker is added
+     before parsing. A value that already carries one (an ISO string from a
+     newer engine) is parsed as it stands. */
+  function edgeTime(s) {
+    if (!s) return null;
+    var str = String(s);
+    if (!/([Zz]|[+-]\d\d:?\d\d)$/.test(str)) str = str.replace(" ", "T") + "Z";
+    var d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function edgeTimeCell(s) {
+    var d = edgeTime(s);
+    return h("td", { class: "td-muted", text: d ? I.datetime(d) : "—" });
+  }
+
+  /* The three ids of the range switch. app.js owns what each means in seconds
+     and in bucket width; an id it does not know falls back to the hour. */
+  var HIST_RANGES = ["1h", "24h", "7d"];
+
+  /* The storage-off ghost, the Traffic view's own treatment: `available:
+     false` is not an empty period and not an error — the engine never looked,
+     so the honest answer is the panel that says how to make it look. */
+  function edgeGhost(titleKey, subKey) {
+    return h("div", { class: "ext-point" }, [
+      h("span", { class: "ext-point__badge" }, K.badge("badge--elev", I.t("tr.history.endpoint"), "history")),
+      h("div", { class: "section-label", style: { fontSize: "var(--t-md)", color: "var(--text)" } },
+        [w.icon("chart"), h("span", { text: I.t(titleKey) })]),
+      h("p", { class: "td-muted", style: { maxWidth: "72ch", marginBottom: "var(--s-4)" }, text: I.t(subKey) }),
+      h("div", { class: "ext-ghost" }, ghostChart())
+    ]);
+  }
+
+  /* `head` is the one number in the chart's own unit. It is deliberately NOT
+     the period's total: the totals are in the stats row below, and repeating
+     one of them beside a per-second axis read as "the rate is 46.4k". */
+  function histChart(labelKey, values, head, color, tag) {
+    return h("div", { class: "tcard" }, [
+      h("div", { class: "tcard__head" }, [
+        h("div", { class: "tcard__label" }, [
+          (function () { var d = h("span", { class: "tcard__dir" }); d.style.background = color; return d; })(),
+          h("span", { text: I.t(labelKey) }),
+          tag || null
+        ]),
+        h("div", { class: "tcard__now", text: head })
+      ]),
+      h("div", { class: "tcard__chart", style: { height: "150px" } },
+        K.areaChart(values.length ? values : [0, 0], { color: color, height: 150 }))
+    ]);
+  }
+
+  /* The row the card was opened from, so focus can be put back on it when the
+     card that took it goes away. CSS.escape because a zone name is whatever
+     the zones file says it is. */
+  function edgeZoneRow(root, zone) {
+    return root.querySelector('tr[data-edge-zone="' + CSS.escape(zone) + '"]');
+  }
+
+  /* The card under the zones table. `z` is the zone's live row when it still
+     has one — it is what knows whether the rung bites anywhere — and may be
+     absent if a reload dropped the zone while the card was open, in which case
+     the counters are labelled without that claim rather than with a guess. */
+  function edgeHistoryCard(root, ctx, zone, z) {
+    var st = ctx.state.edgeHist;
+    var body;
+    var nodes = (z && z.nodes) || 0, rungWatch = (z && (z.rung_watch_only || []).length) || 0;
+    /* The rung previewing on every node NOW says nothing about the hour, day
+       or week behind it: a rung switched to watch-only an hour ago leaves real
+       denials in the period it was still biting for. So the live state only
+       gets to title the series "would be refused" when the period ALSO holds
+       no real refusal — the buckets carry their own denied/challenged and are
+       asked below. With a zone nobody reports (nodes: 0) there is no live
+       claim to make at all. */
+    var liveWatchOnly = nodes > 0 && rungWatch >= nodes;
+
+    if (st.forbidden) return null;              /* another tenant's zone: nothing to say */
+    if (st.notFound) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.gone") }));
+    } else if (!st.fetchedAt) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.loading") }));
+    } else if (!st.ok) {
+      body = h("div", { class: "card__body" }, h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.hist.error") })]));
+    } else if (!st.available) {
+      body = h("div", { class: "card__body" }, edgeGhost("ed.hist.off.title", "ed.hist.off.sub"));
+    } else if (!st.points.length) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.empty") }));
+    } else {
+      var rps = [], refused = [], h3 = [];
+      var sumReq = 0, sumRefused = 0, sumReal = 0, sumH3 = 0, sumErr = 0, maxNodes = 0, anyH3 = false;
+      st.points.forEach(function (p) {
+        var req = p.requests || 0;
+        /* the API's own formula: requests over the real length of the windows
+           that fell in the bucket (they are not aligned across nodes, so this
+           is a rate to the nearest window, never an exact one) */
+        rps.push(p.window_seconds > 0 ? req / p.window_seconds : 0);
+        var real = (p.denied || 0) + (p.challenged || 0);
+        var ref = real + (p.would_deny || 0) + (p.would_challenge || 0);
+        refused.push(ref);
+        if (p.h3_requests) anyH3 = true;
+        h3.push(req > 0 ? (p.h3_requests || 0) / req * 100 : 0);
+        sumReq += req; sumRefused += ref; sumReal += real; sumH3 += p.h3_requests || 0;
+        sumErr += (p.status_4xx || 0) + (p.status_5xx || 0);
+        maxNodes = Math.max(maxNodes, p.nodes || 0);
+      });
+      /* "Would be refused" is a claim about the whole series, so it is made
+         only when the period bears it out; the preview tag is a claim about
+         NOW and rides on the live state either way. */
+      var watchOnly = liveWatchOnly && sumReal === 0;
+      var refusedKey = watchOnly ? "ed.hist.wouldbe" : "ed.hist.refused";
+      var peak = function (vals) { return I.t("ac.peak") + " " + I.abbr(Math.max.apply(null, vals)); };
+      var charts = [
+        histChart("ed.hist.rps", rps, peak(rps), "var(--chart-in)", null),
+        histChart(refusedKey, refused, peak(refused), watchOnly ? "var(--elev)" : "var(--active)",
+          liveWatchOnly ? K.badge("badge--dry", I.t("ed.challenge.preview")) : null)
+      ];
+      /* the HTTP/3 line is drawn only where there is HTTP/3 to draw: a flat
+         zero line under a zone nobody reaches over QUIC would read as a
+         measurement of nothing */
+      if (anyH3) {
+        charts.push(histChart("ed.hist.h3", h3, I.pct(sumReq > 0 ? sumH3 / sumReq : 0), "var(--chart-out)", null));
+      }
+      var stats = [
+        [I.t("ed.hist.nodes"), I.num(maxNodes)],
+        [I.t("ed.requests"), I.num(sumReq)],
+        [I.t(refusedKey), I.num(sumRefused)],
+        [I.t("ed.hist.errors"), I.num(sumErr)],
+        [I.t("ed.hist.bucket"), I.duration(st.stepSeconds)]
+      ];
+      body = h("div", { class: "card__body" }, [
+        h("div", { class: "hist-charts" }, charts),
+        h("div", { class: "hist-stats" }, stats.map(function (s) {
+          return h("div", { class: "hist-stat" }, [
+            h("div", { class: "hist-stat__lbl", text: s[0] }),
+            h("div", { class: "hist-stat__val mono", text: s[1] })
+          ]);
+        }))
+      ]);
+    }
+
+    var seg = h("div", { class: "seg" }, HIST_RANGES.map(function (r) {
+      return h("button", { class: "seg__btn" + (st.range === r ? " is-on" : ""), text: I.t("ed.hist.range." + r),
+        onclick: function () { ctx.actions.setEdgeHistRange(r); } });
+    }));
+    return h("div", { class: "card mt-4" }, [
+      h("div", { class: "card__head" }, [
+        h("div", { class: "card__title" }, [w.icon("history"), h("span", { text: I.t("ed.hist.title") }), K.badge("badge--accent", zone)]),
+        h("div", { class: "row", style: { gap: "var(--s-2)" } }, [
+          seg,
+          /* closing removes this button with the card, so the keyboard would
+             land on <body>; focus goes back to the row the card belongs to,
+             the drawer's own return-focus treatment */
+          h("button", { class: "btn btn--ghost btn--sm", onclick: function () {
+            ctx.actions.toggleEdgeZone(zone);
+            var row = edgeZoneRow(root, zone);
+            if (row) row.focus();
+          } }, [w.icon("x"), h("span", { text: I.t("ed.hist.close") })])
+        ])
+      ]),
+      body
+    ]);
+  }
+
+  /* "Who would have been challenged — over {period}": the same question the
+     live table asks of one window, asked of the whole period. */
+  function edgeHistorySourcesCard(ctx, zone) {
+    var st = ctx.state.edgeHist;
+    if (st.forbidden || st.notFound) return null;
+    /* the charts' own card carries the loading state, the storage-off ghost
+       and the failure of the HISTORY read for the pair, so none of those is
+       repeated here. The SOURCES read is this card's alone: the charts have
+       nothing to say about it, and a card that simply vanished would read as
+       "no source was telling in this period" rather than as a query that
+       never answered. */
+    if (!st.fetchedAt || !st.ok || !st.available) return null;
+    var period = I.t("ed.hist.range." + st.range);
+    var head = function (count) {
+      return h("div", { class: "card__head" }, [
+        h("div", { class: "card__title" }, [w.icon("shield-alert"), h("span", { text: I.t("ed.srcs.title", { t: period }) }),
+          count === null ? null : K.badge("badge--muted", String(count))]),
+        h("span", { class: "td-muted", text: I.t("ed.srcs.sub") })
+      ]);
+    };
+    if (!st.srcOk) {
+      return h("div", { class: "card mt-4" }, [
+        head(null),
+        h("div", { class: "card__body" }, h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+          w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.srcs.error") })]))
+      ]);
+    }
+    if (!st.srcAvailable) return null;
+    var rows = st.sources.map(function (s) {
+      return h("tr", {}, [
+        h("td", { class: "mono", text: s.source }),
+        h("td", {}, edgeStateBadge(s.state)),
+        h("td", { class: "num mono", text: I.abbr(s.requests || 0) }),
+        h("td", { class: "num mono", text: I.num(s.windows || 0) }),
+        h("td", { class: "num mono", text: I.num(s.nodes || 0) }),
+        edgeTimeCell(s.first_seen),
+        edgeTimeCell(s.last_seen)
+      ]);
+    });
+    return h("div", { class: "card mt-4" }, [
+      head(st.sources.length),
+      st.sources.length
+        ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+            h("thead", {}, h("tr", {}, [V.th("ed.source"), V.th("col.state"), V.thNum("ed.requests"),
+              V.thNum("ed.srcs.windows"), V.thNum("ed.nodes"), V.th("ed.srcs.firstseen"), V.th("ed.srcs.lastseen")])),
+            h("tbody", {}, rows)
+          ]))
+        : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.srcs.empty") }))
+    ]);
+  }
+
+  /* The fleet's events, last 24 hours. The kinds are an enum so a kapkan
+     newer than this console renders its seventeenth kind as its raw name
+     (I.label falls back to the key) instead of dropping it. */
+  var EVENT_KIND_BADGE = {
+    node_alive: "badge--calm", terminator_alive: "badge--calm", generation_installed: "badge--calm",
+    cert_issued: "badge--calm", cert_renewed: "badge--calm", challenge_ended: "badge--calm",
+    node_lost: "badge--active", generation_refused: "badge--active", cert_gone: "badge--active",
+    clock_skew: "badge--active", report_truncated: "badge--elev", challenge_started: "badge--elev",
+    dry_run: "badge--dry"
+  };
+  function edgeEventsCard(ctx) {
+    var st = ctx.state.edgeEvents;
+    if (st.forbidden) return null;              /* a tenant-scoped token: the events name nodes */
+    if (st.absent) return null;                 /* a kapkan without the endpoint: no card, not a fault */
+    var body;
+    if (!st.fetchedAt) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.hist.loading") }));
+    } else if (!st.ok) {
+      body = h("div", { class: "card__body" }, h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("ed.ev.error") })]));
+    } else if (!st.available) {
+      body = h("div", { class: "card__body" }, edgeGhost("ed.hist.off.title", "ed.ev.off.sub"));
+    } else if (!st.events.length) {
+      body = h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("ed.ev.empty") }));
+    } else {
+      var rows = st.events.map(function (e) {
+        return h("tr", {}, [
+          edgeTimeCell(e.event_time),
+          h("td", {}, K.badge(EVENT_KIND_BADGE[e.kind] || "badge--muted", I.label("edgeEventKind", e.kind))),
+          h("td", { class: "mono", text: e.node || "—" }),
+          h("td", { class: "mono td-muted", text: e.zone || "—" }),
+          h("td", { class: "td-muted", text: e.detail || "" })
+        ]);
+      });
+      body = h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+        h("thead", {}, h("tr", {}, [V.th("ed.ev.when"), V.th("ed.ev.kind"), V.th("col.node"), V.th("ed.zone"), V.th("ed.ev.detail")])),
+        h("tbody", {}, rows)
+      ]));
+    }
+    return h("div", { class: "card mt-6" }, [
+      h("div", { class: "card__head" }, [
+        h("div", { class: "card__title" }, [w.icon("clock"), h("span", { text: I.t("ed.ev.title") }),
+          st.available && st.events.length ? K.badge("badge--muted", String(st.events.length)) : null]),
+        h("span", { class: "td-muted", text: I.t("ed.ev.sub") })
+      ]),
+      body
+    ]);
+  }
+
+  /* ---------- the zones table's E6 cells ----------
+     Every field E6 added is OPTIONAL on the wire, and a brain older than it
+     sends none of them. Each cell below therefore reads its field defensively
+     and falls back to exactly what this table rendered before E6 — the
+     regression guard is that an old brain's table is byte-for-byte the one it
+     always was. */
+
+  /* The Nodes column answers "how much of this zone's placement is up?", not
+     "how many nodes happen to be reporting it". placement (E6.3) is absent
+     from an older brain, and the cell then reads as it did: the count of
+     alive nodes reporting the zone. A zone whose placement covers NO node
+     gets a dash rather than 0/0 — nowhere to serve it is a configuration
+     mistake (`-check-config` warns about it), not an outage, and 0/0 in a red
+     column would send an operator hunting for a dead box. */
+  function edgeNodesCell(z) {
+    var pl = z.placement;
+    if (!pl || !pl.nodes) return h("td", { class: "num mono", text: I.num(z.nodes || 0) });
+    var placed = pl.nodes.length, alive = (pl.alive || []).length;
+    /* the operator's topology label, absent for a tenant-scoped token — which
+       sees the node names and nothing of how the operator groups them. It is
+       shown on the empty placement too, and matters most there: the group
+       nobody lists IS the reason the zone is served nowhere. */
+    var group = pl.hostgroup ? h("div", { class: "td-muted", text: pl.hostgroup }) : null;
+    if (!placed) {
+      return h("td", { class: "num" }, [
+        h("div", { class: "td-muted", attrs: { title: I.t("ed.nodes.none") }, text: "—" }), group]);
+    }
+    var kids = [h("div", { class: "mono", attrs: { title: I.t("ed.nodes.title", { t: pl.nodes.join(", ") }) },
+      text: I.num(alive) + "/" + I.num(placed) })];
+    /* the zone has nodes and none of them is alive: the operator's alarm */
+    if (z.unserved) kids.push(K.badge("badge--active", I.t("ed.nodes.unserved"), "shield-alert"));
+    kids.push(group);
+    return h("td", { class: "num" }, kids);
+  }
+
+  /* A row the zones FILE seeded that no alive node reports (E6.2) has no
+     window at all: its counters are absent, not zero. A "0" in an rps column
+     reads as "measured, and quiet"; a dash reads as "nothing measured", which
+     is the only true answer for a zone in mode: none or one whose nodes are
+     all down. An older brain rows a zone only when a node reported it, so
+     nodes is never 0 there and nothing changes. */
+  function edgeNumCell(z, value, fmt) {
+    if (!z.nodes) return h("td", { class: "num" }, h("span", { class: "td-muted", text: "—" }));
+    return h("td", { class: "num mono", text: fmt(value || 0) });
+  }
+
+  /* The challenge column, with the three states a file-seeded row can be in
+     BEFORE the rung is worth reading: a proxy-only zone challenges nothing by
+     construction, a deciding zone nobody serves applies nothing at all, and a
+     deciding zone that IS placed on a live node has simply not been reported
+     yet. Saying "off" for any of them would be the console answering a
+     question the fleet never got to ask.
+
+     The three are told apart by the PLACEMENT, not by the report count:
+     `nodes` counts the alive nodes whose last report mentioned the zone,
+     while liveness lives in placement.alive/unserved, so keying "not served
+     by any alive node" on `nodes: 0` alone would print it beside a "2/2" in
+     the Nodes cell — two cells of one row contradicting each other — for a
+     zone whose nodes are up but silent (a fresh start, a report older than
+     the window, a zone the node shed under zones_truncated).
+
+     mode and placement are both absent on an older brain: without mode the
+     row falls through to the E4.5 cell, and without placement (pre-E6.3) the
+     report count is the only liveness the console has and the cell reads as
+     it did. */
+  function edgeZoneChallenge(z) {
+    if (z.mode === "none") return h("span", { class: "td-muted", text: I.t("ed.proxyonly") });
+    if (z.mode && !z.nodes) {
+      var pl = z.placement;
+      if (!pl || !pl.nodes || z.unserved || !pl.nodes.length) {
+        return h("span", { class: "td-muted", text: I.t("ed.notserved") });
+      }
+      return h("span", { class: "td-muted", text: I.t("ed.noreport") });
+    }
+    return edgeChallengeCell(z);
+  }
+
+  /* ---------- tenant filter (E6.2) ----------
+     Only an unscoped token is ever told a zone's tenant, so the chips appear
+     only when a row carries one: a single-tenant deployment and every scoped
+     operator see the view exactly as before. TENANT_NONE stands for the
+     unlabelled (house) zones — it holds a '*', which a tenant label may not
+     (`[A-Za-z0-9._-]`), so it can never collide with a real one. */
+  var TENANT_NONE = "*none*";
+  function edgeTenantList(zones) {
+    /* a prototype-less set: a tenant is `[A-Za-z0-9._-]`, so "__proto__" is a
+       legal label, and on a plain `{}` it would hit the prototype setter,
+       record nothing and leave that customer with no chip of their own */
+    var seen = Object.create(null), labelled = false, unlabelled = false;
+    zones.forEach(function (z) {
+      if (z.tenant) { seen[z.tenant] = true; labelled = true; } else unlabelled = true;
+    });
+    if (!labelled) return null;
+    var list = Object.keys(seen).sort();
+    if (unlabelled) list.push(TENANT_NONE);
+    return list;
+  }
+  /* The persisted choice is honoured only while it still names something on
+     screen. A tenant that has left the file — or one carried over from an
+     unscoped session into a scoped token's — would otherwise filter the whole
+     table away and read as an empty fleet. It is FORGOTTEN rather than
+     masked: a choice merely hidden would re-engage by itself the moment that
+     tenant's zones came back, days later, with nothing on screen having said
+     so. This decision is made during a render, and clearEdgeTenant
+     deliberately does not start another one. */
+  function edgeTenantCurrent(ctx, list) {
+    var cur = ctx.state.edgeTenant || "";
+    if (!cur) return "";
+    if (list && list.indexOf(cur) >= 0) return cur;
+    ctx.actions.clearEdgeTenant();
+    return "";
+  }
+  function edgeTenantChips(ctx, list, cur) {
+    function chip(val, label) {
+      return h("button", { class: "seg__btn" + (cur === val ? " is-on" : ""), text: label,
+        onclick: function () { ctx.actions.setEdgeTenant(val); } });
+    }
+    var chips = [chip("", I.t("ed.tenant.all"))];
+    list.forEach(function (t) { chips.push(chip(t, t === TENANT_NONE ? I.t("ed.tenant.none") : t)); });
+    return h("div", { class: "filters" }, [
+      h("span", { class: "row", style: { color: "var(--muted)" } }, [w.icon("layers"), h("span", { class: "td-muted", text: I.t("ed.tenant.filter") })]),
+      h("div", { class: "seg seg--wrap" }, chips)
+    ]);
+  }
+
   function edge(root, ctx) {
     ctx.actions.loadEdge();
     var st = ctx.state.edge;
@@ -724,35 +1147,71 @@
     } else if (!st.zones.length) {
       children.push(h("div", { class: "card" }, K.empty("shield-check", I.t("ed.nozones.title"), I.plural(st.nodesAlive, "edgeNodesUp") + " " + I.t("ed.nozones.sub"), "muted")));
     } else {
-      var inv = st.inv || [];
-      var rows = st.zones.map(function (z) {
+      /* the inventory is the Edge NODES view's document, read here for the
+         one thing the merged status cannot carry: why a node serves a zone
+         over TCP. A 403 or a failed fetch leaves it empty and the HTTP/3
+         tooltip falls back to bare node names. */
+      var inv = ctx.state.edgeInv.list || [];
+      /* the tenant chips narrow the zones table AND the would-be set below,
+         so an operator filtering to one customer is not still reading every
+         other customer's sources underneath it */
+      var openZone = ctx.state.edgeHist.zone;
+      var tenants = edgeTenantList(st.zones);
+      var tenant = edgeTenantCurrent(ctx, tenants);
+      var zones = tenant
+        ? st.zones.filter(function (z) { return tenant === TENANT_NONE ? !z.tenant : z.tenant === tenant; })
+        : st.zones;
+      if (tenants) children.push(edgeTenantChips(ctx, tenants, tenant));
+      var rows = zones.map(function (z) {
         var watch = z.watch_only || [];
-        return h("tr", {}, [
+        var open = openZone === z.zone;
+        var toggle = function () { ctx.actions.toggleEdgeZone(z.zone); };
+        return h("tr", { class: "is-clickable" + (open ? " is-open" : ""), tabindex: "0", role: "button",
+          /* the open row's own click closes the card, so it must not offer to
+             open it; aria-expanded is the same fact for a screen reader */
+          attrs: { title: I.t(open ? "ed.hist.close" : "ed.hist.open"), "aria-expanded": open ? "true" : "false" },
+          dataset: { edgeZone: z.zone },
+          onclick: toggle, onkeydown: function (e) { hgKey(e, toggle); } }, [
           h("td", { class: "target-cell" }, [
-            h("div", { class: "mono", text: z.zone }),
+            h("div", { class: "row", style: { gap: "8px" } },
+              [w.icon(open ? "chevron-down" : "chevron-right"), h("span", { class: "mono", text: z.zone })]),
+            /* the owner label, for unscoped tokens only — the API omits it
+               for a scoped one, whose every row is its own */
+            z.tenant ? h("div", { class: "td-muted", text: z.tenant }) : null,
             watch.length ? h("div", { class: "td-muted", text: I.plural(watch.length, "edgeWatchOnlyNodes") }) : null
           ]),
-          h("td", { class: "num mono", text: I.num(z.nodes || 0) }),
-          h("td", { class: "num mono", text: I.num(Math.round(z.rps || 0)) }),
-          h("td", { class: "num mono", text: I.abbr(z.challenged || 0) }),
-          h("td", { class: "num mono", text: I.abbr(z.cleared || 0) }),
-          h("td", { class: "num mono", text: I.abbr(z.would_challenge || 0) }),
-          h("td", { class: "num mono", text: I.abbr(z.would_deny || 0) }),
-          h("td", {}, edgeChallengeCell(z)),
+          edgeNodesCell(z),
+          edgeNumCell(z, Math.round(z.rps || 0), I.num.bind(I)),
+          edgeNumCell(z, z.challenged, I.abbr.bind(I)),
+          edgeNumCell(z, z.cleared, I.abbr.bind(I)),
+          edgeNumCell(z, z.would_challenge, I.abbr.bind(I)),
+          edgeNumCell(z, z.would_deny, I.abbr.bind(I)),
+          h("td", {}, edgeZoneChallenge(z)),
           h("td", {}, edgeH3Cell(z, inv))
         ]);
       });
       children.push(h("div", { class: "card" }, [
         h("div", { class: "card__head" }, [
-          h("div", { class: "card__title" }, [w.icon("shield-check"), h("span", { text: I.t("ed.zones") }), K.badge("badge--muted", String(st.zones.length))]),
+          h("div", { class: "card__title" }, [w.icon("shield-check"), h("span", { text: I.t("ed.zones") }), K.badge("badge--muted", String(zones.length))]),
           h("span", { class: "td-muted", text: I.plural(st.nodesReporting, "edgeReportingNodes") })
         ]),
-        h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
+        h("div", { class: "tablewrap" }, h("table", { class: "tbl edge-tbl" }, [
           h("thead", {}, h("tr", {}, [V.th("ed.zone"), V.thNum("ed.nodes"), V.thNum("ed.rps"), V.thNum("ed.challenged"), V.thNum("ed.cleared"),
             V.thNum("ed.wouldchallenge"), V.thNum("ed.woulddeny"), V.th("ed.challenge"), V.th("ed.h3")])),
           h("tbody", {}, rows)
         ]))
       ]));
+
+      /* the stored history of the zone whose row is open, under the table it
+         was opened from. The reads are on demand — asked for here, once the
+         operator has actually opened a zone, never by the 3s poll. */
+      if (openZone) {
+        ctx.actions.loadEdgeHistory();
+        var openRow = null;
+        st.zones.forEach(function (z) { if (z.zone === openZone) openRow = z; });
+        children.push(edgeHistoryCard(root, ctx, openZone, openRow));
+        children.push(edgeHistorySourcesCard(ctx, openZone));
+      }
 
       /* zone entries the nodes cut from their reports to fit: those zones are
          missing or undercounted above, and the table must not read as whole */
@@ -764,13 +1223,13 @@
          zones (the caption says so); partial when a node cut part of its
          per-source detail — the aggregator's bound or the report's size */
       var would = [], partial = false;
-      st.zones.forEach(function (z) { if (z.partial) partial = true; (z.would_be || []).forEach(function (s) { would.push({ zone: z.zone, s: s }); }); });
+      zones.forEach(function (z) { if (z.partial) partial = true; (z.would_be || []).forEach(function (s) { would.push({ zone: z.zone, s: s }); }); });
       would.sort(function (a, b) { return (b.s.requests || 0) - (a.s.requests || 0) || (a.s.source < b.s.source ? -1 : a.s.source > b.s.source ? 1 : 0); });
       var wouldRows = would.map(function (e) {
         return h("tr", {}, [
           h("td", { class: "mono", text: e.s.source }),
           h("td", { class: "mono td-muted", text: e.zone }),
-          h("td", {}, K.badge(e.s.state === "would-deny" ? "badge--dry" : "badge--muted", I.t("ed.state." + e.s.state))),
+          h("td", {}, edgeStateBadge(e.s.state)),
           h("td", { class: "num mono", text: I.abbr(e.s.requests || 0) }),
           h("td", {}, h("span", { class: "row wrap", style: { gap: "4px" } }, (e.s.nodes || []).map(function (n) { return K.badge("badge--muted", n); })))
         ]);
@@ -788,6 +1247,205 @@
           : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t(partial ? "ed.wouldbe.shed" : "ed.wouldbe.empty") }))
       ]));
     }
+
+    /* The fleet's events belong to the fleet, not to a zone, so they are shown
+       whatever the zone table came back with — as long as there are edge nodes
+       at all and the token can see node names. `unscoped` rides on /status for
+       every role and long predates the events endpoint, so it says nothing
+       about a kapkan older than E6.6; that one answers 404, which the api
+       layer reports as absent and this card drops in silence. */
+    if (ctx.status.edge_nodes_total && ctx.status.unscoped) {
+      ctx.actions.loadEdgeEvents();
+      children.push(edgeEventsCard(ctx));
+    }
+    /* keyboard focus lives on a zone row, and this view re-mounts on every
+       poll: keep it where the operator put it, the attacks table's treatment */
+    var af = document.activeElement;
+    var keepZone = (af && af.getAttribute) ? af.getAttribute("data-edge-zone") : null;
+    K.mount(root, children);
+    if (keepZone) { var kr = edgeZoneRow(root, keepZone); if (kr) kr.focus(); }
+  }
+
+  /* ===== EDGE NODES (E6.7): the fleet inventory =====
+     One row per CONFIGURED edge node — the scrub Nodes view's shape, and its
+     discipline about provenance. Two sources sit on one row and are kept
+     apart on purpose:
+
+       the BRAIN's knowledge — liveness (the zones poll is the only liveness
+       signal; a self-report never is), the agent tokens bound to the node and
+       the placement scope with the count of zones it puts there;
+
+       the NODE's CLAIMS — its kapkan version, the terminator it orchestrates,
+       that terminator's HTTP/3 readiness and the certificates it holds. Every
+       one of those columns is labelled "(reported)" for the same reason the
+       scrub view labels its own: they are trustworthy to display and never to
+       decide by.
+
+     Every E6 field is optional on the wire. A brain older than E6.1/E6.3
+     sends no tokens, no last_token, no hostgroups and no zones_placed, and
+     those cells render a dash rather than an invented answer.
+
+     The whole document is unscoped-only, so a scoped token gets a 403 — which
+     is a NOTICE here, not an error: the fleet is not broken, the caller is
+     simply not entitled to the topology. */
+
+  /* the docs section the unbound-token banner sends an operator to */
+  var DOCS_BINDING = "https://kapkan.io/docs/authentication#binding-an-agent-token-to-its-node";
+
+  function edgeNodeStateBadge(n) {
+    if (n.alive) return K.badge("badge--calm", I.t(n.holding ? "nd.polling" : "nd.up"), "shield-check");
+    if (n.last_seen) return K.badge("badge--active", I.t("nd.lost"), "shield-alert");
+    return K.badge("badge--muted", I.t("nd.never"), "clock");
+  }
+
+  /* The tokens cell carries the whole migration story for one node: which
+     tokens are bound to it, and which token actually polled last (watch it
+     flip as a fleet moves off a shared credential). A node with no token of
+     its own WHILE a fleet-wide one exists is the case worth a colour: that
+     unbound token may poll and report as this node, and a blank cell would
+     read as "nothing to do here". With every token bound the amber never
+     appears, so the badge is a migration marker, not permanent decoration. */
+  function edgeNodeTokensCell(n, unbound) {
+    var toks = n.tokens || [];
+    var kids = [];
+    if (toks.length) {
+      kids.push(h("span", { class: "row wrap", style: { gap: "4px" } },
+        toks.map(function (t) { return K.badge("badge--muted", t, "lock"); })));
+    } else if (unbound.length) {
+      kids.push(K.badge("badge--elev", I.t("en.shared"), "shield-alert", I.t("en.shared.title")));
+    } else {
+      kids.push(h("span", { class: "td-muted", text: "—" }));
+    }
+    if (n.last_token) kids.push(h("div", { class: "td-muted", text: I.t("en.lasttoken", { t: n.last_token }) }));
+    return h("td", {}, kids);
+  }
+
+  /* One certificate as the node reports it: the zone, when it expires, and
+     the issuer behind the tooltip. The colour is the expiry alarm edge-spec
+     asks for (T−30 d), read off the node's own claim; an unparsable date is
+     shown as unknown rather than as an expiry in 1970. */
+  var CERTS_SHOWN = 6;
+  function edgeCertBadge(c) {
+    var when = new Date(c.not_after);
+    if (isNaN(when.getTime())) return K.badge("badge--muted", c.zone + " · " + I.t("common.na"));
+    var days = (when.getTime() - Date.now()) / 86400000;
+    var tone = days <= 7 ? "badge--active" : days <= 30 ? "badge--elev" : "badge--muted";
+    var title = c.issuer
+      ? I.t("en.cert.title", { i: c.issuer, t: I.datetime(when) })
+      : I.t("en.cert.title.noissuer", { t: I.datetime(when) });
+    return K.badge(tone, c.zone + " · " + I.rel(when), null, title);
+  }
+  function edgeNodeCertsCell(rep) {
+    if (!rep) return h("td", { class: "td-muted", text: "—" });
+    var certs = rep.certs || [];
+    if (!certs.length && !rep.certs_truncated) return h("td", {}, h("span", { class: "td-muted", text: I.t("en.nocerts") }));
+    var shown = certs.slice(0, CERTS_SHOWN);
+    var kids = shown.map(edgeCertBadge);
+    if (certs.length > shown.length) {
+      kids.push(K.badge("badge--muted", I.t("en.certs.more", { n: I.num(certs.length - shown.length) }), null,
+        certs.slice(CERTS_SHOWN).map(function (c) { return c.zone; }).join("\n")));
+    }
+    /* a list the node CUT to fit the 64 KiB body limit is short, not
+       complete: say so, or the row claims the fleet holds fewer certificates
+       than it does */
+    if (rep.certs_truncated) {
+      kids.push(K.badge("badge--dry", I.t("en.certs.cut", { n: I.num(rep.certs_truncated) })));
+    }
+    return h("td", {}, h("span", { class: "row wrap", style: { gap: "4px" } }, kids));
+  }
+
+  /* The node's HTTP/3 readiness, straight from its terminator probe — the
+     same four readings the Edge view's zone tooltip explains, said here once
+     per node instead of once per zone. Absent from a node that predates the
+     probe, and a dash is the honest rendering of that. */
+  function edgeNodeH3Cell(rep) {
+    var h3 = rep && rep.terminator && rep.terminator.h3;
+    if (!h3 || !h3.state) return h("td", { class: "td-muted", text: "—" });
+    var label = edgeH3StateLabel(h3.state);
+    return h("td", {}, K.badge(h3.state === "ready" ? "badge--calm" : "badge--elev", label, null, h3.advisory || ""));
+  }
+
+  function edgeNodeTerminatorCell(rep) {
+    var t = rep && rep.terminator;
+    if (!t) return h("td", { class: "td-muted", text: "—" });
+    return h("td", { class: "td-muted" }, [
+      h("div", { class: "mono", text: (t.kind || "—") + (t.version ? " · " + t.version : "") }),
+      t.generation ? h("div", { text: I.t("en.generation", { n: I.num(t.generation) }) }) : null
+    ]);
+  }
+
+  /* An unbound agent token is a fleet-wide credential: it may poll and report
+     as ANY node. The brain keeps accepting it (bindings are a migration, not
+     a flag day), so nothing else on this page would say so — hence a banner
+     that names the tokens and links to the one paragraph that fixes it. */
+  function edgeUnboundBanner(unbound) {
+    return h("div", { class: "banner banner--dry" }, [
+      w.icon("shield-alert"),
+      h("span", { class: "banner__txt", text: I.plural(unbound.length, "edgeUnboundTokens", { t: unbound.join(", ") }) }),
+      h("a", { class: "btn btn--ghost btn--sm", href: DOCS_BINDING, target: "_blank", rel: "noopener", text: I.t("en.unbound.link") })
+    ]);
+  }
+
+  function edgeNodes(root, ctx) {
+    ctx.actions.loadEdgeInv();
+    var st = ctx.state.edgeInv;
+    var children = [V.viewHead(I.t("nav.edgenodes"), I.t("en.sub"))];
+
+    if (!ctx.status.edge_nodes_total) {
+      children.push(h("div", { class: "card" }, K.empty("globe", I.t("ed.empty.title"), I.t("ed.empty.sub"), "muted")));
+    } else if (st.forbidden) {
+      /* a scoped token: the notice, never an error — the fleet is fine, the
+         inventory is simply topology and stays with unscoped tokens */
+      children.push(h("div", { class: "banner banner--info" }, [w.icon("lock"), h("span", { class: "banner__txt", text: I.t("en.adminonly") })]));
+    } else if (!st.fetchedAt) {
+      children.push(h("div", { class: "card" }, h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("en.loading") }))));
+    } else if (!st.ok) {
+      /* a FAILED fetch is an error state, never an empty fleet: /status says
+         edge nodes exist, so a bare table claiming zero would be a false
+         count at exactly the moment someone opens this view */
+      children.push(h("div", { class: "banner banner--dry-loud", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"), h("span", { class: "banner__txt", text: I.t("en.error") })]));
+    } else {
+      if (st.unbound.length) children.push(edgeUnboundBanner(st.unbound));
+      var rows = st.list.map(function (n) {
+        var rep = n.report;
+        var groups = n.hostgroups || [];
+        return h("tr", {}, [
+          h("td", { class: "target-cell" }, h("div", { class: "mono", text: n.name })),
+          h("td", {}, edgeNodeStateBadge(n)),
+          edgeNodeTokensCell(n, st.unbound),
+          h("td", {}, groups.length
+            ? h("span", { class: "row wrap", style: { gap: "4px" } }, groups.map(function (g) { return K.badge("badge--muted", g); }))
+            : h("span", { class: "td-muted", text: "—" })),
+          h("td", { class: "num" }, n.zones_placed != null
+            ? h("span", { class: "mono", text: I.num(n.zones_placed) })
+            : h("span", { class: "td-muted", text: "—" })),
+          h("td", { class: "td-muted" }, rep ? [
+            h("div", { class: "mono", text: rep.version || "—" }),
+            n.reported_at ? h("div", { text: I.rel(new Date(n.reported_at)) }) : null
+          ] : h("span", { text: I.t("nd.noreport") })),
+          edgeNodeTerminatorCell(rep),
+          edgeNodeH3Cell(rep),
+          edgeNodeCertsCell(rep),
+          h("td", { class: "td-muted", text: n.last_seen ? I.rel(new Date(n.last_seen)) : I.t("nd.never") })
+        ]);
+      });
+      children.push(h("div", { class: "card" }, [
+        h("div", { class: "card__head" }, [
+          h("div", { class: "card__title" }, [w.icon("globe"), h("span", { text: I.t("en.list") }), K.badge("badge--muted", String(st.total))]),
+          h("span", { class: "td-muted", text: I.t("en.note", { t: st.staleAfter }) })
+        ]),
+        h("div", { class: "tablewrap" }, h("table", { class: "tbl fleet-tbl" }, [
+          /* en.h3, not the Edge view's ed.h3: this column is the NODE's claim
+             about its own terminator, so it carries the "(reported)" label
+             every other claim column on this row carries */
+          h("thead", {}, h("tr", {}, [V.th("col.node"), V.th("col.state"), V.th("en.tokens"), V.th("en.scope"),
+            V.thNum("en.zones"), V.th("en.version"), V.th("en.terminator"), V.th("en.h3"), V.th("en.certs"), V.th("nd.lastseen")])),
+          h("tbody", {}, rows)
+        ]))
+      ]));
+      children.push(h("div", { class: "banner banner--info mt-4" }, [w.icon("info"), h("span", { class: "banner__txt", text: I.t("en.reportnote") })]));
+    }
     K.mount(root, children);
   }
 
@@ -797,4 +1455,5 @@
   V.attackDetail = attackDetail;
   V.nodes = nodes;
   V.edge = edge;
+  V.edgenodes = edgeNodes;
 })(window);

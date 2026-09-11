@@ -16,11 +16,21 @@
     /* likewise gated on edge_nodes_total: the Edge view (E4.5) exists only
        where edge nodes front zones */
     { id: "edge", icon: "shield-check", key: "nav.edge", section: "monitor", whenEdge: true },
+    /* the fleet's own inventory beside its zones (E6.7): same gate */
+    { id: "edgenodes", icon: "globe", key: "nav.edgenodes", section: "monitor", whenEdge: true },
     { id: "hostgroups", icon: "layers", key: "nav.hostgroups", section: "config" },
     { id: "traffic", icon: "chart", key: "nav.traffic", section: "config" },
     { id: "settings", icon: "settings", key: "nav.settings", section: "config" }
   ];
   var WINDOW = 60;
+
+  /* The Edge view's tenant filter survives a reload of the page but not the
+     browser session: it narrows what an operator is LOOKING at, and a filter
+     silently still in force a week later is how a zone goes unwatched.
+     sessionStorage may throw (a locked-down profile), so every access is
+     guarded and an unreadable store simply means "no filter". */
+  var TENANT_KEY = "kapkan.edgeTenant";
+  function savedTenant() { try { return sessionStorage.getItem(TENANT_KEY) || ""; } catch (e) { return ""; } }
 
   var state = {
     view: "overview",
@@ -40,11 +50,41 @@
     /* edge zones status (E4.5) — the same on-demand + freshness-guard shape:
        it merges the nodes' last ten-second windows, so a 10s refresh is the
        data's own pace */
-    /* inv is the edge-node inventory that rides along with the zone status:
-       the nodes' own reports, read for per-node HTTP/3 detail (E5.5) */
-    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [], inv: [] },
+    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] },
+    /* the edge-node inventory (E6.7), fetched on its own guard and read by
+       BOTH edge views: the Edge nodes table renders all of it, the Edge
+       view's HTTP/3 cell only each node's terminator.h3. Unscoped-only, so
+       `forbidden` is a first-class state rather than an error. */
+    edgeInv: { loading: false, fetchedAt: 0, ok: false, forbidden: false, total: 0, staleAfter: 15, list: [], unbound: [] },
+    /* which tenant's zones the Edge view shows; "" is every tenant */
+    edgeTenant: savedTenant(),
+    /* one zone's stored history (E6.7): opened by clicking a zone row, closed
+       by clicking it again. Same on-demand + freshness-guard shape as the
+       status above, and for a stronger reason — these reads hit ClickHouse and
+       the windows behind them are ten seconds long, so joining the 3s poll
+       would buy nothing and cost a query every three seconds. */
+    /* seq is the read that owns this state: only the newest may write it (see
+       loadEdgeHistory), so a zone switch cannot be captioned by the answer to
+       the zone before it. */
+    edgeHist: { zone: null, range: "1h", key: "", loading: false, fetchedAt: 0, seq: 0,
+      ok: false, forbidden: false, notFound: false, available: false, stepSeconds: 0, points: [],
+      srcOk: false, srcAvailable: false, sources: [] },
+    /* the fleet's events, last 24h — unscoped tokens only (they name nodes);
+       absent when the kapkan is older than the endpoint */
+    edgeEvents: { loading: false, fetchedAt: 0, ok: false, forbidden: false, absent: false, available: false, events: [] },
     last: { rung: -1 }
   };
+
+  /* The history card's ranges: the period and the bucket asked for it. The
+     brain may RAISE the step (a range holds at most 5000 buckets) or cap it at
+     a day, so the response's step_seconds — not this one — is what the buckets
+     were built with. views2.js renders the switch from the same three ids. */
+  var EDGE_RANGES = {
+    "1h":  { seconds: 3600,   step: 60 },
+    "24h": { seconds: 86400,  step: 600 },
+    "7d":  { seconds: 604800, step: 3600 }
+  };
+  var EDGE_EVENTS_SECONDS = 86400;
 
   /* ---------- buffers ---------- */
   function pushBuf() {
@@ -337,24 +377,132 @@
       });
     },
     /* edge zones status — the nodes' last windows merged; 10s freshness, the
-       window's own length. The inventory is fetched with it because only a
+       window's own length. The inventory is fetched alongside because only a
        node's own report says WHY it serves a zone over TCP (E5.5); the status
        alone decides whether the view renders, so an inventory that fails or is
-       refused leaves the table intact and only the tooltip poorer. Both
-       fetches resolve — neither rejects — so one is never lost to the other. */
+       refused leaves the table intact and only the tooltip poorer. Each
+       fetch carries its own freshness guard, so neither is ever lost to the
+       other's timing. */
     loadEdge: function () {
+      actions.loadEdgeInv();
       var e = state.edge;
       if (e.loading) return;
       if (e.fetchedAt && Date.now() - e.fetchedAt < 10000) return;
       e.loading = true;
-      Promise.all([API.getEdgeZones(), API.getEdgeNodes()]).then(function (res) {
-        var r = res[0];
+      API.getEdgeZones().then(function (r) {
         e.loading = false; e.fetchedAt = Date.now();
         e.ok = r.ok; e.forbidden = !!r.forbidden;
         e.nodesAlive = r.nodesAlive; e.nodesReporting = r.nodesReporting; e.zonesTruncated = r.zonesTruncated || 0; e.zones = r.zones;
-        e.inv = (res[1] && res[1].nodes) || [];
         if (state.view === "edge") renderView();
       });
+    },
+    /* ---- edge zone history (E6.7) ---- */
+    /* Clicking the open zone's row again shuts the card: the row is the only
+       control, so it has to be able to undo itself. */
+    toggleEdgeZone: function (zone) {
+      var e = state.edgeHist;
+      if (e.zone === zone) { e.zone = null; renderView(); return; }
+      /* `loading` is deliberately NOT cleared: a read for the zone just left
+         may still be in flight, and clearing it would let this render start a
+         second pair of ClickHouse queries beside it. The in-flight one is the
+         one that resolves, sees the zone has changed and re-renders — which is
+         where the new zone's read starts, once and not twice. */
+      e.zone = zone; e.key = ""; e.fetchedAt = 0;
+      e.ok = false; e.forbidden = false; e.notFound = false; e.available = false;
+      e.stepSeconds = 0; e.points = []; e.srcOk = false; e.srcAvailable = false; e.sources = [];
+      renderView();
+    },
+    setEdgeHistRange: function (r) {
+      var e = state.edgeHist;
+      if (!EDGE_RANGES[r] || e.range === r) return;
+      e.range = r; e.key = ""; e.fetchedAt = 0;
+      renderView();
+    },
+    /* The zone card's two reads, fetched together so the sources table and the
+       charts always describe the SAME period — a partial refresh would caption
+       one period's sources with another's range. Both resolve, neither
+       rejects, so one failing never loses the other. */
+    loadEdgeHistory: function () {
+      var e = state.edgeHist;
+      if (!e.zone || e.loading) return;
+      var range = EDGE_RANGES[e.range] || EDGE_RANGES["1h"];
+      var key = e.zone + "|" + e.range;
+      if (e.key === key && e.fetchedAt && Date.now() - e.fetchedAt < 10000) return;
+      e.loading = true;
+      var zone = e.zone, rangeID = e.range, seq = ++e.seq;
+      var to = new Date(), from = new Date(to.getTime() - range.seconds * 1000);
+      var fromISO = from.toISOString(), toISO = to.toISOString();
+      Promise.all([
+        API.getEdgeHistory(zone, fromISO, toISO, range.step),
+        API.getEdgeHistorySources(zone, fromISO, toISO, "")
+      ]).then(function (res) {
+        var h = res[0], s = res[1];
+        /* only the newest read may write this state or release the guard: an
+           answer overtaken by a later one has nothing left to say, and
+           clearing `loading` for it would start a third read beside the
+           second */
+        if (seq !== e.seq) return;
+        e.loading = false;
+        /* the operator may have clicked another zone or another range while
+           this was in flight — a late answer must not caption itself with the
+           new selection; the re-render is where that selection's own read
+           starts */
+        if (e.zone !== zone || e.range !== rangeID) { renderView(); return; }
+        e.fetchedAt = Date.now(); e.key = key;
+        e.ok = h.ok; e.forbidden = !!h.forbidden; e.notFound = !!h.notFound;
+        e.available = h.available; e.stepSeconds = h.stepSeconds || range.step; e.points = h.points;
+        e.srcOk = s.ok; e.srcAvailable = s.available; e.sources = s.sources;
+        if (state.view === "edge") renderView();
+      });
+    },
+    loadEdgeEvents: function () {
+      var v = state.edgeEvents;
+      if (v.loading) return;
+      /* a kapkan without the endpoint will not grow one while the page is
+         open: asked once, answered 404, never asked again */
+      if (v.absent) return;
+      if (v.fetchedAt && Date.now() - v.fetchedAt < 10000) return;
+      v.loading = true;
+      var to = new Date(), from = new Date(to.getTime() - EDGE_EVENTS_SECONDS * 1000);
+      API.getEdgeEvents(from.toISOString(), to.toISOString()).then(function (r) {
+        v.loading = false; v.fetchedAt = Date.now();
+        v.ok = r.ok; v.forbidden = !!r.forbidden; v.absent = !!r.absent; v.available = r.available; v.events = r.events;
+        if (state.view === "edge") renderView();
+      });
+    },
+    /* edge-node inventory (E6.7) — the loadNodes shape again: on demand, half
+       a stale_after capped at 10s, so a node the brain has given up on is
+       never shown as up for longer than the API itself would claim. A 403 is
+       a state, not a failure: the inventory is unscoped-only. */
+    loadEdgeInv: function () {
+      var n = state.edgeInv;
+      if (n.loading) return;
+      var fresh = Math.min(10000, (n.staleAfter || 15) * 500);
+      if (n.fetchedAt && Date.now() - n.fetchedAt < fresh) return;
+      n.loading = true;
+      API.getEdgeNodes().then(function (r) {
+        n.loading = false; n.fetchedAt = Date.now();
+        n.ok = r.ok; n.forbidden = !!r.forbidden;
+        n.total = r.total; n.staleAfter = r.staleAfter;
+        n.list = r.nodes; n.unbound = r.unbound || [];
+        if (state.view === "edgenodes" || state.view === "edge") renderView();
+      });
+    },
+    /* the Edge view's tenant chips; "" is every tenant */
+    setEdgeTenant: function (t) {
+      state.edgeTenant = t;
+      try { sessionStorage.setItem(TENANT_KEY, t); } catch (e) {}
+      renderView();
+    },
+    /* Forget a saved choice that names no tenant on screen. The view calls it
+       WHILE rendering — it has just decided to draw the unfiltered table — so
+       it must not render again; it only makes the store agree with what the
+       operator is looking at, instead of leaving behind a filter that would
+       switch itself back on when that tenant's zones returned. The key is
+       written in this file and nowhere else. */
+    clearEdgeTenant: function () {
+      state.edgeTenant = "";
+      try { sessionStorage.removeItem(TENANT_KEY); } catch (e) {}
     },
     openDrawer: openDrawer, closeDrawer: closeDrawer,
     withdraw: function (anchor, target) {
