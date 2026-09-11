@@ -184,6 +184,12 @@ func TestLocaleParityRegistered(t *testing.T) {
 // keys, edgeH3ReadyNodes and edgeH3StillServing (10 + 2 = 12 keys; in en, 20 +
 // 4 = 24 forms).
 //
+// The fleet console (E6.7) added 34 strings: nine ed.* for the zones table's
+// tenant chips, its placement cell and the three readings a file-seeded row
+// can carry where a rung cannot be read off, plus nav.edgenodes and 24 en.*
+// for the Edge nodes view (336 + 34 = 370), and one plural key,
+// edgeUnboundTokens (12 + 1 = 13 keys; in en, 24 + 2 = 26 forms).
+//
 // The Edge view's zone-history card (E6.7) added 36 strings — the nineteen
 // ed.hist.* of the card itself (its title, the three range ids, the chart and
 // stats labels, and its loading / error / gone / empty / storage-off states),
@@ -191,7 +197,7 @@ func TestLocaleParityRegistered(t *testing.T) {
 // table (its own error state included: a sources read can fail while the
 // charts' read succeeds), ed.state.{denied,challenged} (the two states the
 // stored history has and a ten-second window does not), and the eight ed.ev.*
-// of the fleet-events card (336 + 36 = 372) — plus a NINTH enum group,
+// of the fleet-events card (336 + 34 + 36 = 406) — plus a NINTH enum group,
 // edgeEventKind, whose sixteen members are the event kinds the write path
 // emits (43 + 16 = 59): an enum rather than sixteen strings so a newer
 // kapkan's seventeenth kind renders as its raw name instead of vanishing.
@@ -204,9 +210,9 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		want   int
 	}{
 		{"units", 0, 4},
-		{"plurals", 1, 12},
-		{"plurals", 0, 24},  // 12 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5)
-		{"strings", 0, 372}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +36: ed.hist/srcs/ev/state (E6.7)
+		{"plurals", 1, 13},
+		{"plurals", 0, 26},  // 13 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5) + edgeUnboundTokens (E6.7)
+		{"strings", 0, 406}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history)
 		{"enums", 1, 9},
 		{"enums", 0, 59}, // +16: edgeEventKind (E6.7)
 		{"enumsShort", 1, 1},

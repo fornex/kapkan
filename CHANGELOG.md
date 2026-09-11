@@ -379,9 +379,9 @@ security-relevant.
   so a fleet migrates one node at a time, and is named in four places until it is bound:
   `kapkan -check-config` (WARNING), the daemon's log at start and on every reload, the edge
   inventory (`unbound_agent_tokens`, and per node `tokens` and `last_token` — the token that last
-  polled as it), and the console (a later E6 change). Making an unbound agent token an error is
-  scheduled for a MAJOR release; there is deliberately no switch to make it one today. The zones
-  document is untouched: a fleet without bindings gets byte-identical documents and ETags, so the
+  polled as it), and the console's **Edge nodes** view (E6.7). Making an unbound agent token an
+  error is scheduled for a MAJOR release; there is deliberately no switch to make it one today.
+  The zones document is untouched: a fleet without bindings gets byte-identical documents and ETags, so the
   upgrade reloads nothing. Config surface: `api.tokens[].node` (schema, overlay, config builder).
 - Edge track, E6.2 — a zone belongs to a tenant (milestone E6, fleet). `zones[].tenant` is an
   optional ownership label on the hostgroups' tenant axis — never inherited (not from
@@ -406,10 +406,10 @@ security-relevant.
   nothing more, the operator sees a leaked scoped token walking hostnames. Every zone of the file
   that turns h3 on shows `h3.enabled`, with `serving`/`unsupported` from the alive nodes'
   `terminator.h3` — a `mode: none` zone included — and the document sums the nodes'
-  `certs_truncated` beside `zones_truncated`. The shipped console renders a zone no alive node
-  reports yet with `nodes: 0` and no challenge; the Edge view's cells for those rows are a later E6
-  change. Config surface: `zones[].tenant` (zones schema), `api.tokens.tenant` overlay entry marked
-  server-verified.
+  `certs_truncated` beside `zones_truncated`. From E6.7 the console rows those zones — the ones no
+  alive node reports yet — as dashes with the reason in the challenge column, and puts the tenant
+  label under each zone name. Config surface: `zones[].tenant` (zones schema), `api.tokens.tenant`
+  overlay entry marked server-verified.
 - Edge track, E6.4 — the edge history's storage (milestone E6, analytics). Three ClickHouse
   tables beside the three the brain always had: `edge_windows` (one row per edge node, zone and
   closed ten-second window — the report's counters, response statuses, HTTP/3 requests and the
@@ -507,6 +507,34 @@ security-relevant.
   certificates stay on disk and stop renewing (runbook, not automation). Config surface: both
   schemas, the overlay, docs (zones, configuration, edge *Placing zones on nodes* + Limits,
   edge-install, api, authentication).
+- Edge track, E6.7 (fleet) — the console half of E6 (edge-spec §8; no engine behaviour change). A
+  new **Edge nodes** view carries one row per *configured* node and keeps the scrubbing Nodes
+  view's discipline about provenance: what the brain knows — liveness (the zones poll is the only
+  liveness signal), the agent tokens bound to the node or, where an agent token is still unbound,
+  an amber **shared token** badge, the token that last polled as it, the node's placement scope
+  and its `zones_placed` — sits beside what the node claims, each column labelled *(reported)*:
+  its Kapkan version, the terminator it orchestrates with the live generation, that terminator's
+  HTTP/3 readiness and the certificates it holds, amber inside thirty days of expiry and red
+  inside seven, with a list the node cut to fit its report saying so rather than reading as a
+  shorter fleet. While `unbound_agent_tokens` is non-empty a banner names those tokens — an
+  unbound agent token may poll and report as *any* node — and links to *Binding an agent token to
+  its node*; both it and the badge vanish once every token is bound. The inventory is
+  unscoped-only, so a scoped token gets the *visible to unscoped tokens only* notice, not an error.
+  In the **Edge** view, the **Nodes** column now reads `placement` rather than who happens to be
+  reporting: `2/2` alive of placed, `0/1` with a red **UNSERVED** badge, the node names in the
+  tooltip and the hostgroup underneath for unscoped readers, and a dash — never `0/0` — for a
+  zone no node's scope covers, which is a `-check-config` warning and not an outage. Rows the
+  zones file seeds but no node reports show dashes instead of zeros and say why in the challenge
+  column, decided from the placement: *proxy only* for `policy.mode: none`, *not served by any
+  alive node* when the placed nodes are all down or nothing places the zone, *no report yet* when
+  a placed node is alive but silent. With a tenant on a row, an unscoped reader also gets the
+  label under each zone name and a row of tenant chips that narrows the table and the *Who would
+  be challenged* set together (remembered for the browser session; a choice that names nothing on
+  screen is forgotten rather than left to re-engage). A scoped operator sees its own slice with no
+  chips, no tenant column and no hostgroup. Every E6 field is optional on the wire, so a pre-E6
+  brain's table is byte-for-byte the one it always was. Five locales; new Go gates check that
+  every i18n key the console uses exists, that its documentation links resolve to a real heading,
+  and that every allowlisted asset serves and carries its view registrations.
 - Edge track, E6.7 (history half) — the operator console reads the edge history (milestone E6).
   Clicking a zone's row in the Edge view opens that zone's stored history under the table over
   **1 h / 24 h / 7 d** (`step` 60 / 600 / 3600): requests per second per bucket, "refused or would
