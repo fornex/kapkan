@@ -655,6 +655,15 @@
      still holds a QUIC listener: off, saying so — the file and the fleet
      disagree, and hiding that would read as a finished switch-off. */
   var h3States = { ready: 1, no_module: 1, node_off: 1, unknown: 1 };
+  /* The state is a NODE's word and reaches us unfiltered, so the "do we have a
+     string for it?" test has to be an own-property one: a report claiming
+     `"state": "constructor"` passes a bare `h3States[state]` lookup through
+     the prototype chain and the badge then renders the raw catalogue key. Both
+     the tooltip and the per-node cell read the state through here, so they can
+     never disagree about which readings are known. */
+  function edgeH3StateLabel(state) {
+    return Object.prototype.hasOwnProperty.call(h3States, state) ? I.t("ed.h3.state." + state) : state;
+  }
   function edgeH3Report(inv, name) {
     for (var i = 0; i < inv.length; i++) {
       if (inv[i].name === name) {
@@ -671,7 +680,7 @@
     return names.map(function (name) {
       var h3 = edgeH3Report(inv, name);
       if (!h3 || !h3.state) return name;
-      var line = name + " — " + (h3States[h3.state] ? I.t("ed.h3.state." + h3.state) : h3.state);
+      var line = name + " — " + edgeH3StateLabel(h3.state);
       return h3.advisory ? line + " · " + h3.advisory : line;
     }).join("\n");
   }
@@ -751,15 +760,34 @@
     return h("td", { class: "num mono", text: fmt(value || 0) });
   }
 
-  /* The challenge column, with the two states a file-seeded row can be in
+  /* The challenge column, with the three states a file-seeded row can be in
      BEFORE the rung is worth reading: a proxy-only zone challenges nothing by
-     construction, and a deciding zone nobody serves applies nothing at all.
-     Saying "off" for either would be the console answering a question the
-     fleet never got to ask. mode is the brain's word and is absent on an
-     older brain — which then always falls through to the E4.5 cell. */
+     construction, a deciding zone nobody serves applies nothing at all, and a
+     deciding zone that IS placed on a live node has simply not been reported
+     yet. Saying "off" for any of them would be the console answering a
+     question the fleet never got to ask.
+
+     The three are told apart by the PLACEMENT, not by the report count:
+     `nodes` counts the alive nodes whose last report mentioned the zone,
+     while liveness lives in placement.alive/unserved, so keying "not served
+     by any alive node" on `nodes: 0` alone would print it beside a "2/2" in
+     the Nodes cell — two cells of one row contradicting each other — for a
+     zone whose nodes are up but silent (a fresh start, a report older than
+     the window, a zone the node shed under zones_truncated).
+
+     mode and placement are both absent on an older brain: without mode the
+     row falls through to the E4.5 cell, and without placement (pre-E6.3) the
+     report count is the only liveness the console has and the cell reads as
+     it did. */
   function edgeZoneChallenge(z) {
     if (z.mode === "none") return h("span", { class: "td-muted", text: I.t("ed.proxyonly") });
-    if (z.mode && !z.nodes) return h("span", { class: "td-muted", text: I.t("ed.notserved") });
+    if (z.mode && !z.nodes) {
+      var pl = z.placement;
+      if (!pl || !pl.nodes || z.unserved || !pl.nodes.length) {
+        return h("span", { class: "td-muted", text: I.t("ed.notserved") });
+      }
+      return h("span", { class: "td-muted", text: I.t("ed.noreport") });
+    }
     return edgeChallengeCell(z);
   }
 
@@ -771,7 +799,10 @@
      (`[A-Za-z0-9._-]`), so it can never collide with a real one. */
   var TENANT_NONE = "*none*";
   function edgeTenantList(zones) {
-    var seen = {}, labelled = false, unlabelled = false;
+    /* a prototype-less set: a tenant is `[A-Za-z0-9._-]`, so "__proto__" is a
+       legal label, and on a plain `{}` it would hit the prototype setter,
+       record nothing and leave that customer with no chip of their own */
+    var seen = Object.create(null), labelled = false, unlabelled = false;
     zones.forEach(function (z) {
       if (z.tenant) { seen[z.tenant] = true; labelled = true; } else unlabelled = true;
     });
@@ -783,11 +814,17 @@
   /* The persisted choice is honoured only while it still names something on
      screen. A tenant that has left the file — or one carried over from an
      unscoped session into a scoped token's — would otherwise filter the whole
-     table away and read as an empty fleet. */
+     table away and read as an empty fleet. It is FORGOTTEN rather than
+     masked: a choice merely hidden would re-engage by itself the moment that
+     tenant's zones came back, days later, with nothing on screen having said
+     so. This decision is made during a render, and clearEdgeTenant
+     deliberately does not start another one. */
   function edgeTenantCurrent(ctx, list) {
     var cur = ctx.state.edgeTenant || "";
-    if (!cur || !list) return "";
-    return list.indexOf(cur) >= 0 ? cur : "";
+    if (!cur) return "";
+    if (list && list.indexOf(cur) >= 0) return cur;
+    ctx.actions.clearEdgeTenant();
+    return "";
   }
   function edgeTenantChips(ctx, list, cur) {
     function chip(val, label) {
@@ -999,7 +1036,7 @@
   function edgeNodeH3Cell(rep) {
     var h3 = rep && rep.terminator && rep.terminator.h3;
     if (!h3 || !h3.state) return h("td", { class: "td-muted", text: "—" });
-    var label = h3States[h3.state] ? I.t("ed.h3.state." + h3.state) : h3.state;
+    var label = edgeH3StateLabel(h3.state);
     return h("td", {}, K.badge(h3.state === "ready" ? "badge--calm" : "badge--elev", label, null, h3.advisory || ""));
   }
 
@@ -1074,8 +1111,11 @@
           h("span", { class: "td-muted", text: I.t("en.note", { t: st.staleAfter }) })
         ]),
         h("div", { class: "tablewrap" }, h("table", { class: "tbl fleet-tbl" }, [
+          /* en.h3, not the Edge view's ed.h3: this column is the NODE's claim
+             about its own terminator, so it carries the "(reported)" label
+             every other claim column on this row carries */
           h("thead", {}, h("tr", {}, [V.th("col.node"), V.th("col.state"), V.th("en.tokens"), V.th("en.scope"),
-            V.thNum("en.zones"), V.th("en.version"), V.th("en.terminator"), V.th("ed.h3"), V.th("en.certs"), V.th("nd.lastseen")])),
+            V.thNum("en.zones"), V.th("en.version"), V.th("en.terminator"), V.th("en.h3"), V.th("en.certs"), V.th("nd.lastseen")])),
           h("tbody", {}, rows)
         ]))
       ]));

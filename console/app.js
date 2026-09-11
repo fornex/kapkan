@@ -395,6 +395,16 @@
       try { sessionStorage.setItem(TENANT_KEY, t); } catch (e) {}
       renderView();
     },
+    /* Forget a saved choice that names no tenant on screen. The view calls it
+       WHILE rendering — it has just decided to draw the unfiltered table — so
+       it must not render again; it only makes the store agree with what the
+       operator is looking at, instead of leaving behind a filter that would
+       switch itself back on when that tenant's zones returned. The key is
+       written in this file and nowhere else. */
+    clearEdgeTenant: function () {
+      state.edgeTenant = "";
+      try { sessionStorage.removeItem(TENANT_KEY); } catch (e) {}
+    },
     openDrawer: openDrawer, closeDrawer: closeDrawer,
     withdraw: function (anchor, target) {
       K.confirm(anchor, { title: I.t("ac.withdraw"), text: I.t("ac.withdraw.confirm", { t: target }), danger: true, confirmLabel: I.t("ac.withdraw"),
