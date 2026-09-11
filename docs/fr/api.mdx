@@ -64,6 +64,9 @@ sinon. Voir [Multi-tenant](/docs/multi-tenancy).
 | GET | `/api/v1/dataplane/rules` | Le flux de règles du [nœud de scrubbing](/docs/scrubbing#nœuds-de-nettoyage-gérés) (`agent`/`operator` non rattaché) ; long-poll par ETag, retenu jusqu'à 30 s. |
 | POST | `/api/v1/dataplane/nodes/{name}/report` | Le rapport consultatif d'un nœud de scrubbing sur lui-même (`agent`/`operator` non rattaché). |
 | GET | `/api/v1/dataplane/nodes` | Inventaire des nœuds gérés : vivacité, configuration, nombre de bans par nœud (`viewer` non rattaché ou plus). |
+| GET | `/api/v1/edge/history` | L'[historique edge](/docs/storage#historique-edge) d'une zone, regroupé en intervalles sur une plage (`viewer` ; un jeton rattaché à un tenant sur ses propres zones) ; `{available:false, points:[]}` lorsque le stockage est désactivé. |
+| GET | `/api/v1/edge/history/sources` | Les sources significatives de la zone sur une plage — qui a été refusé, mis au défi ou l'aurait été (`viewer` ; un jeton rattaché à un tenant sur ses propres zones). |
+| GET | `/api/v1/edge/events` | Les transitions que le cerveau a vues dans la flotte edge, la plus récente d'abord (`viewer` non rattaché ou plus). |
 | GET | `/metrics` | Métriques Prometheus. |
 | GET | `/healthz` | Sonde de vivacité/disponibilité non authentifiée : `503` jusqu'au démarrage complet, puis `200`. |
 
@@ -551,7 +554,13 @@ ETag est **retenu** jusqu'à ce que la table change ou pendant 30 s au maximum, 
 réponse `304` — un long-poll qui offre des mises à jour de règles en moins d'une seconde sur du
 HTTP ordinaire. Un nœud s'identifie avec `?node=<name>`, et **cette interrogation est le signal de
 vivacité du nœud** — le nom doit donc être un nœud configuré (un nom inconnu renvoie `404`) et, en
-dehors du mode local sans jeton, la requête doit porter un vrai jeton.
+dehors du mode local sans jeton, la requête doit porter un vrai jeton. Un jeton lié à un nœud
+(`api.tokens[].node`) ne peut interroger que sous l'identité de ce nœud : un autre nom, ou aucun
+nom, est un `403` uniforme avant qu'aucune présence ne soit enregistrée. Un rechargement qui
+retire le nœud, retire le jeton ou déplace la liaison du jeton met fin à une interrogation en
+attente avec la réponse qu'une première interrogation obtiendrait désormais (`404`, `401`, `403`).
+La présence n'est estampillée que par les jetons `agent` — le `?node=X` d'un operator est un
+aperçu du document de X et ne déplace aucune vivacité.
 
 ```json
 {
@@ -588,9 +597,14 @@ console peut décider d'afficher ou non les fonctionnalités liées aux nœuds s
 ### Le canal edge
 
 Ces points de terminaison existent pour les [nœuds edge](/docs/edge) — des machines exécutant
-[`kapkan edge`](/docs/cli#edge). Comme le canal des nœuds de scrubbing, ils prennent le rôle
-`agent` ou un jeton `operator` non rattaché, jamais un `viewer` ni un jeton rattaché à un tenant :
-le document de zones couvre tous les tenants. **Le cerveau distribue la politique, jamais les
+[`kapkan edge`](/docs/cli#edge). Comme le canal des nœuds de scrubbing, les points de terminaison
+destinés aux nœuds prennent le rôle `agent` ou un jeton `operator` non rattaché, jamais un `viewer`
+ni un jeton rattaché à un tenant : le document de zones couvre tous les tenants. Ceux destinés aux
+humains diffèrent : l'inventaire des nœuds et les événements de la flotte
+(`GET /api/v1/edge/events`) sont des lectures de rang `viewer` pour les jetons non rattachés ;
+l'état des zones, l'[historique edge](#get-apiv1edgehistory) avec ses sources significatives (rang
+`viewer`) et le levier (rang `operator`) admettent un jeton [rattaché à un
+tenant](/docs/multi-tenancy) pour ses propres zones. **Le cerveau distribue la politique, jamais les
 verdicts** — il n'existe aucun appel par requête, ni ici ni ailleurs ; un nœud répond seul aux
 requêtes. Le nombre de nœuds edge configurés (`edge_nodes_total`) circule sur `/api/v1/status` pour
 tous les rôles, de sorte qu'une console peut décider d'afficher ou non la vue Edge sans aucun de ces
@@ -598,16 +612,29 @@ appels.
 
 #### GET /api/v1/edge/zones
 
-Le document de zones qu'un nœud rend et applique : chaque zone du [fichier de zones](/docs/zones)
-avec ses origines, sa version TLS minimale, ses URL de directory ACME et sa politique, plus les
-autorisations d'émission en cours et les challenges ACME diffusés à la flotte. Un `GET` simple
+Le document de zones qu'un nœud rend et applique : les zones du [fichier de zones](/docs/zones) que
+la [portée de placement](/docs/edge#placer-les-zones-sur-les-nœuds) du nœud couvre — toutes les
+zones pour le `GET` nu d'un operator, ou pour une flotte dont les zones ne portent aucun
+`hostgroup` (une zone étiquetée n'est servie que par les nœuds qui listent son groupe) — avec leurs
+origines, leur version TLS minimale, leurs URL de directory ACME et leur politique, plus les
+autorisations d'émission en cours, les challenges ACME diffusés, les clés de laissez-passer et les
+leviers de ces zones ; l'`ETag` est celui du nœud. Un `GET` simple
 renvoie le document avec un `ETag` de hachage de contenu ; un `GET` dont le `If-None-Match` nomme
 cet ETag est **retenu** jusqu'à ce que le document change — un rechargement réussi du fichier de
 zones, un challenge de certificat publié par un nœud — ou pendant 25 s au maximum, puis reçoit une
-réponse `304`. Un nœud s'identifie avec `?node=<name>`, et **cette interrogation est le signal de
+réponse `304`. Un rechargement qui retire le nœud, retire le jeton ou déplace la liaison du jeton
+met fin à une interrogation en attente avec la réponse qu'une première interrogation obtiendrait
+désormais (`404`, `401`, `403`), jamais un document. Un nœud s'identifie avec `?node=<name>`, et
+**cette interrogation est le signal de
 vivacité du nœud** ; le nom doit donc être une entrée `edge.nodes[]` configurée (un nom inconnu
-renvoie `404`) et la requête doit porter un vrai jeton. Au plus 4 interrogations par nom de jeton
-et 8 au total peuvent être retenues à la fois ; une interrogation supplémentaire correspondante
+renvoie `404`) et la requête doit porter un vrai jeton. Un jeton lié à un nœud
+(`api.tokens[].node`) ne peut interroger, rapporter et coordonner l'ACME que sous l'identité de ce
+nœud — le nom d'un autre nœud, ou une interrogation sans `?node=`, est un `403` uniforme qui ne
+nomme jamais le nœud lié, refusé avant qu'aucune présence ne soit estampillée ni rien stocké ; seuls
+les jetons `agent` estampillent la présence, de sorte que le `?node=X` d'un operator est un aperçu
+du document de X, sans présence. Au plus 4 interrogations par nom de jeton
+et `max(8, 2 × le nombre de nœuds edge)` au total peuvent être retenues à la fois ; une
+interrogation supplémentaire correspondante
 reçoit `429` avec `Retry-After: 1` (`too many concurrent zone holds`), ce que le nœud traite comme
 un échec et qui le fait temporiser (1 s, doublant jusqu'à 30 s) — donnez à chaque nœud son propre
 jeton agent.
@@ -676,14 +703,27 @@ partie de l'ensemble des candidats), puis la liste de chaque zone réduite de mo
 certificats, puis les zones — chaque coupe étant comptée : `sources_truncated` est le nombre de
 sources candidates manquantes dans la liste (celles que la borne propre au nœud de 20 par fenêtre a
 laissées de côté, et celles qu'un rapport en train de rétrécir a délestées), `certs_truncated` et
-`zones_truncated` les entrées supprimées. Stocké et renvoyé par `GET /api/v1/edge/nodes`. Jamais un
+`zones_truncated` les entrées supprimées. Stocké et renvoyé par `GET /api/v1/edge/nodes`. Avec le
+[stockage](/docs/storage#historique-edge) activé, les fenêtres et les sources significatives du
+rapport sont aussi écrites dans l'historique edge, et ce qui a changé depuis le rapport précédent du
+nœud devient des événements — après que le rapport a été stocké, et sans que la réponse ne l'attende
+jamais. Jamais un
 signal de vivacité (l'interrogation l'est). Un `{name}` inconnu renvoie `404` ; le succès est
 `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 
 L'inventaire des nœuds : chaque nœud edge configuré avec la vivacité de son interrogation, joint à
-son dernier rapport. Une lecture de rang `viewer`, jetons non rattachés uniquement.
+son dernier rapport, à sa portée de placement (`hostgroups` — la portée effective, `["global"]` pour
+un nœud qui n'en a pas — et `zones_placed`, les zones du fichier qu'il couvre), plus `tokens` (les
+noms des jetons agent qui lui sont liés par `api.tokens[].node`) et
+`last_token` (le nom du jeton qui a interrogé en dernier sous son identité — jamais un secret) ; le
+document porte `unbound_agent_tokens` tant qu'un jeton agent est non lié et qu'il existe des nœuds
+auxquels le lier (absent sinon) — la vue de migration de
+[Lier un token agent à son nœud](/docs/authentication#lier-un-token-agent-à-son-nœud).
+`hostgroups` et `zones_placed` sont toujours présents ; `tokens`, `last_token` et
+`unbound_agent_tokens` sont omis quand ils sont vides. Une lecture de rang `viewer`, jetons non
+rattachés uniquement.
 
 #### GET /api/v1/edge/zones/status
 
@@ -698,19 +738,36 @@ qu'un aperçu, le levier en vigueur (`override`), l'HTTP/3 de la zone sur toute 
 que le cerveau le détient, `serving` les nœuds vivants dont la génération active écoute en QUIC
 pour la zone, `unsupported` ceux où elle l'a demandé et est servie en TCP, `requests` la somme des
 requêtes HTTP/3 de la dernière fenêtre des nœuds ; absent pour une zone dont personne ne parle ni
-ne demande h3. Cet état est construit à partir de la section zones des rapports, qui liste les
-zones **qui décident** : l'HTTP/3 d'une zone en `mode: none` n'apparaît donc que dans le
-`terminator.h3` des nœuds sous [`GET /api/v1/edge/nodes`](#get-apiv1edgenodes) ; `enabled` apparaît
-pour toute zone à laquelle le fichier active h3 et qui est présente ici — remontée par un nœud, ou
-porteuse d'un levier), et **l'ensemble des candidats** : l'union des
+ne demande h3. `enabled` apparaît pour chaque zone du fichier à laquelle il active h3 — y compris
+une zone en `mode: none` — et `serving`/`unsupported` nomment les écouteurs QUIC actifs des nœuds
+vivants pour la zone, d'après leur `terminator.h3`, que la zone décide ou non ; `requests` provient
+de la section zones des rapports, qui ne liste que les zones **qui décident**), et
+**l'ensemble des candidats** : l'union des
 sources pour lesquelles les nœuds ont prévisualisé un défi ou un refus, l'état le plus fort
 conservé, les plus actives d'abord, bornée à 20 par nœud rapporteur (`would_be_truncated` compte le
 reste). `partial` indique que les sources candidates d'un nœud n'ont pas toutes tenu — sa borne par
 fenêtre, ou un rapport qui a dû rétrécir — de sorte que l'ensemble est ce qui a survécu, pas tout le
 monde ; `zones_truncated` sur le document somme les entrées de zone que les nœuds vivants ont
-coupées de leurs rapports, des zones absentes ou sous-comptées ici. Une lecture de rang `viewer`,
-jetons non rattachés uniquement, comme l'inventaire. C'est le *qui aurait été mis au défi* de la
-spécification edge : lisez-le avant que le palier d'une zone ne passe en production.
+coupées de leurs rapports, des zones absentes ou sous-comptées ici — un compte à l'échelle de la
+flotte, pris avant le filtre de tenant, de sorte qu'un appelant rattaché peut voir un nombre qui
+couvre des zones qu'il ne peut pas voir. Chaque zone du fichier de zones
+a elle aussi une ligne — `mode` (son `policy.mode`) et `file_challenge` (son `policy.challenge`)
+sont la parole du cerveau, `challenge` ce que les nœuds appliquent — et `certs` liste le certificat
+que chaque nœud vivant détient pour la zone (`node`, `not_after`, `issuer` — le dernier omis quand
+le nœud n'en rapporte aucun ; des métadonnées seulement, issues des rapports ; `certs_truncated` sur
+le document somme les entrées que les nœuds ont coupées de leurs rapports pour tenir dans la limite
+de taille — à l'échelle de la flotte, comme `zones_truncated` —, de sorte qu'une liste courte est
+ce qui a survécu, pas ce qui est détenu). Chaque zone du
+fichier porte aussi son `placement {hostgroup, nodes, alive}` — le groupe dans lequel le fichier la
+range, les nœuds configurés dont la portée la couvre et lesquels d'entre eux sont vivants — et
+`unserved: true` lorsqu'elle a des nœuds mais qu'aucun n'est vivant (une zone qu'aucune portée de
+nœud ne couvre affiche `nodes: []` et est plutôt un avertissement de `-check-config`). Ce qu'un nœud affirme d'une zone hors de sa portée est stocké dans son rapport, et n'est ni fusionné ici ni écrit dans l'[historique edge](#get-apiv1edgehistory) (`kapkan_edge_history_dropped_total{reason="outside_scope"}`). `placement.hostgroup` n'est présent que pour les jetons non rattachés : un tenant voit les noms des nœuds sur lesquels sa zone est servie, pas la façon dont l'operator les groupe. Une lecture de rang `viewer`. Un jeton non rattaché voit chaque zone,
+les étiquetées avec leur `tenant` (la clé est absente sur une zone non étiquetée) ; un jeton
+[rattaché à un tenant](/docs/multi-tenancy) exactement ses propres zones — le nom d'hôte d'aucun
+autre tenant dans aucune ligne, aucun ensemble de candidats ni aucune liste HTTP/3, et pas de champ
+`tenant`. Les noms des nœuds sont visibles d'un tenant ; l'inventaire non. C'est le *qui aurait été
+mis au défi* de la spécification edge : lisez-le avant que le palier d'une zone ne passe en
+production.
 
 ```json
 {
@@ -719,6 +776,9 @@ spécification edge : lisez-le avant que le palier d'une zone ne passe en produc
   "zones": [
     {
       "zone": "shop.example.com",
+      "tenant": "shop",
+      "mode": "decide",
+      "file_challenge": "auto",
       "nodes": 2,
       "challenge": "auto",
       "rps": 812.4,
@@ -731,16 +791,68 @@ spécification edge : lisez-le avant que le palier d'une zone ne passe en produc
       "would_be": [
         { "source": "203.0.113.7", "state": "would-deny", "requests": 1210, "nodes": ["edge-1", "edge-2"] },
         { "source": "198.51.100.23", "state": "would-challenge", "requests": 640, "nodes": ["edge-1"] }
+      ],
+      "certs": [
+        { "node": "edge-1", "not_after": "2026-11-20T09:12:00Z", "issuer": "R11" },
+        { "node": "edge-2", "not_after": "2026-11-20T09:12:00Z", "issuer": "R11" }
       ]
     }
   ]
 }
 ```
 
-Une zone qu'aucun nœud vivant n'a encore rapportée apparaît tout de même lorsqu'un levier est posé
-sur elle : `nodes: 0`, `rps: 0` et `override`, sans mode. Les compteurs de requêtes (`requests`,
+Une zone qu'aucun nœud vivant n'a encore rapportée — une zone en `policy.mode: none`, ou une zone
+dont les nœuds ne sont pas en service — a tout de même sa ligne : `nodes: 0`, `rps: 0`, son `mode`
+et son `file_challenge`, et `override` lorsqu'un levier est posé. Un levier sur une zone qu'un
+rechargement a depuis retirée du fichier garde lui aussi une ligne, sans `mode` (pour les appelants
+non rattachés uniquement — c'est à eux de le libérer). Les compteurs de requêtes (`requests`,
 `decided`, `denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`) sont omis quand ils
 valent zéro ; `nodes` et `rps` sont toujours présents.
+
+#### GET /api/v1/edge/history
+
+L'[historique edge](/docs/storage#historique-edge) d'une zone : les fenêtres de dix secondes des
+nœuds sommées en intervalles de `step` secondes entre `from` et `to` (RFC 3339 ; la dernière heure
+par défaut ; au plus 31 jours ; `step` vaut 60 s par défaut, est relevé pour qu'une plage ne
+contienne pas plus de 5 000 intervalles, et vaut au plus 86 400 s — un jour) — `{available, zone,
+node, step_seconds, points: [{ts, nodes, window_seconds, requests, decided, denied, challenged,
+cleared, would_deny, would_challenge, status_2xx, status_3xx, status_4xx, status_5xx,
+h3_requests}]}`. `nodes` compte les nœuds distincts qui ont rapporté dans l'intervalle ;
+`step_seconds` est le pas réellement appliqué ; `zone` et `node` reprennent la requête, `node`
+seulement lorsque le filtre a été donné ; déduisez le débit avec `requests / window_seconds` et la
+part HTTP/3 avec `h3_requests / requests`. `zone` est obligatoire, rabattu en minuscules comme les
+noms du fichier, et doit figurer dans le fichier de zones (`404 unknown zone` sinon) ;
+`node=<name>` restreint à un seul nœud configuré (`404 unknown edge node`). Rang `viewer`. Un jeton
+[rattaché à un tenant](/docs/multi-tenancy) lit ses propres zones ; toute autre zone — celle d'un
+autre tenant, non étiquetée, disparue du fichier ou inexistante — est un unique `403` uniforme
+(`zone is outside your tenant`), compté dans
+`kapkan_api_zone_refused_total{route="edge_history"}` et journalisé une fois par minute et par
+jeton, et `node=` est réservé aux jetons non rattachés (un tenant obtient `nodes` comme un compte,
+jamais l'historique d'un seul nœud). Stockage désactivé : `{available: false, points: []}`, jamais
+une erreur — la zone n'est pas regardée, de sorte que chaque jeton obtient cette réponse pour
+n'importe quelle zone et que rien n'est compté ni journalisé ; une requête en échec renvoie `502`.
+
+#### GET /api/v1/edge/history/sources
+
+Les sources significatives de la zone sur la plage — le *qui aurait été mis au défi* de la
+spécification edge, posé sur une période plutôt que sur une fenêtre de dix secondes : `{available,
+zone, state, sources: [{source, state, requests, windows, nodes, first_seen, last_seen}]}`, les plus
+actives d'abord, au plus 1 001 lignes. Le `state` de chaque source est la chose la plus forte qu'un
+nœud lui a faite sur la plage (`denied` devant `challenged` devant `would-deny` devant
+`would-challenge`) ; `state=` filtre sur l'une de ces quatre valeurs (`400` pour toute autre — les
+visiteurs ne sont jamais stockés), et le `state` de premier niveau reprend ce filtre, absent sans
+lui. Mêmes règles de `zone`, de plage et de portée que l'historique ci-dessus.
+
+#### GET /api/v1/edge/events
+
+Les transitions que le cerveau a vues, la plus récente d'abord, au plus 1 001 : `{available,
+events: [{event_time, node, zone, kind, detail}]}`, avec les filtres optionnels `node=`, `zone=` et
+`kind=` — `kind` vaut l'une des valeurs `node_alive`, `node_lost`, `version`, `dry_run`,
+`document_rendered`, `generation_installed`, `generation_refused`, `terminator_alive`, `h3_state`,
+`cert_issued`, `cert_renewed`, `cert_gone`, `challenge_started`, `challenge_ended`, `clock_skew`,
+`report_truncated` (`400` sinon). Rang `viewer`, **jetons non rattachés uniquement** : les
+événements nomment les nœuds et les changements de la flotte. Les mêmes règles de plage ; avec le
+stockage désactivé, la réponse est `{available: false, events: []}`.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot et …/acme/challenges
 
@@ -750,17 +862,28 @@ avant de commander un certificat (`{"zone": "…"}` → `{"granted": true, "expi
 afin qu'une flotte n'épuise pas en un après-midi le plafond de certificats dupliqués d'une CA ; il
 attend au plus 15 minutes, puis commande quand même. Un nœud qui détient le créneau publie son
 challenge HTTP-01 en attente (`{"zone", "token", "key_authorization"}`) et le cerveau le diffuse
-dans le document de zones pendant dix minutes afin que chaque nœud y réponde — la validation de la
-CA peut atterrir sur n'importe quel nœud derrière une adresse partagée. Un challenge actif n'est
+dans le document de chaque nœud qui sert la zone pendant dix minutes, afin que chacun d'eux y
+réponde — la validation de la CA peut atterrir sur n'importe quel nœud derrière l'adresse partagée
+de la zone. Un challenge actif n'est
 jamais écrasé par une key authorization différente (`409`), un nœud peut détenir 16 challenges
 actifs, et chaque appel est journalisé avec le nœud, la zone et le préfixe du token : un jeton
 agent est un identifiant qui émet des certificats, effectuez-en la rotation dès qu'un nœud est
-compromis.
+compromis. Les deux ne prennent que les zones que la [portée de
+placement](/docs/edge#placer-les-zones-sur-les-nœuds) du nœud couvre : une zone que le nœud ne sert
+pas est pour lui un `404 unknown zone`, octet pour octet la réponse qu'obtient une zone inexistante
+(un `{"release": true}` fait exception : il ne touche que l'attribution propre à l'appelant, il est
+idempotent, et il reçoit `204` pour n'importe quel nom de zone, servie ou non).
 
 #### POST /api/v1/edge/zones/\{name\}/challenge et DELETE
 
 [Le levier](/docs/edge#le-levier) : fixer le mode de défi d'une zone pour une durée bornée, quoi que
-dise le fichier de zones. Rang `operator`, jetons non rattachés uniquement.
+dise le fichier de zones. Rang `operator`. Un operator [rattaché à un
+tenant](/docs/multi-tenancy) ne peut l'actionner que sur ses propres zones ; toute autre zone —
+celle d'un autre tenant, non étiquetée, ou disparue du fichier — est pour lui un
+`404 unknown zone`, la même réponse qu'obtient un nom inconnu, décidée avant que le corps ne soit
+lu. L'appelant n'en apprend pas davantage ; l'operator, si : chacun de ces refus compte dans
+`kapkan_api_zone_refused_total{route="edge_lever"}` et est journalisé une fois par minute et par
+jeton, et aucune ligne d'audit n'est écrite.
 
 ```json
 { "mode": "manual", "ttl_seconds": 1800, "reason": "credential stuffing from residential proxies" }
@@ -773,8 +896,8 @@ journal, à la ligne d'audit et aux réponses de l'API — `override.reason` dan
 200 caractères). Une zone inconnue renvoie
 `404` ; une zone en `policy.mode: none` renvoie `409` — rien n'y met au défi. La surcharge voyage
 dans le document de zones sous `challenge_override` (les interrogations retenues sont réveillées
-aussitôt) et chaque nœud applique le mode effectif sur son chemin rapide, de sorte qu'elle prend
-fin à `until` avec ou sans cerveau. Auditée comme `edge_challenge` `set` / `cleared`. Les deux
+aussitôt) et chaque nœud qui sert la zone applique le mode effectif sur son chemin rapide, de sorte
+qu'elle prend fin à `until` avec ou sans cerveau. Auditée comme `edge_challenge` `set` / `cleared`. Les deux
 méthodes répondent `200` avec le palier tel qu'il est désormais et où le levier agit :
 
 ```json
@@ -795,8 +918,10 @@ méthodes répondent `200` avec le palier tel qu'il est désormais et où le lev
 
 `file_mode` est le `policy.challenge` tel que le fichier le porte ; `zone_watch_only` et
 `rung_watch_only` sont les `policy.dry_run` et `challenge_options.dry_run` de la zone — avec l'un
-ou l'autre, le levier prévisualise au lieu d'agir, sur chaque nœud ; `nodes[]` liste chaque nœud
-configuré avec sa vivacité et le `dry_run` qu'il rapporte (absent tant qu'il n'a pas rapporté) — un
+ou l'autre, le levier prévisualise au lieu d'agir, sur chaque nœud ; `nodes[]` liste les nœuds sur
+lesquels la zone est [placée](/docs/edge#placer-les-zones-sur-les-nœuds) — chaque nœud configuré
+pour une zone qu'un rechargement a depuis retirée du fichier — avec sa vivacité et le `dry_run`
+qu'il rapporte (absent tant qu'il n'a pas rapporté) — un
 nœud qui ne fait que compter doit être repéré avant de faire confiance au levier. `mode`, `until`
 et `reason` sont absents quand la zone suit son fichier, et `file_mode` est vide pour une zone
 qu'un rechargement a depuis retirée du fichier — un tel levier peut encore être levé, jamais posé.

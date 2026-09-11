@@ -59,6 +59,9 @@ devuelve `403` en caso contrario. Consulta [Multi-tenencia](/docs/multi-tenancy)
 | GET | `/api/v1/dataplane/rules` | El feed de reglas del [nodo de scrubbing](/docs/scrubbing#nodos-de-scrubbing-gestionados) (`agent`/`operator` sin acotar); long-poll con ETag, retenido hasta 30 s. |
 | POST | `/api/v1/dataplane/nodes/{name}/report` | El autoinforme orientativo de un nodo de scrubbing (`agent`/`operator` sin acotar). |
 | GET | `/api/v1/dataplane/nodes` | Inventario de nodos gestionados: vitalidad, configuración, recuentos de baneos por nodo (`viewer` sin acotar o superior). |
+| GET | `/api/v1/edge/history` | El [historial edge](/docs/storage#historial-edge) de una zona agrupado en cubos sobre un rango (`viewer`; un token acotado sobre sus propias zonas); `{available:false, points:[]}` cuando el almacenamiento está desactivado. |
+| GET | `/api/v1/edge/history/sources` | Las fuentes que dicen algo de la zona a lo largo de un rango — a quién se rechazó, se desafió o se habría rechazado o desafiado (`viewer`; un token acotado sobre sus propias zonas). |
+| GET | `/api/v1/edge/events` | Las transiciones que el cerebro vio en la flota edge, las más recientes primero (`viewer` sin acotar o superior). |
 | GET | `/metrics` | Métricas de Prometheus. |
 | GET | `/healthz` | Sonda de vida/disponibilidad sin autenticación: `503` hasta que arranca por completo, luego `200`. |
 
@@ -538,7 +541,12 @@ se **retiene** hasta que la tabla cambie o hasta 30 s, y luego se responde `304`
 ofrece actualizaciones de reglas por debajo del segundo sobre HTTP corriente. Un nodo se identifica
 con `?node=<name>`, y **ese sondeo es la señal de vitalidad del nodo** — así que el nombre debe ser
 un nodo configurado (un nombre desconocido es `404`) y, fuera del modo local sin token, la petición
-debe llevar un token real.
+debe llevar un token real. Un token vinculado a un nodo (`api.tokens[].node`) solo puede sondear como
+ese nodo: otro nombre, o ningún nombre, es un `403` uniforme antes de que se registre presencia
+alguna. Una recarga que elimina el nodo, elimina el token o cambia la vinculación del token termina
+un sondeo retenido con la respuesta que obtendría ahora un primer sondeo (`404`, `401`, `403`). La
+presencia solo la marcan los tokens `agent` — el `?node=X` de un operator es una vista previa del
+documento de X y no mueve ninguna vitalidad.
 
 ```json
 {
@@ -575,24 +583,41 @@ funcionalidades de nodos sin esta llamada.
 ### El canal edge
 
 Estos endpoints existen para los [nodos edge](/docs/edge) — máquinas que ejecutan
-[`kapkan edge`](/docs/cli#edge). Como el canal de nodos de scrubbing, toman el rol `agent` o un
-token `operator` sin acotar, nunca un `viewer` ni un token acotado a un tenant: el documento de zonas
-abarca todos los tenants. **El cerebro distribuye política, nunca veredictos** — no existe ninguna
+[`kapkan edge`](/docs/cli#edge). Como el canal de nodos de scrubbing, los endpoints de cara a los
+nodos toman el rol `agent` o un token `operator` sin acotar, nunca un `viewer` ni un token acotado a
+un tenant: el documento de zonas abarca todos los tenants. Los de cara a las personas son distintos:
+el inventario de nodos y los eventos de la flota (`GET /api/v1/edge/events`) son lecturas de rango
+`viewer` para tokens sin acotar; el estado de zonas, el
+[historial edge](#get-apiv1edgehistory) con sus fuentes que dicen algo (rango `viewer`) y la palanca
+(rango `operator`) admiten un token [acotado a un tenant](/docs/multi-tenancy) sobre sus propias
+zonas. **El cerebro distribuye política, nunca veredictos** — no existe ninguna
 llamada por petición, ni aquí ni en ningún otro sitio; un nodo responde a las peticiones por sí solo.
 El recuento de nodos edge configurados (`edge_nodes_total`) viaja en `/api/v1/status` para todos los
 roles, así que una consola puede decidir si mostrar la vista Edge sin ninguna de estas llamadas.
 
 #### GET /api/v1/edge/zones
 
-El documento de zonas que un nodo renderiza y aplica: cada zona del [archivo de zonas](/docs/zones)
-con sus orígenes, su versión mínima de TLS, sus directorios ACME y su política, más las concesiones
-de emisión vivas y los challenges ACME propagados. Un `GET` simple devuelve el documento con un
+El documento de zonas que un nodo renderiza y aplica: las zonas del [archivo de zonas](/docs/zones)
+que cubre el [alcance de colocación](/docs/edge#colocar-zonas-en-los-nodos) del nodo — todas las
+zonas para el `GET` simple de un operator, o para una flota cuyas zonas no llevan `hostgroup` (una
+zona etiquetada solo la sirven los nodos que listan su grupo) — con sus orígenes, su versión mínima
+de TLS, sus directorios ACME y su política, más las concesiones
+de emisión vivas, los challenges ACME propagados, las claves de pase y las palancas de esas zonas; el
+`ETag` es el del propio nodo. Un `GET` simple devuelve el documento con un
 `ETag` de hash de contenido; un `GET` cuyo `If-None-Match` nombra ese ETag se **retiene** hasta que
 el documento cambie — una recarga exitosa del archivo de zonas, un challenge de certificado publicado
-por un nodo — o hasta 25 s, y luego se responde `304`. Un nodo se identifica con `?node=<name>`, y
+por un nodo — o hasta 25 s, y luego se responde `304`. Una recarga que elimina el nodo, elimina el
+token o cambia la vinculación del token termina un sondeo retenido con la respuesta que obtendría
+ahora un primer sondeo (`404`, `401`, `403`), nunca con un documento. Un nodo se identifica con
+`?node=<name>`, y
 **ese sondeo es la señal de vitalidad del nodo**, así que el nombre debe ser una entrada
 `edge.nodes[]` configurada (un nombre desconocido es `404`) y la petición debe llevar un token real.
-Como máximo pueden estar retenidos a la vez 4 sondeos por nombre de token y 8 en total; a un sondeo
+Un token vinculado a un nodo (`api.tokens[].node`) solo puede sondear, reportar y coordinar ACME como
+ese nodo — el nombre de otro nodo, o un sondeo sin `?node=`, es un `403` uniforme que nunca nombra al
+nodo vinculado, rechazado antes de que se marque presencia alguna o se guarde nada; solo los tokens
+`agent` marcan presencia, así que el `?node=X` de un operator es una vista previa del documento de X
+sin presencia. Como máximo pueden estar retenidos a la vez 4 sondeos por nombre de token y
+`max(8, 2 × el número de nodos edge)` en total; a un sondeo
 más que coincida se le responde `429` con `Retry-After: 1` (`too many concurrent zone holds`), lo
 que el nodo trata como un fallo y ante el que espera antes de reintentar (1 s, duplicándose hasta
 30 s) — da a cada nodo su propio token agent.
@@ -660,13 +685,25 @@ de candidatos), luego la lista de cada zona a la mitad, luego los certificados, 
 cada recorte se cuenta: `sources_truncated` son las fuentes candidatas que faltan en la lista (las
 que el límite por ventana del nodo, 20, dejó fuera, y las que recortó un reporte que tuvo que
 encogerse), `certs_truncated` y `zones_truncated` las entradas eliminadas. Almacenado y devuelto por
-`GET /api/v1/edge/nodes`. Nunca es una señal de vitalidad (el sondeo lo es). Un `{name}`
+`GET /api/v1/edge/nodes`. Con el [almacenamiento](/docs/storage#historial-edge) activo, las ventanas
+del reporte y sus fuentes que dicen algo se escriben además en el historial edge, y lo que cambió
+desde el reporte anterior del nodo se convierte en eventos — después de guardar el reporte y sin que
+la respuesta espere nunca por ello. Nunca es una señal de vitalidad (el sondeo lo es). Un `{name}`
 desconocido es `404`; el éxito es `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 
 El inventario de nodos: cada nodo edge configurado con la vitalidad de su sondeo unida a su último
-reporte. Una lectura de rango `viewer`, solo tokens sin acotar.
+reporte, su alcance de colocación (`hostgroups` — el alcance efectivo, `["global"]` para un nodo que
+no tiene ninguno — y `zones_placed`, las zonas del archivo que cubre), más `tokens` (los nombres de
+los tokens agent vinculados a él con `api.tokens[].node`) y
+`last_token` (el nombre del token que sondeó por última vez como él — nunca un secreto); el documento
+lleva `unbound_agent_tokens` mientras algún token agent esté sin vincular y existan nodos a los que
+vincularlo (ausente en caso contrario) — la vista de migración de
+[Vincular un token de agente a su nodo](/docs/authentication#vincular-un-token-de-agente-a-su-nodo).
+`hostgroups` y `zones_placed` están siempre presentes; `tokens`, `last_token` y
+`unbound_agent_tokens` se omiten cuando están vacíos. Una lectura de rango `viewer`, solo tokens sin
+acotar.
 
 #### GET /api/v1/edge/zones/status
 
@@ -680,19 +717,37 @@ desafío de zona completa en vigor y si en cada uno actúa o previsualiza, la pa
 — `enabled` es el `tls.h3` del archivo de zonas tal como lo tiene el cerebro, `serving` los nodos
 vivos cuya generación activa escucha por QUIC para la zona, `unsupported` aquellos donde lo pidió y
 se sirve por TCP, y `requests` la suma de las peticiones HTTP/3 de la última ventana de los nodos;
-ausente para una zona de la que nadie habla ni pide h3. Este estado se construye desde la sección
-de zonas de los informes, que enumera las zonas **que deciden**, así que el HTTP/3 de una zona con
-`mode: none` solo aparece en el `terminator.h3` de los nodos bajo
-[`GET /api/v1/edge/nodes`](#get-apiv1edgenodes); `enabled` aparece para cualquier zona a la que el
-archivo active h3 y que esté presente aquí — reportada por un nodo, o con una palanca puesta), y el
-**conjunto de candidatos**: la unión de las fuentes para las que los nodos
+ausente para una zona de la que nadie habla ni pide h3. `enabled` aparece para cada zona del archivo
+que active h3 — una zona con `mode: none` incluida — y `serving`/`unsupported` nombran, a partir de
+su `terminator.h3`, los listeners QUIC activos de los nodos vivos para la zona, decida o no;
+`requests` viene de la sección de zonas de los reportes, que enumera **solo** las zonas que deciden),
+y el **conjunto de candidatos**: la unión de las fuentes para las que los nodos
 previsualizaron un desafío o una denegación, conservando el estado más fuerte, las más activas
 primero, acotada a 20 por nodo que reporta (`would_be_truncated` cuenta el resto). `partial` indica
 que no todas las fuentes candidatas de un nodo cupieron — por su límite por ventana, o por un
 reporte que tuvo que encogerse — así que el conjunto es lo que sobrevivió, no todo el mundo;
 `zones_truncated` en el documento suma las entradas de zona que los nodos vivos recortaron de sus
-reportes: zonas que aquí faltan o están infracontadas. Una lectura de rango `viewer`, solo tokens
-sin acotar, como el inventario. Este es el *a quién se habría desafiado* de la especificación del
+reportes: zonas que aquí faltan o están infracontadas — un recuento de toda la flota, tomado antes
+del filtro de tenant, así que quien llame acotado puede ver un número que cubre zonas que no ve. Cada zona del archivo de zonas tiene además su
+fila — `mode` (su `policy.mode`) y `file_challenge` (su `policy.challenge`) son la palabra del
+cerebro, y `challenge` lo que aplican los nodos — y `certs` lista el certificado que cada nodo vivo
+tiene para la zona (`node`, `not_after`, `issuer` — el último se omite cuando el nodo no reporta
+ninguno; solo metadatos, sacados de los reportes; `certs_truncated` en el documento suma las entradas
+que los nodos recortaron de sus reportes para caber en el límite de tamaño — de toda la flota, como
+`zones_truncated` —, así que una lista corta es lo que sobrevivió, no lo que se tiene). Cada zona del archivo lleva también su `placement {hostgroup,
+nodes, alive}` — el grupo en el que la pone el archivo, los nodos configurados cuyo alcance la cubre y
+cuáles de ellos están vivos — y `unserved: true` cuando tiene nodos pero ninguno está vivo (una zona
+que ningún alcance de nodo cubre muestra `nodes: []` y en su lugar es un aviso de `-check-config`). Lo
+que un nodo afirma sobre una zona fuera de su alcance se guarda en su reporte, y ni se fusiona aquí ni
+se escribe en el [historial edge](#get-apiv1edgehistory)
+(`kapkan_edge_history_dropped_total{reason="outside_scope"}`). `placement.hostgroup` está presente
+solo para los tokens sin acotar: un tenant ve los nombres de los nodos en los que se sirve su zona, no
+cómo los agrupa el operador. Una lectura de rango `viewer`. Un token sin acotar ve todas las zonas,
+las etiquetadas con su `tenant` (la clave está ausente en una zona sin etiquetar); un token
+[acotado a un tenant](/docs/multi-tenancy), exactamente sus propias zonas — ningún nombre de host de
+otro tenant en ninguna fila, conjunto de candidatos ni lista de HTTP/3, y ningún campo `tenant`. Los
+nombres de los nodos son visibles para un tenant; el inventario no. Este es el *a quién se habría
+desafiado* de la especificación del
 edge: léelo antes de que el peldaño de una zona pase a producción.
 
 ```json
@@ -702,6 +757,9 @@ edge: léelo antes de que el peldaño de una zona pase a producción.
   "zones": [
     {
       "zone": "shop.example.com",
+      "tenant": "shop",
+      "mode": "decide",
+      "file_challenge": "auto",
       "nodes": 2,
       "challenge": "auto",
       "rps": 812.4,
@@ -714,16 +772,68 @@ edge: léelo antes de que el peldaño de una zona pase a producción.
       "would_be": [
         { "source": "203.0.113.7", "state": "would-deny", "requests": 1210, "nodes": ["edge-1", "edge-2"] },
         { "source": "198.51.100.23", "state": "would-challenge", "requests": 640, "nodes": ["edge-1"] }
+      ],
+      "certs": [
+        { "node": "edge-1", "not_after": "2026-11-20T09:12:00Z", "issuer": "R11" },
+        { "node": "edge-2", "not_after": "2026-11-20T09:12:00Z", "issuer": "R11" }
       ]
     }
   ]
 }
 ```
 
-Una zona que ningún nodo vivo ha reportado aún aparece igualmente cuando tiene una palanca fijada:
-`nodes: 0`, `rps: 0` y `override`, sin modo. Los contadores de peticiones (`requests`, `decided`,
+Una zona que ningún nodo vivo ha reportado aún — una en `policy.mode: none`, o una cuyos nodos no
+están levantados — tiene igualmente su fila: `nodes: 0`, `rps: 0`, su `mode` y su `file_challenge`, y
+`override` cuando hay una palanca fijada. Una palanca sobre una zona que una recarga ha eliminado
+desde entonces del archivo conserva también su fila, sin `mode` (solo para quienes llaman sin acotar
+— es suya para retirarla). Los contadores de peticiones (`requests`, `decided`,
 `denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`) se omiten cuando valen cero;
 `nodes` y `rps` están siempre presentes.
+
+#### GET /api/v1/edge/history
+
+El [historial edge](/docs/storage#historial-edge) de una zona: las ventanas de diez segundos de los
+nodos sumadas en cubos de `step` segundos entre `from` y `to` (RFC 3339; la última hora por defecto;
+como máximo 31 días; `step` vale 60 s por defecto, se eleva para que un rango contenga como máximo
+5 000 cubos, y es como máximo 86 400 s — un día) — `{available, zone, node, step_seconds, points:
+[{ts, nodes, window_seconds, requests, decided, denied, challenged, cleared, would_deny,
+would_challenge, status_2xx, status_3xx, status_4xx, status_5xx, h3_requests}]}`. `nodes` cuenta los
+nodos distintos que reportaron en el cubo; `step_seconds` es el paso realmente aplicado; `zone` y
+`node` repiten los de la petición, `node` solo cuando se dio el filtro; deriva la tasa como
+`requests / window_seconds` y la proporción de HTTP/3 como `h3_requests / requests`. `zone` es
+obligatorio, se pasa a minúsculas como los nombres del archivo y debe estar en el archivo de zonas (si
+no, `404 unknown zone`); `node=<name>` lo reduce a un nodo configurado (`404 unknown edge node`).
+Rango `viewer`. Un token [acotado a un tenant](/docs/multi-tenancy) lee sus propias zonas; cualquier
+otra zona — de otro tenant, sin etiquetar, desaparecida del archivo o inexistente — es un único `403`
+uniforme (`zone is outside your tenant`), contado en
+`kapkan_api_zone_refused_total{route="edge_history"}` y registrado una vez por minuto y token, y
+`node=` es solo para tokens sin acotar (un tenant obtiene `nodes` como recuento, nunca el historial de
+un nodo concreto). Con el almacenamiento apagado: `{available: false, points: []}`, nunca un error —
+no se mira la zona, así que cualquier token obtiene esa respuesta para cualquier zona y no se cuenta
+ni se registra nada; una consulta fallida es `502`.
+
+#### GET /api/v1/edge/history/sources
+
+Las fuentes que dicen algo de la zona a lo largo del rango — el *a quién se habría desafiado* de la
+especificación del edge, preguntado sobre un periodo en lugar de sobre una ventana de diez segundos:
+`{available, zone, state, sources: [{source, state, requests, windows, nodes, first_seen,
+last_seen}]}`, las más activas primero, como máximo 1 001 filas. El `state` de cada fuente es lo más
+fuerte que cualquier nodo hizo con ella a lo largo del rango (`denied` por encima de `challenged`, por
+encima de `would-deny`, por encima de `would-challenge`); `state=` filtra a uno de esos cuatro (`400`
+para cualquier otra cosa — los visitantes no se guardan nunca), y el `state` de nivel superior repite
+ese filtro, y está ausente si no se dio ninguno. Las mismas reglas de `zone`, de rango y de alcance
+que el historial de arriba.
+
+#### GET /api/v1/edge/events
+
+Las transiciones que el cerebro vio, las más recientes primero, como máximo 1 001: `{available,
+events: [{event_time, node, zone, kind, detail}]}`, con filtros opcionales `node=`, `zone=` y `kind=`
+— `kind` es uno de `node_alive`, `node_lost`, `version`, `dry_run`, `document_rendered`,
+`generation_installed`, `generation_refused`, `terminator_alive`, `h3_state`, `cert_issued`,
+`cert_renewed`, `cert_gone`, `challenge_started`, `challenge_ended`, `clock_skew`,
+`report_truncated` (si no, `400`). Rango `viewer`, **solo tokens sin acotar**: los eventos nombran
+nodos y los cambios de la flota. Las mismas reglas de rango; con el almacenamiento apagado se responde
+`{available: false, events: []}`.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot y …/acme/challenges
 
@@ -732,17 +842,28 @@ solicitar un certificado (`{"zone": "…"}` → `{"granted": true, "expires_at":
 `{"granted": false, "holder": "…", "retry_after_seconds": …}`; `{"release": true}` lo devuelve), para
 que una flota no agote en una tarde el límite de certificados duplicados de una CA; espera como
 máximo 15 minutos y luego lo solicita de todos modos. Un nodo que posee el hueco publica su challenge
-HTTP-01 pendiente (`{"zone", "token", "key_authorization"}`) y el cerebro lo propaga en el documento
-de zonas durante diez minutos para que todos los nodos lo respondan — la validación de la CA puede
-caer en cualquier nodo detrás de una dirección compartida. Un challenge vivo nunca se sobrescribe con
+HTTP-01 pendiente (`{"zone", "token", "key_authorization"}`) y el cerebro lo propaga durante diez
+minutos en el documento de cada nodo que sirve la zona, para que todos ellos lo respondan — la
+validación de la CA puede caer en cualquier nodo detrás de la dirección compartida de la zona. Un
+challenge vivo nunca se sobrescribe con
 una autorización de clave distinta (`409`), un nodo puede tener 16 challenges vivos, y cada llamada
 se registra con el nodo, la zona y el prefijo del token: un token agent es una credencial que emite
-certificados; rótalo ante cualquier compromiso de un nodo.
+certificados; rótalo ante cualquier compromiso de un nodo. Ambos toman solo las zonas que cubre el
+[alcance de colocación](/docs/edge#colocar-zonas-en-los-nodos) del nodo: una zona que el nodo no sirve
+es `404 unknown zone` para él, byte a byte la respuesta que recibe una zona inexistente (un
+`{"release": true}` es la excepción: toca solo la concesión propia de quien llama, es idempotente y se
+responde `204` para cualquier nombre de zona, la sirva o no).
 
 #### POST /api/v1/edge/zones/\{name\}/challenge y DELETE
 
 [La palanca](/docs/edge#la-palanca): fija el modo de desafío de una zona durante un tiempo acotado,
-diga lo que diga el archivo de zonas. Rango `operator`, solo tokens sin acotar.
+diga lo que diga el archivo de zonas. Rango `operator`. Un operator
+[acotado a un tenant](/docs/multi-tenancy) puede accionarla solo en sus propias zonas; cualquier otra
+zona — de otro tenant, sin etiquetar o desaparecida del archivo — es `404 unknown zone` para él, la
+misma respuesta que recibe un nombre desconocido, decidida antes de leer el cuerpo. Quien llama no
+aprende nada más; el operador sí: cada rechazo así cuenta en
+`kapkan_api_zone_refused_total{route="edge_lever"}` y se registra una vez por minuto y token, y no se
+escribe ninguna fila de auditoría.
 
 ```json
 { "mode": "manual", "ttl_seconds": 1800, "reason": "credential stuffing from residential proxies" }
@@ -753,9 +874,9 @@ diga lo que diga el archivo de zonas. Rango `operator`, solo tokens sin acotar.
 las respuestas de la API — `override.reason` en `GET /api/v1/edge/zones/status` y la respuesta
 propia de este endpoint (como máximo 200 caracteres). Una zona desconocida es `404`; una zona en
 `policy.mode: none` es `409` — ahí nada desafía. La anulación viaja en el documento de zonas como
-`challenge_override` (los sondeos retenidos se despiertan de inmediato) y cada nodo aplica el modo
-efectivo en su ruta rápida, de modo que termina en `until` con o sin cerebro. Se audita como
-`edge_challenge` `set` / `cleared`. Ambos métodos responden `200` con el peldaño tal como queda y
+`challenge_override` (los sondeos retenidos se despiertan de inmediato) y cada nodo que sirve la zona
+aplica el modo efectivo en su ruta rápida, de modo que termina en `until` con o sin cerebro. Se audita
+como `edge_challenge` `set` / `cleared`. Ambos métodos responden `200` con el peldaño tal como queda y
 dónde actúa la palanca:
 
 ```json
@@ -777,7 +898,9 @@ dónde actúa la palanca:
 `file_mode` es `policy.challenge` tal como lo tiene el archivo; `zone_watch_only` y
 `rung_watch_only` son el `policy.dry_run` y el `challenge_options.dry_run` de la zona — con
 cualquiera de los dos la palanca previsualiza en lugar de actuar, en todos los nodos; `nodes[]`
-lista cada nodo configurado con su vitalidad y su `dry_run` reportado (ausente hasta que haya
+lista los nodos en los que la zona está [colocada](/docs/edge#colocar-zonas-en-los-nodos) — cada nodo
+configurado para una zona que una recarga ha eliminado desde entonces del archivo — con su vitalidad y
+su `dry_run` reportado (ausente hasta que haya
 reportado) — un nodo que solo cuenta debe verse antes de confiar en la palanca. `mode`, `until` y
 `reason` están ausentes cuando la zona sigue su archivo, y `file_mode` está vacío para una zona que
 una recarga ha eliminado desde entonces del archivo — esa palanca aún puede retirarse, nunca

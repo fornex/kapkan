@@ -9,7 +9,8 @@ export const metadata = {
 Une seule instance Kapkan peut servir de nombreux clients (cas d'usage fournisseur de services
 managés (MSP) ou centre de données internet (IDC)) et donner à chacun un token qui ne voit et ne
 touche **que les siens** : attaques, bannissements et hôtes. Un tenant n'est qu'une étiquette
-optionnelle sur un [hostgroup](/docs/hostgroups) — il n'y a pas de nouvel objet de premier niveau,
+optionnelle sur un [hostgroup](/docs/hostgroups) — ou, sur un cerveau edge, sur une
+[zone](/docs/zones) — il n'y a pas de nouvel objet de premier niveau,
 pas de registre de tenants distinct, et le chemin critique de détection reste intact.
 
 ```yaml
@@ -39,7 +40,7 @@ api:
 
 Trois étapes correspondent directement au YAML ci-dessus :
 
-1. **Étiquetez le ou les hostgroups de chaque client** avec `tenant: "customerA"` (la même étiquette peut se répéter sur plusieurs groupes — par exemple les groupes web et DNS d'un client).
+1. **Étiquetez le ou les hostgroups de chaque client** avec `tenant: "customerA"` (la même étiquette peut se répéter sur plusieurs groupes — par exemple les groupes web et DNS d'un client), ou ses [zones edge](/docs/zones) avec `zones[].tenant` pour un client qui a des noms d'hôtes et aucun préfixe.
 2. **Ajoutez un token API** sous `api.tokens` portant ce même `tenant:` plus un `role:` — `viewer` est en lecture seule, `operator` peut aussi bannir/débannir.
 3. **Remettez ce token au client.** Il ne voit et ne touche alors que ses propres préfixes ; tout le reste (les autres tenants, les groupes non étiquetés) lui est invisible.
 
@@ -51,7 +52,8 @@ C'est tout le workflow. Le reste de cette page explique comment la propriété e
 plus long que le moteur et le mitigateur utilisent déjà pour attribuer le trafic — quand des
 préfixes se chevauchent, le hostgroup correspondant le plus spécifique l'emporte
 ([longest-prefix match](/docs/glossary)). Un tenant peut s'étendre sur plusieurs hostgroups (un
-client avec des groupes web et DNS séparés).
+client avec des groupes web et DNS séparés). Une [zone edge](/docs/zones) porte la même étiquette
+(`zones[].tenant`), si bien qu'un client peut ne posséder que des noms d'hôtes et aucun préfixe.
 
 Toute IP qui tombe en dehors de tout hostgroup nommé est gérée par le **groupe global/de repli**
 implicite (le fourre-tout). Ce groupe global peut porter un `tenant` de premier niveau afin que ce
@@ -74,8 +76,11 @@ Un [token API](/docs/authentication) gagne un `tenant` optionnel, qui s'appuie s
 | `tenant: customerA`, `role: operator` | uniquement customerA | uniquement customerA |
 
 Un token sans portée est un admin — le comportement par défaut, entièrement rétrocompatible. Un
-token cadré sur un tenant qu'aucun hostgroup n'utilise est rejeté au chargement de la config (une
-faute de frappe ne verrait sinon silencieusement rien).
+token cadré sur un tenant qu'aucun hostgroup — et, avec un bloc `edge`, aucune
+[zone](/docs/zones) — n'utilise est rejeté au chargement de la config (une faute de frappe ne
+verrait sinon silencieusement rien). Avec un bloc edge, cette vérification a besoin des deux
+fichiers : elle tourne donc quand le démon les charge ; le validateur côté navigateur ne voit que
+`kapkan.yaml`, et `kapkan -check-config` sur l'hôte est la vraie vérification.
 
 <Callout type="info" title="Le rôle agent se situe hors de cet axe">
 Le token `agent` d'un [nœud de scrubbing](/docs/scrubbing#nœuds-de-nettoyage-gérés) n'est **pas**
@@ -111,6 +116,18 @@ qu'un token cadré ne peut jamais retomber sur les données d'un autre tenant.
   `POST /api/v1/config/reload` est
   **réservé aux admins** — un reload réécrit la politique de chaque tenant ainsi que l'ensemble
   des tokens lui-même.
+- **Zones edge** — une zone du [fichier de zones](/docs/zones) porte elle aussi un `tenant`
+  optionnel. `GET /api/v1/edge/zones/status` ne renvoie à un token cadré que ses propres zones — le
+  nom d'hôte d'un autre tenant n'apparaît dans aucune ligne, aucun ensemble de candidats et aucune
+  liste HTTP/3, et le champ `tenant` est omis — et un operator cadré ne tire le
+  [levier](/docs/edge#le-levier) que sur ses propres zones : toute autre zone, celle d'un autre
+  tenant, non étiquetée ou disparue du fichier, renvoie le même `404 unknown zone` qu'un nom
+  inconnu. L'[historique edge](/docs/api#get-apiv1edgehistory) suit la même ligne : un token cadré
+  lit l'historique et les sources significatives de ses propres zones, toute autre zone est un
+  unique `403` uniforme, et le filtre par nœud comme les événements de la flotte restent sans
+  portée. Les noms des nœuds sur lesquels une zone est servie sont visibles de son tenant ; le
+  document de zones, les rapports des nœuds, la coordination ACME, l'inventaire des nœuds et
+  `config/reload` restent sans portée.
 - **L'ambiguïté échoue de façon sûre** — si un même secret bearer correspond à des tokens de rôle
   ou de tenant différents (un secret réutilisé), la requête est refusée plutôt que résolue vers la
   portée la plus large.

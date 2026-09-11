@@ -1,14 +1,14 @@
 export const metadata = {
   title: "Speicherung (ClickHouse)",
   description:
-    "Optionale ClickHouse-Persistenz für Angriffs- und Verkehrsverlauf — Forensik und Dashboard-Diagramme, ohne die Erkennung jemals zu blockieren.",
+    "Optionale ClickHouse-Persistenz für Angriffs-, Verkehrs-, Audit- und Edge-Verlauf — Forensik und Dashboard-Diagramme, ohne die Erkennung jemals zu blockieren.",
 };
 
 # Speicherung (ClickHouse)
 
-Verweisen Sie Kapkan auf einen ClickHouse-Server, um den Angriffs- und Verkehrsverlauf
-festzuhalten — die Antwort auf die Frage "Was hat uns letzten Dienstag getroffen?". Ohne ihn
-läuft Kapkan vollständig prozessintern auf Live-Daten.
+Verweisen Sie Kapkan auf einen ClickHouse-Server, um den Angriffs-, Verkehrs-, Audit- und
+Edge-Verlauf festzuhalten — die Antwort auf die Frage "Was hat uns letzten Dienstag getroffen?".
+Ohne ihn läuft Kapkan vollständig prozessintern auf Live-Daten.
 
 Dafür benötigen Sie einen laufenden ClickHouse-Server (jede aktuelle Version). Kapkan
 kommuniziert mit dessen HTTP-Schnittstelle, die standardmäßig auf Port `8123` lauscht — das ist
@@ -67,20 +67,31 @@ prüfen Sie zuerst die Logs, wenn die Zählwerte bei null bleiben.
 Kapkan kommuniziert über die **HTTP-Schnittstelle** von ClickHouse mit der Go-Standardbibliothek —
 ohne Treiberabhängigkeit. Die einzige externe Abhängigkeit ist der ClickHouse-Server selbst.
 
-Beim Start erstellt Kapkan idempotent drei MergeTree-Tabellen:
+Beim Start erstellt Kapkan idempotent sechs MergeTree-Tabellen:
 
 | Tabelle | Inhalt |
 | --- | --- |
 | `attack_events` | Jeder Angriffsbeginn und jedes Angriffsende: Typ, Richtung, Raten, die Top-Quellen des Samples, der Sperrstatus und der Erkennungs-`reason`. |
 | `traffic` | Periodische Momentaufnahmen von Rate und Baseline pro Host (alle `traffic_interval_seconds`). |
-| `audit_events` | Dem Betreiber zugeordnete Änderungen: wer jede Sperre/Entsperrung/Konfigurations-Neuladung ausgelöst hat, wann und mit welchem Ergebnis. Siehe [Audit-Log](/docs/audit). |
+| `audit_events` | Dem Betreiber zugeordnete Änderungen: wer jede Sperre/Entsperrung/Konfigurations-Neuladung/jeden Edge-Hebel ausgelöst hat, wann und mit welchem Ergebnis. Siehe [Audit-Log](/docs/audit). |
+| `edge_windows` | Eine Zeile pro [Edge-Knoten](/docs/edge), Zone und geschlossenem Zehn-Sekunden-Fenster: was der Knoten gesehen und getan hat — Anfragen, Urteile, Kandidatenzähler, Antwortstatus, HTTP/3-Anfragen, der Zustand der Stufe. Siehe [Edge-Historie](#edge-historie). |
+| `edge_sources` | Die **aussagekräftigen** Quellen jedes Fensters — gesperrt, herausgefordert, would-deny, would-challenge — höchstens 20 pro Knoten, Zone und Fenster. Gewöhnliche Besucher werden nie gespeichert. |
+| `edge_events` | Übergänge, die das Gehirn in den Reports und der Präsenz eines Knotens gesehen hat: ein Knoten lebendig oder verloren, seine Version, sein Dry-Run, das Dokument, das er gerendert hat, eine installierte oder abgelehnte Generation, der Terminator lebendig oder nicht und sein HTTP/3-Zustand, ein ausgestelltes, erneuertes oder verschwundenes Zertifikat, eine begonnene oder beendete zonenweite Challenge, ein gefundener Uhrenversatz, ein Report, der schrumpfen musste. |
 
 Jede trägt eine `ttl_days`-TTL pro Zeile, sodass die Aufbewahrung ohne Eingriff des Betreibers
 begrenzt bleibt.
 
 Die Schreib-Anmeldedaten benötigen beim ersten Lauf `CREATE`-Rechte (Datenbank + Tabellen) und
-`INSERT`-Rechte; danach genügt `INSERT`. Fehler bei der Schema-Erstellung werden beim Start
-protokolliert, sind aber nicht fatal.
+`INSERT`-Rechte — und erneut beim ersten Start eines Releases, das Tabellen hinzufügt (dieses hier
+fügt die drei `edge_*`-Tabellen hinzu); dazwischen genügt `INSERT`. Die Schema-Initialisierung
+versucht jedes Statement und protokolliert jede Ablehnung einzeln (Anmeldedaten, die `INSERT`,
+aber nicht `CREATE` dürfen, sehen diese Zeilen bei jedem Start; sie sind harmlos, sobald die
+Tabellen existieren), sodass die drei Edge-Tabellen und die Spalten-Upgrades weiter unten auch
+dann versucht werden, wenn ein früheres Statement abgelehnt wurde, und ein Upgrade, dessen
+Anmeldedaten nicht mehr `CREATE` dürfen, behält die Tabellen, die es immer hatte. Wenn beim Start
+`edge history table not created` erscheint, führen Sie einen Start mit Anmeldedaten aus, die
+`CREATE` dürfen, oder erstellen Sie die Tabelle selbst mit dem Statement in
+`engine/internal/storage/edge_rows.go`.
 
 Die `reason`-Spalte der `attack_events`-Tabelle enthält das kompakte JSON des Erkennungs-
 [reason](/docs/detection) — warum der Angriff ausgelöst wurde (Herkunft des Schwellenwerts,
@@ -88,6 +99,81 @@ Warm-up, Protokollanteile) — und ist in der Zeile zum Angriffsende leer. Beste
 erhalten die Spalte automatisch: Die Schema-Initialisierung führt ein `ADD COLUMN IF NOT EXISTS`
 aus, das stillschweigend übersprungen wird, wenn die Schreib-Anmeldedaten keine `ALTER`-Rechte
 haben (Neuinstallationen verfügen bereits darüber).
+
+## Edge-Historie
+
+Die drei `edge_*`-Tabellen halten fest, was der [Edge-Zonenstatus](/docs/api#get-apiv1edgezonesstatus)
+zehn Sekunden lang zeigt — pro Zone, über die Zeit. Sie werden aus den beratenden Reports der
+Edge-Knoten über den Schreibpfad des Gehirns gefüllt, jede Zeile ist also die Behauptung eines
+Knotens; das Gehirn summiert, es handelt nie danach. Die Regeln unten sind der Vertrag des
+Schreibpfads.
+
+- **Rohe Fenster, beim Lesen gebucketet.** `edge_windows` hält die Zehn-Sekunden-Fenster der Knoten
+  so, wie sie kamen (`ORDER BY (zone, ts, node)`); eine Historie-Abfrage summiert sie mit
+  `toStartOfInterval` zu Buckets, genau wie bei `traffic`. Es gibt keine `rps`-Spalte — sie ist
+  `sum(requests) / sum(window_seconds)` — und keine Verdichtung auf dem Gehirn.
+- **Zwei Uhren.** `ts` ist der Schluss des Fensters nach der Uhr des **Knotens**, solange sie
+  höchstens zehn Minuten nach- oder eine Minute vorgeht gegenüber der des Gehirns; andernfalls wird
+  stattdessen die Uhr des Gehirns geschrieben und ein `clock_skew`-Ereignis hält den Befund fest.
+  `received_at` ist immer die Uhr des Gehirns.
+- **Keine Mandanten-Spalte.** Welcher Mandant eine Zone besitzt, wird zur Abfragezeit aus der
+  aktiven [Zonendatei](/docs/zones) gelesen (`zones[].tenant`) — eine einzige Wahrheit, sodass ein
+  Umetikettieren einer Zone keine veralteten Zeilen hinterlässt.
+- **Nur die aussagekräftigen Quellen.** `edge_sources` speichert eine Quelle nur dann, wenn ein
+  Knoten sie gesperrt, herausgefordert oder eines von beidem als Vorschau gezeigt hat
+  (`would-deny`, `would-challenge`) — höchstens 20 pro Knoten, Zone und Fenster: zuerst die
+  Kandidaten, dann die gesperrten und herausgeforderten, innerhalb jeder Stufe die aktivsten. Quellen, die zugelassen, freigegeben oder bloß markiert wurden, sind Besucher und werden
+  nie geschrieben.
+- **Nichts für stille Zonen.** Eine Zone in `policy.mode: none` oder eine entscheidende Zone, die
+  zuletzt kein Fenster geschlossen hat (der Report führt sie ohne Schlusszeitpunkt und ohne
+  gezähltes mit), schreibt keine Zeile und zählt als nichts. Eine Zertifikatsausstellung hinterlässt
+  selbst auf einer untätigen Zone eine Spur: Die HTTP-01-Prüfungen der CA sind Anfragen, die der
+  Knoten zählt (ein paar `2xx` pro Validierung, `decided` 0).
+- **Eine Zeile pro Fenster.** Ein Report, den der Knoten erneut sendet — derselbe Knoten, dieselbe
+  Zone, derselbe Schlusszeitpunkt —, wird einmal geschrieben, und ein Report trägt ein Fenster pro
+  Zone. Ein Fenster für eine Zone, die die Zonendatei nicht hat, ein Fenster (oder ein Zertifikat,
+  eine Challenge) für eine Zone, die die [Platzierung](/docs/edge#zonen-auf-knoten-verteilen) des
+  berichtenden Knotens nicht abdeckt, ein Fenster mit Zählern, aber ohne Schlusszeitpunkt, oder ein
+  zweites Fenster für eine Zone in einem Report wird übersprungen; jeder übersprungene Teil zählt
+  in `kapkan_edge_history_dropped_total{reason}` (`unknown_zone`, `outside_scope`, `no_at`,
+  `duplicate`, `extra_window`, `bad_source`, `source_cap`) — solange die Speicherung an ist; ist
+  sie aus, wird nichts geschrieben und nichts gezählt. Der Report selbst wird weiterhin angenommen
+  und live angezeigt; nur die Historie überspringt den Teil. `duplicate` ist einmal pro Burst-Ende
+  erwartbar, wenn ein Knoten häufiger berichtet, als seine Fenster schließen.
+- **Übergänge als Ereignisse.** `edge_events` hält fest, was sich zwischen zwei Reports eines
+  Knotens geändert hat — seine Version, sein Dry-Run, das gerenderte Dokument, eine installierte
+  oder abgelehnte Generation, der Terminator lebendig oder nicht, sein HTTP/3-Zustand, ein
+  ausgestelltes, erneuertes oder verschwundenes Zertifikat, eine begonnene oder beendete zonenweite
+  Challenge, ein gefundener oder behobener Uhrenversatz, ein Report, der schrumpfen musste — jeweils
+  einmal pro Änderung, und, aus den Polls, `node_alive` / `node_lost` (der Verlust zu dem Zeitpunkt
+  gestempelt, an dem er geschah: der letzte Poll plus `stale_after`). Der erste Report nach einem
+  Start des Gehirns ist die Grundlinie und schreibt keine Ereignisse — außer `clock_skew`, das die
+  Uhr des Fensters betrifft und auch bei einem ersten Report geschrieben wird, wenn diese Uhr falsch
+  geht. Ein Zertifikat oder eine Challenge wird für eine Zone festgehalten, die die Zonendatei hat,
+  und ein Report, der sein Ende abwerfen musste (`report_truncated`), wird nicht als „verschwunden"
+  für das gelesen, was er nicht mehr auflistet. Der Präsenz-Ticker läuft alle
+  `min(stale_after/2, 5 s)`, nie unter einer Sekunde; nach einem Start des Gehirns wird ein Knoten
+  bei seinem ersten Poll auf die Grundlinie gesetzt (still) oder als verloren, sobald `stale_after`
+  ohne einen vergangen ist — ein Neustart ist nie ein flottenweiter `node_alive`-Schwall. Die
+  Präsenz-Übergänge werden zusätzlich auf INFO protokolliert, mit oder ohne Speicherung.
+
+Volumen pro Tag: `edge_windows` wächst um **8 640 × (entscheidende Zonen mit Verkehr × lebendige
+Knoten)** Zeilen (je ein Zehn-Sekunden-Fenster), `edge_sources` um höchstens das 20-fache davon und
+`edge_events` um die Handvoll Übergänge, die eine Flotte hat. Messen Sie, was das auf Ihrem Server
+kostet, statt zu raten — komprimierte Zeilengrößen hängen von Ihren Zonen- und Knotennamen ab:
+
+```sql
+SELECT table, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS on_disk
+FROM system.parts
+WHERE database = 'kapkan' AND active
+GROUP BY table ORDER BY table
+```
+
+Die Aufbewahrung ist `ttl_days`, wie bei jeder anderen Tabelle. Die Historie wird über
+[`GET /api/v1/edge/history`](/docs/api#get-apiv1edgehistory) (Buckets), `…/edge/history/sources`
+(wer gesperrt, herausgefordert oder es beinahe worden wäre, über einen Zeitraum) und
+`GET /api/v1/edge/events` (die Übergänge) gelesen — und die Tabellen können Sie auch direkt
+abfragen.
 
 ## Backpressure
 

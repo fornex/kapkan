@@ -63,6 +63,9 @@ beschränkt und liefert andernfalls `403`. Siehe
 | GET | `/api/v1/dataplane/rules` | Der Regel-Feed für [Scrub-Knoten](/docs/scrubbing#verwaltete-scrubbing-knoten) (`agent`/ungebundenes `operator`); ETag-Long-Poll, bis zu 30 s gehalten. |
 | POST | `/api/v1/dataplane/nodes/{name}/report` | Der beratende Selbstreport eines Scrub-Knotens (`agent`/ungebundenes `operator`). |
 | GET | `/api/v1/dataplane/nodes` | Inventar der verwalteten Knoten: Lebendigkeit, Konfiguration, Ban-Zähler pro Knoten (ungebundenes `viewer`+). |
+| GET | `/api/v1/edge/history` | Die [Edge-Historie](/docs/storage#edge-historie) einer Zone, über einen Zeitraum gebucketet (`viewer`; ein tenant-bezogenes Token auf seinen eigenen Zonen); `{available:false, points:[]}`, wenn die Speicherung deaktiviert ist. |
+| GET | `/api/v1/edge/history/sources` | Die aussagekräftigen Quellen der Zone über einen Zeitraum — wer abgewiesen, herausgefordert oder es beinahe worden wäre (`viewer`; ein tenant-bezogenes Token auf seinen eigenen Zonen). |
+| GET | `/api/v1/edge/events` | Die Übergänge, die das Gehirn in der Edge-Flotte gesehen hat, neueste zuerst (ungebundenes `viewer`+). |
 | GET | `/metrics` | Prometheus-Metriken. |
 | GET | `/healthz` | Unauthentifizierte Liveness-/Readiness-Probe: `503`, bis vollständig gestartet, danach `200`. |
 
@@ -549,7 +552,12 @@ und dann mit `304` beantwortet — ein Long-Poll, der Regel-Updates im Sub-Sekun
 gewöhnliches HTTP liefert. Ein Knoten identifiziert sich mit `?node=<name>`, und **dieser Poll ist
 das Lebendigkeitssignal des Knotens** — der Name muss also ein konfigurierter Knoten sein (ein
 unbekannter Name ist `404`) und, außerhalb des token-losen lokalen Modus, muss die Anfrage ein
-echtes Token mitführen.
+echtes Token mitführen. Ein an einen Knoten gebundenes Token (`api.tokens[].node`) darf nur als
+dieser Knoten pollen: ein anderer Name oder gar keiner ist ein einheitliches `403`, bevor
+irgendeine Präsenz festgehalten wird. Ein Reload, der den Knoten entfernt, das Token entfernt oder
+die Bindung des Tokens verschiebt, beendet einen geparkten Poll mit der Antwort, die ein erster
+Poll jetzt bekäme (`404`, `401`, `403`). Präsenz wird nur von `agent`-Tokens gestempelt — das
+`?node=X` eines Operators ist eine Vorschau auf das Dokument von X und bewegt keine Lebendigkeit.
 
 ```json
 {
@@ -586,25 +594,44 @@ Aufruf entscheiden kann, ob sie Knoten-Bedienelemente anzeigt.
 ### Der Edge-Kanal
 
 Diese Endpunkte existieren für [Edge-Knoten](/docs/edge) — Boxen, die [`kapkan edge`](/docs/cli#edge)
-ausführen. Wie der Scrub-Knoten-Kanal verlangen sie die Rolle `agent` oder ein ungebundenes
-`operator`-Token, niemals ein `viewer`- oder ein tenant-bezogenes Token: Das Zonendokument
-umspannt jeden Tenant. **Das Gehirn verteilt Richtlinien, niemals Urteile** — weder hier noch
+ausführen. Wie beim Scrub-Knoten-Kanal verlangen die knotenseitigen Endpunkte die Rolle `agent`
+oder ein ungebundenes `operator`-Token, niemals ein `viewer`- oder ein tenant-bezogenes Token: Das
+Zonendokument umspannt jeden Tenant. Bei den menschenseitigen ist es anders: Das Knoteninventar und
+die Ereignisse der Flotte (`GET /api/v1/edge/events`) sind Lesezugriffe mit `viewer`-Rang für
+ungebundene Tokens; der Zonenstatus, die [Edge-Historie](#get-apiv1edgehistory) mit ihren
+aussagekräftigen Quellen (`viewer`-Rang) und der Hebel (`operator`-Rang) lassen ein
+[tenant-bezogenes](/docs/multi-tenancy) Token für dessen eigene Zonen zu. **Das Gehirn verteilt
+Richtlinien, niemals Urteile** — weder hier noch
 anderswo existiert ein Aufruf pro Anfrage; ein Knoten beantwortet Anfragen allein. Die Anzahl der
 konfigurierten Edge-Knoten (`edge_nodes_total`) reitet für jede Rolle auf `/api/v1/status` mit,
 sodass eine Konsole ohne einen dieser Aufrufe entscheiden kann, ob sie die Edge-Ansicht anzeigt.
 
 #### GET /api/v1/edge/zones
 
-Das Zonendokument, das ein Knoten rendert und durchsetzt: jede Zone der [Zonendatei](/docs/zones)
-mit ihren Origins, ihrer TLS-Mindestversion, ihren ACME-Directories und ihrer Richtlinie, dazu die
-aktiven Ausstellungsfreigaben und die an alle Knoten verteilten ACME-Challenges. Ein einfacher
+Das Zonendokument, das ein Knoten rendert und durchsetzt: die Zonen der
+[Zonendatei](/docs/zones), die der
+[Platzierungs-Geltungsbereich](/docs/edge#zonen-auf-knoten-verteilen) des Knotens abdeckt — jede
+Zone beim bloßen `GET` eines Operators oder bei einer Flotte, deren Zonen keine `hostgroup` tragen
+(eine beschriftete Zone wird nur von Knoten bedient, die ihre Gruppe auflisten) — mit ihren
+Origins, ihrer TLS-Mindestversion, ihren ACME-Directories und ihrer Richtlinie, dazu die aktiven
+Ausstellungsfreigaben, die verteilten ACME-Challenges, die Freigabeschlüssel und die Hebel dieser
+Zonen; das `ETag` ist das des Knotens selbst. Ein einfacher
 `GET` liefert das Dokument mit einem Content-Hash-`ETag`; ein `GET`, dessen `If-None-Match` dieses
 ETag nennt, wird **gehalten**, bis sich das Dokument ändert — ein erfolgreicher Reload der
 Zonendatei, eine von einem Knoten veröffentlichte Zertifikats-Challenge — oder bis zu 25 s, und
-dann mit `304` beantwortet. Ein Knoten identifiziert sich mit `?node=<name>`, und **dieser Poll
+dann mit `304` beantwortet. Ein Reload, der den Knoten entfernt, das Token entfernt oder die
+Bindung des Tokens verschiebt, beendet einen geparkten Poll mit der Antwort, die ein erster Poll
+jetzt bekäme (`404`, `401`, `403`), niemals mit einem Dokument. Ein Knoten identifiziert sich mit
+`?node=<name>`, und **dieser Poll
 ist das Lebendigkeitssignal des Knotens** — der Name muss also ein konfigurierter
 `edge.nodes[]`-Eintrag sein (ein unbekannter Name ist `404`) und die Anfrage muss ein echtes Token
-mitführen. Höchstens 4 Polls pro Token-Name und 8 insgesamt dürfen gleichzeitig geparkt sein; ein
+mitführen. Ein an einen Knoten gebundenes Token (`api.tokens[].node`) darf nur als dieser Knoten
+pollen, berichten und ACME koordinieren — der Name eines anderen Knotens oder ein Poll ohne
+`?node=` ist ein einheitliches `403`, das den gebundenen Knoten nie nennt und abgewiesen wird,
+bevor irgendeine Präsenz gestempelt oder irgendetwas gespeichert wird; nur `agent`-Tokens stempeln
+Präsenz, das `?node=X` eines Operators ist also eine präsenzfreie Vorschau auf das Dokument von X.
+Höchstens 4 Polls pro Token-Name und `max(8, 2 × die Anzahl der Edge-Knoten)` insgesamt dürfen
+gleichzeitig geparkt sein; ein
 weiterer passender Poll wird mit `429` und `Retry-After: 1` beantwortet
 (`too many concurrent zone holds`), was der Knoten als Fehlschlag wertet und mit Backoff
 beantwortet (1 s, verdoppelt bis 30 s) — geben Sie jedem Knoten ein eigenes agent-Token.
@@ -674,13 +701,27 @@ jeder Zone halbiert, dann Zertifikate, dann Zonen — und jeder Schnitt wird gez
 `sources_truncated` sind die Kandidaten, die in der Liste fehlen (die, die die eigene Grenze des
 Knotens von 20 pro Fenster weggelassen hat, und die, die ein schrumpfender Report abgegeben hat),
 `certs_truncated` und `zones_truncated` die verworfenen Einträge. Gespeichert und von
-`GET /api/v1/edge/nodes` zurückgegeben. Niemals ein Lebendigkeitssignal (das ist der Poll). Ein
+`GET /api/v1/edge/nodes` zurückgegeben. Mit eingeschalteter
+[Speicherung](/docs/storage#edge-historie) werden die Fenster und die aussagekräftigen Quellen des
+Reports zusätzlich in die Edge-Historie geschrieben, und was sich seit dem vorherigen Report des
+Knotens geändert hat, wird zu Ereignissen — nachdem der Report gespeichert ist und ohne dass die
+Antwort jemals darauf wartet. Niemals ein Lebendigkeitssignal (das ist der Poll). Ein
 unbekanntes `{name}` ist `404`; Erfolg ist `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 
 Das Knoteninventar: jeder konfigurierte Edge-Knoten mit seiner Poll-Lebendigkeit, verbunden mit
-seinem letzten Report. Ein Lesezugriff mit `viewer`-Rang, nur ungebundene Tokens.
+seinem letzten Report, seinem Platzierungs-Geltungsbereich (`hostgroups` — der effektive
+Geltungsbereich, `["global"]` für einen Knoten ohne einen — und `zones_placed`, die Zonen der
+Datei, die er abdeckt), dazu `tokens` (die Namen der agent-Tokens, die mit `api.tokens[].node` an
+ihn gebunden sind) und
+`last_token` (der Name des Tokens, das zuletzt als er gepollt hat — niemals ein Geheimnis); das
+Dokument trägt `unbound_agent_tokens`, solange irgendein agent-Token ungebunden ist und es Knoten
+gibt, an die es gebunden werden könnte (fehlt sonst) — die Migrationsansicht von
+[Ein Agent-Token an seinen Knoten binden](/docs/authentication#ein-agent-token-an-seinen-knoten-binden).
+`hostgroups` und `zones_placed` sind immer vorhanden; `tokens`, `last_token` und
+`unbound_agent_tokens` werden weggelassen, wenn sie leer sind. Ein Lesezugriff mit `viewer`-Rang,
+nur ungebundene Tokens.
 
 #### GET /api/v1/edge/zones/status
 
@@ -695,20 +736,42 @@ hinweg (`h3 {enabled, serving, unsupported, requests}` — `enabled` ist das `tl
 so wie das Gehirn es hält, `serving` die lebendigen Knoten, deren aktive Generation für die Zone
 über QUIC lauscht, `unsupported` die, auf denen sie danach verlangt hat und über TCP ausgeliefert
 wird, `requests` die HTTP/3-Anfragen der Knoten im letzten Fenster, summiert; es fehlt bei einer
-Zone, für die niemand h3 spricht oder verlangt. Dieser Status wird aus dem Zonenabschnitt der
-Reports gebaut, und der listet **entscheidende** Zonen — das HTTP/3 einer Zone mit `mode: none`
-erscheint deshalb nur im `terminator.h3` der Knoten unter
-[`GET /api/v1/edge/nodes`](#get-apiv1edgenodes); `enabled` erscheint für jede Zone, für die die
-Datei h3 einschaltet und die hier vorhanden ist — von einem Knoten gemeldet, oder mit einem Hebel),
-und die **Kandidatenmenge**: die
+Zone, für die niemand h3 spricht oder verlangt. `enabled` erscheint für jede Zone der Datei, die h3
+einschaltet — eine Zone mit `mode: none` eingeschlossen —, und `serving`/`unsupported` benennen die
+aktiven QUIC-Listener der lebendigen Knoten für die Zone aus deren `terminator.h3`, entscheidende
+Zone oder nicht; `requests` kommt aus dem Zonenabschnitt der Reports, und der listet nur
+**entscheidende** Zonen), und die **Kandidatenmenge**: die
 Vereinigung der Quellen, für die die Knoten eine Challenge oder eine Sperre als Vorschau gezeigt
 haben, der stärkere Zustand behalten, die aktivsten zuerst, begrenzt auf 20 pro meldendem Knoten
 (`would_be_truncated` zählt den Rest). `partial` sagt, dass die Kandidaten eines Knotens nicht
 alle Platz fanden — seine Grenze pro Fenster, oder ein Report, der schrumpfen musste —, die Menge
 ist also, was übrig blieb, nicht jeder; `zones_truncated` auf dem
 Dokument summiert die Zoneneinträge, die die lebendigen Knoten aus ihren Reports geschnitten
-haben — Zonen, die hier fehlen oder zu niedrig gezählt sind. Ein Lesezugriff mit `viewer`-Rang,
-nur ungebundene Tokens, wie das Inventar. Das ist das *wer herausgefordert worden wäre* der
+haben — Zonen, die hier fehlen oder zu niedrig gezählt sind; eine flottenweite Zahl, vor dem
+Mandantenfilter genommen, sodass ein tenant-bezogener Aufrufer eine Zahl sehen kann, die Zonen
+abdeckt, die er nicht sehen kann. Auch jede Zone der Zonendatei hat eine
+Zeile — `mode` (ihr `policy.mode`) und `file_challenge` (ihr `policy.challenge`) sind das Wort des
+Gehirns, `challenge` das, was die Knoten anwenden —, und `certs` führt das Zertifikat auf, das jeder
+lebendige Knoten für die Zone hält (`node`, `not_after`, `issuer` — letzteres fehlt, wenn der Knoten
+keines meldet; nur Metadaten, aus den Reports; `certs_truncated` auf dem Dokument summiert die
+Einträge, die die Knoten aus ihren Reports geschnitten haben, um in die Größengrenze zu passen —
+flottenweit, wie `zones_truncated` —, eine kurze Liste ist also, was übrig blieb, nicht was
+gehalten wird). Jede Zone der Datei trägt außerdem
+ihre `placement {hostgroup, nodes, alive}` — die Gruppe, in die die Datei sie steckt, die
+konfigurierten Knoten, deren Geltungsbereich sie abdeckt, und welche davon lebendig sind — und
+`unserved: true`, wenn sie Knoten hat, aber keiner davon lebendig ist (eine Zone, die kein
+Geltungsbereich eines Knotens abdeckt, zeigt `nodes: []` und ist stattdessen eine
+`-check-config`-Warnung). Die Behauptungen eines Knotens über eine Zone außerhalb seines
+Geltungsbereichs werden in seinem Report gespeichert und weder hier zusammengeführt noch in die
+[Edge-Historie](#get-apiv1edgehistory) geschrieben
+(`kapkan_edge_history_dropped_total{reason="outside_scope"}`). `placement.hostgroup` ist nur für
+ungebundene Tokens vorhanden: Ein Mandant sieht die Namen der Knoten, auf denen seine Zone bedient
+wird, nicht, wie der Betreiber sie gruppiert. Ein Lesezugriff mit `viewer`-Rang. Ein ungebundenes
+Token sieht jede Zone, beschriftete mit ihrem `tenant` (der Schlüssel fehlt bei einer unbeschrifteten
+Zone); ein [tenant-bezogenes](/docs/multi-tenancy) Token genau seine eigenen Zonen — kein Hostname
+eines anderen Mandanten in irgendeiner Zeile, Kandidatenmenge oder HTTP/3-Liste und kein
+`tenant`-Feld. Knotennamen sind für einen Mandanten sichtbar; das Inventar nicht. Das ist das
+*wer herausgefordert worden wäre* der
 Edge-Spezifikation: Lesen Sie es, bevor die Stufe einer Zone in den Echtbetrieb geht.
 
 ```json
@@ -718,6 +781,9 @@ Edge-Spezifikation: Lesen Sie es, bevor die Stufe einer Zone in den Echtbetrieb 
   "zones": [
     {
       "zone": "shop.example.com",
+      "tenant": "shop",
+      "mode": "decide",
+      "file_challenge": "auto",
       "nodes": 2,
       "challenge": "auto",
       "rps": 812.4,
@@ -730,16 +796,68 @@ Edge-Spezifikation: Lesen Sie es, bevor die Stufe einer Zone in den Echtbetrieb 
       "would_be": [
         { "source": "203.0.113.7", "state": "would-deny", "requests": 1210, "nodes": ["edge-1", "edge-2"] },
         { "source": "198.51.100.23", "state": "would-challenge", "requests": 640, "nodes": ["edge-1"] }
+      ],
+      "certs": [
+        { "node": "edge-1", "not_after": "2026-11-20T09:12:00Z", "issuer": "R11" },
+        { "node": "edge-2", "not_after": "2026-11-20T09:12:00Z", "issuer": "R11" }
       ]
     }
   ]
 }
 ```
 
-Eine Zone, die noch kein lebendiger Knoten gemeldet hat, erscheint trotzdem, wenn ein Hebel auf ihr
-gesetzt ist: `nodes: 0`, `rps: 0` und `override`, kein Modus. Die Anfragezähler (`requests`,
+Eine Zone, die noch kein lebendiger Knoten gemeldet hat — eine in `policy.mode: none` oder eine,
+deren Knoten nicht laufen —, hat trotzdem ihre Zeile: `nodes: 0`, `rps: 0`, ihr `mode` und ihr
+`file_challenge`, und `override`, wenn ein Hebel gesetzt ist. Auch ein Hebel auf einer Zone, die ein
+Reload inzwischen aus der Datei entfernt hat, behält eine Zeile, ohne `mode` (nur für ungebundene
+Aufrufer — es ist ihre Sache, ihn zu löschen). Die Anfragezähler (`requests`,
 `decided`, `denied`, `challenged`, `cleared`, `would_deny`, `would_challenge`) werden weggelassen,
 wenn sie null sind; `nodes` und `rps` sind immer vorhanden.
+
+#### GET /api/v1/edge/history
+
+Die [Edge-Historie](/docs/storage#edge-historie) einer Zone: die Zehn-Sekunden-Fenster der Knoten,
+summiert in `step`-Sekunden-Buckets zwischen `from` und `to` (RFC 3339; standardmäßig die letzte
+Stunde; höchstens 31 Tage; `step` ist standardmäßig 60 s, wird angehoben, damit ein Zeitraum
+höchstens 5 000 Buckets fasst, und beträgt höchstens 86 400 s — einen Tag) — `{available, zone,
+node, step_seconds, points: [{ts, nodes, window_seconds, requests, decided, denied, challenged,
+cleared, would_deny, would_challenge, status_2xx, status_3xx, status_4xx, status_5xx,
+h3_requests}]}`. `nodes` zählt die verschiedenen Knoten, die im Bucket berichtet haben;
+`step_seconds` ist der tatsächlich angewendete Schritt; `zone` und `node` geben die Anfrage wieder,
+`node` nur, wenn der Filter gesetzt war; die Rate leiten Sie als `requests / window_seconds` ab und
+den HTTP/3-Anteil als `h3_requests / requests`. `zone` ist erforderlich, wird wie die Namen der
+Datei in Kleinbuchstaben gefaltet und muss in der Zonendatei stehen (sonst `404 unknown zone`);
+`node=<name>` grenzt auf einen konfigurierten Knoten ein (`404 unknown edge node`). `viewer`-Rang.
+Ein [tenant-bezogenes](/docs/multi-tenancy) Token liest seine eigenen Zonen; jede andere Zone — die
+eines anderen Mandanten, eine unbeschriftete, eine aus der Datei verschwundene oder eine nicht
+existierende — ist ein einziges einheitliches `403` (`zone is outside your tenant`), gezählt in
+`kapkan_api_zone_refused_total{route="edge_history"}` und einmal pro Minute und Token protokolliert,
+und `node=` gibt es nur für ungebundene Tokens (ein Mandant bekommt `nodes` als Anzahl, nie die
+Historie eines einzelnen Knotens). Speicherung aus: `{available: false, points: []}`, niemals ein
+Fehler — die Zone wird gar nicht erst angesehen, jedes Token bekommt also für jede Zone diese
+Antwort, und nichts wird gezählt oder protokolliert; eine fehlgeschlagene Abfrage ist `502`.
+
+#### GET /api/v1/edge/history/sources
+
+Die aussagekräftigen Quellen der Zone über den Zeitraum — das *wer herausgefordert worden wäre* der
+Edge-Spezifikation, über eine Zeitspanne statt über ein Zehn-Sekunden-Fenster gefragt:
+`{available, zone, state, sources: [{source, state, requests, windows, nodes, first_seen,
+last_seen}]}`, die aktivsten zuerst, höchstens 1 001 Zeilen. Der `state` jeder Quelle ist das
+Stärkste, was irgendein Knoten ihr über den Zeitraum angetan hat (`denied` vor `challenged` vor
+`would-deny` vor `would-challenge`); `state=` filtert auf eines dieser vier (`400` für alles andere
+— Besucher werden nie gespeichert), und der `state` auf oberster Ebene gibt diesen Filter wieder, er
+fehlt ohne einen. Dieselben Regeln für `zone`, Zeitraum und Scope wie bei der Historie oben.
+
+#### GET /api/v1/edge/events
+
+Die Übergänge, die das Gehirn gesehen hat, neueste zuerst, höchstens 1 001: `{available, events:
+[{event_time, node, zone, kind, detail}]}`, mit optionalen Filtern `node=`, `zone=` und `kind=` —
+`kind` ist eines von `node_alive`, `node_lost`, `version`, `dry_run`, `document_rendered`,
+`generation_installed`, `generation_refused`, `terminator_alive`, `h3_state`, `cert_issued`,
+`cert_renewed`, `cert_gone`, `challenge_started`, `challenge_ended`, `clock_skew`,
+`report_truncated` (sonst `400`). `viewer`-Rang, **nur ungebundene Tokens**: Die Ereignisse benennen
+Knoten und die Veränderungen der Flotte. Dieselben Zeitraumregeln; ist die Speicherung aus, lautet
+die Antwort `{available: false, events: []}`.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot und …/acme/challenges
 
@@ -750,17 +868,29 @@ zurück), damit eine Flotte nicht an einem einzigen Nachmittag das Duplicate-Cer
 einer CA aufbraucht; er wartet höchstens 15 Minuten und bestellt dann trotzdem. Ein Knoten, der
 den Slot hält, veröffentlicht seine ausstehende HTTP-01-Challenge
 (`{"zone", "token", "key_authorization"}`), und das Gehirn verteilt sie zehn Minuten lang im
-Zonendokument an alle Knoten, sodass jeder Knoten sie beantwortet — die Validierung der CA kann
-auf jedem Knoten hinter einer gemeinsamen Adresse landen. Eine aktive Challenge wird niemals durch
+Dokument jedes Knotens, der die Zone bedient, sodass jeder von ihnen sie beantwortet — die
+Validierung der CA kann auf jedem Knoten hinter der gemeinsamen Adresse der Zone landen. Eine
+aktive Challenge wird niemals durch
 eine andere Key Authorization überschrieben (`409`), ein Knoten darf 16 aktive Challenges halten,
 und jeder Aufruf wird mit Knoten, Zone und dem Präfix des Tokens protokolliert: Ein agent-Token
 ist ein zertifikatsausstellendes Credential — rotieren Sie es bei jeder Kompromittierung eines
-Knotens.
+Knotens. Beide nehmen nur die Zonen, die der
+[Platzierungs-Geltungsbereich](/docs/edge#zonen-auf-knoten-verteilen) des Knotens abdeckt: Eine
+Zone, die der Knoten nicht bedient, ist für ihn `404 unknown zone`, Byte für Byte die Antwort, die
+eine nicht existierende Zone bekommt (ein `{"release": true}` ist die Ausnahme: Es berührt nur die
+eigene Freigabe des Aufrufers, ist idempotent und wird für jeden Zonennamen mit `204` beantwortet,
+bedient oder nicht).
 
 #### POST /api/v1/edge/zones/\{name\}/challenge und DELETE
 
 [Der Hebel](/docs/edge#der-hebel): Setzt den Challenge-Modus einer Zone für eine begrenzte Zeit,
-was auch immer die Zonendatei sagt. `operator`-Rang, nur ungebundene Tokens.
+was auch immer die Zonendatei sagt. `operator`-Rang. Ein
+[tenant-bezogener](/docs/multi-tenancy) Operator darf ihn nur auf seinen eigenen Zonen ziehen; jede
+andere Zone — die eines anderen Mandanten, eine unbeschriftete oder eine aus der Datei
+verschwundene — ist für ihn `404 unknown zone`, dieselbe Antwort, die ein unbekannter Name bekommt,
+entschieden, bevor der Body gelesen wird. Der Aufrufer erfährt nichts weiter; der Betreiber schon:
+Jede solche Abweisung zählt in `kapkan_api_zone_refused_total{route="edge_lever"}` und wird einmal
+pro Minute und Token protokolliert, und es wird keine Audit-Zeile geschrieben.
 
 ```json
 { "mode": "manual", "ttl_seconds": 1800, "reason": "credential stuffing from residential proxies" }
@@ -772,9 +902,9 @@ Log, die Audit-Zeile und die Antworten der API — `override.reason` in
 `GET /api/v1/edge/zones/status` und die eigene Antwort dieses Endpunkts (höchstens 200 Zeichen).
 Eine unbekannte Zone ist `404`; eine
 Zone in `policy.mode: none` ist `409` — dort fordert nichts heraus. Die Übersteuerung reist als
-`challenge_override` im Zonendokument (geparkte Polls werden sofort geweckt), und jeder Knoten
-wendet den effektiven Modus auf seinem schnellen Pfad an, sodass sie zu `until` endet, mit oder
-ohne Gehirn. Auditiert als `edge_challenge` `set` / `cleared`. Beide Methoden antworten `200` mit
+`challenge_override` im Zonendokument (geparkte Polls werden sofort geweckt), und jeder Knoten, der
+die Zone bedient, wendet den effektiven Modus auf seinem schnellen Pfad an, sodass sie zu `until`
+endet, mit oder ohne Gehirn. Auditiert als `edge_challenge` `set` / `cleared`. Beide Methoden antworten `200` mit
 der Stufe, wie sie jetzt steht, und wo der Hebel greift:
 
 ```json
@@ -795,8 +925,10 @@ der Stufe, wie sie jetzt steht, und wo der Hebel greift:
 
 `file_mode` ist `policy.challenge`, wie die Datei es hat; `zone_watch_only` und `rung_watch_only`
 sind `policy.dry_run` und `challenge_options.dry_run` der Zone — bei einem von beiden zeigt der
-Hebel auf jedem Knoten nur eine Vorschau, statt zu greifen; `nodes[]` führt jeden konfigurierten
-Knoten mit seiner Lebendigkeit und seinem gemeldeten `dry_run` auf (fehlt, bis er gemeldet hat) —
+Hebel auf jedem Knoten nur eine Vorschau, statt zu greifen; `nodes[]` führt die Knoten auf, auf
+denen die Zone [platziert](/docs/edge#zonen-auf-knoten-verteilen) ist — jeden konfigurierten Knoten
+bei einer Zone, die ein Reload inzwischen aus der Datei entfernt hat —, mit seiner Lebendigkeit und
+seinem gemeldeten `dry_run` (fehlt, bis er gemeldet hat) —
 ein Knoten, der nur zählt, muss gesehen werden, bevor man dem Hebel vertraut. `mode`, `until` und
 `reason` fehlen, wenn die Zone ihrer Datei folgt, und `file_mode` ist leer für eine Zone, die ein
 Reload inzwischen aus der Datei entfernt hat — ein solcher Hebel kann noch gelöscht, aber nicht

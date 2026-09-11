@@ -87,9 +87,9 @@ et désormais [`kapkan edge`](/docs/cli#edge). L'installer de bout en bout fait 
   refusé ou mis au défi, et qui l'*aurait* été.
 - **ACME** tourne sur chaque nœud : les clés de compte et les certificats sont générés sur la
   machine et ne la quittent jamais. Le cerveau se contente de sérialiser l'émission par zone (un
-  seul nœud commande à la fois) et de diffuser un défi HTTP-01 en attente à tous les nœuds, de
-  sorte que la validation de la CA puisse atterrir sur n'importe lequel d'entre eux. Les deux sont
-  consultatifs : un nœud renouvelle même sans cerveau.
+  seul nœud commande à la fois) et de diffuser un défi HTTP-01 en attente à chaque nœud qui sert la
+  zone, de sorte que la validation de la CA puisse atterrir sur n'importe lequel d'entre eux. Les
+  deux sont consultatifs : un nœud renouvelle même sans cerveau.
 
 ### La séparation rapide/lent
 
@@ -219,7 +219,9 @@ le mode propre au fichier, les indicateurs d'observation seule de la zone (`poli
 `challenge_options.dry_run` — avec l'un ou l'autre, le levier *prévisualise* au lieu d'agir) et
 chaque nœud configuré avec sa vivacité et le `dry_run` qu'il rapporte — un nœud qui ne fait que
 compter doit être repéré avant de faire confiance au levier. C'est une action d'opérateur (rang
-`operator`, jetons non rattachés), auditée comme `edge_challenge`, nommée `override` par
+`operator` ; un operator [rattaché à un tenant](/docs/multi-tenancy) ne peut l'actionner que sur ses
+propres zones — toute autre zone est un `404 unknown zone` pour lui), auditée comme
+`edge_challenge`, nommée `override` par
 [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) — la vue Edge de la console
 montre le mode que les nœuds appliquent sous lui (`manual`, `auto`), pas le levier lui-même — et
 tenue dans la mémoire du cerveau comme le coordinateur d'émission : un outil d'incident, disparu
@@ -385,6 +387,83 @@ Deux choses à garder en tête : les flux UDP ont besoin de délais conntrack qu
 accorde pas forcément par défaut, et `quic_gso` (le contexte `http`) est à vous de le poser dans
 `nginx.conf` si vous le voulez — Kapkan ne génère ni l'un ni l'autre.
 
+## Placer les zones sur les nœuds
+
+Par défaut, chaque nœud sert chaque zone : un document, une flotte. Une flotte avec des PoP — un
+site aux États-Unis et un site en Europe, disons — place les zones sur les nœuds selon l'axe que
+Kapkan possède déjà pour les préfixes, le **hostgroup** :
+
+```yaml
+# kapkan.yaml
+hostgroups:
+  - { name: edge-us, networks: ["198.51.100.0/26"] }   # the US PoP's VIP prefix
+  - { name: edge-eu, networks: ["198.51.100.64/26"] }  # the EU PoP's VIP prefix
+edge:
+  nodes:
+    - { name: us-1, hostgroups: [edge-us] }           # US zones only
+    - { name: eu-1, hostgroups: [edge-eu, global] }   # EU zones and the global ones
+    - { name: any-1 }                                 # no scope = the global group alone
+```
+
+```yaml
+# zones.yaml
+zones:
+  - { name: shop.example.com, hostgroup: edge-us, origins: ["10.0.0.10:8080"] }
+  - { name: shop.example.eu,  hostgroup: edge-eu, origins: ["10.0.1.10:8080"] }
+  - { name: www.example.com,  origins: ["10.0.2.10:8080"] }          # global
+```
+
+La règle tient en une phrase : **un nœud sert une zone quand le hostgroup de la zone est dans la
+portée du nœud**. Le hostgroup d'une zone, c'est `zones[].hostgroup`, ou `global` quand elle n'en
+nomme aucun ; la portée d'un nœud, c'est `edge.nodes[].hostgroups`, ou `[global]` quand il n'en
+liste aucun. Les conséquences, par ordre de fréquence :
+
+- **Une étiquette, à elle seule, est stricte.** Poser `hostgroup: edge-us` sur une zone la retire de
+  tout nœud qui ne liste pas `edge-us` — `any-1` ci-dessus cesse de la servir. L'isolation et le
+  budget de certificats en double de la CA suivent le placement par défaut ; rien n'est ouvert par
+  accident. Une zone placée sur un groupe de N nœuds, c'est N commandes par émission, pas celles de
+  toute la flotte — le plafond des [Limites](#limites-à-connaître) se compte par placement.
+- **`global` est un littéral.** Un nœud qui doit servir les zones de son PoP *et* celles valables
+  sur toute la flotte liste les deux : `[edge-eu, global]`. Un nœud avec seulement `[edge-eu]`
+  n'obtient aucune zone globale.
+- **La portée suit l'adressage.** Un hostgroup a besoin d'au moins un préfixe dans `networks` — le
+  préfixe de VIP du PoP, que vous protégez de toute façon. Le placement n'est pas une seconde
+  topologie ; c'est celle que vous avez déjà déclarée.
+- **Chaque nœud reçoit son propre document** — exactement les zones que sa portée couvre, avec leurs
+  attributions de certificats, les défis ACME diffusés, les clés de laissez-passer et les leviers,
+  et son propre ETag. Un nœud qui demande le créneau d'émission d'une zone qu'il ne sert pas, ou qui
+  publie un défi pour elle, reçoit le même `404 unknown zone` qu'une zone inexistante. Le placement
+  lui-même n'entre jamais dans le document.
+- **Cadrer impose des tokens liés.** Dès qu'un nœud a une portée, chaque token `agent` doit porter
+  [`node`](/docs/authentication#lier-un-token-agent-à-son-nœud) — une portée appliquée face à un
+  token partagé serait une promesse que rien ne tient. Les flottes sans portées gardent leur délai
+  de grâce.
+- **Appartenance et placement sont deux axes.** `tenant` dit qui peut voir la zone, `hostgroup` où
+  elle est servie ; quand la zone et son hostgroup portent tous deux un tenant, ils doivent
+  concorder, et rien n'est hérité — une zone dans un groupe étiqueté reste une zone « maison » tant
+  qu'elle ne dit pas le contraire. La règle vaut pour les hostgroups nommés : le groupe global est le
+  fourre-tout de la flotte, pas le PoP d'un tenant, de sorte qu'une zone étiquetée peut rester
+  globale quoi que dise le `tenant` de premier niveau de `kapkan.yaml`. Un hostgroup qui n'existe pas
+  fait échouer le rechargement (les zones précédentes restent en service), comme tout fichier de
+  zones cassé.
+- **Jamais à la vitesse d'une attaque.** Le placement est un changement lent, comme les origines ou
+  le TLS : déplacer une zone regénère les nœuds qu'elle quitte et ceux qu'elle rejoint, et recharge
+  leurs terminateurs. La [séparation rapide/lent](#la-séparation-rapidelent) est intacte.
+
+`kapkan -check-config` affiche la matrice — la portée de chaque nœud, le nombre de zones qu'il
+couvre, son token — et avertit pour une zone qu'aucune portée de nœud ne couvre (elle n'est servie
+nulle part tant qu'un nœud ne liste pas son groupe). `GET /api/v1/edge/zones/status` porte le
+`placement {hostgroup, nodes, alive}` de chaque zone et signale `unserved` lorsque ses nœuds
+existent mais qu'aucun n'est vivant ; la réponse du levier liste les nœuds de la zone, pas ceux de
+la flotte ; l'inventaire montre les `hostgroups` et `zones_placed` de chaque nœud. Ce qu'un nœud
+affirme d'une zone hors de sa portée est stocké dans son rapport, mais n'est pas fusionné dans
+l'état de la zone.
+
+**Mode opératoire — une zone quitte un nœud.** Sortir une zone d'un nœud y est un rechargement lent
+ordinaire : le terminateur cesse de servir le nom, les certificats du nœud pour elle restent sur
+disque et cessent d'être renouvelés. Supprimez-les quand vous en êtes sûr, ou laissez-les ; rien ne
+renouvelle un certificat pour une zone que le nœud ne sert plus.
+
 ## Ce que fait le nœud en cas de panne
 
 | Panne | Comportement |
@@ -416,8 +495,10 @@ accorde pas forcément par défaut, et `quic_gso` (le contexte `http`) est à vo
   de dix secondes de chaque zone, les sources qu'elle a refusées, mises au défi ou qu'elle l'aurait
   fait, et si son palier s'y applique ou n'y fait que prévisualiser. Voir
   [l'API](/docs/api#le-canal-edge).
-- **Les zones sur toute la flotte**, `GET /api/v1/edge/zones/status`, fusionne les zones des nœuds
-  vivants : débits sommés, les nœuds sur lesquels une zone est en observation seule ou sous un défi
+- **Les zones sur toute la flotte**, `GET /api/v1/edge/zones/status`, liste chaque zone du fichier
+  de zones et y fusionne les rapports des nœuds vivants (un token [rattaché à un
+  tenant](/docs/multi-tenancy) reçoit ses propres zones) : débits sommés, les nœuds sur lesquels une
+  zone est en observation seule ou sous un défi
   global (appliqué ou en aperçu), le levier en vigueur, et l'ensemble des candidats. La vue
   **Edge** de la console — affichée dès que `edge.nodes[]` est configuré — la rend ; voir
   [le tableau de bord](/docs/dashboard).
@@ -450,15 +531,21 @@ accorde pas forcément par défaut, et `quic_gso` (le contexte `http`) est à vo
 - **HTTP/3 se règle par zone et se génère là où le nœud en est capable**, à l'échelle du nœud pour
   ce que nginx décide avant le SNI (Retry actif, 0-RTT désactivé), sans migration de connexion ni
   reprise de session entre nœuds — voir [HTTP/3 (QUIC)](#http3-quic).
-- **Plafonds de certificats en double.** Des certificats par nœud signifient que N nœuds sur une
-  zone font N commandes ; Let's Encrypt limite un nom à environ cinq par semaine. Le créneau
+- **Plafonds de certificats en double.** Des certificats par nœud signifient que les N nœuds sur
+  lesquels une zone est [placée](#placer-les-zones-sur-les-nœuds) font N commandes (toute la flotte
+  pour une zone globale) ; Let's Encrypt limite un nom à environ cinq par semaine. Le créneau
   d'émission du cerveau et le jitter des renouvellements les étalent ; `acme.fallback` (ZeroSSL,
   Google Trust Services — les deux exigent un External Account Binding) est l'échappatoire.
   Prévoyez les comptes CA pour les grandes flottes.
-- **Le token agent émet des certificats.** Tant que les tokens ne sont pas liés aux nœuds, un
-  détenteur du token agent peut publier une réponse de défi pour n'importe quelle zone via le
-  cerveau (seulement depuis un nœud qui détient le créneau d'émission de la zone, et chaque appel
-  est journalisé). Faites tourner le token si un nœud est compromis.
+- **Le token agent émet des certificats — pour les zones de son nœud.** Liez chaque token agent à
+  son nœud (`api.tokens[].node`, voir
+  [authentification](/docs/authentication#lier-un-token-agent-à-son-nœud)) pour qu'un token volé ne
+  puisse pas agir sous l'identité d'un autre nœud, et [placez les zones sur les
+  nœuds](#placer-les-zones-sur-les-nœuds) pour que son nœud ne serve que les zones qu'il doit
+  servir : un token lié volé ne peut alors prendre le créneau d'émission et publier une réponse de
+  défi que pour les zones que la portée de son nœud couvre (chaque appel étant journalisé), et la
+  compromission d'un nœud est une exposition de certificat pour ces zones-là, pas pour celles de
+  toute la flotte. Faites tourner le token de ce nœud ; le cerveau ne détient rien à voler.
 
 ## Voir aussi
 

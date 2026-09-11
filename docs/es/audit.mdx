@@ -30,8 +30,10 @@ proceso.
 
 ## Qué se registra
 
-Se auditan cinco acciones. `ban`, `config_reload` y `source_block` se registran tanto en caso de
-éxito como de fallo; `unban` y `source_unblock` se registran solo en caso de éxito — una eliminación
+Se auditan seis acciones. `ban`, `config_reload` y `source_block` se registran tanto en caso de
+éxito como de fallo; `edge_challenge` en cada `200` — soltar una palanca que no estaba viva registra
+igualmente `cleared`, y solo una palanca denegada (`404`, `400`, `409`) queda fuera; `unban` y
+`source_unblock` se registran solo en caso de éxito — una eliminación
 fallida o sin efecto devuelve un error y no se escribe en el rastro, aunque sí queda registrada en el
 log:
 
@@ -42,6 +44,7 @@ log:
 | `config_reload` | `POST /api/v1/config/reload` | `ok` en caso de éxito; `error` cuando la nueva configuración no se puede parsear o validar. |
 | `source_block` | `POST /api/v1/dataplane/sources` | `blocked` en caso de éxito; `rejected` cuando la política lo deniega. Un bloqueo denegado es en sí una acción de operador, así que se atribuye igual que un baneo denegado. El [plano de fingerprints](/docs/fingerprinting) también escribe registros `source_block` — `source: "auto"`, solo en caso de éxito — cuando bloquea un JA4. |
 | `source_unblock` | `POST /api/v1/dataplane/sources/unblock` | `removed` en caso de éxito. |
+| `edge_challenge` | `POST`/`DELETE /api/v1/edge/zones/{name}/challenge` | `set` cuando se acciona [la palanca](/docs/edge#la-palanca), `cleared` cuando se suelta (`DELETE` o `mode: off`, hubiera o no una palanca viva); `reason` es `<mode> until <RFC 3339>; <motivo del operador>` en `set`, y el motivo del operador (`mode: off`) o vacío (`DELETE`) en `cleared`. Una palanca denegada — una zona desconocida o fuera del tenant, un TTL inválido, una zona en `mode: none` — no se escribe. |
 
 `config_reload` está restringido a tokens sin alcance (admin). Un operator acotado a un tenant es
 denegado con `403` *antes* de que la recarga se ejecute, y **no se escribe ningún registro de
@@ -79,7 +82,7 @@ como las demás lecturas.
 | --- | --- | --- |
 | `from` | ahora − 1h | Inicio RFC 3339 de la ventana. |
 | `to` | ahora | Fin RFC 3339 de la ventana. Debe ser posterior a `from`; la ventana no puede exceder **31 días**. |
-| `action` | (todas) | Filtra a una de `ban`, `unban`, `config_reload`, `source_block`, `source_unblock`. |
+| `action` | (todas) | Filtra a una de `ban`, `unban`, `config_reload`, `source_block`, `source_unblock`, `edge_challenge`. |
 | `target` | (todos) | Filtra a una IP. Debe ser visible para el tenant de quien llama, o la solicitud es `403`. |
 
 El endpoint devuelve como máximo ~1000 registros por consulta, del más reciente al más antiguo. Si
@@ -118,17 +121,17 @@ Cada registro lleva estos campos:
 | Campo | Notas |
 | --- | --- |
 | `event_time` | UTC, `YYYY-MM-DD HH:MM:SS`. |
-| `action` | `ban`, `unban`, `config_reload`, `source_block` o `source_unblock`. |
-| `result` | `active`, `rejected`, `withdrawn`, `ok`, `error`, `blocked` o `removed`. |
+| `action` | `ban`, `unban`, `config_reload`, `source_block`, `source_unblock` o `edge_challenge`. |
+| `result` | `active`, `rejected`, `withdrawn`, `ok`, `error`, `blocked`, `removed`, `set` o `cleared`. |
 | `operator` | El nombre del token de API que coincidió; vacío en modo abierto (sin token). |
 | `role` | El rol de quien llama (`viewer` / `operator`). |
 | `tenant` | El alcance de tenant de quien llama; vacío para una llamada sin alcance (admin). |
-| `target` | La IP para `ban`/`unban`; `source->victim` para `source_block`/`source_unblock`; vacío para `config_reload`. |
-| `target_type` | `host` para `ban`/`unban`; `source` para `source_block`/`source_unblock`; `global` para `config_reload`. |
-| `reason` | Detalle de la denegación o el error; vacío en caso de éxito. |
+| `target` | La IP para `ban`/`unban`; `source->victim` para `source_block`/`source_unblock`; la zona para `edge_challenge`; vacío para `config_reload`. |
+| `target_type` | `host` para `ban`/`unban`; `source` para `source_block`/`source_unblock`; `zone` para `edge_challenge`; `global` para `config_reload`. |
+| `reason` | Detalle de la denegación o el error; vacío en caso de éxito — salvo para `edge_challenge`: en `set`, el modo, su fin y el motivo del operador; en `cleared`, el motivo del operador o vacío. |
 | `source` | `api` para una acción de operator, o `auto` para una iniciada por el motor. Hoy el [plano de fingerprints](/docs/fingerprinting) escribe registros `source_block` con `source: "auto"` — y sin operator, rol ni tenant — cuando el JA4 de un cliente está en la lista de bloqueo. |
-| `ban_state` | El estado de baneo final para `ban`/`unban`; vacío para `config_reload` y las acciones de bloqueo de origen. |
-| `dry_run` | `1` cuando el despliegue está en [dry-run](/docs/safety). |
+| `ban_state` | El estado de baneo final para `ban`/`unban`; vacío para `config_reload`, las acciones de bloqueo de origen y `edge_challenge`. |
+| `dry_run` | `1` cuando la acción se ejecutó bajo [dry-run](/docs/safety) (`ban`/`unban`, las acciones de bloqueo de origen); siempre `0` para `config_reload` y `edge_challenge`, a los que dry-run no condiciona. |
 
 Una consulta contra una ventana fuera de rango devuelve `400`; un valor de `action` desconocido
 devuelve `400`; un `target` mal formado devuelve `400`. Con el almacenamiento deshabilitado la

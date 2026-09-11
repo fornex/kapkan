@@ -86,9 +86,9 @@ und nun [`kapkan edge`](/docs/cli#edge). Die Installation von Anfang bis Ende be
   sehen, wer abgewiesen oder herausgefordert wurde — und wer es *geworden wäre*.
 - **ACME** läuft auf jedem Knoten: Account-Schlüssel und Zertifikate werden auf der Box erzeugt
   und verlassen sie nie. Das Gehirn serialisiert lediglich die Ausstellung pro Zone (ein Knoten
-  bestellt zu einem Zeitpunkt) und verteilt eine ausstehende HTTP-01-Challenge an jeden Knoten,
-  sodass die Validierung der CA auf jedem von ihnen landen darf. Beides ist beratend: Ein Knoten
-  erneuert auch ohne Gehirn.
+  bestellt zu einem Zeitpunkt) und verteilt eine ausstehende HTTP-01-Challenge an jeden Knoten, der
+  die Zone bedient, sodass die Validierung der CA auf jedem von ihnen landen darf. Beides ist
+  beratend: Ein Knoten erneuert auch ohne Gehirn.
 
 ### Die Fast/Slow-Trennung
 
@@ -217,7 +217,9 @@ den eigenen Modus der Datei, die Nur-beobachten-Flags der Zone (`policy.dry_run`
 `challenge_options.dry_run` — bei einem von beiden zeigt der Hebel nur eine *Vorschau*, statt zu
 greifen) und jeden konfigurierten Knoten mit seiner Lebendigkeit und seinem gemeldeten `dry_run` —
 ein Knoten, der nur zählt, muss gesehen werden, bevor man dem Hebel vertraut. Er ist eine Aktion
-des Betreibers (`operator`-Rang, ungebundene Tokens), auditiert als `edge_challenge`, von
+des Betreibers (`operator`-Rang; ein [tenant-bezogener](/docs/multi-tenancy) Operator darf ihn nur
+auf seinen eigenen Zonen ziehen — jede andere Zone ist für ihn `404 unknown zone`), auditiert als
+`edge_challenge`, von
 [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) als `override` benannt —
 die Edge-Ansicht der Konsole zeigt den Modus, den die Knoten unter ihm anwenden (`manual`, `auto`),
 nicht den Hebel selbst — und wird wie der Ausstellungskoordinator im Speicher des Gehirns
@@ -383,6 +385,87 @@ Zwei Dinge zum Mitdenken: UDP-Flows brauchen Conntrack-Timeouts, die eine Firewa
 standardmäßig vielleicht nicht gibt, und `quic_gso` (der `http`-Kontext) ist Ihre Sache in
 `nginx.conf`, wenn Sie es wollen — Kapkan rendert beides nicht.
 
+## Zonen auf Knoten verteilen
+
+Standardmäßig bedient jeder Knoten jede Zone: ein Dokument, eine Flotte. Eine Flotte mit PoPs — etwa
+ein US-Standort und ein EU-Standort — verteilt Zonen auf Knoten entlang der Achse, die Kapkan für
+Präfixe schon hat, der **Hostgroup**:
+
+```yaml
+# kapkan.yaml
+hostgroups:
+  - { name: edge-us, networks: ["198.51.100.0/26"] }   # the US PoP's VIP prefix
+  - { name: edge-eu, networks: ["198.51.100.64/26"] }  # the EU PoP's VIP prefix
+edge:
+  nodes:
+    - { name: us-1, hostgroups: [edge-us] }           # US zones only
+    - { name: eu-1, hostgroups: [edge-eu, global] }   # EU zones and the global ones
+    - { name: any-1 }                                 # no scope = the global group alone
+```
+
+```yaml
+# zones.yaml
+zones:
+  - { name: shop.example.com, hostgroup: edge-us, origins: ["10.0.0.10:8080"] }
+  - { name: shop.example.eu,  hostgroup: edge-eu, origins: ["10.0.1.10:8080"] }
+  - { name: www.example.com,  origins: ["10.0.2.10:8080"] }          # global
+```
+
+Die Regel ist ein Satz: **Ein Knoten bedient eine Zone, wenn die Hostgroup der Zone im
+Geltungsbereich des Knotens liegt.** Die Hostgroup einer Zone ist `zones[].hostgroup` oder `global`,
+wenn sie keine nennt; der Geltungsbereich eines Knotens ist `edge.nodes[].hostgroups` oder
+`[global]`, wenn er keine auflistet. Die Folgen, in der Reihenfolge, in der sie einen treffen:
+
+- **Ein Label allein ist strikt.** `hostgroup: edge-us` auf eine Zone zu setzen, nimmt sie von jedem
+  Knoten, der `edge-us` nicht auflistet — `any-1` oben bedient sie nicht mehr. Isolation und das
+  Duplikat-Zertifikat-Budget der CA folgen standardmäßig der Platzierung; nichts wird aus Versehen
+  geöffnet. Eine Zone, die auf einer Gruppe von N Knoten platziert ist, sind N Bestellungen pro
+  Ausstellung, nicht die der Flotte — die Obergrenze unter
+  [Grenzen](#grenzen-die-sie-kennen-sollten) wird pro Platzierung gezählt.
+- **`global` ist ein Literal.** Ein Knoten, der die Zonen seines PoPs *und* die flottenweiten
+  bedienen muss, listet beide auf: `[edge-eu, global]`. Ein Knoten mit nur `[edge-eu]` bekommt keine
+  globale Zone.
+- **Der Geltungsbereich folgt der Adressierung.** Eine Hostgroup braucht mindestens ein Präfix in
+  `networks` — das VIP-Präfix des PoPs, das Sie ohnehin schützen. Platzierung ist keine zweite
+  Topologie; es ist die, die Sie bereits deklariert haben.
+- **Jeder Knoten bekommt sein eigenes Dokument** — genau die Zonen, die sein Geltungsbereich
+  abdeckt, mit ihren Zertifikats-Freigaben, den verteilten ACME-Challenges, den Freigabeschlüsseln
+  und den Hebeln, und mit seinem eigenen ETag. Ein Knoten, der den Ausstellungs-Slot einer Zone
+  verlangt, die er nicht bedient, oder eine Challenge für sie veröffentlicht, erhält dasselbe
+  `404 unknown zone` wie für eine nicht existierende Zone. Die Platzierung selbst gelangt nie in das
+  Dokument.
+- **Eingrenzen setzt gebundene Tokens voraus.** In dem Moment, in dem irgendein Knoten einen
+  Geltungsbereich hat, muss jedes `agent`-Token ein
+  [`node`](/docs/authentication#ein-agent-token-an-seinen-knoten-binden) tragen — ein
+  Geltungsbereich, der gegen ein geteiltes Token durchgesetzt wird, wäre ein Versprechen, das nichts
+  hält. Flotten ohne Geltungsbereiche behalten ihre Schonfrist.
+- **Eigentum und Platzierung sind zwei Achsen.** `tenant` sagt, wer die Zone sehen darf,
+  `hostgroup`, wo sie bedient wird; tragen sowohl die Zone als auch ihre Hostgroup einen Mandanten,
+  müssen sie übereinstimmen, und nichts wird vererbt — eine Zone in einer beschrifteten Gruppe ist
+  weiterhin eine House-Zone, solange sie nichts anderes sagt. Die Regel gilt für benannte
+  Hostgroups: Die globale Gruppe ist der Catch-all der Flotte, nicht der PoP eines Mandanten, eine
+  beschriftete Zone darf also global bleiben, was auch immer das Top-Level-`tenant` der
+  `kapkan.yaml` sagt. Eine Hostgroup, die nicht existiert, lässt den Reload scheitern (die
+  vorherigen Zonen bleiben live), wie jede defekte Zonendatei.
+- **Niemals mit Angriffsgeschwindigkeit.** Platzierung ist eine langsame Änderung wie Origins oder
+  TLS: Eine Zone zu verschieben rendert die Knoten neu, die sie verlässt und zu denen sie kommt, und
+  lädt deren Terminatoren neu. Die [Fast/Slow-Trennung](#die-fastslow-trennung) bleibt unberührt.
+
+`kapkan -check-config` gibt die Matrix aus — den Geltungsbereich jedes Knotens, wie viele Zonen er
+abdeckt, sein Token — und warnt vor einer Zone, die kein Geltungsbereich eines Knotens abdeckt (sie
+wird nirgends bedient, bis ein Knoten ihre Gruppe auflistet).
+`GET /api/v1/edge/zones/status` trägt die `placement {hostgroup, nodes, alive}` jeder Zone und
+markiert `unserved`, wenn ihre Knoten existieren, aber keiner lebendig ist; die Antwort des Hebels
+listet die Knoten der Zone auf, nicht die der Flotte; das Inventar zeigt die `hostgroups` und
+`zones_placed` jedes Knotens. Die Behauptungen eines Knotens über eine Zone außerhalb seines
+Geltungsbereichs werden in seinem Report gespeichert, aber nicht in den Status der Zone gemischt.
+
+**Runbook — eine Zone verlässt einen Knoten.** Eine Zone von einem Knoten zu nehmen, ist dort ein
+gewöhnlicher langsamer Reload: Der Terminator bedient den Namen nicht mehr, die Zertifikate des
+Knotens dafür bleiben auf der Platte liegen und werden nicht mehr erneuert. Löschen Sie sie, wenn
+Sie sicher sind, oder lassen Sie sie liegen; nichts erneuert ein Zertifikat für eine Zone, die der
+Knoten nicht mehr bedient.
+
 ## Was der Knoten bei Ausfällen tut
 
 | Ausfall | Verhalten |
@@ -415,8 +498,10 @@ standardmäßig vielleicht nicht gibt, und `quic_gso` (der `http`-Kontext) ist I
   und den **Zonenabschnitt** — das letzte Zehn-Sekunden-Fenster jeder Zone, die Quellen, die sie
   abgewiesen oder herausgefordert hat oder hätte, und ob ihre Stufe dort greift oder nur eine
   Vorschau zeigt. Siehe [die API](/docs/api#der-edge-kanal).
-- **Die Zonen über die Flotte hinweg**, `GET /api/v1/edge/zones/status`, führt die Zonen der
-  lebendigen Knoten zusammen: Raten summiert, die Knoten, auf denen eine Zone nur beobachtend ist
+- **Die Zonen über die Flotte hinweg**, `GET /api/v1/edge/zones/status`, listet jede Zone der
+  Zonendatei auf und mischt die Reports der lebendigen Knoten hinein (ein
+  [tenant-bezogenes](/docs/multi-tenancy) Token bekommt seine eigenen Zonen): Raten summiert, die
+  Knoten, auf denen eine Zone nur beobachtend ist
   oder unter einer zonenweiten Challenge steht (greifend oder als Vorschau), der wirksame Hebel
   und die Kandidatenmenge. Die **Edge**-Ansicht der Konsole — angezeigt, sobald `edge.nodes[]`
   konfiguriert ist — stellt sie dar; siehe [das Dashboard](/docs/dashboard).
@@ -450,15 +535,22 @@ standardmäßig vielleicht nicht gibt, und `quic_gso` (der `http`-Kontext) ist I
 - **HTTP/3 gilt pro Zone und wird gerendert, wo der Knoten es kann**, knotenweit in dem, was nginx
   vor SNI entscheidet (Retry an, 0-RTT aus), ohne Verbindungsmigration oder Session-Resumption
   zwischen Knoten — siehe [HTTP/3 (QUIC)](#http3-quic).
-- **Obergrenzen für Duplikat-Zertifikate.** Zertifikate pro Knoten bedeuten, dass N Knoten auf
-  einer Zone N Bestellungen sind; Let's Encrypt begrenzt einen Namen auf etwa fünf pro Woche. Der
+- **Obergrenzen für Duplikat-Zertifikate.** Zertifikate pro Knoten bedeuten, dass die N Knoten, auf
+  denen eine Zone [platziert](#zonen-auf-knoten-verteilen) ist, N Bestellungen sind (bei einer
+  globalen Zone die ganze Flotte); Let's Encrypt begrenzt einen Namen auf etwa fünf pro Woche. Der
   Ausstellungs-Slot des Gehirns und der Erneuerungs-Jitter verteilen sie; `acme.fallback` (ZeroSSL,
   Google Trust Services — beide benötigen ein External Account Binding) ist der Notausgang. Planen
   Sie CA-Accounts für große Flotten.
-- **Das agent-Token stellt Zertifikate aus.** Bis Tokens an Knoten gebunden sind, kann der
-  Inhaber des agent-Tokens über das Gehirn eine Challenge-Antwort für jede Zone veröffentlichen
-  (nur von einem Knoten aus, der den Ausstellungs-Slot der Zone hält, und jeder Aufruf wird
-  protokolliert). Rotieren Sie das Token, wenn ein Knoten kompromittiert ist.
+- **Das agent-Token stellt Zertifikate aus — für die Zonen seines Knotens.** Binden Sie jedes
+  agent-Token an seinen Knoten (`api.tokens[].node`, siehe
+  [Authentifizierung](/docs/authentication#ein-agent-token-an-seinen-knoten-binden)), damit ein
+  gestohlenes Token nicht als ein anderer Knoten handeln kann, und
+  [verteilen Sie Zonen auf Knoten](#zonen-auf-knoten-verteilen), damit sein Knoten nur die Zonen
+  bedient, die er soll: Ein gestohlenes gebundenes Token kann dann den Ausstellungs-Slot nehmen und
+  eine Challenge-Antwort nur für die Zonen veröffentlichen, die der Geltungsbereich seines Knotens
+  abdeckt (jeder Aufruf wird protokolliert), und die Kompromittierung eines Knotens ist eine
+  Zertifikats-Exposition für diese Zonen, nicht für die der Flotte. Rotieren Sie das Token dieses
+  Knotens; das Gehirn hält nichts, was sich stehlen ließe.
 
 ## Verwandte Themen
 

@@ -132,7 +132,7 @@ scrubbing:
 
 | Clé | Signification |
 | --- | --- |
-| `nodes[].name` | Identité du nœud. **Doit être égale** au `controller.name` que l'agent du nœud présente lorsqu'il interroge le cerveau (brain), sinon chaque interrogation renvoie un `404` retentissant. |
+| `nodes[].name` | Identité du nœud. **Doit être égale** au `controller.name` que l'agent du nœud présente lorsqu'il interroge le cerveau (brain), sinon chaque interrogation renvoie un `404` retentissant. Liez-lui le token `agent` du nœud avec `api.tokens[].node` (voir [authentification](/docs/authentication#lier-un-token-agent-à-son-nœud)) : un token lié est refusé sous l'identité de tout autre nœud, sur l'interrogation des règles comme sur le rapport. |
 | `nodes[].next_hop` / `next_hop6` | Le ou les next-hops BGP du nœud. `next_hop` est requis ; `next_hop6` est requis pour dévier vers ce nœud les victimes IPv6. |
 | `nodes[].capacity_mbps` | La capacité de nettoyage du nœud, affichée dans la console et utilisée par `least_loaded`. `0` signifie inconnue. |
 | `nodes[].hostgroups` | Restreint les [hostgroups](/docs/hostgroups) que ce nœud dessert. Vide signifie qu'il accepte n'importe quel groupe. Un groupe dont le palier dévie doit disposer d'un nœud qui le dessert, ou du scalaire `next_hop` comme repli. |

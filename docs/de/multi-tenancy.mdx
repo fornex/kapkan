@@ -9,8 +9,9 @@ export const metadata = {
 Eine einzelne Kapkan-Instanz kann viele Kunden bedienen (Anwendungsfall eines Managed Service
 Provider (MSP) oder Internet Data Center (IDC)) und jedem ein Token geben, das **nur dessen
 eigene** Angriffe, Bans und Hosts sieht und verändert. Ein Mandant (tenant) ist lediglich ein
-optionales Label an einer [Hostgruppe](/docs/hostgroups) — es gibt kein neues Top-Level-Objekt,
-keine separate Mandantenregistrierung, und der heiße Erkennungspfad bleibt unberührt.
+optionales Label an einer [Hostgruppe](/docs/hostgroups) — oder, auf einem Edge-Gehirn, an einer
+[Zone](/docs/zones) — es gibt kein neues Top-Level-Objekt, keine separate Mandantenregistrierung,
+und der heiße Erkennungspfad bleibt unberührt.
 
 ```yaml
 tenant: "house"                 # optional: label the global/fallback group
@@ -39,7 +40,7 @@ api:
 
 Drei Schritte entsprechen direkt dem YAML oben:
 
-1. **Markieren Sie die Hostgruppe(n) jedes Kunden** mit `tenant: "customerA"` (dasselbe Label kann sich über mehrere Gruppen wiederholen — etwa die Web- und DNS-Gruppe eines Kunden).
+1. **Markieren Sie die Hostgruppe(n) jedes Kunden** mit `tenant: "customerA"` (dasselbe Label kann sich über mehrere Gruppen wiederholen — etwa die Web- und DNS-Gruppe eines Kunden), oder seine [Edge-Zonen](/docs/zones) mit `zones[].tenant` für einen Kunden mit Hostnamen und ohne Präfixe.
 2. **Fügen Sie ein API-Token** unter `api.tokens` hinzu, das denselben `tenant:` plus eine `role:` trägt — `viewer` ist schreibgeschützt, `operator` kann zusätzlich bannen/entbannen.
 3. **Übergeben Sie dem Kunden dieses Token.** Er sieht und verändert nun nur seine eigenen Präfixe; alles andere (andere Mandanten, unmarkierte Gruppen) ist für ihn unsichtbar.
 
@@ -51,7 +52,9 @@ Das ist der gesamte Workflow. Der Rest dieser Seite erklärt, wie Eigentümersch
 beantwortet, den Engine und Mitigator bereits zur Zuordnung von Traffic verwenden — wenn sich
 Präfixe überlappen, gewinnt die spezifischste passende Hostgruppe
 ([Longest-Prefix-Match](/docs/glossary)). Ein Mandant kann sich über mehrere Hostgruppen
-erstrecken (ein Kunde mit getrennten Web- und DNS-Gruppen).
+erstrecken (ein Kunde mit getrennten Web- und DNS-Gruppen). Eine [Edge-Zone](/docs/zones) trägt
+dasselbe Label (`zones[].tenant`), sodass ein Kunde Hostnamen und überhaupt keine Präfixe besitzen
+kann.
 
 Jede IP, die außerhalb jeder benannten Hostgruppe liegt, wird von der impliziten
 **globalen/Fallback-Gruppe** (dem Catch-all) behandelt. Diese globale Gruppe kann ein
@@ -76,8 +79,11 @@ bannen/entbannen.
 | `tenant: customerA`, `role: operator` | nur customerA | nur customerA |
 
 Ein ungebundenes Token ist ein Admin — das standardmäßige, vollständig abwärtskompatible
-Verhalten. Ein Token, das an einen Mandanten gebunden ist, den keine Hostgruppe nutzt, wird beim
-Laden der Konfiguration abgelehnt (ein Tippfehler würde sonst stillschweigend nichts sehen).
+Verhalten. Ein Token, das an einen Mandanten gebunden ist, den keine Hostgruppe — und, bei
+vorhandenem `edge`-Block, keine [Zone](/docs/zones) — nutzt, wird beim Laden der Konfiguration
+abgelehnt (ein Tippfehler würde sonst stillschweigend nichts sehen). Mit einem Edge-Block braucht
+diese Prüfung beide Dateien, sie läuft also, wenn der Daemon sie lädt; der Validator im Browser
+sieht nur die `kapkan.yaml`, und `kapkan -check-config` auf dem Host ist die eigentliche Prüfung.
 
 <Callout type="info" title="Die agent-Rolle liegt außerhalb dieser Achse">
 Das `agent`-Token eines [Scrub-Knotens](/docs/scrubbing#verwaltete-scrubbing-knoten) ist **kein**
@@ -114,6 +120,19 @@ sodass ein gebundenes Token niemals auf die Daten eines anderen Mandanten durchf
   blocken, und ein Opfer außerhalb des Mandanten erhält beim Blocken wie beim Entblocken dasselbe
   einheitliche `403`. `POST /api/v1/config/reload` ist **nur für Admins** — ein Reload schreibt die
   Policy jedes Mandanten und das Token-Set selbst neu.
+- **Edge-Zonen** — eine Zone in der [Zonendatei](/docs/zones) trägt ebenfalls ein optionales
+  `tenant`. `GET /api/v1/edge/zones/status` gibt einem gebundenen Token nur dessen eigene Zonen
+  zurück — der Hostname eines anderen Mandanten erscheint in keiner Zeile, in keiner
+  Kandidatenmenge und in keiner HTTP/3-Liste, und das Feld `tenant` entfällt —, und ein gebundener
+  Operator zieht den [Hebel](/docs/edge#der-hebel) nur auf seinen eigenen Zonen: Jede andere Zone,
+  die eines anderen Mandanten, eine unmarkierte oder eine aus der Datei verschwundene, antwortet
+  mit demselben `404 unknown zone` wie ein unbekannter Name. Die
+  [Edge-Historie](/docs/api#get-apiv1edgehistory) folgt derselben Linie: Ein gebundenes Token liest
+  die Historie und die aussagekräftigen Quellen seiner eigenen Zonen, jede andere Zone ist ein
+  einziges einheitliches `403`, und der Filter pro Knoten sowie die Ereignisse der Flotte bleiben
+  ungebunden. Die Namen der Knoten, auf denen eine Zone bedient wird, sind für ihren Mandanten
+  sichtbar; das Zonendokument, die Knoten-Reports, die ACME-Koordination, das Knoteninventar und
+  `config/reload` bleiben ungebunden.
 - **Mehrdeutigkeit schlägt geschlossen fehl** — wenn ein einzelnes Bearer-Secret zu Tokens
   unterschiedlicher Rolle oder unterschiedlichen Mandanten passt (ein wiederverwendetes Secret),
   wird die Anfrage abgelehnt, statt auf den weiteren Scope aufgelöst zu werden.
