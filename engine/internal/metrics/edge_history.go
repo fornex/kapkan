@@ -8,7 +8,8 @@ import (
 // EdgeHistoryDropped counts the parts of an edge node's report the brain did
 // NOT write to the edge history (E6.5), by reason: unknown_zone (a zone the
 // zones file does not have — a window, a certificate or a challenge naming
-// it), no_at (a window that carries counters but no close time), duplicate
+// it), outside_scope (a zone the file has but the reporting node's placement
+// does not cover, E6.3), no_at (a window that carries counters but no close time), duplicate
 // (a close time already written for that node and zone — a report re-sent;
 // expected once per burst end when reports are more frequent than windows),
 // extra_window (a second window for one zone in one report), bad_source (a
@@ -21,5 +22,5 @@ var EdgeHistoryDropped = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "kapkan",
 	Subsystem: "edge",
 	Name:      "history_dropped_total",
-	Help:      "Report parts not written to the edge history, by reason (unknown_zone|no_at|duplicate|extra_window|bad_source|source_cap).",
+	Help:      "Report parts not written to the edge history, by reason (unknown_zone|outside_scope|no_at|duplicate|extra_window|bad_source|source_cap).",
 }, []string{"reason"})

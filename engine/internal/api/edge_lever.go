@@ -180,10 +180,11 @@ type EdgeChallengeLeverResponse struct {
 	// bites, on every node.
 	ZoneWatchOnly bool `json:"zone_watch_only"`
 	RungWatchOnly bool `json:"rung_watch_only"`
-	// Nodes lists every configured edge node with what the brain knows: alive
-	// (from its poll) and, from its last report, whether it is in dry-run —
-	// a node that only counts must say so, and the operator must see it
-	// before trusting the lever.
+	// Nodes lists the nodes whose placement scope covers the zone (E6.3;
+	// every configured node for a zone a reload has since removed from the
+	// file) with what the brain knows: alive (from its poll) and, from its
+	// last report, whether it is in dry-run — a node that only counts must
+	// say so, and the operator must see it before trusting the lever.
 	Nodes []EdgeLeverNode `json:"nodes"`
 }
 
@@ -298,7 +299,14 @@ func (s *Server) leverResponse(zone string, fz *edgedocZoneView, now time.Time) 
 	cfg := s.store.Get()
 	if cfg.Edge != nil {
 		staleAfter := edgeStaleAfter(cfg)
+		// The nodes that matter are the zone's placement (E6.3): where the
+		// lever bites. A zone gone from the file has no placement — every
+		// node is listed, as before, for the operator clearing it.
+		fileZone := zoneInFile(cfg, zone)
 		for i := range cfg.Edge.Nodes {
+			if fileZone != nil && !cfg.Edge.Nodes[i].Serves(fileZone) {
+				continue
+			}
 			name := cfg.Edge.Nodes[i].Name
 			n := EdgeLeverNode{Name: name, Alive: s.edgePresence.alive(name, staleAfter)}
 			if rep, _, ok := s.edgeReports.get(name); ok {

@@ -138,9 +138,11 @@ var stringPatterns = map[string]string{
 	"dataplane.ratelimit_profiles.name": groupNameRe.String(),
 	"edge.nodes.name":                   groupNameRe.String(),
 	"dataplane.static_rules.name":       groupNameRe.String(),
+	"edge.nodes.hostgroups":             groupNameRe.String(),
 	// The zones file's paths are rooted at "zones." (zones_schema.go) and never
 	// collide with a kapkan.yaml path, so its labels live in the same table.
-	"zones.tenant": groupNameRe.String(),
+	"zones.tenant":    groupNameRe.String(),
+	"zones.hostgroup": groupNameRe.String(),
 }
 
 // GenerateSchema returns the canonical JSON Schema for the configuration file.

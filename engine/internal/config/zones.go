@@ -61,6 +61,16 @@ type Zone struct {
 	// never enters the document the nodes render: a labelled file yields the
 	// bytes and ETag the unlabelled one did.
 	Tenant string `yaml:"tenant"`
+	// Hostgroup places the zone on nodes (E6.3, D8): the zone is served by
+	// every edge node whose scope (edge.nodes[].hostgroups) lists this
+	// hostgroup; empty places it in the global group, served by every node
+	// whose scope lists "global" — which is every node without a scope, so a
+	// fleet without scopes serves everything, byte for byte as before. The
+	// placement enters neither the document (a node gets only its zones) nor
+	// the ownership axis: a hostgroup's own tenant, when both are set, must
+	// equal the zone's, and nothing is inherited. The hostgroup must exist in
+	// kapkan.yaml — checked when the brain loads both files.
+	Hostgroup string `yaml:"hostgroup"`
 	// Origins are the upstreams the terminator proxies to, as host:port, at
 	// least one. The edge never forwards client bytes itself (edge-spec §0):
 	// these are rendered into the terminator's upstream block.
@@ -282,6 +292,9 @@ func (zone *Zone) validate() error {
 	// same log/JSON/header-safe charset as hostgroup names and tenants.
 	if zone.Tenant != "" && !groupNameRe.MatchString(zone.Tenant) {
 		return fmt.Errorf("%s: tenant %q must match %s", zone.Name, zone.Tenant, groupNameRe)
+	}
+	if zone.Hostgroup != "" && !groupNameRe.MatchString(zone.Hostgroup) {
+		return fmt.Errorf("%s: hostgroup %q must match %s", zone.Name, zone.Hostgroup, groupNameRe)
 	}
 
 	if len(zone.Origins) == 0 {

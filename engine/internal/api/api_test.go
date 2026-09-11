@@ -1280,6 +1280,10 @@ func TestAuditEndpointParamValidation(t *testing.T) {
 			t.Errorf("audit?%s = %d, want %d", tc.q, rec.Code, tc.want)
 		}
 	}
+	// No rows is an empty array, never null (the fake answers nil).
+	if rec := do(t, h, http.MethodGet, "/api/v1/audit?action=ban", ""); !strings.Contains(rec.Body.String(), `"events":[]`) {
+		t.Errorf("audit with no rows = %s, want \"events\":[]", rec.Body.String())
+	}
 	// The shared range parsing (parseRange, E6.6): the window reaches the
 	// query as given, and a bad bound carries the shared message.
 	if rec := do(t, h, http.MethodGet, "/api/v1/audit?from=2026-09-10T12:00:00Z&to=2026-09-10T13:00:00Z", ""); rec.Code != http.StatusOK ||

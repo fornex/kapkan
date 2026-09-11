@@ -63,11 +63,18 @@ type (
 	EdgeDocGrant     = edgedoc.Grant
 )
 
-// buildEdgeDoc derives the document from a loaded zones file. Pure — no clock,
-// no server — so the doc-shape tests are tables. A nil zones file (no edge
-// block, or the brain has not loaded one) yields the empty document, not an
-// error: an edge with nothing to serve is a valid state.
-func buildEdgeDoc(z *config.Zones) EdgeDoc {
+// buildEdgeDoc derives the whole document from a loaded zones file. Pure — no
+// clock, no server — so the doc-shape tests are tables. A nil zones file (no
+// edge block, or the brain has not loaded one) yields the empty document, not
+// an error: an edge with nothing to serve is a valid state.
+func buildEdgeDoc(z *config.Zones) EdgeDoc { return buildEdgeDocServed(z, nil) }
+
+// buildEdgeDocServed is buildEdgeDoc over the zones serves says so for — one
+// node's document (E6.3: a node gets exactly the zones its placement scope
+// covers). A nil serves keeps every zone: the whole document, which is what
+// an operator's bare GET and a fleet without scopes receive, byte for byte
+// as before. The placement itself never enters the document.
+func buildEdgeDocServed(z *config.Zones, serves func(*config.Zone) bool) EdgeDoc {
 	doc := EdgeDoc{
 		Version:        edgeDocVersion,
 		Zones:          []EdgeDocZone{},
@@ -79,6 +86,9 @@ func buildEdgeDoc(z *config.Zones) EdgeDoc {
 	}
 	for i := range z.Zones {
 		zn := &z.Zones[i]
+		if serves != nil && !serves(zn) {
+			continue
+		}
 		// Origins keep the file's order: an operator may order upstreams on
 		// purpose, and the file is already the deterministic source.
 		origins := make([]string, len(zn.Origins))
@@ -169,15 +179,33 @@ func edgeDocBytes(doc EdgeDoc) (body []byte, etag string, err error) {
 	return body, `"` + hex.EncodeToString(sum[:16]) + `"`, nil
 }
 
-// edgeSnapshot builds the current document: the zones from the config store,
-// plus the live issuance slots and fanned-out challenges (edge_acme.go) and
-// each zone's clearance keys (edge_clearance.go). buildEdgeDoc stays pure; the
-// coordinator adds only entries whose times are fixed for their lifetime and
-// the keyring's keys change only at an epoch boundary, so the ETag moves
-// exactly when there is news.
-func (s *Server) edgeSnapshot() ([]byte, string, error) {
+// edgeSnapshotFor builds the current document for one node: the zones from
+// the config store, plus the live issuance slots and fanned-out challenges
+// (edge_acme.go) and each zone's clearance keys (edge_clearance.go).
+// buildEdgeDoc stays pure; the coordinator adds only entries whose times are
+// fixed for their lifetime and the keyring's keys change only at an epoch
+// boundary, so the ETag moves exactly when there is news.
+//
+// It is the document as that node receives it: the zones its
+// placement scope covers (E6.3), and — because every fill below keys on
+// doc.Zones — only the issuance grants, fanned-out challenges, clearance keys
+// and levers of those zones; the ETag is per node for free. An empty node
+// (an operator's bare GET) is the whole document. A NAMED node the
+// configuration does not have serves nothing — an empty document, never the
+// whole file: a node a reload has just removed may still be parked in a
+// hold, and the answer that ends its service must not hand it every zone's
+// keys (the hold re-checks the name and answers 404; this is the floor
+// under it).
+func (s *Server) edgeSnapshotFor(node string) ([]byte, string, error) {
 	cfg := s.store.Get()
-	doc := buildEdgeDoc(cfg.ZonesCfg)
+	var serves func(*config.Zone) bool
+	if node != "" {
+		serves = func(*config.Zone) bool { return false }
+		if n := configuredEdgeNode(cfg, node); n != nil {
+			serves = n.Serves
+		}
+	}
+	doc := buildEdgeDocServed(cfg.ZonesCfg, serves)
 	now := time.Now()
 	s.edgeIssuance.fill(&doc, now)
 	if cfg.Edge != nil {
@@ -211,9 +239,10 @@ func edgeStaleAfter(cfg *config.Config) time.Duration {
 }
 
 // handleEdgeZones serves the zone document, long-polling per the protocol
-// described in rules.go. Unscoped tokens only: the document lists every
-// tenant's zones (per-node zone scoping is the fleet milestone), so a scoped
-// operator would otherwise learn every other tenant's hostnames from one GET.
+// described in rules.go. Unscoped tokens only: a node's document lists every
+// tenant's zones its placement covers (E6.3) and the bare GET the whole file,
+// so a scoped operator would otherwise learn other tenants' hostnames from
+// one GET.
 func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 	c := callerFrom(r)
 	if !c.unscoped() {
@@ -253,7 +282,9 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 	if cfg := s.store.Get(); cfg.Edge != nil {
 		s.edgeHolds.setTotal(max(maxRuleHoldsTotal, 2*len(cfg.Edge.Nodes)))
 	}
-	body, etag, err := s.edgeSnapshot()
+	// The document is the node's (E6.3): its placement scope's zones, or the
+	// whole file for an operator's bare GET.
+	body, etag, err := s.edgeSnapshotFor(node)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "encoding zones document failed")
 		return
@@ -284,7 +315,15 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		acmeChanged := s.edgeIssuance.Changed()
 		keysChanged := s.edgeClearance.Changed()
 		leverChanged := s.edgeLever.Changed()
-		body, cur, err := s.edgeSnapshot()
+		// A reload may have removed this node (E6.3), removed the token or
+		// moved its binding (E6.1) while the poll was parked: the answer that
+		// ends the hold is the one a first poll would now get — never a
+		// document, the whole file least of all.
+		if code, msg := s.edgeHoldStillValid(c, node); code != 0 {
+			writeError(w, code, msg)
+			return
+		}
+		body, cur, err := s.edgeSnapshotFor(node)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "encoding zones document failed")
 			return
@@ -308,11 +347,11 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 			// Shutting down: answer NOW so Shutdown is not stalled behind a
 			// parked poll. Verified, not assumed — a reload may have landed.
 			rotate.Stop()
-			s.endEdgeHold(w, etag)
+			s.endEdgeHold(w, c, node, etag)
 			return
 		case <-deadline.C:
 			rotate.Stop()
-			s.endEdgeHold(w, etag)
+			s.endEdgeHold(w, c, node, etag)
 			return
 		case <-changed:
 			// Woken by a reload; loop to rebuild and compare.
@@ -335,11 +374,26 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// edgeHoldStillValid is what a parked edge poll re-checks before it answers:
+// the node it named still exists (a reload may have cut it out of the fleet —
+// 404, as a first poll would get) and the token may still act as it
+// (holdStillAuthorized: removed → 401, rebound → 403).
+func (s *Server) edgeHoldStillValid(c caller, node string) (int, string) {
+	if node != "" && configuredEdgeNode(s.store.Get(), node) == nil {
+		return http.StatusNotFound, "unknown edge node"
+	}
+	return s.holdStillAuthorized(c, node)
+}
+
 // endEdgeHold answers a hold that ended on the deadline or on shutdown with one
 // final look at the store, for the same reason endHold does: "nothing changed"
 // is verified, so a 304 never names a superseded ETag.
-func (s *Server) endEdgeHold(w http.ResponseWriter, etag string) {
-	if body, cur, err := s.edgeSnapshot(); err == nil && cur != etag {
+func (s *Server) endEdgeHold(w http.ResponseWriter, c caller, node, etag string) {
+	if code, msg := s.edgeHoldStillValid(c, node); code != 0 {
+		writeError(w, code, msg)
+		return
+	}
+	if body, cur, err := s.edgeSnapshotFor(node); err == nil && cur != etag {
 		writeRuleDoc(w, body, cur)
 		return
 	}
@@ -725,6 +779,12 @@ type EdgeNodeStatus struct {
 	// fleet's migration from a shared token node by node.
 	Tokens    []string `json:"tokens,omitempty"`
 	LastToken string   `json:"last_token,omitempty"`
+	// Hostgroups is the node's effective placement scope (E6.3): its
+	// edge.nodes[].hostgroups, or ["global"] when it lists none; ZonesPlaced
+	// counts the zones of the file that scope covers — what the node's
+	// document holds.
+	Hostgroups  []string `json:"hostgroups"`
+	ZonesPlaced int      `json:"zones_placed"`
 	// Report is the node's last self-report, VERBATIM and advisory.
 	Report     *EdgeReport `json:"report,omitempty"`
 	ReportedAt string      `json:"reported_at,omitempty"`
@@ -749,10 +809,18 @@ func (s *Server) handleEdgeNodes(w http.ResponseWriter, r *http.Request) {
 			n := &cfg.Edge.Nodes[i]
 			lastSeen, holding := s.edgePresence.seen(n.Name)
 			ns := EdgeNodeStatus{
-				Name:      n.Name,
-				Alive:     s.edgePresence.alive(n.Name, staleAfter),
-				Holding:   holding,
-				LastToken: s.edgePresence.lastTokenOf(n.Name),
+				Name:       n.Name,
+				Alive:      s.edgePresence.alive(n.Name, staleAfter),
+				Holding:    holding,
+				LastToken:  s.edgePresence.lastTokenOf(n.Name),
+				Hostgroups: n.Scope(),
+			}
+			if cfg.ZonesCfg != nil {
+				for j := range cfg.ZonesCfg.Zones {
+					if n.Serves(&cfg.ZonesCfg.Zones[j]) {
+						ns.ZonesPlaced++
+					}
+				}
 			}
 			for _, tk := range cfg.API.TokenSpecs {
 				if tk.Node == n.Name {

@@ -12,8 +12,11 @@ package api
 // kapkan_edge_history_dropped_total{reason} when they skip something:
 //
 //   - a window's zone must be in the live zones file (unknown_zone) — the
-//     history is keyed by the file's zones, and a node cannot make it grow;
-//     the same gate holds for the certificates and challenges events name;
+//     history is keyed by the file's zones, and a node cannot make it grow —
+//     and placed on the reporting node (outside_scope, E6.3): the history is
+//     the durable merge, and a node's claim about a zone it does not serve
+//     is the inventory's to show, never the zone's history; the same gates
+//     hold for the certificates and challenges the events name;
 //   - a quiet deciding zone — the report's shape for "no window closed
 //     lately": no close time, no counters, no sources — is nothing to write,
 //     silently; a window that carries counters but no close time is a broken
@@ -208,8 +211,16 @@ func (h *edgeHistory) observe(cfg *config.Config, node string, prev *EdgeReport,
 	}
 	inThisReport := make(map[string]bool, len(rep.Zones))
 	for _, z := range rep.Zones {
-		if zoneInFile(cfg, z.Zone) == nil {
+		fz := zoneInFile(cfg, z.Zone)
+		if fz == nil {
 			historyDrop("unknown_zone")
+			continue
+		}
+		if !cfg.EdgeNodeServes(node, fz) {
+			// The history is the durable merge (E6.3): a node's claim about
+			// a zone its placement does not cover is stored in its report
+			// for the inventory and written nowhere else.
+			historyDrop("outside_scope")
 			continue
 		}
 		if quietZone(z) {
@@ -312,11 +323,24 @@ func diffReports(cfg *config.Config, node string, prev, rep EdgeReport, now time
 	ev := func(zone, kind, detail string) {
 		out = append(out, historyEvent(now, node, zone, kind, detail))
 	}
+	// served says whether the zone is the file's and the node's (E6.3);
+	// known counts the drop as well, for the kinds a report asserts
+	// (issued, renewed, started) — absence is read only for served zones and
+	// counted for none.
+	served := func(zone string) bool {
+		z := zoneInFile(cfg, zone)
+		return z != nil && cfg.EdgeNodeServes(node, z)
+	}
 	known := func(zone string) bool {
-		if zoneInFile(cfg, zone) != nil {
+		z := zoneInFile(cfg, zone)
+		switch {
+		case z == nil:
+			historyDrop("unknown_zone")
+		case !cfg.EdgeNodeServes(node, z):
+			historyDrop("outside_scope")
+		default:
 			return true
 		}
-		historyDrop("unknown_zone")
 		return false
 	}
 	if rep.Version != "" && rep.Version != prev.Version {
@@ -372,7 +396,7 @@ func diffReports(cfg *config.Config, node string, prev, rep EdgeReport, now time
 	}
 	if rep.CertsTruncated == 0 {
 		for _, zone := range sortedKeys(prevCerts) {
-			if _, still := newCerts[zone]; !still && zoneInFile(cfg, zone) != nil {
+			if _, still := newCerts[zone]; !still && served(zone) {
 				ev(zone, EventCertGone, "")
 			}
 		}
@@ -411,7 +435,7 @@ func diffReports(cfg *config.Config, node string, prev, rep EdgeReport, now time
 	}
 	if rep.ZonesTruncated == 0 {
 		for _, zone := range sortedKeys(prevChal) {
-			if _, still := newChal[zone]; !still && prevChal[zone] != nil && zoneInFile(cfg, zone) != nil {
+			if _, still := newChal[zone]; !still && prevChal[zone] != nil && served(zone) {
 				ev(zone, EventChallengeEnded, "zone left the report")
 			}
 		}

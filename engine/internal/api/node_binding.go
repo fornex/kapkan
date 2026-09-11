@@ -77,6 +77,31 @@ func (s *Server) nodeActor(w http.ResponseWriter, r *http.Request, name, route s
 	return c, true
 }
 
+// holdStillAuthorized re-applies, inside a long-poll, what the route checked
+// at entry: a reload may have removed the caller's token or moved its binding
+// while the poll was parked, and the answer that ends the hold must not be
+// one the token could no longer ask for. It returns the status and message to
+// end the hold with, or 0 when the hold may go on. Open mode (no token) has
+// nothing to re-check.
+func (s *Server) holdStillAuthorized(c caller, node string) (int, string) {
+	if c.token == "" {
+		return 0, ""
+	}
+	cfg := s.store.Get()
+	for i := range cfg.API.TokenSpecs {
+		tk := &cfg.API.TokenSpecs[i]
+		if tk.Name != c.token {
+			continue
+		}
+		if tk.Node != "" && tk.Node != node {
+			// Never name the bound node (nodeActor's rule).
+			return http.StatusForbidden, "this token is bound to another node"
+		}
+		return 0, ""
+	}
+	return http.StatusUnauthorized, "unknown token"
+}
+
 // stampsPresence reports whether a caller's poll counts as the node's liveness:
 // agent tokens only (bound and matching, or unbound in grace). An operator's
 // ?node= is a preview, and in token-less open mode there is no agent at all.

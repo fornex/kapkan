@@ -124,13 +124,66 @@ func checkConfigTo(w io.Writer, path string) int {
 	return 0
 }
 
-// printEdgeWarnings reports the node-channel smells that are legal config but
-// weaken the fleet's trust posture, foremost an agent token bound to no node
-// (edge-spec §9 risk 6): such a token may poll as any node, report as any node
-// and publish an ACME key authorization for any fleet zone. Printed after the
-// OK line, exit code unchanged — the daemon runs it; a MAJOR release is where it
-// becomes an error.
+// printEdgeWarnings prints the edge fleet as the brain will run it — each node
+// with its placement scope, the zones that scope covers and the token bound to
+// it (or SHARED) — and then the node-channel smells that are legal config but
+// weaken the fleet's trust posture: a zone no node serves (E6.3: the file
+// places it where no node's scope reaches) and an agent token bound to no node
+// (edge-spec §9 risk 6: such a token may poll as any node, report as any node
+// and publish an ACME key authorization for its node's zones). Printed after
+// the OK line, exit code unchanged — the daemon runs it; a MAJOR release is
+// where the unbound token becomes an error.
 func printEdgeWarnings(w io.Writer, cfg *config.Config) {
+	if cfg.Edge != nil {
+		zones := 0
+		if cfg.ZonesCfg != nil {
+			zones = len(cfg.ZonesCfg.Zones)
+		}
+		// The header and the orphan WARNING print for any edge block — a
+		// block with no nodes serves every zone nowhere, which is exactly
+		// what the WARNING is for.
+		_, _ = fmt.Fprintf(w, "  edge:      %d node(s), %d zone(s)\n", len(cfg.Edge.Nodes), zones)
+		for i := range cfg.Edge.Nodes {
+			n := &cfg.Edge.Nodes[i]
+			placed := 0
+			if cfg.ZonesCfg != nil {
+				for j := range cfg.ZonesCfg.Zones {
+					if n.Serves(&cfg.ZonesCfg.Zones[j]) {
+						placed++
+					}
+				}
+			}
+			var bound []string
+			for _, tk := range cfg.API.TokenSpecs {
+				if tk.Node == n.Name {
+					bound = append(bound, tk.Name)
+				}
+			}
+			token := "SHARED"
+			switch {
+			case len(bound) > 0:
+				token = strings.Join(bound, ",")
+			case len(cfg.UnboundAgentTokens()) == 0:
+				token = "-"
+			}
+			_, _ = fmt.Fprintf(w, "    - %-20s scope=[%s]  zones=%d  token=%s\n", n.Name, strings.Join(n.Scope(), " "), placed, token)
+		}
+		if cfg.ZonesCfg != nil {
+			var orphans []string
+			for j := range cfg.ZonesCfg.Zones {
+				if z := &cfg.ZonesCfg.Zones[j]; len(cfg.EdgeNodesServing(z)) == 0 {
+					orphans = append(orphans, z.Name+" (hostgroup "+config.EdgePlacement(z)+")")
+				}
+			}
+			if len(orphans) > 0 {
+				_, _ = fmt.Fprintf(w, "  WARNING: %d zone(s) that no node's scope covers — served nowhere until a node lists\n"+
+					"           the hostgroup in edge.nodes[].hostgroups or the zone moves:\n", len(orphans))
+				for _, o := range orphans {
+					_, _ = fmt.Fprintf(w, "    - %s\n", o)
+				}
+			}
+		}
+	}
 	unbound := cfg.UnboundAgentTokens()
 	if len(unbound) == 0 {
 		return
