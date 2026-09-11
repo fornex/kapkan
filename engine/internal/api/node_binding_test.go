@@ -130,7 +130,7 @@ func slotHeld(s *Server, zone string) bool {
 func TestNodeBindingRefusesAnotherNodeOnTheEdgeChannel(t *testing.T) {
 	s := testServer(t, bindingStore(t))
 	aw := &fakeAuditWriter{}
-	s.SetAuditWriter(aw)
+	s.SetStorageWriter(aw)
 	h := s.Handler()
 
 	// Poll as the other node.
@@ -222,7 +222,7 @@ func TestNodeBindingRefusesAnotherNodeOnTheEdgeChannel(t *testing.T) {
 func TestNodeBindingRefusesAnotherNodeOnTheScrubChannel(t *testing.T) {
 	s := testServer(t, bindingStore(t))
 	aw := &fakeAuditWriter{}
-	s.SetAuditWriter(aw)
+	s.SetStorageWriter(aw)
 	h := s.Handler()
 	// s1 is bound to fra1: an edge name, no name, or the OTHER configured scrub
 	// node are all refused.

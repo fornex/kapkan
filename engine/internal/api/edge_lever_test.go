@@ -42,7 +42,7 @@ func TestEdgeChallengeLever(t *testing.T) {
 	store, _ := edgeStore(t, edgeZonesOne)
 	s := testServer(t, store)
 	aw := &fakeAuditWriter{}
-	s.SetAuditWriter(aw)
+	s.SetStorageWriter(aw)
 	h := s.Handler()
 	set := `{"mode":"manual","ttl_seconds":600,"reason":"incident 42"}`
 	// The node has reported (in dry-run) but not polled yet: the lever's

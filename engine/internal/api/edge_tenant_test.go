@@ -157,7 +157,7 @@ func TestEdgeLeverTenantScoped(t *testing.T) {
 	store, zonesPath := tenantStore(t)
 	s := testServer(t, store)
 	aw := &fakeAuditWriter{}
-	s.SetAuditWriter(aw)
+	s.SetStorageWriter(aw)
 	fq := &fakeQuerier{}
 	s.SetQuerier(fq)
 	h := s.Handler()

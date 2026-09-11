@@ -55,7 +55,7 @@ func TestSourceBlockLifecycleOverHTTP(t *testing.T) {
 	t.Setenv("K_B", "b-secret")
 	s := testServerWithDataplane(t, storeFromYAML(t, sourcesAPIYAML()))
 	aw := &fakeAuditWriter{}
-	s.SetAuditWriter(aw)
+	s.SetStorageWriter(aw)
 	h := s.Handler()
 
 	body := `{"victim":"203.0.113.10","source":"198.51.100.7","ttl_seconds":300,"reason":"nginx: 429 storm"}`
@@ -136,7 +136,7 @@ func TestSourceBlockErrorMapping(t *testing.T) {
 	// A server WITHOUT a data-plane backend: the plain test fixture.
 	s := testServer(t, storeFromYAML(t, tenantAPIYAML()))
 	aw := &fakeAuditWriter{}
-	s.SetAuditWriter(aw)
+	s.SetStorageWriter(aw)
 	h := s.Handler()
 
 	cases := []struct {
