@@ -101,13 +101,16 @@ type fakeQuerier struct {
 	pts       []storage.TrafficPoint
 	err       error
 	gotKey    string
+	gotFrom   time.Time
+	gotTo     time.Time
+	gotStep   int
 	auditRows []storage.AuditRow
 	auditErr  error
 	gotAudit  storage.AuditFilter
 }
 
-func (f *fakeQuerier) QueryTraffic(_ context.Context, key string, _, _ time.Time, _ int) ([]storage.TrafficPoint, error) {
-	f.gotKey = key
+func (f *fakeQuerier) QueryTraffic(_ context.Context, key string, from, to time.Time, step int) ([]storage.TrafficPoint, error) {
+	f.gotKey, f.gotFrom, f.gotTo, f.gotStep = key, from, to, step
 	return f.pts, f.err
 }
 
@@ -161,6 +164,19 @@ func TestTrafficEndpoint(t *testing.T) {
 	}
 	if fq.gotKey != "203.0.113.10" {
 		t.Errorf("querier key = %q, want 203.0.113.10", fq.gotKey)
+	}
+	if fq.gotStep != 10 {
+		t.Errorf("querier step = %d, want 10", fq.gotStep)
+	}
+	// The shared range/step rules (parseRange/parseStep, E6.6): an explicit
+	// window reaches the query as given, a 31-day range at step=1 is raised to
+	// 536 s (5 000 buckets), step=0 is 400 with the shared message.
+	do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=203.0.113.10&from=2026-08-10T00:00:00Z&to=2026-09-10T00:00:00Z&step=1", "")
+	if fq.gotStep != 536 || !fq.gotFrom.Equal(time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)) || !fq.gotTo.Equal(time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("querier got step %d from %s to %s, want 536 over the 31 days asked", fq.gotStep, fq.gotFrom, fq.gotTo)
+	}
+	if rec := do(t, s.Handler(), http.MethodGet, "/api/v1/traffic?key=203.0.113.10&step=0", ""); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid step (positive integer seconds)") {
+		t.Errorf("step=0 = %d %s, want 400 with the shared message", rec.Code, rec.Body.String())
 	}
 
 	// invalid key → 400
@@ -1247,7 +1263,8 @@ func TestAuditEndpointStorageDisabled(t *testing.T) {
 // TestAuditEndpointParamValidation: bad params 400; a valid action 200.
 func TestAuditEndpointParamValidation(t *testing.T) {
 	s := testServer(t, storeFromYAML(t, apiYAML))
-	s.SetQuerier(&fakeQuerier{})
+	fq := &fakeQuerier{}
+	s.SetQuerier(fq)
 	h := s.Handler()
 	for _, tc := range []struct {
 		q    string
@@ -1262,6 +1279,15 @@ func TestAuditEndpointParamValidation(t *testing.T) {
 		if rec := do(t, h, http.MethodGet, "/api/v1/audit?"+tc.q, ""); rec.Code != tc.want {
 			t.Errorf("audit?%s = %d, want %d", tc.q, rec.Code, tc.want)
 		}
+	}
+	// The shared range parsing (parseRange, E6.6): the window reaches the
+	// query as given, and a bad bound carries the shared message.
+	if rec := do(t, h, http.MethodGet, "/api/v1/audit?from=2026-09-10T12:00:00Z&to=2026-09-10T13:00:00Z", ""); rec.Code != http.StatusOK ||
+		!fq.gotAudit.From.Equal(time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)) || !fq.gotAudit.To.Equal(time.Date(2026, 9, 10, 13, 0, 0, 0, time.UTC)) {
+		t.Errorf("audit range: %d, query got from %s to %s", rec.Code, fq.gotAudit.From, fq.gotAudit.To)
+	}
+	if rec := do(t, h, http.MethodGet, "/api/v1/audit?from=notatime", ""); !strings.Contains(rec.Body.String(), "invalid from (expected RFC3339)") {
+		t.Errorf("audit?from=notatime body = %s, want the shared message", rec.Body.String())
 	}
 }
 

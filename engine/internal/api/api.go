@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -371,6 +370,12 @@ func (s *Server) Handler() http.Handler {
 	// on its own zones only — any other zone is the uniform 404 (E6.2).
 	write("POST /api/v1/edge/zones/{name}/challenge", s.handleEdgeChallengeLever)
 	write("DELETE /api/v1/edge/zones/{name}/challenge", s.handleEdgeChallengeLever)
+	// The edge history's read side (edge_history_read.go, E6.6): a zone's
+	// bucketed windows and its telling sources over a range, viewer rank, a
+	// scoped token on its own zones; the events name nodes and stay unscoped.
+	read("GET /api/v1/edge/history", s.handleEdgeHistory)
+	read("GET /api/v1/edge/history/sources", s.handleEdgeHistorySources)
+	read("GET /api/v1/edge/events", s.handleEdgeEvents)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	// Liveness/readiness probe — unauthenticated (it leaks nothing) so an updater
 	// or supervisor can confirm the daemon is fully up after a restart. 503 until
@@ -898,49 +903,20 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "target is outside your tenant")
 		return
 	}
-	to := time.Now()
-	from := to.Add(-time.Hour)
-	if v := q.Get("from"); v != "" {
-		t, e := time.Parse(time.RFC3339, v)
-		if e != nil {
-			writeError(w, http.StatusBadRequest, "invalid from (expected RFC3339)")
-			return
-		}
-		from = t
-	}
-	if v := q.Get("to"); v != "" {
-		t, e := time.Parse(time.RFC3339, v)
-		if e != nil {
-			writeError(w, http.StatusBadRequest, "invalid to (expected RFC3339)")
-			return
-		}
-		to = t
-	}
-	if !to.After(from) {
-		writeError(w, http.StatusBadRequest, "to must be after from")
+	// The range and step rules are shared with the audit and edge history
+	// reads (edge_history_read.go): RFC 3339, the last hour by default, at
+	// most 31 days, the step raised so a range holds at most 5000 buckets.
+	from, to, errMsg := parseRange(q, time.Now())
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
 		return
 	}
-	const maxRange = 31 * 24 * time.Hour
-	if to.Sub(from) > maxRange {
-		writeError(w, http.StatusBadRequest, "time range too large (max 31 days)")
+	step, errMsg := parseStep(q, from, to)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
 		return
 	}
-	step := 60
-	if v := q.Get("step"); v != "" {
-		n, e := strconv.Atoi(v)
-		if e != nil || n <= 0 {
-			writeError(w, http.StatusBadRequest, "invalid step (positive integer seconds)")
-			return
-		}
-		step = n
-	}
-	// Bound the bucket count so a wide range with a tiny step can't force an
-	// oversized GROUP BY / response: raise step to keep buckets <= maxBuckets.
-	const maxBuckets = 5000
-	if span := int(to.Sub(from).Seconds()); span/step > maxBuckets {
-		step = (span + maxBuckets - 1) / maxBuckets
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), historyQueryTimeout)
 	defer cancel()
 	pts, err := s.querier.QueryTraffic(ctx, addr.String(), from, to, step)
 	if err != nil {
@@ -961,31 +937,9 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	to := time.Now()
-	from := to.Add(-time.Hour)
-	if v := q.Get("from"); v != "" {
-		t, e := time.Parse(time.RFC3339, v)
-		if e != nil {
-			writeError(w, http.StatusBadRequest, "invalid from (expected RFC3339)")
-			return
-		}
-		from = t
-	}
-	if v := q.Get("to"); v != "" {
-		t, e := time.Parse(time.RFC3339, v)
-		if e != nil {
-			writeError(w, http.StatusBadRequest, "invalid to (expected RFC3339)")
-			return
-		}
-		to = t
-	}
-	if !to.After(from) {
-		writeError(w, http.StatusBadRequest, "to must be after from")
-		return
-	}
-	const maxRange = 31 * 24 * time.Hour
-	if to.Sub(from) > maxRange {
-		writeError(w, http.StatusBadRequest, "time range too large (max 31 days)")
+	from, to, errMsg := parseRange(q, time.Now())
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
 		return
 	}
 	f := storage.AuditFilter{From: from, To: to}

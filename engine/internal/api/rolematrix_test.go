@@ -146,6 +146,14 @@ edge:
 		{"GET", "/api/v1/edge/zones/status", "", "", map[string]bool{"viewer": true, "operator": true, "scoped": true}},
 		{"POST", "/api/v1/edge/zones/a.example/challenge", `{"mode":"manual","ttl_seconds":600}`, "POST /api/v1/edge/zones/{name}/challenge", map[string]bool{"operator": true, "scoped": true}},
 		{"DELETE", "/api/v1/edge/zones/a.example/challenge", "", "DELETE /api/v1/edge/zones/{name}/challenge", map[string]bool{"operator": true, "scoped": true}},
+		// The edge history reads (edge_history_read.go, E6.6): viewer rank; a
+		// scoped token reads its own zones' history — whether a zone is its own
+		// is the handler's business, and with no querier here the history
+		// answers available:false to anyone; the events name nodes and stay
+		// unscoped, so the scoped identity is DENIED there.
+		{"GET", "/api/v1/edge/history", "", "", map[string]bool{"viewer": true, "operator": true, "scoped": true}},
+		{"GET", "/api/v1/edge/history/sources", "", "", map[string]bool{"viewer": true, "operator": true, "scoped": true}},
+		{"GET", "/api/v1/edge/events", "", "", map[string]bool{"viewer": true, "operator": true}},
 	}
 
 	// The two route sets must be IDENTICAL: every registered /api/v1 pattern
