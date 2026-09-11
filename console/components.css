@@ -343,6 +343,15 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
 .seg { display: inline-flex; background: var(--inset); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 3px; gap: 2px; }
 .seg__btn { border: none; background: none; color: var(--muted); font-size: var(--t-sm); font-weight: 600; padding: 5px 11px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
 .seg__btn.is-on { background: var(--accent); color: var(--accent-ink); }
+/* a segmented control that may hold an unbounded number of options — the
+   Edge view's tenant chips, one per customer — must wrap rather than push the
+   table's own horizontal scroll out to the width of the tenant list */
+.seg--wrap { display: flex; flex-wrap: wrap; }
+
+/* The edge fleet inventory carries ten columns; on a narrow window .tablewrap
+   scrolls it, and a squeezed column must not break a node's NAME across two
+   lines — the name is its identity, and "edge-\n1" reads as a different box. */
+.fleet-tbl .target-cell { white-space: nowrap; }
 
 /* ============================================================================
    Rate-vs-baseline bar (Hosts)

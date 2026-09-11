@@ -315,16 +315,26 @@
         });
       }).catch(function () { return { ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] }; });
     },
-    /* edge-node inventory (Edge view, E5.5): each node's last self-report, for
-       the per-node detail the merged zone status cannot carry — terminator.h3's
-       state and advisory behind the HTTP/3 cell's tooltip. Fetched beside the
-       zone status, which already gates the view; a 403 or a failure here costs
-       the tooltip's detail, never the table. */
+    /* edge-node inventory. Two readers, one fetch:
+         - the Edge nodes view (E6.7) renders the whole document — each node's
+           placement scope, the agent tokens bound to it and its last report;
+         - the Edge view's HTTP/3 cell (E5.5) reads only terminator.h3 for the
+           per-node detail the merged zone status cannot carry.
+       Unscoped tokens only, like the scrub inventory: a 403 is reported as
+       FORBIDDEN, not as an error, so the Edge nodes view can show the
+       admin-only notice and the HTTP/3 tooltip can degrade to bare node names
+       instead of the table claiming an empty fleet.
+       unbound_agent_tokens is absent once every agent token is bound. */
     getEdgeNodes: function () {
       return request("/api/v1/edge/nodes").then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, total: 0, staleAfter: 15, nodes: [], unbound: [] };
         if (!res.ok) throw new Error("edge nodes -> " + res.status);
-        return res.json().then(function (r) { return { ok: true, nodes: r.nodes || [] }; });
-      }).catch(function () { return { ok: false, nodes: [] }; });
+        return res.json().then(function (r) {
+          return { ok: true, forbidden: false, total: r.nodes_total || 0,
+            staleAfter: r.stale_after_seconds || 15, nodes: r.nodes || [],
+            unbound: r.unbound_agent_tokens || [] };
+        });
+      }).catch(function () { return { ok: false, forbidden: false, total: 0, staleAfter: 15, nodes: [], unbound: [] }; });
     },
     /* ---- edge history (E6.6 reads; the Edge view's zone card) ----
        All three are on-demand reads with a freshness guard in app.js, never
