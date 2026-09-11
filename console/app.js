@@ -58,8 +58,33 @@
     edgeInv: { loading: false, fetchedAt: 0, ok: false, forbidden: false, total: 0, staleAfter: 15, list: [], unbound: [] },
     /* which tenant's zones the Edge view shows; "" is every tenant */
     edgeTenant: savedTenant(),
+    /* one zone's stored history (E6.7): opened by clicking a zone row, closed
+       by clicking it again. Same on-demand + freshness-guard shape as the
+       status above, and for a stronger reason — these reads hit ClickHouse and
+       the windows behind them are ten seconds long, so joining the 3s poll
+       would buy nothing and cost a query every three seconds. */
+    /* seq is the read that owns this state: only the newest may write it (see
+       loadEdgeHistory), so a zone switch cannot be captioned by the answer to
+       the zone before it. */
+    edgeHist: { zone: null, range: "1h", key: "", loading: false, fetchedAt: 0, seq: 0,
+      ok: false, forbidden: false, notFound: false, available: false, stepSeconds: 0, points: [],
+      srcOk: false, srcAvailable: false, sources: [] },
+    /* the fleet's events, last 24h — unscoped tokens only (they name nodes);
+       absent when the kapkan is older than the endpoint */
+    edgeEvents: { loading: false, fetchedAt: 0, ok: false, forbidden: false, absent: false, available: false, events: [] },
     last: { rung: -1 }
   };
+
+  /* The history card's ranges: the period and the bucket asked for it. The
+     brain may RAISE the step (a range holds at most 5000 buckets) or cap it at
+     a day, so the response's step_seconds — not this one — is what the buckets
+     were built with. views2.js renders the switch from the same three ids. */
+  var EDGE_RANGES = {
+    "1h":  { seconds: 3600,   step: 60 },
+    "24h": { seconds: 86400,  step: 600 },
+    "7d":  { seconds: 604800, step: 3600 }
+  };
+  var EDGE_EVENTS_SECONDS = 86400;
 
   /* ---------- buffers ---------- */
   function pushBuf() {
@@ -368,6 +393,80 @@
         e.loading = false; e.fetchedAt = Date.now();
         e.ok = r.ok; e.forbidden = !!r.forbidden;
         e.nodesAlive = r.nodesAlive; e.nodesReporting = r.nodesReporting; e.zonesTruncated = r.zonesTruncated || 0; e.zones = r.zones;
+        if (state.view === "edge") renderView();
+      });
+    },
+    /* ---- edge zone history (E6.7) ---- */
+    /* Clicking the open zone's row again shuts the card: the row is the only
+       control, so it has to be able to undo itself. */
+    toggleEdgeZone: function (zone) {
+      var e = state.edgeHist;
+      if (e.zone === zone) { e.zone = null; renderView(); return; }
+      /* `loading` is deliberately NOT cleared: a read for the zone just left
+         may still be in flight, and clearing it would let this render start a
+         second pair of ClickHouse queries beside it. The in-flight one is the
+         one that resolves, sees the zone has changed and re-renders — which is
+         where the new zone's read starts, once and not twice. */
+      e.zone = zone; e.key = ""; e.fetchedAt = 0;
+      e.ok = false; e.forbidden = false; e.notFound = false; e.available = false;
+      e.stepSeconds = 0; e.points = []; e.srcOk = false; e.srcAvailable = false; e.sources = [];
+      renderView();
+    },
+    setEdgeHistRange: function (r) {
+      var e = state.edgeHist;
+      if (!EDGE_RANGES[r] || e.range === r) return;
+      e.range = r; e.key = ""; e.fetchedAt = 0;
+      renderView();
+    },
+    /* The zone card's two reads, fetched together so the sources table and the
+       charts always describe the SAME period — a partial refresh would caption
+       one period's sources with another's range. Both resolve, neither
+       rejects, so one failing never loses the other. */
+    loadEdgeHistory: function () {
+      var e = state.edgeHist;
+      if (!e.zone || e.loading) return;
+      var range = EDGE_RANGES[e.range] || EDGE_RANGES["1h"];
+      var key = e.zone + "|" + e.range;
+      if (e.key === key && e.fetchedAt && Date.now() - e.fetchedAt < 10000) return;
+      e.loading = true;
+      var zone = e.zone, rangeID = e.range, seq = ++e.seq;
+      var to = new Date(), from = new Date(to.getTime() - range.seconds * 1000);
+      var fromISO = from.toISOString(), toISO = to.toISOString();
+      Promise.all([
+        API.getEdgeHistory(zone, fromISO, toISO, range.step),
+        API.getEdgeHistorySources(zone, fromISO, toISO, "")
+      ]).then(function (res) {
+        var h = res[0], s = res[1];
+        /* only the newest read may write this state or release the guard: an
+           answer overtaken by a later one has nothing left to say, and
+           clearing `loading` for it would start a third read beside the
+           second */
+        if (seq !== e.seq) return;
+        e.loading = false;
+        /* the operator may have clicked another zone or another range while
+           this was in flight — a late answer must not caption itself with the
+           new selection; the re-render is where that selection's own read
+           starts */
+        if (e.zone !== zone || e.range !== rangeID) { renderView(); return; }
+        e.fetchedAt = Date.now(); e.key = key;
+        e.ok = h.ok; e.forbidden = !!h.forbidden; e.notFound = !!h.notFound;
+        e.available = h.available; e.stepSeconds = h.stepSeconds || range.step; e.points = h.points;
+        e.srcOk = s.ok; e.srcAvailable = s.available; e.sources = s.sources;
+        if (state.view === "edge") renderView();
+      });
+    },
+    loadEdgeEvents: function () {
+      var v = state.edgeEvents;
+      if (v.loading) return;
+      /* a kapkan without the endpoint will not grow one while the page is
+         open: asked once, answered 404, never asked again */
+      if (v.absent) return;
+      if (v.fetchedAt && Date.now() - v.fetchedAt < 10000) return;
+      v.loading = true;
+      var to = new Date(), from = new Date(to.getTime() - EDGE_EVENTS_SECONDS * 1000);
+      API.getEdgeEvents(from.toISOString(), to.toISOString()).then(function (r) {
+        v.loading = false; v.fetchedAt = Date.now();
+        v.ok = r.ok; v.forbidden = !!r.forbidden; v.absent = !!r.absent; v.available = r.available; v.events = r.events;
         if (state.view === "edge") renderView();
       });
     },

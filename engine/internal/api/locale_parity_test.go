@@ -189,6 +189,19 @@ func TestLocaleParityRegistered(t *testing.T) {
 // can carry where a rung cannot be read off, plus nav.edgenodes and 24 en.*
 // for the Edge nodes view (336 + 34 = 370), and one plural key,
 // edgeUnboundTokens (12 + 1 = 13 keys; in en, 24 + 2 = 26 forms).
+//
+// The Edge view's zone-history card (E6.7) added 36 strings — the nineteen
+// ed.hist.* of the card itself (its title, the three range ids, the chart and
+// stats labels, and its loading / error / gone / empty / storage-off states),
+// the seven ed.srcs.* of the "who would have been challenged over the period"
+// table (its own error state included: a sources read can fail while the
+// charts' read succeeds), ed.state.{denied,challenged} (the two states the
+// stored history has and a ten-second window does not), and the eight ed.ev.*
+// of the fleet-events card (336 + 34 + 36 = 406) — plus a NINTH enum group,
+// edgeEventKind, whose sixteen members are the event kinds the write path
+// emits (43 + 16 = 59): an enum rather than sixteen strings so a newer
+// kapkan's seventeenth kind renders as its raw name instead of vanishing.
+// TestLocaleEdgeEventKindsMatchWritePath pins that group to the Go list.
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -199,9 +212,9 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		{"units", 0, 4},
 		{"plurals", 1, 13},
 		{"plurals", 0, 26},  // 13 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5) + edgeUnboundTokens (E6.7)
-		{"strings", 0, 370}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7)
-		{"enums", 1, 8},
-		{"enums", 0, 43},
+		{"strings", 0, 406}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history)
+		{"enums", 1, 9},
+		{"enums", 0, 59}, // +16: edgeEventKind (E6.7)
 		{"enumsShort", 1, 1},
 		{"enumsShort", 0, 5},
 	} {
@@ -214,6 +227,37 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 			t.Errorf("%s.js: %s at depth %d: parsed %d keys, hand count says %d — the parser is wrong, or the catalog grew and this count needs bumping",
 				baseLocale, tc.object, tc.depth, got, tc.want)
 		}
+	}
+}
+
+// TestLocaleEdgeEventKindsMatchWritePath pins the console's edgeEventKind enum
+// to the kinds the write path actually emits (edgeEventKindList).
+//
+// The console renders an unknown kind as its raw name on purpose, so a newer
+// kapkan's kind is never dropped from the fleet-events table — which also means
+// a kind added here with no locale entry ships as `report_cut` in five
+// languages with every other gate green. The parity gate cannot see it: it
+// compares the catalogs against one another, and en.js is the one being
+// forgotten. The reverse, a label for a kind the brain no longer emits, is dead
+// weight a translator keeps re-translating, so both directions fail.
+func TestLocaleEdgeEventKindsMatchWritePath(t *testing.T) {
+	en := loadCatalogs(t)[baseLocale]
+	enums := en.fields["enums"]
+	if enums == nil {
+		t.Fatalf("%s.js: no top-level %q", baseLocale, "enums")
+	}
+	kinds := enums.fields["edgeEventKind"]
+	if kinds == nil {
+		t.Fatalf("%s.js: enums.edgeEventKind is missing — the fleet-events card would label every kind with its raw name", baseLocale)
+	}
+	missing, extra := diffKeys(edgeEventKindList, kinds.paths("", 0))
+	for _, k := range missing {
+		t.Errorf("%s/%s.js: enums.edgeEventKind has no entry for %q, which the write path emits — the card renders the raw kind name in every language",
+			localesDir, baseLocale, k)
+	}
+	for _, k := range extra {
+		t.Errorf("%s/%s.js: enums.edgeEventKind labels %q, which edgeEventKindList does not emit — a renamed or dropped kind leaves a label nothing can reach",
+			localesDir, baseLocale, k)
 	}
 }
 
