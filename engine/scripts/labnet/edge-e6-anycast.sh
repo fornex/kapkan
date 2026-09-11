@@ -35,28 +35,38 @@
 #      for the whole issuance, edge-1's certificate can only have been
 #      validated by the challenge fanned out to edge-2 — both nodes issued,
 #      both published, a slot was refused, the two leaves differ, the
-#      inventory has two alive nodes on one document, no key bytes in it;
+#      inventory has two alive nodes each on its OWN document (they differ
+#      under placement, so a shared zones_etag is not a fleet-health signal;
+#      the zone they share is byte-identical in both), no key bytes in it;
 #   B. the two hash forms: L3 (policy 0) pins one client to one node for 40
 #      connections; L4 (policy 1) spreads it over both, over TCP and over
 #      HTTP/3 alike — the same policy governs the UDP 4-tuple;
 #   C. the per-node ceilings under each form: `policy.rate.rps` is enforced
 #      per node, so under L4 one source gets up to N× the ceiling. The share
-#      is RECORDED — those are the guide's numbers;
+#      is RECORDED with the batch's duration beside it — those are the guide's
+#      numbers. Under L3 the same burst concentrates on ONE node, crosses the
+#      rollup's flood rule there and is promoted to a table denial for
+#      DenyTTL: the arm asserts that too, because an operator picking a low
+#      per-node rps under L3 must know it;
 #   D. a node dies and nobody withdraws: the route still points at it, so a
 #      share of requests fails while the rest are served; keepalive to the
 #      dead node breaks and to the live one survives; the inventory says
-#      `alive:false` within `stale_after` and the brain touches no route.
+#      `alive:false` `stale_after` after its last sighting and the brain
+#      touches no route.
 #      D2: the link down instead — the nexthop goes `dead` and every request
 #      is served without any operator action ("a directly connected router
 #      notices link loss, a routed hop does not"), then the withdrawal as
 #      what it really is, a RIB effect: `ip route replace`, recovery timed;
 #   E. the withdrawal SIGNAL without a BGP daemon: a refused document is not
 #      one (`converged:false`, /healthz 200, the VIP serving), a dead
-#      terminator is (/healthz 503 within a second, while the brain's
-#      inventory still says `alive:true` — the node's signal fires, the
-#      inventory's does not);
+#      terminator is (/healthz 503 within one `controller.report_interval_
+#      seconds` — the liveness check rides that ticker, 1 s here, 10 s by
+#      default — while the brain's inventory still says `alive:true`: the
+#      node's signal fires, the inventory's does not);
 #   F. the brain dead: both nodes serve TCP and h3 through the VIP, /healthz
-#      200, and a restarted brain has them back within `stale_after`;
+#      200, and a restarted brain has them back at the nodes' next poll —
+#      what bounds that is the poll's own backoff after a failed poll (1 s
+#      doubling to 30 s), never `stale_after`;
 #   G. the two cross-node facts a shared address exposes: a TLS session is
 #      not resumable on the other node (spec §3, sid_ctx), while a clearance
 #      cookie IS honoured there (fleet-wide clearance keys). This arm also
@@ -68,18 +78,21 @@
 #      arm proves the cause with a supported knob (`omit_catch_all`) rather
 #      than asserting it, and only then tests the cross-node claim, so that
 #      claim is not vacuous;
-#   H. MTU: 1200 on ONE leg breaks HTTP/3 for the share of clients hashed to
-#      that node while TCP is untouched;
+#   H. MTU: 1200 on ONE leg takes HTTP/3 away from a client for the WHOLE
+#      shared address — a path MTU is cached per destination and the
+#      destination is the VIP — and it stays broken after the leg is repaired
+#      until `ip route flush cache`, while TCP is untouched;
 #   I. (stretch, ANYCAST_BGP=1, OUTSIDE the acceptance path) the same
 #      withdrawal contract driven by a real speaker: bird2 on each node
 #      announcing the VIP /32, enabled and disabled by a once-a-second
 #      /healthz probe.
 #
-# Build the binaries for the container arch first (from engine/), then run
-# this inside ONE privileged debian:13-slim container (never two rigs at
-# once — check `docker ps`):
+# Build the binaries for the container arch first (every command below runs
+# from the REPO ROOT), then run this inside ONE privileged debian:13-slim
+# container (never two rigs at once — check `docker ps`):
 #
-#   CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/kapkan ./cmd/kapkan
+#   mkdir -p /tmp/lab
+#   (cd engine && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/kapkan ./cmd/kapkan)
 #   git clone --depth 1 https://github.com/letsencrypt/pebble /tmp/pebble-src \
 #     && (cd /tmp/pebble-src && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/pebble ./cmd/pebble)
 #   docker run --privileged --rm -v /tmp/lab:/lab -v "$PWD:/w" -w /w debian:13-slim \
@@ -113,7 +126,8 @@ VIP=198.51.100.7
 E1=10.0.1.2;  R1=10.0.1.1          # edge-1's unicast, rtr's end of its leg
 E2=10.0.2.2;  R2=10.0.2.1          # edge-2's unicast, rtr's end of its leg
 CLI=10.1.0.2; RC=10.1.0.1          # the client behind the router
-BURST=10.1.0.50                    # arm C's own source: it gets laddered, the client must not
+BURST3=10.1.0.50                   # arm C's L3 source: it gets laddered, the client must not
+BURST4=10.1.0.51                   # arm C's L4 source: and the L3 one's ladder must not reach it
 BRAIN=203.0.113.20; ORIGIN=203.0.113.30; CA=203.0.113.40; RSVC=203.0.113.1
 ZONE=shop.test                     # global: both nodes serve it, through the VIP
 ZONEB=nodeb.test                   # placed on pop-b: only edge-2 serves it
@@ -125,6 +139,7 @@ EXTRA_BROKEN=/tmp/extra-broken.conf
 # The figures the guide quotes. Pre-set so the summary is printed even when an
 # arm fell over before recording its own.
 D_FAIL=0; D_OK=0; D_LOST_MS=0; D2_MS=0; E_MS=0; F_MS=0; H_FAIL=0
+ANN_PIDS=""                        # arm I's /healthz->birdc loops, killed by pid
 export KAPKAN_OP=optok KAPKAN_A1=a1tok KAPKAN_A2=a2tok
 tok() { case $1 in op) echo optok;; a1) echo a1tok;; a2) echo a2tok;; *) echo "$1";; esac; }
 
@@ -146,8 +161,19 @@ cleanup() {
   pkill -f "^$KAPKAN " 2>/dev/null; pkill -f "^$PEBBLE " 2>/dev/null
   pkill -f '^nginx: master' 2>/dev/null; pkill -f '^python3 /tmp/origin.py' 2>/dev/null
   pkill -f '^python3 /tmp/browser.py' 2>/dev/null; pkill -f '^python3 /tmp/keepalive.py' 2>/dev/null
-  pkill -f 'bird -c' 2>/dev/null; pkill -f '^/tmp/announce' 2>/dev/null
-  for ns in rtr edge1 edge2 brain origin ca cli; do ip netns del "$ns" 2>/dev/null; done
+  pkill -f 'bird -c' 2>/dev/null
+  # The announce loops are shell scripts started by path, so their cmdline is
+  # `/bin/sh /tmp/announce-N.sh` — an anchored `^/tmp/announce` pattern matches
+  # nothing and the loops outlive the rig. Kill the recorded pids, and then
+  # everything still living in a namespace: membership is the exact list, and
+  # it catches whatever a pattern would miss.
+  # shellcheck disable=SC2086
+  [ -n "$ANN_PIDS" ] && kill -9 $ANN_PIDS 2>/dev/null
+  pkill -f 'announce-[12]\.sh' 2>/dev/null
+  for ns in rtr edge1 edge2 brain origin ca cli; do
+    ip netns pids "$ns" 2>/dev/null | xargs -r kill -9 2>/dev/null
+    ip netns del "$ns" 2>/dev/null
+  done
   ip link del brsvc 2>/dev/null
   for z in $ZONE $ZONEB; do hosts_drop "$z" 2>/dev/null; done
 }
@@ -170,12 +196,17 @@ leg() { # NS IFNAME IP/CIDR PEERNAME PEERIP/CIDR  (peer end lands in rtr)
 leg edge1 e1-r  $E1/30  r-e1  $R1/30
 leg edge2 e2-r  $E2/30  r-e2  $R2/30
 leg cli   cli-r $CLI/24 r-cli $RC/24
-# A second address on the client, for arm C's burst alone. It must NOT be the
+# Two more addresses on the client, one per half of arm C. Neither may be the
 # address every other arm uses: a source that spends a window over its ceiling
 # is promoted by the rollup's flood rule to a table denial for a minute or
 # more, and a 403 from that ladder is indistinguishable, at the client, from
-# the node being gone (run 1 spent four arms on exactly that confusion).
-ip netns exec cli ip addr add $BURST/24 dev cli-r
+# the node being gone (run 1 spent four arms on exactly that confusion). The
+# two halves need one address EACH for the same reason: the L3 half hands one
+# node 34 refusals of 40, which is over FloodMinDenied (20) at well over
+# FloodDeniedShare (0.3), so that source is table-denied on that node when the
+# window closes — two seconds later, in the middle of the L4 half.
+ip netns exec cli ip addr add $BURST3/24 dev cli-r
+ip netns exec cli ip addr add $BURST4/24 dev cli-r
 # The service network (brain, origin, CA) hangs off the router on a bridge:
 # the nodes reach the brain by UNICAST, over the same router, and the CA
 # reaches the zone through the VIP — so validation crosses the hash.
@@ -347,6 +378,15 @@ etag()   { ip netns exec cli curl -s -o /dev/null -D - -m5 -H "Authorization: Be
 doc()    { api "$1" "$B/edge/zones?node=$2"; }
 wait_eq() { local n=$(( $1 * 5 )) want=$2 i; shift 2; for i in $(seq 1 "$n"); do [ "$("$@")" = "$want" ] && return 0; sleep 0.2; done; return 1; }
 wait_ne() { local n=$(( $1 * 5 )) not=$2 i; shift 2; for i in $(seq 1 "$n"); do [ "$("$@")" != "$not" ] && return 0; sleep 0.2; done; return 1; }
+# A node's report carries the LAST CLOSED window of a zone, so everything
+# per-window (top_sources, h3_requests) has to be waited for by CONDITION, not
+# by a sleep: the aggregator's 10 s window is phased by its own clock, not by
+# when a batch ran. zfield reads a field of that window, zat its close time as
+# epoch seconds, and wait_window waits until the window a batch fell into has
+# closed AND been reported — at most window + report_interval.
+zfield() { node_f "edge-$1" "([z for z in n.get('report',{}).get('zones',[]) if z['zone']=='$ZONE']+[{}])[0].get('$2',0)"; }
+zat() { local a; a=$(node_f "edge-$1" "([z for z in n.get('report',{}).get('zones',[]) if z['zone']=='$ZONE']+[{}])[0].get('at','')"); date -u -d "$a" +%s 2>/dev/null || echo 0; }
+wait_window() { local n=$1 after=$2 i; for i in $(seq 1 $(( $3 * 2 )) ); do [ "$(zat "$n")" -gt "$after" ] 2>/dev/null && return 0; sleep 0.5; done; return 1; }
 : > /tmp/brain.log
 start_brain
 rc=$(check_config); [ "$rc" = "0" ] && ok "-check-config accepts the fleet (two bound agent tokens, two scopes)" || bad "-check-config: rc=$rc $(head -3 /tmp/check.out)"
@@ -374,10 +414,18 @@ CONF
   # because the master keeps the namespace — names this node and no other.
   ip netns exec "$2" unshare -u sh -c "hostname edge-$1; exec nginx -c /tmp/edge$1-nginx.conf" >/tmp/edge$1-nginx.log 2>&1 &
 }
+# wait_nginx N — nginx up WITH its pid file written. This is a precondition of
+# `kapkan edge`, not a nicety: the node's first apply SIGHUPs the pid in
+# `terminator.pid_file`, and an unwritten pid file makes that reload an error
+# the node then retries only after RetryMin — a minute, with no knob set in
+# this rig's edge.yaml, which is longer than every wait below. A hard sleep
+# guarded that on the author's box and nothing on a slower one. There is
+# nothing to wait for on :443: until kapkan renders, this nginx has no server
+# block at all, so a live pid IS the condition.
+wait_nginx() { local n=$1 i p; for i in $(seq 1 100); do p=$(cat "/tmp/edge$n-nginx.pid" 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 node_nginx 1 edge1 $STATE1
 node_nginx 2 edge2 $STATE2
-sleep 0.6
-[ "$(pgrep -fc 'nginx: master')" = "2" ] && ok "two nginx masters are up ($(nginx -v 2>&1 | grep -oE '[0-9.]+$'))" || bad "nginx masters: $(pgrep -fc 'nginx: master')"
+wait_nginx 1 && wait_nginx 2 && [ "$(pgrep -fc 'nginx: master')" = "2" ] && ok "two nginx masters are up, each with its pid file written ($(nginx -v 2>&1 | grep -oE '[0-9.]+$'))" || bad "nginx masters: $(pgrep -fc 'nginx: master'), pid files '$(cat /tmp/edge1-nginx.pid 2>/dev/null)'/'$(cat /tmp/edge2-nginx.pid 2>/dev/null)'"
 
 # ---------------------------------------------------------------- kapkan edge on both nodes
 edge_yaml() { # N STATE SOCKS [OMIT_CATCH_ALL]
@@ -555,19 +603,38 @@ route_one $E2 r-e2
 : > /tmp/edge1.log; : > /tmp/edge2.log
 "$KAPKAN" edge -config /tmp/edge1.yaml -check 2>&1 | tee /tmp/check1.out | grep -q 'is valid' && ok "edge-1's edge.yaml passes -check" || bad "edge-1 -check: $(cat /tmp/check1.out)"
 "$KAPKAN" edge -config /tmp/edge2.yaml -check 2>&1 | tee /tmp/check2.out | grep -q 'is valid' && ok "edge-2's edge.yaml passes -check (identical but for name, dirs and status_listen — the guide's rule)" || bad "edge-2 -check: $(cat /tmp/check2.out)"
-start_edge 1; start_edge 2
-wait_healthy 1 40 && ok "edge-1 healthy: a tested generation is live" || { bad "edge-1 never became healthy"; tail -10 /tmp/edge1.log; }
-wait_healthy 2 40 && ok "edge-2 healthy" || { bad "edge-2 never became healthy"; tail -10 /tmp/edge2.log; }
-for i in $(seq 1 900); do [ "$(certs_seen 1)" -ge 1 ] && [ "$(certs_seen 2)" -ge 2 ] && break; sleep 0.2; done
-[ "$(certs_seen 1)" -ge 1 ] && ok "edge-1 has a certificate for $ZONE — validated on edge-2, through the fan-out" || { bad "edge-1 issued nothing in 180 s"; grep -i 'acme\|certif' /tmp/edge1.log | tail -3; }
-[ "$(certs_seen 2)" -ge 2 ] && ok "edge-2 has its own certificates ($(certs_seen 2): $ZONE and the placed $ZONEB)" || { bad "edge-2 certificates: $(certs_seen 2)"; grep -i 'acme\|certif' /tmp/edge2.log | tail -3; }
+# wait_certs N WANT SECONDS — wait for N's `certificate issued` count, failing
+# FAST on an order the CA refused: a failed order is retried an hour later
+# (acme's backoffMin), so a wait that sits out the clock only hides the error.
+wait_certs() {
+  local n=$1 want=$2 i
+  for i in $(seq 1 $(( $3 * 5 ))); do
+    [ "$(certs_seen "$n")" -ge "$want" ] && return 0
+    grep -q 'certificate order failed' "/tmp/edge$n.log" && return 1
+    sleep 0.2
+  done
+  return 1
+}
+# The starts are STAGGERED, and not for tidiness. The fan-out is not
+# acknowledged: a node publishes its HTTP-01 token to the brain and accepts the
+# challenge at once, while the brain only WAKES the other node's parked poll —
+# nothing confirms the token is installed there. Pebble validates in one pass
+# (PEBBLE_VA_NOSLEEP=1, no retry) and a lost order costs an hour, which no wait
+# in this rig can sit out. So edge-2 issues first, alone; by the time edge-1
+# asks for a certificate, the node that must answer for it is idle.
+start_edge 2
+wait_healthy 2 40 && ok "edge-2 healthy: a tested generation is live" || { bad "edge-2 never became healthy"; tail -10 /tmp/edge2.log; }
+wait_certs 2 2 180 && ok "edge-2 has its own certificates ($(certs_seen 2): $ZONE and the placed $ZONEB), validated on itself — the route points here" || { bad "edge-2 certificates: $(certs_seen 2)"; grep -i 'acme\|certif' /tmp/edge2.log | tail -3; }
+start_edge 1
+wait_healthy 1 40 && ok "edge-1 healthy" || { bad "edge-1 never became healthy"; tail -10 /tmp/edge1.log; }
+wait_certs 1 1 180 && ok "edge-1 has a certificate for $ZONE — validated on edge-2, through the fan-out" || { bad "edge-1 issued nothing in 180 s"; grep -i 'acme\|certif' /tmp/edge1.log | tail -3; }
 grep -q 'edge acme challenge published.*node=edge-1' /tmp/brain.log && grep -q 'edge acme challenge published.*node=edge-2' /tmp/brain.log && ok "the brain fanned out a challenge published by each node" || bad "challenge publications: $(grep -c 'challenge published' /tmp/brain.log) lines, nodes $(grep -oE 'challenge published.*node=[a-z0-9-]+' /tmp/brain.log | grep -oE 'node=.*' | sort -u | tr '\n' ' ')"
-# Whether the two nodes happened to collide on one zone at startup is a race —
-# in run 1 they did not, because each took a different zone's slot in the same
-# millisecond and the work was naturally staggered. The serialisation itself is
-# not a race, so it is asserted directly on the route both nodes use: hold the
-# zone's slot as edge-1, then ask for it as edge-2.
-echo "  (natural startup contention: $(grep -c 'granted=false' /tmp/brain.log) refused slot request(s) — a race, so the assertion below does not depend on it)"
+# Whether the two nodes happen to collide on one zone at startup is a race —
+# and with the starts staggered above there is normally nothing to collide
+# with. The serialisation itself is not a race, so it is asserted directly on
+# the route both nodes use: hold the zone's slot as edge-1, then ask for it as
+# edge-2.
+echo "  (startup contention seen so far: $(grep -c 'granted=false' /tmp/brain.log) refused slot request(s) — incidental, the assertion below does not depend on it)"
 api a1 "$B/edge/nodes/edge-1/acme/slot" -X POST -H 'Content-Type: application/json' -d "{\"zone\":\"$ZONE\"}" > /tmp/slot-hold.json
 [ "$(jx "d['granted']" < /tmp/slot-hold.json)" = "true" ] && ok "edge-1 takes $ZONE's issuance slot on demand" || bad "slot for edge-1: $(cat /tmp/slot-hold.json)"
 api a2 "$B/edge/nodes/edge-2/acme/slot" -X POST -H 'Content-Type: application/json' -d "{\"zone\":\"$ZONE\"}" > /tmp/slot-refused.json
@@ -627,9 +694,24 @@ H1_0=$(nmetric 1 'kapkan_edge_requests_total{protocol="h3"'); H2_0=$(nmetric 2 '
 batch 40 h3 /tmp/b-h3.txt
 H4_1=$(served edge-1 /tmp/b-h3.txt); H4_2=$(served edge-2 /tmp/b-h3.txt)
 [ "$(n200 /tmp/b-h3.txt)" = "40" ] && [ "$H4_1" -ge 1 ] && [ "$H4_2" -ge 1 ] && ok "…and so did 40 --http3-only requests (edge-1 $H4_1, edge-2 $H4_2): the same policy hashes the UDP 4-tuple" || bad "L4 h3 spread: edge-1 $H4_1, edge-2 $H4_2, codes $(mix /tmp/b-h3.txt)"
-sleep 12   # the rollup closes 10 s windows; h3_requests is per window
+# The metric is a per-RECORD counter — it moves as each access-log line
+# arrives, so it is waited for on itself, not on a window's clock.
+wait_ne 5 "$H1_0" nmetric 1 'kapkan_edge_requests_total{protocol="h3"'
+wait_ne 5 "$H2_0" nmetric 2 'kapkan_edge_requests_total{protocol="h3"'
 H1=$(nmetric 1 'kapkan_edge_requests_total{protocol="h3"'); H2=$(nmetric 2 'kapkan_edge_requests_total{protocol="h3"')
-[ "$H1" -gt "$H1_0" ] && [ "$H2" -gt "$H2_0" ] && ok "both nodes counted h3 requests of their own (kapkan_edge_requests_total protocol=h3: +$((H1-H1_0)) and +$((H2-H2_0)); the report's h3_requests is the same count per window)" || bad "h3 counted on one node only: edge-1 $H1_0->$H1, edge-2 $H2_0->$H2"
+[ "$H1" -gt "$H1_0" ] && [ "$H2" -gt "$H2_0" ] && ok "both nodes counted h3 requests of their own (kapkan_edge_requests_total protocol=h3: +$((H1-H1_0)) and +$((H2-H2_0)))" || bad "h3 counted on one node only: edge-1 $H1_0->$H1, edge-2 $H2_0->$H2"
+# And the report's own per-window field, which is what the guide quotes and
+# what a fleet-wide consumer reads — a different number from a different code
+# path, waited for by condition (the window closes on the aggregator's clock,
+# up to 10 s, and is reported one interval later).
+H3R1=0; H3R2=0
+for i in $(seq 1 40); do
+  [ "$H3R1" = "0" ] && H3R1=$(zfield 1 h3_requests)
+  [ "$H3R2" = "0" ] && H3R2=$(zfield 2 h3_requests)
+  [ "$H3R1" != "0" ] && [ "$H3R2" != "0" ] && break
+  sleep 0.5
+done
+[ "$H3R1" -ge 1 ] 2>/dev/null && [ "$H3R2" -ge 1 ] 2>/dev/null && ok "…and each node's report says so for the closed window too (h3_requests $H3R1 and $H3R2 for $ZONE)" || bad "report h3_requests: edge-1 '$H3R1', edge-2 '$H3R2'"
 [ "$(zst $ZONE "sorted(z.get('h3',{}).get('serving',[]))")" = "['edge-1', 'edge-2']" ] && ok "the fleet status names both nodes under h3.serving" || bad "h3.serving: $(zst $ZONE "z.get('h3')")"
 
 # ================================================================ ARM C
@@ -641,45 +723,104 @@ ZONE_RPS=5; zones_yaml; ET1=$(sfield 1 accepted_etag); reload_brain
 wait_ne 15 "$ET1" sfield 1 accepted_etag && ok "the low ceiling (rps 5) reached the nodes on the fast path" || bad "the rate change never reached edge-1"
 sleep 1.5
 dr() { nmetric "$1" 'kapkan_edge_decisions_total{result="deny_rate"'; }
+# The decider's counters move as each access-log record reaches the node, so a
+# delta read the instant curl returns is short — and the shortfall would land
+# in the NEXT half's delta. Each half's counts are therefore read once the
+# node has stopped counting, by condition.
+dr_settled() { local n=$1 a b i; a=$(dr "$n"); for i in $(seq 1 20); do sleep 0.3; b=$(dr "$n"); [ "$b" = "$a" ] && { echo "$b"; return 0; }; a=$b; done; echo "$a"; }
+# Each half rides its OWN source, and that is load-bearing, not tidiness: the
+# L3 half hands one node ~34 refusals of 40 decided, over the flood rule's
+# FloodMinDenied (20) at far over its FloodDeniedShare (0.3), so when that
+# window closes the source is promoted to a TABLE denial there for DenyTTL.
+# On a shared address that close falls wherever the aggregator's clock puts
+# it — including inside the L4 half two seconds later, which would answer 403
+# instead of 429, leave deny_rate still, and skew the recorded table without
+# failing anything. Hence BURST3 and BURST4, and hence the 200+429 = 40
+# assertions below: a 403 in either half is now a FAIL, not a silent skew.
 hashpol 0
-D1_0=$(dr 1); D2_0=$(dr 2); batch 40 tcp /tmp/c-l3.txt --interface $BURST
-C3_429=$(ncode 429 /tmp/c-l3.txt); C3_200=$(ncode 200 /tmp/c-l3.txt); D1_3=$(( $(dr 1) - D1_0 )); D2_3=$(( $(dr 2) - D2_0 ))
-[ "$C3_429" -ge 1 ] && ok "under L3 the burst is refused: $C3_429 of 40 answered 429, $C3_200 served" || bad "no 429 under L3 at rps 5: $(mix /tmp/c-l3.txt)"
+D1_0=$(dr 1); D2_0=$(dr 2); T0=$(date +%s%N); batch 40 tcp /tmp/c-l3.txt --interface $BURST3; T3_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
+C3_429=$(ncode 429 /tmp/c-l3.txt); C3_200=$(ncode 200 /tmp/c-l3.txt); D1_3=$(( $(dr_settled 1) - D1_0 )); D2_3=$(( $(dr_settled 2) - D2_0 ))
+[ "$C3_429" -ge 1 ] && [ $((C3_200 + C3_429)) -eq 40 ] && ok "under L3 the burst is refused: $C3_429 of 40 answered 429, $C3_200 served, and nothing else ($(mix /tmp/c-l3.txt)) — every answer is the rate ceiling's, none a table verdict" || bad "L3 batch: $(mix /tmp/c-l3.txt) (429 + 200 must be all 40; a 403 would be the flood rule's ladder, not the ceiling)"
 [ $(( D1_3 * D2_3 )) -eq 0 ] && [ $(( D1_3 + D2_3 )) -ge 1 ] && ok "every rate denial came from ONE node (deny_rate: edge-1 +$D1_3, edge-2 +$D2_3) — one ceiling, as configured" || bad "rate denials on both nodes under L3: edge-1 +$D1_3, edge-2 +$D2_3"
-sleep 2
 hashpol 1
-D1_0=$(dr 1); D2_0=$(dr 2); batch 40 tcp /tmp/c-l4.txt --interface $BURST
-C4_429=$(ncode 429 /tmp/c-l4.txt); C4_200=$(ncode 200 /tmp/c-l4.txt); D1_4=$(( $(dr 1) - D1_0 )); D2_4=$(( $(dr 2) - D2_0 ))
-[ "$C4_429" -ge 1 ] && [ "$D1_4" -ge 1 ] && [ "$D2_4" -ge 1 ] && ok "under L4 BOTH nodes refused ($C4_429 of 40 were 429, deny_rate edge-1 +$D1_4, edge-2 +$D2_4): the ceiling is per node, and the source met two of them" || bad "L4 ceilings: 429s $C4_429, deny_rate edge-1 +$D1_4, edge-2 +$D2_4"
-python3 - "$C3_200" "$C4_200" "$C3_429" "$C4_429" "$D1_3" "$D2_3" "$D1_4" "$D2_4" > /tmp/arm-c.txt <<'PY'
+D1_0=$(dr 1); D2_0=$(dr 2); T0=$(date +%s%N); batch 40 tcp /tmp/c-l4.txt --interface $BURST4; T4_MS=$(( ($(date +%s%N) - T0) / 1000000 )); C4_END=$(date -u +%s)
+C4_429=$(ncode 429 /tmp/c-l4.txt); C4_200=$(ncode 200 /tmp/c-l4.txt); D1_4=$(( $(dr_settled 1) - D1_0 )); D2_4=$(( $(dr_settled 2) - D2_0 ))
+[ "$C4_429" -ge 1 ] && [ $((C4_200 + C4_429)) -eq 40 ] && [ "$D1_4" -ge 1 ] && [ "$D2_4" -ge 1 ] && ok "under L4 BOTH nodes refused ($C4_429 of 40 were 429, $C4_200 served, nothing else; deny_rate edge-1 +$D1_4, edge-2 +$D2_4): the ceiling is per node, and the source met two of them" || bad "L4 ceilings: $(mix /tmp/c-l4.txt) (429 + 200 must be all 40), deny_rate edge-1 +$D1_4, edge-2 +$D2_4"
+# The ratio is a range, not a constant: a node's bucket holds rps tokens and
+# refills rps per second, so a batch lasting T seconds is admitted 5 + 5·T per
+# node. T is recorded beside the counts and asserted, because on a slow box
+# the same 40 connections mean a different table.
+CV=$(python3 - "$C3_200" "$C4_200" "$C3_429" "$C4_429" "$D1_3" "$D2_3" "$D1_4" "$D2_4" "$T3_MS" "$T4_MS" <<'PY'
 import sys
-l3_200, l4_200, l3_429, l4_429, d13, d23, d14, d24 = (int(x) for x in sys.argv[1:9])
+l3_200, l4_200, l3_429, l4_429, d13, d23, d14, d24, t3, t4 = (int(x) for x in sys.argv[1:11])
 ratio = (l4_200 / l3_200) if l3_200 else 0.0
-print(f"policy.rate.rps 5, 40 connections from one source, two nodes:")
-print(f"  L3 (policy 0): served {l3_200}, refused {l3_429} (429 share {l3_429/40*100:.0f}%), deny_rate edge-1 {d13} edge-2 {d23}")
-print(f"  L4 (policy 1): served {l4_200}, refused {l4_429} (429 share {l4_429/40*100:.0f}%), deny_rate edge-1 {d14} edge-2 {d24}")
-print(f"  the source got {ratio:.1f}x the admitted requests under L4 (the guide's \"up to N x the ceiling\", N = the node count = 2)")
+T3, T4 = t3 / 1000.0, t4 / 1000.0
+lines = [
+    "policy.rate.rps 5, 40 connections from one source, two nodes:",
+    f"  L3 (policy 0): served {l3_200}, refused {l3_429} (429 share {l3_429/40*100:.0f}%), deny_rate edge-1 {d13} edge-2 {d23}, batch {T3:.1f}s",
+    f"  L4 (policy 1): served {l4_200}, refused {l4_429} (429 share {l4_429/40*100:.0f}%), deny_rate edge-1 {d14} edge-2 {d24}, batch {T4:.1f}s",
+    f"  the source got {ratio:.1f}x the admitted requests under L4 (the guide's \"up to N x the ceiling\", N = the node count = 2)",
+    "  that figure is a RANGE, not a constant: a node's bucket admits rps + rps*T over a batch of T",
+    f"  seconds, so it holds while each node's share of the batch exceeds its own allowance (5 + 5*T <= 20,",
+    f"  i.e. T <= 3 s for 40 connections over two nodes; here T was {T3:.1f}s and {T4:.1f}s). Asserted as 1.5x-2.5x.",
+    f"  the other side of the same coin: under L3 all {l3_429} refusals land on ONE node, over the rollup's",
+    "  flood rule (>= 20 refusals in a window, >= 30% of that source's decided requests), so the source is",
+    "  promoted there to a TABLE denial for DenyTTL (a minute, escalating) — asserted. Under L4 the split",
+    "  keeps each node under the threshold and the source stays `allow`. A low per-node rps under an L3",
+    "  hash therefore blocks a busy client; under L4 it only slows it.",
+]
+open("/tmp/arm-c.txt", "w").write("\n".join(lines) + "\n")
+print("ok" if 1.5 <= ratio <= 2.5 and T3 <= 3.0 and T4 <= 3.0 else f"out-of-range ratio={ratio:.2f} T3={T3:.1f}s T4={T4:.1f}s")
 PY
+)
 sed 's/^/  /' /tmp/arm-c.txt
-grep -q 'x the admitted' /tmp/arm-c.txt && ok "the L3-vs-L4 shares are recorded for the guide (/tmp/arm-c.txt)" || bad "arm C recorded nothing"
-# top_sources rides a CLOSED 10 s window, so give the rollup two of them.
-srcs() { api op "$B/edge/nodes" | jx "[s['source'] for z in ([n for n in d['nodes'] if n['name']=='edge-$1']+[{}])[0].get('report',{}).get('zones',[]) if z['zone']=='$ZONE' for s in z.get('top_sources',[])]"; }
+[ "$CV" = "ok" ] && ok "the L3-vs-L4 shares are recorded for the guide with the batch durations beside them, and the ratio is in the 1.5x-2.5x the bucket allows (/tmp/arm-c.txt)" || bad "arm C's recorded share: $CV"
+# top_sources rides a CLOSED 10 s window, so it is waited for by CONDITION:
+# the window the L4 batch fell into must have closed (its `at` later than the
+# batch's end) and been reported — at most 10 s plus one report interval. The
+# L4 source is the one to look for: under L4 both nodes saw it, while the L3
+# source, by design, only ever reached one.
+srcs() { api op "$B/edge/nodes" | jx "'\n'.join(s['source']+' '+s['state'] for z in ([n for n in d['nodes'] if n['name']=='edge-$1']+[{}])[0].get('report',{}).get('zones',[]) if z['zone']=='$ZONE' for s in z.get('top_sources',[]))"; }
+bsrc() { awk -v s="$BURST4" '$1==s {print $2}' "$1" 2>/dev/null | head -1; }
 for i in $(seq 1 60); do
   srcs 1 > /tmp/c-src-1.txt; srcs 2 > /tmp/c-src-2.txt
-  grep -q "$CLI" /tmp/c-src-1.txt && grep -q "$CLI" /tmp/c-src-2.txt && break
+  if [ "$(zat 1)" -gt "$C4_END" ] 2>/dev/null && [ "$(zat 2)" -gt "$C4_END" ] 2>/dev/null; then
+    [ -n "$(bsrc /tmp/c-src-1.txt)" ] && [ -n "$(bsrc /tmp/c-src-2.txt)" ] && break
+  fi
   sleep 0.5
 done
-grep -q "$CLI" /tmp/c-src-1.txt && grep -q "$CLI" /tmp/c-src-2.txt && ok "the bursting source appears in BOTH nodes' top_sources — each node saw it, neither saw the whole of it (a rate-refused source is reported \`allow\`: over its ceiling is not a table denial)" || bad "top_sources: edge-1 $(cat /tmp/c-src-1.txt), edge-2 $(cat /tmp/c-src-2.txt)"
+S1=$(bsrc /tmp/c-src-1.txt); S2=$(bsrc /tmp/c-src-2.txt)
+[ -n "$S1" ] && [ -n "$S2" ] && ok "the bursting source $BURST4 appears in BOTH nodes' top_sources for the window it burst in — each node saw it, neither saw the whole of it" || bad "top_sources: edge-1 '$(tr '\n' ' ' < /tmp/c-src-1.txt)', edge-2 '$(tr '\n' ' ' < /tmp/c-src-2.txt)'"
+[ "$S1" = "allow" ] && [ "$S2" = "allow" ] && ok "…and in that window each node still reports it \`allow\`: a rate denial is not a table verdict. What promotes a source to one is the flood rule, when its refusals in a single window cross FloodMinDenied (20) — which, diluted over two nodes, neither node's share does" || bad "state of $BURST4: edge-1 '$S1', edge-2 '$S2' ('denied' means one node took >= 20 of the 40 refusals in one window and the flood rule promoted it)"
+# The other half of that rule, and the half an operator picking a low per-node
+# rps under the guide's recommended L3 hash must know: there the whole burst
+# lands on ONE node, so its ~34 refusals in one window ARE over the threshold
+# and the source is promoted to a table denial for DenyTTL (a minute to start,
+# escalating). The L3 hash is deterministic, so this probe reaches the node the
+# burst did; a 403 is the promotion, a 200 or a 429 would mean it never
+# happened.
+hashpol 0
+C3P=""
+for i in $(seq 1 60); do
+  C3P=$(vget "promoted-$RANDOM" --interface $BURST3); C3P=${C3P%% *}
+  [ "$C3P" = "403" ] && break
+  sleep 0.5
+done
+[ "$C3P" = "403" ] && ok "under L3 the concentrated burst IS promoted: $BURST3 now gets a 403 table denial from the node that refused it — a low per-node rps under an L3 hash turns a busy source into a blocked one for DenyTTL, where the same 40 connections diluted over L4 stayed \`allow\`" || bad "no table denial for $BURST3 under L3 within 30 s: last answer '$C3P'"
 ZONE_RPS=1000; zones_yaml; reload_brain; sleep 1.5
 
 # ================================================================ ARM D
 say "ARM D — a node dies and nobody withdraws: the route still points at it"
+# Every arm from here on needs ONE client spread over BOTH nodes — "a share
+# fails", "edge-2 served it too" — so each states the hash form it assumes
+# rather than inheriting arm C's last `hashpol` call.
+hashpol 1
 ROUTE0=$(vip_route)
 # A clean-client pre-check, so that a client the ladder has promoted (arm C's
-# burst source is a different address for exactly this reason) can never be
-# mistaken for a node that is gone.
+# two burst sources are separate addresses for exactly this reason) can never
+# be mistaken for a node that is gone.
 batch_until 20 tcp /tmp/d-pre.txt 40 20
-[ "$(n200 /tmp/d-pre.txt)" = "20" ] && [ "$(served edge-1 /tmp/d-pre.txt)" -ge 1 ] && [ "$(served edge-2 /tmp/d-pre.txt)" -ge 1 ] && ok "before the kill: 20 of 20 served, both nodes ($(served edge-1 /tmp/d-pre.txt)/$(served edge-2 /tmp/d-pre.txt)) — the client is clean, arm C's burst rode its own address" || bad "the client is not clean before arm D: $(mix /tmp/d-pre.txt)"
+[ "$(n200 /tmp/d-pre.txt)" = "20" ] && [ "$(served edge-1 /tmp/d-pre.txt)" -ge 1 ] && [ "$(served edge-2 /tmp/d-pre.txt)" -ge 1 ] && ok "before the kill: 20 of 20 served, both nodes ($(served edge-1 /tmp/d-pre.txt)/$(served edge-2 /tmp/d-pre.txt)) — the client is clean, arm C's bursts rode their own addresses" || bad "the client is not clean before arm D: $(mix /tmp/d-pre.txt)"
 rm -f /tmp/ka-ready /tmp/ka-go
 ip netns exec cli python3 /tmp/keepalive.py $ZONE $E1 $E2 > /tmp/keepalive.out 2>&1 &
 KA_PID=$!
@@ -704,14 +845,31 @@ KA=$(cat /tmp/keepalive.out)
 # to reopen — and be refused.
 [ "$(jx "d['opens_before']" <<< "$KA")" = "[1, 1]" ] && [ "$(jx "d['first']" <<< "$KA")" = "[200, 200]" ] && [ "$(jx "sum(d['server_closed'])" <<< "$KA")" = "0" ] && ok "one TCP connection to each node, both answering 200, neither closed by the server: genuinely established connections" || bad "keepalive bookkeeping: $KA"
 [ "$(jx "d['second'][0]" <<< "$KA")" = "200" ] && [ "$(jx "d['opens'][0]" <<< "$KA")" = "1" ] && [ "$(jx "d['second'][1]" <<< "$KA")" != "200" ] && ok "across the kill the connection to edge-1 answers 200 on that same connection and the one to edge-2 is gone ($(jx "d['second']" <<< "$KA")) — a shared address gives an established connection no protection whatever" || bad "keepalive across the kill: $KA"
-wait_eq 20 false node_f edge-2 "n['alive']" && D_LOST_MS=$(( ($(date +%s%N) - KILL0) / 1000000 )) && ok "the inventory marks edge-2 alive:false ${D_LOST_MS} ms after the kill (stale_after_seconds $STALE)" || { D_LOST_MS=0; bad "edge-2 still alive: $(node_f edge-2 "n['alive']")"; }
+if wait_eq 20 false node_f edge-2 "n['alive']"; then
+  D_LOST_MS=$(( ($(date +%s%N) - KILL0) / 1000000 ))
+  # The bound is the product's, not the wait's: `alive` is the brain's judgment
+  # at read time — a parked poll, or a sighting within stale_after — so the
+  # flip is due stale_after after the dead node's parked poll closed with its
+  # socket. Asserted with 2 s for that close and the observer's 200 ms step.
+  [ "$D_LOST_MS" -le $(( (STALE + 2) * 1000 )) ] && ok "the inventory marks edge-2 alive:false ${D_LOST_MS} ms after the kill — stale_after_seconds $STALE after its last sighting, within the asserted $(( (STALE + 2) * 1000 )) ms" || bad "alive:false took ${D_LOST_MS} ms, over stale_after ($STALE s) plus 2 s of slack"
+else
+  D_LOST_MS=0; bad "edge-2 still alive: $(node_f edge-2 "n['alive']")"
+fi
 [ "$(node_f edge-1 "n['alive']")" = "true" ] && ok "edge-1 is untouched by its neighbour's death" || bad "edge-1 alive: $(node_f edge-1 "n['alive']")"
-[ "$(vip_route)" = "$ROUTE0" ] && ok "the router's VIP route is byte-identical: the brain never touches routing for a zone address ($ROUTE0)" || bad "the VIP route changed by itself: '$ROUTE0' -> '$(vip_route)'"
+# The two checks below are STRUCTURAL: in this topology no Kapkan code path
+# can touch the router's table or name the VIP, so they cannot fail by any
+# product action — they record the ABSENCE of a zone-address path, not a
+# decision. The one product-facing check of the claim is the third: the brain's
+# ban list, the thing its speaker announces, must not carry the VIP either.
+[ "$(vip_route)" = "$ROUTE0" ] && ok "the router's VIP route is byte-identical: the brain never touches routing for a zone address ($ROUTE0) — structural" || bad "the VIP route changed by itself: '$ROUTE0' -> '$(vip_route)'"
 # The brain HAS a BGP speaker configured here (positive control), and it still
 # never says a word about the zone's address: its speaker is for victims under
-# attack, never for service routing.
-grep -q 'bgp peer state' /tmp/brain.log && ok "the brain's own BGP speaker is up and peering (positive control: there IS a speaker to keep quiet)" || bad "no bgp peer line in the brain log — the next assertion would be vacuous"
-grep -q "$VIP" /tmp/brain.log && bad "the brain's log mentions the VIP $VIP" || ok "the brain never mentions $VIP: nothing in Kapkan announces or withdraws a zone's address"
+# attack, never for service routing. Nothing listens at 127.0.0.2, so what the
+# log shows is the speaker's own FSM, not an established session.
+grep -q 'bgp peer state' /tmp/brain.log && ok "the brain's own BGP speaker is configured and running (peer state transitions logged): there IS a speaker to keep quiet" || bad "no bgp peer line in the brain log — the next assertion would be vacuous"
+grep -q "$VIP" /tmp/brain.log && bad "the brain's log mentions the VIP $VIP" || ok "the brain never mentions $VIP: nothing in Kapkan announces or withdraws a zone's address — structural"
+api op "$B/bans" > /tmp/d-bans.json
+grep -q "$VIP" /tmp/d-bans.json && bad "the brain's ban list carries the VIP $VIP: $(cut -c1-200 /tmp/d-bans.json)" || ok "and its ban list — the set its speaker announces — carries no $VIP either, with a node of that address dead ($(wc -c < /tmp/d-bans.json) bytes)"
 
 say "ARM D2 — the link down instead: a dead nexthop needs no operator, a dead node does"
 ip netns exec rtr ip link set r-e2 down
@@ -729,12 +887,25 @@ for i in $(seq 1 100); do batch 5 tcp /tmp/d2-probe.txt; [ "$(n200 /tmp/d2-probe
 D2_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
 batch 40 tcp /tmp/d2-withdrawn.txt; batch 20 h3 /tmp/d2-withdrawn-h3.txt
 [ "$(n200 /tmp/d2-withdrawn.txt)" = "40" ] && [ "$(n200 /tmp/d2-withdrawn-h3.txt)" = "20" ] && ok "after the operator's withdrawal (one \`ip route replace … via edge-1\`) 40 of 40 TCP and 20 of 20 HTTP/3 requests are served, in ${D2_MS} ms from the RIB change" || bad "after the withdrawal: TCP $(mix /tmp/d2-withdrawn.txt), h3 $(mix /tmp/d2-withdrawn-h3.txt)"
-C2_0=$(certs_seen 2)
-node_nginx 2 edge2 $STATE2; sleep 0.6; start_edge 2
+C2_0=$(certs_seen 2); SLOT2_0=$(grep -c 'slot requested.*node=edge-2' /tmp/brain.log)
+A2_0=$(node_f edge-2 "n['alive']"); R0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+node_nginx 2 edge2 $STATE2; wait_nginx 2; start_edge 2
 wait_healthy 2 30 && ok "edge-2 restarted (its render came back from disk)" || bad "edge-2 did not come back"
-wait_eq 15 true node_f edge-2 "n['alive']" && ok "the inventory has it alive again at its first poll" || bad "edge-2 not alive after the restart"
-sleep 3
-[ "$(certs_seen 2)" = "$C2_0" ] && ok "the restarted node ordered nothing new: its certificates came back from disk (\`certificate issued\` still $C2_0)" || bad "edge-2 re-issued after a restart: $C2_0 -> $(certs_seen 2) lines"
+# "Alive again at its first poll" pinned rather than waited out: it was alive
+# FALSE before the restart, and the sighting the brain now holds was made
+# AFTER it — a leftover sighting would be at least stale_after older, which is
+# what an eventual 15 s wait alone would not have told apart.
+wait_eq 15 true node_f edge-2 "n['alive']"
+LS2=$(node_f edge-2 "n['last_seen']")
+LS2_E=$(date -u -d "$LS2" +%s 2>/dev/null || echo 0); R0_E=$(date -u -d "$R0" +%s 2>/dev/null || echo 0)
+[ "$A2_0" = "false" ] && [ "$(node_f edge-2 "n['alive']")" = "true" ] && [ "$LS2_E" -ge "$R0_E" ] && ok "the inventory has it alive again from a poll made after the restart (alive false -> true, last_seen $LS2 >= restart $R0)" || bad "edge-2 after the restart: alive $A2_0 -> $(node_f edge-2 "n['alive']"), last_seen '$LS2' vs restart '$R0'"
+# "Ordered nothing new" read off the FRESH process instead of a sleep: its own
+# ACME counter is zero, and the brain logged no slot request from it — a slot
+# is taken before every order, at its start, so this is not a race with a
+# completion the way a `certificate issued` grep after a fixed sleep is.
+A2M=$(nmetric 2 'kapkan_edge_acme_attempts_total')
+SLOT2=$(grep -c 'slot requested.*node=edge-2' /tmp/brain.log)
+[ "$A2M" = "0" ] && [ "$SLOT2" = "$SLOT2_0" ] && [ "$(certs_seen 2)" = "$C2_0" ] && ok "the restarted node ordered nothing: its certificates came back from disk (its own kapkan_edge_acme_attempts_total is 0, it asked the brain for no issuance slot, \`certificate issued\` still $C2_0)" || bad "edge-2 after a restart: acme_attempts $A2M, slot requests $SLOT2_0 -> $SLOT2, certificate issued $C2_0 -> $(certs_seen 2)"
 route_both
 
 # ================================================================ ARM E
@@ -756,14 +927,18 @@ wait_eq 40 true sfield 2 converged && ok "the file fixed: edge-2 converges again
 # (ii) The terminator itself gone, with terminator.pid_file set: THAT is the
 # signal — and the brain's inventory does not have it, because the node is
 # still polling perfectly well.
+# What bounds the 503 is `controller.report_interval_seconds`, not a health
+# timer: the pid check is sampled on the report ticker (one second here, TEN
+# by default), so an operator who withdraws on /healthz must set that interval
+# to the probe period they want. Asserted at one interval plus 300 ms.
 kill "$(cat /tmp/edge2-nginx.pid 2>/dev/null)" 2>/dev/null
 T0=$(date +%s%N)
 for i in $(seq 1 50); do [ "$(hcode 2)" = "503" ] && break; sleep 0.1; done
 E_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
-[ "$(hcode 2)" = "503" ] && ok "/healthz on edge-2 turned 503 in ${E_MS} ms of nginx dying (terminator.pid_file is what makes this observable)" || bad "/healthz after killing nginx: $(hcode 2)"
+[ "$(hcode 2)" = "503" ] && [ "$E_MS" -le 1300 ] && ok "/healthz on edge-2 turned 503 ${E_MS} ms after nginx died — within one controller.report_interval_seconds (1 s in this rig; the product default is 10), the tick the liveness check rides; terminator.pid_file is what makes it observable at all" || bad "/healthz after killing nginx: $(hcode 2) after ${E_MS} ms (bound: one report interval + 300 ms)"
 [ "$(node_f edge-2 "n['alive']")" = "true" ] && ok "…while the brain's inventory still says alive:true — the node's own signal fired, the inventory's did not (never withdraw on \`alive\`)" || bad "inventory alive after the nginx kill: $(node_f edge-2 "n['alive']")"
 [ "$(node_f edge-2 "n['report']['terminator']['alive']")" = "false" ] && ok "the node's report does say terminator.alive:false (the honest field, one poll behind)" || bad "report terminator.alive: $(node_f edge-2 "n['report']['terminator']['alive']")"
-node_nginx 2 edge2 $STATE2; sleep 0.8
+node_nginx 2 edge2 $STATE2; wait_nginx 2
 wait_eq 20 200 hcode 2 && ok "nginx restarted on its live configuration: /healthz 200 again" || bad "/healthz after the nginx restart: $(hcode 2)"
 batch_until 10 tcp /tmp/e-back.txt 50 10
 [ "$(n200 /tmp/e-back.txt)" = "10" ] && [ "$(served edge-2 /tmp/e-back.txt)" -ge 1 ] && ok "the VIP serves from both nodes again ($(served edge-1 /tmp/e-back.txt)/$(served edge-2 /tmp/e-back.txt))" || bad "after the nginx restart: $(mix /tmp/e-back.txt), edge-2 $(served edge-2 /tmp/e-back.txt)"
@@ -773,15 +948,17 @@ say "ARM F — the brain dead: the fleet is fail-static behind one address"
 kill_brain && ok "the brain is dead" || bad "the brain is still answering"
 batch 20 tcp /tmp/f-nobrain.txt; batch 20 h3 /tmp/f-nobrain-h3.txt
 [ "$(n200 /tmp/f-nobrain.txt)" = "20" ] && [ "$(served edge-1 /tmp/f-nobrain.txt)" -ge 1 ] && [ "$(served edge-2 /tmp/f-nobrain.txt)" -ge 1 ] && ok "20 of 20 TCP requests served by both nodes with the brain dead" || bad "TCP with the brain dead: $(mix /tmp/f-nobrain.txt), $(served edge-1 /tmp/f-nobrain.txt)/$(served edge-2 /tmp/f-nobrain.txt)"
-[ "$(n200 /tmp/f-nobrain-h3.txt)" = "20" ] && ok "…and 20 of 20 over HTTP/3" || bad "h3 with the brain dead: $(mix /tmp/f-nobrain-h3.txt)"
+[ "$(n200 /tmp/f-nobrain-h3.txt)" = "20" ] && [ "$(served edge-1 /tmp/f-nobrain-h3.txt)" -ge 1 ] && [ "$(served edge-2 /tmp/f-nobrain-h3.txt)" -ge 1 ] && ok "…and 20 of 20 over HTTP/3, from both nodes too ($(served edge-1 /tmp/f-nobrain-h3.txt)/$(served edge-2 /tmp/f-nobrain-h3.txt))" || bad "h3 with the brain dead: $(mix /tmp/f-nobrain-h3.txt), edge-1 $(served edge-1 /tmp/f-nobrain-h3.txt)/edge-2 $(served edge-2 /tmp/f-nobrain-h3.txt)"
 [ "$(hcode 1)" = "200" ] && [ "$(hcode 2)" = "200" ] && ok "both /healthz stay 200: the brain is not in the health predicate" || bad "healthz with the brain dead: $(hcode 1)/$(hcode 2)"
 mv /tmp/brain.log /tmp/brain-1.log; T0=$(date +%s%N); start_brain
-# What bounds this is the node's own poll backoff after a failed poll (1 s
-# doubling to 30 s), not anything the brain does — so the figure is recorded
-# rather than asserted tight.
+# What bounds this is the node's own poll backoff after a failed poll — 1 s
+# doubling to 30 s — and NOTHING the brain does, `stale_after` included: the
+# nodes never stopped being alive to themselves, they simply had nowhere to
+# poll. So the assertion is the backoff's own ceiling, and the figure, which
+# depends only on how long the outage was, is recorded beside it.
 if wait_eq 45 true node_f edge-1 "n['alive']" && wait_eq 45 true node_f edge-2 "n['alive']"; then
   F_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
-  ok "the brain came back and both nodes are alive again ${F_MS} ms later — the node's poll backoff is the whole delay"
+  [ "$F_MS" -le 31000 ] && ok "the brain came back and both nodes are alive again ${F_MS} ms later, inside the poll backoff's 30 s ceiling — the backoff, reached by an outage of this length, is the whole delay" || bad "the nodes took ${F_MS} ms to come back, over the poll backoff's 30 s ceiling"
 else
   F_MS=0; bad "nodes after the brain's return: $(node_f edge-1 "n['alive']")/$(node_f edge-2 "n['alive']")"
 fi
@@ -789,11 +966,14 @@ fi
 # ================================================================ ARM G
 say "ARM G — the two cross-node facts a shared address exposes"
 # A TLS session must not resume on the other node: nginx binds it to the
-# node's own certificate through the session id context (spec §3). TLS 1.3 has
-# no session ids and kapkan renders `ssl_session_tickets off`, so 1.3 has
-# nothing to resume at all (E5 asserts that); TLS 1.2 with the rendered
-# `ssl_session_cache` is the only form in which a resumption can be OFFERED,
-# so it is the form that can test the claim.
+# node's own certificate through the session id context (spec §3). TLS 1.3 is
+# in the SAME position as 1.2 here, not a different one: `ssl_session_tickets
+# off` sets SSL_OP_NO_TICKET, and nginx then issues stateful 1.3 tickets whose
+# sessions it looks up in `ssl_session_cache` — so 1.3 resumes nowhere today
+# for exactly the catch-all reason recorded below, and will resume on its own
+# node once the catch-all carries a cache, never across nodes. TLS 1.2 is the
+# form this arm drives because `openssl s_client -sess_out/-sess_in` makes the
+# offer and its answer visible in one word.
 sess() { # SRCNODE DSTNODE FILE — save a session from SRC, offer it to DST
   local s=$1 d=$2 f=$3
   ip netns exec cli sh -c "printf 'GET /g HTTP/1.1\r\nHost: $ZONE\r\nConnection: close\r\n\r\n' | openssl s_client -connect $(ip_of "$s"):443 -servername $ZONE -CAfile /tmp/pebble-root.crt -tls1_2 -sess_out /tmp/g-$s.sess -ign_eof" >/tmp/g-save-$s.txt 2>&1
@@ -813,16 +993,24 @@ r=$(sess 1 1 /tmp/g-default.txt)
 [ "$r" = "New" ] && ok "as rendered it does NOT resume even on edge-1 ('$r') — see the note above: the catch-all default server has no ssl_session_cache, so no zone on any node resumes a TLS 1.2 session" || bad "expected New on the same node with the catch-all in place, got '$r'"
 edge_yaml 1 $STATE1 $SOCKS1 true; edge_yaml 2 $STATE2 $SOCKS2 true
 kill_node 1; kill_node 2
-node_nginx 1 edge1 $STATE1; node_nginx 2 edge2 $STATE2; sleep 0.8; start_edge 1; start_edge 2
+node_nginx 1 edge1 $STATE1; node_nginx 2 edge2 $STATE2; wait_nginx 1; wait_nginx 2; start_edge 1; start_edge 2
 wait_healthy 1 40 && wait_healthy 2 40 && ok "both nodes restarted with omit_catch_all: their own servers are now the address's default (the QUIC anchor still carries the one reuseport listener)" || bad "a node did not come back under omit_catch_all: $(sfield 1 healthy)/$(sfield 2 healthy)"
-[ "$(cat $STATE1/conf/live/kapkan_00_common.conf | grep -c ssl_reject_handshake)" = "1" ] && ok "edge-1's shared file now holds only the QUIC anchor, no TCP catch-all" || bad "catch-all servers in the shared file: $(grep -c ssl_reject_handshake $STATE1/conf/live/kapkan_00_common.conf)"
+[ "$(grep -c ssl_reject_handshake $STATE1/conf/live/kapkan_00_common.conf)" = "1" ] && [ "$(grep -c ssl_reject_handshake $STATE2/conf/live/kapkan_00_common.conf)" = "1" ] && ok "both shared files now hold only the QUIC anchor, no TCP catch-all — the change is on the node being offered the session as much as on the one issuing it" || bad "catch-all servers in the shared files: edge-1 $(grep -c ssl_reject_handshake $STATE1/conf/live/kapkan_00_common.conf), edge-2 $(grep -c ssl_reject_handshake $STATE2/conf/live/kapkan_00_common.conf)"
 r=$(sess 1 1 /tmp/g-same.txt)
 [ "$r" = "Reused" ] && ok "with the catch-all omitted the same session is Reused on edge-1 — the cache and the code path work; the default server was suppressing them" || bad "resumption on its own node under omit_catch_all: '$r'"
+# The positive control on the OTHER node, which is the one the cross-node
+# claim rests on: without it, a New from edge-2 is equally what a broken
+# cache, a mis-rendered ssl_session_cache or a TLS 1.2 misconfiguration there
+# would produce, and the claim below would be vacuous.
+r=$(sess 2 2 /tmp/g-same2.txt)
+[ "$r" = "Reused" ] && ok "and edge-2 resumes its OWN session too: its cache works, so what it refuses below is the session, not the node" || bad "resumption on edge-2's own node under omit_catch_all: '$r'"
 r=$(sess 1 2 /tmp/g-other.txt)
-[ "$r" = "New" ] && ok "and offered to edge-2, whose cache demonstrably works too, it is New: a session does not cross nodes (spec §3 — the session id context is the node's own certificate)" || bad "edge-2 resumed a session from edge-1: '$r'"
+[ "$r" = "New" ] && ok "offered edge-1's session, edge-2 answers New: a session does not cross nodes (spec §3 — the session id context is the node's own certificate)" || bad "edge-2 resumed a session from edge-1: '$r'"
+r=$(sess 2 1 /tmp/g-other2.txt)
+[ "$r" = "New" ] && ok "…and symmetrically, edge-2's session is New on edge-1: neither direction crosses" || bad "edge-1 resumed a session from edge-2: '$r'"
 edge_yaml 1 $STATE1 $SOCKS1; edge_yaml 2 $STATE2 $SOCKS2
 kill_node 1; kill_node 2
-node_nginx 1 edge1 $STATE1; node_nginx 2 edge2 $STATE2; sleep 0.8; start_edge 1; start_edge 2
+node_nginx 1 edge1 $STATE1; node_nginx 2 edge2 $STATE2; wait_nginx 1; wait_nginx 2; start_edge 1; start_edge 2
 wait_healthy 1 40 && wait_healthy 2 40 && ok "the catch-all restored on both nodes" || bad "a node did not come back with the catch-all: $(sfield 1 healthy)/$(sfield 2 healthy)"
 # The clearance cookie is the opposite case, and deliberately so: the keys are
 # the fleet's, so a visitor cleared on one node is cleared on all of them.
@@ -843,7 +1031,7 @@ batch_until 10 tcp /tmp/g-off.txt 50 10
 [ "$(n200 /tmp/g-off.txt)" = "10" ] && ok "the rung off again: 10 of 10 served through the VIP" || bad "after clearing the lever: $(mix /tmp/g-off.txt)"
 
 # ================================================================ ARM H
-say "ARM H — MTU 1200 on ONE leg: HTTP/3 breaks for that node's share, TCP does not"
+say "ARM H — MTU 1200 on ONE leg: HTTP/3 breaks for the whole VIP (a cached PMTU), TCP does not"
 ip netns exec rtr ip link set r-e2 mtu 1200; ip netns exec edge2 ip link set e2-r mtu 1200
 sleep 0.5
 H3TMO=2   # a QUIC handshake into a 1200-byte path cannot complete; it can only time out
@@ -937,6 +1125,9 @@ done
 SH
       chmod 755 /tmp/announce-$n.sh
       ip netns exec "$(ns_of "$n")" /tmp/announce-$n.sh >>/tmp/announce-$n.log 2>&1 &
+      # Recorded, because these loops cannot be found by name later: a script
+      # started by path runs as `/bin/sh /tmp/announce-N.sh`.
+      ANN_PIDS="$ANN_PIDS $!"
     done
     for i in $(seq 1 60); do [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && break; sleep 0.5; done
     [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && ok "both announcements are in the router's FIB as one multipath route ($(vip_route))" || bad "bird did not produce a multipath route: $(vip_route)"
@@ -949,7 +1140,7 @@ SH
     batch 40 tcp /tmp/i-withdrawn.txt
     [ "$(n200 /tmp/i-withdrawn.txt)" = "40" ] && [ "$(served edge-1 /tmp/i-withdrawn.txt)" = "40" ] && ok "nginx killed on edge-2: /healthz 503 -> the protocol disabled -> the nexthop left the FIB -> 40 of 40 on edge-1, ${I_MS} ms from kill to all-edge-1" || bad "after the speaker's withdrawal: $(mix /tmp/i-withdrawn.txt), edge-1 $(served edge-1 /tmp/i-withdrawn.txt)"
     echo "  bird2: kill -> all-edge-1 in ${I_MS} ms" >> /tmp/arm-i.txt
-    node_nginx 2 edge2 $STATE2; sleep 1
+    node_nginx 2 edge2 $STATE2; wait_nginx 2
     for i in $(seq 1 60); do [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && break; sleep 0.5; done
     [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && ok "nginx back: the announcement returns and the route is multipath again" || bad "the route did not come back: $(vip_route)"
     ZONEB_EXTRA=$EXTRA_BROKEN; zones_yaml; reload_brain
@@ -957,7 +1148,9 @@ SH
     sleep 3
     [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && ok "a refused document did NOT withdraw the route: /healthz stayed 200, so the speaker stayed enabled" || bad "a refused document withdrew the route: $(vip_route)"
     ZONEB_EXTRA=""; zones_yaml; reload_brain
-    pkill -f '^/tmp/announce' 2>/dev/null; pkill -f 'bird -c' 2>/dev/null
+    # shellcheck disable=SC2086
+    kill $ANN_PIDS 2>/dev/null; ANN_PIDS=""
+    pkill -f 'announce-[12]\.sh' 2>/dev/null; pkill -f 'bird -c' 2>/dev/null
     route_both
   fi
 fi
@@ -969,12 +1162,17 @@ fi
   cat /tmp/arm-c.txt
   echo
   echo "arm D  (a node dies, nobody withdraws): $D_FAIL of 40 requests failed, $D_OK served;"
-  echo "       the inventory said alive:false ${D_LOST_MS} ms after the kill (stale_after_seconds $STALE)"
+  echo "       the inventory said alive:false ${D_LOST_MS} ms after the kill — stale_after_seconds $STALE"
+  echo "       after the dead node's last sighting, which is the whole of that delay"
   echo "arm D2 (the operator's withdrawal): the first all-200 batch of five completed ${D2_MS} ms after"
   echo "       the \`ip route replace\`, then 40/40 TCP and 20/20 h3 — a withdrawal is a RIB change,"
   echo "       so what bounds recovery is the client's next request, not any Kapkan timer"
-  echo "arm E  (the node's own signal): /healthz turned 503 ${E_MS} ms after nginx died"
-  echo "arm F  (the brain's return): both nodes alive again ${F_MS} ms after it came back (the node's poll backoff)"
+  echo "arm E  (the node's own signal): /healthz turned 503 ${E_MS} ms after nginx died — the bound is one"
+  echo "       controller.report_interval_seconds (1 s in this rig; the product default is 10), the tick the"
+  echo "       terminator-liveness check rides, so an operator withdrawing on /healthz sets it to their probe period"
+  echo "arm F  (the brain's return): both nodes alive again ${F_MS} ms after it came back — what bounds this is"
+  echo "       the node's own poll backoff (1 s doubling to 30 s) and never stale_after: the nodes were alive"
+  echo "       throughout, they simply had nowhere to poll"
   echo "arm H  (MTU 1200 on one leg): $H_FAIL of 40 h3 requests failed while TCP was 40/40 — not a share:"
   echo "       the client caches that path MTU for the VIP itself, so HTTP/3 fails toward the healthy"
   echo "       node too, and stays broken after the link is repaired until the cache is flushed"

@@ -674,31 +674,43 @@ security-relevant.
   `extra_directives_file`, an operator's debugging trick and never a product header. Arms:
   with the route pinned to one node for the whole issuance, the other node's certificate can
   only have come from the **fan-out** (both issued, both published, a slot refused, two
-  different leaves for one name, one document and one ETag for the fleet, no key bytes in the
-  inventory); the two **hash forms** (layer 3 pins one client's 40 connections to one node,
-  layer 4 spreads them over both — over TCP and over `--http3-only` alike, the same policy
-  hashing the UDP 4-tuple); the **per-node ceilings**, whose L3-versus-L4 shares are recorded
+  different leaves for one name, each node reporting the ETag of its OWN document — the two
+  differ under placement, so a shared `zones_etag` is not a fleet-health signal — the shared
+  zone's entry byte-identical in both, no key bytes in the inventory); the two **hash forms**
+  (layer 3 pins one client's 40 connections to one node, layer 4 spreads them over both — over
+  TCP and over `--http3-only` alike, the same policy hashing the UDP 4-tuple); the **per-node
+  ceilings**, whose L3-versus-L4 shares are recorded with each batch's duration beside them
   because they are the guide's "up to N× the ceiling" (a rate-refused source carries no node
   header — the render's `@kapkan_denied` declares its own `add_header` — so refusals are
-  counted at the decider's metric, and the source shows up in *both* nodes' `top_sources`); a
-  **node dying with nobody withdrawing** (a share of requests fails, the keepalive to the dead
-  node breaks and to the live one survives, the inventory says `alive:false` within
-  `stale_after`, and the router's route is byte-identical throughout — the brain touches no
-  routing for a zone address), then the same node reached over a **downed link** (the nexthop
-  goes `dead` and every request is served with no operator action, "a directly connected router
-  notices link loss, a routed hop does not") and the withdrawal as what it really is, one `ip
-  route replace`, timed; the **withdrawal signal** without a BGP daemon — a refused document is
-  *not* one (`converged:false`, `/healthz` 200, the VIP still serving from that node) while a
-  dead terminator *is* (`/healthz` 503 within a second of nginx dying, with the brain's
+  counted at the decider's metric, and the L4 source shows up in *both* nodes' `top_sources`,
+  still reported `allow`). The two hash forms differ there in kind, not only in degree, which
+  the rig asserts and the guide must carry: under L4 the refusals are diluted, while under L3
+  they all land on one node, cross the rollup's flood rule (20 refusals in a window, 30% of
+  that source's decided requests) and promote the source to a **table denial** for `DenyTTL` —
+  a low per-node `rps` under an L3 hash blocks a busy client rather than slowing it. A **node
+  dying with nobody withdrawing** (a share of requests fails, the keepalive to the dead node
+  breaks and to the live one survives, the inventory says `alive:false` `stale_after` after
+  its last sighting, and the router's route is byte-identical throughout — the brain touches
+  no routing for a zone address, and its ban list carries no zone address either), then the
+  same node reached over a **downed link** (the nexthop goes `dead` and every request is served
+  with no operator action, "a directly connected router notices link loss, a routed hop does
+  not") and the withdrawal as what it really is, one `ip route replace`, timed; the
+  **withdrawal signal** without a BGP daemon — a refused document is *not* one
+  (`converged:false`, `/healthz` 200, the VIP still serving from that node) while a dead
+  terminator *is* (`/healthz` 503 within one `controller.report_interval_seconds` of nginx
+  dying — the tick that liveness check rides, 1 s in the rig and 10 s by default, so it is the
+  knob an operator withdrawing on `/healthz` sets to their probe period — with the brain's
   inventory still saying `alive:true`); the brain dead (both nodes serve TCP and h3 through the
-  VIP, `/healthz` 200, alive again within `stale_after` of its return); the two **cross-node
-  facts** a shared address exposes (a TLS session from one node is `New` on the other — spec §3
-  — while a clearance cookie solved on one is honoured, and marked `cleared` at the origin, by
-  the other); and **MTU** 1200 on one leg alone, which breaks HTTP/3 for that node's share of
-  clients while TCP is untouched — and not for its *share* of them: a path MTU is cached per
-  destination address, the destination is the address every node shares, so HTTP/3 fails toward
-  the healthy node too and stays broken after the link is repaired until the client's cache is
-  flushed. A stretch arm behind `ANYCAST_BGP=1`, outside the acceptance path, drives the same
+  VIP, `/healthz` 200, alive again at the nodes' next poll on its return, bounded by the poll's
+  own backoff of 1 s doubling to 30 s and never by `stale_after`); the two **cross-node facts**
+  a shared address exposes (a TLS session from one node is `New` on the other — spec §3 — and
+  the other node's cache is shown to resume its own session first, so that `New` is the session
+  id context and not a broken node; while a clearance cookie solved on one is honoured, and
+  marked `cleared` at the origin, by the other); and **MTU** 1200 on one leg alone, which
+  breaks HTTP/3 while TCP is untouched — and not for that node's *share* of clients: a path MTU
+  is cached per destination address, the destination is the address every node shares, so
+  HTTP/3 fails toward the healthy node too and stays broken after the link is repaired until
+  the client's cache is flushed. A stretch arm behind `ANYCAST_BGP=1`, outside the acceptance path, drives the same
   withdrawal contract with a real bird2 speaker on each node enabled and disabled by a
   once-a-second `/healthz` probe. Test-only; no product change — but the runs caught seven rig
   bugs and **one product finding, not fixed here**: as rendered, a TLS 1.2 session resumes on no
@@ -706,9 +718,13 @@ security-relevant.
   default server and kapkan's catch-all declares no `ssl_session_cache`, so every zone's
   `ssl_session_cache`/`ssl_session_timeout` are dead configuration and every returning client
   pays a full handshake (the same family as the `ssl_protocols` behaviour the shared file already
-  documents). Arm G proves the cause with the supported `omit_catch_all` knob — with the
-  catch-all omitted the session is `Reused` on its own node and still `New` on the other — which
-  is what keeps the cross-node guarantee of edge-spec §3 from being accidentally true.
+  documents). TLS 1.3 is in the same position rather than a different one: with
+  `ssl_session_tickets off` nginx issues stateful tickets it looks up in that same cache, so it
+  too resumes nowhere today and will resume on its own node — never across nodes — once the
+  catch-all carries a cache. Arm G proves the cause with the supported `omit_catch_all` knob —
+  with the catch-all omitted the session is `Reused` on its own node and still `New` on the
+  other — which is what keeps the cross-node guarantee of edge-spec §3 from being accidentally
+  true.
 
 ### Fixed
 
