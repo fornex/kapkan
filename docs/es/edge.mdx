@@ -84,9 +84,9 @@ y ahora [`kapkan edge`](/docs/cli#edge). Instalarlo de principio a fin es la
   o desafió, y a quién se *habría* rechazado o desafiado.
 - **ACME** se ejecuta en cada nodo: las claves de cuenta y los certificados se generan en la
   máquina y nunca salen de ella. El cerebro solo serializa la emisión por zona (un nodo pide a la
-  vez) y reparte un desafío HTTP-01 pendiente a todos los nodos, de modo que la validación de la
-  CA puede caer en cualquiera de ellos. Ambas cosas son orientativas: un nodo renueva con el
-  cerebro ausente.
+  vez) y reparte un desafío HTTP-01 pendiente a todos los nodos que sirven la zona, de modo que la
+  validación de la CA puede caer en cualquiera de ellos. Ambas cosas son orientativas: un nodo
+  renueva con el cerebro ausente.
 
 ### La división rápida/lenta
 
@@ -212,7 +212,9 @@ La respuesta dice dónde actúa la palanca: el modo propio del archivo, los indi
 observación de la zona (`policy.dry_run` y `challenge_options.dry_run` — con cualquiera de los dos,
 la palanca *previsualiza* en lugar de actuar) y cada nodo configurado con su vitalidad y su
 `dry_run` reportado — un nodo que solo cuenta debe verse antes de confiar en la palanca. Es una
-acción de operador (rango `operator`, tokens sin acotar), auditada como `edge_challenge`, llamada
+acción de operador (rango `operator`; un operator [acotado a un tenant](/docs/multi-tenancy) puede
+accionarla solo en sus propias zonas — cualquier otra zona es `404 unknown zone` para él), auditada
+como `edge_challenge`, llamada
 `override` por [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) — la vista
 Edge de la consola muestra el modo que los nodos aplican bajo ella (`manual`, `auto`), no la
 palanca en sí — y guardada en la memoria del cerebro como el coordinador de emisión: una
@@ -374,6 +376,80 @@ Dos cosas más que tener en cuenta: los flujos UDP necesitan tiempos de conntrac
 puede no darles de forma predeterminada, y `quic_gso` (el contexto `http`) es cosa tuya en
 `nginx.conf` si lo quieres — Kapkan no renderiza ninguno de los dos.
 
+## Colocar zonas en los nodos
+
+De forma predeterminada, cada nodo sirve cada zona: un documento, una flota. Una flota con PoPs — un
+sitio en EE. UU. y otro en la UE, pongamos — coloca las zonas en los nodos a lo largo del eje que
+Kapkan ya tiene para los prefijos, el **hostgroup**:
+
+```yaml
+# kapkan.yaml
+hostgroups:
+  - { name: edge-us, networks: ["198.51.100.0/26"] }   # the US PoP's VIP prefix
+  - { name: edge-eu, networks: ["198.51.100.64/26"] }  # the EU PoP's VIP prefix
+edge:
+  nodes:
+    - { name: us-1, hostgroups: [edge-us] }           # US zones only
+    - { name: eu-1, hostgroups: [edge-eu, global] }   # EU zones and the global ones
+    - { name: any-1 }                                 # no scope = the global group alone
+```
+
+```yaml
+# zones.yaml
+zones:
+  - { name: shop.example.com, hostgroup: edge-us, origins: ["10.0.0.10:8080"] }
+  - { name: shop.example.eu,  hostgroup: edge-eu, origins: ["10.0.1.10:8080"] }
+  - { name: www.example.com,  origins: ["10.0.2.10:8080"] }          # global
+```
+
+La regla cabe en una frase: **un nodo sirve una zona cuando el hostgroup de la zona está en el
+alcance del nodo**. El hostgroup de una zona es `zones[].hostgroup`, o `global` cuando no nombra
+ninguno; el alcance de un nodo es `edge.nodes[].hostgroups`, o `[global]` cuando no lista ninguno.
+Las consecuencias, por orden de cuánto muerden:
+
+- **Una etiqueta por sí sola es estricta.** Poner `hostgroup: edge-us` en una zona la retira de todo
+  nodo que no liste `edge-us` — `any-1`, arriba, deja de servirla. El aislamiento y el presupuesto de
+  certificados duplicados de la CA siguen la colocación de forma predeterminada; nada se abre por
+  accidente. Una zona colocada en un grupo de N nodos son N pedidos por emisión, no los de la flota
+  — el límite de [Límites](#límites-que-conviene-conocer) se cuenta por colocación.
+- **`global` es un literal.** Un nodo que debe servir las zonas de su PoP *y* las de toda la flota
+  lista ambos: `[edge-eu, global]`. Un nodo con solo `[edge-eu]` no recibe ninguna zona global.
+- **El alcance sigue al direccionamiento.** Un hostgroup necesita al menos un prefijo dentro de
+  `networks` — el prefijo VIP del PoP, que proteges de todos modos. La colocación no es una segunda
+  topología; es la que ya declaraste.
+- **Cada nodo recibe su propio documento** — exactamente las zonas que cubre su alcance, con sus
+  concesiones de certificado, sus desafíos ACME repartidos, sus claves de pase y sus palancas, y su
+  propio ETag. Un nodo que pide el turno de emisión de una zona que no sirve, o que publica un
+  desafío para ella, recibe el mismo `404 unknown zone` que recibe una zona inexistente. La
+  colocación misma nunca entra en el documento.
+- **Dar alcances exige tokens vinculados.** En cuanto un nodo tiene alcance, todo token `agent` debe
+  llevar [`node`](/docs/authentication#vincular-un-token-de-agente-a-su-nodo) — un alcance aplicado
+  contra un token compartido sería una promesa que nadie cumple. Las flotas sin alcances conservan su
+  margen.
+- **La propiedad y la colocación son dos ejes.** `tenant` dice quién puede ver la zona, y
+  `hostgroup` dónde se sirve; cuando la zona y su hostgroup llevan ambos un tenant deben coincidir, y
+  no se hereda nada — una zona en un grupo etiquetado sigue siendo una zona de la casa salvo que diga
+  otra cosa. La regla es para los hostgroups con nombre: el grupo global es el catch-all de la flota,
+  no el PoP de un tenant, así que una zona etiquetada puede quedarse en global diga lo que diga el
+  `tenant` de nivel superior de `kapkan.yaml`. Un hostgroup que no existe hace fallar la recarga (las
+  zonas anteriores siguen en servicio), como cualquier archivo de zonas roto.
+- **Nunca a velocidad de ataque.** La colocación es un cambio lento, como los orígenes o el TLS:
+  mover una zona vuelve a renderizar los nodos que abandona y a los que llega, y recarga sus
+  terminadores. La [división rápida/lenta](#la-división-rápidalenta) queda intacta.
+
+`kapkan -check-config` imprime la matriz — el alcance de cada nodo, cuántas zonas cubre, su token — y
+avisa sobre una zona que ningún alcance de nodo cubre (no se sirve en ningún sitio hasta que un nodo
+liste su grupo). `GET /api/v1/edge/zones/status` lleva el `placement {hostgroup, nodes, alive}` de
+cada zona y marca `unserved` cuando sus nodos existen pero ninguno está vivo; la respuesta de la
+palanca lista los nodos de la zona, no los de la flota; el inventario muestra los `hostgroups` y
+`zones_placed` de cada nodo. Lo que un nodo afirma sobre una zona fuera de su alcance se guarda en su
+reporte, pero no se fusiona en el estado de la zona.
+
+**Runbook — una zona abandona un nodo.** Sacar una zona de un nodo es una recarga lenta corriente
+allí: el terminador deja de servir el nombre, y los certificados del nodo para ella se quedan en
+disco y dejan de renovarse. Bórralos cuando estés seguro, o déjalos; nada renueva un certificado para
+una zona que el nodo ya no sirve.
+
 ## Qué hace el nodo cuando algo falla
 
 | Fallo | Comportamiento |
@@ -405,8 +481,10 @@ puede no darles de forma predeterminada, y `quic_gso` (el contexto `http`) es co
   zonas** — la última ventana de diez segundos de cada zona, las fuentes que rechazó, desafió o
   habría rechazado o desafiado, y si su peldaño ahí actúa o previsualiza. Ver
   [la API](/docs/api#el-canal-edge).
-- **Las zonas de toda la flota**, `GET /api/v1/edge/zones/status`, fusiona las zonas de los nodos
-  vivos: tasas sumadas, los nodos en los que una zona está en solo observación o bajo un desafío de
+- **Las zonas de toda la flota**, `GET /api/v1/edge/zones/status`, lista cada zona del archivo de
+  zonas y fusiona en ella los reportes de los nodos vivos (un token
+  [acotado a un tenant](/docs/multi-tenancy) recibe sus propias zonas): tasas sumadas, los nodos en
+  los que una zona está en solo observación o bajo un desafío de
   zona completa (actuando o previsualizando), la palanca en vigor y el conjunto de candidatos. La
   vista **Edge** de la consola — que aparece una vez configurado `edge.nodes[]` — lo representa;
   ver [el panel de control](/docs/dashboard).
@@ -438,15 +516,21 @@ puede no darles de forma predeterminada, y `quic_gso` (el contexto `http`) es co
 - **HTTP/3 es por zona y se renderiza donde el nodo puede**, y vale para todo el nodo en lo que
   nginx decide antes del SNI (Retry activo, 0-RTT desactivado), sin migración de conexión ni
   reanudación de sesión entre nodos — ver [HTTP/3 (QUIC)](#http3-quic).
-- **Límites de certificados duplicados.** Certificados por nodo significa que N nodos en una zona
-  son N pedidos; Let's Encrypt limita un nombre a unos cinco por semana. El turno de emisión del
+- **Límites de certificados duplicados.** Certificados por nodo significa que los N nodos en los que
+  una zona está [colocada](#colocar-zonas-en-los-nodos) son N pedidos (toda la flota para una zona
+  global); Let's Encrypt limita un nombre a unos cinco por semana. El turno de emisión del
   cerebro y el jitter de renovación los reparten; `acme.fallback` (ZeroSSL, Google Trust Services
   — ambos necesitan un External Account Binding) es la vía de escape. Planifica las cuentas de CA
   para flotas grandes.
-- **El token agent emite certificados.** Hasta que los tokens se vinculen a los nodos, quien posea
-  el token `agent` puede publicar una respuesta de desafío para cualquier zona a través del
-  cerebro (solo desde un nodo que tenga el turno de emisión de la zona, y cada llamada queda
-  registrada). Rota el token si un nodo se ve comprometido.
+- **El token agent emite certificados — para las zonas de su nodo.** Vincula cada token agent a su
+  nodo (`api.tokens[].node`, ver
+  [autenticación](/docs/authentication#vincular-un-token-de-agente-a-su-nodo)) para que un token
+  robado no pueda actuar como otro nodo, y [coloca las zonas en los nodos](#colocar-zonas-en-los-nodos)
+  para que su nodo sirva solo las zonas que debe: un token vinculado robado podrá entonces tomar el
+  turno de emisión y publicar una respuesta de desafío solo para las zonas que cubre el alcance de su
+  nodo (cada llamada queda registrada), y el compromiso de un nodo es una exposición de certificado
+  para esas zonas, no para las de la flota. Rota el token de ese nodo; el cerebro no guarda nada que
+  robar.
 
 ## Relacionado
 

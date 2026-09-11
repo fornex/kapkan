@@ -31,7 +31,7 @@ una de ellas.
 | `-config <path>` | `configs/dev.yaml` | Ruta al [archivo de configuración](/docs/configuration) YAML. |
 | `-log-format <fmt>` | `json` | Formato de salida de los registros: `json` (estructurado, para recolectores de logs) o `text` (legible para humanos, para ejecuciones locales). Cualquier valor distinto de `text` se trata como `json`. |
 | `-log-level <lvl>` | `info` | Nivel mínimo de registro: `debug`, `info`, `warn`, `error`. Un valor no reconocido recae en `info`. |
-| `-check-config <path>` | — | Valida el archivo de configuración en `<path>` y termina; **no** inicia el demonio. Consulta [más abajo](#validar-una-configuración). |
+| `-check-config <path>` | — | Valida el archivo de configuración en `<path>` y termina; **no** inicia el demonio. Después de la línea `OK` imprime avisos sobre configuración legal pero poco sensata: reglas estáticas que nunca pueden actuar, tokens `agent` no vinculados a un nodo (`api.tokens[].node`) y zonas que ningún alcance de nodo edge cubre; con un bloque `edge` imprime además el alcance, el número de zonas y la vinculación de token de cada nodo. Consulta [más abajo](#validar-una-configuración). |
 | `-dump-schema` | `false` | Imprime el esquema JSON de la configuración en stdout y termina. Consulta [más abajo](#volcar-el-esquema). |
 | `-dump-zones-schema` | `false` | Imprime en stdout el esquema JSON del [archivo de zonas](/docs/zones) que sirve un cerebro edge (`edge.zones_file`) y termina. |
 | `-version` | `false` | Imprime la versión de compilación y termina. La misma versión se expone en tiempo de ejecución mediante `/api/v1/status` y la [métrica](/docs/metrics) `kapkan_build_info`. |
@@ -123,9 +123,15 @@ La división limpia 0/1 encaja directamente en CI o en una comprobación previa 
 
 Una configuración válida todavía puede imprimir un bloque `WARNING` después de la línea `OK`:
 configuración legal que el demonio ejecutará, pero casi con seguridad no lo que querías decir. Hoy
-hay uno: una [regla estática que nunca puede
+hay tres: una [regla estática que nunca puede
 actuar](/docs/dataplane-tuning#reglas-que-nunca-pueden-actuar), nombrando la regla y qué se lleva sus
-paquetes. El código de salida sigue siendo `0`, así que una comprobación existente no se ve
+paquetes; un token `agent` no
+[vinculado a un nodo](/docs/authentication#vincular-un-token-de-agente-a-su-nodo)
+(`api.tokens[].node`), nombrando cada token así; y una zona del archivo de zonas que ningún
+[alcance de colocación](/docs/edge#colocar-zonas-en-los-nodos) de nodo edge cubre, nombrando la zona
+y su hostgroup. Con un bloque `edge`, la sección de configuración resuelta lista además el alcance de
+cada nodo, cuántas zonas cubre y el token vinculado a él (o `SHARED` mientras exista un token agent
+sin vincular). El código de salida sigue siendo `0`, así que una comprobación existente no se ve
 afectada; si quieres que los avisos también rompan la build, busca `WARNING` en la salida además del
 código.
 

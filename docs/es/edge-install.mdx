@@ -43,22 +43,46 @@ edge:
   stale_after_seconds: 15              # a node unheard-from this long counts as lost
 api:
   tokens:
-    - { name: edge-agent, token_env: KAPKAN_EDGE_AGENT_TOKEN, role: agent }
+    - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
+    - { name: edge-2, token_env: KAPKAN_EDGE_2_TOKEN, role: agent, node: edge-2 }
 ```
+
+**Acota las zonas a los nodos** cuando la flota tiene PoPs: da a cada nodo los hostgroups cuyas zonas
+sirve (`edge.nodes[].hostgroups: [edge-us]`, con el literal `global` para las zonas de toda la
+flota) y a cada zona su `hostgroup`; un nodo sin alcance sirve solo las zonas globales, y una zona
+sin hostgroup es global. La regla, el literal `global` y el runbook están en
+[Colocar zonas en los nodos](/docs/edge#colocar-zonas-en-los-nodos); el límite de certificados
+duplicados se cuenta por colocación, no por flota (ver
+[Límites](/docs/edge#límites-que-conviene-conocer)). Dar un alcance a cualquier nodo obliga a que
+todo token agent esté vinculado, como arriba.
 
 `kapkan -check-config /etc/kapkan/config.yaml` valida ambos archivos (sigue `edge.zones_file`), y
 `kapkan -dump-zones-schema` imprime el esquema JSON del archivo de zonas para tu editor. Da a cada
-nodo su propio token `agent`: el cerebro retiene como máximo 4 sondeos por nombre de token (8 en
-total) y responde `429` a uno más, lo que un nodo trata como un fallo y ante el que espera antes
-de reintentar. Un archivo de zonas que no se puede leer o validar en una recarga **mantiene en
+nodo **su propio token `agent`, vinculado a él con `node`**: un token vinculado se rechaza como
+cualquier otro nodo antes de que el cerebro haga nada con el nombre, de modo que un token robado de
+una máquina ya no puede hablar por ningún otro nodo — su presencia, sus reportes y sus turnos ACME
+siguen siendo suyos — y solo hay que rotar ese token. Un archivo de zonas que no se puede leer o
+validar en una recarga **mantiene en
 servicio las zonas anteriores** — el cerebro nunca sirve un documento a medio romper. Todas las
 claves están en la [referencia de zonas](/docs/zones).
 
-<Callout type="info" title="El token agent es una credencial que emite certificados">
+<Callout type="info" title="El token agent es una credencial que emite certificados — vincúlalo">
 Un nodo edge se autentica con un token `agent` (ver [autenticación](/docs/authentication)).
 Además de sondear el documento, usa ese token para coordinar la emisión de certificados a través
-del cerebro. Guárdalo en el archivo de entorno del nodo, nunca en `edge.yaml`, y rótalo si un nodo
-se ve comprometido.
+del cerebro — así que un token **sin vincular** puede actuar como cualquier nodo, y rotarlo tras un
+compromiso significa rotar el de toda la flota. Vincula cada token a su nodo (`api.tokens[].node`);
+hasta que todo token agent esté vinculado, `-check-config`, el log del demonio y el
+`unbound_agent_tokens` del inventario lo dicen. Lo que compra la vinculación es la suplantación y el
+radio de rotación; lo que limita el conjunto de zonas para las que un token vinculado robado puede
+emitir es el [alcance de colocación](/docs/edge#colocar-zonas-en-los-nodos) del nodo: actuando como
+su propio nodo puede tomar el turno de emisión y publicar una autorización de clave ACME solo para
+las zonas que ese alcance cubre (todas las zonas en una flota sin alcances) — trata el compromiso de
+un nodo como una exposición de certificado para las zonas de ese nodo. Migrar una flota desde un
+único token compartido: añade un token vinculado por nodo **con su propio secreto** (un valor
+compartido con la entrada sin vincular es ambiguo y se rechaza con `401` para cada nodo que lo
+presente), cambia el archivo de entorno de cada nodo y mira cómo cambia el `last_token` del
+inventario, y quita la entrada compartida al final — mientras tanto, un token sin vincular sigue
+funcionando. Guarda el token en el archivo de entorno del nodo, nunca en `edge.yaml`.
 </Callout>
 
 ## 2. En la máquina: nginx o Angie
@@ -234,10 +258,14 @@ todos los nodos mientras sus hermanas aplican.
 
 ## Varios nodos y una dirección compartida
 
-Apunta el `controller.name` de cada nodo a su propia entrada de `edge.nodes[]` y pon el mismo
-documento de zonas delante de todos ellos. Bajo anycast o una VIP compartida, la validación
-HTTP-01 de la CA puede caer en cualquier nodo: el nodo que hace el pedido publica su respuesta al
-desafío en el cerebro, que la reparte en el documento, y **todos** los nodos la responden. La
+Apunta el `controller.name` de cada nodo a su propia entrada de `edge.nodes[]` y pon las mismas
+zonas delante de todos ellos — cada nodo detrás de una dirección compartida debe servir la zona, es
+decir, listar su hostgroup en `edge.nodes[].hostgroups` (o dejar la zona global en nodos sin
+alcance). Bajo anycast o una VIP compartida, la validación
+HTTP-01 de la CA puede caer en cualquier nodo detrás de esa dirección: el nodo que hace el pedido
+publica su respuesta al desafío en el cerebro, que la reparte en el documento de **todos los nodos
+que sirven la zona**, y cada uno de ellos la responde; un nodo en el que la zona no está colocada
+rechaza ese Host y no puede responderla. La
 emisión se serializa por zona a través del turno del cerebro para que una flota no agote en una
 tarde el límite de certificados duplicados de una CA, y la renovación lleva jitter por nodo. Todo
 ello es orientativo: con el cerebro ausente, cada nodo sigue renovando por su cuenta.
