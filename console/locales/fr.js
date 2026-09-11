@@ -1,8 +1,11 @@
 /* locales/fr.js — French catalog. Mirrors en.js key-for-key. Technical tokens
    (FlowSpec, RTBH, BGP, NTP/DNS/SYN…, pps, Mb/s, IPs, routes) stay verbatim.
-   One word per concept, as in docs/fr: an API credential is a « token » (never
-   « jeton »), and a scope — a token's tenant or a node's placement — is a
-   « périmètre » (never « portée »). */
+   One word per concept, as in docs/fr/authentication.mdx (the page the console
+   links to; the other French pages are still being aligned with it): an API
+   credential is a « token » (never « jeton »), and the scope of a token (its
+   tenant) or of a node (its placement) is a « périmètre » (never « portée »).
+   The rules engine's host/group scope is a different concept and keeps
+   « portée », as docs/fr/api.mdx does. */
 (function (w) {
   w.KAPKAN_LOCALES = w.KAPKAN_LOCALES || {};
   w.KAPKAN_LOCALES.fr = {
@@ -355,6 +358,44 @@ activeAttacks: { one: "# attaque active", other: "# attaques actives" },
       "ed.h3.tip.silent": "Les autres nœuds n'ont remonté aucune disponibilité HTTP/3 — ils sont peut-être antérieurs à la version qui la remonte.",
       "ed.h3.tip.offserving": "Le fichier de zones ne demande plus HTTP/3, mais ces nœuds gardent un port d'écoute QUIC :",
 
+      /* one zone's stored history + the fleet's events (Edge view, E6.7) */
+      "ed.hist.open": "Ouvrir l'historique enregistré de cette zone",
+      "ed.hist.title": "Historique de la zone",
+      "ed.hist.range.1h": "1 h",
+      "ed.hist.range.24h": "24 h",
+      "ed.hist.range.7d": "7 j",
+      "ed.hist.close": "Fermer",
+      "ed.hist.rps": "Requêtes/s",
+      "ed.hist.refused": "Refusées ou le seraient",
+      "ed.hist.wouldbe": "Seraient refusées",
+      "ed.hist.h3": "Part HTTP/3, %",
+      "ed.hist.nodes": "Nœuds vus",
+      "ed.hist.errors": "4xx / 5xx",
+      "ed.hist.bucket": "Intervalle",
+      "ed.hist.loading": "Lecture de l'historique enregistré…",
+      "ed.hist.error": "L'historique enregistré de la zone n'a pas pu être lu.",
+      "ed.hist.gone": "Cette zone n'est plus dans le fichier de zones ; il n'y a donc aucun historique enregistré à lire pour elle.",
+      "ed.hist.empty": "Aucune fenêtre enregistrée pour cette période.",
+      "ed.hist.off.title": "Aucun historique enregistré",
+      "ed.hist.off.sub": "Les fenêtres des nœuds, leurs sources parlantes et les évènements de la flotte sont conservés dans ClickHouse. Activez le stockage dans la configuration du moteur pour lire une zone sur une heure, un jour ou une semaine, et non sur les dix dernières secondes seulement.",
+      "ed.srcs.title": "Qui aurait été vérifié — sur {t}",
+      "ed.srcs.sub": "Ce qu'un nœud, quel qu'il soit, a fait de plus strict à chaque source sur la période. Les plus actives d'abord.",
+      "ed.srcs.error": "Les sources parlantes de la période n'ont pas pu être lues.",
+      "ed.srcs.empty": "Aucune source n'a été refusée, vérifiée ni pressentie sur cette période.",
+      "ed.srcs.windows": "Fenêtres",
+      "ed.srcs.firstseen": "Vue d'abord",
+      "ed.srcs.lastseen": "Vue en dernier",
+      "ed.state.denied": "refusée",
+      "ed.state.challenged": "vérifiée",
+      "ed.ev.title": "Évènements de la flotte",
+      "ed.ev.sub": "Ce que le moteur a vu changer ces 24 dernières heures, du plus récent au plus ancien.",
+      "ed.ev.empty": "Rien n'a changé ces 24 dernières heures.",
+      "ed.ev.error": "Les évènements de la flotte n'ont pas pu être lus.",
+      "ed.ev.off.sub": "Les évènements de la flotte — un nœud perdu, une génération refusée, un certificat renouvelé — sont conservés dans ClickHouse. Activez le stockage dans la configuration du moteur pour les voir ici.",
+      "ed.ev.when": "Quand",
+      "ed.ev.kind": "Évènement",
+      "ed.ev.detail": "Détail",
+
       "ed.tenant.filter": "Tenant",
       "ed.tenant.all": "Tous les tenants",
       "ed.tenant.none": "Sans étiquette",
@@ -409,6 +450,24 @@ activeAttacks: { one: "# attaque active", other: "# attaques actives" },
       banState: { active: "Actif", withdrawn: "Retiré", rejected: "Rejeté" },
       action: { dataplane: "Rejet dans le noyau (XDP)", none: "Alerte seule", flowspec: "FlowSpec : rejet / limite", divert: "Redirection vers nettoyage", blackhole: "Blackhole (RTBH)" },
       calc: { per_host: "Par hôte", total: "Total du groupe" },
+      edgeEventKind: {
+        node_alive: "Nœud actif",
+        node_lost: "Nœud perdu",
+        version: "Version",
+        dry_run: "Simulation",
+        document_rendered: "Document généré",
+        generation_installed: "Génération installée",
+        generation_refused: "Génération refusée",
+        terminator_alive: "Terminateur",
+        h3_state: "État HTTP/3",
+        cert_issued: "Certificat émis",
+        cert_renewed: "Certificat renouvelé",
+        cert_gone: "Certificat absent",
+        challenge_started: "Vérification activée",
+        challenge_ended: "Vérification levée",
+        clock_skew: "Décalage d'horloge",
+        report_truncated: "Rapport tronqué"
+      },
       attackType: {
         ntp_amplification: "Amplification NTP",
         dns_amplification: "Amplification DNS",

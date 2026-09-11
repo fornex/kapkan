@@ -535,6 +535,38 @@ security-relevant.
   brain's table is byte-for-byte the one it always was. Five locales; new Go gates check that
   every i18n key the console uses exists, that its documentation links resolve to a real heading,
   and that every allowlisted asset serves and carries its view registrations.
+- Edge track, E6.7 (history half) — the operator console reads the edge history (milestone E6).
+  Clicking a zone's row in the Edge view opens that zone's stored history under the table over
+  **1 h / 24 h / 7 d** (`step` 60 / 600 / 3600): requests per second per bucket, "refused or would
+  be" (denied + challenged + would-deny + would-challenge; the *preview* tag says the rung bites on
+  no node **now**, while the title becomes **Would be refused** only when the period holds no real
+  refusal either — a rung switched to watch-only an hour ago leaves real denials behind it), an
+  HTTP/3 share line only where some bucket actually saw HTTP/3, and the period's totals — nodes
+  seen, requests, refusals, 4xx/5xx and the bucket width the engine **actually applied**
+  (`step_seconds`, which the brain may raise or cap, not the step asked for). Under it, **Who
+  would have been challenged — over {period}** from `/edge/history/sources`, busiest first, with
+  the live table's own state badges (now one shared lookup, so a source cannot read differently in
+  the two tables, and `denied` / `challenged` — states a ten-second window never carries — have
+  their own tones). For unscoped tokens a **Fleet events** card closes the view: the last 24 h of
+  `/edge/events`, newest first, the sixteen kinds as a locale enum so a newer kapkan's
+  seventeenth renders as its raw name instead of vanishing. Storage off (`available: false`)
+  renders the Traffic view's labelled ghost, never an error; a `403` (a tenant on another
+  tenant's zone, or on the events at all) hides the element rather than reporting a fault; a zone
+  a reload has dropped from the zones file says so instead of showing a failure; a `404` on
+  `/edge/events` is a kapkan older than the endpoint, so that card too is dropped in silence
+  rather than banging every ten seconds on a route that does not exist. A failure of the sources
+  read alone is said out loud in the sources card, which keeps its head and shows the error —
+  a table that simply vanished would read as "no source was telling in this period". The zone's
+  two reads are issued when a zone is opened or its range changes, the fleet's events whenever the
+  Edge view is on screen for an unscoped token; all three carry a ten-second freshness guard and
+  are **not** in the console's three-second poll, a late answer for a zone or range the operator
+  has since left is discarded, and a zone switched under an in-flight read starts one replacement
+  pair of ClickHouse queries rather than two. The zone row is a proper toggle for the keyboard —
+  `aria-expanded`, a title that offers to close the card it opened, and focus handed back to the
+  row when the card closes or the view re-mounts under the poll. 36 strings and the sixteen-member
+  `edgeEventKind` enum in all five locales, the enum pinned to the kinds the write path emits and
+  the response fields the console reads pinned to their structs by new tests; the dashboard page
+  documents the card.
 - Edge track, E5.8 — the acceptance rig, `engine/scripts/labnet/edge-e5.sh` (edge-spec §8, E5): the E4
   rig's netns topology on **Debian 13** — stock nginx 1.26.3 with the HTTP/3 module and curl 8.14.1
   with HTTP3, no third-party repository — with the brain **inside the edge netns** and its XDP data
@@ -692,6 +724,10 @@ security-relevant.
 
 ### Fixed
 
+- Console: the storage-off placeholder chart on the Traffic view (and now on the Edge view's
+  history cards) re-rolled its random shape on every 3 s poll and twitched as if it were live
+  data; the shape is drawn once per page load. Noticed while the Edge view took the same ghost
+  over (E6.7).
 - Storage: rows enqueued just before shutdown were lost when they filled a batch — the
   size-triggered flush sent on the run context, which the shutdown had just cancelled, so the
   POST failed with `context canceled` and the rows were counted as errors. Every flush now sends
