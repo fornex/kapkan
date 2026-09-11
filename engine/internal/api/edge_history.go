@@ -157,11 +157,13 @@ func clip(s string) string {
 }
 
 // challengeMode narrows the report's challenge mode to the three values the
-// document defines; anything else a node sends is "other". The column is
+// document defines; anything else a node SENT is "other", and a report that
+// carries no mode at all (a node older than the field) stays empty — two
+// different facts for whoever reads the column. The column is
 // LowCardinality, and its cardinality is the document's, not a node's.
 func challengeMode(s string) string {
 	switch s {
-	case edgedoc.ChallengeOff, edgedoc.ChallengeManual, edgedoc.ChallengeAuto:
+	case "", edgedoc.ChallengeOff, edgedoc.ChallengeManual, edgedoc.ChallengeAuto:
 		return s
 	}
 	return "other"

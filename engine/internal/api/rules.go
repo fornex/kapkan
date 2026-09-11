@@ -226,7 +226,9 @@ func (s *Server) handleDataplaneRules(w http.ResponseWriter, r *http.Request) {
 		changed := s.mit.RulesChanged()
 		// A reload may have removed the node, the token, or moved the
 		// token's binding while the poll was parked (E6.1): end the hold the
-		// way a first poll would now be answered.
+		// way a first poll would now be answered — and wake for the reload
+		// itself, so the refusal comes at once, not at the deadline.
+		reloaded := s.store.Changed()
 		if code, msg := s.rulesHoldStillValid(c, node); code != 0 {
 			writeError(w, code, msg)
 			return
@@ -258,6 +260,9 @@ func (s *Server) handleDataplaneRules(w http.ResponseWriter, r *http.Request) {
 			// (e.g. a change to a non-divert ban), in which case we keep
 			// holding out the same deadline rather than returning a spurious
 			// "nothing changed" early.
+		case <-reloaded:
+			// A configuration reload: the loop re-checks the node and the
+			// token (a rebound or removed one ends here) and re-hashes.
 		}
 	}
 }
