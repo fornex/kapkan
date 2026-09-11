@@ -315,16 +315,91 @@
         });
       }).catch(function () { return { ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] }; });
     },
-    /* edge-node inventory (Edge view, E5.5): each node's last self-report, for
-       the per-node detail the merged zone status cannot carry — terminator.h3's
-       state and advisory behind the HTTP/3 cell's tooltip. Fetched beside the
-       zone status, which already gates the view; a 403 or a failure here costs
-       the tooltip's detail, never the table. */
+    /* edge-node inventory. Two readers, one fetch:
+         - the Edge nodes view (E6.7) renders the whole document — each node's
+           placement scope, the agent tokens bound to it and its last report;
+         - the Edge view's HTTP/3 cell (E5.5) reads only terminator.h3 for the
+           per-node detail the merged zone status cannot carry.
+       Unscoped tokens only, like the scrub inventory: a 403 is reported as
+       FORBIDDEN, not as an error, so the Edge nodes view can show the
+       admin-only notice and the HTTP/3 tooltip can degrade to bare node names
+       instead of the table claiming an empty fleet.
+       unbound_agent_tokens is absent once every agent token is bound. */
     getEdgeNodes: function () {
       return request("/api/v1/edge/nodes").then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, total: 0, staleAfter: 15, nodes: [], unbound: [] };
         if (!res.ok) throw new Error("edge nodes -> " + res.status);
-        return res.json().then(function (r) { return { ok: true, nodes: r.nodes || [] }; });
-      }).catch(function () { return { ok: false, nodes: [] }; });
+        return res.json().then(function (r) {
+          return { ok: true, forbidden: false, total: r.nodes_total || 0,
+            staleAfter: r.stale_after_seconds || 15, nodes: r.nodes || [],
+            unbound: r.unbound_agent_tokens || [] };
+        });
+      }).catch(function () { return { ok: false, forbidden: false, total: 0, staleAfter: 15, nodes: [], unbound: [] }; });
+    },
+    /* ---- edge history (E6.6 reads; the Edge view's zone card) ----
+       All three are on-demand reads with a freshness guard in app.js, never
+       part of the 3s poll: they hit ClickHouse, and the windows they read are
+       ten seconds long.
+
+       Three answers are distinct and must stay so:
+         available:false — storage is off. NOT an error and NOT an empty
+           period: the engine never looked at the zone, so the view shows the
+           same "enable storage" ghost the Traffic view uses.
+         forbidden — 403. A tenant-scoped token on another tenant's zone, or
+           on /edge/events at all (the events name nodes). The element is
+           hidden rather than shown as an error: the answer is deliberately
+           uninformative, so there is nothing to report.
+         ok:false — a real failure (502, a dropped connection). Said out loud,
+           because a zone WITH storage on and no answer is not a quiet zone.
+       notFound is the fourth: a zone gone from the zones file (a lever kept
+       its row). Nothing to read, and not a fault.
+       absent is the fifth, on /edge/events only: a kapkan older than the
+       endpoint itself. Also not a fault — see getEdgeEvents. */
+    getEdgeHistory: function (zone, fromISO, toISO, step) {
+      var qs = "zone=" + encodeURIComponent(zone) +
+        "&from=" + encodeURIComponent(fromISO) + "&to=" + encodeURIComponent(toISO) + "&step=" + step;
+      return request("/api/v1/edge/history?" + qs).then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, available: false, points: [] };
+        if (res.status === 404) return { ok: false, notFound: true, available: false, points: [] };
+        if (!res.ok) throw new Error("edge history -> " + res.status);
+        return res.json().then(function (r) {
+          return { ok: true, available: !!r.available, zone: r.zone || zone,
+            /* the brain may raise or cap the step it was asked for — the
+               response's own value is the one the buckets were built with */
+            stepSeconds: r.step_seconds || step, points: r.points || [] };
+        });
+      }).catch(function () { return { ok: false, available: false, points: [] }; });
+    },
+    getEdgeHistorySources: function (zone, fromISO, toISO, state) {
+      var qs = "zone=" + encodeURIComponent(zone) +
+        "&from=" + encodeURIComponent(fromISO) + "&to=" + encodeURIComponent(toISO);
+      if (state) qs += "&state=" + encodeURIComponent(state);
+      return request("/api/v1/edge/history/sources?" + qs).then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, available: false, sources: [] };
+        if (res.status === 404) return { ok: false, notFound: true, available: false, sources: [] };
+        if (!res.ok) throw new Error("edge history sources -> " + res.status);
+        return res.json().then(function (r) {
+          return { ok: true, available: !!r.available, sources: r.sources || [] };
+        });
+      }).catch(function () { return { ok: false, available: false, sources: [] }; });
+    },
+    getEdgeEvents: function (fromISO, toISO) {
+      var qs = "from=" + encodeURIComponent(fromISO) + "&to=" + encodeURIComponent(toISO);
+      return request("/api/v1/edge/events?" + qs).then(function (res) {
+        if (res.status === 403) return { ok: false, forbidden: true, available: false, events: [] };
+        /* absent is the fifth answer, and only /events has it: a kapkan older
+           than the endpoint has no route to refuse or to serve, so its 404 is
+           "this kapkan has no fleet events", not a fault. The card is dropped
+           the way a 403 drops it — a loud banner re-read every ten seconds
+           would be the console shouting at a brain that is merely older. The
+           zone reads cannot use the same rule: there a 404 is an answer about
+           the ZONE (gone from the zones file), which the card does say. */
+        if (res.status === 404) return { ok: false, absent: true, available: false, events: [] };
+        if (!res.ok) throw new Error("edge events -> " + res.status);
+        return res.json().then(function (r) {
+          return { ok: true, available: !!r.available, events: r.events || [] };
+        });
+      }).catch(function () { return { ok: false, available: false, events: [] }; });
     },
     getTraffic: function (key, fromISO, toISO, step) {
       var qs = "key=" + encodeURIComponent(key);

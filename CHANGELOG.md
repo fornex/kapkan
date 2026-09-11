@@ -379,9 +379,9 @@ security-relevant.
   so a fleet migrates one node at a time, and is named in four places until it is bound:
   `kapkan -check-config` (WARNING), the daemon's log at start and on every reload, the edge
   inventory (`unbound_agent_tokens`, and per node `tokens` and `last_token` — the token that last
-  polled as it), and the console (a later E6 change). Making an unbound agent token an error is
-  scheduled for a MAJOR release; there is deliberately no switch to make it one today. The zones
-  document is untouched: a fleet without bindings gets byte-identical documents and ETags, so the
+  polled as it), and the console's **Edge nodes** view (E6.7). Making an unbound agent token an
+  error is scheduled for a MAJOR release; there is deliberately no switch to make it one today.
+  The zones document is untouched: a fleet without bindings gets byte-identical documents and ETags, so the
   upgrade reloads nothing. Config surface: `api.tokens[].node` (schema, overlay, config builder).
 - Edge track, E6.2 — a zone belongs to a tenant (milestone E6, fleet). `zones[].tenant` is an
   optional ownership label on the hostgroups' tenant axis — never inherited (not from
@@ -406,10 +406,10 @@ security-relevant.
   nothing more, the operator sees a leaked scoped token walking hostnames. Every zone of the file
   that turns h3 on shows `h3.enabled`, with `serving`/`unsupported` from the alive nodes'
   `terminator.h3` — a `mode: none` zone included — and the document sums the nodes'
-  `certs_truncated` beside `zones_truncated`. The shipped console renders a zone no alive node
-  reports yet with `nodes: 0` and no challenge; the Edge view's cells for those rows are a later E6
-  change. Config surface: `zones[].tenant` (zones schema), `api.tokens.tenant` overlay entry marked
-  server-verified.
+  `certs_truncated` beside `zones_truncated`. From E6.7 the console rows those zones — the ones no
+  alive node reports yet — as dashes with the reason in the challenge column, and puts the tenant
+  label under each zone name. Config surface: `zones[].tenant` (zones schema), `api.tokens.tenant`
+  overlay entry marked server-verified.
 - Edge track, E6.4 — the edge history's storage (milestone E6, analytics). Three ClickHouse
   tables beside the three the brain always had: `edge_windows` (one row per edge node, zone and
   closed ten-second window — the report's counters, response statuses, HTTP/3 requests and the
@@ -507,6 +507,66 @@ security-relevant.
   certificates stay on disk and stop renewing (runbook, not automation). Config surface: both
   schemas, the overlay, docs (zones, configuration, edge *Placing zones on nodes* + Limits,
   edge-install, api, authentication).
+- Edge track, E6.7 (fleet) — the console half of E6 (edge-spec §8; no engine behaviour change). A
+  new **Edge nodes** view carries one row per *configured* node and keeps the scrubbing Nodes
+  view's discipline about provenance: what the brain knows — liveness (the zones poll is the only
+  liveness signal), the agent tokens bound to the node or, where an agent token is still unbound,
+  an amber **shared token** badge, the token that last polled as it, the node's placement scope
+  and its `zones_placed` — sits beside what the node claims, each column labelled *(reported)*:
+  its Kapkan version, the terminator it orchestrates with the live generation, that terminator's
+  HTTP/3 readiness and the certificates it holds, amber inside thirty days of expiry and red
+  inside seven, with a list the node cut to fit its report saying so rather than reading as a
+  shorter fleet. While `unbound_agent_tokens` is non-empty a banner names those tokens — an
+  unbound agent token may poll and report as *any* node — and links to *Binding an agent token to
+  its node*; both it and the badge vanish once every token is bound. The inventory is
+  unscoped-only, so a scoped token gets the *visible to unscoped tokens only* notice, not an error.
+  In the **Edge** view, the **Nodes** column now reads `placement` rather than who happens to be
+  reporting: `2/2` alive of placed, `0/1` with a red **UNSERVED** badge, the node names in the
+  tooltip and the hostgroup underneath for unscoped readers, and a dash — never `0/0` — for a
+  zone no node's scope covers, which is a `-check-config` warning and not an outage. Rows the
+  zones file seeds but no node reports show dashes instead of zeros and say why in the challenge
+  column, decided from the placement: *proxy only* for `policy.mode: none`, *not served by any
+  alive node* when the placed nodes are all down or nothing places the zone, *no report yet* when
+  a placed node is alive but silent. With a tenant on a row, an unscoped reader also gets the
+  label under each zone name and a row of tenant chips that narrows the table and the *Who would
+  be challenged* set together (remembered for the browser session; a choice that names nothing on
+  screen is forgotten rather than left to re-engage). A scoped operator sees its own slice with no
+  chips, no tenant column and no hostgroup. Every E6 field is optional on the wire, so a pre-E6
+  brain's table is byte-for-byte the one it always was. Five locales; new Go gates check that
+  every i18n key the console uses exists, that its documentation links resolve to a real heading,
+  and that every allowlisted asset serves and carries its view registrations.
+- Edge track, E6.7 (history half) — the operator console reads the edge history (milestone E6).
+  Clicking a zone's row in the Edge view opens that zone's stored history under the table over
+  **1 h / 24 h / 7 d** (`step` 60 / 600 / 3600): requests per second per bucket, "refused or would
+  be" (denied + challenged + would-deny + would-challenge; the *preview* tag says the rung bites on
+  no node **now**, while the title becomes **Would be refused** only when the period holds no real
+  refusal either — a rung switched to watch-only an hour ago leaves real denials behind it), an
+  HTTP/3 share line only where some bucket actually saw HTTP/3, and the period's totals — nodes
+  seen, requests, refusals, 4xx/5xx and the bucket width the engine **actually applied**
+  (`step_seconds`, which the brain may raise or cap, not the step asked for). Under it, **Who
+  would have been challenged — over {period}** from `/edge/history/sources`, busiest first, with
+  the live table's own state badges (now one shared lookup, so a source cannot read differently in
+  the two tables, and `denied` / `challenged` — states a ten-second window never carries — have
+  their own tones). For unscoped tokens a **Fleet events** card closes the view: the last 24 h of
+  `/edge/events`, newest first, the sixteen kinds as a locale enum so a newer kapkan's
+  seventeenth renders as its raw name instead of vanishing. Storage off (`available: false`)
+  renders the Traffic view's labelled ghost, never an error; a `403` (a tenant on another
+  tenant's zone, or on the events at all) hides the element rather than reporting a fault; a zone
+  a reload has dropped from the zones file says so instead of showing a failure; a `404` on
+  `/edge/events` is a kapkan older than the endpoint, so that card too is dropped in silence
+  rather than banging every ten seconds on a route that does not exist. A failure of the sources
+  read alone is said out loud in the sources card, which keeps its head and shows the error —
+  a table that simply vanished would read as "no source was telling in this period". The zone's
+  two reads are issued when a zone is opened or its range changes, the fleet's events whenever the
+  Edge view is on screen for an unscoped token; all three carry a ten-second freshness guard and
+  are **not** in the console's three-second poll, a late answer for a zone or range the operator
+  has since left is discarded, and a zone switched under an in-flight read starts one replacement
+  pair of ClickHouse queries rather than two. The zone row is a proper toggle for the keyboard —
+  `aria-expanded`, a title that offers to close the card it opened, and focus handed back to the
+  row when the card closes or the view re-mounts under the poll. 36 strings and the sixteen-member
+  `edgeEventKind` enum in all five locales, the enum pinned to the kinds the write path emits and
+  the response fields the console reads pinned to their structs by new tests; the dashboard page
+  documents the card.
 - Edge track, E6.10 — the fleet acceptance rig, `engine/scripts/labnet/edge-e6.sh` (edge-spec §8,
   E6): the E5 topology on Debian 13 with a **real ClickHouse** beside the brain (the binary of the
   image CI pins; the rig prints the version it ran against) and no XDP — two nodes, five zones
@@ -749,6 +809,10 @@ security-relevant.
 
 ### Fixed
 
+- Console: the storage-off placeholder chart on the Traffic view (and now on the Edge view's
+  history cards) re-rolled its random shape on every 3 s poll and twitched as if it were live
+  data; the shape is drawn once per page load. Noticed while the Edge view took the same ghost
+  over (E6.7).
 - Storage: rows enqueued just before shutdown were lost when they filled a batch — the
   size-triggered flush sent on the run context, which the shutdown had just cancelled, so the
   POST failed with `context canceled` and the rows were counted as errors. Every flush now sends

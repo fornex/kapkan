@@ -90,6 +90,25 @@
 .attacks-tbl .attack-detail-row td { padding: 0; background: var(--inset); border-bottom: 1px solid var(--border); }
 .attacks-tbl .attack-detail-row:hover td { background: var(--inset); }
 
+/* Edge zones table — a row opens that zone's stored history below the table,
+   so the rows carry the same affordance the attacks table does. */
+.edge-tbl tr.is-clickable { cursor: pointer; }
+.edge-tbl .target-cell { line-height: 1.35; }
+.edge-tbl .target-cell .ico { width: 14px; height: 14px; color: var(--muted); }
+.edge-tbl tr.is-open { background: var(--surface-2); }
+.edge-tbl tr.is-open td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* One zone's history card: the charts side by side (they share an x-axis, so
+   they read as one period) and the period's totals under them. */
+.hist-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s-4); }
+.hist-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--s-3); margin-top: var(--s-4);
+  background: var(--inset); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-4);
+}
+.hist-stat__lbl { font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+.hist-stat__val { font-size: var(--t-lg); font-weight: 700; color: var(--text-strong); font-variant-numeric: tabular-nums; margin-top: 2px; }
+
 /* Hosts: aggregate traffic summary above the top-talkers list */
 .host-agg { display: flex; align-items: center; gap: var(--s-5); }
 .host-agg__label { font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
@@ -324,6 +343,15 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
 .seg { display: inline-flex; background: var(--inset); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 3px; gap: 2px; }
 .seg__btn { border: none; background: none; color: var(--muted); font-size: var(--t-sm); font-weight: 600; padding: 5px 11px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
 .seg__btn.is-on { background: var(--accent); color: var(--accent-ink); }
+/* a segmented control that may hold an unbounded number of options — the
+   Edge view's tenant chips, one per customer — must wrap rather than push the
+   table's own horizontal scroll out to the width of the tenant list */
+.seg--wrap { display: flex; flex-wrap: wrap; }
+
+/* The edge fleet inventory carries ten columns; on a narrow window .tablewrap
+   scrolls it, and a squeezed column must not break a node's NAME across two
+   lines — the name is its identity, and "edge-\n1" reads as a different box. */
+.fleet-tbl .target-cell { white-space: nowrap; }
 
 /* ============================================================================
    Rate-vs-baseline bar (Hosts)
