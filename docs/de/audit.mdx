@@ -30,8 +30,10 @@ im Prozess-Log.
 
 ## Was aufgezeichnet wird
 
-Fünf Aktionen werden auditiert. `ban`, `config_reload` und `source_block` werden sowohl bei Erfolg
-als auch bei Fehlschlag aufgezeichnet; `unban` und `source_unblock` werden nur bei Erfolg
+Sechs Aktionen werden auditiert. `ban`, `config_reload` und `source_block` werden sowohl bei Erfolg
+als auch bei Fehlschlag aufgezeichnet; `edge_challenge` bei jedem `200` — das Lösen eines Hebels,
+der gar nicht aktiv war, zeichnet dennoch `cleared` auf, nur ein verweigerter Hebel (`404`, `400`,
+`409`) bleibt außen vor; `unban` und `source_unblock` werden nur bei Erfolg
 aufgezeichnet — eine fehlgeschlagene oder wirkungslose Entfernung gibt einen Fehler zurück und wird
 nicht in die Spur geschrieben, obwohl sie dennoch protokolliert wird (ein fehlgeschlagener Unban ist
 ein `404 "no active ban"`, keine Richtlinienentscheidung, es gibt also nichts zu attribuieren):
@@ -43,6 +45,7 @@ ein `404 "no active ban"`, keine Richtlinienentscheidung, es gibt also nichts zu
 | `config_reload` | `POST /api/v1/config/reload` | `ok` bei Erfolg; `error`, wenn die neue Konfiguration nicht geparst oder validiert werden kann. |
 | `source_block` | `POST /api/v1/dataplane/sources` | `blocked` bei Erfolg; `rejected`, wenn die Policy ihn verweigert. Ein verweigerter Source-Block ist selbst eine Operator-Aktion und wird wie ein verweigerter Ban attribuiert. Die [Fingerprint-Ebene](/docs/fingerprinting) schreibt ebenfalls `source_block`-Einträge — `source: "auto"`, nur bei Erfolg —, wenn sie eine JA4 blockiert. |
 | `source_unblock` | `POST /api/v1/dataplane/sources/unblock` | `removed` bei Erfolg. |
+| `edge_challenge` | `POST`/`DELETE /api/v1/edge/zones/{name}/challenge` | `set`, wenn der [Hebel](/docs/edge#der-hebel) gezogen wird, `cleared`, wenn er gelöst wird (`DELETE` oder `mode: off`, ob ein Hebel aktiv war oder nicht); `reason` ist auf `set` `<mode> until <RFC 3339>; <Grund des Operators>`, auf `cleared` der Grund des Operators (`mode: off`) oder leer (`DELETE`). Ein verweigerter Hebel — eine unbekannte oder außerhalb des Mandanten liegende Zone, ein ungültiger TTL, eine Zone in `mode: none` — wird nicht geschrieben. |
 
 Eine **abgelehnte** Aktion wird bewusst auditiert: ein Ban, der von der Whitelist, den
 konfigurierten `networks` oder einer [Blast-Radius-Absicherung](/docs/safety) zurückgewiesen wird,
@@ -80,7 +83,7 @@ Lesezugriffe.
 | --- | --- | --- |
 | `from` | now − 1h | RFC 3339 Beginn des Fensters. |
 | `to` | now | RFC 3339 Ende des Fensters. Muss nach `from` liegen; das Fenster darf **31 days** nicht überschreiten. |
-| `action` | (alle) | Filter auf eines von `ban`, `unban`, `config_reload`, `source_block`, `source_unblock`. |
+| `action` | (alle) | Filter auf eines von `ban`, `unban`, `config_reload`, `source_block`, `source_unblock`, `edge_challenge`. |
 | `target` | (alle) | Filter auf eine IP. Muss für den Mandanten des Aufrufers sichtbar sein, sonst ist die Anfrage `403`. |
 
 Der Endpoint gibt höchstens ~1000 Einträge pro Abfrage zurück, neueste zuerst. Wenn Sie dieses
@@ -120,17 +123,17 @@ Jeder Eintrag trägt diese Felder:
 | Feld | Hinweise |
 | --- | --- |
 | `event_time` | UTC, `YYYY-MM-DD HH:MM:SS`. |
-| `action` | `ban`, `unban`, `config_reload`, `source_block` oder `source_unblock`. |
-| `result` | `active`, `rejected`, `withdrawn`, `ok`, `error`, `blocked` oder `removed`. |
+| `action` | `ban`, `unban`, `config_reload`, `source_block`, `source_unblock` oder `edge_challenge`. |
+| `result` | `active`, `rejected`, `withdrawn`, `ok`, `error`, `blocked`, `removed`, `set` oder `cleared`. |
 | `operator` | Der Name des passenden API-Tokens; leer im offenen (token-losen) Modus. |
 | `role` | Die Rolle des Aufrufers (`viewer` / `operator`). |
 | `tenant` | Der Mandanten-Scope des Aufrufers; leer für einen ungebundenen (Admin-)Aufrufer. |
-| `target` | Die IP bei `ban`/`unban`; `source->victim` bei `source_block`/`source_unblock`; leer bei `config_reload`. |
-| `target_type` | `host` bei `ban`/`unban`; `source` bei `source_block`/`source_unblock`; `global` bei `config_reload`. |
-| `reason` | Ablehnungs- oder Fehlerdetail; leer bei Erfolg. |
+| `target` | Die IP bei `ban`/`unban`; `source->victim` bei `source_block`/`source_unblock`; die Zone bei `edge_challenge`; leer bei `config_reload`. |
+| `target_type` | `host` bei `ban`/`unban`; `source` bei `source_block`/`source_unblock`; `zone` bei `edge_challenge`; `global` bei `config_reload`. |
+| `reason` | Ablehnungs- oder Fehlerdetail; leer bei Erfolg — außer bei `edge_challenge`: auf `set` der Modus, sein Ende und der Grund des Operators, auf `cleared` der Grund des Operators oder leer. |
 | `source` | `api` für eine Operator-Aktion oder `auto` für eine engine-initiierte. Heute schreibt die [Fingerprint-Ebene](/docs/fingerprinting) `source_block`-Einträge mit `source: "auto"` — und ohne Operator, Rolle oder Mandant —, wenn die JA4 eines Clients auf der Blockliste steht. |
-| `ban_state` | Der finale Ban-Zustand bei `ban`/`unban`; leer bei `config_reload` und den Source-Block-Aktionen. |
-| `dry_run` | `1`, wenn das Deployment im [dry-run](/docs/safety) ist. |
+| `ban_state` | Der finale Ban-Zustand bei `ban`/`unban`; leer bei `config_reload`, den Source-Block-Aktionen und `edge_challenge`. |
+| `dry_run` | `1`, wenn die Aktion unter [dry-run](/docs/safety) lief (`ban`/`unban`, die Source-Block-Aktionen); immer `0` bei `config_reload` und `edge_challenge`, die dry-run nicht absichert. |
 
 Eine Abfrage gegen ein Fenster außerhalb des zulässigen Bereichs gibt `400` zurück; ein
 unbekannter `action`-Wert gibt `400` zurück; ein fehlerhaftes `target` gibt `400` zurück. Bei

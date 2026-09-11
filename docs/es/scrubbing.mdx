@@ -130,7 +130,7 @@ scrubbing:
 
 | Clave | Significado |
 | --- | --- |
-| `nodes[].name` | Identidad del nodo. **Debe coincidir** con el `controller.name` que presenta el agente del nodo cuando sondea, o cada sondeo será un sonoro `404`. |
+| `nodes[].name` | Identidad del nodo. **Debe coincidir** con el `controller.name` que presenta el agente del nodo cuando sondea, o cada sondeo será un sonoro `404`. Vincula a él el token `agent` del nodo con `api.tokens[].node` (ver [autenticación](/docs/authentication#vincular-un-token-de-agente-a-su-nodo)): un token vinculado se rechaza como cualquier otro nodo, tanto en el sondeo de reglas como en el reporte. |
 | `nodes[].next_hop` / `next_hop6` | El o los next-hop BGP del nodo. `next_hop` es obligatorio; `next_hop6` es obligatorio para desviar víctimas IPv6 a ese nodo. |
 | `nodes[].capacity_mbps` | La capacidad de scrubbing del nodo, mostrada en la consola y usada por `least_loaded`. `0` significa desconocida. |
 | `nodes[].hostgroups` | Restringe qué [hostgroups](/docs/hostgroups) atiende este nodo. Vacío significa que acepta cualquier grupo. Un grupo cuya escalera desvía debe tener un nodo que lo atienda, o el `next_hop` escalar como fallback. |

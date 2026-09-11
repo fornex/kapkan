@@ -66,19 +66,67 @@ arrancar, no un valor predeterminado silencioso.
 | --- | --- |
 | `viewer` | Solo lectura: estado, ataques, hosts, baneos, métricas. |
 | `operator` | Todo lo que puede hacer un viewer, además de baneo/desbaneo manual, [bloqueos de origen](/docs/api#el-canal-de-bloqueo-de-orígenes) y recarga de configuración (la recarga es exclusiva de admin; consulta más abajo). |
-| `agent` | La credencial de un [nodo de scrubbing](/docs/scrubbing#nodos-de-scrubbing-gestionados): el feed de reglas del dataplane y su propio reporte, y **nada más**. |
+| `agent` | La credencial de un nodo — de un [nodo de scrubbing](/docs/scrubbing#nodos-de-scrubbing-gestionados) o de un [nodo edge](/docs/edge): los sondeos de reglas y de zonas, su propio reporte y la coordinación ACME del edge, y **nada más**. Vincúlalo a su nodo con `node` (más abajo). |
 
 No hay un rol `admin` aparte que asignar: un *admin* es simplemente un token de operator sin ningún `tenant` definido. Los valores de rol que el motor acepta son `viewer`, `operator` y `agent`; la distinción admin/acotado es el eje de [Multi-tenencia](/docs/multi-tenancy), que se trata más abajo.
 
 <Callout type="info" title="El rol agent no es un viewer de menor rango">
-`agent` queda **fuera** de la escala de privilegios, por debajo de `viewer`: concede exactamente dos
-rutas (`GET /api/v1/dataplane/rules` y `POST /api/v1/dataplane/nodes/{name}/report`) y se le deniega
+`agent` queda **fuera** de la escala de privilegios, por debajo de `viewer`: concede exactamente las
+rutas de nodo (los sondeos de reglas y de zonas, los dos autorreportes, el turno ACME del edge y la
+publicación de desafíos) y se le deniega
 cualquier otro endpoint, incluido el canal de bloqueo de orígenes, que instala reglas en el kernel y
-por eso queda reservado al rol operator — un token agent comprometido, que vive en una máquina de scrubbing remota,
+por eso queda reservado al rol operator — un token agent comprometido, que vive en una máquina remota,
 no debe convertirse en una llave que lo lee todo. Tampoco puede acotarse a un tenant: el feed de
 reglas es de todo el despliegue, así que un `tenant` en un token agent es un error de validación
-grave. Dale a cada nodo de scrubbing su propio token agent, nunca uno de operator.
+grave. Dale a cada nodo su propio token agent, nunca uno de operator, y **vincúlalo al nodo**
+(más abajo).
 </Callout>
+
+### Vincular un token de agente a su nodo
+
+Un token agent lleva `node`: el nombre de exactamente una entrada de `edge.nodes[]` o
+`scrubbing.nodes[]`. El cerebro rechaza entonces ese token en cada ruta en la que un nodo se nombra a
+sí mismo — los sondeos (`?node=<name>`), los autorreportes, el turno ACME y la publicación de
+desafíos — cuando el nombre presentado es el de otro nodo, y lo rechaza **antes** de hacer nada con
+ese nombre: no se marca presencia, no se guarda ningún reporte, no se concede ningún turno, no se
+publica ninguna autorización de clave. El rechazo es un `403` uniforme que no nombra al nodo
+vinculado, un aviso por minuto y token en el log del cerebro, y un incremento en
+`kapkan_api_node_binding_refused_total{route}`. Un token vinculado que sondea sin `?node=` también se
+rechaza: su vinculación ya dice qué nodo es.
+
+```yaml
+api:
+  tokens:
+    - { name: edge-fra1, token_env: KAPKAN_EDGE_FRA1, role: agent, node: edge-fra1 }
+    - { name: edge-nyc1, token_env: KAPKAN_EDGE_NYC1, role: agent, node: edge-nyc1 }
+    - { name: scrub-1,   token_env: KAPKAN_SCRUB_1,   role: agent, node: fra1 }
+```
+
+Reglas: `node` solo se permite en tokens `agent`; el nombre debe existir en exactamente una de las dos
+listas de nodos (un nombre presente en ambas se rechaza por ambiguo — los dos canales son dominios de
+confianza distintos); varios tokens pueden vincularse al mismo nodo, que es como se rota un token sin
+dejar un hueco.
+
+Sin `node`, un token agent es una **credencial para toda la flota**: puede sondear como cualquier nodo
+y reportar como cualquier nodo — la razón por la que un token robado obligaba antes a rotarlo para
+toda la flota. Lo que `node` cambia es la suplantación y el radio de rotación; lo que limita el
+conjunto de zonas para las que un token vinculado robado puede emitir es el
+[alcance de colocación](/docs/edge#colocar-zonas-en-los-nodos) del nodo: actuando como su propio nodo
+puede tomar el turno de emisión y publicar una autorización de clave ACME solo para las zonas que ese
+alcance cubre — todas las zonas en una flota sin alcances. Trata el compromiso de un nodo como una
+exposición de certificado para las zonas de ese nodo, y rota el token de ese nodo. Un token sin
+vincular sigue funcionando exactamente como antes, así que una flota migra nodo a nodo — salvo que
+algún nodo tenga un [alcance de colocación](/docs/edge#colocar-zonas-en-los-nodos)
+(`edge.nodes[].hostgroups`): entonces todo token `agent` debe llevar `node`, un error de validación
+grave, porque un alcance aplicado contra un token compartido es una promesa que nadie cumple — y se
+lo nombra hasta que esté vinculado: por `kapkan -check-config` (un WARNING), en el log del demonio al
+arrancar y en cada recarga, y en el inventario edge (`unbound_agent_tokens`; por nodo, `tokens` lista
+los nombres de los tokens vinculados y `last_token` el token que sondeó por última vez como él —
+míralo cambiar durante una migración). Hacer que un token agent sin vincular sea también un error en
+flotas sin alcances está previsto para una versión MAJOR.
+
+La presencia solo la marcan los tokens agent: un operator que sondea con `?node=X` recibe el documento
+de X como **vista previa** y no hace que X parezca vivo.
 
 `token_env` y `tokens` son **mutuamente excluyentes**: `token_env` es exactamente un único token de
 operator. Una solicitud se coteja con cada token configurado (en tiempo constante); se aplica el rol
@@ -88,7 +136,8 @@ de entorno vacía o sin definir nunca coincide, de modo que un secreto mal confi
 cerrada.
 
 Dale a cada token un secreto distinto: si un mismo valor secreto se configura para dos tokens con
-roles o tenants diferentes, la solicitud se rechaza (`401 Unauthorized`) en lugar de adivinar
+roles, tenants o vinculaciones de nodo diferentes (incluidos una entrada sin vincular y otra
+vinculada), la solicitud se rechaza (`401 Unauthorized`) en lugar de adivinar
 cuál querías. El daemon registra `ambiguous API token` cuando esto ocurre.
 
 El *valor* secreto de un token se lee del entorno en cada solicitud, así que rotarlo surte efecto en

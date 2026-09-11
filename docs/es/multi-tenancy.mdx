@@ -9,7 +9,8 @@ export const metadata = {
 Una instancia de Kapkan puede atender a muchos clientes (un caso de uso de proveedor de
 servicios gestionados (MSP) o de centro de datos de internet (IDC)) y dar a cada uno un token
 que ve y modifica **solo sus propios** ataques, baneos y hosts. Un tenant es solo una etiqueta
-opcional en un [hostgroup](/docs/hostgroups) — no hay ningún objeto nuevo de nivel superior, ni
+opcional en un [hostgroup](/docs/hostgroups) — o, en un cerebro edge, en una
+[zona](/docs/zones) —, no hay ningún objeto nuevo de nivel superior, ni
 un registro de tenants aparte, y el camino crítico de detección permanece intacto.
 
 ```yaml
@@ -39,7 +40,7 @@ api:
 
 Tres pasos se corresponden directamente con el YAML de arriba:
 
-1. **Etiqueta el o los hostgroup(s) de cada cliente** con `tenant: "customerA"` (la misma etiqueta puede repetirse en varios grupos — los grupos de web y DNS de un cliente, por ejemplo).
+1. **Etiqueta el o los hostgroup(s) de cada cliente** con `tenant: "customerA"` (la misma etiqueta puede repetirse en varios grupos — los grupos de web y DNS de un cliente, por ejemplo), o sus [zonas edge](/docs/zones) con `zones[].tenant` para un cliente que tiene nombres de host y ningún prefijo.
 2. **Añade un token de API** bajo `api.tokens` que lleve ese mismo `tenant:` más un `role:` — `viewer` es de solo lectura, `operator` también puede banear/desbanear.
 3. **Entrega ese token al cliente.** Ahora ve y modifica solo sus propios prefijos; todo lo demás (otros tenants, grupos sin etiquetar) le es invisible.
 
@@ -51,7 +52,9 @@ Ese es todo el flujo de trabajo. El resto de esta página explica cómo se resue
 prefijo más largo que el motor y el mitigador ya usan para atribuir el tráfico — cuando los
 prefijos se solapan, gana el hostgroup coincidente más específico
 ([longest-prefix match](/docs/glossary)). Un tenant puede abarcar varios hostgroups (un cliente
-con grupos separados de web y DNS).
+con grupos separados de web y DNS). Una [zona edge](/docs/zones) lleva la misma etiqueta
+(`zones[].tenant`), así que un cliente puede ser dueño de nombres de host y de ningún prefijo en
+absoluto.
 
 Cualquier IP que quede fuera de todos los hostgroups con nombre la maneja el **grupo global/de
 respaldo** implícito (el catch-all). Ese grupo global puede llevar un `tenant` de nivel superior
@@ -74,8 +77,11 @@ Un [token de API](/docs/authentication) gana un `tenant` opcional, que se apoya 
 | `tenant: customerA`, `role: operator` | solo customerA | solo customerA |
 
 Un token sin alcance es un administrador — el comportamiento por defecto, totalmente
-retrocompatible. Un token acotado a un tenant que ningún hostgroup usa se rechaza al cargar la
-configuración (de lo contrario, una errata vería silenciosamente nada).
+retrocompatible. Un token acotado a un tenant que ningún hostgroup —y, con un bloque `edge`,
+ninguna [zona](/docs/zones)— usa se rechaza al cargar la configuración (de lo contrario, una errata
+vería silenciosamente nada). Con un bloque edge esa comprobación necesita ambos archivos, así que se
+ejecuta cuando el demonio los carga; el validador del navegador solo ve `kapkan.yaml`, y
+`kapkan -check-config` en la máquina es la comprobación de verdad.
 
 <Callout type="info" title="El rol agent queda fuera de este eje">
 El token `agent` de un [nodo de scrubbing](/docs/scrubbing#nodos-de-scrubbing-gestionados) **no** es
@@ -112,6 +118,18 @@ token con alcance nunca puede caer hacia los datos de otro tenant.
   desbloquear. `POST /api/v1/config/reload`
   es **solo para administradores** — un reload reescribe la política de cada tenant y el propio
   conjunto de tokens.
+- **Zonas edge** — una zona del [archivo de zonas](/docs/zones) lleva también un `tenant` opcional.
+  `GET /api/v1/edge/zones/status` devuelve a un token con alcance solo sus propias zonas — el nombre
+  de host de otro tenant no aparece en ninguna fila, en ningún conjunto de candidatos ni en ninguna
+  lista de HTTP/3, y el campo `tenant` se omite — y un operator con alcance acciona
+  [la palanca](/docs/edge#la-palanca) solo en sus propias zonas: cualquier otra zona, de otro tenant,
+  sin etiquetar o desaparecida del archivo, responde el mismo `404 unknown zone` que recibe un nombre
+  desconocido. El [historial edge](/docs/api#get-apiv1edgehistory) sigue la misma línea: un token con
+  alcance lee el historial y las fuentes que dicen algo de sus propias zonas, cualquier otra zona es
+  un único `403` uniforme, y el filtro por nodo y los eventos de la flota siguen siendo para tokens
+  sin acotar. Los nombres de los nodos en los que se sirve una zona son visibles para su tenant; el
+  documento de zonas, los reportes de los nodos, la coordinación ACME, el inventario de nodos y
+  `config/reload` siguen sin acotar.
 - **La ambigüedad falla cerrada** — si un secreto bearer coincide con tokens de distinto rol o
   tenant (un secreto reutilizado), la solicitud se rechaza en lugar de resolverse al alcance más
   amplio.

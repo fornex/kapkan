@@ -32,7 +32,7 @@ stillschweigend nur eines von beiden zu befolgen.
 | `-config <path>` | `configs/dev.yaml` | Pfad zur YAML-[Konfigurationsdatei](/docs/configuration). |
 | `-log-format <fmt>` | `json` | Log-Ausgabeformat: `json` (strukturiert, für Log-Collectors) oder `text` (menschenlesbar, für lokale Läufe). Jeder andere Wert als `text` wird als `json` behandelt. |
 | `-log-level <lvl>` | `info` | Minimales Log-Level: `debug`, `info`, `warn`, `error`. Ein unbekannter Wert fällt auf `info` zurück. |
-| `-check-config <path>` | — | Validiert die Konfigurationsdatei unter `<path>` und beendet sich — startet den Daemon **nicht**. Siehe [unten](#eine-konfiguration-validieren). |
+| `-check-config <path>` | — | Validiert die Konfigurationsdatei unter `<path>` und beendet sich — startet den Daemon **nicht**. Nach der `OK`-Zeile gibt er Warnungen für zulässige, aber unkluge Konfiguration aus: statische Regeln, die nie greifen können, `agent`-Tokens, die nicht an einen Knoten gebunden sind (`api.tokens[].node`), und Zonen, die kein Geltungsbereich eines Edge-Knotens abdeckt; bei vorhandenem `edge`-Block gibt er zusätzlich den Geltungsbereich, die Zonenzahl und die Token-Bindung jedes Knotens aus. Siehe [unten](#eine-konfiguration-validieren). |
 | `-dump-schema` | `false` | Gibt das JSON-Schema der Konfiguration auf stdout aus und beendet sich. Siehe [unten](#das-schema-ausgeben). |
 | `-dump-zones-schema` | `false` | Gibt das JSON-Schema der [Zonendatei](/docs/zones), die ein Edge-Gehirn ausliefert (`edge.zones_file`), auf stdout aus und beendet sich. |
 | `-version` | `false` | Gibt die Build-Version aus und beendet sich. Dieselbe Version wird zur Laufzeit über `/api/v1/status` und die `kapkan_build_info`-[Metrik](/docs/metrics) bereitgestellt. |
@@ -128,8 +128,15 @@ Die saubere 0/1-Aufteilung fügt sich direkt in CI oder eine Pre-Deploy-Prüfung
 
 Eine gültige Konfiguration kann nach der `OK`-Zeile dennoch einen `WARNING`-Block ausgeben — gültige
 Konfiguration, die der Daemon ausführen wird, aber fast sicher nicht das, was Sie gemeint haben.
-Heute gibt es genau einen Fall: eine [statische Regel, die nie greifen
-kann](/docs/dataplane-tuning#regeln-die-nie-greifen), samt Regelname und dem, was ihre Pakete nimmt.
+Heute gibt es drei Fälle: eine [statische Regel, die nie greifen
+kann](/docs/dataplane-tuning#regeln-die-nie-greifen), samt Regelname und dem, was ihre Pakete nimmt;
+ein `agent`-Token, das nicht [an einen Knoten
+gebunden](/docs/authentication#ein-agent-token-an-seinen-knoten-binden) ist (`api.tokens[].node`),
+samt Namen jedes solchen Tokens; und eine Zone der Zonendatei, die kein
+[Platzierungs-Geltungsbereich](/docs/edge#zonen-auf-knoten-verteilen) eines Edge-Knotens abdeckt,
+samt Zone und ihrer Hostgroup. Bei vorhandenem `edge`-Block listet der Abschnitt zur aufgelösten
+Konfiguration außerdem den Geltungsbereich jedes Knotens auf, wie viele Zonen er abdeckt und das an
+ihn gebundene Token (oder `SHARED`, solange ein ungebundenes agent-Token existiert).
 Der Exit-Code bleibt `0`, eine bestehende Prüfung ist also nicht betroffen; sollen Warnungen den
 Build ebenfalls brechen, prüfen Sie die Ausgabe zusätzlich zum Code auf `WARNING`.
 

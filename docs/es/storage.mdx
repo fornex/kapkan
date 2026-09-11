@@ -1,14 +1,14 @@
 export const metadata = {
   title: "Almacenamiento (ClickHouse)",
   description:
-    "Persistencia opcional en ClickHouse para el historial de ataques y de tráfico — análisis forense y gráficos del panel, sin bloquear nunca la detección.",
+    "Persistencia opcional en ClickHouse para el historial de ataques, de tráfico, de auditoría y del edge — análisis forense y gráficos del panel, sin bloquear nunca la detección.",
 };
 
 # Almacenamiento (ClickHouse)
 
-Apunta Kapkan a un servidor ClickHouse para conservar el historial de ataques y de tráfico —
-la respuesta a "qué nos golpeó el martes pasado". Sin él, Kapkan se ejecuta por completo en
-proceso sobre datos en vivo.
+Apunta Kapkan a un servidor ClickHouse para conservar el historial de ataques, de tráfico, de
+auditoría y del edge — la respuesta a "qué nos golpeó el martes pasado". Sin él, Kapkan se ejecuta
+por completo en proceso sobre datos en vivo.
 
 Necesitas un servidor ClickHouse en ejecución (cualquier versión reciente) para esto. Kapkan se
 comunica con su interfaz HTTP, que escucha en el puerto `8123` por defecto — ese es el puerto de
@@ -66,20 +66,30 @@ los recuentos se quedan en cero.
 Kapkan se comunica con la **interfaz HTTP** de ClickHouse usando la biblioteca estándar de Go —
 sin dependencia de un driver. La única dependencia externa es el propio servidor ClickHouse.
 
-Al arrancar, crea de forma idempotente tres tablas MergeTree:
+Al arrancar, crea de forma idempotente seis tablas MergeTree:
 
 | Tabla | Contenido |
 | --- | --- |
 | `attack_events` | Cada inicio y fin de ataque: tipo, dirección, tasas, las principales fuentes de la muestra, el estado del bloqueo y el `reason` de la detección. |
 | `traffic` | Instantáneas periódicas de tasa y línea base por host (cada `traffic_interval_seconds`). |
-| `audit_events` | Mutaciones atribuidas a un operador: quién emitió cada ban/unban/recarga de configuración, cuándo y con qué resultado. Consulta [Registro de auditoría](/docs/audit). |
+| `audit_events` | Mutaciones atribuidas a un operador: quién emitió cada ban/unban/recarga de configuración/palanca del edge, cuándo y con qué resultado. Consulta [Registro de auditoría](/docs/audit). |
+| `edge_windows` | Una fila por [nodo edge](/docs/edge), zona y ventana cerrada de diez segundos: lo que el nodo vio e hizo — peticiones, veredictos, recuentos de candidatos, estados de respuesta, peticiones HTTP/3, el estado del peldaño. Consulta [Historial edge](#historial-edge). |
+| `edge_sources` | Las fuentes que **dicen algo** de cada ventana — denied, challenged, would-deny, would-challenge — como máximo 20 por nodo, zona y ventana. Los visitantes corrientes no se guardan nunca. |
+| `edge_events` | Transiciones que el cerebro vio en los reportes y la presencia de un nodo: un nodo vivo o perdido, su versión, su dry-run, el documento que renderizó, una generación instalada o rechazada, el terminador vivo o no y su estado de HTTP/3, un certificado emitido, renovado o desaparecido, un desafío de zona completa iniciado o terminado, un desfase de reloj encontrado o recuperado, un reporte que tuvo que encoger. |
 
 Cada una lleva un TTL por fila de `ttl_days`, de modo que la retención queda acotada sin
 intervención del operador.
 
 La credencial de escritura necesita derechos `CREATE` (base de datos + tablas) e `INSERT` en la
-primera ejecución; a partir de entonces basta con `INSERT`. Los fallos de creación del esquema se
-registran al arrancar, no son fatales.
+primera ejecución — y de nuevo en el primer arranque de una versión que añade tablas (esta añade las
+tres tablas `edge_*`); entre medias basta con `INSERT`. La inicialización del esquema intenta todas
+las sentencias y registra cada rechazo por separado (una credencial que puede hacer `INSERT` pero no
+`CREATE` ve esas líneas en cada arranque; son inofensivas una vez que las tablas existen), de modo
+que las tres tablas del edge y las ampliaciones de columnas de abajo se intentan aunque una sentencia
+anterior fuera rechazada, y una actualización cuya credencial ya no puede hacer `CREATE` conserva las
+tablas que siempre tuvo. Si al arrancar aparece `edge history table not created`, haz un arranque con
+una credencial que pueda hacer `CREATE`, o crea la tabla tú mismo con la sentencia de
+`engine/internal/storage/edge_rows.go`.
 
 La columna `reason` de la tabla `attack_events` contiene el JSON compacto del
 [reason](/docs/detection) de la detección — por qué se disparó el ataque (procedencia del
@@ -87,6 +97,81 @@ umbral, calentamiento, cuotas de protocolo) — y está vacía en la fila de fin
 implementaciones existentes obtienen la columna automáticamente: la inicialización del esquema
 ejecuta un `ADD COLUMN IF NOT EXISTS`, que se omite en silencio si la credencial de escritura
 carece de derechos `ALTER` (las instalaciones nuevas ya la tienen).
+
+## Historial edge
+
+Las tres tablas `edge_*` conservan lo que el
+[estado de zonas del edge](/docs/api#get-apiv1edgezonesstatus) muestra durante diez segundos — por
+zona y a lo largo del tiempo. Las llena la ruta de escritura del cerebro a partir de los reportes
+orientativos de los nodos edge, así que cada fila es la afirmación de un nodo; el cerebro suma, nunca
+actúa sobre ella. Las reglas de abajo son el contrato de la ruta de escritura.
+
+- **Ventanas en bruto, agrupadas en la lectura.** `edge_windows` guarda las ventanas de diez segundos
+  de los nodos tal como llegaron (`ORDER BY (zone, ts, node)`); una consulta de historial las suma en
+  cubos con `toStartOfInterval`, exactamente igual que `traffic`. No hay columna `rps` — es
+  `sum(requests) / sum(window_seconds)` — ni compactación en el cerebro.
+- **Dos relojes.** `ts` es el cierre de la ventana según el reloj del **nodo** cuando ese reloj va
+  como mucho diez minutos atrasado o un minuto adelantado respecto al del cerebro; si no, se escribe
+  el reloj del cerebro y un evento `clock_skew` registra el hallazgo. `received_at` es siempre el
+  reloj del cerebro.
+- **Sin columna de tenant.** Qué tenant es dueño de una zona se lee del
+  [archivo de zonas](/docs/zones) vivo en el momento de la consulta (`zones[].tenant`) — una sola
+  verdad, así que reetiquetar una zona no deja filas obsoletas.
+- **Solo las fuentes que dicen algo.** `edge_sources` guarda una fuente solo cuando un nodo la
+  rechazó, la desafió o previsualizó cualquiera de las dos (`would-deny`, `would-challenge`) — como
+  máximo 20 por nodo, zona y ventana: primero las candidatas, luego las rechazadas y las
+  desafiadas, y dentro de cada nivel las más activas. Las fuentes que se dejaron pasar, se
+  admitieron o solo se marcaron son visitantes y no se escriben nunca.
+- **Nada para las zonas tranquilas.** Una zona en `policy.mode: none`, o una zona que decide y no ha
+  cerrado ninguna ventana últimamente (el reporte la lleva sin hora de cierre y sin nada contado), no
+  escribe fila y no cuenta como nada. Una emisión de certificado deja rastro incluso en una zona
+  ociosa: las sondas HTTP-01 de la CA son peticiones que el nodo cuenta (unos pocos `2xx` por
+  validación, `decided` a 0).
+- **Una fila por ventana.** Un reporte que el nodo reenvía — el mismo nodo, zona y hora de cierre —
+  se escribe una sola vez, y un reporte lleva una ventana por zona. Una ventana para una zona que el
+  archivo de zonas no tiene, una ventana (o un certificado, o un desafío) para una zona que la
+  [colocación](/docs/edge#colocar-zonas-en-los-nodos) del nodo que reporta no cubre, una ventana con
+  contadores pero sin hora de cierre, o una segunda ventana para una misma zona en un mismo reporte
+  se omiten; cada parte omitida cuenta en `kapkan_edge_history_dropped_total{reason}`
+  (`unknown_zone`, `outside_scope`, `no_at`, `duplicate`, `extra_window`, `bad_source`,
+  `source_cap`) — mientras el almacenamiento está activo; con él apagado no se escribe nada y no se
+  cuenta nada. El reporte en sí se acepta igualmente y se muestra en vivo; solo el historial omite esa
+  parte. `duplicate` es esperable una vez al final de cada ráfaga, cuando un nodo reporta más a menudo
+  de lo que se cierran sus ventanas.
+- **Transiciones como eventos.** `edge_events` registra lo que cambió entre dos reportes de un nodo —
+  su versión, su dry-run, el documento renderizado, una generación instalada o rechazada, el
+  terminador vivo o no, su estado de HTTP/3, un certificado emitido, renovado o desaparecido, un
+  desafío de zona completa iniciado o terminado, un desfase de reloj encontrado o recuperado, un
+  reporte que tuvo que encoger — cada uno una vez por cambio y, a partir de los sondeos, `node_alive`
+  / `node_lost` (la pérdida se marca cuando ocurrió: el último sondeo más `stale_after`). El primer
+  reporte tras un arranque del cerebro es la línea base y no escribe eventos — salvo `clock_skew`, que
+  va sobre el reloj de la ventana y se escribe también en un primer reporte cuando ese reloj está
+  desfasado. Un certificado o un desafío se registran para una zona que el archivo de zonas tiene, y
+  un reporte que tuvo que soltar su cola (`report_truncated`) no se lee como un "desapareció" de lo
+  que ya no lista. El tic de presencia se ejecuta cada `min(stale_after/2, 5 s)`, nunca por debajo de
+  un segundo; tras un arranque del cerebro un nodo obtiene su línea base en su primer sondeo (en
+  silencio), o se da por perdido una vez pasado `stale_after` sin ninguno — un reinicio nunca es una
+  ráfaga de `node_alive` para toda la flota. Las transiciones de presencia también se registran a
+  nivel INFO, haya almacenamiento o no.
+
+Volumen, por día: `edge_windows` crece en **8 640 × (zonas que deciden con tráfico × nodos vivos)**
+filas (una ventana de diez segundos cada una), `edge_sources` como mucho 20 veces eso, y
+`edge_events` en el puñado de transiciones que tenga una flota. Mide lo que eso cuesta en tu servidor
+en lugar de adivinarlo — los tamaños de fila comprimidos dependen de los nombres de tus zonas y
+nodos:
+
+```sql
+SELECT table, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS on_disk
+FROM system.parts
+WHERE database = 'kapkan' AND active
+GROUP BY table ORDER BY table
+```
+
+La retención es `ttl_days`, como en todas las demás tablas. El historial se lee a través de
+[`GET /api/v1/edge/history`](/docs/api#get-apiv1edgehistory) (cubos), `…/edge/history/sources` (a
+quién se rechazó, se desafió o se habría rechazado o desafiado, a lo largo de un periodo) y
+`GET /api/v1/edge/events` (las transiciones) — y las tablas también son tuyas para consultarlas
+directamente.
 
 ## Contrapresión
 

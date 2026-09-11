@@ -43,22 +43,48 @@ edge:
   stale_after_seconds: 15              # a node unheard-from this long counts as lost
 api:
   tokens:
-    - { name: edge-agent, token_env: KAPKAN_EDGE_AGENT_TOKEN, role: agent }
+    - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
+    - { name: edge-2, token_env: KAPKAN_EDGE_2_TOKEN, role: agent, node: edge-2 }
 ```
+
+**Cadrez les zones sur les nœuds** lorsque la flotte a des PoP : donnez à chaque nœud les
+hostgroups dont il sert les zones (`edge.nodes[].hostgroups: [edge-us]`, avec le littéral `global`
+pour les zones valables sur toute la flotte) et à chaque zone son `hostgroup` ; un nœud sans portée
+ne sert que les zones globales, une zone sans hostgroup est globale. La règle, le littéral `global`
+et le mode opératoire sont dans [Placer les zones sur les
+nœuds](/docs/edge#placer-les-zones-sur-les-nœuds) ; le plafond de certificats en double se compte
+par placement, pas par flotte (voir [Limites](/docs/edge#limites-à-connaître)). Cadrer un nœud,
+quel qu'il soit, impose que chaque token agent soit lié, comme ci-dessus.
 
 `kapkan -check-config /etc/kapkan/config.yaml` valide les deux fichiers (il suit
 `edge.zones_file`), et `kapkan -dump-zones-schema` imprime le schéma JSON du fichier de zones pour
-votre éditeur. Donnez à chaque nœud son propre token `agent` : le cerveau retient au plus 4
-interrogations par nom de token (8 au total) et répond `429` à la suivante, ce qu'un nœud traite
-comme un échec et qui le fait temporiser (back-off). Un fichier de zones qui ne peut être lu ou
+votre éditeur. Donnez à chaque nœud **son propre token `agent`, lié à lui avec `node`** : un token
+lié est refusé sous l'identité de tout autre nœud avant même que le cerveau ne fasse quoi que ce
+soit de ce nom, de sorte qu'un token volé sur une machine ne peut plus parler pour aucun autre nœud
+— sa présence, ses rapports et ses créneaux ACME restent les siens — et seul ce token-là doit être
+renouvelé. Un fichier de zones qui ne peut être lu ou
 validé lors d'un rechargement **garde les zones précédentes en service** — le cerveau ne sert
 jamais un document à moitié cassé. Chaque clé est dans la [référence des zones](/docs/zones).
 
-<Callout type="info" title="Le token agent est un identifiant qui émet des certificats">
+<Callout type="info" title="Le token agent est un identifiant qui émet des certificats — liez-le">
 Un nœud edge s'authentifie avec un token `agent` (voir [authentification](/docs/authentication)).
 Outre l'interrogation du document, il utilise ce token pour coordonner l'émission des certificats
-via le cerveau. Gardez-le dans le fichier d'environnement du nœud, jamais dans `edge.yaml`, et
-faites-le tourner si un nœud est compromis.
+via le cerveau — un token **non lié** peut donc agir sous l'identité de n'importe quel nœud, et le
+renouveler après une compromission revient à renouveler celui de toute la flotte. Liez chaque token
+à son nœud (`api.tokens[].node`) ; tant que chaque token agent n'est pas lié, `-check-config`, le
+journal du démon et l'`unbound_agent_tokens` de l'inventaire le disent. Ce que la liaison apporte,
+c'est l'usurpation d'identité et le rayon de rotation ; ce qui limite l'ensemble des zones pour
+lesquelles un token lié volé peut émettre, c'est la [portée de
+placement](/docs/edge#placer-les-zones-sur-les-nœuds) du nœud : agissant sous l'identité de son
+propre nœud, il ne peut prendre le créneau d'émission et publier une autorisation de clé ACME que
+pour les zones que cette portée couvre (toutes les zones sur une flotte sans portées) — traitez la
+compromission d'un nœud comme une exposition de certificat pour les zones de ce nœud. Pour migrer
+une flotte depuis un unique token partagé : ajoutez un token lié par nœud **avec son propre
+secret** (une valeur partagée avec l'entrée non liée est ambiguë et refusée par un `401` pour chaque
+nœud qui la présente), basculez le fichier d'environnement de chaque nœud et regardez le
+`last_token` de l'inventaire basculer, puis supprimez l'entrée partagée en dernier — un token non
+lié continue de fonctionner entre-temps. Gardez le token dans le fichier d'environnement du nœud,
+jamais dans `edge.yaml`.
 </Callout>
 
 ## 2. Sur la machine : nginx ou Angie
@@ -237,9 +263,13 @@ observation seule sur chaque nœud pendant que ses voisines appliquent.
 ## Plusieurs nœuds et une adresse partagée
 
 Faites pointer le `controller.name` de chaque nœud vers sa propre entrée `edge.nodes[]` et placez
-le même document de zones devant tous. Sous anycast ou une VIP partagée, la validation HTTP-01 de
-la CA peut atterrir sur n'importe quel nœud : le nœud qui commande publie sa réponse au défi auprès
-du cerveau, qui la diffuse dans le document, et **chaque** nœud y répond. L'émission est sérialisée
+les mêmes zones devant tous — chaque nœud derrière une même adresse partagée doit servir la zone,
+c'est-à-dire lister son hostgroup dans `edge.nodes[].hostgroups` (ou laisser la zone globale sur des
+nœuds sans portée). Sous anycast ou une VIP partagée, la validation HTTP-01 de la CA peut atterrir
+sur n'importe quel nœud derrière cette adresse : le nœud qui commande publie sa réponse au défi
+auprès du cerveau, qui la diffuse dans le document de **chaque nœud qui sert la zone**, et chacun
+d'eux y répond ; un nœud sur lequel la zone n'est pas placée refuse le Host et ne peut pas
+répondre. L'émission est sérialisée
 par zone via le créneau du cerveau, pour qu'une flotte ne consomme pas le plafond de certificats en
 double d'une CA en un après-midi, et le renouvellement est décalé aléatoirement (jitter) par nœud.
 Tout cela est consultatif : sans cerveau, chaque nœud renouvelle encore de lui-même.
