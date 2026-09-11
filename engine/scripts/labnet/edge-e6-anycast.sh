@@ -705,7 +705,7 @@ batch 40 tcp /tmp/b-l4.txt
 B4_1=$(served edge-1 /tmp/b-l4.txt); B4_2=$(served edge-2 /tmp/b-l4.txt)
 [ "$(n200 /tmp/b-l4.txt)" = "40" ] && [ "$B4_1" -ge 1 ] && [ "$B4_2" -ge 1 ] && ok "under L4 one client's 40 TCP connections reached BOTH nodes (edge-1 $B4_1, edge-2 $B4_2)" || bad "L4 TCP spread: edge-1 $B4_1, edge-2 $B4_2, codes $(mix /tmp/b-l4.txt)"
 H1_0=$(nmetric 1 'kapkan_edge_requests_total{protocol="h3"'); H2_0=$(nmetric 2 'kapkan_edge_requests_total{protocol="h3"')
-align_window; batch 40 h3 /tmp/b-h3.txt; B_END=$(date -u +%s)
+align_window; B_START_MS=$(date -u +%s%3N); T0=$(date +%s%N); batch 40 h3 /tmp/b-h3.txt; B_END_MS=$(date -u +%s%3N); TB_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
 H4_1=$(served edge-1 /tmp/b-h3.txt); H4_2=$(served edge-2 /tmp/b-h3.txt)
 [ "$(n200 /tmp/b-h3.txt)" = "40" ] && [ "$H4_1" -ge 1 ] && [ "$H4_2" -ge 1 ] && ok "…and so did 40 --http3-only requests (edge-1 $H4_1, edge-2 $H4_2): the same policy hashes the UDP 4-tuple" || bad "L4 h3 spread: edge-1 $H4_1, edge-2 $H4_2, codes $(mix /tmp/b-h3.txt)"
 # The metric is a per-RECORD counter — it moves as each access-log line
@@ -716,14 +716,25 @@ H1=$(nmetric 1 'kapkan_edge_requests_total{protocol="h3"'); H2=$(nmetric 2 'kapk
 [ "$H1" -gt "$H1_0" ] && [ "$H2" -gt "$H2_0" ] && ok "both nodes counted h3 requests of their own (kapkan_edge_requests_total protocol=h3: +$((H1-H1_0)) and +$((H2-H2_0)))" || bad "h3 counted on one node only: edge-1 $H1_0->$H1, edge-2 $H2_0->$H2"
 # And the report's own per-window field, which is what the guide quotes and
 # what a fleet-wide consumer reads — a different number from a different code
-# path. It is read from THE window the batch fell into (align_window put the
-# whole batch in one window per node; wait_window waits for that window to
-# close and be reported), not from the first window that happens to show a
-# non-zero — which, a run in five, was arm A's single h3 request in the
-# previous window.
-wait_window 1 "$B_END" 12; wait_window 2 "$B_END" 12
-H3R1=$(zfield 1 h3_requests); H3R2=$(zfield 2 h3_requests)
-[ "$H3R1" -ge 1 ] 2>/dev/null && [ "$H3R2" -ge 1 ] 2>/dev/null && [ "$H3R1" -le "$H4_1" ] 2>/dev/null && [ "$H3R2" -le "$H4_2" ] 2>/dev/null && ok "…and each node's report says so for the window the batch fell into (h3_requests $H3R1 and $H3R2 for $ZONE; the batch's shares were $H4_1 and $H4_2 — the field cannot exceed what the node served)" || bad "report h3_requests for the batch's window: edge-1 '$H3R1' (served $H4_1), edge-2 '$H3R2' (served $H4_2)"
+# path. Forty --http3-only requests are forty QUIC handshakes from forty curl
+# processes: the batch takes seconds, so even phased by align_window it can
+# straddle a window boundary on one node (a run of this rig read 1 of 26 in
+# the window that closed after the batch — the tail of a burst a boundary
+# had cut). So the field is SUMMED over the windows the batch fell into: every
+# closed window with `at` from the batch's start until the one that closed at
+# or after its end, each read once from a single report (at and the count
+# together, so a report arriving between two reads cannot pair one window's
+# stamp with the next one's count). The sum must equal the node's share of
+# the batch exactly: not "some h3", the batch itself, counted by a code path
+# that never saw /tmp/b-h3.txt. Nothing else sends h3 to this zone here. The
+# stamps are MILLISECONDS: a 40-request batch runs in well under a second, so
+# with whole seconds a window that closed in the same second just BEFORE the
+# batch's first request would both be counted (it holds arm A's one request)
+# and end the collection before the batch's own window had closed.
+h3win() { node_f "edge-$1" "(lambda z: str(z.get('at',''))+' '+str(z.get('h3_requests',0)))(([z for z in n.get('report',{}).get('zones',[]) if z['zone']=='$ZONE']+[{}])[0])"; }
+h3sum() { local n=$1 i pair at v last="" sum=0; for i in $(seq 1 30); do pair=$(h3win "$n"); at=$(date -u -d "${pair% *}" +%s%3N 2>/dev/null || echo 0); v=${pair##* }; if [ "$at" -gt "$B_START_MS" ] && [ "$at" != "$last" ]; then sum=$(( sum + ${v:-0} )); last=$at; fi; [ "$at" -ge "$B_END_MS" ] && break; sleep 0.5; done; echo "$sum"; }
+H3R1=$(h3sum 1); H3R2=$(h3sum 2)
+[ "$H3R1" = "$H4_1" ] && [ "$H3R2" = "$H4_2" ] && ok "…and each node's report counts exactly its share of the batch (h3_requests summed over the window(s) the batch fell into: $H3R1 and $H3R2 for $ZONE = the $H4_1 and $H4_2 the two nodes served; the 40 QUIC handshakes took $TB_MS ms)" || bad "report h3_requests over the batch's window(s): edge-1 $H3R1 (served $H4_1), edge-2 $H3R2 (served $H4_2); batch $TB_MS ms"
 [ "$(zst $ZONE "sorted(z.get('h3',{}).get('serving',[]))")" = "['edge-1', 'edge-2']" ] && ok "the fleet status names both nodes under h3.serving" || bad "h3.serving: $(zst $ZONE "z.get('h3')")"
 
 # ================================================================ ARM C
