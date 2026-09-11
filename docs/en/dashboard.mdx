@@ -90,14 +90,18 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
   `kapkan -check-config` warning, not an outage). Hover the cell for the node names; under it,
   for an unscoped token, sits the zone's hostgroup. Rows the file seeds but no node reports show
   dashes instead of zeros — a measured zero and *nothing measured* are different answers — and
-  say why in the challenge column: *proxy only* for a zone in `policy.mode: none`, *not served by
-  any alive node* for a deciding zone whose nodes are down.
+  say why in the challenge column, reading the placement rather than the report count: *proxy
+  only* for a zone in `policy.mode: none`, *not served by any alive node* for a deciding zone
+  whose placed nodes are all down or that no node's scope covers, and *no report yet* for one
+  whose placed node is alive but has not mentioned the zone — a fresh start, a report older than
+  the window, or a zone the node cut from its report.
 
   With [multi-tenancy](/docs/multi-tenancy), an unscoped token also sees each zone's `tenant`
   under its name and a row of **tenant chips** above the table that narrows both the zones and
-  the "who would be challenged" panel to one customer (remembered for the browser session). A
-  tenant-scoped token sees exactly its own zones with no chips and no banner — the *admin only*
-  notice is reserved for a brain too old to answer it at all.
+  the **Who would be challenged** panel to one customer (remembered for the browser session; a
+  choice that no longer names a tenant on screen is forgotten rather than left to switch itself
+  back on). A tenant-scoped token sees exactly its own zones with no chips and no banner — the
+  *visible to unscoped tokens only* notice is reserved for a brain too old to answer it at all.
 - **Edge nodes** — the fleet's own inventory beside its zones, shown under the same condition.
   One row per configured node: whether it is alive or **LOST** (the zones poll is the only
   liveness signal), the agent tokens [bound to it](/docs/authentication#binding-an-agent-token-to-its-node)
@@ -108,8 +112,8 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
   inside seven. A node with no token of its own carries an amber **shared token** badge while any
   agent token is unbound, and a banner at the top names those tokens: an unbound agent token may
   poll and report as *any* node in the fleet. The inventory names tokens and scopes, so it is
-  visible to unscoped tokens only; a scoped one gets the same read-only notice the other
-  admin-only panels show.
+  visible to unscoped tokens only; a scoped one sees the same *visible to unscoped tokens only*
+  notice the scrubbing-node inventory shows in its place.
 - **Ban table** — every ban, active and historical (with the scrubbing node column when nodes
   are configured).
 - **Traffic / Reports** — live ingress/egress charts built from the in-memory rate
