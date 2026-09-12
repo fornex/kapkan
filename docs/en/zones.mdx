@@ -122,6 +122,16 @@ zone's `:80` listener answers `503` for everything but the ACME challenge path �
 never proxied over cleartext. Every name is issued explicitly; wildcards (DNS-01) are a later
 milestone.
 
+The CA reaches the zone over its **public address**, exactly as a visitor does, and the brain
+publishes the pending challenge in the document of every node the zone is [placed
+on](/docs/edge#placing-zones-on-nodes) — so whichever of them the validation lands on answers
+it. The corollary is the one that bites: a zone whose name does not resolve to a node that
+serves it cannot be issued at all, and a node outside the placement refuses the connection
+rather than answering the challenge path. Point the name at the placement before you expect a
+certificate. A validation also leaves a trace: the CA's probes are a handful of requests in the
+zone's windows, undecided `2xx`, which is why an idle zone's [history](/docs/storage#edge-history)
+is not quite empty around an issuance.
+
 ## Related
 
 - [Edge nodes](/docs/edge) — the role, its failure modes and limits
