@@ -125,7 +125,7 @@ Chaque enregistrement comporte ces champs :
 | `result` | `active`, `rejected`, `withdrawn`, `ok`, `error`, `blocked`, `removed`, `set` ou `cleared`. |
 | `operator` | Le nom du token d'API correspondant ; vide en mode ouvert (sans token). |
 | `role` | Le rôle de l'appelant (`viewer` / `operator`). |
-| `tenant` | La portée tenant de l'appelant ; vide pour un appelant non limité (admin). |
+| `tenant` | Le périmètre tenant de l'appelant ; vide pour un appelant non limité (admin). |
 | `target` | L'IP pour `ban`/`unban` ; `source->victim` pour `source_block`/`source_unblock` ; la zone pour `edge_challenge` ; vide pour `config_reload`. |
 | `target_type` | `host` pour `ban`/`unban` ; `source` pour `source_block`/`source_unblock` ; `zone` pour `edge_challenge` ; `global` pour `config_reload`. |
 | `reason` | Détail du refus ou de l'erreur ; vide en cas de succès — sauf pour `edge_challenge` : sur `set`, le mode, sa fin et la raison de l'opérateur, sur `cleared`, la raison de l'opérateur ou rien. |
@@ -141,7 +141,7 @@ renvoie `400` ; un `target` mal formé renvoie `400`. Avec le stockage désactiv
 
 L'endpoint d'audit est **limité au tenant côté serveur**, exactement comme `/attacks` et `/bans`. Un
 [token limité à un tenant](/docs/multi-tenancy) ne voit que les enregistrements dont le `tenant`
-correspond à sa propre portée ; la portée est liée lors de l'authentification et ne peut être élargie
+correspond à son propre périmètre ; le périmètre est lié lors de l'authentification et ne peut être élargi
 par aucun paramètre de requête. Un token non limité (admin) voit les enregistrements de tous les
 tenants. Un filtre `target` qui nomme une adresse en dehors du tenant de l'appelant est refusé avec
 `403`, de sorte que le journal d'audit ne constitue pas un oracle d'existence inter-tenant.

@@ -24,7 +24,7 @@ notifications excédentaires sont abandonnées et comptabilisées plutôt que d'
 sans limite des connexions ou des processus de hook.
 
 <Callout type="info" title="Les secrets proviennent de l'environnement">
-Les jetons de bot et les identifiants SMTP sont lus depuis des variables d'environnement
+Les tokens de bot et les identifiants SMTP sont lus depuis des variables d'environnement
 nommées, jamais depuis le fichier de configuration. Le fichier ne contient que le nom de
 la variable (par exemple `token_env: "KAPKAN_TG_TOKEN"`), ce qui vous permet de conserver
 la configuration dans git.
@@ -35,7 +35,7 @@ la configuration dans git.
 ### Telegram
 
 Définissez `notify.telegram.token_env` sur le nom de la variable d'environnement contenant
-le jeton de votre bot, et `notify.telegram.chat_id` sur le chat cible. Le jeton est lu
+le token de votre bot, et `notify.telegram.chat_id` sur le chat cible. Le token est lu
 depuis cette variable au moment de l'envoi ; il n'est jamais stocké dans le fichier. Les
 messages sont envoyés en HTML et incluent la cible de l'attaque, sa classification, la
 métrique déclenchante et l'état du bannissement.
@@ -112,7 +112,7 @@ Définissez `notify.exec.command` sur le chemin absolu d'un exécutable existant
 - La charge utile [callback](#schéma-de-la-charge-utile-de-callback) JSON sur **stdin**.
 - Le nom de l'événement (`attack_started`, `attack_ended` ou `update_available`) en tant que **`argv[1]`**.
 - Un **environnement minimal** : seules les variables `PATH`, `HOME`, `TZ`, `LANG`, `USER`
-  et `TMPDIR` sont transmises. Les secrets du démon (jetons de bot, identifiants SMTP) ne
+  et `TMPDIR` sont transmises. Les secrets du démon (tokens de bot, identifiants SMTP) ne
   sont jamais hérités par le hook ni par ses enfants.
 
 La commande doit exister et être exécutable au chargement de la configuration.

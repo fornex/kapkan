@@ -34,7 +34,7 @@ ssh -L 8080:127.0.0.1:8080 user@kapkan-host
 ```
 
 Ouvrez ensuite [http://localhost:8080](http://localhost:8080) sur votre poste de travail. (Relier
-l'écouteur à une adresse publique nécessite d'abord un jeton d'API — voir la mise en garde
+l'écouteur à une adresse publique nécessite d'abord un token d'API — voir la mise en garde
 [Authentification](#authentification) ci-dessous.)
 
 Pour ne servir que l'API JSON et les métriques sans l'interface, désactivez-la :
@@ -131,16 +131,16 @@ la ligne ASN ni les étiquettes de pays.
 ## Authentification
 
 Par défaut, l'API et le tableau de bord ne sont pas authentifiés, ce qui n'est sûr que parce que la valeur par défaut
-de `api.listen` se lie à `127.0.0.1`. Lorsque vous définissez un jeton d'API, le tableau de bord s'adapte : l'enveloppe
-statique de l'interface se charge toujours, mais les données qui la sous-tendent ne s'affichent qu'une fois le jeton fourni.
+de `api.listen` se lie à `127.0.0.1`. Lorsque vous définissez un token d'API, le tableau de bord s'adapte : l'enveloppe
+statique de l'interface se charge toujours, mais les données qui la sous-tendent ne s'affichent qu'une fois le token fourni.
 
-Lorsque l'authentification est activée, le tableau de bord demande le jeton et le conserve dans le
+Lorsque l'authentification est activée, le tableau de bord demande le token et le conserve dans le
 `sessionStorage` du navigateur, en l'attachant comme en-tête bearer sur chaque requête API qu'il effectue. Chaque
 requête `/api/v1` est autorisée avec `Authorization: Bearer <token>` ; `/metrics` et l'enveloppe
 statique restent ouverts, mais pas les données en direct ni les contrôles de bannissement / rechargement.
 
-<Callout type="warning" title="Définissez un jeton avant d'exposer l'écouteur">
-Avant de lier `api.listen` à autre chose que `127.0.0.1`, configurez un jeton d'API. Consultez
+<Callout type="warning" title="Définissez un token avant d'exposer l'écouteur">
+Avant de lier `api.listen` à autre chose que `127.0.0.1`, configurez un token d'API. Consultez
 [Authentification](/docs/authentication) pour savoir comment définir `api.token_env` et comment les requêtes sont
 vérifiées.
 </Callout>
@@ -148,4 +148,4 @@ vérifiées.
 ## Voir aussi
 
 - [API REST](/docs/api) — les points de terminaison que le tableau de bord interroge et les actions de contrôle qu'il appelle.
-- [Authentification](/docs/authentication) — comment protéger l'API et le tableau de bord avec un jeton.
+- [Authentification](/docs/authentication) — comment protéger l'API et le tableau de bord avec un token.

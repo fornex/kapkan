@@ -413,9 +413,9 @@ zones:
   - { name: www.example.com,  origins: ["10.0.2.10:8080"] }          # global
 ```
 
-La règle tient en une phrase : **un nœud sert une zone quand le hostgroup de la zone est dans la
-portée du nœud**. Le hostgroup d'une zone, c'est `zones[].hostgroup`, ou `global` quand elle n'en
-nomme aucun ; la portée d'un nœud, c'est `edge.nodes[].hostgroups`, ou `[global]` quand il n'en
+La règle tient en une phrase : **un nœud sert une zone quand le hostgroup de la zone est dans le
+périmètre du nœud**. Le hostgroup d'une zone, c'est `zones[].hostgroup`, ou `global` quand elle n'en
+nomme aucun ; le périmètre d'un nœud, c'est `edge.nodes[].hostgroups`, ou `[global]` quand il n'en
 liste aucun. Les conséquences, par ordre de fréquence :
 
 - **Une étiquette, à elle seule, est stricte.** Poser `hostgroup: edge-us` sur une zone la retire de
@@ -426,17 +426,17 @@ liste aucun. Les conséquences, par ordre de fréquence :
 - **`global` est un littéral.** Un nœud qui doit servir les zones de son PoP *et* celles valables
   sur toute la flotte liste les deux : `[edge-eu, global]`. Un nœud avec seulement `[edge-eu]`
   n'obtient aucune zone globale.
-- **La portée suit l'adressage.** Un hostgroup a besoin d'au moins un préfixe dans `networks` — le
+- **Le périmètre suit l'adressage.** Un hostgroup a besoin d'au moins un préfixe dans `networks` — le
   préfixe de VIP du PoP, que vous protégez de toute façon. Le placement n'est pas une seconde
   topologie ; c'est celle que vous avez déjà déclarée.
-- **Chaque nœud reçoit son propre document** — exactement les zones que sa portée couvre, avec leurs
+- **Chaque nœud reçoit son propre document** — exactement les zones que son périmètre couvre, avec leurs
   attributions de certificats, les défis ACME diffusés, les clés de laissez-passer et les leviers,
   et son propre ETag. Un nœud qui demande le créneau d'émission d'une zone qu'il ne sert pas, ou qui
   publie un défi pour elle, reçoit le même `404 unknown zone` qu'une zone inexistante. Le placement
   lui-même n'entre jamais dans le document.
-- **Cadrer impose des tokens liés.** Dès qu'un nœud a une portée, chaque token `agent` doit porter
-  [`node`](/docs/authentication#lier-un-token-agent-à-son-nœud) — une portée appliquée face à un
-  token partagé serait une promesse que rien ne tient. Les flottes sans portées gardent leur délai
+- **Cadrer impose des tokens liés.** Dès qu'un nœud a un périmètre, chaque token `agent` doit porter
+  [`node`](/docs/authentication#lier-un-token-agent-à-son-nœud) — un périmètre appliqué face à un
+  token partagé serait une promesse que rien ne tient. Les flottes sans périmètres gardent leur délai
   de grâce.
 - **Appartenance et placement sont deux axes.** `tenant` dit qui peut voir la zone, `hostgroup` où
   elle est servie ; quand la zone et son hostgroup portent tous deux un tenant, ils doivent
@@ -450,13 +450,13 @@ liste aucun. Les conséquences, par ordre de fréquence :
   le TLS : déplacer une zone regénère les nœuds qu'elle quitte et ceux qu'elle rejoint, et recharge
   leurs terminateurs. La [séparation rapide/lent](#la-séparation-rapidelent) est intacte.
 
-`kapkan -check-config` affiche la matrice — la portée de chaque nœud, le nombre de zones qu'il
-couvre, son token — et avertit pour une zone qu'aucune portée de nœud ne couvre (elle n'est servie
+`kapkan -check-config` affiche la matrice — le périmètre de chaque nœud, le nombre de zones qu'il
+couvre, son token — et avertit pour une zone qu'aucun périmètre de nœud ne couvre (elle n'est servie
 nulle part tant qu'un nœud ne liste pas son groupe). `GET /api/v1/edge/zones/status` porte le
 `placement {hostgroup, nodes, alive}` de chaque zone et signale `unserved` lorsque ses nœuds
 existent mais qu'aucun n'est vivant ; la réponse du levier liste les nœuds de la zone, pas ceux de
 la flotte ; l'inventaire montre les `hostgroups` et `zones_placed` de chaque nœud. Ce qu'un nœud
-affirme d'une zone hors de sa portée est stocké dans son rapport, mais n'est pas fusionné dans
+affirme d'une zone hors de son périmètre est stocké dans son rapport, mais n'est pas fusionné dans
 l'état de la zone.
 
 **Mode opératoire — une zone quitte un nœud.** Sortir une zone d'un nœud y est un rechargement lent
@@ -543,7 +543,7 @@ renouvelle un certificat pour une zone que le nœud ne sert plus.
   puisse pas agir sous l'identité d'un autre nœud, et [placez les zones sur les
   nœuds](#placer-les-zones-sur-les-nœuds) pour que son nœud ne serve que les zones qu'il doit
   servir : un token lié volé ne peut alors prendre le créneau d'émission et publier une réponse de
-  défi que pour les zones que la portée de son nœud couvre (chaque appel étant journalisé), et la
+  défi que pour les zones que le périmètre de son nœud couvre (chaque appel étant journalisé), et la
   compromission d'un nœud est une exposition de certificat pour ces zones-là, pas pour celles de
   toute la flotte. Faites tourner le token de ce nœud ; le cerveau ne détient rien à voler.
 

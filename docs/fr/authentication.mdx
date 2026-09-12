@@ -115,21 +115,21 @@ Sans `node`, un token agent est un **identifiant valable pour toute la flotte** 
 sous l'identité de n'importe quel nœud et rapporter sous l'identité de n'importe quel nœud — la
 raison pour laquelle un token volé imposait naguère de le renouveler pour toute la flotte. Ce que
 `node` change, c'est l'usurpation d'identité et le rayon de rotation ; ce qui limite l'ensemble des
-zones pour lesquelles un token lié volé peut émettre, c'est la [portée de
+zones pour lesquelles un token lié volé peut émettre, c'est le [périmètre de
 placement](/docs/edge#placer-les-zones-sur-les-nœuds) du nœud : agissant sous l'identité de son
 propre nœud, il ne peut prendre le créneau d'émission et publier une autorisation de clé ACME que
-pour les zones que cette portée couvre — toutes les zones sur une flotte sans portées. Traitez la
+pour les zones que ce périmètre couvre — toutes les zones sur une flotte sans périmètres. Traitez la
 compromission d'un nœud comme une exposition de certificat pour les zones de ce nœud, et renouvelez
 le token de ce nœud. Un token non lié continue de fonctionner exactement comme avant : une flotte
-migre donc un nœud à la fois — sauf si un nœud a une [portée de
+migre donc un nœud à la fois — sauf si un nœud a un [périmètre de
 placement](/docs/edge#placer-les-zones-sur-les-nœuds) (`edge.nodes[].hostgroups`), auquel cas chaque
-token `agent` doit porter `node`, sous peine d'erreur de validation bloquante, car une portée
-appliquée face à un token partagé est une promesse que rien ne tient — et il est nommé tant qu'il
+token `agent` doit porter `node`, sous peine d'erreur de validation bloquante, car un périmètre
+appliqué face à un token partagé est une promesse que rien ne tient — et il est nommé tant qu'il
 n'est pas lié : par `kapkan -check-config` (un WARNING), dans le journal du démon au démarrage et à
 chaque rechargement, et dans l'inventaire edge (`unbound_agent_tokens` ; par nœud, `tokens` liste
 les noms des tokens liés et `last_token` le token qui a interrogé en dernier sous son identité —
 regardez-le basculer pendant une migration). Faire aussi d'un token agent non lié une erreur sur les
-flottes sans portées est prévu pour une version MAJEURE.
+flottes sans périmètres est prévu pour une version MAJEURE.
 
 La présence n'est estampillée que par les tokens agent : un operator qui interroge avec `?node=X`
 reçoit le document de X en **aperçu** et ne fait pas paraître X vivant.

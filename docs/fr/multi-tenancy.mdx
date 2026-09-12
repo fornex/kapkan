@@ -64,18 +64,18 @@ Une étiquette de tenant n'est **pas** une unité de politique de mitigation —
 attributs BGP et l'escalade restent par hostgroup. C'est purement une étiquette de propriété
 utilisée pour cadrer l'API.
 
-## Portée du token
+## Périmètre du token
 
 Un [token API](/docs/authentication) gagne un `tenant` optionnel, qui s'appuie sur son rôle : un
 `viewer` peut lire mais ne rien modifier ; un `operator` peut aussi bannir/débannir.
 
 | Token | Voit | Peut modifier |
 | --- | --- | --- |
-| sans portée (pas de `tenant`) | tous les tenants (admin) | tout ce que son rôle autorise (un viewer lit tous les tenants ; un operator peut bannir/débannir dans tous les tenants) |
+| sans périmètre (pas de `tenant`) | tous les tenants (admin) | tout ce que son rôle autorise (un viewer lit tous les tenants ; un operator peut bannir/débannir dans tous les tenants) |
 | `tenant: customerA`, `role: viewer` | uniquement customerA | rien |
 | `tenant: customerA`, `role: operator` | uniquement customerA | uniquement customerA |
 
-Un token sans portée est un admin — le comportement par défaut, entièrement rétrocompatible. Un
+Un token sans périmètre est un admin — le comportement par défaut, entièrement rétrocompatible. Un
 token cadré sur un tenant qu'aucun hostgroup — et, avec un bloc `edge`, aucune
 [zone](/docs/zones) — n'utilise est rejeté au chargement de la config (une faute de frappe ne
 verrait sinon silencieusement rien). Avec un bloc edge, cette vérification a besoin des deux
@@ -100,7 +100,7 @@ qu'un token cadré ne peut jamais retomber sur les données d'un autre tenant.
 
 - **Lectures** — `/api/v1/status`, `/attacks`, `/hosts`, `/bans` et `/audit` ne renvoient que les
   lignes dont le groupe propriétaire porte le tenant de l'appelant. `/status` est reconstruit par
-  portée : un token cadré n'obtient que ses propres hostgroups et compteurs, jamais les réseaux
+  périmètre : un token cadré n'obtient que ses propres hostgroups et compteurs, jamais les réseaux
   protégés globaux, les seuils globaux ni la ligne de config du groupe de repli à l'échelle du
   déploiement — ainsi un tenant n'apprend jamais les préfixes ou la posture BGP d'un autre. Un
   tenant house (le groupe de repli étiqueté d'un `tenant`) voit toujours ses attaques, bannissements
@@ -125,12 +125,12 @@ qu'un token cadré ne peut jamais retomber sur les données d'un autre tenant.
   inconnu. L'[historique edge](/docs/api#get-apiv1edgehistory) suit la même ligne : un token cadré
   lit l'historique et les sources significatives de ses propres zones, toute autre zone est un
   unique `403` uniforme, et le filtre par nœud comme les événements de la flotte restent sans
-  portée. Les noms des nœuds sur lesquels une zone est servie sont visibles de son tenant ; le
+  périmètre. Les noms des nœuds sur lesquels une zone est servie sont visibles de son tenant ; le
   document de zones, les rapports des nœuds, la coordination ACME, l'inventaire des nœuds et
-  `config/reload` restent sans portée.
+  `config/reload` restent sans périmètre.
 - **L'ambiguïté échoue de façon sûre** — si un même secret bearer correspond à des tokens de rôle
-  ou de tenant différents (un secret réutilisé), la requête est refusée plutôt que résolue vers la
-  portée la plus large.
+  ou de tenant différents (un secret réutilisé), la requête est refusée plutôt que résolue vers le
+  périmètre le plus large.
 
 <Callout type="warning" title="Une ressource est partagée entre tenants : les 8 emplacements de victimes d'une source">
 Le contrôle d'accès est par tenant, mais une structure du noyau ne l'est pas. Un blocage de source
@@ -182,14 +182,14 @@ cela signifie qu'un reload erroné peut brièvement déplacer des lignes entre t
 ## Rétrocompatibilité
 
 Aucun tenant configuré nulle part = comportement mono-tenant, à l'octet près : chaque groupe est
-non étiqueté, chaque token est un admin sans portée, et l'API renvoie tout comme avant. La
+non étiqueté, chaque token est un admin sans périmètre, et l'API renvoie tout comme avant. La
 multi-tenancy est opt-in et vous ne pouvez pas obtenir d'isolation sur une API ouverte (sans
 token) — il n'y a aucun principal à cadrer.
 
 ## Voir aussi
 
 - [Groupes d'hôtes](/docs/hostgroups) — les groupes de préfixes qu'un tenant étiquette.
-- [Authentification](/docs/authentication) — les rôles de token sur lesquels s'appuie la portée du tenant.
+- [Authentification](/docs/authentication) — les rôles de token sur lesquels s'appuie le périmètre du tenant.
 - [Journal d'audit](/docs/audit) — la piste par tenant des actions des operators.
 - [API REST](/docs/api) — les endpoints filtrés par tenant.
 - [Référence de configuration](/docs/configuration)
