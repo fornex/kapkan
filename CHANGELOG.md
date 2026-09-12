@@ -567,6 +567,31 @@ security-relevant.
   `edgeEventKind` enum in all five locales, the enum pinned to the kinds the write path emits and
   the response fields the console reads pinned to their structs by new tests; the dashboard page
   documents the card.
+- Edge track, E6.8 — the lever in the operator console (milestone E6, edge-spec §8; no engine
+  behaviour change). The Edge view's challenge column gains the control for the rung it already
+  showed: an operator opens a small panel on any zone in `policy.mode: decide`, picks the rung
+  (**manual** or **auto**, each with a line saying what it does) and how long to hold it (15 min,
+  1 h, 6 h, 24 h — all inside the API's `60..86400`), adds an optional reason for the audit row
+  and the nodes' logs, and pulls it; a running lever shows in the same cell as **lever · manual ·
+  42m left**, counting down from the `override` the zone status already carries (no new read, and
+  nothing added to the three-second poll), with the operator's reason on hover, and the button
+  becomes **End**. Before it is pulled the panel says what would stop it biting, read off the row:
+  a rung every reporting node only previews, or a zone no live node serves. The success is
+  captioned by the lever's own answer — a set that only previews (`zone_watch_only`,
+  `rung_watch_only`, or every alive node in dry-run) says so rather than claiming the zone is
+  being challenged. Every refusal is shown **in the panel**, which stays open: `409` (a
+  proxy-only zone), `403`, a failure with the brain's own text rendered as text, and the one
+  answer that deliberately means two things — an unknown zone and a zone outside a tenant-scoped
+  token's reach are byte-identical `404`s, so the console has a single string for both rather than
+  rebuilding the existence oracle the API refuses to be. A lever left on a zone a reload has
+  dropped from the file keeps its **End** button, so no row is left that nothing can retire. The
+  control is `operator`-only (a `viewer` sees no button) and appears only on a brain that merges
+  the zones file into the status: a kapkan older than that carries no zone `mode`, and its table
+  is byte for byte the one it always was. The panel is a body-level popover, so the poll re-renders
+  the table under it without touching what is being filled in; Escape, an outside click and focus
+  returned to the button it opened from come with it (the confirm popover gained that focus
+  handling too). 34 strings in all five locales, and the response fields the console reads pinned
+  to their structs by a new test; the dashboard and edge pages document the control.
 - Edge track, E6.10 — the fleet acceptance rig, `engine/scripts/labnet/edge-e6.sh` (edge-spec §8,
   E6): the E5 topology on Debian 13 with a **real ClickHouse** beside the brain (the binary of the
   image CI pins; the rig prints the version it ran against) and no XDP — two nodes, five zones

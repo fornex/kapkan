@@ -1,8 +1,7 @@
 /* locales/fr.js — French catalog. Mirrors en.js key-for-key. Technical tokens
    (FlowSpec, RTBH, BGP, NTP/DNS/SYN…, pps, Mb/s, IPs, routes) stay verbatim.
    One word per concept, as in docs/fr/authentication.mdx (the page the console
-   links to; the other French pages are still being aligned with it): an API
-   credential is a « token » (never « jeton »), and the scope of a token (its
+   links to): an API credential is a « token » (never « jeton »), and the scope of a token (its
    tenant) or of a node (its placement) is a « périmètre » (never « portée »).
    The rules engine's host/group scope is a different concept and keeps
    « portée », as docs/fr/api.mdx does. */
@@ -357,6 +356,42 @@ activeAttacks: { one: "# attaque active", other: "# attaques actives" },
       "ed.h3.tip.partial": "La zone demande HTTP/3 ; ces nœuds la servent en TCP :",
       "ed.h3.tip.silent": "Les autres nœuds n'ont remonté aucune disponibilité HTTP/3 — ils sont peut-être antérieurs à la version qui la remonte.",
       "ed.h3.tip.offserving": "Le fichier de zones ne demande plus HTTP/3, mais ces nœuds gardent un port d'écoute QUIC :",
+
+      /* le levier : le palier d'une zone pour une durée bornée (E6.8) */
+      "ed.lever.start": "Vérifier…",
+      "ed.lever.start.tip": "Fixer le palier de cette zone pour une durée bornée, quoi que dise le fichier de zones.",
+      "ed.lever.end": "Arrêter",
+      "ed.lever.end.tip": "Arrêter la vérification en cours ; la zone suit de nouveau son fichier de zones.",
+      "ed.lever.on": "levier · {m} · encore {t}",
+      "ed.lever.tip": "Un opérateur a fixé le palier de cette zone. Il s'arrête tout seul à {t}, avec ou sans le moteur.",
+      "ed.lever.manual": "manuelle",
+      "ed.lever.auto": "auto",
+      "ed.lever.manual.sub": "Toute requête sans laissez-passer valide est envoyée à la page de laissez-passer.",
+      "ed.lever.auto.sub": "Le nœud vérifie une source quand ses agrégats le disent, et la zone entière quand le seuil zone_rps se déclenche.",
+      "ed.lever.title": "Tirer le levier",
+      "ed.lever.sub": "Le palier de la zone pour une durée bornée, quoi que dise le fichier de zones. Il s'arrête tout seul et ne recharge rien.",
+      "ed.lever.mode": "Palier",
+      "ed.lever.ttl": "Pour",
+      "ed.lever.ttl.15m": "15 min",
+      "ed.lever.ttl.1h": "1 h",
+      "ed.lever.ttl.6h": "6 h",
+      "ed.lever.ttl.24h": "24 h",
+      "ed.lever.reason": "Motif (facultatif)",
+      "ed.lever.reason.ph": "bourrage d'identifiants via des proxys résidentiels",
+      "ed.lever.confirm": "Tirer le levier",
+      "ed.lever.working": "En cours…",
+      "ed.lever.note.preview": "Tous les nœuds qui rapportent cette zone ne font qu'un aperçu de son palier : la vérification sera comptée et personne ne sera envoyé à la page.",
+      "ed.lever.note.unserved": "Aucun nœud vivant ne sert cette zone : personne n'appliquera le levier tant qu'il n'en revient pas un.",
+      "ed.lever.end.title": "Arrêter la vérification",
+      "ed.lever.end.text": "La zone suit de nouveau son fichier de zones, sur chaque nœud, dès qu'il lit le document suivant.",
+      "ed.lever.end.confirm": "Arrêter la vérification",
+      "ed.lever.toast.on": "La vérification est active pour {z}.",
+      "ed.lever.toast.preview": "La vérification est active pour {z} — en simulation : elle compte au lieu d'agir.",
+      "ed.lever.toast.ended": "La vérification pour {z} est arrêtée.",
+      "ed.lever.err.notfound": "Cette zone n'est pas dans le fichier de zones, ou ce token ne l'atteint pas.",
+      "ed.lever.err.conflict": "Cette zone est en proxy seul : rien n'y vérifie.",
+      "ed.lever.err.forbidden": "Ce token n'a pas le droit de tirer le levier.",
+      "ed.lever.err.failed": "Le levier n'a pas pu être tiré.",
 
       /* one zone's stored history + the fleet's events (Edge view, E6.7) */
       "ed.hist.open": "Ouvrir l'historique enregistré de cette zone",
