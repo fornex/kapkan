@@ -154,13 +154,21 @@ Schreibpfads.
   für das gelesen, was er nicht mehr auflistet. Der Präsenz-Ticker läuft alle
   `min(stale_after/2, 5 s)`, nie unter einer Sekunde; nach einem Start des Gehirns wird ein Knoten
   bei seinem ersten Poll auf die Grundlinie gesetzt (still) oder als verloren, sobald `stale_after`
-  ohne einen vergangen ist — ein Neustart ist nie ein flottenweiter `node_alive`-Schwall. Die
+  ohne einen vergangen ist — ein Neustart ist nie ein flottenweiter `node_alive`-Schwall. **Auch
+  diese zweite Grundlinie ist still**: Ein Knoten, von dem das Gehirn seit seinem Start nichts
+  gehört hat, bekommt keine `node_lost`-Zeile, denn nichts ist übergegangen — ein Knoten, der über
+  einen Neustart hinweg schon ausgefallen war, erscheint in den Ereignissen erst, wenn er
+  zurückkommt, und zwar als `node_alive`. Die
   Präsenz-Übergänge werden zusätzlich auf INFO protokolliert, mit oder ohne Speicherung.
 
 Volumen pro Tag: `edge_windows` wächst um **8 640 × (entscheidende Zonen mit Verkehr × lebendige
 Knoten)** Zeilen (je ein Zehn-Sekunden-Fenster), `edge_sources` um höchstens das 20-fache davon und
-`edge_events` um die Handvoll Übergänge, die eine Flotte hat. Messen Sie, was das auf Ihrem Server
-kostet, statt zu raten — komprimierte Zeilengrößen hängen von Ihren Zonen- und Knotennamen ab:
+`edge_events` um die Handvoll Übergänge, die eine Flotte hat. Auf der Platte ist das wenig: Ein
+Abnahmelauf hat `edge_windows` mit rund hundert komprimierten Bytes pro Zeile gemessen und die
+beiden anderen mit einigen Dutzend Bytes — eine Größenordnung, mit der Sie planen können, keine
+Zahl zum Multiplizieren, denn die Stichprobe waren ein paar Dutzend Zeilen in winzigen Parts (die
+schlecht komprimieren), und Ihre Zonen- und Knotennamen sind nicht unsere. Messen Sie, was es auf
+Ihrem Server tatsächlich kostet:
 
 ```sql
 SELECT table, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS on_disk
@@ -178,9 +186,23 @@ abfragen.
 ## Backpressure
 
 Zeilen gelangen in eine begrenzte Warteschlange (`queue_size`) mit nicht blockierendem Senden und
-werden in Batches (`batch_size` / `flush_interval_seconds`) geleert. Wenn ClickHouse langsam ist
-oder ausfällt, werden Zeilen verworfen — gezählt als `kapkan_storage_rows_total` mit
-`result="dropped"` — und die Engine läuft weiter. Siehe [Metriken](/docs/metrics).
+werden in Batches (`batch_size` / `flush_interval_seconds`) geleert. Wann immer ClickHouse Zeilen
+nicht annehmen kann, gehen sie verloren, statt gehalten zu werden, und die Engine läuft weiter;
+`kapkan_storage_rows_total` sagt, welcher der beiden Verluste es war, und die beiden bedeuten nicht
+dasselbe:
+
+- `result="error"` — das Insert selbst ist fehlgeschlagen. Der Batch wird protokolliert
+  (`clickhouse insert failed`) und verworfen. **Ein ClickHouse, das ausgefallen ist, zählt hier**,
+  nicht unter `dropped`: Eine abgewiesene Verbindung scheitert sofort, jedes Leeren räumt die
+  Warteschlange also so schnell, wie sie sich füllt.
+- `result="dropped"` — die Warteschlange war voll, als eine Zeile übergeben wurde, sie hat also nie
+  ein Insert erreicht. Dazu braucht es eine Senke, die *hängt*, statt abzuweisen — ein Server, der
+  die Verbindung hält, ein Netz, das die Pakete verschluckt, ein Leeren, das seinen Timeout
+  aussitzt —, oder einen Burst, der größer ist als `queue_size` und innerhalb eines Leerens
+  eintrifft. Die Erkennung wird in keinem der beiden Fälle blockiert.
+
+Eine `dropped`-Reihe ohne `error` daneben deutet daher auf Latenz hin, nicht auf einen Ausfall.
+Siehe [Metriken](/docs/metrics).
 
 ## Was gespeichert wird und was nicht
 

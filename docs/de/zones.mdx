@@ -126,6 +126,17 @@ Zertifikat eintrifft, antwortet der `:80`-Listener der Zone auf alles außer dem
 mit `503` — eine Zone wird niemals im Klartext per Proxy weitergereicht. Jeder Name wird explizit
 ausgestellt; Wildcards (DNS-01) sind ein späterer Meilenstein.
 
+Die CA erreicht die Zone über ihre **öffentliche Adresse**, genau wie ein Besucher es tut, und das
+Gehirn veröffentlicht die ausstehende Challenge im Dokument jedes Knotens, auf dem die Zone
+[platziert ist](/docs/edge#zonen-auf-knoten-verteilen) — welcher von ihnen die Validierung auch
+trifft, er beantwortet sie. Die Folgerung ist die, die weh tut: Eine Zone, deren Name nicht auf
+einen Knoten auflöst, der sie bedient, kann überhaupt nicht ausgestellt werden, und ein Knoten
+außerhalb der Platzierung weist die Verbindung ab, statt den Challenge-Pfad zu beantworten. Richten
+Sie den Namen auf die Platzierung, bevor Sie ein Zertifikat erwarten. Eine Validierung hinterlässt
+außerdem eine Spur: Die Prüfungen der CA sind eine Handvoll Anfragen in den Fenstern der Zone,
+unentschiedene `2xx` — deshalb ist die [Historie](/docs/storage#edge-historie) einer untätigen Zone
+rund um eine Ausstellung nicht ganz leer.
+
 ## Verwandte Themen
 
 - [Edge-Knoten](/docs/edge) — die Rolle, ihre Ausfallmodi und Grenzen

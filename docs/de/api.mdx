@@ -349,10 +349,11 @@ Lebenszyklus prägen.
 ### GET /api/v1/audit
 
 Gibt den operator-zugeordneten Audit-Trail zurück — wer jeweils `ban`, `unban`,
-`config_reload`, `source_block` oder `source_unblock` ausgelöst hat, wann und mit welchem Ergebnis
-(einschließlich **abgelehnter** Aktionen). Datensätze sind neueste zuerst und der Endpunkt ist
-serverseitig tenant-bezogen. Er nimmt optionale Query-Parameter `from`/`to` (RFC 3339), `action`
-(`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`) und `target` (eine IP) entgegen und liefert standardmäßig die letzte Stunde:
+`config_reload`, `source_block`, `source_unblock` oder `edge_challenge` ausgelöst hat, wann und mit
+welchem Ergebnis (einschließlich **abgelehnter** Aktionen). Datensätze sind neueste zuerst und der
+Endpunkt ist serverseitig tenant-bezogen. Er nimmt optionale Query-Parameter `from`/`to` (RFC 3339),
+`action` (`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`/`edge_challenge`) und
+`target` (eine IP) entgegen und liefert standardmäßig die letzte Stunde:
 
 ```json
 {
@@ -376,7 +377,9 @@ serverseitig tenant-bezogen. Er nimmt optionale Query-Parameter `from`/`to` (RFC
 }
 ```
 
-Wenn der Speicher deaktiviert ist, lautet die Antwort `{"available": false, "events": []}`. Beachten
+Wenn der Speicher deaktiviert ist, lautet die Antwort `{"available": false, "events": []}`. `events`
+ist immer ein Array — leer statt `null`, auch bei einem Mandanten, dessen Zeitraum keinen Datensatz
+enthält —, ein Client darf also ohne Absicherung darüber iterieren. Beachten
 Sie, dass Audit-Datensätze `dry_run` als Ganzzahl (`0`/`1`) kodieren, nicht als JSON-Boolean wie an
 anderer Stelle auf dieser Seite. Die vollständige Feldliste, die Query-Regeln sowie das Modell für
 Operator-Identität und Tenant-Bezug finden Sie auf der eigenen Seite [Audit-Log](/docs/audit).
@@ -706,7 +709,9 @@ Knotens von 20 pro Fenster weggelassen hat, und die, die ein schrumpfender Repor
 Reports zusätzlich in die Edge-Historie geschrieben, und was sich seit dem vorherigen Report des
 Knotens geändert hat, wird zu Ereignissen — nachdem der Report gespeichert ist und ohne dass die
 Antwort jemals darauf wartet. Niemals ein Lebendigkeitssignal (das ist der Poll). Ein
-unbekanntes `{name}` ist `404`; Erfolg ist `204 No Content`.
+unbekanntes `{name}` ist `404`; ein Body über 64 KiB ist `413 report exceeds 64 KiB` — die Grenze,
+unter die ein Knoten sich durch Abgeben von Details hält, ein `413` hier ist also ein Client, der
+das nicht getan hat, und nichts vom Report wird gelesen; Erfolg ist `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 
@@ -720,7 +725,20 @@ Dokument trägt `unbound_agent_tokens`, solange irgendein agent-Token ungebunden
 gibt, an die es gebunden werden könnte (fehlt sonst) — die Migrationsansicht von
 [Ein Agent-Token an seinen Knoten binden](/docs/authentication#ein-agent-token-an-seinen-knoten-binden).
 `hostgroups` und `zones_placed` sind immer vorhanden; `tokens`, `last_token` und
-`unbound_agent_tokens` werden weggelassen, wenn sie leer sind. Ein Lesezugriff mit `viewer`-Rang,
+`unbound_agent_tokens` werden weggelassen, wenn sie leer sind. Das Dokument trägt außerdem
+`nodes_total` und die `stale_after_seconds`, mit denen das Urteil gefällt wird; jeder Knoten trägt
+`alive`, `holding` und `last_seen`.
+
+**Eine Sichtung wird gestempelt, wenn ein Poll beginnt, und noch einmal, wenn er endet — solange
+ein Poll geparkt ist, hält `last_seen` also dessen Beginn** und ist auf einem völlig gesunden
+Knoten bis zu 25 s alt, älter als `stale_after_seconds` in den Standardwerten. `holding` sagt, dass
+gerade jetzt ein Poll geparkt ist, und ein darin geparkter Knoten ist lebendig, was auch immer
+`last_seen` sagt; `alive` heißt *geparkt, oder innerhalb von `stale_after_seconds` gesehen*, niemals
+irgendetwas, was der Knoten in seinem eigenen Report behauptet. Die Folge, mit der Sie planen
+sollten: Eine Änderung, die einen Knoten abschneidet — ein entferntes Token, eine verschobene
+Bindung —, beendet seinen geparkten Poll mit der Abweisung, die ein erster Poll bekäme, und das
+stempelt eine eigene Sichtung; `alive` wird also erst `stale_after_seconds` danach falsch, in den
+Standardwerten bis zu etwa 40 s nach der Änderung. Ein Lesezugriff mit `viewer`-Rang,
 nur ungebundene Tokens.
 
 #### GET /api/v1/edge/zones/status
@@ -825,7 +843,9 @@ cleared, would_deny, would_challenge, status_2xx, status_3xx, status_4xx, status
 h3_requests}]}`. `nodes` zählt die verschiedenen Knoten, die im Bucket berichtet haben;
 `step_seconds` ist der tatsächlich angewendete Schritt; `zone` und `node` geben die Anfrage wieder,
 `node` nur, wenn der Filter gesetzt war; die Rate leiten Sie als `requests / window_seconds` ab und
-den HTTP/3-Anteil als `h3_requests / requests`. `zone` ist erforderlich, wird wie die Namen der
+den HTTP/3-Anteil als `h3_requests / requests`. Diese Regeln für Zeitraum und Schritt teilt sich
+der Endpunkt mit `/api/v1/traffic` und `/api/v1/audit` — eine Implementierung, die drei antworten
+auf einen fehlerhaften Zeitraum also mit derselben Meldung. `zone` ist erforderlich, wird wie die Namen der
 Datei in Kleinbuchstaben gefaltet und muss in der Zonendatei stehen (sonst `404 unknown zone`);
 `node=<name>` grenzt auf einen konfigurierten Knoten ein (`404 unknown edge node`). `viewer`-Rang.
 Ein [tenant-bezogenes](/docs/multi-tenancy) Token liest seine eigenen Zonen; jede andere Zone — die
@@ -858,6 +878,15 @@ Die Übergänge, die das Gehirn gesehen hat, neueste zuerst, höchstens 1 001: `
 `report_truncated` (sonst `400`). `viewer`-Rang, **nur ungebundene Tokens**: Die Ereignisse benennen
 Knoten und die Veränderungen der Flotte. Dieselben Zeitraumregeln; ist die Speicherung aus, lautet
 die Antwort `{available: false, events: []}`.
+
+Jede Art ist ein **Übergang**, ein Zustand, den das Gehirn immer nur einmal gesehen hat, steht also
+nicht hier drin. Der erste Report nach einem Start des Gehirns ist eine stille Grundlinie, und die
+Präsenz ebenso: Ein Knoten wird bei seinem ersten Poll auf die Grundlinie gesetzt — oder, wenn das
+Gehirn nie von ihm hört, als verloren, sobald `stale_after_seconds` seit dem Start des
+Präsenz-Tickers vergangen sind, ohne dass `node_lost` geschrieben wird. Ein Knoten, der über einen
+Neustart des Gehirns hinweg ausgefallen war, hat deshalb kein Ereignis, bis er zurückkommt, und
+sein erstes ist `node_alive`. Was ein Knoten *jetzt* ist, lesen Sie im Inventar, nicht in dieser
+Liste.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot und …/acme/challenges
 

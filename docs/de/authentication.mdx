@@ -95,9 +95,12 @@ Veröffentlichen von Challenges —, wenn der präsentierte Name der eines ander
 weist **ab, bevor** es irgendetwas mit dem Namen tut: keine Präsenz gestempelt, kein Report
 gespeichert, kein Slot gewährt, keine Key-Authorization veröffentlicht. Die Abweisung ist ein
 einheitliches `403`, das den gebundenen Knoten nicht nennt, eine Warnung pro Minute und Token im
-Log des Gehirns und ein Zähler in `kapkan_api_node_binding_refused_total{route}`. Ein gebundenes
-Token, das ohne `?node=` pollt, wird ebenfalls abgewiesen: Seine Bindung sagt, welcher Knoten es
-ist.
+Log des Gehirns und ein Zähler in `kapkan_api_node_binding_refused_total{route}`. Es wird keine
+Zeile im [Audit-Log](/docs/audit) geschrieben: Der Audit-Trail ordnet zu, was ein Operator geändert
+hat, und eine abgewiesene Maschine hat nichts geändert — die Log-Zeile und der Zähler sind der Ort,
+an dem ein falsch konfiguriertes oder gestohlenes Knoten-Token auftaucht. Ein an einen Knoten
+gebundenes Token, das ohne `?node=` pollt, wird ebenfalls abgewiesen: Seine Bindung sagt, welcher
+Knoten es ist.
 
 ```yaml
 api:
@@ -135,6 +138,16 @@ Fehler zu machen, ist für ein MAJOR-Release vorgesehen.
 
 Präsenz wird nur von agent-Tokens gestempelt: Ein Operator, der mit `?node=X` pollt, erhält das
 Dokument von X als **Vorschau** und lässt X nicht lebendig erscheinen.
+
+**Geben Sie einem Migrationsschritt Zeit, sichtbar zu werden.** Eine Token-Änderung trifft auf einen
+bereits geparkten Poll: Das Reload beendet ihn mit der Antwort, die ein erster Poll jetzt bekäme
+(`401` für ein verschwundenes Token, `403` für eines, dessen Bindung verschoben wurde), und der
+Knoten verbindet sich mit dem neu, was er jetzt hat. Das *Inventar* ist langsamer, denn eine
+Sichtung wird gestempelt, wenn ein Poll beginnt, und noch einmal, wenn er endet — die Abweisung
+eingeschlossen —, sodass ein Knoten, den Sie gerade abgeschnitten haben, für den Rest seines Holds
+(bis zu 25 s) als `alive` gelesen wird und danach noch `edge.stale_after_seconds` obendrauf, in den
+Standardwerten also rund 40 s. Warten Sie das ab, bevor Sie das Umspringen von `last_token` lesen,
+sonst sehen Sie den Zustand vor Ihrer Änderung.
 
 `token_env` und `tokens` schließen sich **gegenseitig aus** — `token_env` ist genau ein
 Operator-Token. Eine Anfrage wird gegen jedes konfigurierte Token abgeglichen (in konstanter
