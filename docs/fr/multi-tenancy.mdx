@@ -64,6 +64,18 @@ Une étiquette de tenant n'est **pas** une unité de politique de mitigation —
 attributs BGP et l'escalade restent par hostgroup. C'est purement une étiquette de propriété
 utilisée pour cadrer l'API.
 
+**La propriété et le placement sont deux axes, et ils n'ont pas le droit de se contredire.** Une
+zone porte aussi un `hostgroup` — [l'endroit où elle est
+servie](/docs/edge#placer-les-zones-sur-les-nœuds) —, et ce groupe peut lui-même porter un `tenant`.
+Rien n'est hérité dans un sens ni dans l'autre : une zone dans un groupe étiqueté est une zone
+« house » tant qu'elle ne dit pas le contraire, et l'étiquette d'une zone ne change jamais l'endroit
+où elle tourne. Ce qui est refusé, c'est un *désaccord* : quand la zone et le hostgroup qu'elle nomme
+portent tous deux un tenant et que les deux diffèrent, le rechargement échoue dans son ensemble et
+les zones précédentes restent en service, parce qu'une même zone ne peut pas appartenir à deux
+clients. Le groupe global fait exception, et délibérément : c'est le fourre-tout de la flotte, pas le
+PoP d'un client, si bien qu'une zone étiquetée peut y résider quoi que dise le `tenant` de premier
+niveau de `kapkan.yaml`.
+
 ## Périmètre du token
 
 Un [token API](/docs/authentication) gagne un `tenant` optionnel, qui s'appuie sur son rôle : un
@@ -90,6 +102,14 @@ règles et l'inventaire des nœuds](/docs/api) couvrent tous les tenants par con
 scrubbing filtre pour l'ensemble du déploiement, de sorte que le cadrage par tenant au niveau du
 nœud est une préoccupation de [flotte](/docs/scrubbing), non de token. Traitez un token agent comme
 concernant tout le déploiement, et gardez-le hors des machines qui détiennent des données clients.
+
+Ce qui restreint un token agent, c'est la topologie, jamais la propriété.
+[`node`](/docs/authentication#lier-un-token-agent-à-son-nœud) le lie à une seule machine, et le
+[périmètre de placement](/docs/edge#placer-les-zones-sur-les-nœuds) d'un nœud edge décide quelles
+zones son document porte — quel qu'en soit le propriétaire. Ainsi, un token lié sur un PoP qui sert
+les zones d'un seul client détient bien les zones d'un seul client, mais il les détient à cause de
+l'endroit où se trouve la machine, non parce que le token serait cadré : rien en lui n'est vérifié
+face à un tenant.
 </Callout>
 
 ## Application

@@ -68,7 +68,7 @@ Le tableau de bord interroge l'API JSON et restitue tout ce que Kapkan suit en m
   colonnes rapportées sont étiquetées comme telles, car le rapport qu'un nœud fait sur lui-même est
   consultatif, jamais la source de sa vivacité.
 - **Edge** — affichée uniquement lorsque des [nœuds edge](/docs/edge) sont configurés : chaque zone
-  que les nœuds vivants rapportent, avec son débit de requêtes sur toute la flotte, les nœuds sur
+  du [fichier de zones](/docs/zones), avec son débit de requêtes sur toute la flotte, les nœuds sur
   lesquels elle est en observation seule, et une colonne défi — *arrêt*, *aperçu* (le palier
   demanderait mais ne fait qu'observer, sur chaque nœud), ou le mode de la zone avec les nœuds sur
   lesquels il s'applique (un levier apparaît comme ce mode), et un défi global de zone avec son
@@ -86,7 +86,45 @@ Le tableau de bord interroge l'API JSON et restitue tout ce que Kapkan suit en m
   *le test de disponibilité a échoué*), avec tout avis remonté par la sonde de ce nœud ; et
   *arrêt · 2 nœuds servent encore* quand le fichier de zones ne demande plus HTTP/3 mais qu'un nœud
   garde encore un écouteur QUIC, parce que le fichier et la flotte divergent jusqu'à la génération
-  suivante.
+  suivante. **Cliquez sur la ligne d'une zone** pour ouvrir son historique enregistré sous la
+  table — voir [Historique de la zone](#historique-de-la-zone) ci-dessous.
+
+  La colonne **Nœuds** lit le [placement](/docs/edge#placer-les-zones-sur-les-nœuds) de la zone, et
+  non le nombre de nœuds qui se trouvent la rapporter : `2/2` signifie *deux des deux nœuds sur
+  lesquels cette zone est placée sont vivants*, `0/1` accompagné d'un badge rouge **NON SERVIE** est
+  l'alarme qui dit qu'une zone placée n'a aucun nœud vivant derrière elle, et un tiret désigne une
+  zone qu'aucun périmètre de nœud ne couvre (un avertissement de `kapkan -check-config`, pas une
+  panne). Survolez la cellule pour voir les noms des nœuds ; en dessous, pour un token non rattaché,
+  se trouve le hostgroup de la zone. Les lignes que le fichier amorce mais qu'aucun nœud ne rapporte
+  affichent des tirets plutôt que des zéros — un zéro mesuré et *rien de mesuré* sont deux réponses
+  différentes — et disent pourquoi dans la colonne défi, en lisant le placement plutôt que le nombre
+  de rapports : *proxy seul* pour une zone en `policy.mode: none`, *servie par aucun nœud vivant*
+  pour une zone qui décide dont les nœuds placés sont tous à terre ou qu'aucun périmètre de nœud ne
+  couvre, et *pas encore de rapport* pour une zone dont le nœud placé est vivant mais ne l'a pas
+  mentionnée — un démarrage récent, un rapport plus ancien que la fenêtre, ou une zone que le nœud a
+  coupée de son rapport.
+
+  Avec le [multi-tenant](/docs/multi-tenancy), un token non rattaché voit aussi le `tenant` de
+  chaque zone sous son nom, ainsi qu'une rangée de **pastilles de tenant** au-dessus de la table qui
+  restreint à un seul client aussi bien les zones que le panneau **Qui serait vérifié** (mémorisée
+  pour la session du navigateur ; un choix qui ne nomme plus aucun tenant à l'écran est oublié
+  plutôt que laissé à se réactiver tout seul). Un token rattaché à un tenant voit exactement ses
+  propres zones, sans pastilles ni bannière — l'avis *visible uniquement des tokens sans périmètre*
+  est réservé à un cerveau trop ancien pour y répondre du tout.
+- **Nœuds edge** — l'inventaire propre de la flotte à côté de ses zones, affiché dans les mêmes
+  conditions. Une ligne par nœud configuré : s'il est vivant ou **PERDU** (l'interrogation des zones
+  est le seul signal de vivacité), les tokens agent qui lui sont
+  [liés](/docs/authentication#lier-un-token-agent-à-son-nœud) et quel token a interrogé en dernier
+  sous son identité, son périmètre de placement et le nombre de zones que ce périmètre lui confie,
+  et — d'après le rapport du nœud lui-même, étiqueté *(rapporté)* comme les colonnes des nœuds de
+  scrubbing — sa version de Kapkan, le terminateur qu'il orchestre avec la génération en service, la
+  disponibilité HTTP/3 de ce terminateur et les certificats qu'il détient, colorés en ambre à moins
+  de 30 jours de l'expiration et en rouge à moins de sept. Un nœud sans token propre porte un badge
+  ambre **token partagé** tant qu'un token agent est non lié, et une bannière en haut nomme ces
+  tokens : un token agent non lié peut interroger et rapporter sous l'identité de *n'importe quel*
+  nœud de la flotte. L'inventaire nomme les tokens et les périmètres : il n'est donc visible que des
+  tokens sans périmètre ; un token rattaché voit à sa place le même avis *visible uniquement des
+  tokens sans périmètre* que l'inventaire des nœuds de scrubbing.
 - **Table de bannissement** — chaque bannissement, actif et historique (avec la colonne du nœud de
   scrubbing lorsque des nœuds sont configurés).
 - **Trafic / Rapports** — des graphiques de trafic entrant/sortant en direct construits à partir des
@@ -95,13 +133,70 @@ Le tableau de bord interroge l'API JSON et restitue tout ce que Kapkan suit en m
 - **Contrôles** — les mêmes actions que celles offertes par l'API : **bannissement / débannissement manuel**
   d'une adresse et **rechargement de la configuration** (l'équivalent de l'envoi de `SIGHUP`).
 
-La section **Rapports historiques** de la vue Trafic / Rapports est la seule partie qui nécessite
-du stockage : elle n'est renseignée que lorsque le [stockage ClickHouse](/docs/storage) est activé, et
-affiche sinon un espace réservé étiqueté expliquant comment l'activer.
+Deux parties du tableau de bord nécessitent du stockage : la section **Rapports historiques** de la
+vue Trafic / Rapports, et la carte [Historique de la zone](#historique-de-la-zone) de la vue Edge
+avec sa table de sources et la carte **Évènements de la flotte**. Les deux ne sont renseignées que
+lorsque le [stockage ClickHouse](/docs/storage) est activé, et affichent sinon un espace réservé
+étiqueté expliquant comment l'activer.
 
 <Callout type="success" title="Aucune base de données requise">
 Le tableau de bord est entièrement construit à partir de l'état en mémoire du moteur. Le stockage historique des flows
 est une fonctionnalité distincte et optionnelle — il n'est pas nécessaire pour voir les attaques en direct, les principaux émetteurs ou les bannissements.
+</Callout>
+
+## Historique de la zone
+
+Tout le reste de la vue **Edge** porte sur les dix dernières secondes. Cliquer sur la ligne d'une
+zone ouvre l'historique enregistré de cette zone sous la table, sur **1 h**, **24 h** ou **7 j** —
+la même question posée sur une période plutôt que sur une fenêtre. La carte lit
+l'[historique edge](/docs/api#get-apiv1edgehistory) et a donc besoin du [stockage
+ClickHouse](/docs/storage#historique-edge) ; avec le stockage désactivé, elle affiche le même
+espace réservé étiqueté que la vue Trafic, jamais une erreur. Cliquer de nouveau sur la ligne, ou
+sur **Fermer**, la referme.
+
+La carte porte deux graphiques, et un troisième quand il y a du HTTP/3 à tracer :
+
+- **Requêtes/s** — les fenêtres des nœuds sommées en intervalles (une minute, dix minutes ou une
+  heure, selon la plage) et divisées par la durée réelle des fenêtres tombées dans chacun.
+- **Refusées ou le seraient** — les refusées plus les mises au défi plus celles qui seraient
+  refusées et celles qui seraient mises au défi, de sorte qu'un palier qui ne fait que prévisualiser
+  et un palier qui s'applique sont comptés sur le même axe. L'étiquette *aperçu* dit que le palier
+  ne s'applique sur aucun nœud **maintenant** ; le graphique ne s'intitule **Seraient refusées** que
+  lorsque la période ne contient, elle aussi, aucun refus réel, car un palier passé en observation
+  seule il y a une heure laisse de vrais refus dans les heures qui précèdent.
+- **Part HTTP/3, %** — affichée uniquement lorsqu'un intervalle a réellement vu des requêtes
+  HTTP/3, parce qu'une ligne plate à zéro sous une zone que personne n'atteint en QUIC se lirait
+  comme une mesure plutôt que comme une absence.
+
+Sous les graphiques, les totaux de la période : le plus grand nombre de nœuds vus rapporter dans un
+même intervalle, les requêtes, les refus (réels ou prévisualisés), le compte de 4xx / 5xx et
+l'intervalle que le moteur a réellement utilisé — il **relève** le pas qu'on lui a demandé quand une
+plage contiendrait sinon plus de 5 000 intervalles, si bien que le chiffre nomme les intervalles que
+vous regardez.
+
+Sous la carte, **Qui aurait été vérifié — sur 1 h** (ou **24 h** / **7 j**, selon la plage que vous
+avez choisie) liste les sources significatives de la période, les plus actives d'abord : la chose la
+plus forte qu'un nœud, quel qu'il soit, a faite à chacune (*refusée*, *vérifiée*, *refuserait*,
+*vérifierait*, avec les mêmes badges que la table en direct), ses requêtes, combien de fenêtres et
+de nœuds l'ont vue, et quand elle a été vue d'abord et en dernier. C'est la question à poser avant
+qu'un palier de zone ne passe en production, sur une journée plutôt que sur dix secondes.
+
+Une carte **Évènements de la flotte** clôt la vue pour les tokens non rattachés : ce que le cerveau
+a vu changer ces 24 dernières heures, du plus récent au plus ancien — un nœud perdu ou revenu, une
+version, un indicateur dry-run qui bascule, un document généré, une génération installée ou refusée,
+la vivacité d'un terminateur, un état HTTP/3, un certificat émis, renouvelé ou disparu, un défi
+global de zone qui démarre ou se termine, l'horloge d'un nœud qui dérive hors de la tolérance, un
+rapport qui a dû être coupé.
+Un token [rattaché à un tenant](/docs/multi-tenancy) ne voit pas la carte du tout : les événements
+nomment des nœuds. L'historique et ses sources, en revanche, sont lisibles par un tenant pour ses
+propres zones — la zone d'un autre tenant est refusée et la carte n'apparaît simplement pas.
+
+<Callout type="info" title="Lus à la demande, pas à chaque interrogation">
+L'historique d'une zone et ses sources sont lus quand vous ouvrez une zone ou changez sa plage ; les
+événements de la flotte sont lus dès que la vue Edge est à l'écran pour un token non rattaché, zone
+ouverte ou non. Les trois au plus toutes les dix secondes, et aucun d'eux sur l'interrogation de
+trois secondes de la console — ils interrogent ClickHouse, et les fenêtres qui les alimentent durent
+dix secondes.
 </Callout>
 
 ## Détail d'une attaque

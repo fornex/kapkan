@@ -429,6 +429,18 @@ liste aucun. Les conséquences, par ordre de fréquence :
 - **Le périmètre suit l'adressage.** Un hostgroup a besoin d'au moins un préfixe dans `networks` — le
   préfixe de VIP du PoP, que vous protégez de toute façon. Le placement n'est pas une seconde
   topologie ; c'est celle que vous avez déjà déclarée.
+- **L'adresse d'une zone suit son placement — c'est vous qui la déplacez.** Kapkan génère de la
+  configuration ; il ne dirige jamais le trafic. Placer une zone sur `edge-us` n'atteint les clients
+  qu'une fois le nom résolu vers les nœuds qui listent `edge-us`, et le nœud qui ne la sert plus
+  cesse de répondre pour elle dès que le nouveau document arrive : le nom retombe sur le catch-all
+  de kapkan, qui ferme la connexion sur `:80` (le `return 444` de nginx) et refuse la poignée de
+  main sur `:443`. Une requête qui arrive sur le mauvais nœud est une connexion coupée, pas un `404`
+  ni une page périmée — côté client, une réponse vide ou une poignée de main refusée : lisez-les
+  comme « mauvais nœud », non comme une origine cassée. **Une autorité de certification
+  est un client comme un autre.** Elle résout la zone comme le fait le monde entier : une validation
+  HTTP-01 qui atterrit hors du placement échoue donc par une erreur de connexion — déplacez
+  l'enregistrement DNS (ou le préfixe anycast) dans le même changement que la zone, et le nœud qui
+  la gagne commande dès sa première interrogation.
 - **Chaque nœud reçoit son propre document** — exactement les zones que son périmètre couvre, avec leurs
   attributions de certificats, les défis ACME diffusés, les clés de laissez-passer et les leviers,
   et son propre ETag. Un nœud qui demande le créneau d'émission d'une zone qu'il ne sert pas, ou qui
@@ -487,14 +499,19 @@ renouvelle un certificat pour une zone que le nœud ne sert plus.
   résultat (`challenge`, `would_challenge`, `allow_cleared` entre autres), les issues de la page de
   laissez-passer, si un défi global de zone est actif — voir [métriques](/docs/metrics#nœuds-edge).
 - **L'inventaire du cerveau**, `GET /api/v1/edge/nodes`, joint la vivacité de chaque nœud configuré
+  — l'interrogation des zones, et rien d'autre —
   à son dernier rapport : version, dry-run, ETag généré, type et version du terminateur, sa
   disponibilité HTTP/3 (`terminator.h3.state` : `ready`, `no_module`, `node_off`, `unknown`, avec
   un avis quand le cœur nginx du build tombe dans la plage d'un avis de sécurité QUIC publié),
   génération
   et résultat de test, certificats (jamais une clé), et la **section zones** — la dernière fenêtre
   de dix secondes de chaque zone, les sources qu'elle a refusées, mises au défi ou qu'elle l'aurait
-  fait, et si son palier s'y applique ou n'y fait que prévisualiser. Voir
-  [l'API](/docs/api#le-canal-edge).
+  fait, et si son palier s'y applique ou n'y fait que prévisualiser. Une présence est estampillée
+  quand une interrogation commence, puis de nouveau quand elle se termine : tant qu'une interrogation
+  est en attente, `last_seen` porte donc le début de celle-ci, et la présence d'un nœud sain est
+  couramment plus ancienne qu'`edge.stale_after_seconds` ; c'est `holding` qui dit qu'une
+  interrogation est ouverte à l'instant même, et un nœud en attente est vivant quoi que dise
+  `last_seen`. Voir [l'API](/docs/api#le-canal-edge).
 - **Les zones sur toute la flotte**, `GET /api/v1/edge/zones/status`, liste chaque zone du fichier
   de zones et y fusionne les rapports des nœuds vivants (un token [rattaché à un
   tenant](/docs/multi-tenancy) reçoit ses propres zones) : débits sommés, les nœuds sur lesquels une

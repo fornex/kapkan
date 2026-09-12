@@ -349,11 +349,12 @@ bannissements façonnent ce cycle de vie.
 
 ### GET /api/v1/audit
 
-Renvoie la piste d'audit attribuée aux opérateurs — qui a émis chaque `ban`, `unban` ou
-`config_reload`, `source_block` ou `source_unblock`, quand, et le résultat (y compris les actions
-**refusées**). Les enregistrements sont triés du plus récent au plus ancien et le point de
-terminaison est rattaché au tenant côté serveur. Il accepte des paramètres de requête optionnels
-`from`/`to` (RFC 3339), `action` (`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`) et
+Renvoie la piste d'audit attribuée aux opérateurs — qui a émis chaque `ban`, `unban`,
+`config_reload`, `source_block`, `source_unblock` ou `edge_challenge`, quand, et le résultat
+(y compris les actions **refusées**). Les enregistrements sont triés du plus récent au plus ancien
+et le point de terminaison est rattaché au tenant côté serveur. Il accepte des paramètres de requête
+optionnels `from`/`to` (RFC 3339), `action`
+(`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`/`edge_challenge`) et
 `target` (une IP), et porte par défaut sur la dernière heure :
 
 ```json
@@ -378,7 +379,9 @@ terminaison est rattaché au tenant côté serveur. Il accepte des paramètres d
 }
 ```
 
-Lorsque le stockage est désactivé, la réponse est `{"available": false, "events": []}`. Notez que
+Lorsque le stockage est désactivé, la réponse est `{"available": false, "events": []}`. `events`
+est toujours un tableau — vide plutôt que `null`, y compris pour un tenant dont la fenêtre ne
+contient aucun enregistrement —, si bien qu'un client peut le parcourir sans garde. Notez que
 les enregistrements d'audit encodent `dry_run` sous forme d'entier (`0`/`1`), et non sous forme du
 booléen JSON utilisé ailleurs sur cette page. Voir la page dédiée [Journal d'audit](/docs/audit)
 pour la liste complète des champs, les règles de requête, ainsi que le modèle d'identité des
@@ -708,8 +711,10 @@ laissées de côté, et celles qu'un rapport en train de rétrécir a délestée
 rapport sont aussi écrites dans l'historique edge, et ce qui a changé depuis le rapport précédent du
 nœud devient des événements — après que le rapport a été stocké, et sans que la réponse ne l'attende
 jamais. Jamais un
-signal de vivacité (l'interrogation l'est). Un `{name}` inconnu renvoie `404` ; le succès est
-`204 No Content`.
+signal de vivacité (l'interrogation l'est). Un `{name}` inconnu renvoie `404` ; un corps de plus de
+64 KiB renvoie `413 report exceeds 64 KiB` — c'est la limite sous laquelle un nœud se déleste de
+détail pour rester : un `413` ici est donc le fait d'un client qui ne l'a pas fait, et rien du
+rapport n'est lu ; le succès est `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 
@@ -722,8 +727,21 @@ document porte `unbound_agent_tokens` tant qu'un token agent est non lié et qu'
 auxquels le lier (absent sinon) — la vue de migration de
 [Lier un token agent à son nœud](/docs/authentication#lier-un-token-agent-à-son-nœud).
 `hostgroups` et `zones_placed` sont toujours présents ; `tokens`, `last_token` et
-`unbound_agent_tokens` sont omis quand ils sont vides. Une lecture de rang `viewer`, tokens non
-rattachés uniquement.
+`unbound_agent_tokens` sont omis quand ils sont vides. Le document porte aussi `nodes_total` et le
+`stale_after_seconds` sur lequel le jugement s'appuie ; chaque nœud porte `alive`, `holding` et
+`last_seen`.
+
+**Une présence est estampillée quand une interrogation commence, puis de nouveau quand elle se
+termine : tant qu'une interrogation est en attente, `last_seen` porte donc le début de celle-ci** et
+peut dater de 25 s sur un nœud parfaitement sain — plus ancien que `stale_after_seconds` avec les
+valeurs par défaut. `holding` dit qu'une interrogation est en attente à l'instant même, et un nœud
+qui en tient une est vivant quoi que dise `last_seen` ; `alive` vaut *en attente, ou vu depuis moins
+de `stale_after_seconds`*, jamais quoi que ce soit que le rapport du nœud lui-même prétend. La
+conséquence à anticiper : un changement qui coupe un nœud — un token retiré, une liaison déplacée —
+met fin à son interrogation en attente avec le refus qu'une première interrogation obtiendrait
+désormais, ce qui estampille une présence à son tour ; `alive` ne passe donc à faux que
+`stale_after_seconds` plus tard, soit jusqu'à environ 40 s après le changement avec les valeurs par
+défaut. Une lecture de rang `viewer`, tokens non rattachés uniquement.
 
 #### GET /api/v1/edge/zones/status
 
@@ -820,7 +838,9 @@ cleared, would_deny, would_challenge, status_2xx, status_3xx, status_4xx, status
 h3_requests}]}`. `nodes` compte les nœuds distincts qui ont rapporté dans l'intervalle ;
 `step_seconds` est le pas réellement appliqué ; `zone` et `node` reprennent la requête, `node`
 seulement lorsque le filtre a été donné ; déduisez le débit avec `requests / window_seconds` et la
-part HTTP/3 avec `h3_requests / requests`. `zone` est obligatoire, rabattu en minuscules comme les
+part HTTP/3 avec `h3_requests / requests`. Ces règles de plage et de pas sont partagées avec
+`/api/v1/traffic` et `/api/v1/audit` — une seule implémentation, si bien que les trois répondent à
+une plage invalide par le même message. `zone` est obligatoire, rabattu en minuscules comme les
 noms du fichier, et doit figurer dans le fichier de zones (`404 unknown zone` sinon) ;
 `node=<name>` restreint à un seul nœud configuré (`404 unknown edge node`). Rang `viewer`. Un token
 [rattaché à un tenant](/docs/multi-tenancy) lit ses propres zones ; toute autre zone — celle d'un
@@ -853,6 +873,14 @@ events: [{event_time, node, zone, kind, detail}]}`, avec les filtres optionnels 
 `report_truncated` (`400` sinon). Rang `viewer`, **tokens non rattachés uniquement** : les
 événements nomment les nœuds et les changements de la flotte. Les mêmes règles de plage ; avec le
 stockage désactivé, la réponse est `{available: false, events: []}`.
+
+Chaque `kind` est une **transition** : un état que le cerveau n'a jamais vu qu'une fois ne figure
+donc pas ici. Le premier rapport après un démarrage du cerveau est une référence silencieuse, et la
+présence l'est aussi — un nœud prend sa référence à sa première interrogation ou, si le cerveau ne
+l'entend jamais, comme perdu une fois `stale_after_seconds` écoulé depuis le démarrage du tic de
+présence, sans écrire de `node_lost`. Un nœud resté à l'arrêt de part et d'autre d'un redémarrage du
+cerveau n'a donc aucun événement jusqu'à son retour, et le premier est un `node_alive`. Pour savoir
+ce qu'un nœud est *maintenant*, lisez l'inventaire, pas cette liste.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot et …/acme/challenges
 

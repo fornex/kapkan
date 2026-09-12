@@ -95,8 +95,10 @@ présenté est celui d'un autre nœud, et il refuse **avant** de faire quoi que 
 aucune présence n'est estampillée, aucun rapport stocké, aucun créneau accordé, aucune autorisation
 de clé publiée. Le refus est un `403` uniforme qui ne nomme pas le nœud lié, un avertissement par
 minute et par token dans le journal du cerveau, et un compte dans
-`kapkan_api_node_binding_refused_total{route}`. Un token lié qui interroge sans `?node=` est refusé
-lui aussi : sa liaison dit quel nœud il est.
+`kapkan_api_node_binding_refused_total{route}`. Aucune ligne d'[audit](/docs/audit) n'est écrite :
+la piste d'audit attribue ce qu'un opérateur a changé, et une machine refusée n'a rien changé — la
+ligne de journal et le compteur sont là où se révèle un token de nœud mal configuré ou volé. Un
+token lié qui interroge sans `?node=` est refusé lui aussi : sa liaison dit quel nœud il est.
 
 ```yaml
 api:
@@ -133,6 +135,16 @@ flottes sans périmètres est prévu pour une version MAJEURE.
 
 La présence n'est estampillée que par les tokens agent : un operator qui interroge avec `?node=X`
 reçoit le document de X en **aperçu** et ne fait pas paraître X vivant.
+
+**Laissez à une étape de migration le temps de se voir.** Un changement de token atteint une
+interrogation déjà en attente : le rechargement y met fin avec la réponse qu'une première
+interrogation obtiendrait désormais (`401` pour un token disparu, `403` pour un token dont la
+liaison a été déplacée), et le nœud se reconnecte avec ce qu'il a maintenant. L'*inventaire*, lui,
+est plus lent, parce qu'une présence est estampillée quand une interrogation commence puis de
+nouveau quand elle se termine — le refus compris : un nœud que vous venez de couper affiche donc
+`alive` pendant tout le reste de son attente (jusqu'à 25 s), puis `edge.stale_after_seconds`
+par-dessus, soit environ 40 s avec les valeurs par défaut. Attendez ce délai avant de lire la
+bascule de `last_token`, sans quoi vous regarderez l'état d'avant votre changement.
 
 `token_env` et `tokens` sont **mutuellement exclusifs** — `token_env` correspond à exactement un
 token operator. Une requête est comparée à chaque token configuré (en temps constant) ; le rôle le
