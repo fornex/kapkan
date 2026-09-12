@@ -135,7 +135,9 @@ Chaque enregistrement comporte ces champs :
 
 Une requête portant sur une fenêtre hors limites renvoie `400` ; une valeur d'`action` inconnue
 renvoie `400` ; un `target` mal formé renvoie `400`. Avec le stockage désactivé, la réponse est
-`{"available": false, "events": []}` avec un code `200`.
+`{"available": false, "events": []}` avec un code `200`. `events` est toujours un tableau : une
+fenêtre qui ne contient aucun enregistrement visible par l'appelant — le premier jour d'un tenant,
+un filtre qui ne correspond à rien — vaut `[]`, jamais `null`.
 
 ## Limitation par tenant
 

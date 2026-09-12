@@ -126,6 +126,16 @@ l'arrivée du premier certificat, l'écouteur `:80` de la zone répond `503` à 
 défi ACME — une zone n'est jamais servie en proxy en clair. Chaque nom est émis explicitement ; les
 jokers (DNS-01) viendront dans un jalon ultérieur.
 
+La CA joint la zone par son **adresse publique**, exactement comme un visiteur, et le cerveau publie
+le défi en cours dans le document de chaque nœud sur lequel la zone est
+[placée](/docs/edge#placer-les-zones-sur-les-nœuds) — celui d'entre eux où la validation atterrit y
+répond donc. Le corollaire est celui qui mord : une zone dont le nom ne résout pas vers un nœud qui
+la sert ne peut pas être émise du tout, et un nœud hors du placement refuse la connexion au lieu de
+répondre sur le chemin du défi. Faites pointer le nom vers le placement avant d'attendre un
+certificat. Une validation laisse aussi une trace : les sondes de la CA sont une poignée de requêtes
+dans les fenêtres de la zone, des `2xx` non décidés — c'est pourquoi l'[historique](/docs/storage#historique-edge)
+d'une zone au repos n'est pas tout à fait vide autour d'une émission.
+
 ## Voir aussi
 
 - [Nœuds edge](/docs/edge) — le rôle, ses modes de panne et ses limites

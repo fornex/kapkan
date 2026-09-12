@@ -154,14 +154,20 @@ contrat du chemin d'écriture.
   présence tourne toutes les `min(stale_after/2, 5 s)`, jamais en dessous d'une seconde ; après un
   démarrage du cerveau, un nœud prend sa référence à sa première interrogation (silencieusement), ou
   est déclaré perdu une fois `stale_after` écoulé sans aucune — un redémarrage n'est jamais une
-  rafale de `node_alive` sur toute la flotte. Les transitions de présence sont aussi journalisées en
-  INFO, avec ou sans stockage.
+  rafale de `node_alive` sur toute la flotte. **Cette seconde référence est silencieuse elle
+  aussi** : un nœud dont le cerveau n'a rien entendu depuis son démarrage n'obtient aucune ligne
+  `node_lost`, parce que rien n'a transité — un nœud déjà à l'arrêt de part et d'autre d'un
+  redémarrage n'apparaît dans les événements qu'à son retour, sous la forme d'un `node_alive`.
+  Les transitions de présence sont aussi journalisées en INFO, avec ou sans stockage.
 
 Volume, par jour : `edge_windows` croît de **8 640 × (zones qui décident avec du trafic × nœuds
 vivants)** lignes (une fenêtre de dix secondes chacune), `edge_sources` d'au plus 20 fois cela, et
-`edge_events` de la poignée de transitions qu'a une flotte. Mesurez ce que cela coûte sur votre
-serveur plutôt que de le deviner — la taille compressée des lignes dépend de vos noms de zones et de
-nœuds :
+`edge_events` de la poignée de transitions qu'a une flotte. Sur disque, c'est peu de chose : une
+campagne de recette a mesuré `edge_windows` à une centaine d'octets compressés par ligne et les deux
+autres à quelques dizaines d'octets — un ordre de grandeur pour se projeter, pas un chiffre à
+multiplier, puisque l'échantillon tenait en quelques dizaines de lignes réparties dans de toutes
+petites parts (qui se compressent mal) et que vos noms de zones et de nœuds ne sont pas les nôtres.
+Mesurez ce que cela coûte réellement sur votre serveur :
 
 ```sql
 SELECT table, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS on_disk
@@ -179,9 +185,23 @@ directement.
 ## Contre-pression
 
 Les lignes sont placées dans une file d'attente bornée (`queue_size`) avec un envoi non bloquant
-et sont vidées par lots (`batch_size` / `flush_interval_seconds`). Si ClickHouse est lent ou
-indisponible, les lignes sont abandonnées — comptabilisées dans `kapkan_storage_rows_total` avec
-`result="dropped"` — et le moteur continue de fonctionner. Voir [Métriques](/docs/metrics).
+et sont vidées par lots (`batch_size` / `flush_interval_seconds`). Dès que ClickHouse ne peut pas
+les prendre, les lignes sont perdues plutôt que retenues, et le moteur continue de fonctionner ;
+`kapkan_storage_rows_total` dit laquelle des deux pertes c'était, et elles ne veulent pas dire la
+même chose :
+
+- `result="error"` — l'insertion elle-même a échoué. Le lot est journalisé
+  (`clickhouse insert failed`) puis abandonné. **Un ClickHouse indisponible compte ici**, et non
+  sous `dropped` : une connexion refusée échoue immédiatement, chaque vidage vide donc la file aussi
+  vite qu'elle se remplit.
+- `result="dropped"` — la file était pleine au moment où une ligne a été transmise, elle n'a donc
+  jamais atteint une insertion. Cela suppose un puits qui *traîne* au lieu de refuser — un serveur
+  qui garde la connexion ouverte, un réseau qui perd les paquets, un vidage qui attend l'expiration
+  de son délai — ou une rafale plus grosse que `queue_size` arrivée pendant un même vidage. La
+  détection n'est bloquée dans aucun des deux cas.
+
+Une série `dropped` sans `error` à côté d'elle pointe donc vers de la latence, pas vers une panne.
+Voir [Métriques](/docs/metrics).
 
 ## Ce qui est et n'est pas persisté
 
