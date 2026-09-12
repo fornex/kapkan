@@ -267,10 +267,22 @@ The channel is the one the scrub node already uses, with a second document famil
   when it does — is small; a fleet that needs cross-node resumption would render
   `ssl_certificate` from a variable (identical directive text on every node, at a per-handshake
   file read) — an E6+ item, not E5. Per-node ticket keys and `ssl_session_cache` cover the
-  common case unchanged — with one E6.9 correction: the shared cache must be declared on the
-  catch-all default server too, because OpenSSL looks sessions up through the context of the
-  server the connection started on even after SNI switched it (`SSL_set_SSL_CTX` leaves
-  `session_ctx` alone); without it no session resumed on any node, its own included.
+  common case unchanged — with two E6.9 corrections. (1) The shared cache, its timeout and
+  `ssl_session_tickets off` must be declared on the catch-all default server (and on the QUIC
+  anchor) too, because OpenSSL reads a session's cache, lifetime and ticket handling through the
+  context of the server the connection started on even after SNI switched it
+  (`SSL_set_SSL_CTX` leaves `session_ctx` alone); without them no session resumed on any node,
+  its own included. (2) The certificate binding above holds where the SNI-selected server's
+  context is the one in force at session creation and lookup — nginx ≥ 1.29.2 and Angie, which
+  switch in the ClientHello callback, or a zone that is itself the default server (the 1.30.4
+  verification). On nginx before 1.29.2 the servername callback runs AFTER OpenSSL has created
+  or looked up the session, so the session id context in force is the default server's — with
+  kapkan's certificate-less catch-all, `SHA-1("HTTP")` on every node and zone — and on one node
+  a session may resume under another zone's name (the request is still routed by Host). What
+  confines a session to its node on every nginx line is that it is a stateful entry in that
+  node's own shared-memory cache and no ticket carries it: no ticket key is shared, and a
+  fleet-shared key on the catch-all would resume across nodes on the pre-1.29.2 line — which is
+  why shared ticket keys stay not offered.
 
 ---
 

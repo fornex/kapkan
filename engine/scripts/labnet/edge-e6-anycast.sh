@@ -1001,8 +1001,11 @@ say "ARM G — the two cross-node facts a shared address exposes"
 # in the SAME position as 1.2 here, not a different one: `ssl_session_tickets
 # off` sets SSL_OP_NO_TICKET, and nginx then issues stateful 1.3 tickets whose
 # sessions it looks up in `ssl_session_cache` — so both resume on their own
-# node only. TLS 1.2 is the form this arm drives because `openssl s_client
-# -sess_out/-sess_in` makes the offer and its answer visible in one word.
+# node only. TLS 1.2 is the form this arm drives first because `openssl
+# s_client -sess_out/-sess_in` makes the offer and its answer visible in one
+# word; a TLS 1.3 leg follows, since on nginx before 1.29.2 the catch-all's
+# `ssl_session_tickets off` is what routes a 1.3 PSK to the cache lookup at
+# all (the options in force at PSK-parse time are the default server's).
 sess() { # SRCNODE DSTNODE FILE — save a session from SRC, offer it to DST
   local s=$1 d=$2 f=$3
   ip netns exec cli sh -c "printf 'GET /g HTTP/1.1\r\nHost: $ZONE\r\nConnection: close\r\n\r\n' | openssl s_client -connect $(ip_of "$s"):443 -servername $ZONE -CAfile /tmp/pebble-root.crt -tls1_2 -sess_out /tmp/g-$s.sess -ign_eof" >/tmp/g-save-$s.txt 2>&1
@@ -1026,9 +1029,24 @@ r=$(sess 1 1 /tmp/g-default.txt)
 r=$(sess 2 2 /tmp/g-same2-default.txt)
 [ "$r" = "Reused" ] && ok "and edge-2 resumes its own session too, as rendered ('$r')" || bad "resumption on edge-2's own node with the catch-all in place: '$r'"
 r=$(sess 1 2 /tmp/g-other-default.txt)
-[ "$r" = "New" ] && ok "offered edge-1's session, edge-2 answers New: a session does not cross nodes (spec §3 — the session id context is the node's own certificate)" || bad "edge-2 resumed a session from edge-1 with the catch-all in place: '$r'"
+[ "$r" = "New" ] && ok "offered edge-1's session, edge-2 answers New: a session does not cross nodes — it is a stateful entry in edge-1's own cache and no ticket carries it (spec §3)" || bad "edge-2 resumed a session from edge-1 with the catch-all in place: '$r'"
 r=$(sess 2 1 /tmp/g-other2-default.txt)
 [ "$r" = "New" ] && ok "…and symmetrically, edge-2's session is New on edge-1: neither direction crosses" || bad "edge-1 resumed a session from edge-2: '$r'"
+# TLS 1.3, the same two facts: with tickets off nginx hands the client a
+# STATEFUL ticket — an id into this node's cache — and only the default
+# server's SSL_OP_NO_TICKET makes OpenSSL look it up there rather than try to
+# decrypt it as a stateless ticket (which would fail, silently, into a full
+# handshake). `sess13` is `sess` without -tls1_2.
+sess13() { local s=$1 d=$2 f=$3
+  ip netns exec cli sh -c "printf 'GET /g13 HTTP/1.1\r\nHost: $ZONE\r\nConnection: close\r\n\r\n' | openssl s_client -connect $(ip_of "$s"):443 -servername $ZONE -CAfile /tmp/pebble-root.crt -sess_out /tmp/g13-$s.sess -ign_eof" >/tmp/g13-save-$s.txt 2>&1
+  ip netns exec cli openssl s_client -connect "$(ip_of "$d")":443 -servername $ZONE -CAfile /tmp/pebble-root.crt -sess_in "/tmp/g13-$s.sess" </dev/null >"$f" 2>&1
+  grep -oE '^(New|Reused)' "$f" | head -1
+}
+r=$(sess13 1 1 /tmp/g13-same.txt)
+[ -s /tmp/g13-1.sess ] && grep -q 'TLSv1.3' /tmp/g13-save-1.txt && ok "a TLS 1.3 session is issued and saved from edge-1 (a stateful ticket, tickets being off)" || bad "no TLS 1.3 session saved from edge-1: $(grep -iE 'protocol|session|error' /tmp/g13-save-1.txt | head -2 | tr '\n' ' ')"
+[ "$r" = "Reused" ] && ok "…and it is Reused on edge-1 over TLS 1.3 ('$r'): the catch-all's tickets-off routes the PSK to the cache" || bad "TLS 1.3 resumption on its own node: '$r' ($(grep -oiE 'Reused|New|Protocol *: *TLSv1.[23]' /tmp/g13-same.txt | tr '\n' ' '))"
+r=$(sess13 1 2 /tmp/g13-other.txt)
+[ "$r" = "New" ] && ok "…and New on edge-2 ('$r'): a TLS 1.3 session does not cross nodes either" || bad "edge-2 resumed edge-1's TLS 1.3 session: '$r'"
 # The supported omit_catch_all knob (an nginx.conf with default servers of its
 # own) makes the zone's own server the address's default: the same two facts
 # must hold there — it was the knob that proved the cause before the fix.
@@ -1042,7 +1060,9 @@ r=$(sess 1 1 /tmp/g-same.txt)
 r=$(sess 2 2 /tmp/g-same2.txt)
 [ "$r" = "Reused" ] && ok "and on edge-2's own node under omit_catch_all" || bad "resumption on edge-2's own node under omit_catch_all: '$r'"
 r=$(sess 1 2 /tmp/g-other.txt)
-[ "$r" = "New" ] && ok "offered edge-1's session under omit_catch_all, edge-2 still answers New: the knob changes the default server, not the session id context" || bad "edge-2 resumed a session from edge-1 under omit_catch_all: '$r'"
+[ "$r" = "New" ] && ok "offered edge-1's session under omit_catch_all, edge-2 still answers New: the knob changes the default server, not where the session lives" || bad "edge-2 resumed a session from edge-1 under omit_catch_all: '$r'"
+r=$(sess 2 1 /tmp/g-other2.txt)
+[ "$r" = "New" ] && ok "…and edge-2's session is New on edge-1 under omit_catch_all: neither direction crosses there either" || bad "edge-1 resumed a session from edge-2 under omit_catch_all: '$r'"
 edge_yaml 1 $STATE1 $SOCKS1; edge_yaml 2 $STATE2 $SOCKS2
 kill_node 1; kill_node 2
 node_nginx 1 edge1 $STATE1; node_nginx 2 edge2 $STATE2; wait_nginx 1; wait_nginx 2; start_edge 1; start_edge 2

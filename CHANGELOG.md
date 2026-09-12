@@ -815,8 +815,14 @@ security-relevant.
   zone's server (`SSL_set_SSL_CTX` leaves `session_ctx` alone); with no cache on the catch-all
   every zone's cache was dead configuration and every returning client, TLS 1.2 or 1.3, paid a
   full handshake — found by the E6.9 anycast rig, which proved the cause with `omit_catch_all`.
-  Nothing crosses nodes: the session id context still binds a session to the node's own
-  certificate (edge-spec §3), tickets stay off and 0-RTT stays off.
+  Nothing crosses nodes: a session is a stateful entry in the node's own cache and no ticket key
+  is shared, so it cannot exist on another node (asserted by the rig over TLS 1.2 and 1.3, both
+  directions); tickets stay off and 0-RTT stays off. The session id context in force is the
+  default server's — on nginx before 1.29.2 the certificate-less catch-all's — so it is not what
+  confines a session, and on one node a session may resume under another zone's name (the request
+  is still routed by Host); edge-spec §3 says so now. An operator on `omit_catch_all` must give
+  their own `:443` default server (and, with `quic.omit_anchor`, their QUIC server) the same three
+  lines — the install guide and its troubleshooting table say which and why.
 
 - Console: the storage-off placeholder chart on the Traffic view (and now on the Edge view's
   history cards) re-rolled its random shape on every 3 s poll and twitched as if it were live
