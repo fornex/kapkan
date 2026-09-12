@@ -65,9 +65,9 @@ El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea e
   porque sigue sondeando reglas), cuántos bloqueos desvían hacia él, y su propia carga, descartes,
   versión y flag de dry-run reportados — las columnas reportadas se etiquetan como tales, porque el
   autoinforme de un nodo es orientativo, nunca la fuente de su vitalidad.
-- **Edge** — se muestra solo cuando hay [nodos edge](/docs/edge) configurados: cada zona que
-  reportan los nodos vivos, con su tasa de peticiones en toda la flota, los nodos en los que está
-  en solo observación y una columna de desafío — *apagada*, *vista previa* (el peldaño pediría,
+- **Edge** — se muestra solo cuando hay [nodos edge](/docs/edge) configurados: cada zona del
+  [archivo de zonas](/docs/zones), con su tasa de peticiones en toda la flota, los nodos en los que
+  está en solo observación y una columna de desafío — *apagada*, *vista previa* (el peldaño pediría,
   pero solo observa, en todos los nodos) o el modo de la zona con los nodos en los que actúa (una
   palanca se muestra como ese modo), y un desafío de zona completa con su motivo (el disparador
   `zone-rps` del nodo) — más un panel **Quién sería comprobado**: las fuentes para las que los
@@ -84,7 +84,43 @@ El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea e
   comprobación de disponibilidad falló*), junto con cualquier aviso que haya levantado la sonda de
   ese nodo; y *apagado · 2 nodos siguen sirviendo* cuando el archivo de zonas ya no pide HTTP/3 pero
   algún nodo mantiene todavía una escucha QUIC, porque el archivo y la flota discrepan hasta que
-  aterrice la siguiente generación.
+  aterrice la siguiente generación. **Haz clic en la fila de una zona** para abrir su historial
+  guardado bajo la tabla — consulta [Historial de la zona](#historial-de-la-zona) más abajo.
+
+  La columna **Nodos** lee la [colocación](/docs/edge#colocar-zonas-en-los-nodos) de la zona, no el
+  número de nodos que da la casualidad de que la reportan: `2/2` es *dos de los dos nodos en los que
+  está colocada esta zona están vivos*, `0/1` más una insignia roja **SIN SERVIR** es la alarma de
+  que una zona colocada no tiene ningún nodo vivo detrás, y un guion es una zona que no cubre el
+  alcance de ningún nodo (un aviso de `kapkan -check-config`, no una caída). Pasa el cursor por la
+  celda para ver los nombres de los nodos; debajo, para un token sin acotar, va el hostgroup de la
+  zona. Las filas que el archivo siembra pero que ningún nodo reporta muestran guiones en lugar de
+  ceros — un cero medido y *nada medido* son respuestas distintas — y dicen por qué en la columna de
+  desafío, leyendo la colocación y no el número de reportes: *solo proxy* para una zona en
+  `policy.mode: none`, *ningún nodo vivo la sirve* para una zona que decide cuyos nodos colocados
+  están todos caídos o a la que no llega el alcance de ningún nodo, y *aún sin informe* para una
+  cuyo nodo colocado está vivo pero no ha mencionado la zona — un arranque reciente, un reporte más
+  antiguo que la ventana, o una zona que el nodo recortó de su reporte.
+
+  Con [multi-tenancy](/docs/multi-tenancy), un token sin acotar ve además el `tenant` de cada zona
+  bajo su nombre y una fila de **chips de tenant** sobre la tabla que reduce tanto las zonas como el
+  panel **Quién sería comprobado** a un solo cliente (se recuerda durante la sesión del navegador;
+  una elección que ya no nombra a ningún tenant en pantalla se olvida, en lugar de dejarla volver a
+  activarse sola). Un token acotado a un tenant ve exactamente sus propias zonas, sin chips y sin
+  banner — el aviso *solo visible para tokens sin acotar* se reserva para un cerebro demasiado
+  antiguo como para responder siquiera.
+- **Nodos edge** — el inventario propio de la flota junto a sus zonas, con la misma condición. Una
+  fila por nodo configurado: si está vivo o **PERDIDO** (el sondeo de zonas es la única señal de
+  vitalidad), los tokens de agente [vinculados a él](/docs/authentication#vincular-un-token-de-agente-a-su-nodo)
+  y qué token sondeó por última vez como él, su alcance de colocación y cuántas zonas le asigna ese
+  alcance, y —del propio reporte del nodo, etiquetado como *(informado)* igual que las columnas de
+  los nodos de scrubbing— su versión de Kapkan, el terminador con el que orquesta con la generación
+  activa, la disponibilidad de HTTP/3 de ese terminador y los certificados que posee, en ámbar a
+  menos de 30 días de la caducidad y en rojo a menos de siete. Un nodo sin token propio lleva una
+  insignia ámbar de **token compartido** mientras algún token de agente esté sin vincular, y un
+  banner arriba nombra esos tokens: un token de agente sin vincular puede sondear y reportar como
+  *cualquier* nodo de la flota. El inventario nombra tokens y alcances, así que solo es visible para
+  tokens sin acotar; uno acotado ve en su lugar el mismo aviso *solo visible para tokens sin acotar*
+  que muestra el inventario de nodos de scrubbing.
 - **Tabla de bloqueos** — todos los bloqueos, activos e históricos (con la columna de nodo de
   scrubbing cuando hay nodos configurados).
 - **Tráfico / Informes** — gráficas de ingress/egress en vivo construidas a partir de los búferes
@@ -93,13 +129,70 @@ El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea e
 - **Controles** — las mismas acciones que ofrece la API: **bloqueo / desbloqueo manual** de una
   dirección y **recarga de configuración** (el equivalente a enviar `SIGHUP`).
 
-La sección de **Informes históricos** en la vista Tráfico / Informes es la única parte que necesita
-almacenamiento: solo se rellena cuando el [almacenamiento de ClickHouse](/docs/storage) está habilitado y,
-de lo contrario, muestra un marcador de posición etiquetado que explica cómo activarlo.
+Dos partes del panel de control necesitan almacenamiento: la sección de **Informes históricos** en la
+vista Tráfico / Informes, y la tarjeta de [Historial de la zona](#historial-de-la-zona) de la vista
+Edge, con su tabla de fuentes y la tarjeta de **Eventos de la flota**. Ambas solo se rellenan cuando
+el [almacenamiento de ClickHouse](/docs/storage) está habilitado y, de lo contrario, muestran un
+marcador de posición etiquetado que explica cómo activarlo.
 
 <Callout type="success" title="No se requiere base de datos">
 El panel de control se construye por completo a partir del estado en memoria del motor. El almacenamiento
 histórico de flows es una función separada y opcional: no es necesaria para ver ataques en vivo, top talkers o bloqueos.
+</Callout>
+
+## Historial de la zona
+
+Todo lo demás de la vista **Edge** son los últimos diez segundos. Hacer clic en la fila de una zona
+abre el historial guardado de esa zona bajo la tabla, sobre **1 h**, **24 h** o **7 d** — la misma
+pregunta hecha sobre un periodo en lugar de sobre una ventana. Lee el
+[historial edge](/docs/api#get-apiv1edgehistory), así que necesita el
+[almacenamiento de ClickHouse](/docs/storage#historial-edge); con el almacenamiento apagado la
+tarjeta muestra el mismo marcador de posición etiquetado que la vista de Tráfico, nunca un error.
+Volver a hacer clic en la fila, o **Cerrar**, la cierra.
+
+La tarjeta lleva dos gráficas, y una tercera cuando hay HTTP/3 que dibujar:
+
+- **Solicitudes/s** — las ventanas de los nodos sumadas en intervalos (de un minuto, de diez minutos
+  o de una hora, según el rango) y divididas entre la duración real de las ventanas que cayeron en
+  cada uno.
+- **Rechazadas o lo serían** — las rechazadas más las comprobadas más las que se rechazarían y las
+  que se comprobarían, de modo que un peldaño que solo previsualiza y otro que actúa se cuentan en
+  el mismo eje. La etiqueta *vista previa* dice que el peldaño no actúa en ningún nodo **ahora**; la
+  gráfica se titula **Serían rechazadas** solo cuando el periodo tampoco contiene ningún rechazo
+  real, porque un peldaño que pasó a solo observación hace una hora deja rechazos reales en las
+  horas anteriores.
+- **Proporción de HTTP/3, %** — se muestra solo cuando algún intervalo vio realmente peticiones
+  HTTP/3, porque una línea plana en cero bajo una zona a la que nadie llega por QUIC se leería como
+  una medición y no como una ausencia.
+
+Bajo las gráficas, los totales del periodo: el máximo de nodos vistos reportando en un mismo
+intervalo, las solicitudes, los rechazos (reales o previstos), el recuento de 4xx/5xx y el ancho de
+intervalo que el motor usó realmente — **eleva** el paso que se le pidió cuando un rango contendría
+si no más de 5 000 intervalos, así que la cifra nombra los intervalos que estás mirando.
+
+Debajo de la tarjeta, **Quién habría sido comprobado — en 1 h** (o **24 h** / **7 d**, según el
+rango que hayas elegido) lista las fuentes que dicen algo del periodo, las más activas primero: lo
+más fuerte que cualquier nodo hizo con cada una (*rechazado*, *comprobado*, *rechazaría*,
+*comprobaría*, con las mismas insignias que usa la tabla en vivo), sus solicitudes, cuántas ventanas
+y nodos la vieron, y cuándo se la vio por primera y por última vez. Esta es la pregunta que hay que
+hacer antes de que el peldaño de una zona pase a producción, sobre un día en lugar de sobre diez
+segundos.
+
+Una tarjeta de **Eventos de la flota** cierra la vista para los tokens sin acotar: lo que el cerebro
+vio cambiar en las últimas 24 horas, lo más reciente primero — un nodo perdido o de vuelta, una
+versión, un flag de dry-run que cambia, un documento generado, una generación instalada o rechazada,
+la vitalidad de un terminador, un estado de HTTP/3, un certificado emitido, renovado o desaparecido,
+un desafío de zona completa que empieza o termina, el reloj de un nodo que se desfasa fuera de
+tolerancia, un reporte que tuvo que recortarse.
+Un token [acotado a un tenant](/docs/multi-tenancy) no ve la tarjeta en absoluto: los eventos
+nombran nodos. El historial y sus fuentes, en cambio, sí los puede leer un tenant para sus propias
+zonas — la zona de otro tenant se rechaza y la tarjeta simplemente no aparece.
+
+<Callout type="info" title="Se leen a demanda, no en cada sondeo">
+El historial de la zona y sus fuentes se leen cuando abres una zona o cambias su rango; los eventos
+de la flota se leen siempre que la vista Edge está en pantalla para un token sin acotar, haya una
+zona abierta o no. Los tres, como mucho cada diez segundos, y ninguno de ellos en el sondeo de tres
+segundos de la consola: consultan ClickHouse, y las ventanas que hay detrás duran diez segundos.
 </Callout>
 
 ## Detalle del ataque

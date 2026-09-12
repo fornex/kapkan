@@ -91,7 +91,10 @@ desafíos — cuando el nombre presentado es el de otro nodo, y lo rechaza **ant
 ese nombre: no se marca presencia, no se guarda ningún reporte, no se concede ningún turno, no se
 publica ninguna autorización de clave. El rechazo es un `403` uniforme que no nombra al nodo
 vinculado, un aviso por minuto y token en el log del cerebro, y un incremento en
-`kapkan_api_node_binding_refused_total{route}`. Un token vinculado que sondea sin `?node=` también se
+`kapkan_api_node_binding_refused_total{route}`. No se escribe ninguna fila de
+[auditoría](/docs/audit): el rastro de auditoría atribuye lo que un operador cambió, y una máquina
+rechazada no cambió nada — la línea del log y el contador son donde aparece un token de nodo mal
+configurado o robado. Un token vinculado que sondea sin `?node=` también se
 rechaza: su vinculación ya dice qué nodo es.
 
 ```yaml
@@ -127,6 +130,15 @@ flotas sin alcances está previsto para una versión MAJOR.
 
 La presencia solo la marcan los tokens agent: un operator que sondea con `?node=X` recibe el documento
 de X como **vista previa** y no hace que X parezca vivo.
+
+**Dale tiempo a un paso de migración para que se note.** Un cambio de token alcanza a un sondeo que ya
+está aparcado: la recarga lo termina con la respuesta que recibiría ahora un sondeo nuevo (`401` para
+un token que ya no existe, `403` para uno cuya vinculación se ha movido), y el nodo se reconecta con
+lo que ahora tenga. El *inventario* es más lento, porque se marca un avistamiento cuando un sondeo
+empieza y otra vez cuando termina — el rechazo incluido —, así que un nodo al que acabas de dejar
+incomunicado figura como `alive` durante lo que le quede de espera (hasta 25 s) y después
+`edge.stale_after_seconds` encima, unos 40 s con los valores predeterminados. Espera a que eso pase
+antes de leer el cambio de `last_token`, o estarás mirando el estado anterior a tu cambio.
 
 `token_env` y `tokens` son **mutuamente excluyentes**: `token_env` es exactamente un único token de
 operator. Una solicitud se coteja con cada token configurado (en tiempo constante); se aplica el rol

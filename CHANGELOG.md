@@ -806,6 +806,24 @@ security-relevant.
   with the catch-all omitted the session is `Reused` on its own node and still `New` on the
   other — which is what keeps the cross-node guarantee of edge-spec §3 from being accidentally
   true.
+- Edge track, E6.11 — the documentation close-out of milestone E6 (edge-spec §8): documentation
+  only, no product change. Every page E6's code touches now says what the acceptance rigs found
+  and the pages did not state. The edge inventory's `last_seen` is stamped when a poll starts and
+  again when it ends, so a parked poll holds its start, `holding` is what says a poll is open, and
+  a node just cut off still reads `alive` for about 40 s (api, edge, authentication). A node
+  report over 64 KiB is `413` — the limit a node sheds detail to stay under (api). A zone's
+  address follows its placement: the node that no longer serves a name closes the connection
+  (`return 444` on `:80`, a refused handshake on `:443`), which is why a misplaced HTTP-01
+  validation fails as a connection error rather than a `404` (edge, zones, edge-install). Presence
+  events are transitions, so a node the brain never heard from is baselined as lost silently and
+  its first event is `node_alive` (api, storage). The storage writer's `dropped` and `error` name
+  different failures — a ClickHouse that is down fails fast and counts `error`, while a stalled
+  sink fills the queue and counts `dropped` (storage, metrics) — and the edge history's compressed
+  volume is given as an order of magnitude (storage). A zone and its named hostgroup must agree on
+  a tenant, the global group exempt (multi-tenancy); `edge_challenge` joins the audit endpoint's
+  action list, whose `events` is always an array, never `null` (api, audit); a binding refusal is
+  never audited (authentication). edge-spec §8 gains milestone E6's acceptance paragraph, naming
+  the three rows the rig met differently from the plan, and the same pass lands in ru/de/fr/es.
 
 ### Fixed
 

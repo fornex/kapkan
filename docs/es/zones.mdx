@@ -125,6 +125,17 @@ el primer certificado, el listener `:80` de la zona responde `503` a todo salvo 
 desafío ACME — una zona nunca se sirve por proxy en texto claro. Cada nombre se emite
 explícitamente; los comodines (DNS-01) son un hito posterior.
 
+La CA llega a la zona por su **dirección pública**, exactamente igual que un visitante, y el cerebro
+publica el desafío pendiente en el documento de todos los nodos en los que la zona está
+[colocada](/docs/edge#colocar-zonas-en-los-nodos) — así que aquel de ellos en el que aterrice la
+validación es el que responde. El corolario es el que muerde: una zona cuyo nombre no resuelve a un
+nodo que la sirve no puede emitirse en absoluto, y un nodo fuera de la colocación rechaza la
+conexión en lugar de responder a la ruta del desafío. Apunta el nombre a la colocación antes de
+esperar un certificado. Una validación deja además rastro: las sondas de la CA son un puñado de
+peticiones en las ventanas de la zona, `2xx` sin decidir, que es por lo que el
+[historial](/docs/storage#historial-edge) de una zona inactiva no está del todo vacío alrededor de
+una emisión.
+
 ## Relacionado
 
 - [Nodos edge](/docs/edge) — el rol, sus modos de fallo y sus límites

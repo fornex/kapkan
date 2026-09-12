@@ -137,7 +137,9 @@ Jeder Eintrag trägt diese Felder:
 
 Eine Abfrage gegen ein Fenster außerhalb des zulässigen Bereichs gibt `400` zurück; ein
 unbekannter `action`-Wert gibt `400` zurück; ein fehlerhaftes `target` gibt `400` zurück. Bei
-deaktivierter Speicherung ist die Antwort `{"available": false, "events": []}` mit `200`.
+deaktivierter Speicherung ist die Antwort `{"available": false, "events": []}` mit `200`. `events`
+ist immer ein Array: Ein Zeitraum, der keinen für den Aufrufer sichtbaren Datensatz enthält — der
+erste Tag eines Mandanten, ein Filter, der auf nichts passt —, ist `[]`, niemals `null`.
 
 ## Mandanten-Scoping
 

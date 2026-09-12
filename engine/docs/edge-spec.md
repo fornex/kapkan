@@ -266,8 +266,17 @@ The channel is the one the scrub node already uses, with a second document famil
   a 4-tuple ECMP/anycast hash a client rarely changes node, so the cost — one full handshake
   when it does — is small; a fleet that needs cross-node resumption would render
   `ssl_certificate` from a variable (identical directive text on every node, at a per-handshake
-  file read) — an E6+ item, not E5. Per-node ticket keys and `ssl_session_cache` cover the
-  common case unchanged.
+  file read) — an E6+ item, not E5. **Correction (E6.9 rig, 2026-09-11): the last claim of this
+  bullet — that per-node ticket keys and `ssl_session_cache` cover the common case unchanged —
+  is false as rendered.** nginx looks a session up on the SSL context of the *address's default
+  server*, and the catch-all in `kapkan_00_common.conf` declares no `ssl_session_cache`, so every
+  zone's `ssl_session_cache`/`ssl_session_timeout` are dead configuration: a TLS 1.2 session
+  resumes on no node, its own included. TLS 1.3 is in the same position, not a better one — with
+  `ssl_session_tickets off` nginx issues stateful tickets it looks up in that same cache. Proven
+  twice (standalone nginx, and in-rig through the supported `omit_catch_all`, where the session
+  is `Reused` on its own node and still `New` on the other). The renderer fix — a cache on the
+  catch-all — is filed; it makes resumption work per node and leaves the cross-node guarantee
+  above exactly as stated.
 
 ---
 
@@ -678,6 +687,58 @@ headline and the long pole.
   not merged; lever nodes = placement; inventory `hostgroups`/`zones_placed`; `-check-config`
   prints the matrix and warns about zones nobody covers. Node side: no code, no edge.yaml, no
   edgedoc field.
+
+  *Acceptance:* a customer sees exactly its own zones and learns nothing about anyone else's,
+  including whether they exist; an agent token stolen from one node buys that node's zones and
+  no other node's identity; a zone runs on the nodes it is placed on and nowhere else, its
+  issuance and levers with it; a zone's history answers *who would have been challenged* over a
+  period, not only over the last ten seconds; and none of the four is in a request's path — the
+  fleet stays fail-static with the brain and the database both gone.
+
+  *Passed 2026-09-11 (E6.10, `engine/scripts/labnet/edge-e6.sh`, **212 assertions, 0 failures**,
+  twice — runs 9 and 10 — on Debian 13 with stock nginx 1.26.3 and the HTTP/3 module, Pebble as
+  the CA and a real ClickHouse pinned to the image CI's `storage-clickhouse` job uses,
+  25.8.33.6; two nodes, five zones under four hostgroups, two tenants, seven token names):* an
+  unscoped fleet's document is byte-identical for every node; a fleet migrates from one shared
+  agent token to one bound token per node with no install, no ETag move and no downtime — and
+  with the shared token removed under a live node, that node keeps serving TLS, h3 and its own
+  429s while the brain shows it LOST; binding refuses another node's name on all six
+  node-identified routes and on the scrub channel too, saving nothing, the other node's sighting
+  and token list untouched; labelling zones is not an event for a node; a tenant sees its zones
+  and no foreign hostname, source, `tenant` key or topology, pulls its own lever without a
+  reload and is refused elsewhere byte-identically; placement gives each node its own document,
+  fans a challenge out only to the serving nodes, refuses a slot outside the scope as a
+  nonexistent zone, shows `unserved`, and moving a zone installs twice on the node that gains it
+  (the render, then its certificate) and once on the one that loses it, whose certificates stay
+  on disk; a wrong rebind is survived fail-static and ended by the reload itself. The history:
+  rows land once and only once, an idle deciding zone writes no decided and no empty window (its
+  only rows are the CA's undecided `2xx` HTTP-01 probes), only the telling sources are stored,
+  the read API equals the SQL sums at two steps and is default-deny; a forged report is not
+  trusted — a window an hour ahead lands once re-stamped with the brain's clock, with exactly one
+  `clock_skew` and one recovery, an unknown zone is dropped and counted, 150 sources become at
+  most 20 rows; the write path never blocks — with ClickHouse first stalled and then dead under a
+  burst of sixty reports every answer was a `204` in under 50 ms with `error` and `dropped` both
+  moving, and nothing of the dead time was back-filled; TTL holds; with storage off the documents,
+  ETags and generations are unchanged and a tcpdump sees no packet to `:8123`; the tables hold no
+  clearance key and no PEM, and with brain and database both dead the node serves. Two product
+  defects fell out of the rig and were fixed before the merge: a poll parked in a hold did not
+  re-check its token after a reload (a rebound node stayed "alive" for up to a hold), and
+  `GET /api/v1/audit` answered `events: null` for a tenant with no rows.
+
+  Three rows of the plan's acceptance map were met **differently**, each for a product reason:
+  **T5** — a relabel to an unused tenant is *accepted*, not refused, because a tenant is made by
+  its zones (E6.2); the scoped token simply loses the zone, and the fail-closed cases are a
+  zone/hostgroup tenant disagreement (D9) and a zone removed under a live token. **S6** — the
+  per-window source cap is proved with 150 sources, not 1 000: a report that large exceeds the
+  64 KiB body limit and is `413`, which a real node never hits because it sheds detail instead.
+  **E** — a node outside a zone's placement *closes the connection* on `:80` (nginx `return 444`)
+  rather than answering `404`, so a validation that lands on the wrong node fails as a connection
+  error. Two sub-claims live in unit tests rather than the rig (`K`'s pre-E6 golden is
+  `TestEdgePlacementGoldenWithoutScopes`; `A`'s scrub twin is the role-matrix test), and `S7`
+  keeps ClickHouse down for about 30 s rather than 60 — the burst already exceeds the writer's
+  queue, which is the drop path the row is about. The anycast half of the milestone has its own
+  rig (E6.9, `edge-e6-anycast.sh`, 109/109 with a real router hop); its numbers and its failure
+  table belong to the anycast deployment guide, with that guide's §8 paragraph.
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and

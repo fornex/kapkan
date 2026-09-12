@@ -342,11 +342,11 @@ lifecycle.
 ### GET /api/v1/audit
 
 Returns the operator-attributed audit trail — who issued each `ban`, `unban`,
-`config_reload`, `source_block` or `source_unblock`, when, and the outcome (including
-**refused** actions). Records are newest-first and the endpoint is tenant-scoped server-side.
-It takes optional `from`/`to` (RFC 3339), `action`
-(`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`) and `target` (an IP) query
-params, and defaults to the last hour:
+`config_reload`, `source_block`, `source_unblock` or `edge_challenge`, when, and the outcome
+(including **refused** actions). Records are newest-first and the endpoint is tenant-scoped
+server-side. It takes optional `from`/`to` (RFC 3339), `action`
+(`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`/`edge_challenge`) and `target`
+(an IP) query params, and defaults to the last hour:
 
 ```json
 {
@@ -370,7 +370,9 @@ params, and defaults to the last hour:
 }
 ```
 
-When storage is disabled the response is `{"available": false, "events": []}`. Note that
+When storage is disabled the response is `{"available": false, "events": []}`. `events` is
+always an array — empty rather than `null`, including for a tenant whose window holds no
+record — so a client may iterate it without a guard. Note that
 audit records encode `dry_run` as an integer (`0`/`1`), not the JSON boolean used elsewhere
 on this page. See the dedicated [Audit log](/docs/audit) page for the full field list, the
 query rules, and the operator-identity and tenant-scoping model.
@@ -675,7 +677,9 @@ per-window bound of 20 left out, and the ones a shrinking report shed), `certs_t
 [storage](/docs/storage#edge-history) on, the report's windows and telling sources are also
 written to the edge history and what changed since the node's previous report becomes events —
 after the report is stored and without the answer ever waiting for it. Never a liveness signal
-(the poll is). An unknown `{name}` is `404`; success is `204 No Content`.
+(the poll is). An unknown `{name}` is `404`; a body over 64 KiB is `413 report exceeds 64 KiB`
+— the limit a node sheds detail to stay under, so a `413` here is a client that did not, and
+nothing of the report is read; success is `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 
@@ -687,7 +691,18 @@ never a secret); the document carries `unbound_agent_tokens` while any agent tok
 nodes exist to bind it to (absent otherwise) — the migration view of [Binding an agent token to
 its node](/docs/authentication#binding-an-agent-token-to-its-node). `hostgroups` and
 `zones_placed` are always present; `tokens`, `last_token` and `unbound_agent_tokens` are omitted
-when empty. A `viewer`-rank read, unscoped tokens only.
+when empty. The document also carries `nodes_total` and the `stale_after_seconds` the judgment
+uses; each node carries `alive`, `holding` and `last_seen`.
+
+**A sighting is stamped when a poll starts and again when it ends, so while a poll is parked
+`last_seen` holds that poll's start** and is up to 25 s old on a perfectly healthy node — older
+than `stale_after_seconds` on the defaults. `holding` says a poll is parked right now, and a
+node parked in one is alive whatever `last_seen` says; `alive` is *parked, or seen within
+`stale_after_seconds`*, never anything the node's own report claims. The consequence to plan
+around: a change that cuts a node off — a token removed, a binding moved — ends its parked poll
+with the refusal a fresh poll would get, which stamps a sighting of its own, so `alive` turns
+false `stale_after_seconds` after that, up to about 40 s after the change on the defaults. A
+`viewer`-rank read, unscoped tokens only.
 
 #### GET /api/v1/edge/zones/status
 
@@ -779,7 +794,9 @@ window_seconds, requests, decided, denied, challenged, cleared, would_deny, woul
 status_2xx, status_3xx, status_4xx, status_5xx, h3_requests}]}`. `nodes` counts the distinct
 nodes that reported in the bucket; `step_seconds` is the step actually applied; `zone` and
 `node` echo the request, `node` only when the filter was given; derive the rate as
-`requests / window_seconds` and the HTTP/3 share as `h3_requests / requests`. `zone` is
+`requests / window_seconds` and the HTTP/3 share as `h3_requests / requests`. Those range and
+step rules are shared with `/api/v1/traffic` and `/api/v1/audit` — one implementation, so the
+three answer a bad range with the same message. `zone` is
 required, folded to lower case like the file's names, and must be in the zones file
 (`404 unknown zone` otherwise); `node=<name>` narrows to one configured node
 (`404 unknown edge node`). `viewer` rank. A [tenant-scoped](/docs/multi-tenancy) token reads its
@@ -810,6 +827,13 @@ of `node_alive`, `node_lost`, `version`, `dry_run`, `document_rendered`, `genera
 `challenge_started`, `challenge_ended`, `clock_skew`, `report_truncated` (`400` otherwise).
 `viewer` rank, **unscoped tokens only**: the events name nodes and the fleet's changes. The same
 range rules; storage off answers `{available: false, events: []}`.
+
+Every kind is a **transition**, so a state the brain has only ever seen once is not in here. The
+first report after a brain start is a silent baseline, and so is presence: a node is baselined
+at its first poll, or — if the brain never hears from it — as lost once `stale_after_seconds`
+has passed since the presence ticker started, without writing `node_lost`. A node that was down
+across a brain restart therefore has no event until it comes back, and its first is
+`node_alive`. Read the inventory, not this list, for what a node is *now*.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot and …/acme/challenges
 
