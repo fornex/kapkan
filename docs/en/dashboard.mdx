@@ -97,6 +97,23 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
   whose placed node is alive but has not mentioned the zone — a fresh start, a report older than
   the window, or a zone the node cut from its report.
 
+  The challenge column is also where [the lever](/docs/edge#the-lever) is pulled. An operator
+  sees a **Challenge…** button on every zone in `policy.mode: decide`; it opens a small panel
+  that asks for the rung (*manual* — "Every request without a valid clearance is sent to the
+  clearance page" — or *auto*), how long to hold it (15 minutes, 1 hour, 6 hours or 24 hours),
+  and an optional reason for the audit row and the nodes' logs. Before you pull it, the panel
+  says what would stop it biting: *"Every node reporting this zone only previews its rung, so
+  the challenge will be counted and nobody will be sent to the page"* when the rung is
+  watch-only across the fleet, and *"No live node serves this zone, so nothing applies the
+  lever until one comes back"* for an unserved zone. A running lever then shows in the cell as
+  **lever · manual · 42m left**, counting down to the moment the zone follows its zones file
+  again, with the operator's reason on hover; the same button becomes **End**, which retires it
+  at once. A refusal is shown in the panel rather than thrown away — including the one answer
+  that deliberately covers two cases, *"This zone is not in the zones file, or this token cannot
+  reach it"*, because the brain answers a zone outside a tenant's reach exactly as it answers a
+  zone that does not exist. The lever is an operator's action: a `viewer` token sees no button,
+  and neither does a console talking to a Kapkan older than the zones-file merge.
+
   With [multi-tenancy](/docs/multi-tenancy), an unscoped token also sees each zone's `tenant`
   under its name and a row of **tenant chips** above the table that narrows both the zones and
   the **Who would be challenged** panel to one customer (remembered for the browser session; a

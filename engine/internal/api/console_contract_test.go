@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
 	"github.com/kapkan-io/kapkan/internal/storage"
 )
 
@@ -61,6 +62,63 @@ func TestConsoleEdgeHistoryContract(t *testing.T) {
 			"EdgeEventRow (views2.js edgeEventsCard)",
 			storage.EdgeEventRow{},
 			[]string{"event_time", "kind", "node", "zone", "detail"},
+		},
+	} {
+		have := jsonKeys(reflect.TypeOf(tc.typ))
+		for _, key := range tc.fields {
+			if !have[key] {
+				t.Errorf("%s: the console reads %q, which is not a json key of this struct any more — console/views2.js and console/api.js read it by name and would silently render nothing",
+					tc.what, key)
+			}
+		}
+	}
+}
+
+// TestConsoleEdgeLeverContract is the same contract for the lever (E6.8), the
+// Edge view's one write.
+//
+// Two of these names decide whether the control appears at all, so a rename is
+// worse here than a blank cell: the button is offered only on a zone whose row
+// carries the zones file's own `mode`, and it offers to END rather than to set
+// when the row carries a live `override`. Rename either and the console
+// quietly stops offering the lever on a fleet that has one — the failure looks
+// exactly like the deliberate pre-E6.2 behaviour, which is the one shape no
+// gate could tell from a bug.
+func TestConsoleEdgeLeverContract(t *testing.T) {
+	for _, tc := range []struct {
+		what   string
+		typ    any
+		fields []string
+	}{
+		{
+			// the challenge cell: whether to offer the lever, and what the
+			// dialog warns about before it is pulled
+			"EdgeZoneStatus (views2.js edgeLeverControl)",
+			EdgeZoneStatus{},
+			[]string{"zone", "mode", "nodes", "rung_watch_only", "unserved", "override"},
+		},
+		{
+			// the running lever's badge: what it set, until when, and why
+			"ChallengeOverride (views2.js edgeLeverLine)",
+			edgedoc.ChallengeOverride{},
+			[]string{"mode", "until", "reason"},
+		},
+		{
+			"EdgeChallengeLeverRequest (api.js setEdgeChallenge)",
+			EdgeChallengeLeverRequest{},
+			[]string{"mode", "ttl_seconds", "reason"},
+		},
+		{
+			// the answer captions the success: a lever that only previews must
+			// never be reported as one that bites
+			"EdgeChallengeLeverResponse (api.js leverCall)",
+			EdgeChallengeLeverResponse{},
+			[]string{"zone", "mode", "until", "file_mode", "zone_watch_only", "rung_watch_only", "nodes"},
+		},
+		{
+			"EdgeLeverNode (views2.js leverPreviews)",
+			EdgeLeverNode{},
+			[]string{"name", "alive", "dry_run"},
 		},
 	} {
 		have := jsonKeys(reflect.TypeOf(tc.typ))
