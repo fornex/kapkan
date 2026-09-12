@@ -12,7 +12,8 @@ zones' certificates on the box, generates the terminator's configuration, decide
 whether to let a client through — or to ask it to prove it is a browser first — and reports
 back. Kapkan **never forwards a client's bytes** — nginx terminates TLS and proxies to your
 origins; Kapkan tells it what to serve and, for each request, whether to serve it. You bring the
-network (anycast, transit, DNS) and the boxes; Kapkan brings the protection loop.
+network ([anycast](/docs/edge-anycast), transit, DNS) and the boxes; Kapkan brings the
+protection loop.
 </Callout>
 
 In plain terms: you list your websites (zones) in one file on the brain, point their DNS at
@@ -334,7 +335,8 @@ false` in the zones file, or the host firewall.
 **What nginx cannot do, and the topologies Kapkan supports.** nginx routes a QUIC connection
 by the socket it arrived on, not by connection ID, so:
 
-- *Supported:* one node per address; several nodes behind a 4-tuple ECMP or anycast hash — a
+- *Supported:* one node per address; several nodes behind a 4-tuple
+  [ECMP or anycast hash](/docs/edge-anycast#which-node-a-client-lands-on-the-hash) — a
   client whose address changes (Wi-Fi to LTE, a NAT rebinding) lands on a node that does not
   know the connection and reconnects; nothing breaks, per-node host keys are enough; a Kapkan
   data plane in front of the node or on it for the cap and the kill.
@@ -434,7 +436,7 @@ the node no longer serves.
 | Document refused (renderer, or `nginx -t` fails) | The previous generation keeps serving; the node stays healthy but `converged: false`, reports the **rendered** document's ETag (not the accepted one), and retries locally every 1 → 10 minutes until it applies or a newer document arrives. The fast path — rates, rungs, the lever — is applied from the **accepted** document meanwhile. |
 | nginx dies | systemd restarts it; with `terminator.pid_file` set the node reports `alive: false` and answers `503` on its `/healthz` meanwhile. Kapkan never supervises the terminator itself. |
 | Certificate unrenewable | The current certificate serves until it expires; `kapkan_edge_cert_not_after_seconds` is the T−30 d alarm; after three failures the node tries the fallback CA. |
-| Node dies | The brain sees the poll stop (`edge.stale_after_seconds`) and shows it in the inventory; steering traffic away is your network's job (anycast withdraw, DNS). |
+| Node dies | The brain sees the poll stop (`edge.stale_after_seconds`) and shows it in the inventory; steering traffic away is your network's job ([anycast withdraw](/docs/edge-anycast#withdrawal-what-says-withdraw-me), DNS) — and the inventory's `alive` is not the signal to withdraw on, `/healthz` is. |
 
 ## Reading the node
 
@@ -501,6 +503,7 @@ the node no longer serves.
 ## Related
 
 - [Install an edge node](/docs/edge-install) — brain side, nginx side, the unit, going live
+- [One address, many nodes](/docs/edge-anycast) — ECMP and anycast: the hash, per-node ceilings, withdrawal
 - [Zones reference](/docs/zones) — every key of `zones.yaml`, and what a policy does to a request
 - [`kapkan edge`](/docs/cli#edge) — the command, its flags and `edge.yaml`
 - [The edge channel](/docs/api#the-edge-channel) — the brain's routes, the zone status and the lever
