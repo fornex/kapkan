@@ -87,8 +87,10 @@ The brain then refuses that token on every route where a node names itself — t
 is another node's, and it refuses **before** doing anything with the name: no presence is stamped,
 no report stored, no slot granted, no key authorization published. The refusal is a uniform `403`
 that does not name the bound node, one warning a minute per token in the brain's log, and a count
-in `kapkan_api_node_binding_refused_total{route}`. A bound token that polls without `?node=` is
-refused as well: its binding says which node it is.
+in `kapkan_api_node_binding_refused_total{route}`. No [audit](/docs/audit) row is written: the
+audit trail attributes what an operator changed, and a refused machine changed nothing — the log
+line and the counter are where a misconfigured or stolen node token shows up. A bound token that
+polls without `?node=` is refused as well: its binding says which node it is.
 
 ```yaml
 api:
@@ -120,6 +122,14 @@ agent token an error on unscoped fleets too is scheduled for a MAJOR release.
 
 Presence is stamped only by agent tokens: an operator polling with `?node=X` receives X's document
 as a **preview** and does not make X look alive.
+
+**Give a migration step time to show.** A token change reaches a poll that is already parked: the
+reload ends it with the answer a fresh poll would now get (`401` for a token that is gone, `403`
+for one whose binding moved), and the node reconnects with whatever it now has. The *inventory*
+is slower, because a sighting is stamped when a poll starts and again when it ends — the
+refusal included — so a node you have just cut off reads `alive` for the rest of its hold (up to
+25 s) and then `edge.stale_after_seconds` on top, roughly 40 s on the defaults. Wait that out
+before reading the flip of `last_token`, or you will be looking at the state before your change.
 
 `token_env` and `tokens` are **mutually exclusive** — `token_env` is exactly one operator
 token. A request is matched against every configured token (in constant time); the highest
