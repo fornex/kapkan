@@ -151,14 +151,19 @@ actúa sobre ella. Las reglas de abajo son el contrato de la ruta de escritura.
   que ya no lista. El tic de presencia se ejecuta cada `min(stale_after/2, 5 s)`, nunca por debajo de
   un segundo; tras un arranque del cerebro un nodo obtiene su línea base en su primer sondeo (en
   silencio), o se da por perdido una vez pasado `stale_after` sin ninguno — un reinicio nunca es una
-  ráfaga de `node_alive` para toda la flota. Las transiciones de presencia también se registran a
+  ráfaga de `node_alive` para toda la flota. **Esa segunda línea base también es silenciosa**: un nodo
+  del que el cerebro no ha sabido nada desde que arrancó no obtiene ninguna fila `node_lost`, porque
+  nada transitó — un nodo que ya estaba caído durante un reinicio aparece en los eventos solo cuando
+  vuelve, como `node_alive`. Las transiciones de presencia también se registran a
   nivel INFO, haya almacenamiento o no.
 
 Volumen, por día: `edge_windows` crece en **8 640 × (zonas que deciden con tráfico × nodos vivos)**
 filas (una ventana de diez segundos cada una), `edge_sources` como mucho 20 veces eso, y
-`edge_events` en el puñado de transiciones que tenga una flota. Mide lo que eso cuesta en tu servidor
-en lugar de adivinarlo — los tamaños de fila comprimidos dependen de los nombres de tus zonas y
-nodos:
+`edge_events` en el puñado de transiciones que tenga una flota. En disco eso es poco: una prueba de
+aceptación midió `edge_windows` en torno a un centenar de bytes comprimidos por fila y las otras dos
+en decenas de bytes — un orden de magnitud con el que planificar, no una cifra para multiplicar,
+porque la muestra fueron unas pocas decenas de filas en partes diminutas (que comprimen mal) y los
+nombres de tus zonas y nodos no son los nuestros. Mide lo que cuesta de verdad en tu servidor:
 
 ```sql
 SELECT table, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS on_disk
@@ -176,9 +181,21 @@ directamente.
 ## Contrapresión
 
 Las filas pasan a una cola acotada (`queue_size`) con un envío no bloqueante y se vuelcan en
-lotes (`batch_size` / `flush_interval_seconds`). Si ClickHouse está lento o caído, las filas se
-descartan —contabilizadas como `kapkan_storage_rows_total` con `result="dropped"`— y el motor sigue
-funcionando. Consulta [Métricas](/docs/metrics).
+lotes (`batch_size` / `flush_interval_seconds`). Siempre que ClickHouse no puede aceptarlas, las
+filas se pierden en lugar de retenerse, y el motor sigue funcionando;
+`kapkan_storage_rows_total` dice cuál de las dos pérdidas fue, y no significan lo mismo:
+
+- `result="error"` — la inserción en sí falló. El lote se registra (`clickhouse insert failed`) y se
+  descarta. **Un ClickHouse caído cuenta aquí**, no en `dropped`: una conexión rechazada falla de
+  inmediato, así que cada volcado vacía la cola tan rápido como se llena.
+- `result="dropped"` — la cola estaba llena cuando se entregó la fila, así que nunca llegó a una
+  inserción. Eso requiere un destino que se *atasque* en lugar de rechazar — un servidor que retiene
+  la conexión, una red que descarta los paquetes, un volcado que agota su tiempo de espera — o una
+  ráfaga mayor que `queue_size` llegando dentro de un mismo volcado. En ningún caso se bloquea la
+  detección.
+
+Por tanto, una serie `dropped` sin una `error` al lado apunta a latencia, no a una caída.
+Consulta [Métricas](/docs/metrics).
 
 ## Qué se persiste y qué no
 
