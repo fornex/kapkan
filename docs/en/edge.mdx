@@ -344,8 +344,10 @@ by the socket it arrived on, not by connection ID, so:
   (`quic_bpf on`, an operator's own line in nginx's `main` context, only carries a connection
   between the workers of one box); **TLS session resumption between nodes** — nginx binds a
   session to the node's certificate through the session id context, and Kapkan's certificates
-  are per node, so a client that changes node does a full handshake (rare under a 4-tuple hash;
-  shared ticket keys were investigated and do not help here); WebSocket over HTTP/3 (nginx does
+  are per node, so a client that changes node does a full handshake (on every new connection
+  under a 4-tuple hash, rarely under an address hash — see
+  [the hash forms](/docs/edge-anycast#which-node-a-client-lands-on-the-hash); shared ticket keys
+  were investigated and do not help here); WebSocket over HTTP/3 (nginx does
   not implement RFC 9220 — it stays on TCP); 0-RTT.
 
 Two things to keep in mind: UDP flows need conntrack timeouts a firewall may not give them by
