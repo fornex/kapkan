@@ -69,15 +69,15 @@
 #      doubling to 30 s), never `stale_after`;
 #   G. the two cross-node facts a shared address exposes: a TLS session is
 #      not resumable on the other node (spec §3, sid_ctx), while a clearance
-#      cookie IS honoured there (fleet-wide clearance keys). This arm also
-#      records a PRODUCT FINDING it stumbled on: as rendered today a TLS 1.2
-#      session resumes on NO node, its own included, because nginx looks a
-#      session up on the SSL context of the address's default server and
-#      kapkan's catch-all carries no `ssl_session_cache` — the same family as
+#      cookie IS honoured there (fleet-wide clearance keys). This arm found
+#      the one PRODUCT DEFECT of the E6 runs, since fixed: as rendered, a TLS
+#      session resumed on NO node, its own included, because OpenSSL looks a
+#      session up through the SSL context of the address's default server and
+#      kapkan's catch-all carried no `ssl_session_cache` — the same family as
 #      the `ssl_protocols` behaviour the shared file already documents. The
-#      arm proves the cause with a supported knob (`omit_catch_all`) rather
-#      than asserting it, and only then tests the cross-node claim, so that
-#      claim is not vacuous;
+#      arm asserts the fix (Reused on its own node, on BOTH nodes, with the
+#      catch-all in place) before the cross-node claim, so that claim is not
+#      vacuous, and still exercises the supported `omit_catch_all` knob;
 #   H. MTU: 1200 on ONE leg takes HTTP/3 away from a client for the WHOLE
 #      shared address — a path MTU is cached per destination and the
 #      destination is the VIP — and it stays broken after the leg is repaired
@@ -1000,11 +1000,9 @@ say "ARM G — the two cross-node facts a shared address exposes"
 # node's own certificate through the session id context (spec §3). TLS 1.3 is
 # in the SAME position as 1.2 here, not a different one: `ssl_session_tickets
 # off` sets SSL_OP_NO_TICKET, and nginx then issues stateful 1.3 tickets whose
-# sessions it looks up in `ssl_session_cache` — so 1.3 resumes nowhere today
-# for exactly the catch-all reason recorded below, and will resume on its own
-# node once the catch-all carries a cache, never across nodes. TLS 1.2 is the
-# form this arm drives because `openssl s_client -sess_out/-sess_in` makes the
-# offer and its answer visible in one word.
+# sessions it looks up in `ssl_session_cache` — so both resume on their own
+# node only. TLS 1.2 is the form this arm drives because `openssl s_client
+# -sess_out/-sess_in` makes the offer and its answer visible in one word.
 sess() { # SRCNODE DSTNODE FILE — save a session from SRC, offer it to DST
   local s=$1 d=$2 f=$3
   ip netns exec cli sh -c "printf 'GET /g HTTP/1.1\r\nHost: $ZONE\r\nConnection: close\r\n\r\n' | openssl s_client -connect $(ip_of "$s"):443 -servername $ZONE -CAfile /tmp/pebble-root.crt -tls1_2 -sess_out /tmp/g-$s.sess -ign_eof" >/tmp/g-save-$s.txt 2>&1
@@ -1013,32 +1011,38 @@ sess() { # SRCNODE DSTNODE FILE — save a session from SRC, offer it to DST
 }
 r=$(sess 1 1 /tmp/g-default.txt)
 [ -s /tmp/g-1.sess ] && ok "a TLS 1.2 session is issued and saved from edge-1 (the render does carry ssl_session_cache and a session id)" || bad "no session saved from edge-1: $(grep -iE 'session|error' /tmp/g-save-1.txt | head -2 | tr '\n' ' ')"
-# FINDING (product, not rig): as rendered, that session resumes NOWHERE — not
-# even on the node that issued it. nginx looks the session up on the SSL
-# context of the address's DEFAULT server, and kapkan's catch-all default
-# server carries no ssl_session_cache, so the per-zone cache is never
-# consulted. Same family as the ssl_protocols behaviour the shared file
-# already documents. The next two assertions prove it with a supported knob
-# rather than a claim: omit_catch_all makes the zone's own server the
-# address's default, and resumption starts working.
-[ "$r" = "New" ] && ok "as rendered it does NOT resume even on edge-1 ('$r') — see the note above: the catch-all default server has no ssl_session_cache, so no zone on any node resumes a TLS 1.2 session" || bad "expected New on the same node with the catch-all in place, got '$r'"
+# THE FIX THIS ARM FOUND (product, not rig): as first rendered, that session
+# resumed NOWHERE — not even on the node that issued it. OpenSSL looks a
+# session up through the SSL context of the server the connection STARTED on
+# — the address's DEFAULT server, SSL_set_SSL_CTX leaves session_ctx alone —
+# and kapkan's catch-all default server carried no ssl_session_cache, so the
+# per-zone cache was never consulted. The catch-all now declares the zones'
+# shared cache; a session must therefore be Reused on its own node with the
+# catch-all in place, and on BOTH nodes (the positive control the cross-node
+# claim rests on: without it a New from the other node is equally what a
+# broken cache there would produce).
+[ "$(grep -c 'ssl_session_cache shared:kapkan_ssl' $STATE1/conf/live/kapkan_00_common.conf)" = "1" ] && [ "$(grep -c 'ssl_session_cache shared:kapkan_ssl' $STATE2/conf/live/kapkan_00_common.conf)" = "1" ] && ok "both shared files declare the zones' session cache on the catch-all default server (the fix the first runs of this arm asked for)" || bad "catch-all without ssl_session_cache: edge-1 $(grep -c ssl_session_cache $STATE1/conf/live/kapkan_00_common.conf), edge-2 $(grep -c ssl_session_cache $STATE2/conf/live/kapkan_00_common.conf)"
+[ "$r" = "Reused" ] && ok "as rendered the session IS Reused on edge-1, the node that issued it, with the catch-all in place ('$r')" || bad "expected Reused on the same node with the catch-all in place, got '$r' — the catch-all's session cache is not being consulted"
+r=$(sess 2 2 /tmp/g-same2-default.txt)
+[ "$r" = "Reused" ] && ok "and edge-2 resumes its own session too, as rendered ('$r')" || bad "resumption on edge-2's own node with the catch-all in place: '$r'"
+r=$(sess 1 2 /tmp/g-other-default.txt)
+[ "$r" = "New" ] && ok "offered edge-1's session, edge-2 answers New: a session does not cross nodes (spec §3 — the session id context is the node's own certificate)" || bad "edge-2 resumed a session from edge-1 with the catch-all in place: '$r'"
+r=$(sess 2 1 /tmp/g-other2-default.txt)
+[ "$r" = "New" ] && ok "…and symmetrically, edge-2's session is New on edge-1: neither direction crosses" || bad "edge-1 resumed a session from edge-2: '$r'"
+# The supported omit_catch_all knob (an nginx.conf with default servers of its
+# own) makes the zone's own server the address's default: the same two facts
+# must hold there — it was the knob that proved the cause before the fix.
 edge_yaml 1 $STATE1 $SOCKS1 true; edge_yaml 2 $STATE2 $SOCKS2 true
 kill_node 1; kill_node 2
 node_nginx 1 edge1 $STATE1; node_nginx 2 edge2 $STATE2; wait_nginx 1; wait_nginx 2; start_edge 1; start_edge 2
 wait_healthy 1 40 && wait_healthy 2 40 && ok "both nodes restarted with omit_catch_all: their own servers are now the address's default (the QUIC anchor still carries the one reuseport listener)" || bad "a node did not come back under omit_catch_all: $(sfield 1 healthy)/$(sfield 2 healthy)"
 [ "$(grep -c ssl_reject_handshake $STATE1/conf/live/kapkan_00_common.conf)" = "1" ] && [ "$(grep -c ssl_reject_handshake $STATE2/conf/live/kapkan_00_common.conf)" = "1" ] && ok "both shared files now hold only the QUIC anchor, no TCP catch-all — the change is on the node being offered the session as much as on the one issuing it" || bad "catch-all servers in the shared files: edge-1 $(grep -c ssl_reject_handshake $STATE1/conf/live/kapkan_00_common.conf), edge-2 $(grep -c ssl_reject_handshake $STATE2/conf/live/kapkan_00_common.conf)"
 r=$(sess 1 1 /tmp/g-same.txt)
-[ "$r" = "Reused" ] && ok "with the catch-all omitted the same session is Reused on edge-1 — the cache and the code path work; the default server was suppressing them" || bad "resumption on its own node under omit_catch_all: '$r'"
-# The positive control on the OTHER node, which is the one the cross-node
-# claim rests on: without it, a New from edge-2 is equally what a broken
-# cache, a mis-rendered ssl_session_cache or a TLS 1.2 misconfiguration there
-# would produce, and the claim below would be vacuous.
+[ "$r" = "Reused" ] && ok "with the catch-all omitted the session is Reused on edge-1 as well — the zone's own server is the address's default there" || bad "resumption on its own node under omit_catch_all: '$r'"
 r=$(sess 2 2 /tmp/g-same2.txt)
-[ "$r" = "Reused" ] && ok "and edge-2 resumes its OWN session too: its cache works, so what it refuses below is the session, not the node" || bad "resumption on edge-2's own node under omit_catch_all: '$r'"
+[ "$r" = "Reused" ] && ok "and on edge-2's own node under omit_catch_all" || bad "resumption on edge-2's own node under omit_catch_all: '$r'"
 r=$(sess 1 2 /tmp/g-other.txt)
-[ "$r" = "New" ] && ok "offered edge-1's session, edge-2 answers New: a session does not cross nodes (spec §3 — the session id context is the node's own certificate)" || bad "edge-2 resumed a session from edge-1: '$r'"
-r=$(sess 2 1 /tmp/g-other2.txt)
-[ "$r" = "New" ] && ok "…and symmetrically, edge-2's session is New on edge-1: neither direction crosses" || bad "edge-1 resumed a session from edge-2: '$r'"
+[ "$r" = "New" ] && ok "offered edge-1's session under omit_catch_all, edge-2 still answers New: the knob changes the default server, not the session id context" || bad "edge-2 resumed a session from edge-1 under omit_catch_all: '$r'"
 edge_yaml 1 $STATE1 $SOCKS1; edge_yaml 2 $STATE2 $SOCKS2
 kill_node 1; kill_node 2
 node_nginx 1 edge1 $STATE1; node_nginx 2 edge2 $STATE2; wait_nginx 1; wait_nginx 2; start_edge 1; start_edge 2

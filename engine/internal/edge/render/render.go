@@ -78,7 +78,13 @@
 // already declares default servers. Its ssl_protocols is the node-wide floor —
 // the lowest tls.min_version among the zones — because nginx before 1.29.2
 // fixes the protocol set from the default server before SNI selects a zone
-// (Angie and nginx ≥ 1.29.2 honour each zone's own line). Zone names longer
+// (Angie and nginx ≥ 1.29.2 honour each zone's own line). It also declares the
+// zones' shared ssl_session_cache: OpenSSL looks sessions up through the
+// context of the server a connection started on — the default server — even
+// after SNI switched it to a zone, so without the cache here no TLS session
+// resumed on any node, its own included (the E6.9 rig's finding; a zone
+// resumes on its own node only, the session id context binds it to the node's
+// certificate). Zone names longer
 // than 46 bytes get a server_names_hash_bucket_size, since the stock bucket
 // cannot hold them once a port has two servers. Two things a deployment must
 // know: a hostname origin is resolved once, at `nginx -t`, and an unresolvable

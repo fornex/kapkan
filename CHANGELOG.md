@@ -793,21 +793,30 @@ security-relevant.
   HTTP/3 fails toward the healthy node too and stays broken after the link is repaired until
   the client's cache is flushed. A stretch arm behind `ANYCAST_BGP=1`, outside the acceptance path, drives the same
   withdrawal contract with a real bird2 speaker on each node enabled and disabled by a
-  once-a-second `/healthz` probe. Test-only; no product change — but the runs caught seven rig
-  bugs and **one product finding, not fixed here**: as rendered, a TLS 1.2 session resumes on no
-  node, its own included, because nginx looks a session up on the SSL context of the address's
-  default server and kapkan's catch-all declares no `ssl_session_cache`, so every zone's
-  `ssl_session_cache`/`ssl_session_timeout` are dead configuration and every returning client
-  pays a full handshake (the same family as the `ssl_protocols` behaviour the shared file already
-  documents). TLS 1.3 is in the same position rather than a different one: with
-  `ssl_session_tickets off` nginx issues stateful tickets it looks up in that same cache, so it
-  too resumes nowhere today and will resume on its own node — never across nodes — once the
-  catch-all carries a cache. Arm G proves the cause with the supported `omit_catch_all` knob —
-  with the catch-all omitted the session is `Reused` on its own node and still `New` on the
-  other — which is what keeps the cross-node guarantee of edge-spec §3 from being accidentally
-  true.
+  once-a-second `/healthz` probe. Test-only — but the runs caught seven rig bugs and **one
+  product finding, fixed in this release** (see *Fixed*): as rendered, a TLS session resumed on
+  no node, its own included, because OpenSSL looks a session up through the SSL context of the
+  address's default server and kapkan's catch-all declared no `ssl_session_cache`, so every
+  zone's `ssl_session_cache`/`ssl_session_timeout` were dead configuration and every returning
+  client paid a full handshake (the same family as the `ssl_protocols` behaviour the shared file
+  already documents). TLS 1.3 was in the same position rather than a different one: with
+  `ssl_session_tickets off` nginx issues stateful tickets it looks up in that same cache. Arm G
+  now asserts the fix — a session is `Reused` on its own node with the catch-all in place, on
+  either node, and `New` on the other in both directions — and still exercises the supported
+  `omit_catch_all` knob, under which the same holds, so the cross-node guarantee of edge-spec §3
+  is not accidentally true.
 
 ### Fixed
+- Edge: TLS sessions resume again on the node that issued them. The catch-all default server the
+  renderer writes into the shared file now declares the zones' `ssl_session_cache shared:kapkan_ssl`
+  (with `ssl_session_timeout 1d` and `ssl_session_tickets off`, as every zone does). OpenSSL keeps
+  looking sessions up — and storing them — through the context of the server a connection
+  started on, the address's default server, even after SNI has switched the connection to a
+  zone's server (`SSL_set_SSL_CTX` leaves `session_ctx` alone); with no cache on the catch-all
+  every zone's cache was dead configuration and every returning client, TLS 1.2 or 1.3, paid a
+  full handshake — found by the E6.9 anycast rig, which proved the cause with `omit_catch_all`.
+  Nothing crosses nodes: the session id context still binds a session to the node's own
+  certificate (edge-spec §3), tickets stay off and 0-RTT stays off.
 
 - Console: the storage-off placeholder chart on the Traffic view (and now on the Edge view's
   history cards) re-rolled its random shape on every 3 s poll and twitched as if it were live

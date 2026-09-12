@@ -173,16 +173,16 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   not vacuous; a clearance cookie is honoured there); and **MTU** 1200 on one
   leg, which takes HTTP/3 away from a client for the *whole* shared address
   rather than for that node's share of it, because a path MTU is cached per
-  destination. Arm G also records the one
-  product finding these runs turned up: as rendered, a TLS 1.2 session resumes
-  on no node at all, because nginx looks a session up on the SSL context of
-  the address's default server and kapkan's catch-all carries no
-  `ssl_session_cache`. TLS 1.3 is in the same position rather than a different
-  one — with `ssl_session_tickets off` nginx issues stateful tickets looked up
-  in that same cache — so it too resumes nowhere today, and will resume on its
-  own node once the catch-all carries a cache, never across nodes. The arm
-  proves the cause with the supported `omit_catch_all`, so the cross-node
-  claim above is not accidentally true.
+  destination. Arm G also found the one product defect these runs turned up,
+  since fixed: as rendered, a TLS session resumed on no node at all, because
+  OpenSSL looks a session up through the SSL context of the address's default
+  server and kapkan's catch-all carried no `ssl_session_cache` (TLS 1.3 was in
+  the same position — with `ssl_session_tickets off` nginx issues stateful
+  tickets looked up in that same cache). The arm now asserts the fix — a
+  session is `Reused` on its own node with the catch-all in place, on either
+  node, and `New` on the other — and still exercises the supported
+  `omit_catch_all` knob, under which the same holds, so the cross-node claim
+  above is not accidentally true.
   Needs `kapkan` and Pebble cross-compiled for the container (from the repo
   root):
 

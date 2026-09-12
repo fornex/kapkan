@@ -96,7 +96,10 @@ http {
 
 Remove (or plan to keep, see below) any `default_server` on `:80`/`:443` — Kapkan renders its
 own catch-all that refuses unknown hosts. Debian's default site declares one; either disable
-the site or set `omit_catch_all: true` in `edge.yaml`. Then confirm the include compiles
+the site or set `omit_catch_all: true` in `edge.yaml` — and in that case give your own `:443`
+default server `ssl_session_cache shared:kapkan_ssl:10m;` and `ssl_session_tickets off;`, the
+lines Kapkan's catch-all would have carried (nginx looks TLS sessions up through the default
+server's context, so without them no client resumes a session on this node). Then confirm the include compiles
 before anything is rendered (a wildcard include of a directory that does not exist yet is fine
 for nginx):
 
@@ -275,6 +278,7 @@ renews on its own.
 | `would-challenge` marks, but nobody is ever challenged | One of the three watch-only layers is on: the node's `dry_run` (`edge.yaml`), the zone's `policy.dry_run`, or the rung's own `challenge_options.dry_run` — `true` by default. `GET /api/v1/edge/zones/status` names the nodes a zone is watch-only on and whether a zone-wide challenge is previewing (`dry_run: true`). |
 | Every request to a zone gets the clearance page | The zone is under challenge: `policy.challenge: manual` in the file, a lever (`override` in `GET /api/v1/edge/zones/status`), or the zone-wide trigger (`challenge_active` with `reason: zone-rps`). A client that clears it is not asked again for `cookie_ttl_seconds`; clients that cannot keep cookies see it every time. |
 | Clients see `503` (or pass unchallenged) on a zone whose rung is on | nginx could not reach the clearance page and followed `failure_mode`. Look for `connect() to unix:/run/kapkan-edge/edge-clearance.sock failed` in nginx's error log: the socket is `0660` for `socket_group`, like the decision socket, and the node logs `clearance page listening` when it is up. |
+| Every returning client does a full TLS handshake (`openssl s_client -sess_in` answers `New` on the same node) | `omit_catch_all: true` with a default server of your own that declares no `ssl_session_cache`: nginx looks sessions up through the default server's context. Add `ssl_session_cache shared:kapkan_ssl:10m;` and `ssl_session_tickets off;` to it. |
 | `nginx -t` fails with *duplicate listen options for 0.0.0.0:443* | Your `nginx.conf` (with `omit_catch_all: true`) already has a `listen 443 quic` with socket options (`reuseport`, `rcvbuf`, …) and Kapkan's QUIC anchor carries its own `reuseport`. Set `quic.omit_anchor: true` and give your server `reuseport` and `ssl_protocols TLSv1.3` yourself. |
 | A zone with `tls.h3: true` is served over TCP only on one node | That node's `terminator.h3.state` is not `ready`: `no_module` (the build lacks `--with-http_v3_module`), `node_off` (`quic.h3: off`) or `unknown` (the probe failed — read the journal). The zone is listed under `terminator.h3.unsupported`; the other nodes serve it over h3. |
 | Browsers are slow to load a zone after `h3: true` | UDP 443 is blocked upstream while `Alt-Svc` announces h3: every browser races the QUIC attempt and times out before falling back. Fix the firewall, or set `tls.h3_options.advertise: false` until you have; `terminator.h3.listening` only tells you the box's half. |
