@@ -341,7 +341,7 @@ by the socket it arrived on, not by connection ID, so:
 - *Not supported:* connection-ID-aware steering and connection migration **between** nodes
   (`quic_bpf on`, an operator's own line in nginx's `main` context, only carries a connection
   between the workers of one box); **TLS session resumption between nodes** — a session is a
-  stateful entry in the node's own cache, no ticket carries it and no ticket key is shared, so a
+  stateful entry in the node's own cache, no stateless ticket carries it and no ticket key is shared, so a
   client that changes node does a full handshake (rare under a 4-tuple hash; shared ticket keys
   were investigated in E5 and are not offered — see edge-spec §3) — on the node that issued it a
   session resumes as usual, the shared cache being declared on the catch-all default server as

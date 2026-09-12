@@ -1029,7 +1029,7 @@ r=$(sess 1 1 /tmp/g-default.txt)
 r=$(sess 2 2 /tmp/g-same2-default.txt)
 [ "$r" = "Reused" ] && ok "and edge-2 resumes its own session too, as rendered ('$r')" || bad "resumption on edge-2's own node with the catch-all in place: '$r'"
 r=$(sess 1 2 /tmp/g-other-default.txt)
-[ "$r" = "New" ] && ok "offered edge-1's session, edge-2 answers New: a session does not cross nodes — it is a stateful entry in edge-1's own cache and no ticket carries it (spec §3)" || bad "edge-2 resumed a session from edge-1 with the catch-all in place: '$r'"
+[ "$r" = "New" ] && ok "offered edge-1's session, edge-2 answers New: a session does not cross nodes — it is a stateful entry in edge-1's own cache and no stateless ticket carries it (spec §3)" || bad "edge-2 resumed a session from edge-1 with the catch-all in place: '$r'"
 r=$(sess 2 1 /tmp/g-other2-default.txt)
 [ "$r" = "New" ] && ok "…and symmetrically, edge-2's session is New on edge-1: neither direction crosses" || bad "edge-1 resumed a session from edge-2: '$r'"
 # TLS 1.3, the same two facts: with tickets off nginx hands the client a

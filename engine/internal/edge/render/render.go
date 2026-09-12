@@ -83,7 +83,7 @@
 // context of the server a connection started on — the default server — even
 // after SNI switched it to a zone, so without the cache here no TLS session
 // resumed on any node, its own included (the E6.9 rig's finding). A session
-// is a stateful entry in the node's own cache with no ticket carrying it, so
+// is a stateful entry in the node's own cache with no stateless ticket carrying it, so
 // it resumes on that node only; on nginx before 1.29.2 the session id context
 // in force is this certificate-less default server's, so there it does not
 // confine it (from 1.29.2, and on Angie, the ClientHello callback switches to

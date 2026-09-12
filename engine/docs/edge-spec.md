@@ -280,7 +280,7 @@ The channel is the one the scrub node already uses, with a second document famil
   kapkan's certificate-less catch-all, `SHA-1("HTTP")` on every node and zone — and on one node
   a session may resume under another zone's name (the request is still routed by Host). What
   confines a session to its node on every nginx line is that it is a stateful entry in that
-  node's own shared-memory cache and no ticket carries it: no ticket key is shared, and a
+  node's own shared-memory cache and no stateless ticket carries it: no ticket key is shared, and a
   fleet-shared key on the catch-all would resume across nodes on the pre-1.29.2 line — which is
   why shared ticket keys stay not offered.
 
