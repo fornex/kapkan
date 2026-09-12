@@ -389,8 +389,8 @@ func TestPolicyShapes(t *testing.T) {
 		{
 			// Under omit_catch_all the bare QUIC anchor is the server a QUIC
 			// connection starts on, so it carries the cache in the catch-all's
-			// place (the operator's own TCP default server must declare it too —
-			// the install guide says so).
+			// place (the operator's own TCP default server must declare the
+			// same three lines too — the install guide says so).
 			fixture: "h3-omit-catchall", file: render.CommonFile,
 			want:    []string{"listen 443 quic reuseport;", "ssl_session_cache shared:kapkan_ssl:10m;"},
 			wantNot: []string{"listen 443 ssl default_server;"},

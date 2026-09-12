@@ -340,10 +340,10 @@ by the socket it arrived on, not by connection ID, so:
   data plane in front of the node or on it for the cap and the kill.
 - *Not supported:* connection-ID-aware steering and connection migration **between** nodes
   (`quic_bpf on`, an operator's own line in nginx's `main` context, only carries a connection
-  between the workers of one box); **TLS session resumption between nodes** — nginx binds a
-  session to the node's certificate through the session id context, and Kapkan's certificates
-  are per node, so a client that changes node does a full handshake (rare under a 4-tuple hash;
-  shared ticket keys were investigated and do not help here) — on the node that issued it a
+  between the workers of one box); **TLS session resumption between nodes** — a session is a
+  stateful entry in the node's own cache, no ticket carries it and no ticket key is shared, so a
+  client that changes node does a full handshake (rare under a 4-tuple hash; shared ticket keys
+  were investigated in E5 and are not offered — see edge-spec §3) — on the node that issued it a
   session resumes as usual, the shared cache being declared on the catch-all default server as
   well, where nginx looks sessions up; WebSocket over HTTP/3 (nginx does
   not implement RFC 9220 — it stays on TCP); 0-RTT.
@@ -470,10 +470,13 @@ the node no longer serves.
   that refuses unknown hosts and SNI. If your `nginx.conf` already declares one (Debian's
   default site does), `nginx -t` fails with *a duplicate default server* — set
   `omit_catch_all: true` and let your servers take that role. Give your `:443` default server
-  the zones' session cache — `ssl_session_cache shared:kapkan_ssl:10m;` with
-  `ssl_session_tickets off;` — because nginx looks a TLS session up through the default server's
-  context even after SNI has picked a zone: without it no returning client resumes a session on
-  that node. Kapkan's own catch-all carries those lines.
+  the zones' three session lines — `ssl_session_cache shared:kapkan_ssl:10m; ssl_session_timeout 1d; ssl_session_tickets off;` — because nginx reads a TLS session's cache, lifetime and ticket setting from
+  the default server's context even after SNI has picked a zone: without them no returning client
+  resumes a session on that node, or keeps one past nginx's five-minute default. The size must be
+  exactly `10m` (a shared zone declared twice at different sizes fails `nginx -t`); a default
+  server that already declares a shared cache (Debian's and Mozilla's templates ship
+  `shared:SSL:10m`) keeps it — any cache on that server serves the zones — and adds only the
+  timeout and `ssl_session_tickets off`. Kapkan's own catch-all carries all three.
 - **Origins resolve at test time.** A hostname origin is resolved once, when nginx loads the
   configuration; one that does not resolve fails `nginx -t` for the whole generation (and is
   retried). Prefer addresses.
