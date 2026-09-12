@@ -344,7 +344,10 @@ by the socket it arrived on, not by connection ID, so:
   (`quic_bpf on`, an operator's own line in nginx's `main` context, only carries a connection
   between the workers of one box); **TLS session resumption between nodes** — a session is a
   stateful entry in the node's own cache, no stateless ticket carries it and no ticket key is shared, so a
-  client that changes node does a full handshake (rare under a 4-tuple hash; shared ticket keys
+  client that changes node does a full handshake (under a 4-tuple hash a new connection lands on
+  a different node on roughly (N−1)/N of them — every second one with two nodes; under an address
+  hash only when the client's own address changes — see
+  [the hash forms](/docs/edge-anycast#which-node-a-client-lands-on-the-hash); shared ticket keys
   were investigated in E5 and are not offered — see edge-spec §3) — on the node that issued it a
   session resumes as usual, the shared cache being declared on the catch-all default server as
   well, where nginx looks sessions up; WebSocket over HTTP/3 (nginx does
