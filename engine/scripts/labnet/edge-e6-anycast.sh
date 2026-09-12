@@ -1099,7 +1099,12 @@ ip netns exec rtr ip link set r-e2 mtu 1500; ip netns exec edge2 ip link set e2-
 H3TMO=2; batch 10 h3 /tmp/h-stale.txt; H3TMO=5
 [ "$(n200 /tmp/h-stale.txt)" = "0" ] && ok "the link is 1500 again and HTTP/3 is STILL broken ($(mix /tmp/h-stale.txt)): the cached exception outlives the fault that caused it" || bad "h3 recovered without a cache flush: $(mix /tmp/h-stale.txt)"
 ip netns exec cli ip route flush cache
-sleep 0.5
+# The flush is not instantaneous for a connection racing it: a run of this rig
+# saw the first of the twenty fail (000) while the other nineteen passed. The
+# claim is "after the flush HTTP/3 works again", so the flush is waited for by
+# condition — one probe until it is answered over h3 (≤ 5 s) — and only then is
+# the batch sent; a batch that still loses a request is the failure it should be.
+for i in $(seq 1 10); do r=$(H3TMO=1 vh3get "flushed-$i"); [ "${r%% *}" = "200" ] && break; sleep 0.5; done
 batch 20 h3 /tmp/h-back.txt
 [ "$(n200 /tmp/h-back.txt)" = "20" ] && [ "$(served edge-2 /tmp/h-back.txt)" -ge 1 ] && ok "after \`ip route flush cache\` on the client: 20 of 20 over HTTP/3, both nodes serving again" || bad "h3 after the MTU restore and flush: $(mix /tmp/h-back.txt), edge-2 $(served edge-2 /tmp/h-back.txt)"
 
