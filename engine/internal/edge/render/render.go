@@ -78,7 +78,15 @@
 // already declares default servers. Its ssl_protocols is the node-wide floor —
 // the lowest tls.min_version among the zones — because nginx before 1.29.2
 // fixes the protocol set from the default server before SNI selects a zone
-// (Angie and nginx ≥ 1.29.2 honour each zone's own line). Zone names longer
+// (Angie and nginx ≥ 1.29.2 honour each zone's own line). It also declares the
+// zones' shared ssl_session_cache: OpenSSL looks sessions up through the
+// context of the server a connection started on — the default server — even
+// after SNI switched it to a zone, so without the cache here no TLS session
+// resumed on any node, its own included (the E6.9 rig's finding). A session
+// is a stateful entry in the node's own cache with no ticket carrying it, so
+// it resumes on that node only; the session id context in force is the
+// default server's — certificate-less on nginx before 1.29.2 — and does not
+// confine it. Zone names longer
 // than 46 bytes get a server_names_hash_bucket_size, since the stock bucket
 // cannot hold them once a port has two servers. Two things a deployment must
 // know: a hostname origin is resolved once, at `nginx -t`, and an unresolvable
@@ -235,8 +243,11 @@ type Node struct {
 	// operator whose own default server already listens `443 quic` with
 	// socket options: nginx allows one listen with options (reuseport, rcvbuf,
 	// backlog, bind, ipv6only, …) per address:port, so the anchor's reuseport
-	// would fail `nginx -t` beside it. That server must then carry reuseport
-	// and TLSv1.3 itself (the anchor's two lines).
+	// would fail `nginx -t` beside it. That server must then carry the
+	// anchor's lines itself: reuseport, TLSv1.3 and the zones' session cache
+	// (ssl_session_cache shared:kapkan_ssl:10m, ssl_session_timeout 1d,
+	// ssl_session_tickets off) — a QUIC connection starts on it, so its cache
+	// is where HTTP/3 sessions live.
 	OmitQUICAnchor bool `json:"omit_quic_anchor,omitempty"`
 }
 
