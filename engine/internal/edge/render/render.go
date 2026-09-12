@@ -84,9 +84,11 @@
 // after SNI switched it to a zone, so without the cache here no TLS session
 // resumed on any node, its own included (the E6.9 rig's finding). A session
 // is a stateful entry in the node's own cache with no ticket carrying it, so
-// it resumes on that node only; the session id context in force is the
-// default server's — certificate-less on nginx before 1.29.2 — and does not
-// confine it. Zone names longer
+// it resumes on that node only; on nginx before 1.29.2 the session id context
+// in force is this certificate-less default server's, so there it does not
+// confine it (from 1.29.2, and on Angie, the ClientHello callback switches to
+// the zone before the session is created, and the zone's own is stamped).
+// Zone names longer
 // than 46 bytes get a server_names_hash_bucket_size, since the stock bucket
 // cannot hold them once a port has two servers. Two things a deployment must
 // know: a hostname origin is resolved once, at `nginx -t`, and an unresolvable
