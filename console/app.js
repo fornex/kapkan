@@ -50,7 +50,7 @@
     /* edge zones status (E4.5) — the same on-demand + freshness-guard shape:
        it merges the nodes' last ten-second windows, so a 10s refresh is the
        data's own pace */
-    edge: { loading: false, fetchedAt: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] },
+    edge: { loading: false, fetchedAt: 0, stale: false, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] },
     /* the edge-node inventory (E6.7), fetched on its own guard and read by
        BOTH edge views: the Edge nodes table renders all of it, the Edge
        view's HTTP/3 cell only each node's terminator.h3. Unscoped-only, so
@@ -383,11 +383,18 @@
        refused leaves the table intact and only the tooltip poorer. Each
        fetch carries its own freshness guard, so neither is ever lost to the
        other's timing. */
-    loadEdge: function () {
+    /* `force` is the lever's (E6.8): after a write the row has to show what
+       the operator just did, not what the last ten-second read saw. It is a
+       FLAG rather than a cleared timestamp because a read may be in flight —
+       that one stamps its own fetchedAt on the way out, which would swallow a
+       cleared one; the flag survives it and the next render re-reads. */
+    loadEdge: function (force) {
       actions.loadEdgeInv();
       var e = state.edge;
+      if (force) e.stale = true;
       if (e.loading) return;
-      if (e.fetchedAt && Date.now() - e.fetchedAt < 10000) return;
+      if (!e.stale && e.fetchedAt && Date.now() - e.fetchedAt < 10000) return;
+      e.stale = false;
       e.loading = true;
       API.getEdgeZones().then(function (r) {
         e.loading = false; e.fetchedAt = Date.now();
@@ -486,6 +493,25 @@
         n.total = r.total; n.staleAfter = r.staleAfter;
         n.list = r.nodes; n.unbound = r.unbound || [];
         if (state.view === "edgenodes" || state.view === "edge") renderView();
+      });
+    },
+    /* ---- the lever (E6.8) ----
+       The only write in the Edge view. Both hand the whole answer back to the
+       dialog that asked — it is the one place a refusal can be read, and it
+       stays open to show it — and on success force the zones status to be
+       re-read at once rather than up to ten seconds later. `done` is called
+       for a failure too: a dialog left spinning on a refused call would be the
+       console pretending the brain never answered. */
+    setEdgeChallenge: function (zone, mode, ttlSeconds, reason, done) {
+      API.setEdgeChallenge(zone, mode, ttlSeconds, reason).then(function (r) {
+        if (r.ok) actions.loadEdge(true);
+        done(r);
+      });
+    },
+    clearEdgeChallenge: function (zone, done) {
+      API.clearEdgeChallenge(zone).then(function (r) {
+        if (r.ok) actions.loadEdge(true);
+        done(r);
       });
     },
     /* the Edge view's tenant chips; "" is every tenant */
