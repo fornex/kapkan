@@ -260,6 +260,10 @@ brain's slot so a fleet does not burn a CA's duplicate-certificate ceiling in on
 and renewal is jittered per node. All of it is advisory: with the brain gone each node still
 renews on its own.
 
+The routing side of the same fleet — the VIP on `lo`, the router's ECMP route, which hash form
+to pick and what it does to a per-node rate ceiling, and what to withdraw on when a node dies —
+is [One address, many nodes](/docs/edge-anycast).
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -284,6 +288,7 @@ renews on its own.
 ## Related
 
 - [Edge nodes](/docs/edge) — how it works and what fails how
+- [One address, many nodes](/docs/edge-anycast) — several nodes behind one anycast/ECMP address
 - [Zones reference](/docs/zones)
 - [`kapkan edge`](/docs/cli#edge) — flags and every `edge.yaml` key
 - [The edge channel](/docs/api#the-edge-channel)

@@ -1,0 +1,448 @@
+export const metadata = {
+  title: "One address, many nodes (anycast)",
+  description:
+    "Put several edge nodes behind one address with ECMP or anycast: the topology, the hash forms and what each does to a per-node rate ceiling, the deterministic ACME fan-out, what says 'withdraw me', and the facts a shared address does not share.",
+};
+
+# One address, many nodes (anycast)
+
+<Callout type="info" title="Your network announces the address; Kapkan runs the boxes behind it">
+Kapkan has no opinion about routing and never touches it. **Your** router, your speaker or your
+cloud's load balancer puts one address in front of several [edge nodes](/docs/edge); Kapkan
+gives each of those boxes its certificates, its configuration and its own decision service, and
+tells you which of them is fit to serve. Nothing in Kapkan announces, withdraws or steers a
+zone's address — the brain's BGP speaker exists for victims under attack, never for service
+routing.
+</Callout>
+
+Everything on this page was executed on a real kernel with a real router hop, real nginx, real
+HTTP/3 and a real ACME certificate authority before it was written down: the acceptance rig is
+`engine/scripts/labnet/edge-e6-anycast.sh`, two nodes behind one `198.51.100.7/32` routed as an
+ECMP route over two point-to-point legs, with the kernel's hash policy switched arm by arm. The
+numbers below are quoted with the conditions that produced them, because most of them move when
+those conditions do.
+
+## What a shared address buys, and what it does not
+
+It buys one name, one certificate story and one policy across N boxes, with the network picking
+the box. It does **not** pool anything the nodes count or cache. The line to hold in your head:
+**the brain distributes policy, never verdicts.**
+
+- **Every rate ceiling is per node.** `policy.rate.rps` is a token bucket on the box that serves
+  the request. Two nodes behind one address are two buckets, and a source the network spreads
+  over both meets each of them separately. See [per-node ceilings](#per-node-ceilings-and-the-hash-you-chose)
+  — this is the single fact that most often surprises an operator moving from one node to three.
+- **Every verdict table is per node.** The rollups that promote a flooder to a deny are the
+  node's own ten-second windows. A source blocked on one node is not blocked on its neighbour.
+- **Every TLS session cache is per node**, and a session issued on one node is never resumable
+  on another — [what does not cross](#what-crosses-nodes-and-what-does-not).
+- **Every certificate is the node's own.** Two nodes serving one name serve two different leaf
+  certificates, issued by two ACME orders from two account keys that never leave their boxes.
+  The rig read both fingerprints and they differ.
+- **Clearance is the fleet's.** A visitor who solves [the proof-of-work rung](/docs/edge#the-proof-of-work-rung)
+  on one node is cleared on all of them: the signing keys come down in the document.
+- **The lever and the zones file are the fleet's.** A rate change, a rung, a lever reach every
+  node on its next poll and reload nothing — the [fast/slow split](/docs/edge#the-fastslow-split)
+  is unchanged by how many nodes there are.
+
+## The topology
+
+```
+                     ┌── leg A (10.0.1.0/30) ──▶ edge-1   198.51.100.7/32 on lo
+ client ──▶ router ──┤                                      kapkan edge · nginx · token a1
+   198.51.100.7      └── leg B (10.0.2.0/30) ──▶ edge-2   198.51.100.7/32 on lo
+   (one ECMP route,                                         kapkan edge · nginx · token a2
+    two nexthops)                                                │
+                                                                 └── unicast ──▶ brain (API)
+```
+
+Four rules, and the rig is built from exactly these:
+
+1. **The VIP lives on each node's loopback**, as a `/32`:
+
+   ```sh
+   # on every node behind the address
+   ip addr add 198.51.100.7/32 dev lo
+   ```
+
+   Kapkan renders address-less `listen` directives, so nginx answers on whatever address the
+   client used and the render never mentions the VIP at all. Nothing in `edge.yaml` or the zones
+   file names it.
+
+2. **The router carries one route with a nexthop per node**, not one route per node:
+
+   ```sh
+   # on the router in front of them
+   ip route replace 198.51.100.7/32 \
+     nexthop via 10.0.1.2 dev leg-a weight 1 \
+     nexthop via 10.0.2.2 dev leg-b weight 1
+   ip route flush cache
+   ```
+
+   A route with two nexthops is an ECMP route; `ip route show 198.51.100.7/32` printing two
+   `nexthop` lines is the check. A speaker (bird, FRR) that accepts both nodes' announcements and
+   merges them produces the same thing — see [the BGP variant](#the-bgp-variant).
+
+3. **Each node reaches the brain by unicast, on its own address, with its own bound token.** One
+   `agent` token per node, bound with `api.tokens[].node`, is not a nicety here: the brain stamps
+   presence and serves each node's document by name, and a shared token behind a shared address
+   makes both meaningless.
+
+   ```yaml
+   # kapkan.yaml on the brain
+   api:
+     tokens:
+       - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
+       - { name: edge-2, token_env: KAPKAN_EDGE_2_TOKEN, role: agent, node: edge-2 }
+   edge:
+     nodes:
+       - { name: edge-1 }
+       - { name: edge-2 }
+     stale_after_seconds: 15
+   ```
+
+   The rig asserts both halves: the brain serves `GET /api/v1/edge/zones?node=edge-1` to
+   edge-1's token, and answers `403` when that same token asks for edge-2's name. See
+   [binding an agent token to its node](/docs/authentication#binding-an-agent-token-to-its-node).
+
+4. **The node configurations are identical but for three things** — `controller.name`,
+   `state_dir`/`sockets_dir`/`terminator.pid_file`, and `status_listen`. Both of the rig's nodes
+   pass `kapkan edge -check` on files that differ in nothing else.
+
+### The return path
+
+A reply to a client carries the address the request arrived on, so on a node with one uplink
+the VIP goes back out the only way there is and there is nothing to configure. Two things do
+need care:
+
+- **Traffic the node originates must use its unicast address.** The brain poll, the report and
+  the ACME order all leave by the node's default route with the node's own source address —
+  which is what makes the node identifiable at all. Do not give the VIP a route that makes it
+  the preferred source; a `/32` on `lo` does not.
+- **A node with more than one uplink needs the reply on the leg it came in on.** Give
+  VIP-sourced traffic its own routing context, the portable form first:
+
+  ```sh
+  # a dedicated table for traffic sourced from the shared address
+  ip route add default via 10.0.1.1 dev leg-a table 100
+  ip rule  add from 198.51.100.7 lookup 100
+  ```
+
+  A **VRF device** (`ip link add vrf-edge type vrf table 100`, then enslave the leg) is the same
+  table reached through a device instead of a rule, on kernels built with `CONFIG_NET_VRF`. The
+  route-leaking form above is the one verified in the network-integration lab and works on every
+  kernel with `CONFIG_IP_MULTIPLE_TABLES`; the anycast rig's nodes have one leg each, so treat
+  the two-uplink recipe as the [return-path recipe](/docs/network-integration#the-return-path)
+  applied here, not as an arm of this rig. Asymmetric paths also bring the
+  [`rp_filter` trap](/docs/network-integration#rp_filter-and-the-asymmetric-reply) with them.
+
+### Placement, if the fleet has PoPs
+
+Nodes behind one address must all serve the zones on that address: give each of them the zone's
+hostgroup in `edge.nodes[].hostgroups`, or leave the zone global on unscoped nodes. A zone placed
+away from a node is not rendered there at all — the rig's placed zone never appears on the node
+that does not list its group, and that node answers nothing for the name. The rule and its
+consequences are [Placing zones on nodes](/docs/edge#placing-zones-on-nodes).
+
+## Which node a client lands on: the hash
+
+The kernel picks a nexthop by hashing the packet, and **which fields it hashes is a sysctl you
+set**, not a property of anycast:
+
+```sh
+sysctl -w net.ipv4.fib_multipath_hash_policy=0   # layer 3: source and destination address
+sysctl -w net.ipv4.fib_multipath_hash_policy=1   # layer 4: the 4-tuple, ports included
+ip route flush cache                             # the running cache keeps the old decision
+```
+
+| Policy | What it hashes | What one client gets | Use it when |
+| --- | --- | --- | --- |
+| `0` (layer 3) | source and destination address | **One node**, for every connection, until the topology changes | Stable, debuggable placement: one client keeps one node, its session cache stays warm and its QUIC stays put. The recommended default — with the ceiling caveat below |
+| `1` (layer 4) | the 4-tuple, ports included | **Both nodes**, connection by connection | An even spread across nodes, at the price of scattering one client's connections, and its rate accounting, over all of them |
+
+In the rig, 40 fresh connections from one client under policy `0` all carried the same node's
+name; under policy `1` the same 40 reached both nodes, and so did 40 `--http3-only` requests —
+the same policy hashes the UDP 4-tuple, so **QUIC is spread exactly like TCP**, and both nodes
+counted their own share under `kapkan_edge_requests_total{protocol="h3"}` and in the report's
+per-window `h3_requests`.
+
+Neither form is "sticky" in any sense a connection can rely on. A client's address changing
+(Wi-Fi to LTE, a NAT rebinding) is a new hash input under either policy, and under layer 4 every
+new connection is a fresh coin toss. A QUIC connection that lands on a node which has never seen
+it simply reconnects: nginx routes QUIC by the socket it arrived on, not by connection ID, and
+connection migration **between** nodes is not supported — see
+[what nginx cannot do](/docs/edge#http3-quic).
+
+## Per-node ceilings, and the hash you chose
+
+`policy.rate.rps` is enforced on the node that serves the request, so a source spread over N
+nodes can be admitted up to N times the ceiling. That is the well-known half. The half that
+costs operators an incident is that **the two hash forms differ in kind, not only in degree.**
+
+The rig set `policy.rate.rps: 5` and fired 40 connections from one source at two nodes:
+
+| Hash policy | Served | Refused (`429`) | `deny_rate` edge-1 / edge-2 | Batch |
+| --- | --- | --- | --- | --- |
+| `0` (layer 3) | 6 | 34 | 0 / 34 | 0.3 s |
+| `1` (layer 4) | 12 | 28 | 10 / 18 | 0.2 s |
+
+Read the two rows against each other, not on their own. Which node does the refusing, and the
+exact per-node split, are the hash's business and move between runs — a repeat run split the
+layer-4 refusals 14/14 instead of 10/18 — while the served counts and the ratio did not.
+
+- **Under layer 4 the source got 2.0× the admitted requests.** That figure is a *range*, not a
+  constant: a node's bucket holds `rps` tokens and refills `rps` per second, so a batch lasting
+  `T` seconds is admitted `rps + rps·T` per node, and the multiplier approaches the node count
+  only while each node's share of the burst still exceeds its own allowance. The rig asserts
+  1.5×–2.5× with the batch duration recorded beside the counts — which is why the table carries
+  a *batch* column at all. **Size a per-node `rps` at roughly your intended fleet ceiling
+  divided by the number of nodes**, and expect the real admitted rate to sit between that and
+  the ceiling itself.
+- **Under layer 3 the whole burst lands on one node** — and 34 refusals in one node's
+  ten-second window cross the rollups' flood rule (at least 20 refusals, at least 30% of that
+  source's decided requests), which promotes the source there to a **table denial** for
+  `DenyTTL`: one minute to start, doubling to ten on repeat. The rig probes that source
+  afterwards and requires the `403`. Under layer 4 the same 40 connections split 10/18, neither
+  node crosses the threshold, and both nodes still report the source as `allow` in their
+  `top_sources`.
+
+<Callout type="warning" title="A low per-node rps under a layer-3 hash blocks a busy client">
+Under layer 4 a source over its ceiling is *slowed*: it collects `429`s with `Retry-After` and
+stays `allow`. Under layer 3 the identical burst is *blocked*: it is concentrated on one node,
+crosses the flood rule there and is denied `403` for `DenyTTL` — a promotion no `429` announces
+and no other node knows about. If you run the recommended layer-3 hash, set the per-node ceiling
+for the busiest legitimate client you have, and watch
+`kapkan_edge_decisions_total{result="deny_rate"}` per node before you tighten it.
+</Callout>
+
+A rate-refused request carries **no** node-attribution header — the render's `@kapkan_denied`
+location declares its own `add_header`, and nginx drops the inherited set wherever a location
+declares one — so count refusals at each node's `/metrics`, not at the response.
+
+## Certificates: the fan-out is deterministic
+
+Each node orders its own certificate for the shared name, and the CA's HTTP-01 validation
+arrives at the VIP — so it lands on whichever node the hash picks, which is usually **not** the
+node that ordered. That works because the ordering node publishes its challenge answer to the
+brain, and the brain fans it out in the document of every node that serves the zone.
+
+The rig proves it the only way that is not circular: it pins the route to edge-2 alone for the
+whole issuance, so edge-1's certificate can only have been validated by the challenge token
+fanned out to edge-2. Both nodes ended up holding their own certificates for the shared name, with different
+leaf fingerprints.
+
+Two more things the rig pins down, both of which matter on a shared address:
+
+- **Issuance is serialised per zone.** Asking for a zone's slot while another node holds it is
+  answered `granted: false` with the holder's name and a `retry_after_seconds` — N nodes on one
+  name would otherwise be N duplicate orders against the CA's weekly cap. The
+  [duplicate-certificate ceiling](/docs/edge#limits-to-know) is counted per placement.
+- **A restarted node orders nothing.** The rig restarts a node and finds its certificates back
+  from disk: its own `kapkan_edge_acme_attempts_total` stays `0` and it asks the brain for no
+  slot.
+
+## Withdrawal: what says "withdraw me"
+
+A shared address is only as good as the thing that stops sending traffic to a broken node.
+Kapkan gives you one honest signal and two tempting non-signals.
+
+| Signal | Withdraw on it? | What the rig saw |
+| --- | --- | --- |
+| **`/healthz` on `status_listen` answers `503`** | **Yes** | The node's nginx was killed; `/healthz` turned `503` **495 ms** later, with `controller.report_interval_seconds: 1` in the rig |
+| `converged: false` in the node's status | **No** | A document the node refused: the previous tested generation kept serving, `/healthz` stayed `200`, and 20 of 20 requests through the VIP were served — edge-2 among them |
+| The brain's inventory says `alive: false` | **No** | It is the brain's view of a poll, not the node's view of itself, and it lags by `stale_after_seconds` |
+
+<Callout type="warning" title="/healthz is sampled on the report ticker">
+The terminator-liveness check rides `controller.report_interval_seconds` — **10 s by default**,
+1 s in the rig. `/healthz` cannot tell you about a dead nginx faster than that interval, so **an
+operator who withdraws on `/healthz` sets that interval to the probe period they want** and
+probes no faster. The check also needs `terminator.pid_file` set: without it the node has
+nothing to check and the death is invisible.
+</Callout>
+
+### What happens if nobody withdraws
+
+The route keeps pointing at the dead node and the hash keeps sending it a share of the traffic.
+With one of two nodes killed outright under a layer-4 hash, the rig's 40 connections split into
+**16 connection failures and 24 served** — the failures being `000` at the client, no answer at
+all, not a refusal. Which node fails and the exact split are the hash's business and move run to
+run; that a share fails does not. An established keepalive connection to the surviving node
+answered `200` on that same connection; the one to the dead node was simply gone. **A shared
+address gives an established connection no protection whatever.**
+
+Meanwhile the brain notices, slowly and only for the record: the inventory turned `alive: false`
+**5103 ms** after the kill, which is `stale_after_seconds: 5` after the dead node's last sighting
+plus the tick on which the brain noticed. Nothing about that flip touches routing: the router's
+VIP route was byte-identical throughout, the brain's log never mentioned the address, and its
+ban list — the set its speaker announces — carried none of it either.
+
+### A dead nexthop needs no operator; a dead node does
+
+Take the **link** down instead of the node and the router marks the nexthop `dead` on its own:
+all 40 requests were served with no operator action. This is the distinction worth internalising
+— *a directly connected router notices link loss, a routed hop does not.* A node that is dead
+while its link is up is invisible to routing, which is exactly why you need a health-driven
+withdrawal.
+
+The withdrawal itself is a RIB change and nothing more:
+
+```sh
+# on the router: stop using the broken node
+ip route replace 198.51.100.7/32 via 10.0.1.2 dev leg-a
+ip route flush cache
+```
+
+The rig's first all-`200` batch completed **45 ms** after that command, followed by 40 of 40 over
+TCP and 20 of 20 over HTTP/3. What bounds recovery is the client's next request, not any Kapkan
+timer.
+
+### A dead brain is not a withdrawal either
+
+The fleet is fail-static, and a shared address changes nothing about that. With the brain killed
+outright the rig's nodes served 20 of 20 requests over TCP and 20 of 20 over HTTP/3 through the
+VIP, from both nodes, with `/healthz` `200` on each: the brain is not in the health predicate,
+and the last document and certificates keep serving from disk.
+
+What brings a node back is **its own next poll**, and what bounds that is the poll's own backoff
+after a failed poll — one second, doubling to a ceiling of 30 — never `edge.stale_after_seconds`,
+which only governs how long the brain waits before calling a silent node lost. In the rig both
+nodes were `alive` again **840 ms** after the brain came back, and the delay depends only on how
+long the outage lasted (how far the backoff had climbed). Do not withdraw an address because the
+brain is unreachable; withdraw because the node in front of you is not serving.
+
+### The BGP variant
+
+Where the address is announced rather than statically routed, put a speaker on each node and let
+it announce the VIP `/32` while the node's own `/healthz` says `200`. The rig's stretch arm runs
+exactly this with bird2, outside the acceptance path (`ANYCAST_BGP=1`):
+
+```sh
+#!/bin/sh
+# on each node: announce while healthy, withdraw the moment it is not
+while :; do
+  if curl -sf -m1 -o /dev/null http://127.0.0.1:9102/healthz; then
+    birdc -s /run/bird/ctl enable announce
+  else
+    birdc -s /run/bird/ctl disable announce
+  fi
+  sleep 1
+done
+```
+
+With the probe at one second and the report interval set to match, killing nginx on one node
+took it out of the router's FIB and moved all 40 of the next batch's requests to the surviving
+node. A refused document did **not** withdraw the route — `/healthz` stayed `200`, so the
+protocol stayed enabled — which is the contract above, enforced by the speaker instead of by
+hand. The speaker is yours: bird, FRR, whatever your network runs. Kapkan ships none and drives
+none.
+
+## What crosses nodes, and what does not
+
+| Fact | Crosses? | Why |
+| --- | --- | --- |
+| A clearance cookie | **Yes** | The rung's signing keys are the fleet's, in the document. A visitor who solved the puzzle on one node was served by the other with the cookie, and the origin saw `X-Kapkan-Mark: cleared` |
+| A TLS session | **No** | nginx binds a session to the node's own certificate through the session id context, and the certificates are per node. Offered edge-1's session, edge-2 answers `New` — in both directions |
+| A rate bucket, a verdict table, a rollup window | **No** | Per node, by design — [per-node ceilings](#per-node-ceilings-and-the-hash-you-chose) |
+| A QUIC connection | **No** | nginx routes QUIC by socket, not connection ID; a migrated client reconnects |
+
+<Callout type="warning" title="Session resumption does not work on any node in the current release">
+A session does not resume on its own node either, and the cause is not anycast: nginx looks a
+session up on the SSL context of the address's **default** server, and Kapkan's catch-all carries
+no `ssl_session_cache` — so every zone's cache is dead configuration and every returning client
+pays a full handshake, TLS 1.2 and TLS 1.3 alike (with `ssl_session_tickets off`, a 1.3 ticket is
+a stateful entry looked up in that same cache). The rig proved the cause with the supported
+`omit_catch_all: true`, which makes the zone's own server the address's default: the same session
+was then `Reused` on its own node — and still `New` on the other, in both directions. **A fix
+that gives the catch-all the zones' cache is in flight**; when it lands, sessions resume on the
+node that issued them and still never across nodes.
+</Callout>
+
+### MTU: one bad leg costs HTTP/3 on the whole address
+
+QUIC never fragments and gives up below a 1280-byte path. On a shared address that is not a
+per-node problem, because **a path MTU is cached per destination and the destination is the
+address every node shares**:
+
+1. The rig set MTU 1200 on one leg only. Of 40 `--http3-only` requests, **38 failed** — and TCP
+   was 40 of 40 throughout, because TCP clamps its MSS per connection. How many get through
+   before the lesson lands is the hash's coin toss; the rig asserts that the great majority do
+   not.
+2. It is not a share of the traffic. Once the first request that reached the small-MTU node
+   taught the client a 1200-byte path MTU for the VIP (`ip route get 198.51.100.7` shows the
+   cached exception), **no** HTTP/3 request succeeded — not even toward the untouched node.
+3. Repairing the leg did not fix it: 10 of 10 still failed. The client's cached exception
+   outlives the fault. Only `ip route flush cache` on the client brought HTTP/3 back, at which
+   point 20 of 20 succeeded from both nodes.
+
+You cannot flush your visitors' caches. Treat any path below 1280 bytes on any leg of a shared
+address as an outage of HTTP/3 for that whole address, fix the MTU before you announce h3, and
+keep [the h3 rollout order](/docs/edge#http3-quic) — nodes first, UDP 443 and MTU second.
+
+## Verifying a fleet behind one address
+
+Run these from a client that reaches the address, and from an operator token on the brain.
+
+```sh
+# 1. One route, two nexthops — not two routes
+ip route show 198.51.100.7/32
+
+# 2. The hash form actually in force
+sysctl net.ipv4.fib_multipath_hash_policy
+
+# 3. Both nodes serve the name, each with its OWN certificate
+openssl s_client -connect 10.0.1.2:443 -servername shop.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
+openssl s_client -connect 10.0.2.2:443 -servername shop.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
+
+# 4. The shared address serves, over TCP and over HTTP/3
+curl -s -o /dev/null -w '%{http_code}\n' https://shop.example.com/
+curl --http3-only -s -o /dev/null -w '%{http_code} %{http_version}\n' https://shop.example.com/
+
+# 5. Every node is alive, placed and reporting its own document
+curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1/edge/nodes
+```
+
+On the inventory, check three things per node, in this order:
+
+- **`alive: true` and a recent `last_seen`** — the poll is the liveness signal.
+- **`zones_placed` contains the zone** every node behind the address must serve. A node that
+  does not list the zone's hostgroup renders nothing for it and answers nothing.
+- **`report.zones_etag` equals the ETag the brain serves that node** (`GET /api/v1/edge/zones?node=<name>`).
+
+<Callout type="info" title="Two nodes' ETags are not supposed to match">
+Each node reports the ETag of **its own** document. With any placement in the fleet those
+documents differ — one node serves a zone the other does not — so a shared `zones_etag` across
+the fleet is **not** a health signal, and chasing one is chasing a bug that is not there. What
+holds is per node: the ETag a node reports is the ETag the brain served *it*. A zone the nodes
+share is byte-identical in both documents. And the inventory carries no key material of any kind
+— certificates appear named by zone, expiry and issuer, never as bytes.
+</Callout>
+
+### Finding out which node served a request
+
+There is no product header naming the node, deliberately. When you need one for an afternoon of
+debugging, the zones file's escape hatch will give you one:
+
+```nginx
+# /etc/kapkan/debug-node.conf, referenced by a zone's extra_directives_file
+add_header X-Kapkan-Node $hostname always;
+```
+
+<Callout type="danger" title="A debugging trick, not a product header">
+This publishes the serving box's hostname to every client of that zone. Kapkan renders the file
+verbatim and `nginx -t` is its only guard. Add it while you are diagnosing a hash or a placement,
+and take it out again. It also does not ride a `429` — the refusal location declares its own
+`add_header` and nginx drops the inherited set there — so it can tell you who *served* a request
+but never who *refused* one. For refusals, read each node's `/metrics`.
+</Callout>
+
+## Related
+
+- [Edge nodes](/docs/edge) — how a node works, the fast/slow split, what fails how
+- [Install an edge node](/docs/edge-install) — one box end to end
+- [Zones reference](/docs/zones) — `policy.rate`, the rung, `extra_directives_file`
+- [Network integration](/docs/network-integration#the-return-path) — the return path, route-leaking and VRF, the `rp_filter` trap
+- [Authentication](/docs/authentication#binding-an-agent-token-to-its-node) — one bound agent token per node
+- [The edge channel](/docs/api#the-edge-channel) — the inventory, the zone status and the lever
+- [Metrics](/docs/metrics#edge-nodes) — the per-node series to watch a fleet with
