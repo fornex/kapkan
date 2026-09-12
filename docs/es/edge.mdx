@@ -417,6 +417,17 @@ Las consecuencias, por orden de cuánto muerden:
 - **El alcance sigue al direccionamiento.** Un hostgroup necesita al menos un prefijo dentro de
   `networks` — el prefijo VIP del PoP, que proteges de todos modos. La colocación no es una segunda
   topología; es la que ya declaraste.
+- **La dirección de una zona sigue a su colocación — la mueves tú.** Kapkan renderiza
+  configuración; nunca dirige tráfico. Colocar una zona en `edge-us` solo llega a los clientes
+  cuando el nombre resuelve a los nodos que listan `edge-us`, y el nodo que ya no la sirve deja de
+  responder por ella en cuanto aterriza el nuevo documento: el nombre cae en el catch-all de kapkan,
+  que cierra la conexión en `:80` (el `return 444` de nginx) y rechaza el handshake en `:443`. Una
+  petición que llega al nodo equivocado es una conexión cortada, no un `404` ni una página obsoleta
+  — en el cliente, una respuesta vacía o un handshake rechazado, así que léelos como *nodo
+  equivocado*, no como un origen roto. **Una autoridad de certificación es uno de esos clientes.**
+  Resuelve la zona como lo hace el mundo, así que una validación HTTP-01 que aterriza fuera de la
+  colocación falla como error de conexión — mueve el registro DNS (o el prefijo anycast) en el mismo
+  cambio que mueve la zona, y el nodo que la gana pedirá el certificado en su primer sondeo.
 - **Cada nodo recibe su propio documento** — exactamente las zonas que cubre su alcance, con sus
   concesiones de certificado, sus desafíos ACME repartidos, sus claves de pase y sus palancas, y su
   propio ETag. Un nodo que pide el turno de emisión de una zona que no sirve, o que publica un
@@ -473,13 +484,18 @@ una zona que el nodo ya no sirve.
   resultado (`challenge`, `would_challenge`, `allow_cleared` entre ellas), los resultados de la
   página de pase, si hay un desafío de zona completa activo — ver [métricas](/docs/metrics#nodos-edge).
 - **El inventario del cerebro**, `GET /api/v1/edge/nodes`, une la vitalidad de cada nodo
-  configurado con su último autoinforme: versión, dry-run, ETag renderizado, tipo y versión del
+  configurado — el sondeo de zonas, y nada más — con su último autoinforme: versión, dry-run, ETag
+  renderizado, tipo y versión del
   terminador, su disponibilidad de HTTP/3 (`terminator.h3.state`: `ready`, `no_module`, `node_off`,
   `unknown`, con un aviso cuando el núcleo nginx de la build cae en el rango de un aviso de
   seguridad de QUIC publicado),
   generación y resultado de prueba, certificados (nunca una clave), y la **sección de
   zonas** — la última ventana de diez segundos de cada zona, las fuentes que rechazó, desafió o
-  habría rechazado o desafiado, y si su peldaño ahí actúa o previsualiza. Ver
+  habría rechazado o desafiado, y si su peldaño ahí actúa o previsualiza. Se marca un avistamiento
+  cuando un sondeo empieza y otra vez cuando termina, así que mientras un sondeo está aparcado
+  `last_seen` conserva el inicio de ese sondeo y el avistamiento de un nodo sano es habitualmente
+  más antiguo que `edge.stale_after_seconds`; lo que dice que hay un sondeo abierto ahora mismo es
+  `holding`, y un nodo aparcado está vivo diga lo que diga `last_seen`. Ver
   [la API](/docs/api#el-canal-edge).
 - **Las zonas de toda la flota**, `GET /api/v1/edge/zones/status`, lista cada zona del archivo de
   zonas y fusiona en ella los reportes de los nodos vivos (un token

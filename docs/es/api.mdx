@@ -342,10 +342,10 @@ ciclo de vida.
 
 ### GET /api/v1/audit
 
-Devuelve el registro de auditoría atribuido al operador: quién emitió cada `ban`, `unban`, `config_reload`, `source_block` o `source_unblock`, cuándo, y el resultado (incluidas las acciones **rechazadas**). Los registros van
+Devuelve el registro de auditoría atribuido al operador: quién emitió cada `ban`, `unban`, `config_reload`, `source_block`, `source_unblock` o `edge_challenge`, cuándo, y el resultado (incluidas las acciones **rechazadas**). Los registros van
 de más reciente a más antiguo y el endpoint está acotado al tenant en el servidor. Acepta los parámetros de
 consulta opcionales `from`/`to` (RFC 3339), `action`
-(`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`) y `target` (una IP), y
+(`ban`/`unban`/`config_reload`/`source_block`/`source_unblock`/`edge_challenge`) y `target` (una IP), y
 por defecto devuelve la última hora:
 
 ```json
@@ -370,7 +370,9 @@ por defecto devuelve la última hora:
 }
 ```
 
-Cuando el almacenamiento está desactivado, la respuesta es `{"available": false, "events": []}`. Ten en cuenta que
+Cuando el almacenamiento está desactivado, la respuesta es `{"available": false, "events": []}`. `events` es
+siempre un array — vacío en lugar de `null`, incluso para un tenant cuya ventana no contiene ningún
+registro —, así que un cliente puede recorrerlo sin comprobaciones previas. Ten en cuenta que
 los registros de auditoría codifican `dry_run` como un entero (`0`/`1`), no como el booleano JSON usado en el resto
 de esta página. Consulta la página dedicada de [Registro de auditoría](/docs/audit) para conocer la lista completa de
 campos, las reglas de consulta y el modelo de identidad del operador y de acotamiento por tenant.
@@ -689,7 +691,9 @@ encogerse), `certs_truncated` y `zones_truncated` las entradas eliminadas. Almac
 del reporte y sus fuentes que dicen algo se escriben además en el historial edge, y lo que cambió
 desde el reporte anterior del nodo se convierte en eventos — después de guardar el reporte y sin que
 la respuesta espere nunca por ello. Nunca es una señal de vitalidad (el sondeo lo es). Un `{name}`
-desconocido es `404`; el éxito es `204 No Content`.
+desconocido es `404`; un cuerpo de más de 64 KiB es `413 report exceeds 64 KiB` — el límite por
+debajo del cual un nodo recorta detalle para mantenerse, así que un `413` aquí es un cliente que no
+lo hizo, y no se lee nada del reporte; el éxito es `204 No Content`.
 
 #### GET /api/v1/edge/nodes
 
@@ -702,8 +706,19 @@ lleva `unbound_agent_tokens` mientras algún token agent esté sin vincular y ex
 vincularlo (ausente en caso contrario) — la vista de migración de
 [Vincular un token de agente a su nodo](/docs/authentication#vincular-un-token-de-agente-a-su-nodo).
 `hostgroups` y `zones_placed` están siempre presentes; `tokens`, `last_token` y
-`unbound_agent_tokens` se omiten cuando están vacíos. Una lectura de rango `viewer`, solo tokens sin
-acotar.
+`unbound_agent_tokens` se omiten cuando están vacíos. El documento lleva además `nodes_total` y el
+`stale_after_seconds` que usa el juicio; cada nodo lleva `alive`, `holding` y `last_seen`.
+
+**Se marca un avistamiento cuando un sondeo empieza y otra vez cuando termina, así que mientras un
+sondeo está aparcado `last_seen` conserva el inicio de ese sondeo** y tiene hasta 25 s de antigüedad
+en un nodo perfectamente sano — más que `stale_after_seconds` con los valores predeterminados.
+`holding` dice que hay un sondeo aparcado ahora mismo, y un nodo aparcado en uno está vivo diga lo
+que diga `last_seen`; `alive` es *aparcado, o visto dentro de `stale_after_seconds`*, nunca nada de
+lo que afirme el propio reporte del nodo. La consecuencia que conviene prever: un cambio que deja a
+un nodo incomunicado — un token eliminado, un vínculo movido — termina su sondeo aparcado con el
+rechazo que recibiría un sondeo nuevo, lo que marca un avistamiento propio, de modo que `alive` pasa
+a falso `stale_after_seconds` después de eso, hasta unos 40 s después del cambio con los valores
+predeterminados. Una lectura de rango `viewer`, solo tokens sin acotar.
 
 #### GET /api/v1/edge/zones/status
 
@@ -800,7 +815,9 @@ como máximo 31 días; `step` vale 60 s por defecto, se eleva para que un rango 
 would_challenge, status_2xx, status_3xx, status_4xx, status_5xx, h3_requests}]}`. `nodes` cuenta los
 nodos distintos que reportaron en el cubo; `step_seconds` es el paso realmente aplicado; `zone` y
 `node` repiten los de la petición, `node` solo cuando se dio el filtro; deriva la tasa como
-`requests / window_seconds` y la proporción de HTTP/3 como `h3_requests / requests`. `zone` es
+`requests / window_seconds` y la proporción de HTTP/3 como `h3_requests / requests`. Esas reglas de
+rango y de paso son las mismas que las de `/api/v1/traffic` y `/api/v1/audit` — una sola
+implementación, así que los tres responden a un rango inválido con el mismo mensaje. `zone` es
 obligatorio, se pasa a minúsculas como los nombres del archivo y debe estar en el archivo de zonas (si
 no, `404 unknown zone`); `node=<name>` lo reduce a un nodo configurado (`404 unknown edge node`).
 Rango `viewer`. Un token [acotado a un tenant](/docs/multi-tenancy) lee sus propias zonas; cualquier
@@ -834,6 +851,14 @@ events: [{event_time, node, zone, kind, detail}]}`, con filtros opcionales `node
 `report_truncated` (si no, `400`). Rango `viewer`, **solo tokens sin acotar**: los eventos nombran
 nodos y los cambios de la flota. Las mismas reglas de rango; con el almacenamiento apagado se responde
 `{available: false, events: []}`.
+
+Cada tipo es una **transición**, así que un estado que el cerebro solo ha visto una vez no aparece
+aquí. El primer reporte tras un arranque del cerebro es una línea de partida silenciosa, y la
+presencia también lo es: un nodo queda fijado como línea de partida en su primer sondeo o — si el
+cerebro nunca sabe de él — como perdido en cuanto pasa `stale_after_seconds` desde que arrancó el
+ticker de presencia, sin escribir `node_lost`. Un nodo que estuvo caído durante un reinicio del
+cerebro no tiene, por tanto, ningún evento hasta que vuelve, y el primero es `node_alive`. Para saber
+qué es un nodo *ahora*, lee el inventario, no esta lista.
 
 #### POST /api/v1/edge/nodes/\{name\}/acme/slot y …/acme/challenges
 
