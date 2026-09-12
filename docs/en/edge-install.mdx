@@ -96,7 +96,13 @@ http {
 
 Remove (or plan to keep, see below) any `default_server` on `:80`/`:443` — Kapkan renders its
 own catch-all that refuses unknown hosts. Debian's default site declares one; either disable
-the site or set `omit_catch_all: true` in `edge.yaml`. Then confirm the include compiles
+the site or set `omit_catch_all: true` in `edge.yaml` — and in that case give your own `:443`
+default server the three lines Kapkan's catch-all would have carried,
+`ssl_session_cache shared:kapkan_ssl:10m; ssl_session_timeout 1d; ssl_session_tickets off;`, because nginx reads a TLS session's cache, lifetime and ticket setting from the default
+server's context: without them no client resumes a session on this node, or keeps one past
+nginx's five-minute default. The size must be exactly `10m`; a default server that already
+declares a shared cache (Debian's and Mozilla's templates ship `shared:SSL:10m`) keeps it and
+adds only the timeout and `ssl_session_tickets off`. Then confirm the include compiles
 before anything is rendered (a wildcard include of a directory that does not exist yet is fine
 for nginx):
 
@@ -275,11 +281,13 @@ renews on its own.
 | `would-challenge` marks, but nobody is ever challenged | One of the three watch-only layers is on: the node's `dry_run` (`edge.yaml`), the zone's `policy.dry_run`, or the rung's own `challenge_options.dry_run` — `true` by default. `GET /api/v1/edge/zones/status` names the nodes a zone is watch-only on and whether a zone-wide challenge is previewing (`dry_run: true`). |
 | Every request to a zone gets the clearance page | The zone is under challenge: `policy.challenge: manual` in the file, a lever (`override` in `GET /api/v1/edge/zones/status`), or the zone-wide trigger (`challenge_active` with `reason: zone-rps`). A client that clears it is not asked again for `cookie_ttl_seconds`; clients that cannot keep cookies see it every time. |
 | Clients see `503` (or pass unchallenged) on a zone whose rung is on | nginx could not reach the clearance page and followed `failure_mode`. Look for `connect() to unix:/run/kapkan-edge/edge-clearance.sock failed` in nginx's error log: the socket is `0660` for `socket_group`, like the decision socket, and the node logs `clearance page listening` when it is up. |
+| Every returning client does a full TLS handshake (`openssl s_client -sess_in` answers `New` on the same node) | `omit_catch_all: true` with a default server of your own that declares no `ssl_session_cache`: nginx reads a session's cache, lifetime and ticket setting through the default server's context. Add `ssl_session_cache shared:kapkan_ssl:10m; ssl_session_timeout 1d; ssl_session_tickets off;` to it (a server with a cache of its own keeps it and adds the other two). |
+| `nginx -t` fails with *the size … of shared memory zone "kapkan_ssl" conflicts with already declared size* | Your `nginx.conf` declares `kapkan_ssl` at another size. Every Kapkan-rendered server declares it at `10m`; use `10m`, or give your own cache a name of its own. |
 | `nginx -t` fails with *duplicate listen options for 0.0.0.0:443* | Your `nginx.conf` (with `omit_catch_all: true`) already has a `listen 443 quic` with socket options (`reuseport`, `rcvbuf`, …) and Kapkan's QUIC anchor carries its own `reuseport`. Set `quic.omit_anchor: true` and give your server `reuseport` and `ssl_protocols TLSv1.3` yourself. |
 | A zone with `tls.h3: true` is served over TCP only on one node | That node's `terminator.h3.state` is not `ready`: `no_module` (the build lacks `--with-http_v3_module`), `node_off` (`quic.h3: off`) or `unknown` (the probe failed — read the journal). The zone is listed under `terminator.h3.unsupported`; the other nodes serve it over h3. |
 | Browsers are slow to load a zone after `h3: true` | UDP 443 is blocked upstream while `Alt-Svc` announces h3: every browser races the QUIC attempt and times out before falling back. Fix the firewall, or set `tls.h3_options.advertise: false` until you have; `terminator.h3.listening` only tells you the box's half. |
 | `curl --http3-only` fails while TCP works, with a tunnel or an overlay in the path | Path MTU under 1280 bytes: QUIC never fragments. Raise the MTU or keep the zone on TCP (MSS clamping saves TCP, not QUIC). |
-| Every QUIC handshake fails while `nginx -t` passes and `Alt-Svc` is sent | An http-level `ssl_protocols` in your `nginx.conf` without `TLSv1.3`, under `omit_catch_all` with `quic.omit_anchor: true` (Kapkan's own catch-all and anchor pin `TLSv1.3`; your default server must too). Look for `SSL_do_handshake() failed … unsupported protocol` in nginx's error log. |
+| Every QUIC handshake fails while `nginx -t` passes and `Alt-Svc` is sent | An http-level `ssl_protocols` in your `nginx.conf` without `TLSv1.3`, under `omit_catch_all` with `quic.omit_anchor: true` (Kapkan's own catch-all and anchor pin `TLSv1.3`; your default server must too). Look for `SSL_do_handshake() failed … unsupported protocol` in nginx's error log. With `quic.omit_anchor` your QUIC server also carries the anchor's session lines — `ssl_session_cache shared:kapkan_ssl:10m; ssl_session_timeout 1d; ssl_session_tickets off;` — or no HTTP/3 session resumes on this node. |
 
 ## Related
 
