@@ -105,9 +105,12 @@ Four rules, and the rig is built from exactly these:
    edge-1's token, and answers `403` when that same token asks for edge-2's name. See
    [binding an agent token to its node](/docs/authentication#binding-an-agent-token-to-its-node).
 
-4. **The node configurations are identical but for three things** — `controller.name`,
-   `state_dir`/`sockets_dir`/`terminator.pid_file`, and `status_listen`. Both of the rig's nodes
-   pass `kapkan edge -check` on files that differ in nothing else.
+4. **The node configurations are identical but for `controller.name`** — and the token each node
+   reads from its own environment. Nothing else about a shared address needs a per-node value.
+   The rig's two `edge.yaml` files also differ in `state_dir`/`sockets_dir`/`terminator.pid_file`,
+   `status_listen` and `terminator.main_conf`, but only because its two "nodes" share one host and
+   cannot share those paths and ports; on separate boxes they are the same file with one name
+   changed. Both pass `kapkan edge -check`.
 
 ### The return path
 
