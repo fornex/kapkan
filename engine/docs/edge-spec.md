@@ -198,7 +198,7 @@ The channel is the one the scrub node already uses, with a second document famil
 | Decision service dies / times out | Per-zone `failure_mode: open` (default — requests pass undecided, counted) or `closed` (503). Default is open: the edge analog of default-PASS. |
 | Renders produce a broken config | `nginx -t` against the candidate file gates every reload; a failing candidate is never installed, the old config keeps serving, the failure is a report field + metric. Mirrors the validate-before-apply gate the config package already enforces (the same validator that ships as `cmd/kapkan-validate`). |
 | Cert unrenewable (CA down, attack outlasts retries) | Serve the current cert until expiry; alarm from T−30 d (metric + console badge + notify). With a 90-day cert renewed from day 60, an attack must outlast ~30 days of retries before expiry is threatened. |
-| Node dies | Brain sees the poll stop (stale_after, as with scrub nodes) and surfaces it. Traffic steering is the operator's network (anycast withdraw, DNS) in v1 — see "self-steering" in E6 candidates. |
+| Node dies | Brain sees the poll stop (stale_after, as with scrub nodes) and surfaces it. Steering traffic away stays the operator's network: E6 shipped the interim contract the anycast deployment guide records — an external speaker on the node withdraws the zone's prefix off `/healthz`, which turns 503 within one `controller.report_interval_seconds` of the terminator dying (the tick the liveness check rides, so it is the knob you set to your probe's period) plus a local TLS probe. The brain withdraws nothing and its inventory is not the signal: it may still read `alive` while `/healthz` already says 503. A node announcing its own zone VIPs is **self-steering**, moved out to E7 in the E6 design round — see §8's E6 entry. |
 
 ---
 
@@ -344,8 +344,16 @@ zones:
   it on nginx 1.22, nginx stable and Angie — `nginx -t` first, then live requests through the
   served render: fail-open with and without a decider, keepalive, WebSocket upgrade, catch-all,
   TLS floor, ACME.
-- The brain serves zones to nodes as a versioned ETag'd doc; per-node scoping (which node
-  serves which zones) is a fleet concern deferred to E6 with hostgroup-scoped agent tokens.
+- The brain serves zones to nodes as a versioned ETag'd doc; per-node scoping (which node serves
+  which zones) is a fleet concern, and E6 shipped it — not as hostgroup-scoped agent tokens, which
+  were the E5-era guess, but as **placement**: a zone names a hostgroup (`zones[].hostgroup`), a
+  node lists the hostgroups it covers (`edge.nodes[].hostgroups`), and the brain builds one
+  document per node from the intersection, `global` being a literal a node opts into by listing it
+  (E6.3). Tenancy is a second, orthogonal label on the zone (`zones[].tenant`, E6.2) and scopes
+  what an API caller sees, never what a node gets. A token is bound to **a node**
+  (`api.tokens[].node`, E6.1) and never to a hostgroup: it names exactly one `edge.nodes[]` or
+  `scrubbing.nodes[]` entry, and the binding is checked before any side effect on all six
+  node-identified routes. The placement itself never enters the document a node receives.
 
 ---
 
@@ -723,9 +731,9 @@ headline and the long pole.
   the read API equals the SQL sums at two steps and is default-deny; a forged report is not
   trusted — a window an hour ahead lands once re-stamped with the brain's clock, with exactly one
   `clock_skew` and one recovery, an unknown zone is dropped and counted, 150 sources become at
-  most 20 rows; the write path never blocks — with ClickHouse first stalled and then dead under a
-  burst of sixty reports every answer was a `204` in under 50 ms with `error` and `dropped` both
-  moving, and nothing of the dead time was back-filled; TTL holds; with storage off the documents,
+  most 20 rows; the write path never blocks — with ClickHouse first stalled and then dead under
+  eight paced and eighty concurrent reports every answer was a `204` in under 50 ms with `error`
+  and `dropped` both moving, and nothing of the dead time was back-filled; TTL holds; with storage off the documents,
   ETags and generations are unchanged and a tcpdump sees no packet to `:8123`; the tables hold no
   clearance key and no PEM, and with brain and database both dead the node serves. Two product
   defects fell out of the rig and were fixed before the merge: a poll parked in a hold did not
@@ -742,10 +750,15 @@ headline and the long pole.
   rather than answering `404`, so a validation that lands on the wrong node fails as a connection
   error. Two sub-claims live in unit tests rather than the rig (`K`'s pre-E6 golden is
   `TestEdgePlacementGoldenWithoutScopes`; `A`'s scrub twin is the role-matrix test), and `S7`
-  keeps ClickHouse down for about 30 s rather than 60 — the burst already exceeds the writer's
-  queue, which is the drop path the row is about. The anycast half of the milestone has its own
-  rig (E6.9, `edge-e6-anycast.sh`, 109/109 with a real router hop); its numbers and its failure
-  table belong to the anycast deployment guide, with that guide's §8 paragraph.
+  proves its two counters against two different failures rather than keeping one server down for
+  60 s: `dropped` against a **stalled** sink (packets to `:8123` black-holed, so every flush hangs
+  on its timeout) under eight paced reports and an eighty-report burst that overflows the writer's
+  queue of 50, then `error` against the **stopped** server, whose flushes fail fast — about 30 s in
+  all rather than the plan's 60. (Sixty paced reports were tried and do not reach the drop path:
+  each second's flush fails and empties the queue into `error`, so it never fills.) The anycast
+  half of the milestone has its own rig (E6.9, `edge-e6-anycast.sh`, 116/116 with a real router
+  hop, arm G asserting the session-cache fix of #154); its numbers and its failure table belong to
+  the anycast deployment guide, with that guide's §8 paragraph.
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and
