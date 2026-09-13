@@ -415,8 +415,13 @@ curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1
 On the inventory, check three things per node, in this order:
 
 - **`alive: true` and a recent `last_seen`** — the poll is the liveness signal.
-- **`zones_placed` contains the zone** every node behind the address must serve. A node that
-  does not list the zone's hostgroup renders nothing for it and answers nothing.
+- **`hostgroups` covers the zone** on every node behind the address — the zone's own hostgroup,
+  or `global` for a global zone. A node whose scope does not cover it renders nothing for it and
+  answers nothing. (`zones_placed` beside it is a *count* — how many of the file's zones that
+  node's document holds — so it tells you a node's scope is empty, never which zones it has.)
+  The per-zone view is the other end of the same fact: `GET /api/v1/edge/zones/status` carries
+  each zone's `placement`, whose `nodes` must list every node behind the address and whose
+  `alive` must list them all again.
 - **`report.zones_etag` equals the ETag the brain serves that node** (`GET /api/v1/edge/zones?node=<name>`).
 
 <Callout type="info" title="Two nodes' ETags are not supposed to match">
