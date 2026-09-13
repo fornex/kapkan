@@ -366,14 +366,18 @@ brain is unreachable; withdraw because the node in front of you is not serving.
 ### The BGP variant
 
 Where the address is announced rather than statically routed, put a speaker on each node and let
-it announce the VIP `/32` while the node's own `/healthz` says `200`. The rig's stretch arm runs
-exactly this with bird2, outside the acceptance path (`ANYCAST_BGP=1`):
+it announce the VIP `/32` while that node's own predicate holds. The rig has a stretch arm that
+runs exactly this with bird2, **outside the acceptance path** and behind `ANYCAST_BGP=1`, so it is
+skipped by default and carries no recorded numbers:
 
 ```sh
 #!/bin/sh
 # on each node: announce while healthy, withdraw the moment it is not
+# 9101 below is this node's status_listen port — use your own
 while :; do
-  if curl -sf -m1 -o /dev/null http://127.0.0.1:9102/healthz; then
+  if curl -sf -m1 -o /dev/null http://127.0.0.1:9101/healthz \
+     && curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 \
+             -o /dev/null https://shop.example.com/; then
     birdc -s /run/bird/ctl enable announce
   else
     birdc -s /run/bird/ctl disable announce
@@ -382,12 +386,12 @@ while :; do
 done
 ```
 
-With the probe at one second and the report interval set to match, killing nginx on one node
-took it out of the router's FIB and moved all 40 of the next batch's requests to the surviving
-node. A refused document did **not** withdraw the route — `/healthz` stayed `200`, so the
-protocol stayed enabled — which is the contract above, enforced by the speaker instead of by
-hand. The speaker is yours: bird, FRR, whatever your network runs. Kapkan ships none and drives
-none.
+What the arm asserts, with the probe at one second and the report interval set to match: killing
+nginx on a node takes it out of the router's FIB and moves the next batch's requests to the
+surviving node, while a refused document does **not** withdraw the route — `/healthz` stays `200`,
+so the protocol stays enabled. That is the contract from the table above, enforced by a speaker
+instead of by hand. The speaker is yours: bird, FRR, whatever your network runs. Kapkan ships none
+and drives none.
 
 ## What crosses nodes, and what does not
 
