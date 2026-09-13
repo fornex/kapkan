@@ -272,20 +272,37 @@ Two more things the rig pins down, both of which matter on a shared address:
 ## Withdrawal: what says "withdraw me"
 
 A shared address is only as good as the thing that stops sending traffic to a broken node.
-Kapkan gives you one honest signal and two tempting non-signals.
+Withdraw on a two-part predicate — Kapkan's own signal **and** a probe of the listener itself —
+and ignore the two tempting non-signals.
 
 | Signal | Withdraw on it? | What the rig saw |
 | --- | --- | --- |
 | **`/healthz` on `status_listen` answers `503`** | **Yes** | The node's nginx was killed; `/healthz` turned `503` **495 ms** later, with `controller.report_interval_seconds: 1` in the rig |
+| **A local TLS probe of the node's own `:443` with the zone's SNI fails** | **Yes** | Not a rig arm: `/healthz` samples the terminator's pid file on the report tick, so it cannot see a wedged listener, an expired certificate or a refused TLS handshake. Probe what a client does |
 | `converged: false` in the node's status | **No** | A document the node refused: the previous tested generation kept serving, `/healthz` stayed `200`, and 20 of 20 requests through the VIP were served — edge-2 among them |
 | The brain's inventory says `alive: false` | **No** | It is the brain's view of a poll, not the node's view of itself, and it lags by `stale_after_seconds` |
+
+**Withdraw when either of the two "yes" signals fails, announce only while both hold.** They
+answer different questions: `/healthz` says Kapkan believes the terminator process is alive, the
+probe says the box actually completes a TLS handshake and serves the zone. On the node itself:
+
+```sh
+# is this box really serving the zone? — from the node, against its own listener
+curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 -o /dev/null https://shop.example.com/
+```
+
+`--resolve` is what makes it a real test: the request carries the zone's SNI and Host, so an
+expired certificate, a broken render or a dead upstream all fail it, while `127.0.0.1` keeps the
+probe off the shared address and out of the hash.
 
 <Callout type="warning" title="/healthz is sampled on the report ticker">
 The terminator-liveness check rides `controller.report_interval_seconds` — **10 s by default**,
 1 s in the rig. `/healthz` cannot tell you about a dead nginx faster than that interval, so **an
 operator who withdraws on `/healthz` sets that interval to the probe period they want** and
 probes no faster. The check also needs `terminator.pid_file` set: without it the node has
-nothing to check and the death is invisible.
+nothing to check and the death is invisible. And it is a *pid* sample either way — a master
+process that is alive while its listener is wedged reads `200`, which is the whole reason the
+local TLS probe is the other half of the predicate.
 </Callout>
 
 ### What happens if nobody withdraws
