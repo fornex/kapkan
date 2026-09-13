@@ -436,7 +436,10 @@ wenn sie keine nennt; der Geltungsbereich eines Knotens ist `edge.nodes[].hostgr
   `return 444` von nginx) und den Handshake auf `:443` abweist. Eine Anfrage, die am falschen Knoten ankommt,
   ist eine abgebrochene Verbindung, kein `404` und keine veraltete Seite — beim Client eine leere
   Antwort oder ein abgewiesener Handshake, und genau so sind sie zu lesen: falscher Knoten, nicht
-  kaputter Origin. **Eine Zertifizierungsstelle ist genau so ein Client.** Sie löst die Zone auf, wie die
+  kaputter Origin. Auf einem Knoten mit `omit_catch_all: true` gibt es kein Kapkan-Catch-all, und
+  Ihr eigener Default-Server antwortet stattdessen — das Symptom ist dann, was dieser Server auf
+  einen unbekannten Host zurückgibt: ein `404`, eine Startseite, eine Weiterleitung. Auf so einem
+  Knoten lesen Sie *das* als falschen Knoten. **Eine Zertifizierungsstelle ist genau so ein Client.** Sie löst die Zone auf, wie die
   Welt es tut, eine HTTP-01-Validierung, die außerhalb der Platzierung landet, scheitert also als
   Verbindungsfehler — bewegen Sie den DNS-Eintrag (oder das Anycast-Präfix) in derselben Änderung,
   die die Zone bewegt, und der Knoten, der sie gewinnt, bestellt bei seinem ersten Poll.

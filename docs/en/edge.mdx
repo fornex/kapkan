@@ -400,7 +400,10 @@ of how often they bite:
   closes the connection on `:80` (nginx's `return 444`) and refuses the handshake on `:443`. A
   request that arrives at the wrong node is a dropped connection, not a `404` or a stale page —
   an empty reply or a refused handshake at the client, so read those as *wrong node*, not as a
-  broken origin. **A certificate authority is such a client.** It resolves the
+  broken origin. On a node with `omit_catch_all: true` there is no kapkan catch-all and your own
+  default server answers instead, so the symptom is whatever that server returns for an unknown
+  host — a `404`, a landing page, a redirect. Read *that* as *wrong node* on such a node.
+  **A certificate authority is such a client.** It resolves the
   zone the way the world does, so an HTTP-01 validation that lands outside the placement fails
   as a connection error — move the DNS record (or the anycast prefix) in the same change that
   moves the zone, and the node that gains it orders on its first poll.

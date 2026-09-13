@@ -436,7 +436,10 @@ liste aucun. Les conséquences, par ordre de fréquence :
   de kapkan, qui ferme la connexion sur `:80` (le `return 444` de nginx) et refuse la poignée de
   main sur `:443`. Une requête qui arrive sur le mauvais nœud est une connexion coupée, pas un `404`
   ni une page périmée — côté client, une réponse vide ou une poignée de main refusée : lisez-les
-  comme « mauvais nœud », non comme une origine cassée. **Une autorité de certification
+  comme « mauvais nœud », non comme une origine cassée. Sur un nœud en `omit_catch_all: true`, il
+  n'y a pas de catch-all kapkan et c'est votre propre serveur par défaut qui répond : le symptôme
+  est alors ce qu'il renvoie pour un hôte inconnu — un `404`, une page d'accueil, une redirection.
+  Sur un tel nœud, lisez *cela* comme « mauvais nœud ». **Une autorité de certification
   est un client comme un autre.** Elle résout la zone comme le fait le monde entier : une validation
   HTTP-01 qui atterrit hors du placement échoue donc par une erreur de connexion — déplacez
   l'enregistrement DNS (ou le préfixe anycast) dans le même changement que la zone, et le nœud qui

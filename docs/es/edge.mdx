@@ -424,7 +424,10 @@ Las consecuencias, por orden de cuánto muerden:
   que cierra la conexión en `:80` (el `return 444` de nginx) y rechaza el handshake en `:443`. Una
   petición que llega al nodo equivocado es una conexión cortada, no un `404` ni una página obsoleta
   — en el cliente, una respuesta vacía o un handshake rechazado, así que léelos como *nodo
-  equivocado*, no como un origen roto. **Una autoridad de certificación es uno de esos clientes.**
+  equivocado*, no como un origen roto. En un nodo con `omit_catch_all: true` no hay catch-all de
+  kapkan y responde tu propio servidor por defecto, así que el síntoma es lo que ese servidor
+  devuelva para un host desconocido: un `404`, una página de inicio, una redirección. En un nodo así,
+  lee *eso* como *nodo equivocado*. **Una autoridad de certificación es uno de esos clientes.**
   Resuelve la zona como lo hace el mundo, así que una validación HTTP-01 que aterriza fuera de la
   colocación falla como error de conexión — mueve el registro DNS (o el prefijo anycast) en el mismo
   cambio que mueve la zona, y el nodo que la gana pedirá el certificado en su primer sondeo.
