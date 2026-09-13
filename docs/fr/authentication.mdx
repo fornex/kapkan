@@ -137,14 +137,17 @@ La présence n'est estampillée que par les tokens agent : un operator qui inter
 reçoit le document de X en **aperçu** et ne fait pas paraître X vivant.
 
 **Laissez à une étape de migration le temps de se voir.** Un changement de token atteint une
-interrogation déjà en attente : le rechargement y met fin avec la réponse qu'une première
-interrogation obtiendrait désormais (`401` pour un token disparu, `403` pour un token dont la
-liaison a été déplacée), et le nœud se reconnecte avec ce qu'il a maintenant. L'*inventaire*, lui,
-est plus lent, parce qu'une présence est estampillée quand une interrogation commence puis de
-nouveau quand elle se termine — le refus compris : un nœud que vous venez de couper affiche donc
-`alive` pendant tout le reste de son attente (jusqu'à 25 s), puis `edge.stale_after_seconds`
-par-dessus, soit environ 40 s avec les valeurs par défaut. Attendez ce délai avant de lire la
-bascule de `last_token`, sans quoi vous regarderez l'état d'avant votre changement.
+interrogation déjà en attente : le rechargement la réveille aussitôt et y met fin avec la réponse
+qu'une première interrogation obtiendrait désormais (`401` pour un token disparu, `403` pour un
+token dont la liaison a été déplacée), et le nœud se reconnecte avec ce qu'il a maintenant.
+L'*inventaire*, lui, a une fenêtre de retard, parce qu'une présence est estampillée quand une
+interrogation commence puis de nouveau quand elle se termine — ce refus compris : un nœud que vous
+venez de couper affiche donc `alive` pendant encore `edge.stale_after_seconds` après le changement,
+soit environ 15 s avec les valeurs par défaut, et vous voyez la bascule à votre lecture suivante de
+l'inventaire. Attendez ce délai avant de lire la bascule de `last_token`, sans quoi vous regarderez
+l'état d'avant votre changement. L'attente borne autre chose : sur un nœud parfaitement sain et en
+attente, `last_seen` peut avoir une attente entière (jusqu'à 25 s) d'âge, ce qui est normal — c'est
+`holding` qui dit que son interrogation est ouverte.
 
 `token_env` et `tokens` sont **mutuellement exclusifs** — `token_env` correspond à exactement un
 token operator. Une requête est comparée à chaque token configuré (en temps constant) ; le rôle le

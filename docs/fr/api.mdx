@@ -726,10 +726,11 @@ noms des tokens agent qui lui sont liés par `api.tokens[].node`) et
 document porte `unbound_agent_tokens` tant qu'un token agent est non lié et qu'il existe des nœuds
 auxquels le lier (absent sinon) — la vue de migration de
 [Lier un token agent à son nœud](/docs/authentication#lier-un-token-agent-à-son-nœud).
-`hostgroups` et `zones_placed` sont toujours présents ; `tokens`, `last_token` et
-`unbound_agent_tokens` sont omis quand ils sont vides. Le document porte aussi `nodes_total` et le
-`stale_after_seconds` sur lequel le jugement s'appuie ; chaque nœud porte `alive`, `holding` et
-`last_seen`.
+`hostgroups` et `zones_placed` sont toujours présents ; `tokens`, `last_token`, `last_seen` et
+`unbound_agent_tokens` sont omis quand ils sont vides — `last_seen` est là dès que le nœud a
+interrogé ce cerveau, et absent pour un nœud jamais vu depuis son démarrage. Le document porte aussi
+`nodes_total` et le `stale_after_seconds` sur lequel le jugement s'appuie ; chaque nœud porte
+`alive` et `holding`.
 
 **Une présence est estampillée quand une interrogation commence, puis de nouveau quand elle se
 termine : tant qu'une interrogation est en attente, `last_seen` porte donc le début de celle-ci** et
@@ -738,10 +739,11 @@ valeurs par défaut. `holding` dit qu'une interrogation est en attente à l'inst
 qui en tient une est vivant quoi que dise `last_seen` ; `alive` vaut *en attente, ou vu depuis moins
 de `stale_after_seconds`*, jamais quoi que ce soit que le rapport du nœud lui-même prétend. La
 conséquence à anticiper : un changement qui coupe un nœud — un token retiré, une liaison déplacée —
-met fin à son interrogation en attente avec le refus qu'une première interrogation obtiendrait
-désormais, ce qui estampille une présence à son tour ; `alive` ne passe donc à faux que
-`stale_after_seconds` plus tard, soit jusqu'à environ 40 s après le changement avec les valeurs par
-défaut. Une lecture de rang `viewer`, tokens non rattachés uniquement.
+réveille aussitôt son interrogation en attente et y met fin avec le refus qu'une première
+interrogation obtiendrait désormais, ce qui estampille une présence à son tour ; `alive` passe donc
+à faux `stale_after_seconds` après le changement — environ 15 s avec les valeurs par défaut, et non
+une attente plus une fenêtre : le refus tombe au rechargement, jamais à l'échéance de l'attente. Une
+lecture de rang `viewer`, tokens non rattachés uniquement.
 
 #### GET /api/v1/edge/zones/status
 
@@ -838,9 +840,10 @@ cleared, would_deny, would_challenge, status_2xx, status_3xx, status_4xx, status
 h3_requests}]}`. `nodes` compte les nœuds distincts qui ont rapporté dans l'intervalle ;
 `step_seconds` est le pas réellement appliqué ; `zone` et `node` reprennent la requête, `node`
 seulement lorsque le filtre a été donné ; déduisez le débit avec `requests / window_seconds` et la
-part HTTP/3 avec `h3_requests / requests`. Ces règles de plage et de pas sont partagées avec
-`/api/v1/traffic` et `/api/v1/audit` — une seule implémentation, si bien que les trois répondent à
-une plage invalide par le même message. `zone` est obligatoire, rabattu en minuscules comme les
+part HTTP/3 avec `h3_requests / requests`. Les règles de plage sont partagées avec
+`/api/v1/traffic` et `/api/v1/audit`, celles de pas avec `/api/v1/traffic` seul — le point de
+terminaison d'audit ne prend pas de `step`. Une seule implémentation, si bien que les trois
+répondent à une plage invalide par le même message. `zone` est obligatoire, rabattu en minuscules comme les
 noms du fichier, et doit figurer dans le fichier de zones (`404 unknown zone` sinon) ;
 `node=<name>` restreint à un seul nœud configuré (`404 unknown edge node`). Rang `viewer`. Un token
 [rattaché à un tenant](/docs/multi-tenancy) lit ses propres zones ; toute autre zone — celle d'un

@@ -690,18 +690,21 @@ to it with `api.tokens[].node`) and `last_token` (the name of the token that las
 never a secret); the document carries `unbound_agent_tokens` while any agent token is unbound and
 nodes exist to bind it to (absent otherwise) — the migration view of [Binding an agent token to
 its node](/docs/authentication#binding-an-agent-token-to-its-node). `hostgroups` and
-`zones_placed` are always present; `tokens`, `last_token` and `unbound_agent_tokens` are omitted
-when empty. The document also carries `nodes_total` and the `stale_after_seconds` the judgment
-uses; each node carries `alive`, `holding` and `last_seen`.
+`zones_placed` are always present; `tokens`, `last_token`, `last_seen` and
+`unbound_agent_tokens` are omitted when empty — `last_seen` is there once the node has polled
+this brain, and absent for one never seen since the brain started. The document also carries
+`nodes_total` and the `stale_after_seconds` the judgment uses; each node carries `alive` and
+`holding`.
 
 **A sighting is stamped when a poll starts and again when it ends, so while a poll is parked
 `last_seen` holds that poll's start** and is up to 25 s old on a perfectly healthy node — older
 than `stale_after_seconds` on the defaults. `holding` says a poll is parked right now, and a
 node parked in one is alive whatever `last_seen` says; `alive` is *parked, or seen within
 `stale_after_seconds`*, never anything the node's own report claims. The consequence to plan
-around: a change that cuts a node off — a token removed, a binding moved — ends its parked poll
-with the refusal a fresh poll would get, which stamps a sighting of its own, so `alive` turns
-false `stale_after_seconds` after that, up to about 40 s after the change on the defaults. A
+around: a change that cuts a node off — a token removed, a binding moved — wakes its parked poll
+at once and ends it with the refusal a fresh poll would get, which stamps a sighting of its own,
+so `alive` turns false `stale_after_seconds` after the change — about 15 s on the defaults, not a
+hold and a window: the refusal lands at the reload, never at the hold's deadline. A
 `viewer`-rank read, unscoped tokens only.
 
 #### GET /api/v1/edge/zones/status
@@ -794,9 +797,10 @@ window_seconds, requests, decided, denied, challenged, cleared, would_deny, woul
 status_2xx, status_3xx, status_4xx, status_5xx, h3_requests}]}`. `nodes` counts the distinct
 nodes that reported in the bucket; `step_seconds` is the step actually applied; `zone` and
 `node` echo the request, `node` only when the filter was given; derive the rate as
-`requests / window_seconds` and the HTTP/3 share as `h3_requests / requests`. Those range and
-step rules are shared with `/api/v1/traffic` and `/api/v1/audit` — one implementation, so the
-three answer a bad range with the same message. `zone` is
+`requests / window_seconds` and the HTTP/3 share as `h3_requests / requests`. The range rules are
+shared with `/api/v1/traffic` and `/api/v1/audit`, and the step rules with `/api/v1/traffic` alone
+— the audit endpoint takes no `step` — one implementation, so a bad range gets the same message on
+all three. `zone` is
 required, folded to lower case like the file's names, and must be in the zones file
 (`404 unknown zone` otherwise); `node=<name>` narrows to one configured node
 (`404 unknown edge node`). `viewer` rank. A [tenant-scoped](/docs/multi-tenancy) token reads its

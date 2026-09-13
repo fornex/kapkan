@@ -705,9 +705,11 @@ los tokens agent vinculados a él con `api.tokens[].node`) y
 lleva `unbound_agent_tokens` mientras algún token agent esté sin vincular y existan nodos a los que
 vincularlo (ausente en caso contrario) — la vista de migración de
 [Vincular un token de agente a su nodo](/docs/authentication#vincular-un-token-de-agente-a-su-nodo).
-`hostgroups` y `zones_placed` están siempre presentes; `tokens`, `last_token` y
-`unbound_agent_tokens` se omiten cuando están vacíos. El documento lleva además `nodes_total` y el
-`stale_after_seconds` que usa el juicio; cada nodo lleva `alive`, `holding` y `last_seen`.
+`hostgroups` y `zones_placed` están siempre presentes; `tokens`, `last_token`, `last_seen` y
+`unbound_agent_tokens` se omiten cuando están vacíos — `last_seen` aparece en cuanto el nodo ha
+sondeado este cerebro, y falta en uno al que no se ha visto desde que arrancó. El documento lleva
+además `nodes_total` y el `stale_after_seconds` que usa el juicio; cada nodo lleva `alive` y
+`holding`.
 
 **Se marca un avistamiento cuando un sondeo empieza y otra vez cuando termina, así que mientras un
 sondeo está aparcado `last_seen` conserva el inicio de ese sondeo** y tiene hasta 25 s de antigüedad
@@ -715,10 +717,11 @@ en un nodo perfectamente sano — más que `stale_after_seconds` con los valores
 `holding` dice que hay un sondeo aparcado ahora mismo, y un nodo aparcado en uno está vivo diga lo
 que diga `last_seen`; `alive` es *aparcado, o visto dentro de `stale_after_seconds`*, nunca nada de
 lo que afirme el propio reporte del nodo. La consecuencia que conviene prever: un cambio que deja a
-un nodo incomunicado — un token eliminado, un vínculo movido — termina su sondeo aparcado con el
-rechazo que recibiría un sondeo nuevo, lo que marca un avistamiento propio, de modo que `alive` pasa
-a falso `stale_after_seconds` después de eso, hasta unos 40 s después del cambio con los valores
-predeterminados. Una lectura de rango `viewer`, solo tokens sin acotar.
+un nodo incomunicado — un token eliminado, un vínculo movido — despierta de inmediato su sondeo
+aparcado y lo termina con el rechazo que recibiría un sondeo nuevo, lo que marca un avistamiento
+propio, de modo que `alive` pasa a falso `stale_after_seconds` después del cambio — unos 15 s con
+los valores predeterminados, no una espera más una ventana: el rechazo cae en la recarga, nunca en
+el vencimiento de la espera. Una lectura de rango `viewer`, solo tokens sin acotar.
 
 #### GET /api/v1/edge/zones/status
 
@@ -815,9 +818,10 @@ como máximo 31 días; `step` vale 60 s por defecto, se eleva para que un rango 
 would_challenge, status_2xx, status_3xx, status_4xx, status_5xx, h3_requests}]}`. `nodes` cuenta los
 nodos distintos que reportaron en el cubo; `step_seconds` es el paso realmente aplicado; `zone` y
 `node` repiten los de la petición, `node` solo cuando se dio el filtro; deriva la tasa como
-`requests / window_seconds` y la proporción de HTTP/3 como `h3_requests / requests`. Esas reglas de
-rango y de paso son las mismas que las de `/api/v1/traffic` y `/api/v1/audit` — una sola
-implementación, así que los tres responden a un rango inválido con el mismo mensaje. `zone` es
+`requests / window_seconds` y la proporción de HTTP/3 como `h3_requests / requests`. Las reglas de
+rango son las mismas que las de `/api/v1/traffic` y `/api/v1/audit`, y las de paso, las de
+`/api/v1/traffic` solo: el endpoint de auditoría no admite `step`. Una sola implementación, así que
+los tres responden a un rango inválido con el mismo mensaje. `zone` es
 obligatorio, se pasa a minúsculas como los nombres del archivo y debe estar en el archivo de zonas (si
 no, `404 unknown zone`); `node=<name>` lo reduce a un nodo configurado (`404 unknown edge node`).
 Rango `viewer`. Un token [acotado a un tenant](/docs/multi-tenancy) lee sus propias zonas; cualquier

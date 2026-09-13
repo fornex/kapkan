@@ -132,13 +132,16 @@ La presencia solo la marcan los tokens agent: un operator que sondea con `?node=
 de X como **vista previa** y no hace que X parezca vivo.
 
 **Dale tiempo a un paso de migración para que se note.** Un cambio de token alcanza a un sondeo que ya
-está aparcado: la recarga lo termina con la respuesta que recibiría ahora un sondeo nuevo (`401` para
-un token que ya no existe, `403` para uno cuya vinculación se ha movido), y el nodo se reconecta con
-lo que ahora tenga. El *inventario* es más lento, porque se marca un avistamiento cuando un sondeo
-empieza y otra vez cuando termina — el rechazo incluido —, así que un nodo al que acabas de dejar
-incomunicado figura como `alive` durante lo que le quede de espera (hasta 25 s) y después
-`edge.stale_after_seconds` encima, unos 40 s con los valores predeterminados. Espera a que eso pase
-antes de leer el cambio de `last_token`, o estarás mirando el estado anterior a tu cambio.
+está aparcado: la recarga lo despierta de inmediato y lo termina con la respuesta que recibiría ahora
+un sondeo nuevo (`401` para un token que ya no existe, `403` para uno cuya vinculación se ha movido),
+y el nodo se reconecta con lo que ahora tenga. El *inventario* va una ventana por detrás, porque se
+marca un avistamiento cuando un sondeo empieza y otra vez cuando termina — ese rechazo incluido —,
+así que un nodo al que acabas de dejar incomunicado figura como `alive` durante
+`edge.stale_after_seconds` más tras el cambio, unos 15 s con los valores predeterminados, y verás el
+cambio en tu siguiente lectura del inventario. Espera a que eso pase antes de leer el cambio de
+`last_token`, o estarás mirando el estado anterior a tu cambio. La espera acota otra cosa: en un nodo
+perfectamente sano y aparcado, `last_seen` puede tener una espera entera (hasta 25 s) de antigüedad,
+y eso es normal — lo que dice que su sondeo está abierto es `holding`.
 
 `token_env` y `tokens` son **mutuamente excluyentes**: `token_env` es exactamente un único token de
 operator. Una solicitud se coteja con cada token configurado (en tiempo constante); se aplica el rol

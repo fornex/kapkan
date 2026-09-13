@@ -724,10 +724,11 @@ ihn gebunden sind) und
 Dokument trägt `unbound_agent_tokens`, solange irgendein agent-Token ungebunden ist und es Knoten
 gibt, an die es gebunden werden könnte (fehlt sonst) — die Migrationsansicht von
 [Ein Agent-Token an seinen Knoten binden](/docs/authentication#ein-agent-token-an-seinen-knoten-binden).
-`hostgroups` und `zones_placed` sind immer vorhanden; `tokens`, `last_token` und
-`unbound_agent_tokens` werden weggelassen, wenn sie leer sind. Das Dokument trägt außerdem
-`nodes_total` und die `stale_after_seconds`, mit denen das Urteil gefällt wird; jeder Knoten trägt
-`alive`, `holding` und `last_seen`.
+`hostgroups` und `zones_placed` sind immer vorhanden; `tokens`, `last_token`, `last_seen` und
+`unbound_agent_tokens` werden weggelassen, wenn sie leer sind — `last_seen` ist da, sobald der
+Knoten dieses Gehirn gepollt hat, und fehlt bei einem, der seit dessen Start nie gesehen wurde. Das
+Dokument trägt außerdem `nodes_total` und die `stale_after_seconds`, mit denen das Urteil gefällt
+wird; jeder Knoten trägt `alive` und `holding`.
 
 **Eine Sichtung wird gestempelt, wenn ein Poll beginnt, und noch einmal, wenn er endet — solange
 ein Poll geparkt ist, hält `last_seen` also dessen Beginn** und ist auf einem völlig gesunden
@@ -736,9 +737,10 @@ gerade jetzt ein Poll geparkt ist, und ein darin geparkter Knoten ist lebendig, 
 `last_seen` sagt; `alive` heißt *geparkt, oder innerhalb von `stale_after_seconds` gesehen*, niemals
 irgendetwas, was der Knoten in seinem eigenen Report behauptet. Die Folge, mit der Sie planen
 sollten: Eine Änderung, die einen Knoten abschneidet — ein entferntes Token, eine verschobene
-Bindung —, beendet seinen geparkten Poll mit der Abweisung, die ein erster Poll bekäme, und das
-stempelt eine eigene Sichtung; `alive` wird also erst `stale_after_seconds` danach falsch, in den
-Standardwerten bis zu etwa 40 s nach der Änderung. Ein Lesezugriff mit `viewer`-Rang,
+Bindung —, weckt seinen geparkten Poll sofort und beendet ihn mit der Abweisung, die ein erster Poll
+bekäme, und das stempelt eine eigene Sichtung; `alive` wird also `stale_after_seconds` nach der
+Änderung falsch — in den Standardwerten rund 15 s, nicht ein Hold plus ein Fenster: Die Abweisung
+fällt auf das Reload, nie auf die Frist des Holds. Ein Lesezugriff mit `viewer`-Rang,
 nur ungebundene Tokens.
 
 #### GET /api/v1/edge/zones/status
@@ -843,9 +845,10 @@ cleared, would_deny, would_challenge, status_2xx, status_3xx, status_4xx, status
 h3_requests}]}`. `nodes` zählt die verschiedenen Knoten, die im Bucket berichtet haben;
 `step_seconds` ist der tatsächlich angewendete Schritt; `zone` und `node` geben die Anfrage wieder,
 `node` nur, wenn der Filter gesetzt war; die Rate leiten Sie als `requests / window_seconds` ab und
-den HTTP/3-Anteil als `h3_requests / requests`. Diese Regeln für Zeitraum und Schritt teilt sich
-der Endpunkt mit `/api/v1/traffic` und `/api/v1/audit` — eine Implementierung, die drei antworten
-auf einen fehlerhaften Zeitraum also mit derselben Meldung. `zone` ist erforderlich, wird wie die Namen der
+den HTTP/3-Anteil als `h3_requests / requests`. Die Regeln für den Zeitraum teilt sich der Endpunkt
+mit `/api/v1/traffic` und `/api/v1/audit`, die für den Schritt allein mit `/api/v1/traffic` — der
+Audit-Endpunkt nimmt kein `step`. Eine Implementierung, die drei antworten auf einen fehlerhaften
+Zeitraum also mit derselben Meldung. `zone` ist erforderlich, wird wie die Namen der
 Datei in Kleinbuchstaben gefaltet und muss in der Zonendatei stehen (sonst `404 unknown zone`);
 `node=<name>` grenzt auf einen konfigurierten Knoten ein (`404 unknown edge node`). `viewer`-Rang.
 Ein [tenant-bezogenes](/docs/multi-tenancy) Token liest seine eigenen Zonen; jede andere Zone — die

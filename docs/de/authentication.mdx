@@ -140,14 +140,16 @@ Präsenz wird nur von agent-Tokens gestempelt: Ein Operator, der mit `?node=X` p
 Dokument von X als **Vorschau** und lässt X nicht lebendig erscheinen.
 
 **Geben Sie einem Migrationsschritt Zeit, sichtbar zu werden.** Eine Token-Änderung trifft auf einen
-bereits geparkten Poll: Das Reload beendet ihn mit der Antwort, die ein erster Poll jetzt bekäme
-(`401` für ein verschwundenes Token, `403` für eines, dessen Bindung verschoben wurde), und der
-Knoten verbindet sich mit dem neu, was er jetzt hat. Das *Inventar* ist langsamer, denn eine
-Sichtung wird gestempelt, wenn ein Poll beginnt, und noch einmal, wenn er endet — die Abweisung
-eingeschlossen —, sodass ein Knoten, den Sie gerade abgeschnitten haben, für den Rest seines Holds
-(bis zu 25 s) als `alive` gelesen wird und danach noch `edge.stale_after_seconds` obendrauf, in den
-Standardwerten also rund 40 s. Warten Sie das ab, bevor Sie das Umspringen von `last_token` lesen,
-sonst sehen Sie den Zustand vor Ihrer Änderung.
+bereits geparkten Poll: Das Reload weckt ihn sofort und beendet ihn mit der Antwort, die ein erster
+Poll jetzt bekäme (`401` für ein verschwundenes Token, `403` für eines, dessen Bindung verschoben
+wurde), und der Knoten verbindet sich mit dem neu, was er jetzt hat. Das *Inventar* hinkt um ein
+Fenster hinterher, denn eine Sichtung wird gestempelt, wenn ein Poll beginnt, und noch einmal, wenn
+er endet — diese Abweisung eingeschlossen —, sodass ein Knoten, den Sie gerade abgeschnitten haben,
+noch `edge.stale_after_seconds` nach der Änderung als `alive` gelesen wird, in den Standardwerten
+also rund 15 s; das Umspringen sehen Sie beim nächsten Lesen des Inventars. Warten Sie das ab, bevor
+Sie das Umspringen von `last_token` lesen, sonst sehen Sie den Zustand vor Ihrer Änderung. Das Hold
+begrenzt etwas anderes: Bei einem völlig gesunden geparkten Knoten ist `last_seen` bis zu ein Hold
+(25 s) alt, und das ist normal — dass sein Poll offen ist, sagt `holding`.
 
 `token_env` und `tokens` schließen sich **gegenseitig aus** — `token_env` ist genau ein
 Operator-Token. Eine Anfrage wird gegen jedes konfigurierte Token abgeglichen (in konstanter

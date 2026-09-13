@@ -809,7 +809,9 @@ security-relevant.
   only, no product change. Every page E6's code touches now says what the acceptance rigs found
   and the pages did not state. The edge inventory's `last_seen` is stamped when a poll starts and
   again when it ends, so a parked poll holds its start, `holding` is what says a poll is open, and
-  a node just cut off still reads `alive` for about 40 s (api, edge, authentication). A node
+  a node just cut off reads `alive` for `edge.stale_after_seconds` after the change — about 15 s
+  on the defaults, the reload ending the parked poll rather than its deadline (api, edge,
+  authentication). A node
   report over 64 KiB is `413` — the limit a node sheds detail to stay under (api). A zone's
   address follows its placement: the node that no longer serves a name closes the connection
   (`return 444` on `:80`, a refused handshake on `:443`), which is why a misplaced HTTP-01
