@@ -122,14 +122,24 @@ need care:
   the ACME order all leave by the node's default route with the node's own source address —
   which is what makes the node identifiable at all. Do not give the VIP a route that makes it
   the preferred source; a `/32` on `lo` does not.
-- **A node with more than one uplink needs the reply on the leg it came in on.** Give
-  VIP-sourced traffic its own routing context, the portable form first:
+- **A node whose default route is a management or brain uplink must send VIP-sourced replies out
+  the service leg.** Give traffic sourced from the shared address its own routing context, the
+  portable form first:
 
   ```sh
   # a dedicated table for traffic sourced from the shared address
   ip route add default via 10.0.1.1 dev leg-a table 100
   ip rule  add from 198.51.100.7 lookup 100
   ```
+
+  Be clear about what that does: table 100 holds **one** default, so it *pins* every VIP-sourced
+  reply to leg-a whichever leg the request arrived on. With one service leg that is exactly right.
+  With two service legs, give table 100 a multipath default instead —
+  `ip route add default table 100 nexthop via 10.0.1.1 dev leg-a nexthop via 10.0.2.1 dev leg-b` —
+  and accept that the reply leaves by the kernel's hash rather than by the ingress leg; returning
+  on the leg a packet arrived on is a connection-tracking job (`CONNMARK` restored to an fwmark
+  with a rule per leg), not a source-address rule. Either way the reply leaves by a service leg,
+  which is what an upstream with `rp_filter` or stateful firewalling needs.
 
   A **VRF device** (`ip link add vrf-edge type vrf table 100`, then enslave the leg) is the same
   table reached through a device instead of a rule, on kernels built with `CONFIG_NET_VRF`. The
