@@ -181,7 +181,10 @@ per-window `h3_requests`.
 
 Neither form is "sticky" in any sense a connection can rely on. A client's address changing
 (Wi-Fi to LTE, a NAT rebinding) is a new hash input under either policy, and under layer 4 every
-new connection is a fresh coin toss. A QUIC connection that lands on a node which has never seen
+new connection is a fresh draw: it lands on a node other than the last one on roughly (N−1)/N of
+them — every second connection with two nodes. That fraction is the rate at which a client pays a
+full TLS handshake, since a session lives only on the node that issued it.
+A QUIC connection that lands on a node which has never seen
 it simply reconnects: nginx routes QUIC by the socket it arrived on, not by connection ID, and
 connection migration **between** nodes is not supported — see
 [what nginx cannot do](/docs/edge#http3-quic).
