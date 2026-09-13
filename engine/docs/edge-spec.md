@@ -198,7 +198,7 @@ The channel is the one the scrub node already uses, with a second document famil
 | Decision service dies / times out | Per-zone `failure_mode: open` (default — requests pass undecided, counted) or `closed` (503). Default is open: the edge analog of default-PASS. |
 | Renders produce a broken config | `nginx -t` against the candidate file gates every reload; a failing candidate is never installed, the old config keeps serving, the failure is a report field + metric. Mirrors the validate-before-apply gate the config package already enforces (the same validator that ships as `cmd/kapkan-validate`). |
 | Cert unrenewable (CA down, attack outlasts retries) | Serve the current cert until expiry; alarm from T−30 d (metric + console badge + notify). With a 90-day cert renewed from day 60, an attack must outlast ~30 days of retries before expiry is threatened. |
-| Node dies | Brain sees the poll stop (stale_after, as with scrub nodes) and surfaces it. Traffic steering is the operator's network (anycast withdraw, DNS) in v1 — see "self-steering" in E6 candidates. |
+| Node dies | Brain sees the poll stop (stale_after, as with scrub nodes) and surfaces it. Traffic steering is the operator's network (anycast withdraw, DNS) in v1 — see "self-steering" in E6 candidates. The operator-facing recipe, with the withdraw predicate and what is NOT a withdrawal signal, is /docs/edge-anycast (E6.9). |
 
 ---
 
@@ -263,8 +263,11 @@ The channel is the one the scrub node already uses, with a second document famil
   the client CA names — `ngx_ssl_session_id_context`), and OpenSSL refuses a resumption whose
   context differs; two nodes with the same shared ticket key but different certificates resume
   nothing (verified on nginx 1.30.4). Shared ticket keys were built and discarded in E5. Under
-  a 4-tuple ECMP/anycast hash a client rarely changes node, so the cost — one full handshake
-  when it does — is small; a fleet that needs cross-node resumption would render
+  a 4-tuple ECMP/anycast hash a new connection lands on a DIFFERENT node on roughly (N−1)/N of
+  them — every second one with two nodes — so the cost, one full handshake, is the rule there
+  rather than the exception (the E6.9 rig's 40 connections from one client reached both nodes
+  under policy 1 and one node under policy 0); under an address hash a client changes node only
+  when its own address does. A fleet that needs cross-node resumption would render
   `ssl_certificate` from a variable (identical directive text on every node, at a per-handshake
   file read) — an E6+ item, not E5. Per-node ticket keys and `ssl_session_cache` cover the
   common case unchanged — with two E6.9 corrections. (1) The shared cache, its timeout and
@@ -694,6 +697,68 @@ headline and the long pole.
   not merged; lever nodes = placement; inventory `hostgroups`/`zones_placed`; `-check-config`
   prints the matrix and warns about zones nobody covers. Node side: no code, no edge.yaml, no
   edgedoc field.
+
+  *Passed 2026-09-12 (E6.9, `engine/scripts/labnet/edge-e6-anycast.sh`, 116/116 against main with
+  the catch-all session fix in; the first rig with a REAL router hop, because the kernel's
+  `fib_multipath_hash_policy` is itself the subject — a `rtr` netns forwards one `198.51.100.7/32`
+  to two nodes as an ECMP route over two point-to-point legs, each node holding the VIP on `lo`,
+  running stock Debian 13 nginx 1.26.3 under `unshare -u` so `$hostname` names it, its own
+  `kapkan edge` and its own agent token bound with `api.tokens[].node`; the brain is unicast-only
+  in its own netns and the Pebble CA resolves the zone to the VIP, so every HTTP-01 validation
+  crosses the hash. No XDP: routing and per-node ceilings are the subject. The runs caught seven
+  rig bugs and one product defect, fixed before merge — the catch-all's missing
+  `ssl_session_cache`, §3 (1)):* the **fan-out** is deterministic — with the route pinned to
+  edge-2 for the whole issuance, edge-1's certificate can only have come from the challenge the
+  brain fanned out; both nodes held their own leaf for the shared name with different
+  fingerprints, a second node's slot request was refused with the holder's name, a restarted node
+  ordered nothing (`acme_attempts_total` 0), and each node reported the ETag of its OWN document
+  (they differ under placement, so a shared `zones_etag` is not a fleet-health signal; the shared
+  zone's entry is byte-identical in both and the inventory carries no key bytes). The two **hash
+  forms** are a sysctl, not a property of anycast: under `fib_multipath_hash_policy=0` one
+  client's 40 connections all named one node; under `1` the same 40 reached both, and so did 40
+  `--http3-only` requests — the same policy hashes the UDP 4-tuple, so QUIC spreads exactly like
+  TCP, both nodes counting their own `protocol="h3"`. **Per-node ceilings** at `policy.rate.rps:
+  5`, 40 connections from one source, with the batch duration recorded because the bucket admits
+  `rps + rps·T`: L3 served 6 / refused 34 (deny_rate 0 / 34) in 0.3 s, L4 served 12 / refused 28
+  (10 / 18; a repeat run split 14/14) in 0.2 s — 2.0× admitted under L4, asserted as the range
+  1.5×–2.5×. The two forms differ in KIND: under L3 all 34 refusals land in one node's ten-second
+  window, cross the rollups' flood rule there and promote the source to a table denial for
+  `DenyTTL` (the rig's zone is `challenge: off`; the probe afterwards requires the 403), while
+  under L4 neither node crosses it and both still report the source `allow`. A rate-refused
+  request carries no node header — `@kapkan_denied` declares its own `add_header`. **Arm D** (a
+  node dies, nobody withdraws): 16 of 40 connections failed outright (`000`, not a refusal) and
+  24 were served, an established keepalive to the survivor answered 200 while the one to the dead
+  node was gone, and the inventory turned `alive:false` 5103 ms after the kill — `stale_after_seconds: 5`
+  after the last sighting plus the tick; the router's route stayed byte-identical throughout and
+  the brain's ban list never carried the address. **Arm D2** (the link down instead): the router
+  marked the nexthop dead on its own and all 40 were served with no operator action — a directly
+  connected router notices link loss, a routed hop does not; the operator's withdrawal is one
+  `ip route replace`, after which the first all-200 batch completed 45 ms later, then 40/40 TCP
+  and 20/20 h3 — what bounds recovery is the client's next request, not a Kapkan timer. **Arm E**
+  (the withdrawal signal): `/healthz` turned 503 **495 ms** after nginx died, bounded by one
+  `controller.report_interval_seconds` (1 s here, 10 s by default — the tick the terminator-liveness
+  check rides, so it is the knob an operator withdrawing on `/healthz` sets to their probe
+  period), while a REFUSED document was not a withdrawal signal at all (`converged:false`,
+  `/healthz` 200, 20 of 20 served through the VIP) and the inventory's `alive` is the brain's
+  lagging view either way. **Arm F** (the brain dead): 20/20 TCP and 20/20 h3 from both nodes
+  with `/healthz` 200 on each, and both nodes `alive` again **840 ms** after it returned — bounded
+  by the node's own poll backoff (1 s doubling to 30 s), never by `stale_after`. **Arm G** (the
+  cross-node facts): a clearance cookie solved on one node was honoured by the other with
+  `cleared` at the origin; a TLS session was `Reused` on its issuing node — either node, TLS 1.2
+  and 1.3 — and `New` on the other in both directions, with the same holding under
+  `omit_catch_all`, so §3's cross-node guarantee is not accidentally true. **Arm H** (MTU 1200 on
+  ONE leg): 38 of 40 `--http3-only` failed while TCP was 40/40, and it is not that node's share —
+  once the first small-MTU answer taught the client a 1200-byte PMTU for the VIP, NO h3 request
+  succeeded, not even toward the untouched node, and repairing the leg did not fix it (10/10 still
+  failed) until `ip route flush cache` on the client, after which 20/20 succeeded from both. **Arm
+  I** (a real bird2 speaker per node, driven by a `/healthz` loop) is a stretch arm behind
+  `ANYCAST_BGP=1`, outside the acceptance path and skipped by default: it asserts the same
+  withdrawal contract and contributes no number here. Corrections the rig forced on the plan: the
+  per-node multiplier is a range set by the batch duration, not "N×"; the L3 hash's real cost is
+  a table denial rather than a slow client; a path MTU is cached per destination, so one bad leg
+  is an h3 outage for the whole address; and the withdraw predicate needs a local TLS probe beside
+  `/healthz`, which samples a pid on the report tick. The operator-facing write-up is
+  /docs/edge-anycast (E6.9 guide).
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and
