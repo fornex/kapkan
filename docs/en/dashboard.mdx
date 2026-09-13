@@ -106,13 +106,19 @@ The dashboard polls the JSON API and renders everything Kapkan tracks in memory:
   the challenge will be counted and nobody will be sent to the page"* when the rung is
   watch-only across the fleet, and *"No live node serves this zone, so nothing applies the
   lever until one comes back"* for an unserved zone. A running lever then shows in the cell as
-  **lever · manual · 42m left**, counting down to the moment the zone follows its zones file
-  again, with the operator's reason on hover; the same button becomes **End**, which retires it
-  at once. A refusal is shown in the panel rather than thrown away — including the one answer
+  **lever · manual · 14m 58s left** — a longer one reads **lever · manual · 5h 42m left** —
+  counting down to the moment the zone follows its zones file again, with the operator's reason
+  on hover; the same button becomes **End**, which retires it at once. The countdown is read
+  against the brain's own clock, taken from the response the zone status arrived in, and **End**
+  stands for as long as the brain reports the lever, whatever this browser's clock makes of the
+  time left: a machine running fast never hides the control for something the fleet is still
+  applying. A refusal is shown in the panel rather than thrown away — including the one answer
   that deliberately covers two cases, *"This zone is not in the zones file, or this token cannot
   reach it"*, because the brain answers a zone outside a tenant's reach exactly as it answers a
-  zone that does not exist. The lever is an operator's action: a `viewer` token sees no button,
-  and neither does a console talking to a Kapkan older than the zones-file merge.
+  zone that does not exist. The lever is an operator's action: a `viewer` token sees the state
+  and no control. A console talking to a Kapkan older than the zones-file merge is offered no
+  **Challenge…** either — that table is the one it always was, plus, when a lever is in force,
+  the badge for it and the **End** that retires it.
 
   With [multi-tenancy](/docs/multi-tenancy), an unscoped token also sees each zone's `tenant`
   under its name and a row of **tenant chips** above the table that narrows both the zones and

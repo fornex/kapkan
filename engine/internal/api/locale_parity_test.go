@@ -208,7 +208,7 @@ func TestLocaleParityRegistered(t *testing.T) {
 // rungs with a line each saying what they do, the dialog's title, subtitle,
 // two field labels, four TTL presets, the reason field with its placeholder,
 // the confirm and its working state, the two notes it shows before the lever
-// is pulled, the four strings of the end-dialog, three success toasts and the
+// is pulled, the three strings of the end-dialog, three success toasts and the
 // four refusals the route can answer (406 + 34 = 440).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
