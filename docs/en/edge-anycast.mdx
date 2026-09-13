@@ -216,18 +216,24 @@ layer-4 refusals 14/14 instead of 10/18 — while the served counts and the rati
   the ceiling itself.
 - **Under layer 3 the whole burst lands on one node** — and 34 refusals in one node's
   ten-second window cross the rollups' flood rule (at least 20 refusals, at least 30% of that
-  source's decided requests), which promotes the source there to a **table denial** for
-  `DenyTTL`: one minute to start, doubling to ten on repeat. The rig probes that source
-  afterwards and requires the `403`. Under layer 4 the same 40 connections split 10/18, neither
-  node crosses the threshold, and both nodes still report the source as `allow` in their
-  `top_sources`.
+  source's decided requests). In a zone whose `challenge` is `off` or `manual` — the rig's zone
+  is `off` — that promotes the source there to a **table denial** for `DenyTTL`: one minute to
+  start, doubling to ten on repeat. The rig probes that source afterwards and requires the `403`.
+  In a `challenge: auto` zone [the ladder](/docs/edge#the-ladder) takes the first crossing
+  instead: the source is sent to the proof-of-work rung, and is denied only if it floods on after
+  clearing or while challenged — a browser gets through, a bot does not. Under layer 4 the same 40
+  connections split 10/18, neither node crosses the threshold at all, and both nodes still report
+  the source as `allow` in their `top_sources`.
 
 <Callout type="warning" title="A low per-node rps under a layer-3 hash blocks a busy client">
 Under layer 4 a source over its ceiling is *slowed*: it collects `429`s with `Retry-After` and
-stays `allow`. Under layer 3 the identical burst is *blocked*: it is concentrated on one node,
-crosses the flood rule there and is denied `403` for `DenyTTL` — a promotion no `429` announces
-and no other node knows about. If you run the recommended layer-3 hash, set the per-node ceiling
-for the busiest legitimate client you have, and watch
+stays `allow`. Under layer 3 the identical burst is *blocked*: it is concentrated on one node and
+crosses the flood rule there. In a zone with `challenge: off` or `manual` that is a `403` for
+`DenyTTL` straight away — a promotion no `429` announces and no other node knows about. In a
+`challenge: auto` zone it is [the rung](/docs/edge#the-ladder) first and the denial only if the
+source floods on afterwards, which is a softer landing but still one node's decision about a
+client the other nodes think is fine. If you run the recommended layer-3 hash, set the per-node
+ceiling for the busiest legitimate client you have, and watch
 `kapkan_edge_decisions_total{result="deny_rate"}` per node before you tighten it.
 </Callout>
 
