@@ -255,10 +255,16 @@ leaf fingerprints.
 
 Two more things the rig pins down, both of which matter on a shared address:
 
-- **Issuance is serialised per zone.** Asking for a zone's slot while another node holds it is
-  answered `granted: false` with the holder's name and a `retry_after_seconds` — N nodes on one
-  name would otherwise be N duplicate orders against the CA's weekly cap. The
-  [duplicate-certificate ceiling](/docs/edge#limits-to-know) is counted per placement.
+- **Issuance is serialised per zone — which spreads the orders, it does not reduce them.** Asking
+  for a zone's slot while another node holds it is answered `granted: false` with the holder's
+  name and a `retry_after_seconds`, so the nodes order one after another instead of all at once.
+  They still order N certificates: every node holds its own leaf, so one issuance of a name placed
+  on N nodes costs N against the CA's
+  [duplicate-certificate ceiling](/docs/edge#limits-to-know) — about five a week at Let's
+  Encrypt, counted per placement. **A fleet larger than that ceiling on one name needs
+  `acme.fallback` or separate CA accounts**; no amount of serialising buys you the sixth
+  certificate. The slot is advisory as well: a node that has waited 15 minutes for it orders
+  anyway, so it is a spreader, never a lock.
 - **A restarted node orders nothing.** The rig restarts a node and finds its certificates back
   from disk: its own `kapkan_edge_acme_attempts_total` stays `0` and it asks the brain for no
   slot.
