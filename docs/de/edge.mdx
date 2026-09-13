@@ -375,10 +375,13 @@ QUIC-Verbindung über den Socket, auf dem sie ankam, nicht über die Connection 
 - *Nicht unterstützt:* Connection-ID-bewusstes Steering und Verbindungsmigration **zwischen**
   Knoten (`quic_bpf on`, eine eigene Zeile des Betreibers im `main`-Kontext von nginx, trägt eine
   Verbindung nur zwischen den Workern einer Maschine); **TLS-Session-Resumption zwischen Knoten** —
-  nginx bindet eine Session über den Session-ID-Kontext an das Zertifikat des Knotens, und Kapkans
-  Zertifikate gelten pro Knoten, ein Client, der den Knoten wechselt, macht also einen vollen
-  Handshake (selten unter einem 4-Tuple-Hash; gemeinsame Ticket-Keys wurden untersucht und helfen
-  hier nicht); WebSocket über HTTP/3 (nginx implementiert RFC 9220 nicht — es bleibt auf TCP);
+  eine Session ist ein zustandsbehafteter Eintrag im eigenen Cache des Knotens, kein zustandsloses
+  Ticket trägt sie, und kein Ticket-Key wird geteilt; ein Client, der den Knoten wechselt, macht
+  also einen vollen Handshake (selten unter einem 4-Tuple-Hash; gemeinsame Ticket-Keys wurden in E5
+  untersucht und werden nicht angeboten — siehe edge-spec §3). Auf dem Knoten, der sie ausgestellt
+  hat, wird eine Session wie gewohnt wieder aufgenommen, denn der gemeinsame Cache ist auch auf dem
+  Catch-all-Default-Server deklariert, wo nginx Sessions nachschlägt. Ebenfalls nicht unterstützt:
+  WebSocket über HTTP/3 (nginx implementiert RFC 9220 nicht — es bleibt auf TCP);
   0-RTT.
 
 Zwei Dinge zum Mitdenken: UDP-Flows brauchen Conntrack-Timeouts, die eine Firewall ihnen
@@ -536,7 +539,17 @@ Knoten nicht mehr bedient.
 - **Ein einziger Default-Server.** Kapkan rendert sein eigenes Catch-all-`default_server` auf
   `:80` und `:443`, das unbekannte Hosts und SNI abweist. Wenn Ihre `nginx.conf` bereits eines
   deklariert (Debians Default-Site tut das), schlägt `nginx -t` mit *a duplicate default server*
-  fehl — setzen Sie `omit_catch_all: true` und lassen Sie Ihre Server diese Rolle übernehmen.
+  fehl — setzen Sie `omit_catch_all: true` und lassen Sie Ihre Server diese Rolle übernehmen. Geben
+  Sie Ihrem `:443`-Default-Server die drei Sitzungszeilen der Zonen — `ssl_session_cache
+  shared:kapkan_ssl:10m; ssl_session_timeout 1d; ssl_session_tickets off;` —, denn nginx liest
+  Cache, Lebensdauer und Ticket-Einstellung einer TLS-Sitzung aus dem Kontext des Default-Servers,
+  auch nachdem SNI eine Zone ausgewählt hat: Ohne sie nimmt kein wiederkehrender Client auf diesem
+  Knoten eine Sitzung wieder auf und behält auch keine über nginx' Fünf-Minuten-Standard hinaus. Die
+  Größe muss genau `10m` sein (eine zweimal in unterschiedlicher Größe deklarierte Shared Zone lässt
+  `nginx -t` scheitern); ein Default-Server, der bereits einen Shared Cache deklariert (Debians und
+  Mozillas Vorlagen liefern `shared:SSL:10m`), behält ihn — jeder Cache auf diesem Server bedient
+  die Zonen — und ergänzt nur die Lebensdauer und `ssl_session_tickets off`. Kapkans eigenes
+  Catch-all trägt alle drei.
 - **Origins werden zur Testzeit aufgelöst.** Ein Hostnamen-Origin wird einmal aufgelöst, wenn
   nginx die Konfiguration lädt; einer, der sich nicht auflösen lässt, lässt `nginx -t` für die
   gesamte Generation fehlschlagen (und wird erneut versucht). Bevorzugen Sie Adressen.

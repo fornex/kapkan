@@ -377,10 +377,13 @@ connexion QUIC par le socket sur lequel elle est arrivée, non par l'identifiant
 - *Non pris en charge :* l'orientation tenant compte de l'identifiant de connexion et la migration
   de connexion **entre** nœuds (`quic_bpf on`, une ligne que l'opérateur écrit lui-même dans le
   contexte `main` de nginx, ne transporte une connexion qu'entre les workers d'une même machine) ;
-  **la reprise de session TLS entre nœuds** — nginx rattache une session au certificat du nœud via
-  le contexte d'identifiant de session, et les certificats de Kapkan sont par nœud : un client qui
-  change de nœud refait donc un handshake complet (rare sous un hachage sur le quadruplet ; les
-  clés de tickets partagées ont été étudiées et n'aident pas ici) ; WebSocket sur HTTP/3 (nginx
+  **la reprise de session TLS entre nœuds** — une session est une entrée à état dans le cache
+  propre du nœud, aucun ticket sans état ne la transporte et aucune clé de tickets n'est partagée :
+  un client qui change de nœud refait donc un handshake complet (rare sous un hachage sur le
+  quadruplet ; les clés de tickets partagées ont été étudiées en E5 et ne sont pas proposées — voir
+  edge-spec §3). Sur le nœud qui l'a émise, une session reprend normalement, le cache partagé étant
+  déclaré aussi sur le serveur par défaut fourre-tout, là où nginx cherche les sessions. Ne sont
+  pas pris en charge non plus : WebSocket sur HTTP/3 (nginx
   n'implémente pas la RFC 9220 — cela reste sur TCP) ; 0-RTT.
 
 Deux choses à garder en tête : les flux UDP ont besoin de délais conntrack qu'un pare-feu ne leur
@@ -533,7 +536,17 @@ renouvelle un certificat pour une zone que le nœud ne sert plus.
 - **Un seul serveur par défaut.** Kapkan génère son propre `default_server` fourre-tout sur `:80`
   et `:443`, qui refuse les hôtes et SNI inconnus. Si votre `nginx.conf` en déclare déjà un (le
   site par défaut de Debian le fait), `nginx -t` échoue avec *a duplicate default server* —
-  définissez `omit_catch_all: true` et laissez vos serveurs jouer ce rôle.
+  définissez `omit_catch_all: true` et laissez vos serveurs jouer ce rôle. Donnez à votre serveur
+  par défaut sur `:443` les trois lignes de session des zones — `ssl_session_cache
+  shared:kapkan_ssl:10m; ssl_session_timeout 1d; ssl_session_tickets off;` — car nginx lit le cache
+  d'une session TLS, sa durée de vie et son traitement des tickets dans le contexte du serveur par
+  défaut, même une fois que le SNI a choisi une zone : sans elles, aucun client de retour ne reprend
+  de session sur ce nœud, ni n'en conserve une au-delà des cinq minutes par défaut de nginx. La
+  taille doit être exactement `10m` (une zone partagée déclarée deux fois à des tailles différentes
+  fait échouer `nginx -t`) ; un serveur par défaut qui déclare déjà un cache partagé (les modèles de
+  Debian et de Mozilla livrent `shared:SSL:10m`) le garde — n'importe quel cache sur ce serveur sert
+  les zones — et n'ajoute que la durée de vie et `ssl_session_tickets off`. Le fourre-tout de Kapkan
+  porte les trois.
 - **Les origines sont résolues au moment du test.** Une origine donnée par nom d'hôte est résolue
   une seule fois, quand nginx charge la configuration ; une qui ne se résout pas fait échouer
   `nginx -t` pour toute la génération (qui est réessayée). Préférez des adresses.

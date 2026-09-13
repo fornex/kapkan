@@ -366,10 +366,13 @@ por el socket en el que llegó, no por el identificador de conexión (connection
 - *No admitido:* el direccionamiento consciente del identificador de conexión y la migración de
   conexión **entre** nodos (`quic_bpf on`, una línea que el operador escribe él mismo en el
   contexto `main` de nginx, solo lleva una conexión entre los workers de una misma máquina); **la
-  reanudación de sesión TLS entre nodos** — nginx ata una sesión al certificado del nodo mediante
-  el contexto del identificador de sesión, y los certificados de Kapkan son por nodo, así que un
-  cliente que cambia de nodo hace un handshake completo (raro con un hash por la cuádrupla; se
-  investigaron las claves de ticket compartidas y aquí no ayudan); WebSocket sobre HTTP/3 (nginx no
+  reanudación de sesión TLS entre nodos** — una sesión es una entrada con estado en la caché propia
+  del nodo, ningún ticket sin estado la transporta y ninguna clave de tickets se comparte, así que
+  un cliente que cambia de nodo hace un handshake completo (raro con un hash por la cuádrupla; las
+  claves de ticket compartidas se investigaron en E5 y no se ofrecen — ver edge-spec §3). En el nodo
+  que la emitió, una sesión se reanuda con normalidad: la caché compartida está declarada también en
+  el servidor por defecto catch-all, que es donde nginx busca las sesiones. Tampoco se admiten:
+  WebSocket sobre HTTP/3 (nginx no
   implementa la RFC 9220 — se queda en TCP); 0-RTT.
 
 Dos cosas más que tener en cuenta: los flujos UDP necesitan tiempos de conntrack que un cortafuegos
@@ -518,7 +521,17 @@ una zona que el nodo ya no sirve.
 - **Un solo servidor por defecto.** Kapkan renderiza su propio catch-all `default_server` en `:80`
   y `:443` que rechaza los hosts y SNI desconocidos. Si tu `nginx.conf` ya declara uno (el sitio
   por defecto de Debian lo hace), `nginx -t` falla con *a duplicate default server* — pon
-  `omit_catch_all: true` y deja que tus servidores asuman ese papel.
+  `omit_catch_all: true` y deja que tus servidores asuman ese papel. Dale a tu servidor por defecto
+  de `:443` las tres líneas de sesión de las zonas — `ssl_session_cache shared:kapkan_ssl:10m;
+  ssl_session_timeout 1d; ssl_session_tickets off;` — porque nginx lee la caché de una sesión TLS,
+  su vida útil y su trato de los tickets del contexto del servidor por defecto incluso después de
+  que el SNI haya elegido una zona: sin ellas ningún cliente que vuelve reanuda una sesión en ese
+  nodo, ni la conserva más allá de los cinco minutos que nginx trae por defecto. El tamaño debe ser
+  exactamente `10m` (una zona compartida declarada dos veces con tamaños distintos hace fallar
+  `nginx -t`); un servidor por defecto que ya declara una caché compartida (las plantillas de Debian
+  y de Mozilla traen `shared:SSL:10m`) la conserva — cualquier caché en ese servidor sirve a las
+  zonas — y solo añade la vida útil y `ssl_session_tickets off`. El catch-all propio de Kapkan lleva
+  las tres.
 - **Los orígenes se resuelven al probar.** Un origen con nombre de host se resuelve una sola vez,
   cuando nginx carga la configuración; uno que no resuelve hace fallar `nginx -t` para toda la
   generación (y se reintenta). Prefiere direcciones.
