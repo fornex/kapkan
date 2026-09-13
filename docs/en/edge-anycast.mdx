@@ -341,20 +341,29 @@ none.
 | Fact | Crosses? | Why |
 | --- | --- | --- |
 | A clearance cookie | **Yes** | The rung's signing keys are the fleet's, in the document. A visitor who solved the puzzle on one node was served by the other with the cookie, and the origin saw `X-Kapkan-Mark: cleared` |
-| A TLS session | **No** | nginx binds a session to the node's own certificate through the session id context, and the certificates are per node. Offered edge-1's session, edge-2 answers `New` — in both directions |
+| A TLS session | **No** | A session is a stateful entry in the node's own shared cache; no stateless ticket carries it and no ticket key is shared, so it cannot exist on another node. Offered edge-1's session, edge-2 answers `New` — in both directions, over TLS 1.2 and TLS 1.3 |
 | A rate bucket, a verdict table, a rollup window | **No** | Per node, by design — [per-node ceilings](#per-node-ceilings-and-the-hash-you-chose) |
 | A QUIC connection | **No** | nginx routes QUIC by socket, not connection ID; a migrated client reconnects |
 
-<Callout type="warning" title="Session resumption does not work on any node in the current release">
-A session does not resume on its own node either, and the cause is not anycast: nginx looks a
-session up on the SSL context of the address's **default** server, and Kapkan's catch-all carries
-no `ssl_session_cache` — so every zone's cache is dead configuration and every returning client
-pays a full handshake, TLS 1.2 and TLS 1.3 alike (with `ssl_session_tickets off`, a 1.3 ticket is
-a stateful entry looked up in that same cache). The rig proved the cause with the supported
-`omit_catch_all: true`, which makes the zone's own server the address's default: the same session
-was then `Reused` on its own node — and still `New` on the other, in both directions. **A fix
-that gives the catch-all the zones' cache is in flight**; when it lands, sessions resume on the
-node that issued them and still never across nodes.
+<Callout type="info" title="A session resumes on the node that issued it, and on no other">
+The catch-all `:443` server Kapkan renders — and, under `omit_catch_all`, the bare QUIC anchor —
+carries the zones' own session lines: `ssl_session_cache shared:kapkan_ssl:10m;
+ssl_session_timeout 1d; ssl_session_tickets off;`. They have to be there because OpenSSL looks a
+session up, and stores it, through the context of the server the connection **started** on — the
+address's default server — even after SNI has switched the connection to a zone. So a returning
+client resumes on the node that issued its session, over TLS 1.2 and TLS 1.3 alike (with
+`ssl_session_tickets off` a 1.3 ticket is a stateful entry in that same cache), and is `New` on
+every other node; the rig asserts both halves in both directions.
+
+What confines a session to its node is that locality — a stateful entry in that node's own cache,
+with no stateless ticket to carry it and no ticket key shared — **not** the certificate. On nginx
+before 1.29.2 the session id context in force is the certificate-less catch-all's, so it binds
+nothing to a node (edge-spec §3).
+
+**Running `omit_catch_all: true`? Your own `:443` default server needs those same three lines** —
+and your own QUIC server too if you also set `quic.omit_anchor`. Without them every returning
+client on that node pays a full handshake; [the install
+guide](/docs/edge-install#troubleshooting) carries the row.
 </Callout>
 
 ### MTU: one bad leg costs HTTP/3 on the whole address
