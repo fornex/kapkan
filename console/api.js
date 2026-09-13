@@ -64,6 +64,23 @@
     });
   }
 
+  /* How far the browser's clock is from the brain's, in milliseconds, read off
+     the response that just came back (same-origin, so `Date` is readable).
+
+     The lever's countdown is the distance between two instants the BRAIN
+     stamped — the override's `until` and the moment it answered — so a browser
+     clock minutes ahead would otherwise run a live lever's badge down to zero
+     while the brain is still enforcing it. A response with no readable Date
+     leaves the offset at 0, which is the browser's own clock: what the console
+     read before. It is deliberately not smoothed or remembered — each fetch
+     carries its own, one second of granularity is far below what this shows,
+     and a stored offset would outlive the clock it measured. */
+  function serverSkew(res) {
+    var d = res.headers.get("Date");
+    var t = d ? Date.parse(d) : NaN;
+    return isNaN(t) ? 0 : t - Date.now();
+  }
+
   /* One call to the lever (E6.8), shared by POST and DELETE so the two can
      never drift in how they read an answer. A body is sent only when there is
      one — DELETE takes none. */
@@ -329,12 +346,15 @@
        not an error. */
     getEdgeZones: function () {
       return request("/api/v1/edge/zones/status").then(function (res) {
-        if (res.status === 403) return { ok: false, forbidden: true, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] };
+        if (res.status === 403) return { ok: false, forbidden: true, skew: 0, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] };
         if (!res.ok) throw new Error("edge -> " + res.status);
+        /* the brain's clock, taken from the same answer the zones came in:
+           the lever's countdown is read against it, not against the browser's */
+        var skew = serverSkew(res);
         return res.json().then(function (r) {
-          return { ok: true, forbidden: false, nodesAlive: r.nodes_alive || 0, nodesReporting: r.nodes_reporting || 0, zonesTruncated: r.zones_truncated || 0, zones: r.zones || [] };
+          return { ok: true, forbidden: false, skew: skew, nodesAlive: r.nodes_alive || 0, nodesReporting: r.nodes_reporting || 0, zonesTruncated: r.zones_truncated || 0, zones: r.zones || [] };
         });
-      }).catch(function () { return { ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] }; });
+      }).catch(function () { return { ok: false, forbidden: false, skew: 0, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] }; });
     },
     /* edge-node inventory. Two readers, one fetch:
          - the Edge nodes view (E6.7) renders the whole document — each node's

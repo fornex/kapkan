@@ -50,7 +50,9 @@
     /* edge zones status (E4.5) — the same on-demand + freshness-guard shape:
        it merges the nodes' last ten-second windows, so a 10s refresh is the
        data's own pace */
-    edge: { loading: false, fetchedAt: 0, stale: false, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] },
+    /* `skew` is the brain's clock minus the browser's, as of the last read: the
+       lever's countdown is a brain-stamped interval and is rendered against it */
+    edge: { loading: false, fetchedAt: 0, stale: false, skew: 0, ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] },
     /* the edge-node inventory (E6.7), fetched on its own guard and read by
        BOTH edge views: the Edge nodes table renders all of it, the Edge
        view's HTTP/3 cell only each node's terminator.h3. Unscoped-only, so
@@ -398,7 +400,7 @@
       e.loading = true;
       API.getEdgeZones().then(function (r) {
         e.loading = false; e.fetchedAt = Date.now();
-        e.ok = r.ok; e.forbidden = !!r.forbidden;
+        e.ok = r.ok; e.forbidden = !!r.forbidden; e.skew = r.skew || 0;
         e.nodesAlive = r.nodesAlive; e.nodesReporting = r.nodesReporting; e.zonesTruncated = r.zonesTruncated || 0; e.zones = r.zones;
         if (state.view === "edge") renderView();
       });
