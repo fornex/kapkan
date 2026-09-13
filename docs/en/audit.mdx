@@ -132,7 +132,9 @@ Each record carries these fields:
 
 A query against an out-of-range window returns `400`; an unknown `action` value returns `400`;
 a malformed `target` returns `400`. With storage disabled the response is
-`{"available": false, "events": []}` at `200`.
+`{"available": false, "events": []}` at `200`. `events` is always an array: a window that holds
+no record the caller may see — a tenant's first day, a filter that matches nothing — is `[]`,
+never `null`.
 
 ## Tenant scoping
 

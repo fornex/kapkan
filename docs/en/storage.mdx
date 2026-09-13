@@ -139,12 +139,18 @@ it. The rules below are the write path's contract.
   "gone" for what it no longer lists. The presence ticker runs every `min(stale_after/2, 5 s)`,
   never under a second; after a brain start a node is baselined at its first poll (silently), or
   as lost once `stale_after` has passed without one — a restart is never a fleet-wide
-  `node_alive` burst. The presence transitions are also logged at INFO, storage or no storage.
+  `node_alive` burst. **That second baseline is silent too**: a node the brain has not heard
+  from since it started gets no `node_lost` row, because nothing transitioned — a node that was
+  already down across a restart appears in the events only when it comes back, as `node_alive`.
+  The presence transitions are also logged at INFO, storage or no storage.
 
 Volume, per day: `edge_windows` grows by **8 640 × (deciding zones with traffic × alive
 nodes)** rows (one ten-second window each), `edge_sources` by at most 20 times that, and
-`edge_events` by the handful of transitions a fleet has. Measure what that costs on your server
-rather than guessing — compressed row sizes depend on your zone and node names:
+`edge_events` by the handful of transitions a fleet has. On disk that is small: an acceptance
+run measured `edge_windows` at roughly a hundred compressed bytes per row and the other two at
+tens of bytes — an order of magnitude to plan with, not a figure to multiply, since the sample
+was a few dozen rows in tiny parts (which compress badly) and your zone and node names are not
+ours. Measure what it actually costs on your server:
 
 ```sql
 SELECT table, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS on_disk
@@ -161,9 +167,20 @@ transitions) — and the tables are yours to query directly too.
 ## Backpressure
 
 Rows go onto a bounded queue (`queue_size`) with a non-blocking send and are flushed in
-batches (`batch_size` / `flush_interval_seconds`). If ClickHouse is slow or down, rows are
-dropped — counted as `kapkan_storage_rows_total` with `result="dropped"` — and the engine keeps
-running. See [Metrics](/docs/metrics).
+batches (`batch_size` / `flush_interval_seconds`). Rows are lost rather than held whenever
+ClickHouse cannot take them, and the engine keeps running; `kapkan_storage_rows_total` says
+which of the two losses it was, and they do not mean the same thing:
+
+- `result="error"` — the insert itself failed. The batch is logged (`clickhouse insert failed`)
+  and discarded. **A ClickHouse that is down counts here**, not under `dropped`: a refused
+  connection fails immediately, so each flush empties the queue as fast as it fills.
+- `result="dropped"` — the queue was full when a row was handed over, so it never reached an
+  insert. That needs a sink that *stalls* rather than refuses — a server holding the connection,
+  a network dropping the packets, a flush waiting out its timeout — or a burst larger than
+  `queue_size` arriving inside one flush. Detection is never blocked either way.
+
+A `dropped` series with no `error` beside it therefore points at latency, not at an outage.
+See [Metrics](/docs/metrics).
 
 ## What is and isn't persisted
 

@@ -71,8 +71,8 @@ Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher
   und seine eigene gemeldete Last, Drops, Version und das Dry-Run-Flag — die gemeldeten Spalten
   sind als solche gekennzeichnet, denn der Selbstreport eines Knotens ist beratend, niemals die
   Quelle seiner Lebendigkeit.
-- **Edge** — nur angezeigt, wenn [Edge-Knoten](/docs/edge) konfiguriert sind: jede Zone, die die
-  lebendigen Knoten melden, mit ihrer Anfragerate über die Flotte hinweg, den Knoten, auf denen
+- **Edge** — nur angezeigt, wenn [Edge-Knoten](/docs/edge) konfiguriert sind: jede Zone der
+  [Zonendatei](/docs/zones), mit ihrer Anfragerate über die Flotte hinweg, den Knoten, auf denen
   sie nur beobachtend ist, und einer Challenge-Spalte — *aus*, *Vorschau* (die Stufe würde fragen,
   beobachtet aber nur, auf jedem Knoten) oder der Modus der Zone mit den Knoten, auf denen er
   greift (ein Hebel erscheint als dieser Modus), sowie eine zonenweite Challenge mit ihrem Grund
@@ -91,6 +91,47 @@ Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher
   fehlgeschlagen*), samt jedem Hinweis, den die Prüfung dieses Knotens gemeldet hat; und
   *aus · 2 Knoten bedienen weiter*, wenn die Zonendatei kein HTTP/3 mehr verlangt, ein Knoten aber
   noch einen QUIC-Listener hält, weil Datei und Flotte bis zur nächsten Generation auseinandergehen.
+  **Klicken Sie auf die Zeile einer Zone**, um ihre gespeicherte Historie unter der Tabelle zu
+  öffnen — siehe [Zonen-Historie](#zonen-historie) weiter unten.
+
+  Die Spalte **Knoten** liest die [Platzierung](/docs/edge#zonen-auf-knoten-verteilen) der Zone,
+  nicht die Zahl der Knoten, die sie zufällig gerade melden: `2/2` heißt *zwei der zwei Knoten, auf
+  denen diese Zone platziert ist, sind lebendig*, `0/1` plus einem roten Abzeichen **UNBEDIENT** ist
+  der Alarm, dass hinter einer platzierten Zone kein lebendiger Knoten steht, und ein Strich ist
+  eine Zone, die überhaupt kein Geltungsbereich eines Knotens abdeckt (eine Warnung von
+  `kapkan -check-config`, kein Ausfall). Fahren Sie über die Zelle, um die Knotennamen zu sehen;
+  darunter steht für ein ungebundenes Token die Hostgroup der Zone. Zeilen, die die Datei anlegt,
+  die aber kein Knoten meldet, zeigen Striche statt Nullen — eine gemessene Null und *nichts
+  gemessen* sind verschiedene Antworten — und sagen in der Challenge-Spalte, warum, wobei sie die
+  Platzierung lesen und nicht die Zahl der Reports: *nur Proxy* für eine Zone in
+  `policy.mode: none`, *von keinem lebenden Knoten bedient* für eine entscheidende Zone, deren
+  platzierte Knoten alle ausgefallen sind oder die kein Geltungsbereich eines Knotens abdeckt, und
+  *noch kein Bericht* für eine, deren platzierter Knoten lebendig ist, die Zone aber nicht erwähnt
+  hat — ein frischer Start, ein Report, der älter ist als das Fenster, oder eine Zone, die der
+  Knoten aus seinem Report geschnitten hat.
+
+  Mit [Mandantenfähigkeit](/docs/multi-tenancy) sieht ein ungebundenes Token außerdem den `tenant`
+  jeder Zone unter ihrem Namen und über der Tabelle eine Reihe von **Mandanten-Chips**, die sowohl
+  die Zonen als auch das Panel **Wer geprüft würde** auf einen Kunden eingrenzen (für die
+  Browser-Sitzung gemerkt; eine Auswahl, die auf dem Bildschirm keinen Mandanten mehr benennt, wird
+  vergessen, statt sich von selbst wieder einzuschalten). Ein tenant-bezogenes Token sieht genau
+  seine eigenen Zonen, ohne Chips und ohne Banner — der Hinweis *nur für Token ohne Mandantenbereich
+  sichtbar* ist einem Gehirn vorbehalten, das zu alt ist, um überhaupt zu antworten.
+- **Edge-Knoten** — das eigene Inventar der Flotte neben ihren Zonen, unter derselben Bedingung
+  angezeigt. Eine Zeile pro konfiguriertem Knoten: ob er lebendig oder **VERLOREN** ist (die
+  Zonen-Abfrage ist das einzige Lebenszeichen), die agent-Tokens, die [an ihn gebunden
+  sind](/docs/authentication#ein-agent-token-an-seinen-knoten-binden), und welches Token zuletzt als
+  er gepollt hat, sein Platzierungsbereich und wie viele Zonen dieser Bereich auf ihn legt, und —
+  aus dem eigenen Bericht des Knotens, als *(gemeldet)* gekennzeichnet wie die Spalten der
+  Scrubbing-Knoten — seine Kapkan-Version, der Terminator, den er orchestriert, mit der aktiven
+  Generation, dessen HTTP/3-Bereitschaft und die Zertifikate, die er hält, innerhalb von 30 Tagen
+  vor Ablauf bernsteinfarben und innerhalb von sieben Tagen rot eingefärbt. Ein Knoten ohne eigenes
+  Token trägt ein bernsteinfarbenes Abzeichen **geteiltes Token**, solange irgendein agent-Token an
+  keinen Knoten gebunden ist, und ein Banner oben nennt diese Tokens: Ein agent-Token ohne Bindung
+  darf als *jeder* Knoten der Flotte abfragen und berichten. Das Inventar nennt Tokens und
+  Geltungsbereiche und ist deshalb nur für Tokens ohne Mandantenbereich sichtbar; eines mit
+  Mandantenbereich sieht an seiner Stelle denselben Hinweis *nur für Tokens ohne Mandanten-Bindung
+  sichtbar*, den auch das Scrubbing-Knoten-Inventar zeigt.
 - **Sperrtabelle** — jede Sperre, aktiv und historisch (mit der Scrubbing-Knoten-Spalte, wenn
   Knoten konfiguriert sind).
 - **Traffic / Reports** — Live-Diagramme für ein- und ausgehenden Verkehr, die aus den
@@ -99,15 +140,74 @@ Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher
 - **Steuerungen** — dieselben Aktionen, die auch die API bietet: **manuelles Sperren / Entsperren**
   einer Adresse und **Konfigurations-Reload** (das Äquivalent zum Senden von `SIGHUP`).
 
-Der Abschnitt **Historische Berichte** in der Ansicht Traffic / Reports ist der einzige Teil, der
-Speicherung benötigt: Er wird nur befüllt, wenn die [ClickHouse-Speicherung](/docs/storage)
-aktiviert ist, und rendert andernfalls einen beschrifteten Platzhalter, der erklärt, wie man sie
-aktiviert.
+Zwei Teile des Dashboards benötigen Speicherung: der Abschnitt **Historische Berichte** in der
+Ansicht Traffic / Reports und die Karte [Zonen-Historie](#zonen-historie) der Edge-Ansicht mit ihrer
+Quellentabelle sowie die Karte **Flotten-Ereignisse**. Beide werden nur befüllt, wenn die
+[ClickHouse-Speicherung](/docs/storage) aktiviert ist, und rendern andernfalls einen beschrifteten
+Platzhalter, der erklärt, wie man sie aktiviert.
 
 <Callout type="success" title="Keine Datenbank erforderlich">
 Das Dashboard wird vollständig aus dem In-Memory-Zustand der Engine aufgebaut. Die historische
 Flow-Speicherung ist eine separate, optionale Funktion — sie ist nicht erforderlich, um
 Live-Angriffe, Top-Talker oder Sperren zu sehen.
+</Callout>
+
+## Zonen-Historie
+
+Alles andere in der **Edge**-Ansicht sind die letzten zehn Sekunden. Ein Klick auf die Zeile einer
+Zone öffnet deren gespeicherte Historie unter der Tabelle, über **1 Std.**, **24 Std.** oder
+**7 Tage** — dieselbe Frage, über einen Zeitraum statt über ein Fenster gestellt. Sie liest die
+[Edge-Historie](/docs/api#get-apiv1edgehistory) und braucht deshalb die
+[ClickHouse-Speicherung](/docs/storage#edge-historie); ist die Speicherung aus, zeigt die Karte
+denselben beschrifteten Platzhalter wie die Traffic-Ansicht, niemals einen Fehler. Ein erneuter
+Klick auf die Zeile oder **Schließen** schließt sie.
+
+Die Karte trägt zwei Diagramme, und ein drittes, wenn es HTTP/3 zu zeichnen gibt:
+
+- **Anfragen/s** — die Fenster der Knoten, in Buckets summiert (eine Minute, zehn Minuten oder eine
+  Stunde, passend zum Zeitraum) und durch die tatsächliche Länge der Fenster geteilt, die in den
+  jeweiligen Bucket fielen.
+- **Abgelehnt oder würde es** — abgewiesen plus herausgefordert plus würde-ablehnen plus
+  würde-prüfen, sodass eine Stufe, die nur eine Vorschau zeigt, und eine, die greift, auf derselben
+  Achse gezählt werden. Das Kennzeichen *Vorschau* sagt, dass die Stufe **jetzt** auf keinem Knoten
+  greift; **Würde abgelehnt** heißt das Diagramm nur dann, wenn auch der Zeitraum selbst keine
+  wirkliche Ablehnung enthält, denn eine Stufe, die vor einer Stunde auf Nur-beobachten gestellt
+  wurde, lässt in den Stunden davor wirkliche Abweisungen zurück.
+- **HTTP/3-Anteil, %** — nur gezeigt, wenn irgendein Bucket tatsächlich HTTP/3-Anfragen gesehen
+  hat, denn eine flache Nulllinie unter einer Zone, die niemand über QUIC erreicht, läse sich als
+  Messung statt als Abwesenheit.
+
+Unter den Diagrammen die Summen des Zeitraums: die höchste Zahl von Knoten, die in einem einzelnen
+Bucket berichtend gesehen wurden, die Anfragen, die Ablehnungen (wirklich oder als Vorschau), die
+4xx/5xx-Zahl und die Breite des Intervalls, das die Engine tatsächlich verwendet hat — sie **hebt**
+den angefragten Schritt an, wenn ein Zeitraum sonst mehr als 5 000 Buckets fassen würde, die Angabe
+benennt also die Buckets, die Sie vor sich haben.
+
+Unter der Karte listet **Wer geprüft worden wäre — über 1 Std.** (oder **24 Std.** / **7 Tage**,
+dem gewählten Zeitraum folgend) die aussagekräftigen Quellen des Zeitraums auf, die aktivsten
+zuerst: das Stärkste, was irgendein Knoten mit jeder von ihnen getan hat (*abgelehnt*, *geprüft*,
+*würde ablehnen*, *würde prüfen*, mit denselben Abzeichen wie in der Live-Tabelle), ihre Anfragen,
+wie viele Fenster und Knoten sie gesehen haben und wann sie zuerst und zuletzt gesehen wurde. Das
+ist die Frage, die man stellt, bevor die Stufe einer Zone in den Echtbetrieb geht — über einen Tag
+statt über zehn Sekunden.
+
+Für ungebundene Tokens schließt eine Karte **Flotten-Ereignisse** die Ansicht ab: was das Gehirn in
+den letzten 24 Stunden an Änderungen sah, das Neueste zuerst — ein Knoten verloren oder zurück, eine
+Version, ein umspringendes Dry-Run-Flag, ein gerendertes Dokument, eine installierte oder abgelehnte
+Generation, die Lebendigkeit eines Terminators, ein HTTP/3-Zustand, ein ausgestelltes, erneuertes
+oder verschwundenes Zertifikat, eine beginnende oder endende zonenweite Challenge, die Uhr eines
+Knotens, die aus dem Rahmen läuft, ein Report, der gekürzt werden musste.
+Ein [tenant-bezogenes](/docs/multi-tenancy) Token sieht die Karte überhaupt nicht: Die Ereignisse
+benennen Knoten. Die Historie und ihre Quellen sind dagegen für einen Mandanten in seinen eigenen
+Zonen lesbar — die Zone eines anderen Mandanten wird abgewiesen, und die Karte erscheint schlicht
+nicht.
+
+<Callout type="info" title="Auf Abruf gelesen, nicht im Poll">
+Die Historie einer Zone und ihre Quellen werden gelesen, wenn Sie eine Zone öffnen oder ihren
+Zeitraum wechseln; die Ereignisse der Flotte werden gelesen, solange die Edge-Ansicht für ein
+ungebundenes Token auf dem Bildschirm ist, ob eine Zone offen ist oder nicht. Alle drei höchstens
+alle zehn Sekunden, und keines davon im Drei-Sekunden-Poll der Konsole — sie fragen ClickHouse ab,
+und die Fenster dahinter sind zehn Sekunden lang.
 </Callout>
 
 ## Angriffsdetails

@@ -66,6 +66,18 @@ Ein Mandanten-Label ist **keine** Einheit der Mitigation-Policy — Schwellenwer
 BGP-Attribute und Eskalation bleiben pro Hostgruppe. Es ist rein ein Eigentümerschafts-Tag, das
 zum Eingrenzen der API dient.
 
+**Eigentümerschaft und Platzierung sind zwei Achsen, und sie dürfen einander nicht widersprechen.**
+Eine Zone trägt außerdem eine `hostgroup` — [wo sie bedient
+wird](/docs/edge#zonen-auf-knoten-verteilen) —, und diese Gruppe kann selbst einen `tenant` tragen.
+In keine der beiden Richtungen wird etwas vererbt: Eine Zone in einer beschrifteten Gruppe ist eine
+House-Zone, solange sie nichts anderes sagt, und das eigene Label einer Zone ändert nie, wo sie
+läuft. Abgewiesen wird ein *Widerspruch*: Tragen die Zone und ihre benannte Hostgruppe beide einen
+Mandanten und unterscheiden sich die beiden, scheitert das Neuladen als Ganzes und die vorherigen
+Zonen bleiben live, denn eine Zone kann nicht zwei Kunden gehören. Die globale Gruppe ist die
+Ausnahme, und zwar mit Absicht: Sie ist der Catch-all der Flotte, nicht der PoP eines Kunden, eine
+beschriftete Zone darf also in ihr sitzen, was auch immer das Top-Level-`tenant` der `kapkan.yaml`
+sagt.
+
 ## Token-Scope
 
 Ein [API-Token](/docs/authentication) erhält einen optionalen `tenant`, der auf seiner Rolle
@@ -93,6 +105,14 @@ und das Knoteninventar](/docs/api) umspannen bewusst jeden Mandanten: Ein Scrub-
 das gesamte Deployment, sodass die tenant-Begrenzung pro Knoten eine [Flotten](/docs/scrubbing)-
 und keine Token-Angelegenheit ist. Behandeln Sie ein agent-Token als deploymentweit und halten Sie
 es von Boxen fern, die kundenbezogene Daten vorhalten.
+
+Was ein agent-Token eingrenzt, ist Topologie, niemals Eigentümerschaft.
+[`node`](/docs/authentication#ein-agent-token-an-seinen-knoten-binden) bindet es an genau eine Box,
+und der [Platzierungs-Geltungsbereich](/docs/edge#zonen-auf-knoten-verteilen) eines Edge-Knotens
+entscheidet, welche Zonen sein Dokument trägt — wem sie auch gehören. Ein an einen Knoten
+gebundenes Token auf einem PoP, der die Zonen eines einzigen Kunden bedient, hält also tatsächlich
+die Zonen eines einzigen Kunden, aber es hält sie, weil die Box dort steht, und nicht, weil das
+Token einen Mandanten-Scope hätte: Nichts an ihm wird gegen einen Mandanten geprüft.
 </Callout>
 
 ## Durchsetzung

@@ -62,6 +62,16 @@ and visible only to admin tokens.
 A tenant label is **not** a unit of mitigation policy — thresholds, BGP attributes and
 escalation stay per-hostgroup. It is purely an ownership tag used to scope the API.
 
+**Ownership and placement are two axes, and they may not contradict each other.** A zone also
+carries a `hostgroup` — [where it is served](/docs/edge#placing-zones-on-nodes) — and that group
+may itself carry a `tenant`. Nothing is inherited in either direction: a zone in a labelled
+group is a house zone until it says otherwise, and a zone's own label never changes where it
+runs. What is refused is a *disagreement*: when the zone and its named hostgroup both carry a
+tenant and the two differ, the reload fails as a whole and the previous zones stay live, because
+one zone cannot belong to two customers. The global group is the exception, and deliberately:
+it is the fleet's catch-all, not a customer's PoP, so a labelled zone may sit in it whatever
+`kapkan.yaml`'s top-level `tenant` says.
+
 ## Token scope
 
 An [API token](/docs/authentication) gains an optional `tenant`, building on its role: a
@@ -86,6 +96,12 @@ viewer with a tenant — it is off the role ladder entirely, and it **cannot** b
 tenant by design: a scrub node filters for the whole deployment, so per-node tenant scoping is a
 [fleet](/docs/scrubbing) concern, not a token one. Treat an agent token as deployment-wide, and
 keep it off boxes that hold customer-facing data.
+
+What narrows an agent token is topology, never ownership. [`node`](/docs/authentication#binding-an-agent-token-to-its-node)
+binds it to one box, and an edge node's [placement scope](/docs/edge#placing-zones-on-nodes)
+decides which zones its document carries — whoever owns them. So a bound token on a PoP that
+serves one customer's zones does hold one customer's zones, but it holds them because of where
+the box is, not because the token is scoped: nothing about it is checked against a tenant.
 </Callout>
 
 ## Enforcement

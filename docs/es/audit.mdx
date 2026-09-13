@@ -135,7 +135,9 @@ Cada registro lleva estos campos:
 
 Una consulta contra una ventana fuera de rango devuelve `400`; un valor de `action` desconocido
 devuelve `400`; un `target` mal formado devuelve `400`. Con el almacenamiento deshabilitado la
-respuesta es `{"available": false, "events": []}` con `200`.
+respuesta es `{"available": false, "events": []}` con `200`. `events` es siempre un array: una
+ventana que no contiene ningún registro que quien llama pueda ver — el primer día de un tenant, un
+filtro que no coincide con nada — es `[]`, nunca `null`.
 
 ## Acotamiento por tenant
 
