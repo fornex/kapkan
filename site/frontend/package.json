@@ -5,9 +5,10 @@
   "scripts": {
     "predev": "node scripts/copy-docs.mjs && node scripts/copy-grafana.mjs && node scripts/build-wasm.mjs",
     "dev": "next dev",
-    "prebuild": "node scripts/copy-docs.mjs && node scripts/copy-grafana.mjs && node scripts/build-wasm.mjs",
+    "prebuild": "node scripts/check-locale-coverage.mjs && node scripts/copy-docs.mjs && node scripts/copy-grafana.mjs && node scripts/build-wasm.mjs",
     "build": "next build",
     "check-links": "node scripts/check-links.mjs",
+    "check-locales": "node scripts/check-locale-coverage.mjs",
     "start": "next start",
     "lint": "eslint"
   },
