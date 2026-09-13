@@ -343,10 +343,18 @@ timer.
 
 ### A dead brain is not a withdrawal either
 
-The fleet is fail-static, and a shared address changes nothing about that. With the brain killed
+The fleet is fail-static, and a shared address changes one thing about that. With the brain killed
 outright the rig's nodes served 20 of 20 requests over TCP and 20 of 20 over HTTP/3 through the
 VIP, from both nodes, with `/healthz` `200` on each: the brain is not in the health predicate,
 and the last document and certificates keep serving from disk.
+
+The one thing it changes is **renewal**, and only behind a shared address: the challenge fan-out
+above is the brain's, so with the brain down the ordering node's challenge answer reaches no other
+node, and an HTTP-01 validation succeeds only when the hash happens to send the CA to the node
+that ordered — about 1 in N attempts. Those attempts retry hourly and never count toward the
+fallback CA, so nothing is burned; what bounds the outage is the certificate, not the brain. The
+`kapkan_edge_cert_not_after_seconds` T−30 d alarm is the budget you have to fix the brain in. See
+[what the node does when things fail](/docs/edge#what-the-node-does-when-things-fail).
 
 What brings a node back is **its own next poll**, and what bounds that is the poll's own backoff
 after a failed poll — one second, doubling to a ceiling of 30 — never `edge.stale_after_seconds`,
