@@ -1080,6 +1080,292 @@
     return edgeChallengeCell(z);
   }
 
+  /* ===== EDGE: the lever (E6.8) =====
+     The zones file says what a zone's rung is; the lever says what it is RIGHT
+     NOW, for a bounded time, whatever the file says. It is the one thing in
+     this view that writes, and it lives in the challenge column because that
+     is where its effect is read.
+
+     SETTING one is offered only when all three hold, and each is a separate
+     question:
+       — the token is an operator (the route is operator rank; a viewer's call
+         would be refused, so the button is not shown to be refused);
+       — the brain is one that merges the zones FILE into the status (E6.2):
+         every E6 field is optional on the wire, and a brain that sends no
+         zone's `mode` at all is never offered the gesture;
+       — the zone is in `policy.mode: decide`: a proxy-only zone challenges
+         nothing by construction and the brain answers `409`.
+
+     ENDING one is offered to an operator wherever the brain says a lever is in
+     force, and asks none of those questions. A running lever is a fact of the
+     brain, not of the file: a reload that empties the zones file (or drops the
+     zone the lever sits on) leaves the override standing and every file-shaped
+     test false, and gating End on the file would leave a row counting down
+     with nothing in the console able to retire it. The operator would have to
+     reach for curl to undo what the console let them do. */
+
+  /* The presets. All four are inside the API's 60..86400 window, and the
+     shortest is long enough to outlive a reload and a node's poll. */
+  var LEVER_TTLS = [
+    { id: "15m", seconds: 900 },
+    { id: "1h", seconds: 3600 },
+    { id: "6h", seconds: 21600 },
+    { id: "24h", seconds: 86400 }
+  ];
+
+  /* The mode as this console knows it. A brain with a mode it does not know
+     renders that mode's own word rather than one of ours — the h3-state
+     discipline: never present a server's vocabulary as if it were ours. */
+  function leverModeLabel(m) {
+    if (m === "manual") return I.t("ed.lever.manual");
+    if (m === "auto") return I.t("ed.lever.auto");
+    return m;
+  }
+
+  /* The lever in force on a zone, or null — and the BRAIN decides that, not
+     this clock. The override rides on the zone status for exactly as long as
+     the brain enforces it and is gone from the next snapshot once it lapses,
+     so its presence is the answer; a console that re-decided liveness by
+     comparing `until` with the browser's clock would drop the badge and the
+     End button on a machine a few minutes fast while the fleet is still
+     sending everyone to the clearance page. The countdown may read `0s left`
+     for the moment between the lapse and the next read: that is the console
+     saying what it knows, and the control stays until the brain says it is
+     over. (The remaining time is read against the brain's clock too — see
+     `skew` — so the two rarely disagree.)
+
+     The one thing still refused is an `until` this console cannot parse: the
+     badge is a countdown, and there is nothing to count. */
+  function leverLive(z) {
+    var o = z.override;
+    if (!o || !o.mode) return null;
+    var until = edgeTime(o.until);
+    if (!until) return null;
+    return { mode: o.mode, until: until, reason: o.reason || "" };
+  }
+
+  /* The running lever, under the rung it overrides: what it set, and how long
+     is left of it. `now` is the brain's clock as of the last zone-status read;
+     the remaining time is recomputed on every render of the view — the 3s one
+     the whole console already runs — so it costs no new read of anything.
+     I.duration floors at zero, so a lever the brain has not yet forgotten
+     reads `0s left` rather than counting into the negative. */
+  function edgeLeverLine(z, now) {
+    var live = leverLive(z);
+    if (!live) return null;
+    var left = I.duration((live.until.getTime() - now) / 1000);
+    var tip = I.t("ed.lever.tip", { t: I.datetime(live.until) });
+    if (live.reason) tip += "\n" + live.reason;
+    return h("div", { class: "lever-line" },
+      K.badge("badge--elev", I.t("ed.lever.on", { m: leverModeLabel(live.mode), t: left }), "shield-alert", tip));
+  }
+
+  /* The control itself. The row it sits in opens the zone's history card on a
+     click and on Enter/Space, so the button stops both: one control, one
+     meaning. */
+  function edgeLeverControl(ctx, z, fileAware) {
+    if (ctx.role !== "operator") return null;
+    var live = !!leverLive(z);
+    /* the file gates SETTING one only: a lever already in force is endable
+       from here whatever the file now says, including nothing at all */
+    if (!live && (!fileAware || z.mode !== "decide")) return null;
+    /* wrapped so the control starts its own line under the rung it acts on:
+       both the state badge and the muted "off" are inline, and a button beside
+       them reads as part of the state rather than as something to press */
+    return h("div", { class: "lever-act" }, h("button", {
+      class: "btn btn--ghost btn--sm lever-btn",
+      dataset: { edgeLever: z.zone },
+      attrs: { title: I.t(live ? "ed.lever.end.tip" : "ed.lever.start.tip") },
+      onclick: function (e) { e.stopPropagation(); edgeLeverDialog(ctx, z, e.currentTarget, live); },
+      onkeydown: function (e) { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); }
+    }, [w.icon(live ? "x" : "shield-alert"), h("span", { text: I.t(live ? "ed.lever.end" : "ed.lever.start") })]));
+  }
+
+  /* Whether what was just set PREVIEWS rather than bites. The lever is brain
+     state; watch-only lives on the zone and on each node, and the response
+     carries both — so a success that only counts is never reported as one that
+     refuses. A node that has not reported carries no dry_run and is counted
+     neither way. */
+  function leverPreviews(r) {
+    if (r.zoneWatchOnly || r.rungWatchOnly) return true;
+    var alive = 0, dry = 0;
+    (r.nodes || []).forEach(function (n) {
+      if (!n.alive || typeof n.dry_run !== "boolean") return;
+      alive++;
+      if (n.dry_run) dry++;
+    });
+    return alive > 0 && dry === alive;
+  }
+
+  /* Which zone the console is waiting on an answer about. Cancel, Escape and
+     an outside click all stay live while a write is in flight — `busy` is said
+     on the button, never enforced by `disabled`, because disabling the focused
+     control drops the keyboard on <body> — so the panel can be dismissed and
+     REOPENED before the brain answers. This is what stops that second panel
+     sending a second write over the first: one lever, one call at a time.
+     The waiters are the dialogs parked on Working… behind it; they are let go
+     when the answer lands, and the answer itself is reported by the dialog
+     that asked for it. A plain object would take a zone named `__proto__` to
+     the prototype setter; zone names cannot be that, but nothing in this file
+     relies on them not being. */
+  var leverInFlight = Object.create(null);
+
+  /* The dialog: mode, how long, why, and a confirm — or, for a lever already
+     running, the one sentence that ends it. Both shapes are the same panel on
+     purpose: a refusal has somewhere to be said either way, and the operator
+     never has to hunt a toast for the reason the lever did not move.
+
+     It is a body-level popover (K.popover), so the 3s poll re-renders the
+     table underneath it without touching what is being filled in, and Escape,
+     an outside click and the focus return to the button all come with it. */
+  function edgeLeverDialog(ctx, z, anchor, ending) {
+    var zone = z.zone;
+    var mode = "manual", ttl = LEVER_TTLS[1], reason = "";
+    var busy = false, failure = null;
+    var pop = null;
+
+    function finish(r) {
+      busy = false;
+      /* Is this panel still the one on screen? It need not be: the dialog
+         stays dismissable while the write is in flight, so by the time the
+         brain answers this one may be gone — or another zone's panel may be
+         open in its place. A success must then not close somebody else's
+         panel (and hand focus to its button), and a refusal drawn into a
+         detached panel would be the console keeping the brain's "no" to
+         itself. Neither outcome is dropped: both are said in a toast, in the
+         words the panel would have used. */
+      var mine = !!(pop && document.body.contains(pop));
+      if (!r.ok) {
+        if (mine) { failure = r; draw(); return; }
+        K.toast(refusalText(r) + (r.error ? " — " + r.error : ""), "err");
+        return;
+      }
+      if (mine) K.closeConfirm();
+      if (ending) { K.toast(I.t("ed.lever.toast.ended", { z: zone }), "ok"); return; }
+      var preview = leverPreviews(r);
+      K.toast(I.t(preview ? "ed.lever.toast.preview" : "ed.lever.toast.on", { z: zone }), preview ? "warn" : "ok");
+    }
+    function submit() {
+      if (busy) return;
+      failure = null;
+      var waiting = leverInFlight[zone];
+      if (waiting) {
+        /* a write for this zone is already out. The console does not send a
+           second one over it — the two would race to be the lever the brain
+           keeps — so this panel says Working… and is let go when that answer
+           lands, wherever it is reported. */
+        busy = true; draw();
+        waiting.push(function () { busy = false; draw(); });
+        return;
+      }
+      busy = true; draw();
+      leverInFlight[zone] = [];
+      var done = function (r) {
+        var waiters = leverInFlight[zone] || [];
+        delete leverInFlight[zone];
+        finish(r);
+        waiters.forEach(function (f) { f(); });
+      };
+      if (ending) ctx.actions.clearEdgeChallenge(zone, done);
+      else ctx.actions.setEdgeChallenge(zone, mode, ttl.seconds, reason, done);
+    }
+    /* A segmented choice. `aria-pressed` carries the selection that the `is-on`
+       class only shows — reconcile's attribute sync keeps it current on every
+       draw() — and the group is named by the same label the field carries, so
+       the rung and the duration are each announced as one set of choices
+       rather than as loose buttons. */
+    function seg(items, isOn, pick, labelKey) {
+      return h("div", { class: "seg seg--wrap", attrs: { role: "group", "aria-label": I.t(labelKey) } }, items.map(function (it) {
+        return h("button", { class: "seg__btn" + (isOn(it) ? " is-on" : ""), text: it.label,
+          attrs: { "aria-pressed": isOn(it) ? "true" : "false" },
+          onclick: function () { pick(it.value); draw(); } });
+      }));
+    }
+    function field(labelKey, control) {
+      return h("div", { class: "lever-field" }, [
+        h("div", { class: "lever-field__lbl", text: I.t(labelKey) }), control]);
+    }
+    /* The refusal in words. The four answers the route gives, each meaning
+       something the operator can act on. `404` deliberately says one thing for
+       two cases: an unknown zone and a zone outside a scoped token's reach
+       answer byte for byte the same, and a console that told them apart would
+       rebuild the existence oracle the API refuses to be. One function, so the
+       panel and the toast that stands in for a dismissed panel say the same
+       sentence about the same refusal. */
+    function refusalText(f) {
+      if (f.notFound) return I.t("ed.lever.err.notfound");
+      if (f.conflict) return I.t("ed.lever.err.conflict");
+      if (f.forbidden) return I.t("ed.lever.err.forbidden");
+      return I.t("ed.lever.err.failed");
+    }
+    /* The refusal as the panel shows it: our line, and the brain's own words
+       under it as TEXT, never as markup — an API string is data. */
+    function refusal() {
+      if (!failure) return null;
+      var msg = refusalText(failure);
+      return h("div", { class: "banner banner--dry-loud lever-err", attrs: { role: "alert" } }, [
+        w.icon("shield-alert"),
+        h("div", { class: "banner__txt" }, [
+          h("div", { text: msg }),
+          failure.error ? h("div", { class: "td-muted", text: failure.error }) : null
+        ])
+      ]);
+    }
+    /* What the operator should know BEFORE pulling it, read off the row they
+       are looking at: a rung every reporting node only previews will count
+       this challenge and serve nobody the page, and a zone with no live node
+       behind it applies nothing at all until one comes back. */
+    function notes() {
+      if (ending) return null;
+      var nodes = z.nodes || 0, rungWatch = (z.rung_watch_only || []).length;
+      var out = [];
+      if (z.unserved) out.push(I.t("ed.lever.note.unserved"));
+      if (nodes > 0 && rungWatch >= nodes) out.push(I.t("ed.lever.note.preview"));
+      if (!out.length) return null;
+      return h("div", { class: "lever-note" }, out.map(function (t) { return h("div", { text: t }); }));
+    }
+    function build() {
+      var kids = [
+        h("div", { class: "confirm__title", text: I.t(ending ? "ed.lever.end.title" : "ed.lever.title") }),
+        h("div", { class: "confirm__txt mono", text: zone })
+      ];
+      if (ending) {
+        kids.push(h("div", { class: "confirm__txt", text: I.t("ed.lever.end.text") }));
+      } else {
+        kids.push(h("div", { class: "confirm__txt", text: I.t("ed.lever.sub") }));
+        kids.push(field("ed.lever.mode", seg(
+          [{ value: "manual", label: I.t("ed.lever.manual") }, { value: "auto", label: I.t("ed.lever.auto") }],
+          function (it) { return it.value === mode; },
+          function (v) { mode = v; }, "ed.lever.mode")));
+        kids.push(h("div", { class: "lever-hint", text: I.t(mode === "manual" ? "ed.lever.manual.sub" : "ed.lever.auto.sub") }));
+        kids.push(field("ed.lever.ttl", seg(
+          LEVER_TTLS.map(function (t) { return { value: t, label: I.t("ed.lever.ttl." + t.id) }; }),
+          function (it) { return it.value.id === ttl.id; },
+          function (v) { ttl = v; }, "ed.lever.ttl")));
+        kids.push(field("ed.lever.reason", h("input", {
+          class: "input", maxlength: "200", placeholder: I.t("ed.lever.reason.ph"), value: reason,
+          oninput: function (e) { reason = e.target.value; }
+        })));
+        kids.push(notes());
+      }
+      kids.push(refusal());
+      kids.push(h("div", { class: "confirm__actions" }, [
+        h("button", { class: "btn btn--ghost btn--sm", text: I.t("confirm.cancel"), onclick: K.closeConfirm }),
+        /* busy is said, not enforced by `disabled`: disabling the focused
+           button drops the keyboard on <body>, and submit() already refuses a
+           second call while one is in flight */
+        h("button", { class: "btn " + (ending ? "btn--danger" : "btn--primary") + " btn--sm",
+          text: I.t(busy ? "ed.lever.working" : ending ? "ed.lever.end.confirm" : "ed.lever.confirm"),
+          attrs: busy ? { "aria-busy": "true" } : null, onclick: submit })
+      ]));
+      return kids;
+    }
+    /* a panel that has been dismissed is not drawn into: the node is detached,
+       and rebuilding it would be work nobody can see */
+    function draw() { if (pop && document.body.contains(pop)) K.mount(pop, build()); }
+    pop = K.popover(anchor, build(), { cls: "confirm--lever", label: I.t(ending ? "ed.lever.end.title" : "ed.lever.title") });
+  }
+
   /* ---------- tenant filter (E6.2) ----------
      Only an unscoped token is ever told a zone's tenant, so the chips appear
      only when a row carries one: a single-tenant deployment and every scoped
@@ -1156,6 +1442,15 @@
          so an operator filtering to one customer is not still reading every
          other customer's sources underneath it */
       var openZone = ctx.state.edgeHist.zone;
+      /* Does this brain merge the zones FILE into the status (E6.2)? Every E6
+         field is optional on the wire, and `mode` is the file's own word, so a
+         brain that carries it for no zone at all is older than the merge and
+         is offered no lever: its table stays what it always was. */
+      var fileAware = st.zones.some(function (z) { return !!z.mode; });
+      /* now, on the brain's clock: the lever's countdown is the distance
+         between two instants the brain stamped, and `skew` is how far this
+         browser is from it as of the read those instants came in */
+      var edgeNow = Date.now() + (st.skew || 0);
       var tenants = edgeTenantList(st.zones);
       var tenant = edgeTenantCurrent(ctx, tenants);
       var zones = tenant
@@ -1186,7 +1481,12 @@
           edgeNumCell(z, z.cleared, I.abbr.bind(I)),
           edgeNumCell(z, z.would_challenge, I.abbr.bind(I)),
           edgeNumCell(z, z.would_deny, I.abbr.bind(I)),
-          h("td", {}, edgeZoneChallenge(z)),
+          /* the rung, the lever running over it, and the control for both —
+             one column, because they are one fact. Both additions are null
+             for a viewer and for a brain older than the file merge, and an
+             h() child of null is appended as nothing: that table is byte for
+             byte the one it always was. */
+          h("td", {}, [edgeZoneChallenge(z), edgeLeverLine(z, edgeNow), edgeLeverControl(ctx, z, fileAware)]),
           h("td", {}, edgeH3Cell(z, inv))
         ]);
       });
@@ -1258,12 +1558,27 @@
       ctx.actions.loadEdgeEvents();
       children.push(edgeEventsCard(ctx));
     }
-    /* keyboard focus lives on a zone row, and this view re-mounts on every
-       poll: keep it where the operator put it, the attacks table's treatment */
+    /* Keyboard focus lives on a zone row or on that row's lever button, and
+       this view re-mounts on every poll: keep it where the operator put it,
+       the attacks table's treatment.
+
+       The button needs this more than the row does. Reconcile matches children
+       by position, and the challenge cell changes shape the moment a lever
+       starts or ends — the badge appears above the button, so what was the
+       button's slot now holds the badge and the button is built fresh. The
+       render that does it is the one the operator's own successful pull
+       triggers, which is exactly when the keyboard must not be dropped on
+       <body>. Both are read off the element, not guessed: a row carries
+       data-edge-zone, the button data-edge-lever, and never both. */
     var af = document.activeElement;
     var keepZone = (af && af.getAttribute) ? af.getAttribute("data-edge-zone") : null;
+    var keepLever = (af && af.getAttribute) ? af.getAttribute("data-edge-lever") : null;
     K.mount(root, children);
     if (keepZone) { var kr = edgeZoneRow(root, keepZone); if (kr) kr.focus(); }
+    else if (keepLever) {
+      var kb = root.querySelector('button[data-edge-lever="' + CSS.escape(keepLever) + '"]');
+      if (kb) kb.focus();
+    }
   }
 
   /* ===== EDGE NODES (E6.7): the fleet inventory =====

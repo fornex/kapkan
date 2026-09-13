@@ -198,8 +198,8 @@ configured node with its liveness and reported `dry_run` — a node that only co
 before the lever is trusted. It is an operator's action (`operator` rank; a
 [tenant-scoped](/docs/multi-tenancy) operator may pull it on its own zones only — any other zone is
 `404 unknown zone` for it), audited as `edge_challenge`, named `override` by [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus)
-— the console's Edge view shows the mode the nodes apply under it (`manual`, `auto`), not the
-lever itself — and held in the brain's memory like the issuance coordinator: an incident's tool,
+— the console's [Edge view](/docs/dashboard#what-it-shows) pulls it from the challenge column of any
+zone in `policy.mode: decide`, and shows a running one there with the time left on it — and held in the brain's memory like the issuance coordinator: an incident's tool,
 gone after a brain restart (the nodes drop it with the first document the restarted brain serves;
 pull it again). The brain's own `dry_run` does not gate it:
 pulling the lever is a policy edit; watch-only lives on the node and the zone. A node running a

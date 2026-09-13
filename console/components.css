@@ -98,6 +98,32 @@
 .edge-tbl tr.is-open { background: var(--surface-2); }
 .edge-tbl tr.is-open td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 
+/* The lever (E6.8) sits under the rung it overrides, in the challenge column:
+   the running override, then the control. Both are absent for a viewer and for
+   a brain older than the zones-file merge, so the cell is unchanged there. */
+.lever-line { margin-top: 4px; }
+.lever-act { margin-top: 6px; }
+
+/* Its dialog is the confirm popover, wider because it carries controls rather
+   than one sentence, and capped so a refusal growing at the bottom can never
+   push the actions off a short viewport. */
+.confirm--lever { width: 320px; max-height: calc(100vh - 24px); overflow-y: auto; }
+.confirm--lever .confirm__txt { margin-bottom: var(--s-2); }
+.lever-field { margin: var(--s-3) 0 0; }
+.lever-field__lbl {
+  font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .06em;
+  color: var(--faint); margin-bottom: 4px;
+}
+.lever-field .input { width: 100%; }
+.lever-hint { font-size: var(--t-xs); color: var(--muted); margin-top: 4px; text-wrap: pretty; }
+.lever-note {
+  margin-top: var(--s-3); padding: var(--s-3);
+  background: var(--inset); border: 1px solid var(--border); border-radius: var(--r-sm);
+  font-size: var(--t-xs); color: var(--muted); display: grid; gap: 4px; text-wrap: pretty;
+}
+.lever-err { margin-top: var(--s-3); }
+.confirm--lever .confirm__actions { margin-top: var(--s-4); }
+
 /* One zone's history card: the charts side by side (they share an x-axis, so
    they read as one period) and the period's totals under them. */
 .hist-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s-4); }
