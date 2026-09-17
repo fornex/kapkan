@@ -829,6 +829,11 @@ security-relevant.
   `edge-install.mdx` link it; the page ships in all five locales.
 
 ### Fixed
+- deps: `google.golang.org/grpc` 1.82.1 → 1.83.2 (an indirect dependency, through gobgp) — GO-2026-6348
+  (heap exhaustion via HTTP/2 DATA-frame fragmentation) and GO-2026-6443 (a server panic on a
+  missing `:authority`/`Host`), both reachable through the BGP speaker's gRPC server. The
+  govulncheck gate caught them on the first CI run after their publication; the only advisory left
+  is the accepted GO-2026-4736 (gobgp NEXT_HOP, no upstream fix).
 - Edge: TLS sessions resume again on the node that issued them. The catch-all default server the
   renderer writes into the shared file now declares the zones' `ssl_session_cache shared:kapkan_ssl`
   (with `ssl_session_timeout 1d` and `ssl_session_tickets off`, as every zone does). OpenSSL keeps
