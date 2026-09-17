@@ -17,8 +17,9 @@ la URL de ejemplo de abajo. Instalar ClickHouse queda fuera del alcance aquí; c
 
 <Callout type="info" title="Mejor esfuerzo, nunca bloquea la detección">
 La persistencia funciona a partir de una cola acotada con un envío no bloqueante. Un ClickHouse
-lento o caído descarta filas (contabilizadas en `kapkan_storage_rows_total` con `result="dropped"`) en
-lugar de frenar la ruta crítica del motor.
+que no puede aceptar filas las pierde en lugar de frenar la ruta crítica del motor: un sumidero
+atascado llena la cola y cuenta como `result="dropped"` en `kapkan_storage_rows_total`, uno caído
+hace fallar cada inserción de inmediato y cuenta como `result="error"` (véase Backpressure más abajo).
 </Callout>
 
 ## Activación

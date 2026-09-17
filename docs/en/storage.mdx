@@ -14,9 +14,10 @@ HTTP interface, which listens on port `8123` by default — that is the port in 
 URL below. Installing ClickHouse is out of scope here; see [clickhouse.com](https://clickhouse.com).
 
 <Callout type="info" title="Best-effort, never blocks detection">
-Persistence runs off a bounded queue with a non-blocking send. A slow or down ClickHouse
-drops rows (counted in `kapkan_storage_rows_total` with `result="dropped"`) rather than stalling
-the engine's hot path.
+Persistence runs off a bounded queue with a non-blocking send. A ClickHouse that cannot take rows loses them
+rather than stalling the engine's hot path — a stalled sink fills the queue and counts
+`result="dropped"` in `kapkan_storage_rows_total`, a down one fails each insert fast and counts
+`result="error"` (see [Backpressure](#backpressure)).
 </Callout>
 
 ## Enabling

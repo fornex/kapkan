@@ -394,7 +394,7 @@ Gehirn unerreichbar ist; ziehen Sie zurück, weil der Knoten vor Ihnen nicht bed
 
 Wo die Adresse angekündigt statt statisch geroutet wird, stellen Sie auf jeden Knoten einen Speaker
 und lassen ihn die VIP `/32` ankündigen, solange das eigene Prädikat dieses Knotens hält. Der
-Aufbau hat einen Zusatzarm, der genau das mit bird2 fährt, **außerhalb des Abnahmepfads** und
+Aufbau hat einen Zusatzarm, der die `/healthz`-Hälfte dieser Schleife mit bird2 fährt, **außerhalb des Abnahmepfads** und
 hinter `ANYCAST_BGP=1`, also standardmäßig übersprungen und ohne aufgezeichnete Zahlen:
 
 ```sh

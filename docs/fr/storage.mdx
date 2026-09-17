@@ -17,8 +17,10 @@ de l'URL d'exemple ci-dessous. L'installation de ClickHouse sort du cadre de cet
 
 <Callout type="info" title="Au mieux des efforts, ne bloque jamais la détection">
 La persistance s'appuie sur une file d'attente bornée avec envoi non bloquant. Un ClickHouse
-lent ou indisponible abandonne des lignes (comptabilisées dans `kapkan_storage_rows_total` avec
-`result="dropped"`) plutôt que de ralentir le chemin critique du moteur.
+qui ne peut pas prendre de lignes les perd plutôt que de ralentir le chemin critique du moteur :
+un puits bloqué remplit la file et compte `result="dropped"` dans `kapkan_storage_rows_total`, un
+serveur indisponible fait échouer chaque insertion aussitôt et compte `result="error"` (voir
+Backpressure plus bas).
 </Callout>
 
 ## Activation

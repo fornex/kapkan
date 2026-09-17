@@ -149,8 +149,8 @@ cross-tenant existence oracle.
 
 Audit records live in the `audit_events` ClickHouse table and inherit the same `ttl_days`
 per-row TTL as the rest of [storage](/docs/storage) — retention is bounded without operator
-intervention. Persistence is best-effort off the same bounded queue: a slow or down ClickHouse
-drops rows rather than blocking a ban, while the `INFO` log line is always emitted.
+intervention. Persistence is best-effort off the same bounded queue: a ClickHouse that cannot take rows
+loses them (see [Backpressure](/docs/storage#backpressure)) rather than blocking a ban, while the `INFO` log line is always emitted.
 
 ## Related
 

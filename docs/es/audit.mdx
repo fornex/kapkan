@@ -154,7 +154,7 @@ tenants.
 Los registros de auditoría viven en la tabla `audit_events` de ClickHouse y heredan el mismo TTL
 por fila `ttl_days` que el resto del [almacenamiento](/docs/storage) — la retención está acotada
 sin intervención del operator. La persistencia es de mejor esfuerzo desde la misma cola acotada:
-un ClickHouse lento o caído descarta filas en lugar de bloquear un baneo, mientras que la línea de
+un ClickHouse que no puede aceptar filas las pierde (véase Backpressure en storage) en lugar de bloquear un baneo, mientras que la línea de
 log `INFO` siempre se emite.
 
 ## Relacionado

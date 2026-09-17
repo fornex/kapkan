@@ -129,8 +129,8 @@ that is gone, `403` for one whose binding moved), and the node reconnects with w
 has. The *inventory* is one window behind, because a sighting is stamped when a poll starts and
 again when it ends — that refusal included — so a node you have just cut off reads `alive` for
 `edge.stale_after_seconds` after the change, about 15 s on the defaults, and you see the flip at
-your next read of the inventory. Wait that out before reading the flip of `last_token`, or you
-will be looking at the state before your change. The hold bounds something else: a perfectly
+your next read of the inventory. `last_token` needs no such wait: it is the token of the node's last accepted poll, so it flips at
+the node's first poll with the new token — and never for a token the brain refuses. The hold bounds something else: a perfectly
 healthy parked node's `last_seen` is up to a hold (25 s) old, which is normal — `holding` is what
 says its poll is open.
 

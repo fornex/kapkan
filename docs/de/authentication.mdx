@@ -146,8 +146,9 @@ wurde), und der Knoten verbindet sich mit dem neu, was er jetzt hat. Das *Invent
 Fenster hinterher, denn eine Sichtung wird gestempelt, wenn ein Poll beginnt, und noch einmal, wenn
 er endet — diese Abweisung eingeschlossen —, sodass ein Knoten, den Sie gerade abgeschnitten haben,
 noch `edge.stale_after_seconds` nach der Änderung als `alive` gelesen wird, in den Standardwerten
-also rund 15 s; das Umspringen sehen Sie beim nächsten Lesen des Inventars. Warten Sie das ab, bevor
-Sie das Umspringen von `last_token` lesen, sonst sehen Sie den Zustand vor Ihrer Änderung. Das Hold
+also rund 15 s; das Umspringen sehen Sie beim nächsten Lesen des Inventars. `last_token` braucht kein solches
+Warten: es ist das Token des letzten angenommenen Polls des Knotens und springt mit dessen erstem
+Poll unter dem neuen Token um — und nie für ein Token, das das Brain abweist. Das Hold
 begrenzt etwas anderes: Bei einem völlig gesunden geparkten Knoten ist `last_seen` bis zu ein Hold
 (25 s) alt, und das ist normal — dass sein Poll offen ist, sagt `holding`.
 

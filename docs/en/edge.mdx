@@ -455,7 +455,7 @@ the node no longer serves.
 | Document refused (renderer, or `nginx -t` fails) | The previous generation keeps serving; the node stays healthy but `converged: false`, reports the **rendered** document's ETag (not the accepted one), and retries locally every 1 → 10 minutes until it applies or a newer document arrives. The fast path — rates, rungs, the lever — is applied from the **accepted** document meanwhile. |
 | nginx dies | systemd restarts it; with `terminator.pid_file` set the node reports `alive: false` and answers `503` on its `/healthz` meanwhile. Kapkan never supervises the terminator itself. |
 | Certificate unrenewable | The current certificate serves until it expires; `kapkan_edge_cert_not_after_seconds` is the T−30 d alarm; after three failures the node tries the fallback CA. |
-| Node dies | The brain sees the poll stop (`edge.stale_after_seconds`) and shows it in the inventory; steering traffic away is your network's job ([anycast withdraw](/docs/edge-anycast#withdrawal-what-says-withdraw-me), DNS) — and the inventory's `alive` is not the signal to withdraw on, `/healthz` is. |
+| Node dies | The brain sees the poll stop (`edge.stale_after_seconds`) and shows it in the inventory; steering traffic away is your network's job ([anycast withdraw](/docs/edge-anycast#withdrawal-what-says-withdraw-me), DNS) — and the inventory's `alive` is not the signal to withdraw on; `/healthz` plus a local TLS probe of the node's own listener is. |
 
 ## Reading the node
 

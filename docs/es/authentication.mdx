@@ -138,8 +138,9 @@ y el nodo se reconecta con lo que ahora tenga. El *inventario* va una ventana po
 marca un avistamiento cuando un sondeo empieza y otra vez cuando termina — ese rechazo incluido —,
 así que un nodo al que acabas de dejar incomunicado figura como `alive` durante
 `edge.stale_after_seconds` más tras el cambio, unos 15 s con los valores predeterminados, y verás el
-cambio en tu siguiente lectura del inventario. Espera a que eso pase antes de leer el cambio de
-`last_token`, o estarás mirando el estado anterior a tu cambio. La espera acota otra cosa: en un nodo
+cambio en tu siguiente lectura del inventario. `last_token` no necesita esa espera: es el token del
+último sondeo aceptado del nodo, así que cambia en el primer sondeo del nodo con el nuevo token —
+y nunca para un token que el brain rechaza. La espera acota otra cosa: en un nodo
 perfectamente sano y aparcado, `last_seen` puede tener una espera entera (hasta 25 s) de antigüedad,
 y eso es normal — lo que dice que su sondeo está abierto es `holding`.
 

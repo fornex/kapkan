@@ -367,7 +367,7 @@ brain is unreachable; withdraw because the node in front of you is not serving.
 
 Where the address is announced rather than statically routed, put a speaker on each node and let
 it announce the VIP `/32` while that node's own predicate holds. The rig has a stretch arm that
-runs exactly this with bird2, **outside the acceptance path** and behind `ANYCAST_BGP=1`, so it is
+runs the `/healthz` half of this loop with bird2, **outside the acceptance path** and behind `ANYCAST_BGP=1`, so it is
 skipped by default and carries no recorded numbers:
 
 ```sh

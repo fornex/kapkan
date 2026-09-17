@@ -144,8 +144,9 @@ L'*inventaire*, lui, a une fenêtre de retard, parce qu'une présence est estamp
 interrogation commence puis de nouveau quand elle se termine — ce refus compris : un nœud que vous
 venez de couper affiche donc `alive` pendant encore `edge.stale_after_seconds` après le changement,
 soit environ 15 s avec les valeurs par défaut, et vous voyez la bascule à votre lecture suivante de
-l'inventaire. Attendez ce délai avant de lire la bascule de `last_token`, sans quoi vous regarderez
-l'état d'avant votre changement. L'attente borne autre chose : sur un nœud parfaitement sain et en
+l'inventaire. `last_token` n'a pas besoin de cette attente : c'est le token de la dernière
+interrogation acceptée du nœud, il bascule donc à la première interrogation du nœud avec le nouveau
+token — et jamais pour un token que le brain refuse. L'attente borne autre chose : sur un nœud parfaitement sain et en
 attente, `last_seen` peut avoir une attente entière (jusqu'à 25 s) d'âge, ce qui est normal — c'est
 `holding` qui dit que son interrogation est ouverte.
 

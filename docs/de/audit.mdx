@@ -156,7 +156,7 @@ mandantenübergreifendes Existenz-Orakel ist.
 Audit-Einträge liegen in der ClickHouse-Tabelle `audit_events` und erben dieselbe `ttl_days`
 Per-Row-TTL wie der Rest der [Speicherung](/docs/storage) — die Aufbewahrung ist ohne
 Operator-Eingriff begrenzt. Die Persistierung erfolgt nach dem Best-Effort-Prinzip über dieselbe
-begrenzte Queue: ein langsames oder ausgefallenes ClickHouse verwirft Zeilen, statt einen Ban zu
+begrenzte Queue: ein ClickHouse, das keine Zeilen annehmen kann, verliert sie (siehe Backpressure unter Storage), statt einen Ban zu
 blockieren, während die `INFO`-Log-Zeile immer ausgegeben wird.
 
 ## Verwandte Themen

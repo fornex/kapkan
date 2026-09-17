@@ -153,7 +153,7 @@ tenants. Un filtre `target` qui nomme une adresse en dehors du tenant de l'appel
 Les enregistrements d'audit résident dans la table ClickHouse `audit_events` et héritent du même TTL
 par ligne `ttl_days` que le reste du [stockage](/docs/storage) — la rétention est bornée sans
 intervention de l'opérateur. La persistance se fait au mieux (best-effort) depuis la même file
-d'attente bornée : un ClickHouse lent ou indisponible abandonne des lignes plutôt que de bloquer un
+d'attente bornée : un ClickHouse qui ne peut pas prendre de lignes les perd (voir Backpressure dans storage) plutôt que de bloquer un
 bannissement, tandis que la ligne de journal `INFO` est toujours émise.
 
 ## Voir aussi
