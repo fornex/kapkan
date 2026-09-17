@@ -383,7 +383,7 @@ el nodo que tiene delante no está sirviendo.
 
 Donde la dirección se anuncia en lugar de enrutarse de forma estática, ponga un speaker en cada
 nodo y déjele anunciar la VIP `/32` mientras aguante el predicado propio de ese nodo. El banco
-tiene un brazo adicional que hace exactamente esto con bird2, **fuera de la ruta de aceptación** y
+tiene un brazo adicional que ejecuta la mitad `/healthz` de este bucle con bird2, **fuera de la ruta de aceptación** y
 detrás de `ANYCAST_BGP=1`, de modo que por defecto se salta y no aporta ninguna cifra registrada:
 
 ```sh

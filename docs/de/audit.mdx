@@ -137,7 +137,9 @@ Jeder Eintrag trägt diese Felder:
 
 Eine Abfrage gegen ein Fenster außerhalb des zulässigen Bereichs gibt `400` zurück; ein
 unbekannter `action`-Wert gibt `400` zurück; ein fehlerhaftes `target` gibt `400` zurück. Bei
-deaktivierter Speicherung ist die Antwort `{"available": false, "events": []}` mit `200`.
+deaktivierter Speicherung ist die Antwort `{"available": false, "events": []}` mit `200`. `events`
+ist immer ein Array: Ein Zeitraum, der keinen für den Aufrufer sichtbaren Datensatz enthält — der
+erste Tag eines Mandanten, ein Filter, der auf nichts passt —, ist `[]`, niemals `null`.
 
 ## Mandanten-Scoping
 
@@ -154,7 +156,7 @@ mandantenübergreifendes Existenz-Orakel ist.
 Audit-Einträge liegen in der ClickHouse-Tabelle `audit_events` und erben dieselbe `ttl_days`
 Per-Row-TTL wie der Rest der [Speicherung](/docs/storage) — die Aufbewahrung ist ohne
 Operator-Eingriff begrenzt. Die Persistierung erfolgt nach dem Best-Effort-Prinzip über dieselbe
-begrenzte Queue: ein langsames oder ausgefallenes ClickHouse verwirft Zeilen, statt einen Ban zu
+begrenzte Queue: ein ClickHouse, das keine Zeilen annehmen kann, verliert sie (siehe Backpressure unter Storage), statt einen Ban zu
 blockieren, während die `INFO`-Log-Zeile immer ausgegeben wird.
 
 ## Verwandte Themen

@@ -1671,7 +1671,7 @@ export const wizardHelp: Partial<Record<Locale, Record<string, string>>> = {
     "geoip.country_database": "Chemin d'un fichier GeoLite2-Country.mmdb sur l'hôte du moteur.",
     "api.dashboard": "Servir l'interface web intégrée sur l'écouteur de l'API.",
     "api.tokens.role": "viewer (lecture seule), operator (lecture + ban/unban/reload) ou agent (identifiant d'un nœud, nettoyage ou edge : les polls de règles et de zones, son propre rapport et les routes ACME edge — rien d'autre ; à lier à son nœud avec node).",
-    "api.tokens.node": "Lie un jeton agent à un seul nœud (une entrée edge.nodes[] ou scrubbing.nodes[]) : le brain le refuse sur chaque route de nœud — poll, rapport, ACME — quand un autre nom de nœud est présenté. Vide, un jeton partagé continue de fonctionner pendant la migration ; le démon et -check-config avertissent tant que chaque jeton agent n'est pas lié.",
+    "api.tokens.node": "Lie un token agent à un seul nœud (une entrée edge.nodes[] ou scrubbing.nodes[]) : le brain le refuse sur chaque route de nœud — poll, rapport, ACME — quand un autre nom de nœud est présenté. Vide, un token partagé continue de fonctionner pendant la migration ; le démon et -check-config avertissent tant que chaque token agent n'est pas lié.",
   },
   es: {
     dry_run: "Si está activo (por defecto, incluso sin la clave), la mitigación se simula y nunca se anuncia. Mantenlo activado hasta validar la detección con telemetría real.",

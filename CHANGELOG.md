@@ -850,17 +850,37 @@ security-relevant.
   N× the ceiling" figure, and the warning that a low per-node ceiling under the recommended
   layer-3 hash *blocks* a busy client rather than slowing it, because its refusals concentrate on
   one node and cross the rollups' flood rule there; the deterministic ACME **fan-out** and the
-  serialised issuance slot; the **withdrawal contract** (`/healthz` yes — sampled on
+  serialised issuance slot; the **withdrawal contract** (`/healthz` AND a local TLS probe of the node's own `:443` yes — `/healthz` sampled on
   `controller.report_interval_seconds`, so an operator withdrawing on it sets that interval to
   their probe period; `converged:false` no; the inventory's `alive` no, and it is the brain's
   lagging view either way), a dead nexthop against a dead node, the `ip route replace` withdrawal
-  and the external-speaker variant driven by a once-a-second `/healthz` probe; the cross-node
+  and the external-speaker variant driven by that two-part probe once a second; the cross-node
   facts (a clearance cookie is honoured fleet-wide, a TLS session resumes on the node that issued
   it and on no other — see *Fixed*); **MTU** below QUIC's 1280-byte floor on one leg as an HTTP/3
   outage for the *whole* shared address, cached per destination and surviving the repair; and a
   verification checklist, including that under placement each node reports the ETag of its OWN
   document, so a shared `zones_etag` is not a fleet-health signal. `edge.mdx` and
   `edge-install.mdx` link it; the page ships in all five locales.
+- Edge track, E6.11 — the documentation close-out of milestone E6 (edge-spec §8): documentation
+  only, no product change. Every page E6's code touches now says what the acceptance rigs found
+  and the pages did not state. The edge inventory's `last_seen` is stamped when a poll starts and
+  again when it ends, so a parked poll holds its start, `holding` is what says a poll is open, and
+  a node just cut off reads `alive` for `edge.stale_after_seconds` after the change — about 15 s
+  on the defaults, the reload ending the parked poll rather than its deadline (api, edge,
+  authentication). A node
+  report over 64 KiB is `413` — the limit a node sheds detail to stay under (api). A zone's
+  address follows its placement: the node that no longer serves a name closes the connection
+  (`return 444` on `:80`, a refused handshake on `:443`), which is why a misplaced HTTP-01
+  validation fails as a connection error rather than a `404` (edge, zones, edge-install). Presence
+  events are transitions, so a node the brain never heard from is baselined as lost silently and
+  its first event is `node_alive` (api, storage). The storage writer's `dropped` and `error` name
+  different failures — a ClickHouse that is down fails fast and counts `error`, while a stalled
+  sink fills the queue and counts `dropped` (storage, metrics) — and the edge history's compressed
+  volume is given as an order of magnitude (storage). A zone and its named hostgroup must agree on
+  a tenant, the global group exempt (multi-tenancy); `edge_challenge` joins the audit endpoint's
+  action list, whose `events` is always an array, never `null` (api, audit); a binding refusal is
+  never audited (authentication). edge-spec §8 gains milestone E6's acceptance paragraph, naming
+  the three rows the rig met differently from the plan, and the same pass lands in ru/de/fr/es.
 
 ### Fixed
 - deps: `google.golang.org/grpc` 1.82.1 → 1.83.2 (an indirect dependency, through gobgp) — GO-2026-6348

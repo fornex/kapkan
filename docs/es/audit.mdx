@@ -135,7 +135,9 @@ Cada registro lleva estos campos:
 
 Una consulta contra una ventana fuera de rango devuelve `400`; un valor de `action` desconocido
 devuelve `400`; un `target` mal formado devuelve `400`. Con el almacenamiento deshabilitado la
-respuesta es `{"available": false, "events": []}` con `200`.
+respuesta es `{"available": false, "events": []}` con `200`. `events` es siempre un array: una
+ventana que no contiene ningún registro que quien llama pueda ver — el primer día de un tenant, un
+filtro que no coincide con nada — es `[]`, nunca `null`.
 
 ## Acotamiento por tenant
 
@@ -152,7 +154,7 @@ tenants.
 Los registros de auditoría viven en la tabla `audit_events` de ClickHouse y heredan el mismo TTL
 por fila `ttl_days` que el resto del [almacenamiento](/docs/storage) — la retención está acotada
 sin intervención del operator. La persistencia es de mejor esfuerzo desde la misma cola acotada:
-un ClickHouse lento o caído descarta filas en lugar de bloquear un baneo, mientras que la línea de
+un ClickHouse que no puede aceptar filas las pierde (véase Backpressure en storage) en lugar de bloquear un baneo, mientras que la línea de
 log `INFO` siempre se emite.
 
 ## Relacionado

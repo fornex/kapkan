@@ -65,6 +65,16 @@ Una etiqueta de tenant **no** es una unidad de política de mitigación — los 
 atributos BGP y el escalado siguen siendo por hostgroup. Es puramente una etiqueta de propiedad
 usada para acotar el alcance de la API.
 
+**La propiedad y la colocación son dos ejes, y no pueden contradecirse.** Una zona lleva además un
+`hostgroup` — [dónde se sirve](/docs/edge#colocar-zonas-en-los-nodos) —, y ese grupo puede llevar a
+su vez un `tenant`. No se hereda nada en ninguna dirección: una zona en un grupo etiquetado es una
+zona de la casa salvo que diga otra cosa, y la etiqueta propia de una zona nunca cambia dónde se
+ejecuta. Lo que se rechaza es un *desacuerdo*: cuando la zona y el hostgroup que nombra llevan ambos
+un tenant y los dos difieren, la recarga falla entera y las zonas anteriores siguen en servicio,
+porque una zona no puede pertenecer a dos clientes. El grupo global es la excepción, y a propósito:
+es el catch-all de la flota, no el PoP de un cliente, así que una zona etiquetada puede quedarse en
+él diga lo que diga el `tenant` de nivel superior de `kapkan.yaml`.
+
 ## Alcance del token
 
 Un [token de API](/docs/authentication) gana un `tenant` opcional, que se apoya en su rol: un
@@ -91,6 +101,13 @@ inventario de nodos](/docs/api) abarcan todos los tenants por diseño: un nodo d
 para todo el despliegue, así que acotar por tenant a nivel de nodo es una cuestión de
 [flota](/docs/scrubbing), no de token. Trata un token agent como de todo el despliegue y mantenlo
 fuera de máquinas que guarden datos de cara al cliente.
+
+Lo que estrecha un token agent es la topología, nunca la propiedad.
+[`node`](/docs/authentication#vincular-un-token-de-agente-a-su-nodo) lo vincula a una sola máquina, y
+el [alcance de colocación](/docs/edge#colocar-zonas-en-los-nodos) de un nodo edge decide qué zonas
+lleva su documento — sean de quien sean. Así que un token vinculado en un PoP que sirve las zonas de
+un solo cliente sí tiene las zonas de un solo cliente, pero las tiene por dónde está la máquina, no
+porque el token esté acotado: nada de él se coteja contra un tenant.
 </Callout>
 
 ## Aplicación

@@ -375,10 +375,13 @@ QUIC-Verbindung über den Socket, auf dem sie ankam, nicht über die Connection 
 - *Nicht unterstützt:* Connection-ID-bewusstes Steering und Verbindungsmigration **zwischen**
   Knoten (`quic_bpf on`, eine eigene Zeile des Betreibers im `main`-Kontext von nginx, trägt eine
   Verbindung nur zwischen den Workern einer Maschine); **TLS-Session-Resumption zwischen Knoten** —
-  nginx bindet eine Session über den Session-ID-Kontext an das Zertifikat des Knotens, und Kapkans
-  Zertifikate gelten pro Knoten, ein Client, der den Knoten wechselt, macht also einen vollen
-  Handshake (selten unter einem 4-Tuple-Hash; gemeinsame Ticket-Keys wurden untersucht und helfen
-  hier nicht); WebSocket über HTTP/3 (nginx implementiert RFC 9220 nicht — es bleibt auf TCP);
+  eine Session ist ein zustandsbehafteter Eintrag im eigenen Cache des Knotens, kein zustandsloses
+  Ticket trägt sie, und kein Ticket-Key wird geteilt; ein Client, der den Knoten wechselt, macht
+  also einen vollen Handshake (selten unter einem 4-Tuple-Hash; gemeinsame Ticket-Keys wurden in E5
+  untersucht und werden nicht angeboten — siehe edge-spec §3). Auf dem Knoten, der sie ausgestellt
+  hat, wird eine Session wie gewohnt wieder aufgenommen, denn der gemeinsame Cache ist auch auf dem
+  Catch-all-Default-Server deklariert, wo nginx Sessions nachschlägt. Ebenfalls nicht unterstützt:
+  WebSocket über HTTP/3 (nginx implementiert RFC 9220 nicht — es bleibt auf TCP);
   0-RTT.
 
 Zwei Dinge zum Mitdenken: UDP-Flows brauchen Conntrack-Timeouts, die eine Firewall ihnen
@@ -428,6 +431,21 @@ wenn sie keine nennt; der Geltungsbereich eines Knotens ist `edge.nodes[].hostgr
 - **Der Geltungsbereich folgt der Adressierung.** Eine Hostgroup braucht mindestens ein Präfix in
   `networks` — das VIP-Präfix des PoPs, das Sie ohnehin schützen. Platzierung ist keine zweite
   Topologie; es ist die, die Sie bereits deklariert haben.
+- **Die Adresse einer Zone folgt ihrer Platzierung — Sie bewegen sie.** Kapkan rendert
+  Konfiguration; es lenkt niemals Verkehr. Eine Zone auf `edge-us` zu platzieren, erreicht Clients
+  erst, wenn der Name auf die Knoten auflöst, die `edge-us` auflisten, und der Knoten, der sie nicht
+  mehr bedient, antwortet für sie in dem Moment nicht mehr, in dem das neue Dokument landet: Der
+  Name fällt auf das Catch-all von Kapkan durch, das die Verbindung auf `:80` schließt (das
+  `return 444` von nginx) und den Handshake auf `:443` abweist. Eine Anfrage, die am falschen Knoten ankommt,
+  ist eine abgebrochene Verbindung, kein `404` und keine veraltete Seite — beim Client eine leere
+  Antwort oder ein abgewiesener Handshake, und genau so sind sie zu lesen: falscher Knoten, nicht
+  kaputter Origin. Auf einem Knoten mit `omit_catch_all: true` gibt es kein Kapkan-Catch-all, und
+  Ihr eigener Default-Server antwortet stattdessen — das Symptom ist dann, was dieser Server auf
+  einen unbekannten Host zurückgibt: ein `404`, eine Startseite, eine Weiterleitung. Auf so einem
+  Knoten lesen Sie *das* als falschen Knoten. **Eine Zertifizierungsstelle ist genau so ein Client.** Sie löst die Zone auf, wie die
+  Welt es tut, eine HTTP-01-Validierung, die außerhalb der Platzierung landet, scheitert also als
+  Verbindungsfehler — bewegen Sie den DNS-Eintrag (oder das Anycast-Präfix) in derselben Änderung,
+  die die Zone bewegt, und der Knoten, der sie gewinnt, bestellt bei seinem ersten Poll.
 - **Jeder Knoten bekommt sein eigenes Dokument** — genau die Zonen, die sein Geltungsbereich
   abdeckt, mit ihren Zertifikats-Freigaben, den verteilten ACME-Challenges, den Freigabeschlüsseln
   und den Hebeln, und mit seinem eigenen ETag. Ein Knoten, der den Ausstellungs-Slot einer Zone
@@ -490,14 +508,19 @@ Knoten nicht mehr bedient.
   Ergebnisse der Freigabeseite, ob eine zonenweite Challenge aktiv ist — siehe
   [Metriken](/docs/metrics#edge-knoten).
 - **Das Inventar des Gehirns**, `GET /api/v1/edge/nodes`, verbindet die Lebendigkeit jedes
-  konfigurierten Knotens mit seinem letzten Selbstreport: Version, Dry-Run, gerenderter ETag, Art
+  konfigurierten Knotens — den Zonen-Poll, und nichts sonst — mit seinem letzten Selbstreport:
+  Version, Dry-Run, gerenderter ETag, Art
   und Version des Terminators, seine HTTP/3-Bereitschaft (`terminator.h3.state`: `ready`,
   `no_module`, `node_off`, `unknown`, mit einem Hinweis, wenn der nginx-Kern des Builds in den
   Bereich eines veröffentlichten QUIC-Sicherheitshinweises fällt),
   Generation und Testergebnis, Zertifikate (niemals ein Schlüssel)
   und den **Zonenabschnitt** — das letzte Zehn-Sekunden-Fenster jeder Zone, die Quellen, die sie
   abgewiesen oder herausgefordert hat oder hätte, und ob ihre Stufe dort greift oder nur eine
-  Vorschau zeigt. Siehe [die API](/docs/api#der-edge-kanal).
+  Vorschau zeigt. Eine Sichtung wird gestempelt, wenn ein Poll beginnt, und noch einmal, wenn er
+  endet — solange ein Poll geparkt ist, hält `last_seen` also dessen Beginn, und die Sichtung eines
+  gesunden Knotens ist routinemäßig älter als `edge.stale_after_seconds`; was sagt, dass gerade
+  jetzt ein Poll offen ist, ist `holding`, und ein geparkter Knoten ist lebendig, was auch immer
+  `last_seen` sagt. Siehe [die API](/docs/api#der-edge-kanal).
 - **Die Zonen über die Flotte hinweg**, `GET /api/v1/edge/zones/status`, listet jede Zone der
   Zonendatei auf und mischt die Reports der lebendigen Knoten hinein (ein
   [tenant-bezogenes](/docs/multi-tenancy) Token bekommt seine eigenen Zonen): Raten summiert, die
@@ -516,7 +539,17 @@ Knoten nicht mehr bedient.
 - **Ein einziger Default-Server.** Kapkan rendert sein eigenes Catch-all-`default_server` auf
   `:80` und `:443`, das unbekannte Hosts und SNI abweist. Wenn Ihre `nginx.conf` bereits eines
   deklariert (Debians Default-Site tut das), schlägt `nginx -t` mit *a duplicate default server*
-  fehl — setzen Sie `omit_catch_all: true` und lassen Sie Ihre Server diese Rolle übernehmen.
+  fehl — setzen Sie `omit_catch_all: true` und lassen Sie Ihre Server diese Rolle übernehmen. Geben
+  Sie Ihrem `:443`-Default-Server die drei Sitzungszeilen der Zonen — `ssl_session_cache
+  shared:kapkan_ssl:10m; ssl_session_timeout 1d; ssl_session_tickets off;` —, denn nginx liest
+  Cache, Lebensdauer und Ticket-Einstellung einer TLS-Sitzung aus dem Kontext des Default-Servers,
+  auch nachdem SNI eine Zone ausgewählt hat: Ohne sie nimmt kein wiederkehrender Client auf diesem
+  Knoten eine Sitzung wieder auf und behält auch keine über nginx' Fünf-Minuten-Standard hinaus. Die
+  Größe muss genau `10m` sein (eine zweimal in unterschiedlicher Größe deklarierte Shared Zone lässt
+  `nginx -t` scheitern); ein Default-Server, der bereits einen Shared Cache deklariert (Debians und
+  Mozillas Vorlagen liefern `shared:SSL:10m`), behält ihn — jeder Cache auf diesem Server bedient
+  die Zonen — und ergänzt nur die Lebensdauer und `ssl_session_tickets off`. Kapkans eigenes
+  Catch-all trägt alle drei.
 - **Origins werden zur Testzeit aufgelöst.** Ein Hostnamen-Origin wird einmal aufgelöst, wenn
   nginx die Konfiguration lädt; einer, der sich nicht auflösen lässt, lässt `nginx -t` für die
   gesamte Generation fehlschlagen (und wird erneut versucht). Bevorzugen Sie Adressen.

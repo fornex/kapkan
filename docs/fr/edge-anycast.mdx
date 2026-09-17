@@ -391,7 +391,7 @@ parce que le nœud devant vous ne sert pas.
 
 Là où l'adresse est annoncée plutôt que routée statiquement, mettez un speaker sur chaque nœud et
 laissez-le annoncer la VIP `/32` tant que le prédicat propre à ce nœud tient. Le banc a un bras
-supplémentaire qui fait exactement cela avec bird2, **hors du chemin d'acceptation** et derrière
+supplémentaire qui exécute la moitié `/healthz` de cette boucle avec bird2, **hors du chemin d'acceptation** et derrière
 `ANYCAST_BGP=1` : il est donc sauté par défaut et ne porte aucun chiffre enregistré :
 
 ```sh

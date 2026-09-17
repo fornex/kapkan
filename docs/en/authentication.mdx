@@ -87,8 +87,10 @@ The brain then refuses that token on every route where a node names itself — t
 is another node's, and it refuses **before** doing anything with the name: no presence is stamped,
 no report stored, no slot granted, no key authorization published. The refusal is a uniform `403`
 that does not name the bound node, one warning a minute per token in the brain's log, and a count
-in `kapkan_api_node_binding_refused_total{route}`. A bound token that polls without `?node=` is
-refused as well: its binding says which node it is.
+in `kapkan_api_node_binding_refused_total{route}`. No [audit](/docs/audit) row is written: the
+audit trail attributes what an operator changed, and a refused machine changed nothing — the log
+line and the counter are where a misconfigured or stolen node token shows up. A bound token that
+polls without `?node=` is refused as well: its binding says which node it is.
 
 ```yaml
 api:
@@ -120,6 +122,17 @@ agent token an error on unscoped fleets too is scheduled for a MAJOR release.
 
 Presence is stamped only by agent tokens: an operator polling with `?node=X` receives X's document
 as a **preview** and does not make X look alive.
+
+**Give a migration step time to show.** A token change reaches a poll that is already parked: the
+reload wakes it at once and ends it with the answer a fresh poll would now get (`401` for a token
+that is gone, `403` for one whose binding moved), and the node reconnects with whatever it now
+has. The *inventory* is one window behind, because a sighting is stamped when a poll starts and
+again when it ends — that refusal included — so a node you have just cut off reads `alive` for
+`edge.stale_after_seconds` after the change, about 15 s on the defaults, and you see the flip at
+your next read of the inventory. `last_token` needs no such wait: it is the token of the node's last accepted poll, so it flips at
+the node's first poll with the new token — and never for a token the brain refuses. The hold bounds something else: a perfectly
+healthy parked node's `last_seen` is up to a hold (25 s) old, which is normal — `holding` is what
+says its poll is open.
 
 `token_env` and `tokens` are **mutually exclusive** — `token_env` is exactly one operator
 token. A request is matched against every configured token (in constant time); the highest
