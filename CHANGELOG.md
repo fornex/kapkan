@@ -805,6 +805,28 @@ security-relevant.
   either node, and `New` on the other in both directions — and still exercises the supported
   `omit_catch_all` knob, under which the same holds, so the cross-node guarantee of edge-spec §3
   is not accidentally true.
+- Edge track, E6.9 (guide) — `docs/en/edge-anycast.mdx`, "One address, many nodes", written
+  from the acceptance rig rather than from the plan and wired into the sidebar's edge group: the
+  topology (the VIP as a `/32` on each node's `lo` against Kapkan's address-less listens, one
+  ECMP route with a nexthop per node, one `agent` token per node bound with `api.tokens[].node`,
+  the return path as route-leaking with VRF as its variant), the two **hash forms** as a choice
+  the operator makes (`fib_multipath_hash_policy`: layer 3 pins a client to one node, layer 4
+  spreads it over both, TCP and QUIC alike) and what each does to a **per-node** `policy.rate.rps`
+  — the recorded L3/L4 table with its batch durations, the `rps + rps·T` range behind the "up to
+  N× the ceiling" figure, and the warning that a low per-node ceiling under the recommended
+  layer-3 hash *blocks* a busy client rather than slowing it, because its refusals concentrate on
+  one node and cross the rollups' flood rule there; the deterministic ACME **fan-out** and the
+  serialised issuance slot; the **withdrawal contract** (`/healthz` yes — sampled on
+  `controller.report_interval_seconds`, so an operator withdrawing on it sets that interval to
+  their probe period; `converged:false` no; the inventory's `alive` no, and it is the brain's
+  lagging view either way), a dead nexthop against a dead node, the `ip route replace` withdrawal
+  and the external-speaker variant driven by a once-a-second `/healthz` probe; the cross-node
+  facts (a clearance cookie is honoured fleet-wide, a TLS session resumes on the node that issued
+  it and on no other — see *Fixed*); **MTU** below QUIC's 1280-byte floor on one leg as an HTTP/3
+  outage for the *whole* shared address, cached per destination and surviving the repair; and a
+  verification checklist, including that under placement each node reports the ETag of its OWN
+  document, so a shared `zones_etag` is not a fleet-health signal. `edge.mdx` and
+  `edge-install.mdx` link it; the page ships in all five locales.
 - Edge track, E6.11 — the documentation close-out of milestone E6 (edge-spec §8): documentation
   only, no product change. Every page E6's code touches now says what the acceptance rigs found
   and the pages did not state. The edge inventory's `last_seen` is stamped when a poll starts and

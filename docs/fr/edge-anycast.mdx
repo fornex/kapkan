@@ -1,0 +1,549 @@
+export const metadata = {
+  title: "Une adresse, plusieurs nœuds (anycast)",
+  description:
+    "Mettre plusieurs nœuds edge derrière une seule adresse avec ECMP ou anycast : la topologie, les formes de hachage et ce que chacune fait d'un plafond de débit par nœud, la distribution ACME déterministe, ce qui dit « retire-moi », et les faits qu'une adresse partagée ne partage pas.",
+};
+
+# Une adresse, plusieurs nœuds (anycast)
+
+<Callout type="info" title="Votre réseau annonce l'adresse ; Kapkan fait tourner les machines derrière">
+Kapkan n'a pas d'avis sur le routage et n'y touche jamais. **Votre** routeur, votre speaker ou le
+répartiteur de charge de votre cloud place une adresse devant plusieurs
+[nœuds edge](/docs/edge) ; Kapkan donne à chacune de ces machines ses certificats, sa configuration
+et son propre service de décision, et vous dit laquelle est apte à servir. Rien dans Kapkan
+n'annonce, ne retire ni n'oriente l'adresse d'une zone — le speaker BGP du cerveau existe pour les
+victimes sous attaque, jamais pour le routage de service.
+</Callout>
+
+Tout ce qui figure sur cette page a été exécuté sur un vrai noyau, avec un vrai saut de routeur, un
+vrai nginx, un vrai HTTP/3 et une vraie autorité de certification ACME avant d'être écrit : le banc
+d'acceptation est `engine/scripts/labnet/edge-e6-anycast.sh`, deux nœuds derrière une seule
+`198.51.100.7/32` routée comme une route ECMP sur deux liens point à point, la politique de hachage
+du noyau étant commutée d'un bras à l'autre. Les chiffres ci-dessous sont cités avec les conditions
+qui les ont produits, parce que la plupart bougent quand ces conditions bougent.
+
+## Ce qu'apporte une adresse partagée, et ce qu'elle n'apporte pas
+
+Elle apporte un nom, une histoire de certificats et une politique sur N machines, le réseau
+choisissant la machine. Elle ne met en commun **rien** de ce que les nœuds comptent ou mettent en
+cache. La phrase à garder en tête : **le cerveau distribue la politique, jamais les verdicts.**
+
+- **Tout plafond de débit est par nœud.** `policy.rate.rps` est un seau à jetons sur la machine qui
+  sert la requête. Deux nœuds derrière une adresse, ce sont deux seaux, et une source que le réseau
+  étale sur les deux rencontre chacun séparément. Voir
+  [les plafonds par nœud](#les-plafonds-par-nœud-et-le-hachage-que-vous-avez-choisi) — c'est le
+  fait qui surprend le plus souvent un opérateur qui passe d'un nœud à trois.
+- **Toute table de verdicts est par nœud.** Les rollups qui promeuvent une source de flood en refus
+  sont les fenêtres de dix secondes du nœud lui-même. Une source bloquée sur un nœud ne l'est pas
+  chez son voisin.
+- **Tout cache de sessions TLS est par nœud**, et une session émise sur un nœud n'est jamais
+  reprenable sur un autre — [ce qui ne franchit pas](#ce-qui-franchit-les-nœuds-et-ce-qui-ne-franchit-pas).
+- **Tout certificat appartient au nœud.** Deux nœuds servant un même nom servent deux certificats
+  feuille différents, émis par deux commandes ACME depuis deux clés de compte qui ne quittent
+  jamais leurs machines. Le banc a lu les deux empreintes : elles diffèrent.
+- **Le laissez-passer appartient à la flotte.** Un visiteur qui résout
+  [le palier de preuve de travail](/docs/edge#le-palier-de-preuve-de-travail) sur un nœud est
+  autorisé sur tous : les clés de signature descendent dans le document.
+- **Le levier et le fichier de zones appartiennent à la flotte.** Un changement de débit, un
+  palier, un levier atteignent chaque nœud à son prochain sondage et ne rechargent rien — la
+  [séparation rapide/lent](/docs/edge#la-séparation-rapidelent) ne change pas avec le nombre de
+  nœuds.
+
+## La topologie
+
+```
+                     ┌── lien A (10.0.1.0/30) ──▶ edge-1   198.51.100.7/32 sur lo
+ client ──▶ routeur ─┤                                      kapkan edge · nginx · token a1
+   198.51.100.7      └── lien B (10.0.2.0/30) ──▶ edge-2   198.51.100.7/32 sur lo
+   (une route ECMP,                                         kapkan edge · nginx · token a2
+    deux nexthops)                                                │
+                                                                  └── unicast ──▶ cerveau (API)
+```
+
+Quatre règles, et le banc est bâti exactement là-dessus :
+
+1. **La VIP vit sur la loopback de chaque nœud**, en `/32` :
+
+   ```sh
+   # sur chaque nœud derrière l'adresse
+   ip addr add 198.51.100.7/32 dev lo
+   ```
+
+   Kapkan génère des directives `listen` sans adresse, donc nginx répond sur l'adresse qu'a
+   utilisée le client et le rendu ne mentionne jamais la VIP. Ni `edge.yaml` ni le fichier de zones
+   ne la nomment.
+
+2. **Le routeur porte une route avec un nexthop par nœud**, pas une route par nœud :
+
+   ```sh
+   # sur le routeur en amont
+   ip route replace 198.51.100.7/32 \
+     nexthop via 10.0.1.2 dev leg-a weight 1 \
+     nexthop via 10.0.2.2 dev leg-b weight 1
+   ip route flush cache
+   ```
+
+   Une route à deux nexthops est une route ECMP ; la vérification est
+   `ip route show 198.51.100.7/32` qui affiche deux lignes `nexthop`. Un speaker (bird, FRR) qui
+   accepte les annonces des deux nœuds et les fusionne produit la même chose — voir
+   [la variante BGP](#la-variante-bgp).
+
+3. **Chaque nœud atteint le cerveau en unicast, sur sa propre adresse, avec son propre token
+   lié.** Un token `agent` par nœud, lié via `api.tokens[].node`, n'est pas un raffinement ici : le
+   cerveau estampille la présence et sert le document de chaque nœud par son nom, et un token
+   partagé derrière une adresse partagée vide les deux de leur sens.
+
+   ```yaml
+   # kapkan.yaml sur le cerveau
+   api:
+     tokens:
+       - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
+       - { name: edge-2, token_env: KAPKAN_EDGE_2_TOKEN, role: agent, node: edge-2 }
+   edge:
+     nodes:
+       - { name: edge-1 }
+       - { name: edge-2 }
+     stale_after_seconds: 15
+   ```
+
+   Le banc vérifie les deux moitiés : le cerveau sert `GET /api/v1/edge/zones?node=edge-1` au token
+   d'edge-1, et répond `403` quand ce même token demande le nom d'edge-2. Voir
+   [lier un token agent à son nœud](/docs/authentication#lier-un-token-agent-à-son-nœud).
+
+4. **Les configurations des nœuds sont identiques à `controller.name` près** — et au token que
+   chaque nœud lit dans son propre environnement. Rien d'autre, dans une adresse partagée, ne
+   demande une valeur par nœud. Les deux `edge.yaml` du banc diffèrent en outre par
+   `state_dir`/`sockets_dir`/`terminator.pid_file`, `status_listen` et `terminator.main_conf`, mais
+   seulement parce que ses deux « nœuds » partagent un hôte et ne peuvent pas partager ces chemins
+   et ces ports ; sur des machines séparées, c'est le même fichier avec un nom changé. Les deux
+   passent `kapkan edge -check`.
+
+### Le chemin de retour
+
+Une réponse au client porte l'adresse sur laquelle la requête est arrivée : sur un nœud à un seul
+lien montant, la VIP repart par le seul chemin qui existe et il n'y a rien à configurer. Deux
+choses demandent tout de même du soin :
+
+- **Le trafic que le nœud émet lui-même doit utiliser son adresse unicast.** Le sondage du cerveau,
+  le rapport et la commande ACME sortent par la route par défaut du nœud avec sa propre adresse
+  source — c'est ce qui rend le nœud identifiable. Ne donnez pas à la VIP une route qui en fasse la
+  source préférée ; un `/32` sur `lo` ne le fait pas.
+- **Un nœud dont la route par défaut est un lien d'administration ou vers le cerveau doit envoyer
+  les réponses issues de la VIP par le lien de service.** Donnez au trafic émis depuis l'adresse
+  partagée son propre contexte de routage, la forme portable d'abord :
+
+  ```sh
+  # une table dédiée au trafic émis depuis l'adresse partagée
+  ip route add default via 10.0.1.1 dev leg-a table 100
+  ip rule  add from 198.51.100.7 lookup 100
+  ```
+
+  Soyons clairs sur ce que cela fait : la table 100 ne contient **qu'une** route par défaut, donc
+  elle *épingle* toute réponse issue de la VIP sur leg-a, quel que soit le lien par lequel la
+  requête est arrivée. Avec un seul lien de service, c'est exactement ce qu'il faut. Avec deux
+  liens de service, donnez plutôt à la table 100 une route par défaut multichemin —
+  `ip route add default table 100 nexthop via 10.0.1.1 dev leg-a nexthop via 10.0.2.1 dev leg-b` —
+  et acceptez que la réponse parte selon le hachage du noyau plutôt que par le lien d'entrée ;
+  repartir par le lien exact sur lequel un paquet est arrivé relève du suivi de connexions
+  (`CONNMARK` restaurée en fwmark, avec une règle par lien), pas d'une règle sur l'adresse source.
+  Dans les deux cas la réponse sort par un lien de service, ce dont a besoin un équipement amont
+  avec `rp_filter` ou un pare-feu à états.
+
+  Un **périphérique VRF** (`ip link add vrf-edge type vrf table 100`, puis y rattacher le lien) est
+  la même table atteinte par un périphérique au lieu d'une règle, sur les noyaux compilés avec
+  `CONFIG_NET_VRF`. La forme par fuite de route ci-dessus est celle vérifiée au laboratoire
+  d'intégration réseau et fonctionne sur tout noyau avec `CONFIG_IP_MULTIPLE_TABLES` ; les nœuds du
+  banc anycast ont un lien chacun, donc traitez la recette à deux liens montants comme la
+  [recette du chemin de retour](/docs/network-integration#le-chemin-de-retour) appliquée ici, et
+  non comme un bras de ce banc. Les chemins asymétriques amènent aussi avec eux le
+  [piège `rp_filter`](/docs/network-integration#rp_filter-et-la-réponse-asymétrique).
+
+### Le placement, si la flotte a des points de présence
+
+Les nœuds derrière une adresse doivent tous servir les zones de cette adresse : donnez à chacun le
+groupe d'hôtes de la zone dans `edge.nodes[].hostgroups`, ou laissez la zone globale sur des nœuds
+sans périmètre. Une zone placée loin d'un nœud n'y est pas générée du tout — la zone placée du banc
+n'apparaît jamais sur le nœud qui ne liste pas son groupe, et ce nœud ne répond rien pour le nom.
+La règle et ses conséquences sont dans
+[Placer les zones sur les nœuds](/docs/edge#placer-les-zones-sur-les-nœuds).
+
+## Sur quel nœud atterrit un client : le hachage
+
+Le noyau choisit un nexthop en hachant le paquet, et **les champs qu'il hache sont un sysctl que
+vous réglez**, pas une propriété de l'anycast :
+
+```sh
+sysctl -w net.ipv4.fib_multipath_hash_policy=0   # couche 3 : adresses source et destination
+sysctl -w net.ipv4.fib_multipath_hash_policy=1   # couche 4 : le quadruplet, ports compris
+ip route flush cache                             # le cache en cours garde l'ancienne décision
+```
+
+| Politique | Ce qu'elle hache | Ce qu'obtient un client | Quand la prendre |
+| --- | --- | --- | --- |
+| `0` (couche 3) | adresses source et destination | **Un nœud**, pour chaque connexion, jusqu'à ce que la topologie change | Placement stable et débogable : un client garde un nœud, son cache de sessions reste chaud et son QUIC ne bouge pas. La valeur recommandée — avec la réserve sur le plafond ci-dessous |
+| `1` (couche 4) | le quadruplet, ports compris | **Les deux nœuds**, connexion par connexion | Une répartition régulière entre les nœuds, au prix de la dispersion des connexions d'un même client, et de sa comptabilité de débit, sur tous |
+
+Sur le banc, 40 connexions fraîches d'un même client sous la politique `0` ont toutes porté le nom
+du même nœud ; sous la politique `1`, ces mêmes 40 ont atteint les deux nœuds, et 40 requêtes
+`--http3-only` aussi — la même politique hache le quadruplet UDP, donc **QUIC est réparti
+exactement comme TCP**, et les deux nœuds ont compté leur part sous
+`kapkan_edge_requests_total{protocol="h3"}` et dans le `h3_requests` du rapport, par fenêtre.
+
+Aucune des deux formes n'est « collante » en un sens sur lequel une connexion pourrait compter. Un
+changement d'adresse du client (Wi-Fi vers LTE, une réattribution NAT) est une nouvelle entrée de
+hachage sous l'une comme sous l'autre, et sous la couche 4 chaque nouvelle connexion est un
+nouveau tirage : elle atterrit sur un nœud autre que le précédent dans environ (N−1)/N des cas —
+une connexion sur deux avec deux nœuds. Cette fraction est exactement le rythme auquel un client
+paie une poignée de main TLS complète, puisqu'une session ne vit que sur le nœud qui l'a émise. Une
+connexion QUIC qui atterrit sur un nœud qui ne l'a jamais vue se reconnecte simplement : nginx
+route QUIC par la socket sur laquelle elle est arrivée, pas par l'identifiant de connexion, et la
+migration de connexion **entre** nœuds n'est pas prise en charge — voir
+[ce que nginx ne sait pas faire](/docs/edge#http3-quic).
+
+## Les plafonds par nœud, et le hachage que vous avez choisi
+
+`policy.rate.rps` est appliqué sur le nœud qui sert la requête, donc une source étalée sur N nœuds
+peut être admise jusqu'à N fois le plafond. C'est la moitié bien connue. La moitié qui coûte un
+incident aux opérateurs, c'est que **les deux formes de hachage diffèrent en nature, pas seulement
+en degré.**
+
+Le banc a fixé `policy.rate.rps: 5` et lancé 40 connexions d'une même source sur deux nœuds :
+
+| Politique de hachage | Servies | Refusées (`429`) | `deny_rate` edge-1 / edge-2 | Lot |
+| --- | --- | --- | --- | --- |
+| `0` (couche 3) | 6 | 34 | 0 / 34 | 0,3 s |
+| `1` (couche 4) | 12 | 28 | 10 / 18 | 0,2 s |
+
+Lisez les deux lignes l'une contre l'autre, pas séparément. Quel nœud refuse, et la répartition
+exacte par nœud, sont l'affaire du hachage et bougent d'une exécution à l'autre — une reprise a
+réparti les refus de la couche 4 en 14/14 au lieu de 10/18 — alors que le nombre de requêtes
+servies et le rapport, eux, n'ont pas bougé.
+
+- **Sous la couche 4, la source a obtenu 2,0× de requêtes admises.** Ce chiffre est une *plage*,
+  pas une constante : le seau d'un nœud contient `rps` jetons et se remplit de `rps` par seconde,
+  donc un lot qui dure `T` secondes est admis à `rps + rps·T` par nœud, et le multiplicateur ne
+  s'approche du nombre de nœuds que tant que la part de la rafale sur chaque nœud dépasse encore sa
+  propre allocation. Le banc vérifie 1,5×–2,5× avec la durée du lot notée à côté des comptes —
+  d'où la colonne *lot* dans le tableau. **Dimensionnez un `rps` par nœud à peu près comme le
+  plafond que vous visez pour la flotte divisé par le nombre de nœuds**, et attendez-vous à ce que
+  le débit réellement admis se situe entre cette valeur et le plafond lui-même.
+- **Sous la couche 3, toute la rafale atterrit sur un seul nœud** — et 34 refus dans la fenêtre de
+  dix secondes d'un nœud franchissent la règle de flood des rollups (au moins 20 refus, au moins
+  30 % des requêtes décidées de cette source). Dans une zone dont `challenge` vaut `off` ou
+  `manual` — celle du banc vaut `off` —, cela promeut la source, là, en **refus de table** pour
+  `DenyTTL` : une minute pour commencer, doublée jusqu'à dix en cas de récidive. Le banc sonde
+  ensuite cette source et exige le `403`. Dans une zone `challenge: auto`, c'est
+  [l'échelle](/docs/edge#léchelle) qui prend le premier franchissement : la source est envoyée au
+  palier de preuve de travail et n'est refusée que si elle continue à flooder après l'avoir passé
+  ou pendant qu'elle est mise au défi — un navigateur passe, un bot non. Sous la couche 4, ces
+  mêmes 40 connexions se sont réparties 10/18, aucun nœud n'a franchi le seuil, et les deux nœuds
+  rapportent toujours la source comme `allow` dans leurs `top_sources`.
+
+<Callout type="warning" title="Un rps par nœud trop bas sous un hachage de couche 3 bloque un client actif">
+Sous la couche 4, une source au-dessus de son plafond est *ralentie* : elle collectionne des `429`
+avec `Retry-After` et reste `allow`. Sous la couche 3, la même rafale est *bloquée* : elle se
+concentre sur un nœud et y franchit la règle de flood. Dans une zone avec `challenge: off` ou
+`manual`, c'est un `403` pour `DenyTTL` tout de suite — une promotion qu'aucun `429` n'annonce et
+dont aucun autre nœud n'a connaissance. Dans une zone `challenge: auto`, c'est d'abord
+[le palier](/docs/edge#léchelle) et le refus seulement si la source continue à flooder ensuite —
+atterrissage plus doux, mais toujours la décision d'un seul nœud sur un client que les autres
+trouvent normal. Si vous faites tourner le hachage de couche 3 recommandé, réglez le plafond par
+nœud sur le client légitime le plus actif que vous ayez, et surveillez
+`kapkan_edge_decisions_total{result="deny_rate"}` par nœud avant de le resserrer.
+</Callout>
+
+Une requête refusée pour dépassement de débit ne porte **aucun** en-tête nommant le nœud — la
+location `@kapkan_denied` du rendu déclare son propre `add_header`, et nginx abandonne le jeu
+hérité partout où une location en déclare un — donc comptez les refus sur les `/metrics` de chaque
+nœud, pas sur la réponse.
+
+## Certificats : la distribution est déterministe
+
+Chaque nœud commande son propre certificat pour le nom partagé, et la validation HTTP-01 de
+l'autorité arrive sur la VIP — elle atterrit donc sur le nœud que choisit le hachage, qui n'est
+généralement **pas** celui qui a commandé. Cela fonctionne parce que le nœud qui commande publie sa
+réponse au défi vers le cerveau, et que le cerveau la distribue dans le document de chaque nœud qui
+sert la zone.
+
+Le banc le prouve de la seule manière qui ne soit pas circulaire : il épingle la route sur edge-2
+seul pendant toute l'émission, de sorte que le certificat d'edge-1 n'a pu être validé que par le
+jeton de défi distribué à edge-2. Les deux nœuds se sont retrouvés avec leurs propres certificats
+pour le nom partagé, avec des empreintes de feuille différentes.
+
+Deux autres choses que le banc cloue, et qui comptent toutes deux sur une adresse partagée :
+
+- **L'émission est sérialisée par zone — ce qui étale les commandes, mais ne les réduit pas.**
+  Demander le créneau d'une zone pendant qu'un autre nœud le détient reçoit `granted: false` avec
+  le nom du détenteur et un `retry_after_seconds` : les nœuds commandent l'un après l'autre plutôt
+  que tous à la fois. Ils commandent toujours N certificats : chaque nœud détient sa propre
+  feuille, donc une émission d'un nom placé sur N nœuds coûte N contre le
+  [plafond de doublons](/docs/edge#limites-à-connaître) de l'autorité — environ cinq par semaine
+  chez Let's Encrypt, compté par placement. **Une flotte plus grande que ce plafond sur un seul nom
+  a besoin d'`acme.fallback` ou de comptes d'autorité séparés** ; aucune sérialisation ne vous
+  achètera le sixième certificat. Le créneau est de plus indicatif : un nœud qui l'a attendu 15
+  minutes commande quand même — c'est un étaleur, jamais un verrou.
+- **Un nœud redémarré ne commande rien.** Le banc redémarre un nœud et retrouve ses certificats
+  depuis le disque : son propre `kapkan_edge_acme_attempts_total` reste à `0` et il ne demande
+  aucun créneau au cerveau.
+
+## Retrait : ce qui dit « retire-moi »
+
+Une adresse partagée ne vaut que ce que vaut ce qui cesse d'envoyer du trafic à un nœud cassé.
+Retirez sur un prédicat en deux parties — le signal propre à Kapkan **et** une sonde de l'écouteur
+lui-même — et ignorez les deux non-signaux tentants.
+
+| Signal | Retirer là-dessus ? | Ce qu'a vu le banc |
+| --- | --- | --- |
+| **`/healthz` sur `status_listen` répond `503`** | **Oui** | Le nginx du nœud a été tué ; `/healthz` est passé à `503` **495 ms** plus tard, avec `controller.report_interval_seconds: 1` sur le banc |
+| **Une sonde TLS locale du `:443` du nœud lui-même avec le SNI de la zone échoue** | **Oui** | Pas un bras du banc : `/healthz` échantillonne le fichier pid du terminateur au tic du rapport, il ne peut donc pas voir un écouteur bloqué, un certificat expiré ou une poignée de main TLS refusée. Sondez ce que fait un client |
+| `converged: false` dans l'état du nœud | **Non** | Un document que le nœud a refusé : la génération testée précédente a continué à servir, `/healthz` est resté `200`, et 20 requêtes sur 20 à travers la VIP ont été servies — edge-2 parmi elles |
+| L'inventaire du cerveau dit `alive: false` | **Non** | C'est la vue du cerveau sur un sondage, pas la vue du nœud sur lui-même, et elle retarde de `stale_after_seconds` |
+
+**Retirez dès que l'un des deux signaux « oui » tombe, et n'annoncez que tant que les deux
+tiennent.** Ils répondent à des questions différentes : `/healthz` dit que Kapkan croit le
+processus terminateur vivant, la sonde dit que la machine mène réellement une poignée de main TLS à
+son terme et sert la zone. Sur le nœud lui-même :
+
+```sh
+# cette machine sert-elle vraiment la zone ? — depuis le nœud, contre son propre écouteur
+curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 -o /dev/null https://shop.example.com/
+```
+
+C'est `--resolve` qui en fait un vrai test : la requête porte le SNI et l'en-tête Host de la zone,
+donc un certificat expiré, un rendu cassé ou une origine morte la font échouer, tandis que
+`127.0.0.1` garde la sonde à l'écart de l'adresse partagée et hors du hachage.
+
+<Callout type="warning" title="/healthz est échantillonné au tic du rapport">
+La vérification de vivacité du terminateur chevauche `controller.report_interval_seconds` —
+**10 s par défaut**, 1 s sur le banc. `/healthz` ne peut pas vous parler d'un nginx mort plus vite
+que cet intervalle, donc **un opérateur qui retire sur `/healthz` règle cet intervalle sur la
+période de sonde qu'il veut** et ne sonde pas plus vite. La vérification a aussi besoin d'un
+`terminator.pid_file` renseigné : sans lui, le nœud n'a rien à vérifier et la mort est invisible.
+Et c'est de toute façon un échantillon de *pid* — un processus maître vivant avec un écouteur
+bloqué se lit `200`, et c'est toute la raison pour laquelle la sonde TLS locale est l'autre moitié
+du prédicat.
+</Callout>
+
+### Ce qui arrive si personne ne retire
+
+La route continue de pointer vers le nœud mort et le hachage continue de lui envoyer une part du
+trafic. Avec l'un des deux nœuds tué net sous un hachage de couche 4, les 40 connexions du banc se
+sont réparties en **16 échecs de connexion et 24 servies** — les échecs étant des `000` côté
+client, aucune réponse du tout, pas un refus. Quel nœud échoue et la répartition exacte sont
+l'affaire du hachage et bougent d'une exécution à l'autre ; le fait qu'une part échoue, non. Une
+connexion keepalive établie vers le nœud survivant a répondu `200` sur cette même connexion ; celle
+vers le nœud mort avait simplement disparu. **Une adresse partagée n'offre absolument aucune
+protection à une connexion établie.**
+
+Pendant ce temps le cerveau s'en aperçoit, lentement et pour la seule forme : l'inventaire est
+passé à `alive: false` **5103 ms** après la mise à mort, soit `stale_after_seconds: 5` après la
+dernière apparition du nœud mort plus le tic auquel le cerveau l'a remarqué. Rien dans ce
+basculement ne touche au routage : la route VIP du routeur est restée identique octet pour octet du
+début à la fin, le journal du cerveau n'a jamais mentionné l'adresse, et sa liste de blocage —
+l'ensemble qu'annonce son speaker — n'en portait rien non plus.
+
+### Un nexthop mort ne demande pas d'opérateur ; un nœud mort, si
+
+Coupez le **lien** au lieu du nœud et le routeur marque le nexthop `dead` tout seul : les 40
+requêtes ont été servies sans la moindre action de l'opérateur. C'est la distinction qui vaut d'être
+intégrée — *un routeur directement connecté remarque la perte d'un lien, un saut routé non.* Un
+nœud mort alors que son lien est debout est invisible au routage, et c'est exactement pourquoi il
+vous faut un retrait piloté par la santé.
+
+Le retrait lui-même est un changement de RIB, rien de plus :
+
+```sh
+# sur le routeur : cesser d'utiliser le nœud cassé
+ip route replace 198.51.100.7/32 via 10.0.1.2 dev leg-a
+ip route flush cache
+```
+
+Le premier lot entièrement en `200` du banc s'est terminé **45 ms** après cette commande, suivi de
+40 sur 40 en TCP et 20 sur 20 en HTTP/3. Ce qui borne la reprise, c'est la requête suivante du
+client, pas un quelconque minuteur de Kapkan.
+
+### Un cerveau mort n'est pas non plus un retrait
+
+La flotte est fail-static, et une adresse partagée y change une chose. Le cerveau tué net, les
+nœuds du banc ont servi 20 requêtes sur 20 en TCP et 20 sur 20 en HTTP/3 à travers la VIP, depuis
+les deux nœuds, avec `/healthz` à `200` sur chacun : le cerveau n'entre pas dans le prédicat de
+santé, et le dernier document et les certificats continuent de servir depuis le disque.
+
+La seule chose qu'elle change, c'est le **renouvellement**, et seulement derrière une adresse
+partagée : la distribution des défis ci-dessus appartient au cerveau, donc le cerveau tombé, la
+réponse au défi du nœud qui commande n'atteint aucun autre nœud, et une validation HTTP-01 ne
+réussit que si le hachage envoie par hasard l'autorité sur le nœud qui a commandé — environ 1
+tentative sur N. Ces tentatives sont réessayées toutes les heures et ne comptent jamais pour
+l'autorité de repli, donc rien n'est brûlé ; ce qui borne la panne, c'est le certificat, pas le
+cerveau. L'alarme `kapkan_edge_cert_not_after_seconds` à T−30 j est le budget dont vous disposez
+pour réparer le cerveau. Voir
+[ce que fait le nœud en cas de panne](/docs/edge#ce-que-fait-le-nœud-en-cas-de-panne).
+
+Ce qui ramène un nœud, c'est **son propre sondage suivant**, et ce qui le borne, c'est le recul
+propre au sondage après un échec — une seconde, doublée jusqu'à un plafond de 30 — jamais
+`edge.stale_after_seconds`, qui ne régit que le temps que le cerveau attend avant de déclarer perdu
+un nœud silencieux. Sur le banc, les deux nœuds étaient de nouveau `alive` **840 ms** après le
+retour du cerveau, et le délai ne dépend que de la durée de la panne (de la hauteur à laquelle le
+recul avait grimpé). Ne retirez pas une adresse parce que le cerveau est injoignable ; retirez
+parce que le nœud devant vous ne sert pas.
+
+### La variante BGP
+
+Là où l'adresse est annoncée plutôt que routée statiquement, mettez un speaker sur chaque nœud et
+laissez-le annoncer la VIP `/32` tant que le prédicat propre à ce nœud tient. Le banc a un bras
+supplémentaire qui fait exactement cela avec bird2, **hors du chemin d'acceptation** et derrière
+`ANYCAST_BGP=1` : il est donc sauté par défaut et ne porte aucun chiffre enregistré :
+
+```sh
+#!/bin/sh
+# sur chaque nœud : annoncer tant qu'il est sain, retirer dès qu'il ne l'est plus
+# 9101 ci-dessous est le port status_listen de ce nœud — mettez le vôtre
+while :; do
+  if curl -sf -m1 -o /dev/null http://127.0.0.1:9101/healthz \
+     && curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 \
+             -o /dev/null https://shop.example.com/; then
+    birdc -s /run/bird/ctl enable announce
+  else
+    birdc -s /run/bird/ctl disable announce
+  fi
+  sleep 1
+done
+```
+
+Ce que ce bras affirme, avec la sonde à la seconde et l'intervalle de rapport réglé pour
+correspondre : tuer nginx sur un nœud le sort de la FIB du routeur et déplace les requêtes du lot
+suivant vers le nœud survivant, tandis qu'un document refusé ne retire **pas** la route —
+`/healthz` reste `200`, donc le protocole reste activé. C'est le contrat du tableau ci-dessus,
+appliqué par un speaker au lieu de la main. Le speaker est le vôtre : bird, FRR, ce que fait
+tourner votre réseau. Kapkan n'en livre aucun et n'en pilote aucun.
+
+## Ce qui franchit les nœuds, et ce qui ne franchit pas
+
+| Fait | Franchit ? | Pourquoi |
+| --- | --- | --- |
+| Un cookie de laissez-passer | **Oui** | Les clés de signature du palier appartiennent à la flotte, dans le document. Un visiteur qui a résolu l'énigme sur un nœud a été servi par l'autre avec le cookie, et l'origine a vu `X-Kapkan-Mark: cleared` |
+| Une session TLS | **Non** | Une session est une entrée à état dans le cache partagé du nœud lui-même ; aucun ticket sans état ne la transporte et aucune clé de tickets n'est partagée, elle ne peut donc pas exister sur un autre nœud. Présentez la session d'edge-1 : edge-2 répond `New` — dans les deux sens, en TLS 1.2 comme en TLS 1.3 |
+| Un seau de débit, une table de verdicts, une fenêtre de rollup | **Non** | Par nœud, à dessein — [les plafonds par nœud](#les-plafonds-par-nœud-et-le-hachage-que-vous-avez-choisi) |
+| Une connexion QUIC | **Non** | nginx route QUIC par socket, pas par identifiant de connexion ; un client migré se reconnecte |
+
+<Callout type="info" title="Une session reprend sur le nœud qui l'a émise, et sur aucun autre">
+Le serveur fourre-tout `:443` que génère Kapkan — et, sous `omit_catch_all`, l'ancre QUIC nue —
+porte les lignes de session des zones : `ssl_session_cache shared:kapkan_ssl:10m;
+ssl_session_timeout 1d; ssl_session_tickets off;`. Elles doivent y être parce qu'OpenSSL cherche
+une session — et la range — via le contexte du serveur sur lequel la connexion a **commencé**,
+c'est-à-dire le serveur par défaut de l'adresse, même après que le SNI a basculé la connexion vers
+une zone. Un client qui revient reprend donc sa session sur le nœud qui l'a émise, en TLS 1.2 comme
+en TLS 1.3 (avec `ssl_session_tickets off`, un ticket 1.3 est une entrée à état dans ce même
+cache), et il est `New` sur tout autre nœud ; le banc vérifie les deux moitiés dans les deux sens.
+
+Ce qui confine une session à son nœud, c'est cette localité — une entrée à état dans le cache
+propre à ce nœud, sans ticket sans état pour la transporter et sans clé de tickets partagée —,
+**pas** le certificat. Sur nginx antérieur à 1.29.2, le contexte d'identifiant de session en
+vigueur est celui du fourre-tout sans certificat : il ne lie donc rien à un nœud (edge-spec §3).
+
+**Vous utilisez `omit_catch_all: true` ? Votre propre serveur par défaut sur `:443` a besoin de ces
+trois mêmes lignes** — et votre propre serveur QUIC aussi si vous réglez en plus
+`quic.omit_anchor`. Sans elles, chaque client qui revient sur ce nœud paie une poignée de main
+complète ; [le guide d'installation](/docs/edge-install#dépannage) porte la ligne correspondante.
+</Callout>
+
+### MTU : un seul mauvais lien coûte HTTP/3 sur toute l'adresse
+
+QUIC ne fragmente jamais et abandonne sous un chemin de 1280 octets. Sur une adresse partagée ce
+n'est pas un problème d'un nœud, parce qu'**une MTU de chemin est mise en cache par destination et
+que la destination est l'adresse que partagent tous les nœuds** :
+
+1. Le banc a mis la MTU à 1200 sur un seul lien. Sur 40 requêtes `--http3-only`, **38 ont
+   échoué** — et TCP est resté à 40 sur 40 tout du long, parce que TCP ajuste son MSS par
+   connexion. Combien passent avant que la leçon ne porte est un coup de dé du hachage ; le banc
+   vérifie que la grande majorité ne passe pas.
+2. Ce n'est pas une part du trafic. Dès que la première requête ayant atteint le nœud à petite MTU
+   a appris au client une MTU de chemin de 1200 octets pour la VIP (`ip route get 198.51.100.7`
+   montre l'exception en cache), **aucune** requête HTTP/3 n'a abouti — pas même vers le nœud
+   intact.
+3. Réparer le lien n'y a rien changé : 10 sur 10 ont encore échoué. L'exception mise en cache par
+   le client survit à la panne. Seul `ip route flush cache` sur le client a ramené HTTP/3, et
+   20 sur 20 ont alors abouti depuis les deux nœuds.
+
+Vous ne pouvez pas vider les caches de vos visiteurs. Traitez tout chemin sous 1280 octets sur
+n'importe quel lien d'une adresse partagée comme une panne de HTTP/3 pour toute cette adresse,
+corrigez la MTU avant d'annoncer h3, et tenez
+[l'ordre de déploiement de h3](/docs/edge#http3-quic) — les nœuds d'abord, UDP 443 et la MTU
+ensuite.
+
+## Vérifier une flotte derrière une adresse
+
+Exécutez ceci depuis un client qui atteint l'adresse, et avec un token opérateur sur le cerveau.
+
+```sh
+# 1. Une route, deux nexthops — pas deux routes
+ip route show 198.51.100.7/32
+
+# 2. La forme de hachage réellement en vigueur
+sysctl net.ipv4.fib_multipath_hash_policy
+
+# 3. Les deux nœuds servent le nom, chacun avec SON PROPRE certificat
+openssl s_client -connect 10.0.1.2:443 -servername shop.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
+openssl s_client -connect 10.0.2.2:443 -servername shop.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
+
+# 4. L'adresse partagée sert, en TCP et en HTTP/3
+curl -s -o /dev/null -w '%{http_code}\n' https://shop.example.com/
+curl --http3-only -s -o /dev/null -w '%{http_code} %{http_version}\n' https://shop.example.com/
+
+# 5. Chaque nœud est vivant, placé et rapporte son propre document
+curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1/edge/nodes
+```
+
+Dans l'inventaire, vérifiez trois choses par nœud, dans cet ordre :
+
+- **`alive: true` et un `last_seen` récent** — le sondage est le signal de vivacité.
+- **`hostgroups` couvre la zone** sur chaque nœud derrière l'adresse — le groupe d'hôtes propre à la
+  zone, ou `global` pour une zone globale. Un nœud dont le périmètre ne la couvre pas ne génère
+  rien pour elle et ne répond rien. (`zones_placed` à côté est un *compte* — combien des zones du
+  fichier le document de ce nœud contient — : il vous dit donc que le périmètre d'un nœud est vide,
+  jamais quelles zones il a.) La vue par zone est le même fait vu de l'autre bout :
+  `GET /api/v1/edge/zones/status` porte le `placement` de chaque zone, dont `nodes` doit lister
+  chaque nœud derrière l'adresse et dont `alive` doit tous les lister de nouveau.
+- **`report.zones_etag` est égal à l'ETag que le cerveau sert à ce nœud**
+  (`GET /api/v1/edge/zones?node=<nom>`).
+
+<Callout type="info" title="Les ETags de deux nœuds ne sont pas censés coïncider">
+Chaque nœud rapporte l'ETag de **son propre** document. Avec n'importe quel placement dans la
+flotte, ces documents diffèrent — un nœud sert une zone que l'autre ne sert pas — donc un
+`zones_etag` commun à la flotte n'est **pas** un signal de santé, et le poursuivre revient à
+poursuivre un bogue qui n'existe pas. Ce qui tient, tient par nœud : l'ETag qu'un nœud rapporte est
+l'ETag que le cerveau *lui* a servi. Une zone que les nœuds partagent est identique octet pour
+octet dans les deux documents. Et l'inventaire ne porte aucun matériel de clé — les certificats y
+apparaissent nommés par zone, expiration et émetteur, jamais en octets.
+</Callout>
+
+### Savoir quel nœud a servi une requête
+
+Il n'existe pas d'en-tête produit nommant le nœud, et c'est délibéré. Quand il vous en faut un pour
+un après-midi de débogage, l'échappatoire du fichier de zones vous en donnera un :
+
+```nginx
+# /etc/kapkan/debug-node.conf, référencé par l'extra_directives_file d'une zone
+add_header X-Kapkan-Node $hostname always;
+```
+
+<Callout type="danger" title="Une astuce de débogage, pas un en-tête produit">
+Cela publie le nom d'hôte de la machine qui sert auprès de chaque client de cette zone. Kapkan
+génère le fichier mot pour mot et `nginx -t` est son seul garde-fou. Ajoutez-le pendant que vous
+diagnostiquez un hachage ou un placement, et retirez-le ensuite. Il ne chevauche pas non plus un
+`429` — la location de refus déclare son propre `add_header` et nginx y abandonne le jeu hérité —
+il peut donc vous dire qui a *servi* une requête, mais jamais qui l'a *refusée*. Pour les refus,
+lisez les `/metrics` de chaque nœud.
+</Callout>
+
+## Voir aussi
+
+- [Nœuds edge](/docs/edge) — comment fonctionne un nœud, la séparation rapide/lent, ce qui tombe et comment
+- [Installer un nœud edge](/docs/edge-install) — une machine de bout en bout
+- [Référence des zones](/docs/zones) — `policy.rate`, le palier, `extra_directives_file`
+- [Intégration réseau](/docs/network-integration#le-chemin-de-retour) — le chemin de retour, la fuite de route et VRF, le piège `rp_filter`
+- [Authentification](/docs/authentication#lier-un-token-agent-à-son-nœud) — un token agent lié par nœud
+- [Le canal edge](/docs/api#le-canal-edge) — l'inventaire, l'état des zones et le levier
+- [Métriques](/docs/metrics#nœuds-edge) — les séries par nœud pour surveiller une flotte
