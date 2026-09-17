@@ -484,10 +484,48 @@
     setTimeout(function () { t.style.opacity = "0"; t.style.transform = "translateY(8px)"; setTimeout(function () { t.remove(); }, 250); }, 3200);
   }
 
+  /* ---------- popover ----------
+     A body-level panel anchored under a control: outside the view's reconciled
+     tree, so the 3s poll re-renders underneath it without disturbing what the
+     operator is filling in. One at a time, under one id, so Escape (app.js) and
+     the drawer's Tab trap keep working for every panel built on it.
+
+     Focus moves into the panel on open and back to the control that opened it
+     on close — the zone-history card's own return-focus treatment, and the only
+     way a panel appended to <body> is reachable from the keyboard at all: it
+     sits after the whole page in tab order. */
+  function popover(anchor, children, opts) {
+    closeConfirm();
+    opts = opts || {};
+    var pop = h("div", { class: "confirm" + (opts.cls ? " " + opts.cls : ""), id: "__confirm",
+      attrs: { role: "dialog", "aria-label": opts.label || null } }, children);
+    document.body.appendChild(pop);
+    var r = anchor.getBoundingClientRect();
+    var top = Math.min(r.bottom + 8, window.innerHeight - pop.offsetHeight - 12);
+    var left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 12);
+    pop.style.top = Math.max(12, top) + "px"; pop.style.left = Math.max(12, left) + "px";
+    setTimeout(function () { document.addEventListener("mousedown", outside); }, 0);
+    function outside(e) { if (!pop.contains(e.target)) closeConfirm(); }
+    pop._outside = outside;
+    pop._return = anchor;
+    var first = pop.querySelector("button, input, select, textarea, [tabindex]:not([tabindex='-1'])");
+    if (first) first.focus();
+    return pop;
+  }
+  function closeConfirm() {
+    var p = document.getElementById("__confirm");
+    if (!p) return;
+    if (p._outside) document.removeEventListener("mousedown", p._outside);
+    /* only take focus back when the panel still holds it: a click that landed
+       on some other control has already chosen where focus belongs */
+    var back = p._return && p.contains(document.activeElement) ? p._return : null;
+    p.remove();
+    if (back && document.body.contains(back)) back.focus();
+  }
+
   /* ---------- confirm popover ---------- */
   function confirm(anchor, opts) {
-    closeConfirm();
-    var pop = h("div", { class: "confirm", id: "__confirm" }, [
+    popover(anchor, [
       h("div", { class: "confirm__title", text: opts.title }),
       h("div", { class: "confirm__txt", text: opts.text }),
       h("div", { class: "confirm__actions" }, [
@@ -495,19 +533,7 @@
         h("button", { class: "btn " + (opts.danger ? "btn--danger" : "btn--primary") + " btn--sm", text: opts.confirmLabel || I.t("confirm.confirm"),
           onclick: function () { closeConfirm(); opts.onConfirm && opts.onConfirm(); } })
       ])
-    ]);
-    document.body.appendChild(pop);
-    var r = anchor.getBoundingClientRect();
-    var top = Math.min(r.bottom + 8, window.innerHeight - pop.offsetHeight - 12);
-    var left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 12);
-    pop.style.top = top + "px"; pop.style.left = Math.max(12, left) + "px";
-    setTimeout(function () { document.addEventListener("mousedown", outside); }, 0);
-    function outside(e) { if (!pop.contains(e.target)) closeConfirm(); }
-    pop._outside = outside;
-  }
-  function closeConfirm() {
-    var p = document.getElementById("__confirm");
-    if (p) { if (p._outside) document.removeEventListener("mousedown", p._outside); p.remove(); }
+    ], { label: opts.title });
   }
 
   /* ---------- empty / loading / error blocks ---------- */
@@ -528,7 +554,7 @@
     ladder: ladder, gauge: gauge, confidence: confidence, baselineBar: baselineBar,
     routeDisplay: routeDisplay, shareGroup: shareGroup, timeline: timeline,
     dropCell: dropCell, kernelRules: kernelRules, bytesFmt: bytesFmt,
-    rejection: rejection, toast: toast, confirm: confirm, closeConfirm: closeConfirm,
+    rejection: rejection, toast: toast, popover: popover, confirm: confirm, closeConfirm: closeConfirm,
     empty: empty, skeletonRows: skeletonRows,
     ACTION_ICON: ACTION_ICON, methodPill: methodPill,
     methodBadge: methodBadge, methodIcon: methodIcon, actionIcon: actionIcon

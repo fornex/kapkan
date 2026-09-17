@@ -64,6 +64,44 @@
     });
   }
 
+  /* How far the browser's clock is from the brain's, in milliseconds, read off
+     the response that just came back (same-origin, so `Date` is readable).
+
+     The lever's countdown is the distance between two instants the BRAIN
+     stamped — the override's `until` and the moment it answered — so a browser
+     clock minutes ahead would otherwise run a live lever's badge down to zero
+     while the brain is still enforcing it. A response with no readable Date
+     leaves the offset at 0, which is the browser's own clock: what the console
+     read before. It is deliberately not smoothed or remembered — each fetch
+     carries its own, one second of granularity is far below what this shows,
+     and a stored offset would outlive the clock it measured. */
+  function serverSkew(res) {
+    var d = res.headers.get("Date");
+    var t = d ? Date.parse(d) : NaN;
+    return isNaN(t) ? 0 : t - Date.now();
+  }
+
+  /* One call to the lever (E6.8), shared by POST and DELETE so the two can
+     never drift in how they read an answer. A body is sent only when there is
+     one — DELETE takes none. */
+  function leverCall(method, zone, body) {
+    var opts = { method: method };
+    if (body != null) { opts.headers = { "Content-Type": "application/json" }; opts.body = body; }
+    return request("/api/v1/edge/zones/" + encodeURIComponent(zone) + "/challenge", opts).then(function (res) {
+      if (res.status === 404) return { ok: false, notFound: true };
+      if (res.status === 409) return { ok: false, conflict: true };
+      if (res.status === 403) return { ok: false, forbidden: true };
+      /* the brain's own words, kept as a string and rendered with textContent
+         by whoever shows it — never parsed, never inserted as markup */
+      return res.json().catch(function () { return {}; }).then(function (b) {
+        if (!res.ok) return { ok: false, error: (b && b.error) || "" };
+        return { ok: true, zone: b.zone || zone, mode: b.mode || "", until: b.until || "",
+          fileMode: b.file_mode || "", zoneWatchOnly: !!b.zone_watch_only,
+          rungWatchOnly: !!b.rung_watch_only, nodes: b.nodes || [] };
+      });
+    }).catch(function () { return { ok: false, error: "" }; });
+  }
+
   /* ============ mapping helpers ============ */
 
   /* TCP flag bitmask -> short string (FIN SYN RST PSH ACK URG ECE CWR). */
@@ -308,12 +346,15 @@
        not an error. */
     getEdgeZones: function () {
       return request("/api/v1/edge/zones/status").then(function (res) {
-        if (res.status === 403) return { ok: false, forbidden: true, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] };
+        if (res.status === 403) return { ok: false, forbidden: true, skew: 0, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] };
         if (!res.ok) throw new Error("edge -> " + res.status);
+        /* the brain's clock, taken from the same answer the zones came in:
+           the lever's countdown is read against it, not against the browser's */
+        var skew = serverSkew(res);
         return res.json().then(function (r) {
-          return { ok: true, forbidden: false, nodesAlive: r.nodes_alive || 0, nodesReporting: r.nodes_reporting || 0, zonesTruncated: r.zones_truncated || 0, zones: r.zones || [] };
+          return { ok: true, forbidden: false, skew: skew, nodesAlive: r.nodes_alive || 0, nodesReporting: r.nodes_reporting || 0, zonesTruncated: r.zones_truncated || 0, zones: r.zones || [] };
         });
-      }).catch(function () { return { ok: false, forbidden: false, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] }; });
+      }).catch(function () { return { ok: false, forbidden: false, skew: 0, nodesAlive: 0, nodesReporting: 0, zonesTruncated: 0, zones: [] }; });
     },
     /* edge-node inventory. Two readers, one fetch:
          - the Edge nodes view (E6.7) renders the whole document — each node's
@@ -400,6 +441,34 @@
           return { ok: true, available: !!r.available, events: r.events || [] };
         });
       }).catch(function () { return { ok: false, available: false, events: [] }; });
+    },
+    /* ---- the lever (E6.8): POST sets a zone's challenge mode for a bounded
+       time, DELETE ends it. Operator rank, so the console offers them only to
+       an operator; a viewer's token would be refused here anyway.
+
+       The refusals are told apart because they mean different things to the
+       operator, and ONE of them deliberately means two things at once:
+         notFound — 404. An unknown zone AND a zone outside a tenant-scoped
+           token's reach answer byte for byte the same, so the console has one
+           string for both. Saying "not yours" where the brain says "unknown"
+           would rebuild across the console exactly the existence oracle the
+           API refuses to be.
+         conflict — 409. The zone is in policy.mode: none; nothing challenges
+           there.
+         forbidden — 403. The token is not an operator.
+       Anything else is a failure with the brain's own `error` text carried
+       back for the dialog to show as TEXT (never as markup).
+
+       The response is the rung as it now stands: where it bites (the zone's
+       and the rung's watch-only flags) and every node the zone is placed on
+       with its own reported dry-run. The console reads them to caption the
+       success — a lever that only previews must not be reported as one that
+       bites. */
+    setEdgeChallenge: function (zone, mode, ttlSeconds, reason) {
+      return leverCall("POST", zone, JSON.stringify({ mode: mode, ttl_seconds: ttlSeconds, reason: reason || "" }));
+    },
+    clearEdgeChallenge: function (zone) {
+      return leverCall("DELETE", zone, null);
     },
     getTraffic: function (key, fromISO, toISO, step) {
       var qs = "key=" + encodeURIComponent(key);
