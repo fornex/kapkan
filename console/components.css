@@ -122,6 +122,7 @@
   font-size: var(--t-xs); color: var(--muted); display: grid; gap: 4px; text-wrap: pretty;
 }
 .lever-err { margin-top: var(--s-3); }
+.lever-err:empty { display: none; margin: 0; }
 .confirm--lever .confirm__actions { margin-top: var(--s-4); }
 
 /* One zone's history card: the charts side by side (they share an x-axis, so

@@ -1300,8 +1300,14 @@
     }
     /* The refusal as the panel shows it: our line, and the brain's own words
        under it as TEXT, never as markup — an API string is data. */
+    /* The banner's slot is ALWAYS there — empty until a refusal arrives — so
+       the actions row below it never changes index: the dialog is re-drawn
+       by position, and a slot that appears on the first 409 would morph the
+       actions row into the banner and drop the focused button on <body>
+       (round 2's finding), so neither Escape nor the view's focus-keep would
+       find the lever button afterwards. CSS hides the empty slot. */
     function refusal() {
-      if (!failure) return null;
+      if (!failure) return h("div", { class: "lever-err" });
       var msg = refusalText(failure);
       return h("div", { class: "banner banner--dry-loud lever-err", attrs: { role: "alert" } }, [
         w.icon("shield-alert"),
@@ -1482,10 +1488,13 @@
           edgeNumCell(z, z.would_challenge, I.abbr.bind(I)),
           edgeNumCell(z, z.would_deny, I.abbr.bind(I)),
           /* the rung, the lever running over it, and the control for both —
-             one column, because they are one fact. Both additions are null
-             for a viewer and for a brain older than the file merge, and an
-             h() child of null is appended as nothing: that table is byte for
-             byte the one it always was. */
+             one column, because they are one fact. The control is null for a
+             viewer and, while no lever is in force, for a brain older than the
+             file merge (only the Challenge… offer is gated on the file); the
+             badge renders for any role wherever the brain reports a live
+             override, and End for an operator. So that table is the one it
+             always was — plus, when a lever is in force, the badge for it and
+             the End that retires it. */
           h("td", {}, [edgeZoneChallenge(z), edgeLeverLine(z, edgeNow), edgeLeverControl(ctx, z, fileAware)]),
           h("td", {}, edgeH3Cell(z, inv))
         ]);
