@@ -1,0 +1,555 @@
+export const metadata = {
+  title: "Eine Adresse, viele Knoten (Anycast)",
+  description:
+    "Mehrere Edge-Knoten mit ECMP oder Anycast hinter eine Adresse stellen: die Topologie, die Hash-Formen und was jede mit einer Ratenobergrenze pro Knoten macht, die deterministische ACME-Verteilung, was 'zieh mich zurück' bedeutet und welche Fakten eine gemeinsame Adresse nicht teilt.",
+};
+
+# Eine Adresse, viele Knoten (Anycast)
+
+<Callout type="info" title="Ihr Netzwerk kündigt die Adresse an; Kapkan betreibt die Boxen dahinter">
+Kapkan hat keine Meinung zum Routing und fasst es nie an. **Ihr** Router, Ihr Speaker oder der
+Load Balancer Ihrer Cloud stellt eine Adresse vor mehrere [Edge-Knoten](/docs/edge); Kapkan gibt
+jeder dieser Boxen ihre Zertifikate, ihre Konfiguration und ihren eigenen Entscheidungsdienst und
+sagt Ihnen, welche davon zum Bedienen taugt. Nichts in Kapkan kündigt, zieht zurück oder lenkt die
+Adresse einer Zone — der BGP-Speaker des Gehirns existiert für Opfer unter Angriff, nie für
+Service-Routing.
+</Callout>
+
+Alles auf dieser Seite wurde auf einem echten Kernel mit einem echten Router-Hop, echtem nginx,
+echtem HTTP/3 und einer echten ACME-Zertifizierungsstelle ausgeführt, bevor es aufgeschrieben
+wurde: Der Abnahmeaufbau ist `engine/scripts/labnet/edge-e6-anycast.sh`, zwei Knoten hinter einer
+`198.51.100.7/32`, als ECMP-Route über zwei Punkt-zu-Punkt-Strecken geroutet, mit der Hash-Policy
+des Kernels von Arm zu Arm umgeschaltet. Die Zahlen unten stehen mit den Bedingungen da, die sie
+erzeugt haben, denn die meisten von ihnen wandern, wenn diese Bedingungen wandern.
+
+## Was eine gemeinsame Adresse bringt und was nicht
+
+Sie bringt einen Namen, eine Zertifikatsgeschichte und eine Policy über N Boxen, wobei das Netz die
+Box auswählt. Sie bündelt **nichts** von dem, was die Knoten zählen oder zwischenspeichern. Der
+Satz, den Sie im Kopf behalten sollten: **Das Gehirn verteilt Policy, niemals Urteile.**
+
+- **Jede Ratenobergrenze gilt pro Knoten.** `policy.rate.rps` ist ein Token-Bucket auf der Box, die
+  die Anfrage bedient. Zwei Knoten hinter einer Adresse sind zwei Buckets, und eine Quelle, die das
+  Netz über beide streut, trifft jeden davon einzeln. Siehe
+  [Obergrenzen pro Knoten](#obergrenzen-pro-knoten-und-der-hash-den-sie-gewählt-haben) — das ist
+  der eine Fakt, der einen Betreiber beim Wechsel von einem Knoten auf drei am häufigsten
+  überrascht.
+- **Jede Urteilstabelle gilt pro Knoten.** Die Rollups, die einen Fluter zu einer Sperre
+  hochstufen, sind die eigenen Zehn-Sekunden-Fenster des Knotens. Eine auf einem Knoten gesperrte
+  Quelle ist beim Nachbarn nicht gesperrt.
+- **Jeder TLS-Session-Cache gilt pro Knoten**, und eine auf einem Knoten ausgestellte Session ist
+  auf einem anderen nie wiederaufnehmbar —
+  [was nicht übergreift](#was-zwischen-knoten-übergreift-und-was-nicht).
+- **Jedes Zertifikat gehört dem Knoten selbst.** Zwei Knoten, die einen Namen bedienen, liefern
+  zwei verschiedene Leaf-Zertifikate aus, ausgestellt über zwei ACME-Bestellungen mit zwei
+  Kontoschlüsseln, die ihre Boxen nie verlassen. Der Aufbau hat beide Fingerprints gelesen, und sie
+  unterscheiden sich.
+- **Die Freigabe gehört der Flotte.** Ein Besucher, der
+  [die Proof-of-Work-Stufe](/docs/edge#die-proof-of-work-stufe) auf einem Knoten löst, ist auf
+  allen freigegeben: Die Signaturschlüssel kommen im Dokument herunter.
+- **Der Hebel und die Zonendatei gehören der Flotte.** Eine Ratenänderung, eine Stufe, ein Hebel
+  erreichen jeden Knoten bei seinem nächsten Poll und laden nichts neu — die
+  [Fast/Slow-Trennung](/docs/edge#die-fastslow-trennung) ändert sich nicht mit der Knotenzahl.
+
+## Die Topologie
+
+```
+                     ┌── Strecke A (10.0.1.0/30) ──▶ edge-1  198.51.100.7/32 auf lo
+ Client ──▶ Router ──┤                                        kapkan edge · nginx · Token a1
+   198.51.100.7      └── Strecke B (10.0.2.0/30) ──▶ edge-2  198.51.100.7/32 auf lo
+   (eine ECMP-Route,                                          kapkan edge · nginx · Token a2
+    zwei Nexthops)                                                  │
+                                                                    └── Unicast ──▶ Gehirn (API)
+```
+
+Vier Regeln, und der Aufbau ist genau daraus gebaut:
+
+1. **Die VIP liegt auf dem Loopback jedes Knotens**, als `/32`:
+
+   ```sh
+   # auf jedem Knoten hinter der Adresse
+   ip addr add 198.51.100.7/32 dev lo
+   ```
+
+   Kapkan rendert `listen`-Direktiven ohne Adresse, also antwortet nginx auf der Adresse, die der
+   Client benutzt hat, und das Rendering erwähnt die VIP überhaupt nicht. Weder `edge.yaml` noch
+   die Zonendatei nennen sie.
+
+2. **Der Router trägt eine Route mit einem Nexthop pro Knoten**, nicht eine Route pro Knoten:
+
+   ```sh
+   # auf dem Router davor
+   ip route replace 198.51.100.7/32 \
+     nexthop via 10.0.1.2 dev leg-a weight 1 \
+     nexthop via 10.0.2.2 dev leg-b weight 1
+   ip route flush cache
+   ```
+
+   Eine Route mit zwei Nexthops ist eine ECMP-Route; die Prüfung ist
+   `ip route show 198.51.100.7/32`, das zwei `nexthop`-Zeilen ausgibt. Ein Speaker (bird, FRR), der
+   die Ankündigungen beider Knoten annimmt und zusammenführt, erzeugt dasselbe — siehe
+   [die BGP-Variante](#die-bgp-variante).
+
+3. **Jeder Knoten erreicht das Gehirn per Unicast, über seine eigene Adresse, mit seinem eigenen
+   gebundenen Token.** Ein `agent`-Token pro Knoten, gebunden über `api.tokens[].node`, ist hier
+   keine Feinheit: Das Gehirn stempelt Präsenz und liefert das Dokument jedes Knotens nach Namen
+   aus, und ein gemeinsames Token hinter einer gemeinsamen Adresse macht beides bedeutungslos.
+
+   ```yaml
+   # kapkan.yaml auf dem Gehirn
+   api:
+     tokens:
+       - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
+       - { name: edge-2, token_env: KAPKAN_EDGE_2_TOKEN, role: agent, node: edge-2 }
+   edge:
+     nodes:
+       - { name: edge-1 }
+       - { name: edge-2 }
+     stale_after_seconds: 15
+   ```
+
+   Der Aufbau prüft beide Hälften: Das Gehirn liefert `GET /api/v1/edge/zones?node=edge-1` an
+   edge-1s Token und antwortet `403`, wenn dasselbe Token nach edge-2s Namen fragt. Siehe
+   [ein Agent-Token an seinen Knoten binden](/docs/authentication#ein-agent-token-an-seinen-knoten-binden).
+
+4. **Die Knotenkonfigurationen sind identisch bis auf `controller.name`** — und das Token, das
+   jeder Knoten aus seiner eigenen Umgebung liest. Sonst braucht an einer gemeinsamen Adresse
+   nichts einen Wert pro Knoten. Die beiden `edge.yaml` des Aufbaus unterscheiden sich zusätzlich
+   in `state_dir`/`sockets_dir`/`terminator.pid_file`, `status_listen` und `terminator.main_conf`,
+   aber nur, weil seine zwei „Knoten“ sich einen Host teilen und diese Pfade und Ports nicht teilen
+   können; auf getrennten Boxen sind es dieselbe Datei mit einem geänderten Namen. Beide bestehen
+   `kapkan edge -check`.
+
+### Der Rückpfad
+
+Eine Antwort an den Client trägt die Adresse, auf der die Anfrage ankam, also geht die VIP auf
+einem Knoten mit einem Uplink den einzigen Weg zurück, den es gibt, und es ist nichts zu
+konfigurieren. Zwei Dinge brauchen aber Sorgfalt:
+
+- **Verkehr, den der Knoten selbst erzeugt, muss seine Unicast-Adresse benutzen.** Der Poll ans
+  Gehirn, der Report und die ACME-Bestellung gehen über die Default-Route des Knotens mit seiner
+  eigenen Quelladresse hinaus — das ist es, was den Knoten überhaupt identifizierbar macht. Geben
+  Sie der VIP keine Route, die sie zur bevorzugten Quelle macht; eine `/32` auf `lo` tut das nicht.
+- **Ein Knoten, dessen Default-Route ein Management- oder Gehirn-Uplink ist, muss Antworten mit
+  VIP-Quelle über die Service-Strecke schicken.** Geben Sie dem Verkehr mit der gemeinsamen Adresse
+  als Quelle seinen eigenen Routing-Kontext, zuerst die portable Form:
+
+  ```sh
+  # eine eigene Tabelle für Verkehr mit der gemeinsamen Adresse als Quelle
+  ip route add default via 10.0.1.1 dev leg-a table 100
+  ip rule  add from 198.51.100.7 lookup 100
+  ```
+
+  Seien Sie sich im Klaren, was das tut: Tabelle 100 hält **eine** Default-Route, also *nagelt* sie
+  jede Antwort mit VIP-Quelle auf leg-a fest, über welche Strecke die Anfrage auch hereinkam. Mit
+  einer Service-Strecke ist genau das richtig. Bei zwei Service-Strecken geben Sie Tabelle 100
+  stattdessen eine Multipath-Default —
+  `ip route add default table 100 nexthop via 10.0.1.1 dev leg-a nexthop via 10.0.2.1 dev leg-b` —
+  und nehmen in Kauf, dass die Antwort über den Hash des Kernels hinausgeht statt über die
+  Eingangsstrecke; die Rückkehr über genau die Strecke, auf der ein Paket ankam, ist eine Aufgabe
+  für Connection Tracking (`CONNMARK`, in eine fwmark zurückgeschrieben, mit einer Regel pro
+  Strecke), keine Regel über die Quelladresse. In beiden Fällen verlässt die Antwort den Knoten
+  über eine Service-Strecke, und das ist es, was ein Upstream mit `rp_filter` oder zustandsbehafteter
+  Firewall braucht.
+
+  Ein **VRF-Gerät** (`ip link add vrf-edge type vrf table 100`, dann die Strecke einhängen) ist
+  dieselbe Tabelle, nur über ein Gerät statt über eine Regel erreicht, auf Kerneln mit
+  `CONFIG_NET_VRF`. Die Route-Leaking-Form oben ist die im Netzwerkintegrations-Labor verifizierte
+  und funktioniert auf jedem Kernel mit `CONFIG_IP_MULTIPLE_TABLES`; die Knoten des Anycast-Aufbaus
+  haben je eine Strecke, also behandeln Sie das Rezept für zwei Uplinks als das hier angewandte
+  [Rückpfad-Rezept](/docs/network-integration#der-rückpfad), nicht als einen Arm dieses Aufbaus.
+  Asymmetrische Pfade bringen außerdem die
+  [`rp_filter`-Falle](/docs/network-integration#rp_filter-und-die-asymmetrische-antwort) mit sich.
+
+### Verteilung, wenn die Flotte PoPs hat
+
+Knoten hinter einer Adresse müssen alle die Zonen auf dieser Adresse bedienen: Geben Sie jedem von
+ihnen die Hostgruppe der Zone in `edge.nodes[].hostgroups`, oder lassen Sie die Zone global auf
+Knoten ohne Eingrenzung. Eine Zone, die weg von einem Knoten verteilt ist, wird dort überhaupt
+nicht gerendert — die verteilte Zone des Aufbaus taucht auf dem Knoten, der ihre Gruppe nicht
+listet, nie auf, und dieser Knoten antwortet nichts für den Namen. Die Regel und ihre Folgen stehen
+unter [Zonen auf Knoten verteilen](/docs/edge#zonen-auf-knoten-verteilen).
+
+## Auf welchem Knoten ein Client landet: der Hash
+
+Der Kernel wählt einen Nexthop, indem er das Paket hasht, und **welche Felder er hasht, ist ein
+sysctl, das Sie setzen**, keine Eigenschaft von Anycast:
+
+```sh
+sysctl -w net.ipv4.fib_multipath_hash_policy=0   # Layer 3: Quell- und Zieladresse
+sysctl -w net.ipv4.fib_multipath_hash_policy=1   # Layer 4: das 4-Tupel, Ports inklusive
+ip route flush cache                             # der laufende Cache behält die alte Entscheidung
+```
+
+| Policy | Was sie hasht | Was ein Client bekommt | Wann Sie sie nehmen |
+| --- | --- | --- | --- |
+| `0` (Layer 3) | Quell- und Zieladresse | **Einen Knoten**, für jede Verbindung, bis sich die Topologie ändert | Stabile, debugbare Verteilung: Ein Client bleibt bei einem Knoten, sein Session-Cache bleibt warm und sein QUIC bleibt, wo es ist. Die empfohlene Vorgabe — mit dem Obergrenzen-Vorbehalt unten |
+| `1` (Layer 4) | das 4-Tupel, Ports inklusive | **Beide Knoten**, Verbindung für Verbindung | Gleichmäßige Verteilung über die Knoten, um den Preis, dass die Verbindungen eines Clients und damit seine Ratenbuchhaltung über alle streuen |
+
+Im Aufbau trugen 40 frische Verbindungen eines Clients unter Policy `0` alle denselben
+Knotennamen; unter Policy `1` erreichten dieselben 40 beide Knoten, und ebenso 40
+`--http3-only`-Anfragen — dieselbe Policy hasht das UDP-4-Tupel, also wird **QUIC genau wie TCP
+verteilt**, und beide Knoten zählten ihren eigenen Anteil unter
+`kapkan_edge_requests_total{protocol="h3"}` und im `h3_requests` des Reports pro Fenster.
+
+Keine der Formen ist „sticky“ in irgendeinem Sinn, auf den sich eine Verbindung verlassen könnte.
+Eine sich ändernde Client-Adresse (WLAN zu LTE, ein NAT-Rebinding) ist unter beiden Policies eine
+neue Hash-Eingabe, und unter Layer 4 ist jede neue Verbindung ein frischer Wurf: Sie landet auf
+rund (N−1)/N davon auf einem anderen Knoten als dem letzten — bei zwei Knoten auf jeder zweiten
+Verbindung. Genau dieser Anteil ist die Rate, mit der ein Client einen vollen TLS-Handshake
+bezahlt, denn eine Session lebt nur auf dem Knoten, der sie ausgestellt hat. Eine
+QUIC-Verbindung, die auf einem Knoten landet, der sie nie gesehen hat, verbindet sich einfach neu:
+nginx routet QUIC über den Socket, auf dem sie ankam, nicht über die Connection ID, und
+Verbindungsmigration **zwischen** Knoten wird nicht unterstützt — siehe
+[was nginx nicht kann](/docs/edge#http3-quic).
+
+## Obergrenzen pro Knoten und der Hash, den Sie gewählt haben
+
+`policy.rate.rps` wird auf dem Knoten durchgesetzt, der die Anfrage bedient, also kann eine über N
+Knoten gestreute Quelle bis zum N-Fachen der Obergrenze durchgelassen werden. Das ist die bekannte
+Hälfte. Die Hälfte, die Betreiber einen Vorfall kostet, ist: **Die zwei Hash-Formen unterscheiden
+sich in der Art, nicht nur im Grad.**
+
+Der Aufbau setzte `policy.rate.rps: 5` und feuerte 40 Verbindungen einer Quelle auf zwei Knoten:
+
+| Hash-Policy | Bedient | Abgelehnt (`429`) | `deny_rate` edge-1 / edge-2 | Batch |
+| --- | --- | --- | --- | --- |
+| `0` (Layer 3) | 6 | 34 | 0 / 34 | 0,3 s |
+| `1` (Layer 4) | 12 | 28 | 10 / 18 | 0,2 s |
+
+Lesen Sie die zwei Zeilen gegeneinander, nicht für sich. Welcher Knoten ablehnt und wie genau es
+sich pro Knoten aufteilt, ist Sache des Hashes und wandert zwischen Läufen — ein Wiederholungslauf
+teilte die Layer-4-Ablehnungen 14/14 statt 10/18 —, während die Zahl der bedienten Anfragen und das
+Verhältnis blieben.
+
+- **Unter Layer 4 bekam die Quelle das 2,0-Fache an durchgelassenen Anfragen.** Diese Zahl ist ein
+  *Bereich*, keine Konstante: Der Bucket eines Knotens hält `rps` Tokens und füllt `rps` pro
+  Sekunde nach, also wird ein Batch von `T` Sekunden pro Knoten mit `rps + rps·T` durchgelassen,
+  und der Multiplikator nähert sich der Knotenzahl nur, solange der Anteil jedes Knotens am
+  Ausbruch noch über seinem eigenen Kontingent liegt. Der Aufbau prüft 1,5×–2,5× mit der
+  Batch-Dauer neben den Zählern — deshalb trägt die Tabelle überhaupt eine *Batch*-Spalte.
+  **Bemessen Sie ein `rps` pro Knoten ungefähr als Ihre beabsichtigte Flottenobergrenze geteilt
+  durch die Knotenzahl**, und erwarten Sie, dass die tatsächlich durchgelassene Rate zwischen
+  diesem Wert und der Obergrenze selbst liegt.
+- **Unter Layer 3 landet der ganze Ausbruch auf einem Knoten** — und 34 Ablehnungen im
+  Zehn-Sekunden-Fenster eines Knotens überschreiten die Flutregel der Rollups (mindestens 20
+  Ablehnungen, mindestens 30 % der entschiedenen Anfragen dieser Quelle). In einer Zone, deren
+  `challenge` `off` oder `manual` ist — die Zone des Aufbaus ist `off` —, stuft das die Quelle dort
+  zu einer **Tabellensperre** für `DenyTTL` hoch: eine Minute zu Beginn, bei Wiederholung auf zehn
+  verdoppelt. Der Aufbau prüft diese Quelle danach und verlangt die `403`. In einer Zone mit
+  `challenge: auto` nimmt sich [die Leiter](/docs/edge#die-leiter) stattdessen die erste
+  Überschreitung: Die Quelle wird auf die Proof-of-Work-Stufe geschickt und erst gesperrt, wenn sie
+  nach dem Lösen oder unter Challenge weiterflutet — ein Browser kommt durch, ein Bot nicht. Unter
+  Layer 4 teilten sich dieselben 40 Verbindungen 10/18, kein Knoten überschritt die Schwelle
+  überhaupt, und beide Knoten melden die Quelle weiterhin als `allow` in ihren `top_sources`.
+
+<Callout type="warning" title="Ein niedriges rps pro Knoten unter einem Layer-3-Hash sperrt einen viel beschäftigten Client">
+Unter Layer 4 wird eine Quelle über ihrer Obergrenze *gebremst*: Sie sammelt `429` mit
+`Retry-After` und bleibt `allow`. Unter Layer 3 wird derselbe Ausbruch *gesperrt*: Er konzentriert
+sich auf einem Knoten und überschreitet dort die Flutregel. In einer Zone mit `challenge: off` oder
+`manual` ist das sofort eine `403` für `DenyTTL` — eine Hochstufung, die keine `429` ankündigt und
+von der kein anderer Knoten weiß. In einer Zone mit `challenge: auto` ist es zuerst
+[die Stufe](/docs/edge#die-leiter) und die Sperre erst, wenn die Quelle danach weiterflutet — eine
+weichere Landung, aber immer noch die Entscheidung eines Knotens über einen Client, den die anderen
+Knoten für in Ordnung halten. Wenn Sie den empfohlenen Layer-3-Hash fahren, setzen Sie die
+Obergrenze pro Knoten auf den arbeitsamsten legitimen Client, den Sie haben, und beobachten Sie
+`kapkan_edge_decisions_total{result="deny_rate"}` pro Knoten, bevor Sie sie enger ziehen.
+</Callout>
+
+Eine ratenbedingt abgelehnte Anfrage trägt **keinen** Header, der den Knoten nennt — die
+`@kapkan_denied`-Location des Renderings deklariert ihren eigenen `add_header`, und nginx verwirft
+den geerbten Satz überall dort, wo eine Location einen eigenen deklariert —, also zählen Sie
+Ablehnungen an den `/metrics` jedes Knotens, nicht an der Antwort.
+
+## Zertifikate: die Verteilung ist deterministisch
+
+Jeder Knoten bestellt sein eigenes Zertifikat für den gemeinsamen Namen, und die
+HTTP-01-Validierung der CA kommt an der VIP an — sie landet also auf dem Knoten, den der Hash
+auswählt, und das ist meist **nicht** der bestellende Knoten. Das geht, weil der bestellende Knoten
+seine Challenge-Antwort ans Gehirn veröffentlicht und das Gehirn sie im Dokument jedes Knotens
+verteilt, der die Zone bedient.
+
+Der Aufbau beweist es auf die einzige nicht zirkuläre Weise: Er nagelt die Route für die ganze
+Ausstellung allein auf edge-2 fest, sodass edge-1s Zertifikat nur über den auf edge-2 verteilten
+Challenge-Token validiert worden sein kann. Beide Knoten hielten am Ende ihre eigenen Zertifikate
+für den gemeinsamen Namen, mit verschiedenen Leaf-Fingerprints.
+
+Zwei weitere Dinge nagelt der Aufbau fest, und beide zählen an einer gemeinsamen Adresse:
+
+- **Die Ausstellung wird pro Zone serialisiert — das verteilt die Bestellungen, es verringert sie
+  nicht.** Wer den Slot einer Zone anfragt, während ein anderer Knoten ihn hält, bekommt
+  `granted: false` mit dem Namen des Halters und einem `retry_after_seconds`, also bestellen die
+  Knoten nacheinander statt alle auf einmal. Sie bestellen trotzdem N Zertifikate: Jeder Knoten
+  hält sein eigenes Leaf, also kostet eine Ausstellung eines auf N Knoten verteilten Namens N gegen
+  die [Duplikat-Obergrenze](/docs/edge#grenzen-die-sie-kennen-sollten) der CA — etwa fünf pro Woche
+  bei Let's Encrypt, gezählt pro Verteilung. **Eine Flotte, die auf einem Namen größer ist als
+  diese Obergrenze, braucht `acme.fallback` oder getrennte CA-Konten**; keine noch so gute
+  Serialisierung kauft Ihnen das sechste Zertifikat. Der Slot ist außerdem beratend: Ein Knoten,
+  der 15 Minuten darauf gewartet hat, bestellt trotzdem — er ist ein Verteiler, nie ein Schloss.
+- **Ein neu gestarteter Knoten bestellt nichts.** Der Aufbau startet einen Knoten neu und findet
+  seine Zertifikate von der Platte zurück: Sein eigenes `kapkan_edge_acme_attempts_total` bleibt
+  `0`, und er fragt das Gehirn um keinen Slot.
+
+## Rückzug: was „zieh mich zurück“ sagt
+
+Eine gemeinsame Adresse ist nur so gut wie das, was aufhört, Verkehr an einen kaputten Knoten zu
+schicken. Ziehen Sie anhand eines zweiteiligen Prädikats zurück — Kapkans eigenem Signal **und**
+einer Probe des Listeners selbst — und ignorieren Sie die zwei verführerischen Nicht-Signale.
+
+| Signal | Danach zurückziehen? | Was der Aufbau sah |
+| --- | --- | --- |
+| **`/healthz` auf `status_listen` antwortet `503`** | **Ja** | Das nginx des Knotens wurde getötet; `/healthz` wurde **495 ms** später `503`, mit `controller.report_interval_seconds: 1` im Aufbau |
+| **Eine lokale TLS-Probe des eigenen `:443` des Knotens mit der SNI der Zone schlägt fehl** | **Ja** | Kein Arm des Aufbaus: `/healthz` tastet die pid-Datei des Terminators im Report-Takt ab und kann deshalb einen verklemmten Listener, ein abgelaufenes Zertifikat oder einen abgelehnten TLS-Handshake nicht sehen. Prüfen Sie, was ein Client tut |
+| `converged: false` im Status des Knotens | **Nein** | Ein Dokument, das der Knoten abgelehnt hat: Die vorherige geprüfte Generation bediente weiter, `/healthz` blieb `200`, und 20 von 20 Anfragen über die VIP wurden bedient — edge-2 darunter |
+| Das Inventar des Gehirns sagt `alive: false` | **Nein** | Das ist die Sicht des Gehirns auf einen Poll, nicht die Sicht des Knotens auf sich selbst, und sie hinkt um `stale_after_seconds` hinterher |
+
+**Ziehen Sie zurück, wenn eines der beiden „Ja“-Signale ausfällt, und kündigen Sie nur an, solange
+beide halten.** Sie beantworten verschiedene Fragen: `/healthz` sagt, dass Kapkan den
+Terminator-Prozess für lebendig hält, die Probe sagt, dass die Box tatsächlich einen TLS-Handshake
+abschließt und die Zone bedient. Auf dem Knoten selbst:
+
+```sh
+# bedient diese Box die Zone wirklich? — vom Knoten aus, gegen seinen eigenen Listener
+curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 -o /dev/null https://shop.example.com/
+```
+
+`--resolve` ist das, was daraus einen echten Test macht: Die Anfrage trägt SNI und Host der Zone,
+also lassen ein abgelaufenes Zertifikat, ein kaputtes Rendering oder ein toter Upstream sie alle
+scheitern, während `127.0.0.1` die Probe von der gemeinsamen Adresse und aus dem Hash heraushält.
+
+<Callout type="warning" title="/healthz wird im Report-Takt abgetastet">
+Die Lebendprüfung des Terminators reitet auf `controller.report_interval_seconds` — **standardmäßig
+10 s**, 1 s im Aufbau. `/healthz` kann Ihnen von einem toten nginx nicht schneller als in diesem
+Intervall berichten, also **setzt ein Betreiber, der auf `/healthz` zurückzieht, dieses Intervall
+auf die Prüfperiode, die er will**, und prüft nicht schneller. Die Prüfung braucht außerdem ein
+gesetztes `terminator.pid_file`: Ohne es hat der Knoten nichts zu prüfen und der Tod ist unsichtbar.
+Und es ist in jedem Fall eine *pid*-Stichprobe — ein Master-Prozess, der bei verklemmtem Listener
+lebt, liest sich als `200`, und genau deshalb ist die lokale TLS-Probe die andere Hälfte des
+Prädikats.
+</Callout>
+
+### Was passiert, wenn niemand zurückzieht
+
+Die Route zeigt weiter auf den toten Knoten, und der Hash schickt ihm weiter einen Anteil des
+Verkehrs. Als einer von zwei Knoten unter einem Layer-4-Hash rundheraus getötet wurde, teilten sich
+die 40 Verbindungen des Aufbaus in **16 Verbindungsfehler und 24 bediente** — die Fehler als `000`
+beim Client, überhaupt keine Antwort, keine Ablehnung. Welcher Knoten ausfällt und wie genau es
+sich teilt, ist Sache des Hashes und wandert von Lauf zu Lauf; dass ein Anteil ausfällt, nicht.
+Eine bestehende Keepalive-Verbindung zum überlebenden Knoten antwortete auf derselben Verbindung
+`200`; die zum toten Knoten war schlicht weg. **Eine gemeinsame Adresse gibt einer bestehenden
+Verbindung überhaupt keinen Schutz.**
+
+Das Gehirn merkt es derweil, langsam und nur fürs Protokoll: Das Inventar kippte **5103 ms** nach
+dem Töten auf `alive: false`, was `stale_after_seconds: 5` nach der letzten Sichtung des toten
+Knotens plus dem Takt ist, in dem das Gehirn es bemerkte. Nichts an diesem Kippen berührt das
+Routing: Die VIP-Route des Routers war durchgehend byte-identisch, das Log des Gehirns erwähnte die
+Adresse nie, und seine Sperrliste — die Menge, die sein Speaker ankündigt — trug ebenfalls nichts
+davon.
+
+### Ein toter Nexthop braucht keinen Betreiber, ein toter Knoten schon
+
+Legen Sie die **Strecke** statt des Knotens still, und der Router markiert den Nexthop von selbst
+als `dead`: Alle 40 Anfragen wurden ohne Zutun des Betreibers bedient. Das ist die Unterscheidung,
+die es sich einzuprägen lohnt — *ein direkt angeschlossener Router merkt den Verlust der Strecke,
+ein gerouteter Hop nicht.* Ein Knoten, der tot ist, während seine Strecke steht, ist für das
+Routing unsichtbar, und genau deshalb brauchen Sie einen gesundheitsgetriebenen Rückzug.
+
+Der Rückzug selbst ist eine RIB-Änderung und nichts weiter:
+
+```sh
+# auf dem Router: den kaputten Knoten nicht mehr benutzen
+ip route replace 198.51.100.7/32 via 10.0.1.2 dev leg-a
+ip route flush cache
+```
+
+Der erste vollständig aus `200` bestehende Batch des Aufbaus war **45 ms** nach diesem Befehl
+fertig, gefolgt von 40 von 40 über TCP und 20 von 20 über HTTP/3. Was die Erholung begrenzt, ist
+die nächste Anfrage des Clients, kein Kapkan-Timer.
+
+### Ein totes Gehirn ist auch kein Rückzug
+
+Die Flotte ist fail-static, und eine gemeinsame Adresse ändert daran eine Sache. Mit rundheraus
+getötetem Gehirn bedienten die Knoten des Aufbaus 20 von 20 Anfragen über TCP und 20 von 20 über
+HTTP/3 durch die VIP, von beiden Knoten, mit `/healthz` `200` auf jedem: Das Gehirn steht nicht im
+Gesundheitsprädikat, und das letzte Dokument und die Zertifikate bedienen weiter von der Platte.
+
+Die eine Sache, die sie ändert, ist die **Erneuerung**, und nur hinter einer gemeinsamen Adresse:
+Die Challenge-Verteilung oben gehört dem Gehirn, also erreicht bei ausgefallenem Gehirn die
+Challenge-Antwort des bestellenden Knotens keinen anderen Knoten, und eine HTTP-01-Validierung
+gelingt nur, wenn der Hash die CA zufällig auf den bestellenden Knoten schickt — etwa 1 von N
+Versuchen. Diese Versuche werden stündlich wiederholt und zählen nie für die Fallback-CA, es
+verbrennt also nichts; was den Ausfall begrenzt, ist das Zertifikat, nicht das Gehirn. Der
+T−30-d-Alarm `kapkan_edge_cert_not_after_seconds` ist das Budget, in dem Sie das Gehirn reparieren
+müssen. Siehe [was der Knoten bei Ausfällen tut](/docs/edge#was-der-knoten-bei-ausfällen-tut).
+
+Was einen Knoten zurückbringt, ist **sein eigener nächster Poll**, und was den begrenzt, ist der
+eigene Backoff des Polls nach einem Fehlschlag — eine Sekunde, verdoppelt bis zu einer Obergrenze
+von 30 — nie `edge.stale_after_seconds`, das nur regelt, wie lange das Gehirn wartet, bevor es
+einen stummen Knoten für verloren erklärt. Im Aufbau waren beide Knoten **840 ms** nach der
+Rückkehr des Gehirns wieder `alive`, und die Verzögerung hängt nur davon ab, wie lange der Ausfall
+dauerte (wie weit der Backoff geklettert war). Ziehen Sie eine Adresse nicht zurück, weil das
+Gehirn unerreichbar ist; ziehen Sie zurück, weil der Knoten vor Ihnen nicht bedient.
+
+### Die BGP-Variante
+
+Wo die Adresse angekündigt statt statisch geroutet wird, stellen Sie auf jeden Knoten einen Speaker
+und lassen ihn die VIP `/32` ankündigen, solange das eigene Prädikat dieses Knotens hält. Der
+Aufbau hat einen Zusatzarm, der genau das mit bird2 fährt, **außerhalb des Abnahmepfads** und
+hinter `ANYCAST_BGP=1`, also standardmäßig übersprungen und ohne aufgezeichnete Zahlen:
+
+```sh
+#!/bin/sh
+# auf jedem Knoten: ankündigen, solange gesund, zurückziehen, sobald nicht
+# 9101 unten ist der status_listen-Port dieses Knotens — nehmen Sie Ihren eigenen
+while :; do
+  if curl -sf -m1 -o /dev/null http://127.0.0.1:9101/healthz \
+     && curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 \
+             -o /dev/null https://shop.example.com/; then
+    birdc -s /run/bird/ctl enable announce
+  else
+    birdc -s /run/bird/ctl disable announce
+  fi
+  sleep 1
+done
+```
+
+Was der Arm behauptet, mit der Probe im Sekundentakt und dem darauf abgestimmten Report-Intervall:
+nginx auf einem Knoten zu töten nimmt ihn aus der FIB des Routers und verschiebt die Anfragen des
+nächsten Batches auf den überlebenden Knoten, während ein abgelehntes Dokument die Route **nicht**
+zurückzieht — `/healthz` bleibt `200`, also bleibt das Protokoll aktiviert. Das ist der Vertrag aus
+der Tabelle oben, durchgesetzt von einem Speaker statt von Hand. Der Speaker gehört Ihnen: bird,
+FRR, was auch immer Ihr Netz fährt. Kapkan liefert keinen aus und steuert keinen.
+
+## Was zwischen Knoten übergreift und was nicht
+
+| Fakt | Greift über? | Warum |
+| --- | --- | --- |
+| Ein Freigabe-Cookie | **Ja** | Die Signaturschlüssel der Stufe gehören der Flotte und stehen im Dokument. Ein Besucher, der das Rätsel auf einem Knoten löste, wurde vom anderen mit dem Cookie bedient, und der Origin sah `X-Kapkan-Mark: cleared` |
+| Eine TLS-Session | **Nein** | Eine Session ist ein zustandsbehafteter Eintrag im eigenen Shared Cache des Knotens; kein zustandsloses Ticket trägt sie, und kein Ticket-Schlüssel ist geteilt, also kann sie auf einem anderen Knoten nicht existieren. Bietet man edge-1s Session an, antwortet edge-2 `New` — in beide Richtungen, über TLS 1.2 und TLS 1.3 |
+| Ein Ratenbucket, eine Urteilstabelle, ein Rollup-Fenster | **Nein** | Pro Knoten, so gewollt — [Obergrenzen pro Knoten](#obergrenzen-pro-knoten-und-der-hash-den-sie-gewählt-haben) |
+| Eine QUIC-Verbindung | **Nein** | nginx routet QUIC über den Socket, nicht über die Connection ID; ein migrierter Client verbindet sich neu |
+
+<Callout type="info" title="Eine Session wird auf dem Knoten wiederaufgenommen, der sie ausgestellt hat, und auf keinem anderen">
+Der Catch-all-Server `:443`, den Kapkan rendert — und unter `omit_catch_all` der nackte
+QUIC-Anker —, trägt die Session-Zeilen der Zonen: `ssl_session_cache shared:kapkan_ssl:10m;
+ssl_session_timeout 1d; ssl_session_tickets off;`. Sie müssen dort stehen, weil OpenSSL eine
+Session über den Kontext des Servers nachschlägt — und ablegt —, auf dem die Verbindung
+**begonnen** hat, also des Default-Servers der Adresse, selbst nachdem SNI die Verbindung auf eine
+Zone umgeschaltet hat. Ein wiederkehrender Client nimmt die Session deshalb auf dem Knoten wieder
+auf, der sie ausgestellt hat, über TLS 1.2 und TLS 1.3 gleichermaßen (mit
+`ssl_session_tickets off` ist ein 1.3-Ticket ein zustandsbehafteter Eintrag in genau diesem Cache),
+und ist auf jedem anderen Knoten `New`; der Aufbau prüft beide Hälften in beide Richtungen.
+
+Was eine Session auf ihren Knoten begrenzt, ist diese Lokalität — ein zustandsbehafteter Eintrag im
+eigenen Cache dieses Knotens, ohne zustandsloses Ticket, das sie trägt, und ohne geteilten
+Ticket-Schlüssel —, **nicht** das Zertifikat. Auf nginx vor 1.29.2 ist der geltende Session-ID-
+Kontext der des zertifikatslosen Catch-all, er bindet also nichts an einen Knoten (edge-spec §3).
+
+**Sie fahren `omit_catch_all: true`? Ihr eigener Default-Server auf `:443` braucht genau diese drei
+Zeilen** — und Ihr eigener QUIC-Server auch, wenn Sie zusätzlich `quic.omit_anchor` setzen. Ohne
+sie zahlt jeder wiederkehrende Client auf diesem Knoten einen vollen Handshake; die
+[Installationsanleitung](/docs/edge-install#fehlerbehebung) trägt die Zeile dazu.
+</Callout>
+
+### MTU: eine schlechte Strecke kostet HTTP/3 auf der ganzen Adresse
+
+QUIC fragmentiert nie und gibt unterhalb eines 1280-Byte-Pfads auf. An einer gemeinsamen Adresse
+ist das kein Problem eines einzelnen Knotens, weil **eine Pfad-MTU pro Ziel zwischengespeichert
+wird und das Ziel die Adresse ist, die sich alle Knoten teilen**:
+
+1. Der Aufbau setzte MTU 1200 auf nur einer Strecke. Von 40 `--http3-only`-Anfragen schlugen **38
+   fehl** — und TCP war durchgehend 40 von 40, weil TCP seine MSS pro Verbindung klemmt. Wie viele
+   durchkommen, bevor die Lektion sitzt, ist der Münzwurf des Hashes; der Aufbau prüft, dass die
+   große Mehrheit es nicht tut.
+2. Es ist kein Anteil des Verkehrs. Sobald die erste Anfrage, die den Knoten mit der kleinen MTU
+   erreichte, dem Client eine Pfad-MTU von 1200 Byte für die VIP beigebracht hatte
+   (`ip route get 198.51.100.7` zeigt die zwischengespeicherte Ausnahme), gelang **keine**
+   HTTP/3-Anfrage mehr — nicht einmal zum unberührten Knoten hin.
+3. Die Strecke zu reparieren behob es nicht: 10 von 10 schlugen weiter fehl. Die
+   zwischengespeicherte Ausnahme des Clients überlebt den Fehler. Erst `ip route flush cache` auf
+   dem Client brachte HTTP/3 zurück, und danach gelangen 20 von 20 von beiden Knoten.
+
+Sie können die Caches Ihrer Besucher nicht leeren. Behandeln Sie jeden Pfad unter 1280 Byte auf
+jeder Strecke einer gemeinsamen Adresse als Ausfall von HTTP/3 für diese ganze Adresse, reparieren
+Sie die MTU, bevor Sie h3 ankündigen, und halten Sie
+[die h3-Ausrollreihenfolge](/docs/edge#http3-quic) ein — zuerst die Knoten, UDP 443 und MTU als
+Zweites.
+
+## Eine Flotte hinter einer Adresse verifizieren
+
+Führen Sie das von einem Client aus, der die Adresse erreicht, und mit einem Operator-Token am
+Gehirn.
+
+```sh
+# 1. Eine Route, zwei Nexthops — nicht zwei Routen
+ip route show 198.51.100.7/32
+
+# 2. Welche Hash-Form tatsächlich gilt
+sysctl net.ipv4.fib_multipath_hash_policy
+
+# 3. Beide Knoten bedienen den Namen, jeder mit seinem EIGENEN Zertifikat
+openssl s_client -connect 10.0.1.2:443 -servername shop.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
+openssl s_client -connect 10.0.2.2:443 -servername shop.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
+
+# 4. Die gemeinsame Adresse bedient, über TCP und über HTTP/3
+curl -s -o /dev/null -w '%{http_code}\n' https://shop.example.com/
+curl --http3-only -s -o /dev/null -w '%{http_code} %{http_version}\n' https://shop.example.com/
+
+# 5. Jeder Knoten ist lebendig, verteilt und meldet sein eigenes Dokument
+curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1/edge/nodes
+```
+
+Prüfen Sie im Inventar pro Knoten drei Dinge, in dieser Reihenfolge:
+
+- **`alive: true` und ein frisches `last_seen`** — der Poll ist das Lebendsignal.
+- **`hostgroups` deckt die Zone ab** auf jedem Knoten hinter der Adresse — die eigene Hostgruppe
+  der Zone oder `global` für eine globale Zone. Ein Knoten, dessen Eingrenzung sie nicht abdeckt,
+  rendert nichts dafür und antwortet nichts. (`zones_placed` daneben ist eine *Zahl* — wie viele
+  Zonen der Datei das Dokument dieses Knotens hält —, sie sagt Ihnen also, dass die Eingrenzung
+  eines Knotens leer ist, nie welche Zonen er hat.) Die Sicht pro Zone ist dasselbe von der anderen
+  Seite: `GET /api/v1/edge/zones/status` trägt das `placement` jeder Zone, dessen `nodes` jeden
+  Knoten hinter der Adresse listen muss und dessen `alive` sie alle noch einmal listen muss.
+- **`report.zones_etag` entspricht dem ETag, das das Gehirn diesem Knoten ausliefert**
+  (`GET /api/v1/edge/zones?node=<name>`).
+
+<Callout type="info" title="Die ETags zweier Knoten sollen gar nicht übereinstimmen">
+Jeder Knoten meldet das ETag **seines eigenen** Dokuments. Bei irgendeiner Verteilung in der Flotte
+unterscheiden sich diese Dokumente — ein Knoten bedient eine Zone, die der andere nicht bedient —,
+also ist ein flottenweit gemeinsames `zones_etag` **kein** Gesundheitssignal, und ihm
+hinterherzujagen heißt, einem Bug hinterherzujagen, den es nicht gibt. Was gilt, gilt pro Knoten:
+Das ETag, das ein Knoten meldet, ist das ETag, das das Gehirn *ihm* ausgeliefert hat. Eine Zone,
+die sich die Knoten teilen, ist in beiden Dokumenten byte-identisch. Und das Inventar trägt
+keinerlei Schlüsselmaterial — Zertifikate erscheinen mit Zone, Ablauf und Aussteller benannt, nie
+als Bytes.
+</Callout>
+
+### Herausfinden, welcher Knoten eine Anfrage bedient hat
+
+Es gibt bewusst keinen Produkt-Header, der den Knoten nennt. Wenn Sie für einen Nachmittag
+Fehlersuche einen brauchen, gibt Ihnen die Hintertür der Zonendatei einen:
+
+```nginx
+# /etc/kapkan/debug-node.conf, referenziert über extra_directives_file einer Zone
+add_header X-Kapkan-Node $hostname always;
+```
+
+<Callout type="danger" title="Ein Debugging-Trick, kein Produkt-Header">
+Das veröffentlicht den Hostnamen der bedienenden Box an jeden Client dieser Zone. Kapkan rendert
+die Datei wörtlich, und `nginx -t` ist ihr einziger Wächter. Fügen Sie ihn hinzu, während Sie einen
+Hash oder eine Verteilung diagnostizieren, und nehmen Sie ihn wieder heraus. Er reitet außerdem
+nicht auf einer `429` mit — die Ablehnungs-Location deklariert ihren eigenen `add_header`, und
+nginx verwirft dort den geerbten Satz —, er kann Ihnen also sagen, wer eine Anfrage *bedient* hat,
+aber nie, wer sie *abgelehnt* hat. Für Ablehnungen lesen Sie die `/metrics` jedes Knotens.
+</Callout>
+
+## Verwandte Themen
+
+- [Edge-Knoten](/docs/edge) — wie ein Knoten arbeitet, die Fast/Slow-Trennung, was wie ausfällt
+- [Einen Edge-Knoten installieren](/docs/edge-install) — eine Box von Anfang bis Ende
+- [Zonen-Referenz](/docs/zones) — `policy.rate`, die Stufe, `extra_directives_file`
+- [Netzwerkintegration](/docs/network-integration#der-rückpfad) — der Rückpfad, Route-Leaking und VRF, die `rp_filter`-Falle
+- [Authentifizierung](/docs/authentication#ein-agent-token-an-seinen-knoten-binden) — ein gebundenes Agent-Token pro Knoten
+- [Der Edge-Kanal](/docs/api#der-edge-kanal) — das Inventar, der Zonenstatus und der Hebel
+- [Metriken](/docs/metrics#edge-knoten) — die Reihen pro Knoten, mit denen man eine Flotte beobachtet

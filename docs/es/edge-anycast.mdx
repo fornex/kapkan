@@ -1,0 +1,541 @@
+export const metadata = {
+  title: "Una dirección, muchos nodos (anycast)",
+  description:
+    "Poner varios nodos edge detrás de una sola dirección con ECMP o anycast: la topología, las formas de hash y qué le hace cada una a un techo de tasa por nodo, el reparto ACME determinista, qué dice «retírame» y los hechos que una dirección compartida no comparte.",
+};
+
+# Una dirección, muchos nodos (anycast)
+
+<Callout type="info" title="Su red anuncia la dirección; Kapkan opera las máquinas que hay detrás">
+Kapkan no tiene opinión sobre el enrutamiento y nunca lo toca. **Su** router, su speaker o el
+balanceador de carga de su nube pone una dirección delante de varios [nodos edge](/docs/edge);
+Kapkan le da a cada una de esas máquinas sus certificados, su configuración y su propio servicio de
+decisión, y le dice cuál de ellas está en condiciones de servir. Nada en Kapkan anuncia, retira ni
+dirige la dirección de una zona: el speaker BGP del cerebro existe para víctimas bajo ataque, nunca
+para el enrutamiento de servicio.
+</Callout>
+
+Todo lo de esta página se ejecutó sobre un kernel real, con un salto de router real, nginx real,
+HTTP/3 real y una autoridad de certificación ACME real antes de escribirse: el banco de aceptación
+es `engine/scripts/labnet/edge-e6-anycast.sh`, dos nodos detrás de una sola `198.51.100.7/32`
+enrutada como una ruta ECMP sobre dos enlaces punto a punto, conmutando la política de hash del
+kernel brazo a brazo. Las cifras de abajo se citan junto con las condiciones que las produjeron,
+porque la mayoría se mueven cuando esas condiciones se mueven.
+
+## Qué aporta una dirección compartida y qué no
+
+Aporta un nombre, una historia de certificados y una política sobre N máquinas, con la red
+eligiendo la máquina. **No** agrupa nada de lo que los nodos cuentan o cachean. La frase que
+conviene tener en la cabeza: **el cerebro reparte política, nunca veredictos.**
+
+- **Todo techo de tasa es por nodo.** `policy.rate.rps` es un cubo de fichas en la máquina que
+  sirve la petición. Dos nodos detrás de una dirección son dos cubos, y un origen que la red
+  reparte entre ambos se encuentra con cada uno por separado. Véanse
+  [los techos por nodo](#los-techos-por-nodo-y-el-hash-que-eligió) — es el único hecho que más a
+  menudo sorprende a un operador que pasa de un nodo a tres.
+- **Toda tabla de veredictos es por nodo.** Los rollups que ascienden a un origen inundador a un
+  bloqueo son las ventanas de diez segundos del propio nodo. Un origen bloqueado en un nodo no lo
+  está en su vecino.
+- **Toda caché de sesiones TLS es por nodo**, y una sesión emitida en un nodo nunca es reanudable
+  en otro — [qué no cruza](#qué-cruza-entre-nodos-y-qué-no).
+- **Todo certificado es del propio nodo.** Dos nodos que sirven un mismo nombre sirven dos
+  certificados de hoja distintos, emitidos por dos pedidos ACME desde dos claves de cuenta que
+  nunca salen de sus máquinas. El banco leyó ambas huellas y difieren.
+- **El pase es de la flota.** Un visitante que resuelve
+  [el peldaño de prueba de trabajo](/docs/edge#el-peldaño-de-prueba-de-trabajo) en un nodo queda
+  autorizado en todos: las claves de firma bajan en el documento.
+- **La palanca y el archivo de zonas son de la flota.** Un cambio de tasa, un peldaño, una palanca
+  llegan a cada nodo en su siguiente sondeo y no recargan nada — la
+  [división rápida/lenta](/docs/edge#la-división-rápidalenta) no cambia con el número de nodos.
+
+## La topología
+
+```
+                     ┌── enlace A (10.0.1.0/30) ──▶ edge-1  198.51.100.7/32 en lo
+ cliente ──▶ router ─┤                                       kapkan edge · nginx · token a1
+   198.51.100.7      └── enlace B (10.0.2.0/30) ──▶ edge-2  198.51.100.7/32 en lo
+   (una ruta ECMP,                                           kapkan edge · nginx · token a2
+    dos nexthops)                                                 │
+                                                                  └── unicast ──▶ cerebro (API)
+```
+
+Cuatro reglas, y el banco está construido exactamente sobre ellas:
+
+1. **La VIP vive en el loopback de cada nodo**, como un `/32`:
+
+   ```sh
+   # en cada nodo detrás de la dirección
+   ip addr add 198.51.100.7/32 dev lo
+   ```
+
+   Kapkan genera directivas `listen` sin dirección, así que nginx responde en la dirección que usó
+   el cliente y la generación no menciona la VIP en ningún momento. Ni `edge.yaml` ni el archivo de
+   zonas la nombran.
+
+2. **El router lleva una ruta con un nexthop por nodo**, no una ruta por nodo:
+
+   ```sh
+   # en el router que hay delante
+   ip route replace 198.51.100.7/32 \
+     nexthop via 10.0.1.2 dev leg-a weight 1 \
+     nexthop via 10.0.2.2 dev leg-b weight 1
+   ip route flush cache
+   ```
+
+   Una ruta con dos nexthops es una ruta ECMP; la comprobación es
+   `ip route show 198.51.100.7/32` mostrando dos líneas `nexthop`. Un speaker (bird, FRR) que
+   acepte los anuncios de ambos nodos y los fusione produce lo mismo — véase
+   [la variante BGP](#la-variante-bgp).
+
+3. **Cada nodo llega al cerebro por unicast, en su propia dirección, con su propio token
+   vinculado.** Un token `agent` por nodo, vinculado con `api.tokens[].node`, no es un detalle aquí:
+   el cerebro sella la presencia y sirve el documento de cada nodo por su nombre, y un token
+   compartido detrás de una dirección compartida deja ambas cosas sin sentido.
+
+   ```yaml
+   # kapkan.yaml en el cerebro
+   api:
+     tokens:
+       - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
+       - { name: edge-2, token_env: KAPKAN_EDGE_2_TOKEN, role: agent, node: edge-2 }
+   edge:
+     nodes:
+       - { name: edge-1 }
+       - { name: edge-2 }
+     stale_after_seconds: 15
+   ```
+
+   El banco comprueba las dos mitades: el cerebro sirve `GET /api/v1/edge/zones?node=edge-1` al
+   token de edge-1, y responde `403` cuando ese mismo token pregunta por el nombre de edge-2. Véase
+   [vincular un token de agente a su nodo](/docs/authentication#vincular-un-token-de-agente-a-su-nodo).
+
+4. **Las configuraciones de los nodos son idénticas salvo por `controller.name`** — y el token que
+   cada nodo lee de su propio entorno. Nada más en una dirección compartida necesita un valor por
+   nodo. Los dos `edge.yaml` del banco difieren además en
+   `state_dir`/`sockets_dir`/`terminator.pid_file`, `status_listen` y `terminator.main_conf`, pero
+   solo porque sus dos «nodos» comparten un host y no pueden compartir esas rutas ni esos puertos;
+   en máquinas separadas son el mismo archivo con un nombre cambiado. Ambos pasan
+   `kapkan edge -check`.
+
+### La ruta de retorno
+
+Una respuesta al cliente lleva la dirección por la que llegó la petición, así que en un nodo con un
+solo enlace de subida la VIP vuelve por el único camino que hay y no hay nada que configurar. Dos
+cosas sí requieren cuidado:
+
+- **El tráfico que origina el propio nodo debe usar su dirección unicast.** El sondeo al cerebro, el
+  informe y el pedido ACME salen por la ruta por defecto del nodo con su propia dirección de
+  origen, que es lo que hace al nodo identificable. No le dé a la VIP una ruta que la convierta en
+  la fuente preferida; un `/32` en `lo` no lo hace.
+- **Un nodo cuya ruta por defecto es un enlace de gestión o hacia el cerebro debe enviar las
+  respuestas originadas en la VIP por el enlace de servicio.** Dele al tráfico originado en la
+  dirección compartida su propio contexto de enrutamiento, primero la forma portable:
+
+  ```sh
+  # una tabla dedicada al tráfico originado en la dirección compartida
+  ip route add default via 10.0.1.1 dev leg-a table 100
+  ip rule  add from 198.51.100.7 lookup 100
+  ```
+
+  Seamos claros con lo que hace eso: la tabla 100 tiene **una** ruta por defecto, de modo que
+  *clava* toda respuesta originada en la VIP a leg-a, por el enlace que sea que llegó la petición.
+  Con un solo enlace de servicio eso es exactamente lo correcto. Con dos enlaces de servicio, dele
+  a la tabla 100 una ruta por defecto multicamino —
+  `ip route add default table 100 nexthop via 10.0.1.1 dev leg-a nexthop via 10.0.2.1 dev leg-b` —
+  y asuma que la respuesta sale según el hash del kernel y no por el enlace de entrada; volver
+  exactamente por el enlace por el que llegó un paquete es tarea del seguimiento de conexiones
+  (`CONNMARK` restaurada en una fwmark, con una regla por enlace), no de una regla sobre la
+  dirección de origen. En cualquier caso la respuesta sale por un enlace de servicio, que es lo que
+  necesita un equipo aguas arriba con `rp_filter` o un cortafuegos con estado.
+
+  Un **dispositivo VRF** (`ip link add vrf-edge type vrf table 100` y luego esclavizar el enlace) es
+  la misma tabla alcanzada por un dispositivo en vez de por una regla, en kernels compilados con
+  `CONFIG_NET_VRF`. La forma con fuga de rutas de arriba es la verificada en el laboratorio de
+  integración de red y funciona en cualquier kernel con `CONFIG_IP_MULTIPLE_TABLES`; los nodos del
+  banco anycast tienen un enlace cada uno, así que trate la receta de dos enlaces de subida como la
+  [receta de la ruta de retorno](/docs/network-integration#la-ruta-de-retorno) aplicada aquí, no
+  como un brazo de este banco. Las rutas asimétricas traen consigo además la
+  [trampa de `rp_filter`](/docs/network-integration#rp_filter-y-la-respuesta-asimétrica).
+
+### Colocación, si la flota tiene puntos de presencia
+
+Los nodos detrás de una dirección deben servir todos las zonas de esa dirección: dele a cada uno el
+grupo de hosts de la zona en `edge.nodes[].hostgroups`, o deje la zona global en nodos sin alcance.
+Una zona colocada lejos de un nodo no se genera allí en absoluto — la zona colocada del banco nunca
+aparece en el nodo que no lista su grupo, y ese nodo no responde nada para el nombre. La regla y sus
+consecuencias están en [Colocar zonas en los nodos](/docs/edge#colocar-zonas-en-los-nodos).
+
+## En qué nodo aterriza un cliente: el hash
+
+El kernel elige un nexthop calculando el hash del paquete, y **qué campos usa para ese hash es un
+sysctl que usted ajusta**, no una propiedad de anycast:
+
+```sh
+sysctl -w net.ipv4.fib_multipath_hash_policy=0   # capa 3: dirección de origen y destino
+sysctl -w net.ipv4.fib_multipath_hash_policy=1   # capa 4: la cuádrupla, puertos incluidos
+ip route flush cache                             # la caché en uso conserva la decisión anterior
+```
+
+| Política | Qué usa para el hash | Qué obtiene un cliente | Cuándo usarla |
+| --- | --- | --- | --- |
+| `0` (capa 3) | dirección de origen y destino | **Un nodo**, en cada conexión, hasta que cambie la topología | Colocación estable y depurable: un cliente se queda con un nodo, su caché de sesiones se mantiene caliente y su QUIC no se mueve. La opción recomendada — con la advertencia sobre el techo de más abajo |
+| `1` (capa 4) | la cuádrupla, puertos incluidos | **Ambos nodos**, conexión a conexión | Un reparto uniforme entre nodos, al precio de dispersar las conexiones de un mismo cliente, y su contabilidad de tasa, por todos ellos |
+
+En el banco, 40 conexiones nuevas de un mismo cliente con la política `0` llevaron todas el nombre
+del mismo nodo; con la política `1` esas mismas 40 alcanzaron ambos nodos, y también lo hicieron 40
+peticiones `--http3-only`: la misma política calcula el hash de la cuádrupla UDP, así que **QUIC se
+reparte exactamente igual que TCP**, y ambos nodos contaron su parte en
+`kapkan_edge_requests_total{protocol="h3"}` y en el `h3_requests` por ventana del informe.
+
+Ninguna de las dos formas es «pegajosa» en ningún sentido en el que una conexión pueda confiar. Que
+cambie la dirección de un cliente (de wifi a LTE, una reasignación de NAT) es una entrada nueva para
+el hash con cualquiera de las dos políticas, y con la capa 4 cada conexión nueva es una tirada
+nueva: aterriza en un nodo distinto del anterior en aproximadamente (N−1)/N de los casos — una de
+cada dos conexiones con dos nodos. Esa fracción es justamente el ritmo al que un cliente paga un
+apretón de manos TLS completo, porque una sesión solo vive en el nodo que la emitió. Una conexión
+QUIC que aterriza en un nodo que nunca la ha visto simplemente se reconecta: nginx enruta QUIC por
+el socket por el que llegó, no por el identificador de conexión, y la migración de conexión
+**entre** nodos no está soportada — véase [lo que nginx no puede hacer](/docs/edge#http3-quic).
+
+## Los techos por nodo, y el hash que eligió
+
+`policy.rate.rps` se aplica en el nodo que sirve la petición, así que un origen repartido entre N
+nodos puede ser admitido hasta N veces el techo. Esa es la mitad conocida. La mitad que le cuesta
+un incidente a los operadores es que **las dos formas de hash difieren en clase, no solo en
+grado.**
+
+El banco fijó `policy.rate.rps: 5` y lanzó 40 conexiones de un mismo origen contra dos nodos:
+
+| Política de hash | Servidas | Rechazadas (`429`) | `deny_rate` edge-1 / edge-2 | Lote |
+| --- | --- | --- | --- | --- |
+| `0` (capa 3) | 6 | 34 | 0 / 34 | 0,3 s |
+| `1` (capa 4) | 12 | 28 | 10 / 18 | 0,2 s |
+
+Lea las dos filas una contra otra, no por separado. Qué nodo rechaza, y el reparto exacto por nodo,
+son asunto del hash y se mueven entre ejecuciones — una repetición repartió los rechazos de capa 4
+en 14/14 en lugar de 10/18 —, mientras que el número de servidas y la proporción no se movieron.
+
+- **Con la capa 4 el origen obtuvo 2,0× de peticiones admitidas.** Esa cifra es un *rango*, no una
+  constante: el cubo de un nodo guarda `rps` fichas y se rellena a `rps` por segundo, así que un
+  lote que dura `T` segundos se admite a `rps + rps·T` por nodo, y el multiplicador solo se acerca
+  al número de nodos mientras la parte de la ráfaga de cada nodo siga superando su propia
+  asignación. El banco comprueba 1,5×–2,5× con la duración del lote anotada junto a los recuentos,
+  que es la razón de que la tabla tenga una columna *lote*. **Dimensione un `rps` por nodo más o
+  menos como el techo que pretende para la flota dividido entre el número de nodos**, y espere que
+  la tasa realmente admitida quede entre ese valor y el propio techo.
+- **Con la capa 3 toda la ráfaga aterriza en un solo nodo** — y 34 rechazos en la ventana de diez
+  segundos de un nodo cruzan la regla de inundación de los rollups (al menos 20 rechazos, al menos
+  el 30 % de las peticiones decididas de ese origen). En una zona cuyo `challenge` sea `off` o
+  `manual` — la del banco es `off` —, eso asciende ahí al origen a un **bloqueo de tabla** durante
+  `DenyTTL`: un minuto para empezar, duplicándose hasta diez si reincide. El banco sondea después
+  ese origen y exige el `403`. En una zona `challenge: auto`, [la escalera](/docs/edge#la-escalera)
+  se queda con el primer cruce: el origen es enviado al peldaño de prueba de trabajo y solo se
+  bloquea si sigue inundando tras superarlo o mientras está retado — un navegador pasa, un bot no.
+  Con la capa 4 esas mismas 40 conexiones se repartieron 10/18, ningún nodo cruzó siquiera el
+  umbral, y ambos nodos siguen informando del origen como `allow` en sus `top_sources`.
+
+<Callout type="warning" title="Un rps por nodo bajo con un hash de capa 3 bloquea a un cliente muy activo">
+Con la capa 4 un origen por encima de su techo es *frenado*: acumula `429` con `Retry-After` y sigue
+en `allow`. Con la capa 3 esa misma ráfaga es *bloqueada*: se concentra en un nodo y cruza allí la
+regla de inundación. En una zona con `challenge: off` o `manual` eso es un `403` durante `DenyTTL`
+de inmediato — un ascenso que ningún `429` anuncia y del que ningún otro nodo sabe nada. En una
+zona `challenge: auto` es primero [el peldaño](/docs/edge#la-escalera) y el bloqueo solo si el
+origen sigue inundando después: un aterrizaje más suave, pero sigue siendo la decisión de un solo
+nodo sobre un cliente que los demás nodos consideran correcto. Si usa el hash de capa 3
+recomendado, ajuste el techo por nodo al cliente legítimo más activo que tenga, y vigile
+`kapkan_edge_decisions_total{result="deny_rate"}` por nodo antes de apretarlo.
+</Callout>
+
+Una petición rechazada por tasa **no** lleva ninguna cabecera que atribuya el nodo — la location
+`@kapkan_denied` de la generación declara su propio `add_header`, y nginx descarta el conjunto
+heredado allí donde una location declara el suyo —, así que cuente los rechazos en las `/metrics`
+de cada nodo, no en la respuesta.
+
+## Certificados: el reparto es determinista
+
+Cada nodo pide su propio certificado para el nombre compartido, y la validación HTTP-01 de la
+autoridad llega a la VIP, de modo que aterriza en el nodo que elija el hash, que normalmente **no**
+es el que pidió. Eso funciona porque el nodo que pide publica su respuesta al reto en el cerebro, y
+el cerebro la reparte en el documento de cada nodo que sirve la zona.
+
+El banco lo demuestra de la única manera que no es circular: clava la ruta solo a edge-2 durante
+toda la emisión, de forma que el certificado de edge-1 solo puede haberse validado con el token de
+reto repartido a edge-2. Ambos nodos acabaron con sus propios certificados para el nombre
+compartido, con huellas de hoja distintas.
+
+Otras dos cosas que el banco deja clavadas, y que importan las dos en una dirección compartida:
+
+- **La emisión se serializa por zona, lo que reparte los pedidos en el tiempo pero no los
+  reduce.** Pedir la ranura de una zona mientras la tiene otro nodo recibe `granted: false` con el
+  nombre de quien la tiene y un `retry_after_seconds`, así que los nodos piden uno tras otro en vez
+  de todos a la vez. Siguen pidiendo N certificados: cada nodo tiene su propia hoja, así que una
+  emisión de un nombre colocado en N nodos cuesta N contra el
+  [techo de duplicados](/docs/edge#límites-que-conviene-conocer) de la autoridad — unos cinco por
+  semana en Let's Encrypt, contados por colocación. **Una flota mayor que ese techo sobre un mismo
+  nombre necesita `acme.fallback` o cuentas de autoridad separadas**; ninguna serialización le
+  comprará el sexto certificado. La ranura es además orientativa: un nodo que la ha esperado 15
+  minutos pide igualmente, así que es un repartidor, nunca un cerrojo.
+- **Un nodo reiniciado no pide nada.** El banco reinicia un nodo y encuentra sus certificados de
+  vuelta desde el disco: su propio `kapkan_edge_acme_attempts_total` se queda en `0` y no le pide
+  ninguna ranura al cerebro.
+
+## Retirada: qué dice «retírame»
+
+Una dirección compartida vale lo que valga aquello que deja de mandar tráfico a un nodo roto.
+Retire según un predicado de dos partes — la señal propia de Kapkan **y** una sonda del propio
+escuchador — e ignore las dos no-señales tentadoras.
+
+| Señal | ¿Retirar por ella? | Qué vio el banco |
+| --- | --- | --- |
+| **`/healthz` en `status_listen` responde `503`** | **Sí** | Se mató el nginx del nodo; `/healthz` pasó a `503` **495 ms** después, con `controller.report_interval_seconds: 1` en el banco |
+| **Una sonda TLS local al `:443` del propio nodo con el SNI de la zona falla** | **Sí** | No es un brazo del banco: `/healthz` muestrea el archivo pid del terminador en el tic del informe, así que no puede ver un escuchador atascado, un certificado caducado ni un apretón de manos TLS rechazado. Sondee lo que hace un cliente |
+| `converged: false` en el estado del nodo | **No** | Un documento que el nodo rechazó: la generación probada anterior siguió sirviendo, `/healthz` se mantuvo en `200`, y 20 de 20 peticiones a través de la VIP fueron servidas — edge-2 entre ellas |
+| El inventario del cerebro dice `alive: false` | **No** | Es la visión del cerebro sobre un sondeo, no la visión del nodo sobre sí mismo, y va con un retraso de `stale_after_seconds` |
+
+**Retire en cuanto falle cualquiera de las dos señales «sí», y anuncie solo mientras aguanten las
+dos.** Responden a preguntas distintas: `/healthz` dice que Kapkan cree vivo al proceso terminador;
+la sonda dice que la máquina completa de verdad un apretón de manos TLS y sirve la zona. En el
+propio nodo:
+
+```sh
+# ¿está esta máquina sirviendo la zona de verdad? — desde el nodo, contra su propio escuchador
+curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 -o /dev/null https://shop.example.com/
+```
+
+`--resolve` es lo que la convierte en una prueba real: la petición lleva el SNI y el Host de la
+zona, así que un certificado caducado, una generación rota o un origen muerto la hacen fallar,
+mientras que `127.0.0.1` mantiene la sonda fuera de la dirección compartida y fuera del hash.
+
+<Callout type="warning" title="/healthz se muestrea en el tic del informe">
+La comprobación de vitalidad del terminador viaja en `controller.report_interval_seconds` — **10 s
+por defecto**, 1 s en el banco. `/healthz` no puede contarle lo de un nginx muerto más rápido que
+ese intervalo, así que **un operador que retire según `/healthz` pone ese intervalo en el periodo
+de sondeo que quiera** y no sondea más rápido. La comprobación necesita además un
+`terminator.pid_file` definido: sin él el nodo no tiene nada que comprobar y la muerte es
+invisible. Y en cualquier caso es un muestreo de *pid* — un proceso maestro vivo con el escuchador
+atascado se lee como `200`, y esa es toda la razón por la que la sonda TLS local es la otra mitad
+del predicado.
+</Callout>
+
+### Qué ocurre si nadie retira
+
+La ruta sigue apuntando al nodo muerto y el hash sigue mandándole una parte del tráfico. Con uno de
+los dos nodos matado en seco bajo un hash de capa 4, las 40 conexiones del banco se repartieron en
+**16 fallos de conexión y 24 servidas** — los fallos como `000` en el cliente, ninguna respuesta en
+absoluto, no un rechazo. Qué nodo falla y el reparto exacto son asunto del hash y se mueven de
+ejecución en ejecución; que falle una parte, no. Una conexión keepalive ya establecida hacia el
+nodo superviviente respondió `200` por esa misma conexión; la que iba al nodo muerto simplemente
+desapareció. **Una dirección compartida no le da ninguna protección a una conexión ya
+establecida.**
+
+Mientras tanto el cerebro se entera, despacio y solo para el acta: el inventario pasó a
+`alive: false` **5103 ms** después de la muerte, que es `stale_after_seconds: 5` tras el último
+avistamiento del nodo muerto más el tic en el que el cerebro se dio cuenta. Nada de ese cambio toca
+el enrutamiento: la ruta VIP del router fue idéntica byte a byte de principio a fin, el registro
+del cerebro nunca mencionó la dirección, y su lista de bloqueos — el conjunto que anuncia su
+speaker — tampoco llevaba nada de esto.
+
+### Un nexthop muerto no necesita operador; un nodo muerto sí
+
+Tire el **enlace** en lugar del nodo y el router marca el nexthop como `dead` por su cuenta: las 40
+peticiones se sirvieron sin ninguna acción del operador. Esta es la distinción que vale la pena
+interiorizar: *un router directamente conectado nota la pérdida del enlace, un salto enrutado no.*
+Un nodo que está muerto mientras su enlace sigue arriba es invisible para el enrutamiento, y
+justamente por eso hace falta una retirada guiada por la salud.
+
+La retirada en sí es un cambio en la RIB y nada más:
+
+```sh
+# en el router: dejar de usar el nodo roto
+ip route replace 198.51.100.7/32 via 10.0.1.2 dev leg-a
+ip route flush cache
+```
+
+El primer lote del banco enteramente de `200` terminó **45 ms** después de esa orden, seguido de 40
+de 40 por TCP y 20 de 20 por HTTP/3. Lo que acota la recuperación es la siguiente petición del
+cliente, no ningún temporizador de Kapkan.
+
+### Un cerebro muerto tampoco es una retirada
+
+La flota es fail-static, y una dirección compartida cambia una cosa de eso. Con el cerebro matado
+en seco, los nodos del banco sirvieron 20 de 20 peticiones por TCP y 20 de 20 por HTTP/3 a través
+de la VIP, desde ambos nodos, con `/healthz` en `200` en cada uno: el cerebro no está en el
+predicado de salud, y el último documento y los certificados siguen sirviendo desde el disco.
+
+Lo único que cambia es la **renovación**, y solo detrás de una dirección compartida: el reparto de
+retos de más arriba es del cerebro, así que con el cerebro caído la respuesta al reto del nodo que
+pide no llega a ningún otro nodo, y una validación HTTP-01 solo triunfa cuando el hash manda por
+casualidad a la autoridad al nodo que pidió — alrededor de 1 intento de cada N. Esos intentos se
+reintentan cada hora y nunca cuentan para la autoridad de reserva, así que no se quema nada; lo que
+acota la avería es el certificado, no el cerebro. La alarma
+`kapkan_edge_cert_not_after_seconds` a T−30 d es el presupuesto que tiene para arreglar el cerebro.
+Véase [qué hace el nodo cuando algo falla](/docs/edge#qué-hace-el-nodo-cuando-algo-falla).
+
+Lo que devuelve un nodo al servicio es **su propio sondeo siguiente**, y lo que acota eso es el
+retroceso propio del sondeo tras un fallo — un segundo, duplicándose hasta un techo de 30 —, nunca
+`edge.stale_after_seconds`, que solo gobierna cuánto espera el cerebro antes de dar por perdido a
+un nodo callado. En el banco ambos nodos volvían a estar `alive` **840 ms** después de que el
+cerebro regresara, y el retraso depende solo de cuánto duró la caída (de lo alto que hubiera
+trepado el retroceso). No retire una dirección porque el cerebro esté inalcanzable; retírela porque
+el nodo que tiene delante no está sirviendo.
+
+### La variante BGP
+
+Donde la dirección se anuncia en lugar de enrutarse de forma estática, ponga un speaker en cada
+nodo y déjele anunciar la VIP `/32` mientras aguante el predicado propio de ese nodo. El banco
+tiene un brazo adicional que hace exactamente esto con bird2, **fuera de la ruta de aceptación** y
+detrás de `ANYCAST_BGP=1`, de modo que por defecto se salta y no aporta ninguna cifra registrada:
+
+```sh
+#!/bin/sh
+# en cada nodo: anunciar mientras esté sano, retirar en cuanto no lo esté
+# 9101 de abajo es el puerto status_listen de este nodo — ponga el suyo
+while :; do
+  if curl -sf -m1 -o /dev/null http://127.0.0.1:9101/healthz \
+     && curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 \
+             -o /dev/null https://shop.example.com/; then
+    birdc -s /run/bird/ctl enable announce
+  else
+    birdc -s /run/bird/ctl disable announce
+  fi
+  sleep 1
+done
+```
+
+Lo que ese brazo afirma, con la sonda a un segundo y el intervalo de informe ajustado a juego:
+matar nginx en un nodo lo saca de la FIB del router y traslada las peticiones del siguiente lote al
+nodo superviviente, mientras que un documento rechazado **no** retira la ruta — `/healthz` se queda
+en `200`, así que el protocolo sigue habilitado. Ese es el contrato de la tabla de arriba, aplicado
+por un speaker en vez de a mano. El speaker es suyo: bird, FRR, lo que sea que haga funcionar su
+red. Kapkan no incluye ninguno ni maneja ninguno.
+
+## Qué cruza entre nodos, y qué no
+
+| Hecho | ¿Cruza? | Por qué |
+| --- | --- | --- |
+| Una cookie de pase | **Sí** | Las claves de firma del peldaño son de la flota, en el documento. Un visitante que resolvió el acertijo en un nodo fue servido por el otro con la cookie, y el origen vio `X-Kapkan-Mark: cleared` |
+| Una sesión TLS | **No** | Una sesión es una entrada con estado en la caché compartida del propio nodo; ningún tique sin estado la transporta y ninguna clave de tiques es compartida, así que no puede existir en otro nodo. Si se le ofrece la sesión de edge-1, edge-2 responde `New` — en ambos sentidos, en TLS 1.2 y en TLS 1.3 |
+| Un cubo de tasa, una tabla de veredictos, una ventana de rollup | **No** | Por nodo, por diseño — [los techos por nodo](#los-techos-por-nodo-y-el-hash-que-eligió) |
+| Una conexión QUIC | **No** | nginx enruta QUIC por socket, no por identificador de conexión; un cliente migrado se reconecta |
+
+<Callout type="info" title="Una sesión se reanuda en el nodo que la emitió, y en ningún otro">
+El servidor comodín `:443` que genera Kapkan — y, con `omit_catch_all`, el ancla QUIC desnuda —
+lleva las líneas de sesión de las zonas: `ssl_session_cache shared:kapkan_ssl:10m;
+ssl_session_timeout 1d; ssl_session_tickets off;`. Tienen que estar ahí porque OpenSSL busca una
+sesión — y la guarda — a través del contexto del servidor en el que **empezó** la conexión, es
+decir, el servidor por defecto de la dirección, incluso después de que el SNI haya cambiado la
+conexión a una zona. Por eso un cliente que vuelve reanuda su sesión en el nodo que la emitió,
+igual en TLS 1.2 que en TLS 1.3 (con `ssl_session_tickets off`, un tique de 1.3 es una entrada con
+estado en esa misma caché), y es `New` en cualquier otro nodo; el banco comprueba las dos mitades
+en ambos sentidos.
+
+Lo que confina una sesión a su nodo es esa localidad — una entrada con estado en la caché propia de
+ese nodo, sin ningún tique sin estado que la transporte y sin clave de tiques compartida —, **no**
+el certificado. En nginx anterior a 1.29.2 el contexto de identificador de sesión vigente es el del
+comodín sin certificado, así que no ata nada a un nodo (edge-spec §3).
+
+**¿Usa `omit_catch_all: true`? Su propio servidor por defecto en `:443` necesita esas mismas tres
+líneas** — y su propio servidor QUIC también si además pone `quic.omit_anchor`. Sin ellas, cada
+cliente que vuelve a ese nodo paga un apretón de manos completo;
+[la guía de instalación](/docs/edge-install#solución-de-problemas) lleva la fila.
+</Callout>
+
+### MTU: un solo enlace malo cuesta HTTP/3 en toda la dirección
+
+QUIC nunca fragmenta y se rinde por debajo de una ruta de 1280 bytes. En una dirección compartida
+eso no es un problema de un nodo, porque **una MTU de ruta se cachea por destino y el destino es la
+dirección que comparten todos los nodos**:
+
+1. El banco puso MTU 1200 en un solo enlace. De 40 peticiones `--http3-only`, **38 fallaron** — y
+   TCP estuvo en 40 de 40 todo el rato, porque TCP ajusta su MSS por conexión. Cuántas pasan antes
+   de que cale la lección es el azar del hash; el banco comprueba que la gran mayoría no pasa.
+2. No es una parte del tráfico. En cuanto la primera petición que alcanzó el nodo de MTU pequeña le
+   enseñó al cliente una MTU de ruta de 1200 bytes para la VIP (`ip route get 198.51.100.7` muestra
+   la excepción cacheada), **ninguna** petición HTTP/3 tuvo éxito — ni siquiera hacia el nodo
+   intacto.
+3. Reparar el enlace no lo arregló: 10 de 10 siguieron fallando. La excepción cacheada del cliente
+   sobrevive al fallo. Solo `ip route flush cache` en el cliente devolvió HTTP/3, y entonces 20 de
+   20 salieron bien desde ambos nodos.
+
+Usted no puede vaciar las cachés de sus visitantes. Trate cualquier ruta por debajo de 1280 bytes
+en cualquier enlace de una dirección compartida como una caída de HTTP/3 para toda esa dirección,
+arregle la MTU antes de anunciar h3, y mantenga
+[el orden de despliegue de h3](/docs/edge#http3-quic) — los nodos primero, UDP 443 y la MTU
+después.
+
+## Verificar una flota detrás de una dirección
+
+Ejecute esto desde un cliente que alcance la dirección, y con un token de operador en el cerebro.
+
+```sh
+# 1. Una ruta, dos nexthops — no dos rutas
+ip route show 198.51.100.7/32
+
+# 2. Qué forma de hash está realmente en vigor
+sysctl net.ipv4.fib_multipath_hash_policy
+
+# 3. Ambos nodos sirven el nombre, cada uno con SU PROPIO certificado
+openssl s_client -connect 10.0.1.2:443 -servername shop.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
+openssl s_client -connect 10.0.2.2:443 -servername shop.example.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
+
+# 4. La dirección compartida sirve, por TCP y por HTTP/3
+curl -s -o /dev/null -w '%{http_code}\n' https://shop.example.com/
+curl --http3-only -s -o /dev/null -w '%{http_code} %{http_version}\n' https://shop.example.com/
+
+# 5. Cada nodo está vivo, colocado e informando de su propio documento
+curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1/edge/nodes
+```
+
+En el inventario, compruebe tres cosas por nodo, en este orden:
+
+- **`alive: true` y un `last_seen` reciente** — el sondeo es la señal de vitalidad.
+- **`hostgroups` cubre la zona** en cada nodo detrás de la dirección — el grupo de hosts propio de
+  la zona, o `global` para una zona global. Un nodo cuyo alcance no la cubra no genera nada para
+  ella y no responde nada. (`zones_placed`, al lado, es un *recuento* — cuántas zonas del archivo
+  contiene el documento de ese nodo —, así que le dice que el alcance de un nodo está vacío, nunca
+  qué zonas tiene.) La vista por zona es el mismo hecho desde el otro extremo:
+  `GET /api/v1/edge/zones/status` lleva el `placement` de cada zona, cuyo `nodes` debe listar cada
+  nodo detrás de la dirección y cuyo `alive` debe listarlos todos otra vez.
+- **`report.zones_etag` es igual al ETag que el cerebro le sirve a ese nodo**
+  (`GET /api/v1/edge/zones?node=<nombre>`).
+
+<Callout type="info" title="Los ETags de dos nodos no tienen por qué coincidir">
+Cada nodo informa del ETag de **su propio** documento. Con cualquier colocación en la flota esos
+documentos difieren — un nodo sirve una zona que el otro no —, así que un `zones_etag` común a toda
+la flota **no** es una señal de salud, y perseguirlo es perseguir un fallo que no existe. Lo que se
+mantiene se mantiene por nodo: el ETag del que informa un nodo es el ETag que el cerebro le sirvió
+*a él*. Una zona que los nodos comparten es idéntica byte a byte en ambos documentos. Y el
+inventario no lleva material de claves de ningún tipo: los certificados aparecen nombrados por
+zona, caducidad y emisor, nunca como bytes.
+</Callout>
+
+### Averiguar qué nodo sirvió una petición
+
+No hay ninguna cabecera de producto que nombre el nodo, y es deliberado. Cuando necesite una para
+una tarde de depuración, la vía de escape del archivo de zonas le dará una:
+
+```nginx
+# /etc/kapkan/debug-node.conf, referenciado por el extra_directives_file de una zona
+add_header X-Kapkan-Node $hostname always;
+```
+
+<Callout type="danger" title="Un truco de depuración, no una cabecera de producto">
+Esto publica el nombre de host de la máquina que sirve a todos los clientes de esa zona. Kapkan
+genera el archivo tal cual y `nginx -t` es su único guardián. Añádalo mientras diagnostica un hash
+o una colocación, y quítelo después. Tampoco viaja en un `429` — la location de rechazo declara su
+propio `add_header` y nginx descarta ahí el conjunto heredado —, así que puede decirle quién
+*sirvió* una petición, pero nunca quién la *rechazó*. Para los rechazos, lea las `/metrics` de cada
+nodo.
+</Callout>
+
+## Relacionado
+
+- [Nodos edge](/docs/edge) — cómo funciona un nodo, la división rápida/lenta, qué falla y cómo
+- [Instalar un nodo edge](/docs/edge-install) — una máquina de principio a fin
+- [Referencia de zonas](/docs/zones) — `policy.rate`, el peldaño, `extra_directives_file`
+- [Integración de red](/docs/network-integration#la-ruta-de-retorno) — la ruta de retorno, la fuga de rutas y VRF, la trampa de `rp_filter`
+- [Autenticación](/docs/authentication#vincular-un-token-de-agente-a-su-nodo) — un token de agente vinculado por nodo
+- [El canal edge](/docs/api#el-canal-edge) — el inventario, el estado de las zonas y la palanca
+- [Métricas](/docs/metrics#nodos-edge) — las series por nodo con las que vigilar una flota

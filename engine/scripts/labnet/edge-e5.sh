@@ -616,16 +616,18 @@ for i in $(seq 1 50); do [ "$(nodefield edge-1 "bool(n.get('report'))")" = "true
 # ================================================================ ARM E
 say "ARM E — 0-RTT is off, and provably"
 [ "$(cat $STATE/conf/live/*.conf | grep -c ssl_early_data)" = "0" ] && ok "no ssl_early_data anywhere in the render" || bad "ssl_early_data rendered"
-# kapkan renders ssl_session_tickets off, so nginx issues no resumption ticket
-# at all — which is why 0-RTT is doubly impossible: no ticket to carry early
-# data, and no ssl_early_data to accept it.
-[ "$(grep -c 'ssl_session_tickets off' $STATE/conf/live/kapkan_zone_$ZONE.conf)" -ge 1 ] && ok "the h3 zone renders ssl_session_tickets off (no resumption ticket is ever issued)" || bad "ssl_session_tickets not off: $(grep ssl_session_tickets $STATE/conf/live/kapkan_zone_$ZONE.conf)"
-# A first TLS 1.3 connection asks for a ticket; with tickets off none is saved,
-# so an early-data replay has nothing to offer — and even were one offered, no
-# ssl_early_data means it could not be accepted. Either way: not accepted.
+# kapkan renders ssl_session_tickets off, so nginx issues no STATELESS ticket:
+# a TLS 1.3 "ticket" is then a stateful entry in the node's own session cache
+# (resumable on this node only), and 0-RTT is impossible either way — no
+# ssl_early_data to accept early data with.
+[ "$(grep -c 'ssl_session_tickets off' $STATE/conf/live/kapkan_zone_$ZONE.conf)" -ge 1 ] && ok "the h3 zone renders ssl_session_tickets off (no stateless ticket is ever issued; a session is a stateful entry in the node's cache)" || bad "ssl_session_tickets not off: $(grep ssl_session_tickets $STATE/conf/live/kapkan_zone_$ZONE.conf)"
+# A first TLS 1.3 connection is handed a stateful ticket (an id into the node's
+# cache); offering it back with early data must not get that data accepted:
+# no ssl_early_data means the server never enables it. Resumption itself is
+# fine (the catch-all carries the shared cache since the E6.9 rig's finding).
 printf 'GET /early HTTP/1.1\r\nHost: %s\r\n\r\n' "$ZONE" > /tmp/early.txt
 ip netns exec legit sh -c "printf 'GET /s1 HTTP/1.1\r\nHost: $ZONE\r\nConnection: close\r\n\r\n' | openssl s_client -connect $EDGE:443 -servername $ZONE -CAfile /tmp/pebble-root.crt -sess_out /tmp/e.sess -ign_eof" >/tmp/sclient-1.out 2>&1
-[ -s /tmp/e.sess ] && echo "  (a session was saved; offering it with early data)" || echo "  (no session saved — tickets are off, as rendered)"
+[ -s /tmp/e.sess ] && echo "  (a session was saved; offering it with early data)" || echo "  (no session saved — the server offered nothing to resume)"
 ip netns exec legit openssl s_client -connect $EDGE:443 -servername $ZONE -CAfile /tmp/pebble-root.crt -sess_in /tmp/e.sess -early_data /tmp/early.txt </dev/null >/tmp/sclient-2.out 2>&1
 grep -q 'Early data was accepted' /tmp/sclient-2.out && bad "the server ACCEPTED early data" || ok "early data was not accepted ($(grep -oiE 'Early data was [a-z ]+' /tmp/sclient-2.out | head -1 || echo 'none offered: tickets are off'))"
 # early_data_capable is omitempty: a false is absent from the JSON, so read it

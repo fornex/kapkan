@@ -827,21 +827,64 @@ security-relevant.
   HTTP/3 fails toward the healthy node too and stays broken after the link is repaired until
   the client's cache is flushed. A stretch arm behind `ANYCAST_BGP=1`, outside the acceptance path, drives the same
   withdrawal contract with a real bird2 speaker on each node enabled and disabled by a
-  once-a-second `/healthz` probe. Test-only; no product change — but the runs caught seven rig
-  bugs and **one product finding, not fixed here**: as rendered, a TLS 1.2 session resumes on no
-  node, its own included, because nginx looks a session up on the SSL context of the address's
-  default server and kapkan's catch-all declares no `ssl_session_cache`, so every zone's
-  `ssl_session_cache`/`ssl_session_timeout` are dead configuration and every returning client
-  pays a full handshake (the same family as the `ssl_protocols` behaviour the shared file already
-  documents). TLS 1.3 is in the same position rather than a different one: with
-  `ssl_session_tickets off` nginx issues stateful tickets it looks up in that same cache, so it
-  too resumes nowhere today and will resume on its own node — never across nodes — once the
-  catch-all carries a cache. Arm G proves the cause with the supported `omit_catch_all` knob —
-  with the catch-all omitted the session is `Reused` on its own node and still `New` on the
-  other — which is what keeps the cross-node guarantee of edge-spec §3 from being accidentally
-  true.
+  once-a-second `/healthz` probe. Test-only — but the runs caught seven rig bugs and **one
+  product finding, fixed in this release** (see *Fixed*): as rendered, a TLS session resumed on
+  no node, its own included, because OpenSSL looks a session up through the SSL context of the
+  address's default server and kapkan's catch-all declared no `ssl_session_cache`, so every
+  zone's `ssl_session_cache`/`ssl_session_timeout` were dead configuration and every returning
+  client paid a full handshake (the same family as the `ssl_protocols` behaviour the shared file
+  already documents). TLS 1.3 was in the same position rather than a different one: with
+  `ssl_session_tickets off` nginx issues stateful tickets it looks up in that same cache. Arm G
+  now asserts the fix — a session is `Reused` on its own node with the catch-all in place, on
+  either node, and `New` on the other in both directions — and still exercises the supported
+  `omit_catch_all` knob, under which the same holds, so the cross-node guarantee of edge-spec §3
+  is not accidentally true.
+- Edge track, E6.9 (guide) — `docs/en/edge-anycast.mdx`, "One address, many nodes", written
+  from the acceptance rig rather than from the plan and wired into the sidebar's edge group: the
+  topology (the VIP as a `/32` on each node's `lo` against Kapkan's address-less listens, one
+  ECMP route with a nexthop per node, one `agent` token per node bound with `api.tokens[].node`,
+  the return path as route-leaking with VRF as its variant), the two **hash forms** as a choice
+  the operator makes (`fib_multipath_hash_policy`: layer 3 pins a client to one node, layer 4
+  spreads it over both, TCP and QUIC alike) and what each does to a **per-node** `policy.rate.rps`
+  — the recorded L3/L4 table with its batch durations, the `rps + rps·T` range behind the "up to
+  N× the ceiling" figure, and the warning that a low per-node ceiling under the recommended
+  layer-3 hash *blocks* a busy client rather than slowing it, because its refusals concentrate on
+  one node and cross the rollups' flood rule there; the deterministic ACME **fan-out** and the
+  serialised issuance slot; the **withdrawal contract** (`/healthz` yes — sampled on
+  `controller.report_interval_seconds`, so an operator withdrawing on it sets that interval to
+  their probe period; `converged:false` no; the inventory's `alive` no, and it is the brain's
+  lagging view either way), a dead nexthop against a dead node, the `ip route replace` withdrawal
+  and the external-speaker variant driven by a once-a-second `/healthz` probe; the cross-node
+  facts (a clearance cookie is honoured fleet-wide, a TLS session resumes on the node that issued
+  it and on no other — see *Fixed*); **MTU** below QUIC's 1280-byte floor on one leg as an HTTP/3
+  outage for the *whole* shared address, cached per destination and surviving the repair; and a
+  verification checklist, including that under placement each node reports the ETag of its OWN
+  document, so a shared `zones_etag` is not a fleet-health signal. `edge.mdx` and
+  `edge-install.mdx` link it; the page ships in all five locales.
 
 ### Fixed
+- deps: `google.golang.org/grpc` 1.82.1 → 1.83.2 (an indirect dependency, through gobgp) — GO-2026-6348
+  (heap exhaustion via HTTP/2 DATA-frame fragmentation) and GO-2026-6443 (a server panic on a
+  missing `:authority`/`Host`), both reachable through the BGP speaker's gRPC server. The
+  govulncheck gate caught them on the first CI run after their publication; the only advisory left
+  is the accepted GO-2026-4736 (gobgp NEXT_HOP, no upstream fix).
+- Edge: TLS sessions resume again on the node that issued them. The catch-all default server the
+  renderer writes into the shared file now declares the zones' `ssl_session_cache shared:kapkan_ssl`
+  (with `ssl_session_timeout 1d` and `ssl_session_tickets off`, as every zone does). OpenSSL keeps
+  looking sessions up — and storing them — through the context of the server a connection
+  started on, the address's default server, even after SNI has switched the connection to a
+  zone's server (`SSL_set_SSL_CTX` leaves `session_ctx` alone); with no cache on the catch-all
+  every zone's cache was dead configuration and every returning client, TLS 1.2 or 1.3, paid a
+  full handshake — found by the E6.9 anycast rig, which proved the cause with `omit_catch_all`.
+  Nothing crosses nodes: a session is a stateful entry in the node's own cache and no ticket key
+  is shared, so it cannot exist on another node (asserted by the rig over TLS 1.2 and 1.3, both
+  directions); tickets stay off and 0-RTT stays off. On nginx before 1.29.2 the session id
+  context in force is the certificate-less catch-all's, so there it is not what confines a
+  session, and on one node a session may resume under another zone's name (the request is still
+  routed by Host); from 1.29.2, and on Angie, the zone's own is stamped — edge-spec §3 says so
+  now. An operator on `omit_catch_all` must give
+  their own `:443` default server (and, with `quic.omit_anchor`, their QUIC server) the same three
+  lines — the install guide and its troubleshooting table say which and why.
 
 - Console: the storage-off placeholder chart on the Traffic view (and now on the Edge view's
   history cards) re-rolled its random shape on every 3 s poll and twitched as if it were live
