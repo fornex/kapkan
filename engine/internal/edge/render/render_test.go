@@ -378,6 +378,24 @@ func TestPolicyShapes(t *testing.T) {
 			wantNot: []string{"limit_req_zone", "limit_conn_zone", "server_names_hash_bucket_size"},
 		},
 		{
+			// The catch-all default server declares the zones' shared session
+			// cache: OpenSSL looks sessions up through the context of the server
+			// a connection started on, so without it no session resumed anywhere
+			// (the E6.9 rig's finding). Tickets and early data stay off there too.
+			fixture: "h3", file: render.CommonFile,
+			want:    []string{"listen 443 ssl default_server;", "ssl_session_cache shared:kapkan_ssl:10m;", "ssl_session_timeout 1d;", "ssl_session_tickets off;"},
+			wantNot: []string{"ssl_session_tickets on"},
+		},
+		{
+			// Under omit_catch_all the bare QUIC anchor is the server a QUIC
+			// connection starts on, so it carries the cache in the catch-all's
+			// place (the operator's own TCP default server must declare the
+			// same three lines too — the install guide says so).
+			fixture: "h3-omit-catchall", file: render.CommonFile,
+			want:    []string{"listen 443 quic reuseport;", "ssl_session_cache shared:kapkan_ssl:10m;"},
+			wantNot: []string{"listen 443 ssl default_server;"},
+		},
+		{
 			// A 75-byte name does not fit the stock 64-byte bucket.
 			fixture: "long-name", file: render.CommonFile,
 			want: []string{"server_names_hash_bucket_size 128;"},
@@ -409,6 +427,53 @@ func TestPolicyShapes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSessionCacheOnDefaultServers pins the zones' three session lines INSIDE
+// the server a connection starts on — the catch-all :443 server, and under
+// omit_catch_all the bare QUIC anchor — and nowhere else in the shared file.
+// TestPolicyShapes' substring checks on the whole file would also pass with
+// the lines at the http level or quoted in a comment; this one cuts the server
+// block out first and counts the directive across the file.
+func TestSessionCacheOnDefaultServers(t *testing.T) {
+	lines := []string{"ssl_session_cache shared:kapkan_ssl:10m;", "ssl_session_timeout 1d;", "ssl_session_tickets off;"}
+	for _, c := range []struct{ fixture, listen string }{
+		{"h3", "listen 443 ssl default_server;"},
+		{"h3-omit-catchall", "listen 443 quic reuseport;"},
+	} {
+		t.Run(c.fixture, func(t *testing.T) {
+			files, err := render.Render(loadFixture(t, c.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := string(files[render.CommonFile])
+			block := serverBlock(t, s, c.listen)
+			for _, l := range lines {
+				if !strings.Contains(block, "\n    "+l+"\n") {
+					t.Errorf("%q is not a directive of the server with %q:\n%s", l, c.listen, block)
+				}
+				if n := strings.Count(s, "\n    "+l+"\n"); n != 1 {
+					t.Errorf("%q rendered %d times in %s, want exactly 1 (that server)", l, n, render.CommonFile)
+				}
+			}
+		})
+	}
+}
+
+// serverBlock returns the top-level `server { … }` block of s that holds the
+// given listen line, opening line to closing brace.
+func serverBlock(t *testing.T, s, listen string) string {
+	t.Helper()
+	i := strings.Index(s, listen)
+	if i < 0 {
+		t.Fatalf("no %q in:\n%s", listen, s)
+	}
+	start := strings.LastIndex(s[:i], "\nserver {")
+	end := strings.Index(s[i:], "\n}\n")
+	if start < 0 || end < 0 {
+		t.Fatalf("no server block around %q", listen)
+	}
+	return s[start+1 : i+end+3]
 }
 
 func TestEmptyDocumentRendersOnlyTheCommonFile(t *testing.T) {
