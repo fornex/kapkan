@@ -816,11 +816,11 @@ security-relevant.
   N× the ceiling" figure, and the warning that a low per-node ceiling under the recommended
   layer-3 hash *blocks* a busy client rather than slowing it, because its refusals concentrate on
   one node and cross the rollups' flood rule there; the deterministic ACME **fan-out** and the
-  serialised issuance slot; the **withdrawal contract** (`/healthz` yes — sampled on
+  serialised issuance slot; the **withdrawal contract** (`/healthz` AND a local TLS probe of the node's own `:443` yes — `/healthz` sampled on
   `controller.report_interval_seconds`, so an operator withdrawing on it sets that interval to
   their probe period; `converged:false` no; the inventory's `alive` no, and it is the brain's
   lagging view either way), a dead nexthop against a dead node, the `ip route replace` withdrawal
-  and the external-speaker variant driven by a once-a-second `/healthz` probe; the cross-node
+  and the external-speaker variant driven by that two-part probe once a second; the cross-node
   facts (a clearance cookie is honoured fleet-wide, a TLS session resumes on the node that issued
   it and on no other — see *Fixed*); **MTU** below QUIC's 1280-byte floor on one leg as an HTTP/3
   outage for the *whole* shared address, cached per destination and surviving the repair; and a
