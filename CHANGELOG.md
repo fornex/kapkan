@@ -19,6 +19,8 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-18
+
 ### Config changes
 
 - **Added** `edge` block (optional): `edge.zones_file` (absolute path to the tenant-owned
