@@ -395,6 +395,8 @@ notify:
 
 # Optional ClickHouse history (forensics + dashboard graphs). kapkan uses
 # the HTTP interface — no driver dependency. Absent = live data only.
+# Needs ClickHouse 21.4 or newer: the clickhouse-server package Debian and
+# Ubuntu ship is 18.16 from 2018 and does not work — install from clickhouse.com.
 # Persistence is best-effort: a slow/down ClickHouse drops rows, never
 # blocks detection.
 #

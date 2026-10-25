@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -20,13 +21,16 @@ import (
 
 // recorder captures every request ClickHouse would receive.
 type recorder struct {
-	mu     sync.Mutex
-	ddl    []string
-	insert map[string][]string // table -> JSON rows (newline-split)
-	status int                 // response status to return (default 200)
+	mu      sync.Mutex
+	ddl     []string
+	insert  map[string][]string // table -> JSON rows (newline-split)
+	status  int                 // response status to return (default 200)
+	version string              // what SELECT version() answers (a current release by default)
 }
 
-func newRecorder() *recorder { return &recorder{insert: map[string][]string{}, status: 200} }
+func newRecorder() *recorder {
+	return &recorder{insert: map[string][]string{}, status: 200, version: "25.8.2.29"}
+}
 
 func (r *recorder) server(t *testing.T) (*httptest.Server, config.StorageSettings) {
 	t.Helper()
@@ -41,6 +45,9 @@ func (r *recorder) server(t *testing.T) (*httptest.Server, config.StorageSetting
 			return
 		}
 		switch {
+		case strings.HasPrefix(strings.TrimSpace(string(body)), "SELECT version()"):
+			_, _ = w.Write([]byte(r.version + "\n"))
+			return
 		case strings.HasPrefix(strings.TrimSpace(string(body)), "CREATE"):
 			r.ddl = append(r.ddl, strings.TrimSpace(string(body)))
 		case strings.HasPrefix(q, "INSERT INTO"):
@@ -257,6 +264,99 @@ func TestInsertErrorDoesNotBlock(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("writer did not shut down with a failing ClickHouse")
+	}
+}
+
+// TestServerVersionGate: Start asks the server its release and names the gap
+// once, as an error, when it predates the floor (issue #122: the 18.16 package
+// Debian and Ubuntu ship); a current server, one that cannot be asked and an
+// answer that is not a version pass silently — and the DDL is issued either
+// way, since the gate informs, it never withholds.
+func TestServerVersionGate(t *testing.T) {
+	cases := []struct {
+		name, version string
+		status        int
+		old           bool
+	}{
+		{name: "debian's 18.16", version: "18.16.1", old: true},
+		{name: "last before the floor", version: "21.3.20.1-lts", old: true},
+		{name: "the floor", version: "21.4.1.6422"},
+		{name: "current", version: "25.8.2.29"},
+		{name: "not a version", version: "ClickHouse"},
+		{name: "empty answer", version: ""},
+		{name: "server refuses", version: "18.16.1", status: 500},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := newRecorder()
+			rec.version = tc.version
+			if tc.status != 0 {
+				rec.status = tc.status
+			}
+			srv, cfg := rec.server(t)
+			defer srv.Close()
+			var logs bytes.Buffer
+			w := NewWriter(cfg, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			ctx, cancel := context.WithCancel(context.Background())
+			w.Start(ctx)
+			cancel()
+			w.Stop()
+			out := logs.String()
+			if gated := strings.Contains(out, "predates the oldest release kapkan supports"); gated != tc.old {
+				t.Fatalf("gate fired = %v, want %v; log:\n%s", gated, tc.old, out)
+			}
+			if tc.old {
+				for _, want := range []string{"level=ERROR", "server=" + tc.version, "minimum=21.4", "clickhouse.com"} {
+					if !strings.Contains(out, want) {
+						t.Errorf("gate line missing %q:\n%s", want, out)
+					}
+				}
+			}
+			if tc.status == 0 {
+				rec.mu.Lock()
+				n := len(rec.ddl)
+				rec.mu.Unlock()
+				if n == 0 {
+					t.Fatal("no DDL issued after the version check: the gate must inform, never withhold")
+				}
+			}
+		})
+	}
+}
+
+// TestParseServerVersion pins what SELECT version() may answer and how the
+// floor compares: only the major.minor count.
+func TestParseServerVersion(t *testing.T) {
+	for _, tc := range []struct {
+		in           string
+		major, minor int
+		ok           bool
+	}{
+		{"18.16.1\n", 18, 16, true},
+		{"25.8.2.29", 25, 8, true},
+		{"24.3.1.2672-lts", 24, 3, true},
+		{"21.4", 21, 4, true},
+		{"", 0, 0, false},
+		{"21", 0, 0, false},
+		{"v21.4.1", 0, 0, false},
+		{"ClickHouse 21.4", 0, 0, false},
+		{"-1.4", 0, 0, false},
+	} {
+		v, ok := parseServerVersion(tc.in)
+		if ok != tc.ok || v.major != tc.major || v.minor != tc.minor {
+			t.Errorf("parseServerVersion(%q) = %v, %v; want %d.%d, %v", tc.in, v, ok, tc.major, tc.minor, tc.ok)
+		}
+	}
+	for _, tc := range []struct {
+		v      serverVersion
+		before bool
+	}{
+		{serverVersion{18, 16}, true}, {serverVersion{20, 12}, true}, {serverVersion{21, 3}, true},
+		{serverVersion{21, 4}, false}, {serverVersion{21, 12}, false}, {serverVersion{22, 1}, false},
+	} {
+		if got := tc.v.before(minServerVersion); got != tc.before {
+			t.Errorf("%v before %v = %v, want %v", tc.v, minServerVersion, got, tc.before)
+		}
 	}
 }
 
