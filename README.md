@@ -807,8 +807,10 @@ storage:
 ```
 
 kapkan talks to ClickHouse's **HTTP interface** with the standard library — no driver
-dependency; the only external dependency is the ClickHouse server itself. On start it
-creates six MergeTree tables (idempotently): `attack_events` (every start/end with type,
+dependency; the only external dependency is the ClickHouse server itself, **21.4 or newer**
+(the `clickhouse-server` package Debian and Ubuntu ship is 18.16 from 2018 and does not
+work — install from clickhouse.com; an older server is named in one `ERROR` line at start).
+On start it creates six MergeTree tables (idempotently): `attack_events` (every start/end with type,
 direction, rates, sample top-sources, top-ASNs when GeoIP is enabled, ban state),
 `traffic` (periodic per-host rate and baseline snapshots), `audit_events` (who did
 what, with which role and tenant, to which target, and how it turned out — served back on

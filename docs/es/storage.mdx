@@ -10,10 +10,18 @@ Apunta Kapkan a un servidor ClickHouse para conservar el historial de ataques, d
 auditoría y del edge — la respuesta a "qué nos golpeó el martes pasado". Sin él, Kapkan se ejecuta
 por completo en proceso sobre datos en vivo.
 
-Necesitas un servidor ClickHouse en ejecución (cualquier versión reciente) para esto. Kapkan se
+Necesitas un servidor ClickHouse en ejecución, **versión 21.4 o más reciente**, para esto. Kapkan se
 comunica con su interfaz HTTP, que escucha en el puerto `8123` por defecto — ese es el puerto de
 la URL de ejemplo de abajo. Instalar ClickHouse queda fuera del alcance aquí; consulta
-[clickhouse.com](https://clickhouse.com).
+[clickhouse.com](https://clickhouse.com) — e instala desde allí: **el paquete `clickhouse-server`
+que traen Debian y Ubuntu es 18.16, de 2018, y no funciona** — su analizador se detiene en la
+cláusula `TTL` del primer `CREATE TABLE`, y además le faltan los parámetros de consulta y
+`toStartOfInterval`. El SQL del motor se apoya en el TTL de tabla (19.6), los parámetros de consulta
+(19.11) y el ajuste `prefer_column_name_to_alias` que fija cada lectura (21.4); un servidor de 19.6 a
+21.3 acepta las filas pero rechaza las lecturas del historial. Al arrancar, el motor pregunta al
+servidor su versión y, si es anterior a 21.4, registra
+`clickhouse server predates the oldest release kapkan supports` con la versión encontrada — la
+primera línea que buscar cuando las tablas nunca aparecen.
 
 <Callout type="info" title="Mejor esfuerzo, nunca bloquea la detección">
 La persistencia funciona a partir de una cola acotada con un envío no bloqueante. Un ClickHouse

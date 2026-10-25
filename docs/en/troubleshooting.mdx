@@ -200,5 +200,10 @@ You enabled [storage](/docs/storage) but `GET /api/v1/attacks` history or your C
 tables stay empty:
 
 - Confirm the ClickHouse server is running and reachable from the Kapkan host.
+- Look for `clickhouse server predates the oldest release kapkan supports` in the engine log at
+  start: Kapkan needs ClickHouse **21.4 or newer**, and an older server refuses its DDL
+  (`Syntax error ... TTL`) or its reads. The `clickhouse-server` package Debian and Ubuntu ship is
+  18.16 from 2018 — install from [clickhouse.com](https://clickhouse.com) instead. See
+  [Storage](/docs/storage).
 - Watch `kapkan_storage_rows_total` by `result`: rows under `written` should climb; rows under
   `dropped` or `error` mean Kapkan cannot write (check the address, credentials and the logs).

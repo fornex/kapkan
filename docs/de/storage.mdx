@@ -10,10 +10,18 @@ Verweisen Sie Kapkan auf einen ClickHouse-Server, um den Angriffs-, Verkehrs-, A
 Edge-Verlauf festzuhalten — die Antwort auf die Frage "Was hat uns letzten Dienstag getroffen?".
 Ohne ihn läuft Kapkan vollständig prozessintern auf Live-Daten.
 
-Dafür benötigen Sie einen laufenden ClickHouse-Server (jede aktuelle Version). Kapkan
+Dafür benötigen Sie einen laufenden ClickHouse-Server, **Version 21.4 oder neuer**. Kapkan
 kommuniziert mit dessen HTTP-Schnittstelle, die standardmäßig auf Port `8123` lauscht — das ist
 der Port in der Beispiel-URL weiter unten. Die Installation von ClickHouse wird hier nicht
-behandelt; siehe [clickhouse.com](https://clickhouse.com).
+behandelt; siehe [clickhouse.com](https://clickhouse.com) — und installieren Sie von dort: **das
+Paket `clickhouse-server`, das Debian und Ubuntu ausliefern, ist 18.16 von 2018 und funktioniert
+nicht** — sein Parser bleibt an der `TTL`-Klausel des ersten `CREATE TABLE` stehen, und ihm fehlen
+außerdem Abfrageparameter und `toStartOfInterval`. Das SQL der Engine stützt sich auf Tabellen-TTL
+(19.6), Abfrageparameter (19.11) und die Einstellung `prefer_column_name_to_alias`, die jeder
+Lesezugriff festlegt (21.4); ein Server von 19.6 bis 21.3 nimmt die Zeilen an, verweigert aber das
+Lesen des Verlaufs. Beim Start fragt die Engine den Server nach seiner Version und protokolliert,
+wenn sie älter als 21.4 ist, `clickhouse server predates the oldest release kapkan supports` mit der
+gefundenen Version — die erste Zeile, nach der Sie suchen sollten, wenn die Tabellen nie erscheinen.
 
 <Callout type="info" title="Best-Effort, blockiert nie die Erkennung">
 Die Persistenz arbeitet über eine begrenzte Warteschlange mit nicht blockierendem Senden. Ein

@@ -214,6 +214,11 @@ Vous avez activé le [stockage](/docs/storage) mais l'historique de `GET /api/v1
 tables ClickHouse restent vides :
 
 - Confirmez que le serveur ClickHouse fonctionne et qu'il est joignable depuis l'hôte Kapkan.
+- Cherchez `clickhouse server predates the oldest release kapkan supports` dans le journal du moteur
+  au démarrage : Kapkan a besoin de ClickHouse **21.4 ou plus récent**, et un serveur plus ancien
+  refuse son DDL (`Syntax error ... TTL`) ou ses lectures. Le paquet `clickhouse-server` livré par
+  Debian et Ubuntu est en 18.16, de 2018 — installez plutôt depuis
+  [clickhouse.com](https://clickhouse.com). Voir [Stockage](/docs/storage).
 - Surveillez `kapkan_storage_rows_total` par `result` : les lignes sous `written` devraient
   augmenter ; des lignes sous `dropped` ou `error` signifient que Kapkan ne peut pas écrire
   (vérifiez l'adresse, les identifiants et les journaux).
