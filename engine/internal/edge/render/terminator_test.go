@@ -1158,7 +1158,12 @@ func (h *harness) startReal(t *testing.T, run func(context.Context) error, name 
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			// What the server returns on cancel — context.Canceled, a closed
+			// listener's error — is not what any test here is about; that it
+			// exited at all, inside the timeout, is (errcheck 2.15 asks for the
+			// discard to be spelled out).
+			_ = err
 		case <-time.After(3 * time.Second):
 		}
 	})
