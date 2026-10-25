@@ -19,6 +19,17 @@ security-relevant.
 
 ## [Unreleased]
 
+### Security
+
+- **Built with Go 1.26.10**, which fixes twelve reachable standard-library advisories
+  (`crypto/x509` GO-2026-6809; `net/http` GO-2026-6617, -6613, -6612, -6611, -6610, -6605, -6603;
+  `net/textproto` -6608; `crypto/tls` -6607; `html/template` -6600, -6599) — and
+  `golang.org/x/net` 0.58.0 → 0.61.0 (an indirect dependency, through gobgp's gRPC server), which
+  carries the `x/net/http2` side of five of them. No code change; the toolchain floor in
+  `engine/go.mod` moves from 1.26.6 to 1.26.10. The govulncheck gate caught them on the first CI
+  run after their publication; the only advisory left is the accepted GO-2026-4736 (gobgp
+  NEXT_HOP, no upstream fix).
+
 ### Fixed
 
 - **storage:** a ClickHouse older than 21.4 is named at start — one `ERROR` line with the
