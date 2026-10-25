@@ -122,6 +122,12 @@ func TestRealClickHouse(t *testing.T) {
 	ctx := context.Background()
 	w := NewWriter(cfg, log).(*ClickHouse)
 
+	// 0. The version gate (issue #122) passes: the server CI runs is a current
+	// one — and a floor that drifted above that image would be caught here.
+	if !w.checkServerVersion(ctx) {
+		t.Fatalf("checkServerVersion: the server at %s predates the floor %s", base, minServerVersion)
+	}
+
 	// 1. The schema parses and is idempotent.
 	for i := 0; i < 2; i++ {
 		if err := w.ensureSchema(ctx); err != nil {

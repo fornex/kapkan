@@ -218,6 +218,11 @@ Sie haben [Speicherung](/docs/storage) aktiviert, aber der Verlauf von `GET /api
 Ihre ClickHouse-Tabellen bleiben leer:
 
 - Stellen Sie sicher, dass der ClickHouse-Server läuft und vom Kapkan-Host erreichbar ist.
+- Suchen Sie beim Start im Log der Engine nach `clickhouse server predates the oldest release kapkan supports`:
+  Kapkan braucht ClickHouse **21.4 oder neuer**; ein älterer Server verweigert seine DDL
+  (`Syntax error ... TTL`) oder seine Lesezugriffe. Das Paket `clickhouse-server`, das Debian und
+  Ubuntu ausliefern, ist 18.16 von 2018 — installieren Sie stattdessen von
+  [clickhouse.com](https://clickhouse.com). Siehe [Speicherung](/docs/storage).
 - Beobachten Sie `kapkan_storage_rows_total` nach `result`: Zeilen unter `written` sollten steigen;
   Zeilen unter `dropped` oder `error` bedeuten, dass Kapkan nicht schreiben kann (prüfen Sie
   Adresse, Zugangsdaten und die Logs).

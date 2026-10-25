@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -218,8 +219,10 @@ func NewQuerier(cfg config.StorageSettings, log *slog.Logger) Querier {
 	return ch
 }
 
-// Start creates the schema (best-effort) and launches the flush loop.
+// Start names a server too old for the package's SQL (once), creates the
+// schema (best-effort) and launches the flush loop.
 func (c *ClickHouse) Start(ctx context.Context) {
+	c.checkServerVersion(ctx)
 	if err := c.ensureSchema(ctx); err != nil {
 		c.log.Error("clickhouse schema init failed; persistence may not work", "err", err)
 	}
@@ -347,6 +350,78 @@ func (c *ClickHouse) send(ctx context.Context, table string, rows [][]byte) {
 		return
 	}
 	metrics.StorageRowsTotal.WithLabelValues(table, "written").Add(float64(len(rows)))
+}
+
+// minServerVersion is the oldest ClickHouse the package runs on. Its SQL was
+// written against a current server, and each construct it leans on has the
+// release that introduced it — production LowCardinality and
+// toStartOfInterval (19.3), TTL for tables (19.6), query parameters (19.11),
+// the prefer_column_name_to_alias setting every read pins (21.4) — so the
+// floor is the newest of them. An older server refuses the DDL or the reads
+// with a message about the construct, never about the gap: issue #122 was the
+// clickhouse-server package Debian and Ubuntu ship, 18.16 from 2018, whose
+// parser stops at the TTL clause of the first CREATE TABLE ("Syntax error ...
+// Expected one of"). Start asks the server its release first and names the
+// gap once, with what to do. Bump this when a new construct needs a newer
+// server, and say so on the Storage page.
+var minServerVersion = serverVersion{major: 21, minor: 4}
+
+// serverVersion is a ClickHouse release's major.minor — what the floor is
+// expressed in; a patch or build number never gates a construct.
+type serverVersion struct{ major, minor int }
+
+func (v serverVersion) String() string { return fmt.Sprintf("%d.%d", v.major, v.minor) }
+
+// before reports whether v is an older release than o.
+func (v serverVersion) before(o serverVersion) bool {
+	return v.major < o.major || (v.major == o.major && v.minor < o.minor)
+}
+
+// parseServerVersion reads the major.minor off what SELECT version() answers
+// ("18.16.1", "25.8.2.29", "24.3.1.2672-lts"); ok is false unless the text
+// opens with two dot-separated integers.
+func parseServerVersion(s string) (v serverVersion, ok bool) {
+	parts := strings.SplitN(strings.TrimSpace(s), ".", 3)
+	if len(parts) < 2 {
+		return serverVersion{}, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil || major < 0 {
+		return serverVersion{}, false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil || minor < 0 {
+		return serverVersion{}, false
+	}
+	return serverVersion{major: major, minor: minor}, true
+}
+
+// checkServerVersion asks ClickHouse which release it is and, when that
+// predates minServerVersion, logs the gap once as an error — the server's
+// version, the floor and what to do — and returns false. The schema and the
+// inserts are still attempted after it: the gate informs, it never withholds
+// (a server between 19.6 and 21.3 takes the rows and refuses only the reads).
+// A server that cannot be asked — down, a credential refused — is left to the
+// DDL and the inserts to report as before, and an answer that is not a
+// version is logged at debug and passed.
+func (c *ClickHouse) checkServerVersion(ctx context.Context) bool {
+	body, err := c.queryRaw(ctx, "SELECT version()", url.Values{})
+	if err != nil {
+		c.log.Debug("clickhouse: server version not read", "err", err)
+		return true
+	}
+	raw := strings.TrimSpace(string(body))
+	v, ok := parseServerVersion(raw)
+	if !ok {
+		c.log.Debug("clickhouse: server version not understood", "answer", raw)
+		return true
+	}
+	if v.before(minServerVersion) {
+		c.log.Error("clickhouse server predates the oldest release kapkan supports — its SQL needs table TTL (19.6), query parameters (19.11) and the prefer_column_name_to_alias setting (21.4), so storage fails on this server: in full below 19.6, the history reads alone from 19.6 to 21.3. Install a current ClickHouse from clickhouse.com (the clickhouse-server package Debian and Ubuntu ship is 18.16, from 2018)", "server", raw, "minimum", minServerVersion.String())
+		return false
+	}
+	c.log.Debug("clickhouse: server version", "server", raw)
+	return true
 }
 
 // ensureSchema creates the database and tables (idempotent). MergeTree with

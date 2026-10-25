@@ -207,5 +207,9 @@ kapkan -check-update -config /etc/kapkan/config.yaml
 остаются пустыми:
 
 - Убедитесь, что сервер ClickHouse запущен и достижим с хоста Kapkan.
+- Поищите в журнале движка при запуске строку `clickhouse server predates the oldest release kapkan supports`:
+  Kapkan нужен ClickHouse **21.4 или новее**, а более старый сервер отвергает его DDL
+  (`Syntax error ... TTL`) или чтения. Пакет `clickhouse-server` из репозиториев Debian и Ubuntu — это
+  18.16 от 2018 года; ставьте с [clickhouse.com](https://clickhouse.com). См. [хранилище](/docs/storage).
 - Следите за `kapkan_storage_rows_total` по `result`: строки под `written` должны расти; строки под
   `dropped` или `error` означают, что Kapkan не может записывать (проверьте адрес, учётные данные и логи).

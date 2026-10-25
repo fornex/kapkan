@@ -30,6 +30,16 @@ security-relevant.
   run after their publication; the only advisory left is the accepted GO-2026-4736 (gobgp
   NEXT_HOP, no upstream fix).
 
+### Fixed
+
+- **storage:** a ClickHouse older than 21.4 is named at start — one `ERROR` line with the
+  server's version, the floor and what to do — instead of six `Syntax error ... TTL` refusals
+  that said nothing about why ([#122](https://github.com/fornex/kapkan/issues/122): the
+  `clickhouse-server` package Debian and Ubuntu ship is 18.16 from 2018; its parser stops at the
+  `TTL` clause, and it lacks production `LowCardinality`, query parameters and
+  `toStartOfInterval` besides). The floor, and what each release of it is for, is on the
+  Storage page.
+
 ## [1.8.0] - 2026-09-18
 
 ### Config changes
