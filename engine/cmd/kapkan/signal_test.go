@@ -118,9 +118,11 @@ func TestRunSignalCommandNotRunning(t *testing.T) {
 }
 
 // The roles' signal handling under each role's name: SIGHUP is logged and
-// ignored, SIGTERM still stops the role. Only this seam is checked for scrub —
-// running that role whole needs an XDP-capable host for its data plane; edge
-// and nginx-exporter are also run whole by their own tests.
+// ignored, SIGTERM still stops the role, and a SIGHUP after that is still
+// ignored until stop. Running scrub whole needs an XDP-capable host for its
+// data plane, so scrub is checked here and, for a SIGHUP while that data plane
+// loads, by TestScrubRoleIgnoresSIGHUPWhileTheDataPlaneLoads; edge and
+// nginx-exporter are also run whole by their own tests.
 func TestRoleSignalsIgnoreSIGHUP(t *testing.T) {
 	for _, role := range []string{"scrub", "edge", "nginx-exporter"} {
 		t.Run(role, func(t *testing.T) {
@@ -132,6 +134,11 @@ func TestRoleSignalsIgnoreSIGHUP(t *testing.T) {
 
 			hupIgnored(t, role, &logs, done)
 			termStops(t, role, done)
+			// Cancelled but not yet stopped is where a role runs its own
+			// shutdown (scrub's on_exit, the edge node's finish): a SIGHUP
+			// there must still be ignored, not end the process.
+			raise(t, syscall.SIGHUP)
+			logs.waitFor(t, "SIGHUP ignored: the "+role+" role has no reload; restart the unit to change its configuration", 3)
 			stop() // and again by the defer: stop is idempotent
 		})
 	}

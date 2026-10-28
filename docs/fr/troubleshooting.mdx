@@ -106,7 +106,9 @@ peut signaler, et ce que chacun signifie :
 - **`ENFORCING`** avec `DRY-RUN` sur la première ligne — le chemin de données réécrit chaque verdict
   de rejet en verdict de passage. C'est la réponse la plus fréquente, et elle reflète ce que fait le
   *noyau*, ce qui peut différer de ce que dit désormais le fichier de configuration. Mettez
-  `dry_run: false` et rechargez.
+  `dry_run: false` et rechargez. Sur un nœud `kapkan scrub`, où le dry-run est le réglage par
+  défaut, réglez-le dans `scrub.yaml` et redémarrez plutôt l'unité du nœud : ce rôle n'a pas de
+  rechargement.
 - **`ENFORCING` avec `GENERIC`** sur la première ligne — le programme est sur le chemin générique
   (skb) plutôt que sur le chemin du pilote, ce qui coûte environ un ordre de grandeur de capacité.
   Soit le pilote de la carte réseau ne prend pas en charge XDP nativement, soit

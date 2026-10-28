@@ -99,7 +99,9 @@ each one means:
 
 - **`ENFORCING`** with `DRY-RUN` on the first line — the datapath is rewriting every drop verdict
   into a pass. This is the most common answer, and it reflects what the *kernel* is doing, which
-  can differ from what the config file now says. Set `dry_run: false` and reload.
+  can differ from what the config file now says. Set `dry_run: false` and reload. On a
+  `kapkan scrub` node, where dry-run is the default, set it in `scrub.yaml` and restart the node's
+  unit instead: that role has no reload.
 - **`ENFORCING` with `GENERIC`** on the first line — the program is on the generic (skb) path
   rather than the driver path, costing roughly an order of magnitude of capacity. Either the NIC
   driver has no native XDP support or `dataplane.xdp_mode: generic` is set.

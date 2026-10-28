@@ -101,6 +101,8 @@ informar y lo que significa cada uno:
 - **`ENFORCING`** con `DRY-RUN` en la primera línea: la ruta de datos está reescribiendo cada veredicto de
   descarte y convirtiéndolo en un paso. Es la respuesta más habitual, y refleja lo que está haciendo el
   *kernel*, que puede diferir de lo que ahora dice el archivo de configuración. Pon `dry_run: false` y recarga.
+  En un nodo `kapkan scrub`, donde dry-run es el valor por defecto, ponlo en `scrub.yaml` y reinicia en su
+  lugar la unidad del nodo: ese rol no tiene recarga.
 - **`ENFORCING` con `GENERIC`** en la primera línea: el programa está en la ruta genérica (skb) en lugar de
   la del driver, lo que cuesta aproximadamente un orden de magnitud de capacidad. O bien el driver de la NIC
   no tiene soporte nativo de XDP, o está configurado `dataplane.xdp_mode: generic`.

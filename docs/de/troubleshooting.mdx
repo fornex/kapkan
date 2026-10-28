@@ -109,7 +109,9 @@ kann, und was jeder davon bedeutet:
 - **`ENFORCING`** mit `DRY-RUN` in der ersten Zeile — der Datenpfad wandelt jedes
   Verwerfen-Urteil in ein Durchlassen um. Das ist die häufigste Antwort, und sie spiegelt wider,
   was der *Kernel* tut — was davon abweichen kann, was die Konfigurationsdatei inzwischen sagt.
-  Setzen Sie `dry_run: false` und laden Sie neu.
+  Setzen Sie `dry_run: false` und laden Sie neu. Auf einem `kapkan scrub`-Knoten, wo Dry-Run der
+  Standard ist, setzen Sie es in `scrub.yaml` und starten Sie stattdessen die Unit des Knotens neu:
+  Diese Rolle kann nicht neu laden.
 - **`ENFORCING` mit `GENERIC`** in der ersten Zeile — das Programm läuft auf dem generischen
   (skb) Pfad statt auf dem Treiberpfad, was rund eine Größenordnung an Kapazität kostet. Entweder
   hat der NIC-Treiber keine native XDP-Unterstützung, oder `dataplane.xdp_mode: generic` ist
