@@ -399,7 +399,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "Telemetry datagrams / sec by protocol",
-      "description": "UDP telemetry datagrams received (kapkan_ingest_packets_total).",
+      "description": "Telemetry datagrams decoded, one per datagram however many flow records it carried (kapkan_ingest_packets_total).",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -508,8 +508,8 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Dropped flows / sec (engine queue full)",
-      "description": "Flows dropped because the engine input queue was full (kapkan_ingest_dropped_flows_total).",
+      "title": "Dropped datagrams / sec (receive queue full)",
+      "description": "Telemetry datagrams (not flows) dropped before decoding because a listener's receive queue was full: the decode workers are not keeping up (kapkan_ingest_dropped_flows_total).",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"

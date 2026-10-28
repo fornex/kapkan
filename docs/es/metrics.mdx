@@ -24,9 +24,9 @@ Vincula (bind) el listener en consecuencia — consulta [Autenticación](/docs/a
 | Métrica | Etiquetas | Significado |
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Total de flows ingeridos, por protocolo de flow. |
-| `kapkan_ingest_packets_total` | `exporter`, `proto` | Total de datagramas de telemetría recibidos, por exportador de origen (con cardinalidad acotada; consulta [`flow_sources`](/docs/configuration)) y protocolo. |
+| `kapkan_ingest_packets_total` | `exporter`, `proto` | Datagramas de telemetría decodificados, por exportador de origen (con cardinalidad acotada; consulta [`flow_sources`](/docs/configuration)) y protocolo — uno por datagrama, sin importar cuántos registros de flow llevara. Un exportador que solo envía contadores sFlow o plantillas NetFlow también aparece aquí; los registros los cuenta `kapkan_ingest_flows_total`. Un datagrama que no se puede decodificar se cuenta en `kapkan_ingest_decode_errors_total` en su lugar. |
 | `kapkan_ingest_decode_errors_total` | `proto` | Datagramas de telemetría que no se pudieron decodificar, por protocolo. |
-| `kapkan_ingest_dropped_flows_total` | — | Flows descartados porque la cola de entrada del motor estaba llena. |
+| `kapkan_ingest_dropped_flows_total` | — | Datagramas de telemetría descartados antes de decodificarse porque la cola de recepción de un listener (`listen.sflow` o `listen.netflow`) estaba llena — los workers de decodificación, que además entregan cada flow al motor de detección, no dan abasto. Pese a su nombre, cuenta datagramas, no flows: un datagrama descartado nunca se decodifica, así que no se sabe cuántos flows llevaba. Tiene la misma unidad que `kapkan_ingest_packets_total`, así que entre las dos dan la proporción de telemetría que se pierde. Debería permanecer en cero. Los datagramas que el kernel descarta antes de que Kapkan los lea no se cuentan aquí; aparecen en los errores de búfer de recepción UDP del host (`netstat -su`). |
 | `kapkan_engine_active_attacks` | — | Gauge de ataques actualmente en curso. |
 | `kapkan_engine_attacks_total` | — | Contador de ataques detectados desde el arranque. |
 | `kapkan_engine_process_latency_seconds` | — | Histograma de la latencia de procesamiento en la ruta crítica (hot-path), observada una vez por lote de ingesta (no por flow). |
@@ -285,7 +285,7 @@ curl -s localhost:8080/metrics | grep kapkan_
 Un dashboard oficial de Grafana para el conjunto `kapkan_*` está disponible para descargar directamente en
 [`kapkan-overview.json`](/kapkan-overview.json) (su código fuente reside en el repositorio bajo
 [`engine/deploy/grafana/`](https://github.com/fornex/kapkan/tree/main/engine/deploy/grafana)).
-Cubre todo el pipeline — tasas de ingesta de flows/datagramas/decodificación y flows descartados, ataques
+Cubre todo el pipeline — tasas de ingesta de flows/datagramas/decodificación y datagramas descartados, ataques
 activos e iniciados, hosts rastreados, cuantiles de latencia en la ruta crítica, rutas anunciadas y reglas
 FlowSpec por `mode`, bloqueos rechazados por `reason`, fallbacks de mitigación, y resultados de notificación
 y almacenamiento. Una fila **Data plane** cubre las métricas XDP de arriba: paquetes por segundo por

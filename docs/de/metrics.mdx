@@ -23,9 +23,9 @@ Binden Sie den Listener entsprechend — siehe [Authentifizierung](/docs/authent
 | Metrik | Labels | Bedeutung |
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Insgesamt aufgenommene Flows, nach Flow-Protokoll. |
-| `kapkan_ingest_packets_total` | `exporter`, `proto` | Insgesamt empfangene Telemetrie-Datagramme, nach Quell-Exporter (kardinalitätsbegrenzt; siehe [`flow_sources`](/docs/configuration)) und Protokoll. |
+| `kapkan_ingest_packets_total` | `exporter`, `proto` | Dekodierte Telemetrie-Datagramme, nach Quell-Exporter (kardinalitätsbegrenzt; siehe [`flow_sources`](/docs/configuration)) und Protokoll — eines pro Datagramm, egal wie viele Flow-Datensätze es trug. Ein Exporter, der nur sFlow-Zähler oder NetFlow-Templates sendet, erscheint hier trotzdem; die Datensätze zählt `kapkan_ingest_flows_total`. Ein Datagramm, das sich nicht dekodieren lässt, zählt stattdessen in `kapkan_ingest_decode_errors_total`. |
 | `kapkan_ingest_decode_errors_total` | `proto` | Telemetrie-Datagramme, deren Dekodierung fehlgeschlagen ist, nach Protokoll. |
-| `kapkan_ingest_dropped_flows_total` | — | Flows, die verworfen wurden, weil die Eingangs-Queue der Engine voll war. |
+| `kapkan_ingest_dropped_flows_total` | — | Telemetrie-Datagramme, die vor dem Dekodieren verworfen wurden, weil die Empfangs-Queue eines Listeners (`listen.sflow` oder `listen.netflow`) voll war — die Decode-Worker, die jeden Flow zugleich an die Erkennung übergeben, kommen nicht hinterher. Trotz des Namens zählt die Metrik Datagramme, nicht Flows: Ein verworfenes Datagramm wird nie dekodiert, wie viele Flows es trug, bleibt also unbekannt. Sie hat dieselbe Einheit wie `kapkan_ingest_packets_total`, zusammen ergeben beide den Anteil der verlorenen Telemetrie. Sollte bei null bleiben. Datagramme, die der Kernel verwirft, bevor Kapkan sie liest, werden hier nicht gezählt; sie erscheinen in den UDP-Empfangspufferfehlern des Hosts (`netstat -su`). |
 | `kapkan_engine_active_attacks` | — | Gauge der aktuell laufenden Angriffe. |
 | `kapkan_engine_attacks_total` | — | Zähler der seit dem Start erkannten Angriffe. |
 | `kapkan_engine_process_latency_seconds` | — | Histogramm der Verarbeitungslatenz auf dem Hot Path, einmal pro Ingest-Batch erfasst (nicht pro Flow). |
@@ -287,7 +287,7 @@ Ein offizielles Grafana-Dashboard für die `kapkan_*`-Sammlung steht direkt zum 
 [`kapkan-overview.json`](/kapkan-overview.json) (sein Quellcode liegt im Repository unter
 [`engine/deploy/grafana/`](https://github.com/fornex/kapkan/tree/main/engine/deploy/grafana)).
 Es deckt die gesamte Pipeline ab — Ingest-Raten für Flows/Datagramme/Dekodierung und
-verworfene Flows, aktive und gestartete Angriffe, verfolgte Hosts, Latenz-Quantile auf dem Hot Path,
+verworfene Datagramme, aktive und gestartete Angriffe, verfolgte Hosts, Latenz-Quantile auf dem Hot Path,
 angekündigte Routen und FlowSpec-Regeln nach `mode`, nach `reason` abgelehnte Sperren,
 Mitigation-Fallbacks sowie Benachrichtigungs- und Speicherergebnisse. Eine Zeile **Data plane**
 deckt die oben genannten XDP-Metriken ab: Pakete pro Sekunde nach Entscheidung, Regeln im Kernel

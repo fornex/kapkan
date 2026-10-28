@@ -23,9 +23,9 @@ Bind the listener accordingly — see [Authentication](/docs/authentication).
 | Metric | Labels | Meaning |
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Total flows ingested, by flow protocol. |
-| `kapkan_ingest_packets_total` | `exporter`, `proto` | Total telemetry datagrams received, by source exporter (cardinality-bounded; see [`flow_sources`](/docs/configuration)) and protocol. |
+| `kapkan_ingest_packets_total` | `exporter`, `proto` | Telemetry datagrams decoded, by source exporter (cardinality-bounded; see [`flow_sources`](/docs/configuration)) and protocol — one per datagram, however many flow records it carried. An exporter that sends only sFlow counters or NetFlow templates still shows here; `kapkan_ingest_flows_total` counts the records. A datagram that fails to decode is counted in `kapkan_ingest_decode_errors_total` instead. |
 | `kapkan_ingest_decode_errors_total` | `proto` | Telemetry datagrams that failed to decode, by protocol. |
-| `kapkan_ingest_dropped_flows_total` | — | Flows dropped because the engine input queue was full. |
+| `kapkan_ingest_dropped_flows_total` | — | Telemetry datagrams dropped before decoding because the receive queue of a listener (`listen.sflow` or `listen.netflow`) was full — the decode workers, which also hand every flow to the detection engine, are not keeping up. Despite the name it counts datagrams, not flows: a dropped datagram is never decoded, so how many flows it carried is unknown. It is in the same unit as `kapkan_ingest_packets_total`, so the two give the share of telemetry being lost. Should sit at zero. Datagrams the kernel discards before Kapkan reads them are not counted here; they show in the host's UDP receive-buffer errors (`netstat -su`). |
 | `kapkan_engine_active_attacks` | — | Gauge of attacks currently in progress. |
 | `kapkan_engine_attacks_total` | — | Counter of attacks detected since start. |
 | `kapkan_engine_process_latency_seconds` | — | Histogram of hot-path processing latency, observed once per ingest batch (not per flow). |
@@ -275,7 +275,7 @@ curl -s localhost:8080/metrics | grep kapkan_
 An official Grafana dashboard for the `kapkan_*` set is available to download directly at
 [`kapkan-overview.json`](/kapkan-overview.json) (its source lives in the repository under
 [`engine/deploy/grafana/`](https://github.com/fornex/kapkan/tree/main/engine/deploy/grafana)).
-It covers the full pipeline — ingest flow/datagram/decode rates and dropped flows, active and
+It covers the full pipeline — ingest flow/datagram/decode rates and dropped datagrams, active and
 started attacks, tracked hosts, hot-path latency quantiles, announced routes and FlowSpec
 rules by `mode`, bans rejected by `reason`, mitigation fallbacks, and notification and storage
 results. A **Data plane** row covers the XDP metrics above: packets per second by verdict,
