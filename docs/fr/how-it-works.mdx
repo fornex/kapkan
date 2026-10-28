@@ -145,14 +145,16 @@ rester rapide à des débits de flows à l'échelle d'une attaque :
   le chemin par flow évite les allocations sur le tas afin que le ramasse-miettes reste à
   l'écart.
 
-Deux chiffres décrivent l'objectif, à des échelles différentes — présentez-les pour ce qu'ils
-sont :
+Deux chiffres le décrivent, et tous deux viennent des mêmes benchmarks — `make bench`, qui
+mesurent l'agrégation en mémoire par flow sur des flows préconstruits, sans socket ni décodeur
+dans la boucle :
 
-- Le README indique que le moteur soutient **≥20M flows/sec/cœur** sur le hot path — le débit
-  par cœur de l'étape d'agrégation en mémoire prise isolément.
-- L'objectif d'ingénierie du projet est de **≥200k flows/sec sur 8 cœurs** pour le
-  traitement par flow de bout en bout — la barre qu'une modification du hot path doit franchir
-  dans les benchmarks `make bench` avant d'être considérée comme terminée.
+- **La barre :** une modification du hot path n'est terminée que lorsqu'elle y atteint
+  **≥200k flows/sec sur 8 cœurs**.
+- **Un point de repère :** sur un Apple M3 Max, l'agrégation traite environ
+  **10M flows/sec sur un cœur** et **24M sur huit**.
+
+Aucun chiffre de bout en bout — socket, décodage et agrégation ensemble — n'est publié.
 
 <Callout type="info" title="Mesurez avant de vous y fier">
 Le moteur est livré avec des benchmarks `go test -bench` (`make bench`). La règle du projet est

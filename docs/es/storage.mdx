@@ -26,8 +26,10 @@ primera línea que buscar cuando las tablas nunca aparecen.
 <Callout type="info" title="Mejor esfuerzo, nunca bloquea la detección">
 La persistencia funciona a partir de una cola acotada con un envío no bloqueante. Un ClickHouse
 que no puede aceptar filas las pierde en lugar de frenar la ruta crítica del motor: un sumidero
-atascado llena la cola y cuenta como `result="dropped"` en `kapkan_storage_rows_total`, uno caído
-hace fallar cada inserción de inmediato y cuenta como `result="error"` (véase Backpressure más abajo).
+caído hace fallar cada inserción de inmediato y cuenta como `result="error"` en
+`kapkan_storage_rows_total`; uno atascado lleva cada inserción hasta su tiempo de espera, también
+`result="error"`, mientras las filas de detrás llenan la cola y cuentan como `result="dropped"`
+(véase Backpressure más abajo).
 </Callout>
 
 ## Activación
@@ -89,9 +91,12 @@ Al arrancar, crea de forma idempotente seis tablas MergeTree:
 Cada una lleva un TTL por fila de `ttl_days`, de modo que la retención queda acotada sin
 intervención del operador.
 
-La credencial de escritura necesita derechos `CREATE` (base de datos + tablas) e `INSERT` en la
-primera ejecución — y de nuevo en el primer arranque de una versión que añade tablas (esta añade las
-tres tablas `edge_*`); entre medias basta con `INSERT`. La inicialización del esquema intenta todas
+Una sola credencial escribe y lee: las lecturas de historial detrás de `/api/v1/traffic`,
+`/api/v1/audit`, `/api/v1/edge/history` y `/api/v1/edge/events` también se ejecutan con ella, y
+responden `502` sin `SELECT`. Necesita derechos `CREATE` (base de datos + tablas), `INSERT` y
+`SELECT` en la primera ejecución — `CREATE` de nuevo en el primer arranque de una versión que añade
+tablas (esta añade las tres tablas `edge_*`); entre medias bastan `INSERT` y `SELECT`. La
+inicialización del esquema intenta todas
 las sentencias y registra cada rechazo por separado (una credencial que puede hacer `INSERT` pero no
 `CREATE` ve esas líneas en cada arranque; son inofensivas una vez que las tablas existen), de modo
 que las tres tablas del edge y las ampliaciones de columnas de abajo se intentan aunque una sentencia
@@ -196,7 +201,8 @@ filas se pierden en lugar de retenerse, y el motor sigue funcionando;
 
 - `result="error"` — la inserción en sí falló. El lote se registra (`clickhouse insert failed`) y se
   descarta. **Un ClickHouse caído cuenta aquí**, no en `dropped`: una conexión rechazada falla de
-  inmediato, así que cada volcado vacía la cola tan rápido como se llena.
+  inmediato, así que cada volcado vacía la cola tan rápido como se llena. Una inserción que agota su
+  tiempo de espera de envío ante un servidor atascado también cuenta aquí.
 - `result="dropped"` — la cola estaba llena cuando se entregó la fila, así que nunca llegó a una
   inserción. Eso requiere un destino que se *atasque* en lugar de rechazar — un servidor que retiene
   la conexión, una red que descarta los paquetes, un volcado que agota su tiempo de espera — o una

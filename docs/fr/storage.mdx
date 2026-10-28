@@ -26,9 +26,10 @@ première ligne à chercher quand les tables n'apparaissent jamais.
 <Callout type="info" title="Au mieux des efforts, ne bloque jamais la détection">
 La persistance s'appuie sur une file d'attente bornée avec envoi non bloquant. Un ClickHouse
 qui ne peut pas prendre de lignes les perd plutôt que de ralentir le chemin critique du moteur :
-un puits bloqué remplit la file et compte `result="dropped"` dans `kapkan_storage_rows_total`, un
-serveur indisponible fait échouer chaque insertion aussitôt et compte `result="error"` (voir
-Backpressure plus bas).
+un serveur indisponible fait échouer chaque insertion aussitôt et compte `result="error"` dans
+`kapkan_storage_rows_total` ; un puits bloqué mène chaque insertion jusqu'à son délai d'expiration,
+également `result="error"`, pendant que les lignes suivantes remplissent la file et comptent
+`result="dropped"` (voir Backpressure plus bas).
 </Callout>
 
 ## Activation
@@ -91,9 +92,12 @@ Au démarrage, il crée de manière idempotente six tables MergeTree :
 Chacune porte un TTL par ligne `ttl_days`, ce qui borne la rétention sans intervention de
 l'opérateur.
 
-L'identifiant d'écriture a besoin des droits `CREATE` (base de données + tables) et `INSERT` lors
-de la première exécution — et de nouveau au premier démarrage d'une version qui ajoute des tables
-(celle-ci ajoute les trois tables `edge_*`) ; entre les deux, `INSERT` suffit. L'initialisation du
+Un seul identifiant écrit et lit : les lectures d'historique derrière `/api/v1/traffic`,
+`/api/v1/audit`, `/api/v1/edge/history` et `/api/v1/edge/events` s'exécutent aussi sous lui, et
+répondent `502` sans `SELECT`. Il a besoin des droits `CREATE` (base de données + tables),
+`INSERT` et `SELECT` lors de la première exécution — de `CREATE` de nouveau au premier démarrage
+d'une version qui ajoute des tables (celle-ci ajoute les trois tables `edge_*`) ; entre les deux,
+`INSERT` et `SELECT` suffisent. L'initialisation du
 schéma tente chaque instruction et consigne chaque refus séparément (un identifiant qui peut
 `INSERT` mais pas `CREATE` voit ces lignes à chaque démarrage ; elles sont inoffensives une fois
 les tables créées), de sorte que les trois tables edge et les ajouts de colonnes ci-dessous sont
@@ -203,7 +207,8 @@ même chose :
 - `result="error"` — l'insertion elle-même a échoué. Le lot est journalisé
   (`clickhouse insert failed`) puis abandonné. **Un ClickHouse indisponible compte ici**, et non
   sous `dropped` : une connexion refusée échoue immédiatement, chaque vidage vide donc la file aussi
-  vite qu'elle se remplit.
+  vite qu'elle se remplit. Une insertion qui dépasse son délai d'envoi face à un serveur bloqué
+  compte ici aussi.
 - `result="dropped"` — la file était pleine au moment où une ligne a été transmise, elle n'a donc
   jamais atteint une insertion. Cela suppose un puits qui *traîne* au lieu de refuser — un serveur
   qui garde la connexion ouverte, un réseau qui perd les paquets, un vidage qui attend l'expiration

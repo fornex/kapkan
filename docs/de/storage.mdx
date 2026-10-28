@@ -26,9 +26,10 @@ gefundenen Version — die erste Zeile, nach der Sie suchen sollten, wenn die Ta
 <Callout type="info" title="Best-Effort, blockiert nie die Erkennung">
 Die Persistenz arbeitet über eine begrenzte Warteschlange mit nicht blockierendem Senden. Ein
 ClickHouse, das keine Zeilen annehmen kann, verliert sie, anstatt den Hot Path der Engine zu
-blockieren: eine hängende Senke füllt die Warteschlange und zählt als `result="dropped"` in
-`kapkan_storage_rows_total`, ein ausgefallenes lässt jeden Insert schnell scheitern und zählt als
-`result="error"` (siehe Backpressure weiter unten).
+blockieren: ein ausgefallenes lässt jeden Insert schnell scheitern und zählt als `result="error"`
+in `kapkan_storage_rows_total`; eine hängende Senke lässt jeden Insert in sein Timeout laufen,
+ebenfalls `result="error"`, während die Zeilen dahinter die Warteschlange füllen und als
+`result="dropped"` zählen (siehe Backpressure weiter unten).
 </Callout>
 
 ## Aktivierung
@@ -91,9 +92,12 @@ Beim Start erstellt Kapkan idempotent sechs MergeTree-Tabellen:
 Jede trägt eine `ttl_days`-TTL pro Zeile, sodass die Aufbewahrung ohne Eingriff des Betreibers
 begrenzt bleibt.
 
-Die Schreib-Anmeldedaten benötigen beim ersten Lauf `CREATE`-Rechte (Datenbank + Tabellen) und
-`INSERT`-Rechte — und erneut beim ersten Start eines Releases, das Tabellen hinzufügt (dieses hier
-fügt die drei `edge_*`-Tabellen hinzu); dazwischen genügt `INSERT`. Die Schema-Initialisierung
+Dieselben Anmeldedaten schreiben und lesen: Auch die Verlaufsabfragen hinter `/api/v1/traffic`,
+`/api/v1/audit`, `/api/v1/edge/history` und `/api/v1/edge/events` laufen unter ihnen und
+antworten ohne `SELECT` mit `502`. Sie benötigen beim ersten Lauf `CREATE`-Rechte (Datenbank +
+Tabellen), `INSERT`- und `SELECT`-Rechte — `CREATE` erneut beim ersten Start eines Releases, das
+Tabellen hinzufügt (dieses hier fügt die drei `edge_*`-Tabellen hinzu); dazwischen genügen
+`INSERT` und `SELECT`. Die Schema-Initialisierung
 versucht jedes Statement und protokolliert jede Ablehnung einzeln (Anmeldedaten, die `INSERT`,
 aber nicht `CREATE` dürfen, sehen diese Zeilen bei jedem Start; sie sind harmlos, sobald die
 Tabellen existieren), sodass die drei Edge-Tabellen und die Spalten-Upgrades weiter unten auch
@@ -204,7 +208,8 @@ dasselbe:
 - `result="error"` — das Insert selbst ist fehlgeschlagen. Der Batch wird protokolliert
   (`clickhouse insert failed`) und verworfen. **Ein ClickHouse, das ausgefallen ist, zählt hier**,
   nicht unter `dropped`: Eine abgewiesene Verbindung scheitert sofort, jedes Leeren räumt die
-  Warteschlange also so schnell, wie sie sich füllt.
+  Warteschlange also so schnell, wie sie sich füllt. Ein Insert, der gegen einen hängenden Server
+  sein Sende-Timeout überschreitet, zählt ebenfalls hier.
 - `result="dropped"` — die Warteschlange war voll, als eine Zeile übergeben wurde, sie hat also nie
   ein Insert erreicht. Dazu braucht es eine Senke, die *hängt*, statt abzuweisen — ein Server, der
   die Verbindung hält, ein Netz, das die Pakete verschluckt, ein Leeren, das seinen Timeout

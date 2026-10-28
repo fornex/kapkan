@@ -26,10 +26,13 @@ terminates and proxies.
 
 It is **dry-run by default**: until you explicitly flip the switch, every would-be blackhole
 is logged and exposed via the API but never announced to your routers, and the in-kernel data
-plane, if you run one, counts what it would drop and passes it. The remote roles start the
-same way, each on its own switch: a scrub node drops nothing and an edge node refuses nothing —
+plane, if you run one, installs no ban or source block — only the rules your own config sets
+there run, counting what they would drop and passing it. The remote roles start the same way,
+each on its own switch: a scrub node drops nothing and an edge node refuses nothing it decides —
 it marks what it would refuse for the origin — until its own file says `dry_run: false`, and
-even then a zone's proof-of-work challenge only previews until that zone turns it on.
+even then a zone's proof-of-work challenge only previews until that zone turns it on. A zone
+set to `failure_mode: closed` still answers `503` whenever the decision service cannot be
+reached, dry-run or not.
 
 The full user documentation — every config key, the deployment guides, the data plane, the
 edge and the network-integration lab — lives at **[kapkan.io/docs](https://kapkan.io/docs)**
@@ -38,7 +41,7 @@ edge and the network-integration lab — lives at **[kapkan.io/docs](https://kap
 ## Features
 
 - **Ingest** sFlow v5, NetFlow v5/v9 and IPFIX over UDP via [goflow2](https://github.com/netsampler/goflow2), in library mode (no sidecar).
-- **Detect** per-destination volumetric attacks using sampling-corrected pps / Mbps / flows-per-second thresholds over a sliding window — optionally per protocol, against [learned per-host baselines](#baselines), and for [attacks your own hosts send](#outgoing-detection). Flows-per-second counts NetFlow/IPFIX records only, so it never fires on sFlow; diffuse subnet-spread floods are caught by [carpet-bomb detection](#carpet-bomb-detection). The in-memory folding step alone sustains ≥20M flows/sec/core; the end-to-end bar a hot-path change must clear is ≥200k flows/sec on 8 cores ([how it works](https://kapkan.io/docs/how-it-works#performance)).
+- **Detect** per-destination volumetric attacks using sampling-corrected pps / Mbps / flows-per-second thresholds over a sliding window — optionally per protocol, against [learned per-host baselines](#baselines), and for [attacks your own hosts send](#outgoing-detection). Flows-per-second counts NetFlow/IPFIX records only, so it never fires on sFlow; diffuse subnet-spread floods are caught by [carpet-bomb detection](#carpet-bomb-detection). The per-flow fold is allocation-free: `make bench` times it at about 10M flows/sec on one Apple M3 Max core and 24M on eight — pre-built flows, no socket or decoder — and every hot-path change must clear ≥200k flows/sec on 8 cores there ([how it works](https://kapkan.io/docs/how-it-works#performance)).
 - **Mitigate** four ways, individually or as an [escalation ladder](#escalation-ladders): drop locally in an in-kernel **[XDP data plane](#in-kernel-data-plane-xdp)**, which announces nothing; or, through an embedded [GoBGP](https://github.com/osrg/gobgp) speaker, announce **BGP FlowSpec** rules (RFC 8955/8956) that drop only the attack vector, IPv4 and IPv6 at parity, **divert** the victim to a scrubbing node, or announce `/32` and `/128` **blackhole** routes. The data plane also runs your own always-on rules with a token bucket per source — one can match the TLS ClientHello or the QUIC v1 Initial, so a handshake flood is metered per source.
 - **Fingerprint** TLS and QUIC clients by [JA4](https://kapkan.io/docs/fingerprinting), off-path (off by default; needs the data plane): the kernel copies a sampled prefix of each ClientHello and QUIC v1 Initial, userspace computes the JA4 and source-blocks any on `ja4_blocklist`. The trigger is spoofable, so a JA4 block acts on the *claimed* source — TTL'd, dry-run-aware and drawn from its own smaller budget, so a crafted-JA4 flood can never starve operator blocks.
 - **Enforce** an application-layer decision made elsewhere: whatever already terminates a victim's traffic hands Kapkan a source to drop in-kernel through [`POST /api/v1/dataplane/sources`](https://kapkan.io/docs/dataplane#source-blocks-from-your-own-stack) — scoped to that victim, with a mandatory TTL, every ban guarantee intact — and `kapkan nginx-exporter`, the reference caller, turns an nginx JSON access log into per-source verdicts.
@@ -95,7 +98,7 @@ key, is [kapkan.io/docs/configuration](https://kapkan.io/docs/configuration):
 
 | Key | Meaning |
 | --- | --- |
-| `dry_run` | When true (default), blackholes are logged and tracked but **never announced**. It governs this daemon only: `kapkan scrub` and `kapkan edge` nodes carry their own `dry_run`, also on by default (see [Going live](#going-live)). |
+| `dry_run` | When true (default), blackholes are logged and tracked but **never announced**. `kapkan scrub` and `kapkan edge` nodes carry their own `dry_run`, also on by default. The brain's flag still travels with each ban to a scrub node — a live scrub node never drops for a ban made in dry-run — and never reaches an edge node (see [Going live](#going-live)). |
 | `listen.sflow` / `listen.netflow` | UDP listen addresses. NetFlow v5/v9 and IPFIX share the netflow socket. At least one is required. |
 | `sampling.default_rate` | Sampling rate used when an exporter does not report its own (must be ≥ 1). |
 | `sampling.boundary[]` | Optional per-exporter boundary interfaces (`exporter`, `external_ifindexes`, `egress_sampling`). Telemetry from several vantage points counts the same packet once per exporter that sees it; naming the edge interfaces makes kapkan count traffic only where it crosses your border. `sampling.boundary_debug: true` temporarily emits a per-exporter/per-interface byte breakdown to find those ifIndexes. |
@@ -664,10 +667,11 @@ longer than the poll's hold. Four things are worth knowing before you deploy thi
   or removed, an origin, the TLS settings or a new certificate is a new generation, tested
   before it is installed.
 - **Watch-only is the node's and the zone's, not the brain's.** The brain's `dry_run` never
-  reaches an edge node. A node refuses nothing until its own `dry_run: false` — a would-be
-  refusal reaches the origin marked `X-Kapkan-Mark: would-deny:<reason>` — a zone stays
+  reaches an edge node. A node refuses nothing it decides until its own `dry_run: false` — a
+  would-be refusal reaches the origin marked `X-Kapkan-Mark: would-deny:<reason>` — a zone stays
   watch-only everywhere with `policy.dry_run: true`, and the challenge only previews until the
-  zone sets `challenge_options.dry_run: false`.
+  zone sets `policy.challenge_options.dry_run: false`. `failure_mode: closed` is not a decision:
+  such a zone answers `503` while the decision service is unreachable, watch-only or not.
 - **The agent token issues certificates — bind it.** Besides polling, a node's `agent` token
   coordinates ACME issuance for the zones it serves: give every node its own, bound with
   `node`, so a stolen one speaks for that node alone. Once any node has a placement scope, an
@@ -698,7 +702,7 @@ carry them in the archive's `deploy/` and, from a package, in `/usr/share/kapkan
    from their own file and go live there, with `dry_run: false` on the node. A scrub node still
    never drops for a ban the brain marks dry-run; an edge node never consults the brain's
    `dry_run` at all — a zone can stay watch-only with `policy.dry_run`, and its challenge
-   previews until `challenge_options.dry_run: false`.
+   previews until `policy.challenge_options.dry_run: false`.
 
 ## Command line
 
@@ -748,8 +752,10 @@ broken, `11` something must be fixed first, `1` could not answer (usually permis
 `2` usage. Add `-json` for the machine-readable form. The pins it reads are
 `dataplane.pin_path` from the file the global `-config` names — the default
 `configs/dev.yaml` is not there on a host, so pass the real one before the command — else
-`/sys/fs/bpf/kapkan`; `-pin-path <dir>` overrides both, and the report always says which path
-it read and why.
+`/sys/fs/bpf/kapkan` when that file has no `dataplane` block or cannot be read. A `dataplane`
+block with `enabled: false` resolves to an empty path, where no pins can be found, so pass
+`-pin-path <dir>` there; it overrides all of these, and the report always says which path it
+read and why.
 
 `edge`, like `scrub`, defaults to dry-run, and neither starts while the variable its
 `controller.token_env` names is empty. `kapkan edge -check` is the edge node's pre-flight: it
@@ -784,10 +790,10 @@ All endpoints are served on `api.listen`.
 | `GET /api/v1/dataplane/nodes` | Scrub-node inventory for the console's Scrubbing nodes view: configured nodes, whether each is polling, its frozen ban count and its last self-report. Viewer rank, unscoped tokens only. |
 | `GET /api/v1/edge/zones` | The zone document an [edge node](#edge-nodes) renders, as a long poll (ETag'd): the zones its placement covers — every zone for a bare `GET` — with origins, TLS floor and policy, plus the live ACME grants and challenges, the rung's signing keys and any lever. With `?node=<name>` the poll is that node's liveness signal. **`agent` or unscoped `operator` only** — not viewer; a node-bound token polls only as its node. |
 | `POST /api/v1/edge/nodes/{name}/report` | An edge node's self-report: version, terminator and live generation, certificates (metadata only) and each deciding zone's last ten-second window with its telling sources. Advisory by contract, never liveness; with [storage](#storage-optional) it also feeds the edge history. `agent` or unscoped `operator`; a node-bound token reports only as its node. |
-| `POST /api/v1/edge/nodes/{name}/acme/slot` (and `…/acme/challenges`) | The issuance coordinator, advisory and in memory: one node at a time orders a zone's certificate, and the slot holder's pending HTTP-01 challenge is fanned out to every node serving the zone. Only for zones the node's placement covers — any other is `404 unknown zone`, the answer a nonexistent zone gets. `agent` or unscoped `operator`; a node-bound token only as its node. |
+| `POST /api/v1/edge/nodes/{name}/acme/slot` (and `…/acme/challenges`) | The issuance coordinator, advisory and in memory: one node at a time orders a zone's certificate, and the slot holder's pending HTTP-01 challenge is fanned out to every node serving the zone. Only for zones the node's placement covers — any other is `404 unknown zone`, the answer a nonexistent zone gets; a `{"release": true}` touches only the caller's own grant and answers `204` for any zone name. `agent` or unscoped `operator`; a node-bound token only as its node. |
 | `GET /api/v1/edge/nodes` | Edge-node inventory for the console's Edge nodes view: liveness from the poll, placement scope and zones placed, the agent tokens bound to each node and the one that last polled as it, its last self-report — and `unbound_agent_tokens`, scrubbing-node tokens included. Viewer rank, unscoped tokens only. |
 | `GET /api/v1/edge/zones/status` | Every zone of the zones file merged with the alive nodes' reports — fleet rate, the challenge mode the nodes apply, watch-only nodes, certificates, placement, the lever in force — and the **would-be set**: who would be challenged, to read before a rung goes live. Viewer rank; a tenant-scoped token sees exactly its own zones. |
-| `POST /api/v1/edge/zones/{name}/challenge` (and `DELETE`) | [The lever](https://kapkan.io/docs/edge#the-lever): set a zone's rung to `manual` or `auto` with a **mandatory** TTL (60s-24h), whatever the zones file says — `{"mode":"manual","ttl_seconds":1800,"reason":"…"}` — or clear it (`DELETE`, or `mode: off`). Every node ends it on time, brain or no brain; it lives in the brain's memory, so a brain restart drops it. Audited. `operator` rank; a tenant-scoped operator on its own zones only — any other zone is `404 unknown zone`, exactly what a nonexistent one answers. |
+| `POST /api/v1/edge/zones/{name}/challenge` (and `DELETE`) | [The lever](https://kapkan.io/docs/edge#the-lever): set a zone's rung to `manual` or `auto` with a **mandatory** TTL (60s-24h), whatever its `policy.challenge` says — `{"mode":"manual","ttl_seconds":1800,"reason":"…"}` — or clear it (`DELETE`, or `mode: off`); a zone in `policy.mode: none` is `409`, since nothing challenges there. Every node ends it on time, brain or no brain; it lives in the brain's memory, so a brain restart drops it. Audited. `operator` rank; a tenant-scoped operator on its own zones only — any other zone is `404 unknown zone`, exactly what a nonexistent one answers. |
 | `GET /api/v1/edge/history` | A zone's [edge history](https://kapkan.io/docs/storage#edge-history) summed into buckets over a range (`zone`, `from`/`to`, `step`; `node=` for unscoped tokens only). Viewer rank; a tenant-scoped token reads its own zones, and any other — nonexistent included — is one uniform `403`. `available: false`, not an error, without storage. |
 | `GET /api/v1/edge/history/sources` | The zone's telling sources over the range: who was denied, challenged, or would have been. Same scope and storage rules as `edge/history`. |
 | `GET /api/v1/edge/events` | The transitions the brain saw in the edge fleet — a node lost or back, a generation refused, a certificate issued or gone, a zone-wide challenge — newest first. Viewer rank, unscoped tokens only (the events name nodes). `available: false` without storage. |
@@ -1064,19 +1070,24 @@ zones only) and `GET /api/v1/edge/events` (unscoped tokens only); report parts i
 counted in `edge_history_dropped_total{reason}`. Contract:
 [kapkan.io/docs/storage](https://kapkan.io/docs/storage#edge-history).
 
-The writer credential needs `CREATE` on the first start, and again on the first start of a
-release that adds tables — 1.8.0 added the three `edge_*` — and `INSERT` in between. Schema init
-attempts every statement, so an upgrade under an `INSERT`-only credential keeps the three core
-tables writing but gets no edge history until one start runs with `CREATE` rights (or the tables
-are created by hand); the refusals it logs on every start are harmless once the tables exist.
+One ClickHouse credential (`username_env` / `password_env`) both writes and reads. It needs
+`CREATE` on the first start, and again on the first start of a release that adds tables —
+1.8.0 added the three `edge_*` — and `INSERT` and `SELECT` in between: the history reads behind
+`/api/v1/traffic`, `/api/v1/audit`, `/api/v1/edge/history` and `/api/v1/edge/events` run under
+it and answer `502` without `SELECT`. A release that adds columns needs `ALTER` once. Schema
+init attempts every statement, so an upgrade under a credential without `CREATE` keeps the
+three core tables writing but gets no edge history until one start runs with `CREATE` rights
+(or the tables are created by hand); the refusals it logs on every start are harmless once the
+tables exist.
 
 Persistence is **best-effort and never blocks detection**: rows go onto a bounded queue
 (`queue_size`) with a non-blocking send and are flushed in batches (`batch_size` /
 `flush_interval_seconds`); a clean stop flushes what is already queued. Rows ClickHouse cannot
 take are lost, never held — a server that is **down** refuses each insert at once and counts it
-under `storage_rows_total{result="error"}`, one that **stalls** (holds the connection, or sits
-behind a network that drops packets) fills the queue and counts `result="dropped"` — and the
-engine keeps running either way. The `storage` block is read at start: a reload that changes it
+under `storage_rows_total{result="error"}`; one that **stalls** (holds the connection, or sits
+behind a network that drops packets) makes each batch wait out its send timeout, also counted
+as `error`, while the rows behind it fill the queue and, once it is full, count
+`result="dropped"` — and the engine keeps running either way. The `storage` block is read at start: a reload that changes it
 is refused. Without the block, kapkan runs entirely in-process on live data.
 
 > Note: per-ASN top-talkers are persisted on `attack_events` (in the `top_asns` column) when
@@ -1200,7 +1211,7 @@ plane needs: on a host with a `dataplane` block, also install the shipped drop-i
 daemon refuses to start and names the cause —
 `sudo install -D -m 0644 deploy/kapkan-dataplane.conf /etc/systemd/system/kapkan.service.d/10-dataplane.conf`
 (packages keep it at `/usr/share/kapkan/kapkan-dataplane.conf`), then
-`sudo systemctl daemon-reload`. See
+`sudo systemctl daemon-reload && sudo systemctl restart kapkan`. See
 [kapkan.io/docs/dataplane-install](https://kapkan.io/docs/dataplane-install).
 
 An [edge node](#edge-nodes) runs the same binary as `kapkan edge`, under its own unit:
@@ -1235,9 +1246,11 @@ is the readiness signal; the unit's `StartLimit*` turns a bad binary into a
 
 `update.sh` upgrades the brain only: it preflights `/etc/kapkan/config.yaml` and restarts
 `kapkan.service` (as a package upgrade does) — it never checks `edge.yaml` or restarts
-`kapkan-edge`. On a scrub or [edge node](#edge-nodes), swap the binary yourself and restart
-the role; on an edge node run `kapkan edge -check` with the new binary first, then
-`systemctl restart kapkan-edge`. Upgrade the nodes before relying on a feature they enforce —
+`kapkan-edge`. It does replace `/usr/local/bin/kapkan`, which `kapkan-edge.service` runs too:
+on a host with both roles, run `kapkan edge -check` and `systemctl restart kapkan-edge` right
+after it, or the edge picks up the unchecked binary at its next start. On a scrub or
+[edge node](#edge-nodes), swap the binary yourself and restart the role; on an edge node run
+`kapkan edge -check` with the new binary first, then `systemctl restart kapkan-edge`. Upgrade the nodes before relying on a feature they enforce —
 the brain's edge inventory (`GET /api/v1/edge/nodes`) shows each node's version. While the
 brain restarts, edge nodes keep serving their cached document, but two things live only in
 its memory: an operator's [challenge lever](https://kapkan.io/docs/edge#the-lever) on a zone
@@ -1280,9 +1293,10 @@ in-process GoBGP peer; no real routers are ever contacted. The end-to-end test i
 instance and asserts the attack and its (auto-expiring) virtual ban appear in the API. The
 data-plane suites go further: they compile the detector's rules into real kernel maps and
 replay captured attack frames through the program, so every published block rate is a
-measurement rather than a claim. The edge renderer's suite does the same for nginx: every
-fixture zone set is rendered, checked with `nginx -t` and served live on nginx 1.22, nginx
-stable and Angie.
+measurement rather than a claim. The edge renderer's suite does the same for nginx, on nginx
+1.22, nginx stable and Angie: every fixture zone set is rendered and checked with `nginx -t`,
+and the behavioural ones — a decider open or closed, `mode: none`, no certificate, the TLS
+floor, HTTP/3, the challenge and the ACME path — are served live and driven with requests.
 
 ## Architecture
 
