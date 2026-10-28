@@ -283,6 +283,10 @@ par zone via le créneau du cerveau, pour qu'une flotte ne consomme pas le plafo
 double d'une CA en un après-midi, et le renouvellement est décalé aléatoirement (jitter) par nœud.
 Tout cela est consultatif : sans cerveau, chaque nœud renouvelle encore de lui-même.
 
+Le côté routage de cette même flotte — la VIP sur `lo`, la route ECMP du routeur, la forme de
+hachage à choisir et ce qu'elle fait d'un plafond de débit par nœud, et sur quel signal retirer un
+nœud qui meurt — fait l'objet de la page [Une adresse, plusieurs nœuds](/docs/edge-anycast).
+
 ## Dépannage
 
 | Symptôme | Cause et correction |
@@ -310,6 +314,7 @@ Tout cela est consultatif : sans cerveau, chaque nœud renouvelle encore de lui-
 ## Voir aussi
 
 - [Nœuds edge](/docs/edge) — le fonctionnement et ce qui casse, et comment
+- [Une adresse, plusieurs nœuds](/docs/edge-anycast) — plusieurs nœuds derrière une seule adresse anycast/ECMP
 - [Référence des zones](/docs/zones)
 - [`kapkan edge`](/docs/cli#edge) — les options et chaque clé d'`edge.yaml`
 - [Le canal edge](/docs/api#le-canal-edge)

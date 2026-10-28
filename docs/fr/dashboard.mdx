@@ -104,6 +104,32 @@ Le tableau de bord interroge l'API JSON et restitue tout ce que Kapkan suit en m
   mentionnée — un démarrage récent, un rapport plus ancien que la fenêtre, ou une zone que le nœud a
   coupée de son rapport.
 
+  C'est aussi dans la colonne défi que l'on actionne [le levier](/docs/edge#le-levier). Un
+  opérateur voit un bouton **Vérifier…** sur chaque zone en `policy.mode: decide` ; ce bouton ouvre
+  un petit panneau qui demande le palier (*manuelle* — « Toute requête sans laissez-passer valide
+  est envoyée à la page de laissez-passer » — ou *auto*), combien de temps le maintenir
+  (15 minutes, 1 heure, 6 heures ou 24 heures) et un motif facultatif pour la ligne d'audit et les
+  journaux des nœuds. Avant que vous ne l'actionniez, le panneau dit ce qui l'empêcherait d'agir :
+  *« Tous les nœuds qui rapportent cette zone ne font qu'un aperçu de son palier : la vérification
+  sera comptée et personne ne sera envoyé à la page »* quand le palier est en observation seule sur
+  toute la flotte, et *« Aucun nœud vivant ne sert cette zone : personne n'appliquera le levier
+  tant qu'il n'en revient pas un »* pour une zone non servie. Un levier en cours apparaît alors dans
+  la cellule sous la forme **levier · manuelle · encore 14min 58s** — un levier plus long se lit
+  **levier · manuelle · encore 5h 42min** — avec un décompte jusqu'au moment où la zone suivra de
+  nouveau son fichier de zones, et le motif de l'opérateur au survol ; le même bouton devient
+  **Arrêter**, qui y met fin aussitôt. Le décompte se lit sur l'horloge du cerveau lui-même,
+  relevée dans la réponse qui a apporté l'état des zones, et **Arrêter** reste en place tant que le
+  cerveau rapporte le levier, quel que soit le temps restant selon l'horloge de ce navigateur : une
+  machine dont l'horloge avance ne masque jamais la commande de ce que la flotte applique encore.
+  Un refus s'affiche dans le panneau au lieu d'être passé sous silence — y compris l'unique réponse
+  qui recouvre délibérément deux cas, *« Cette zone n'est pas dans le fichier de zones, ou ce token
+  ne l'atteint pas »*, parce que le cerveau répond pour une zone hors d'atteinte d'un tenant
+  exactement comme pour une zone qui n'existe pas. Le levier est une action d'opérateur : un token
+  `viewer` en voit l'état, sans aucune commande. Une console qui parle à un Kapkan antérieur à la
+  fusion du fichier de zones ne se voit pas non plus proposer de bouton **Vérifier…** — sa table
+  est celle qu'elle a toujours été, avec en plus, quand un levier est en vigueur, son badge et le
+  bouton **Arrêter** qui y met fin.
+
   Avec le [multi-tenant](/docs/multi-tenancy), un token non rattaché voit aussi le `tenant` de
   chaque zone sous son nom, ainsi qu'une rangée de **pastilles de tenant** au-dessus de la table qui
   restreint à un seul client aussi bien les zones que le panneau **Qui serait vérifié** (mémorisée

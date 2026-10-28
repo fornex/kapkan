@@ -13,7 +13,8 @@ pro Anfrage, ob ein Client durchgelassen wird — oder ob er zuerst beweisen mus
 Browser ist — und meldet zurück. Kapkan **leitet niemals die Bytes eines Clients weiter** — nginx
 terminiert TLS und reicht die Anfragen per Proxy an Ihre Origins weiter; Kapkan sagt ihm, was es
 ausliefern soll und, für jede Anfrage, ob es sie ausliefern soll. Sie bringen das Netzwerk
-(Anycast, Transit, DNS) und die Boxen mit; Kapkan bringt die Schutzschleife mit.
+([Anycast](/docs/edge-anycast), Transit, DNS) und die Boxen mit; Kapkan bringt die Schutzschleife
+mit.
 </Callout>
 
 Einfach gesagt: Sie führen Ihre Websites (Zonen) in einer Datei auf dem Gehirn auf, richten deren
@@ -221,8 +222,9 @@ des Betreibers (`operator`-Rang; ein [tenant-bezogener](/docs/multi-tenancy) Ope
 auf seinen eigenen Zonen ziehen — jede andere Zone ist für ihn `404 unknown zone`), auditiert als
 `edge_challenge`, von
 [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) als `override` benannt —
-die Edge-Ansicht der Konsole zeigt den Modus, den die Knoten unter ihm anwenden (`manual`, `auto`),
-nicht den Hebel selbst — und wird wie der Ausstellungskoordinator im Speicher des Gehirns
+über die [Edge-Ansicht](/docs/dashboard#was-es-anzeigt) der Konsole wird er in der Challenge-Spalte
+jeder Zone in `policy.mode: decide` gezogen, und ein laufender Hebel erscheint dort mit der Zeit,
+die ihm noch bleibt — und wird wie der Ausstellungskoordinator im Speicher des Gehirns
 gehalten: das Werkzeug für einen Vorfall, nach einem Neustart des Gehirns verschwunden (die Knoten
 lassen ihn mit dem ersten Dokument fallen, das das neu gestartete Gehirn ausliefert; ziehen Sie
 ihn erneut). Der eigene `dry_run` des Gehirns hält ihn nicht zurück: Den Hebel zu ziehen ist eine
@@ -367,8 +369,9 @@ nur den langsamen Hebel: `h3: false` in der Zonendatei, oder die Firewall der Ma
 **Was nginx nicht kann, und die Topologien, die Kapkan unterstützt.** nginx routet eine
 QUIC-Verbindung über den Socket, auf dem sie ankam, nicht über die Connection ID, deshalb:
 
-- *Unterstützt:* ein Knoten pro Adresse; mehrere Knoten hinter einem 4-Tuple-ECMP oder einem
-  Anycast-Hash — ein Client, dessen Adresse sich ändert (WLAN zu LTE, ein NAT-Rebinding), landet
+- *Unterstützt:* ein Knoten pro Adresse; mehrere Knoten hinter einem
+  [4-Tuple-ECMP oder einem Anycast-Hash](/docs/edge-anycast#auf-welchem-knoten-ein-client-landet-der-hash) —
+  ein Client, dessen Adresse sich ändert (WLAN zu LTE, ein NAT-Rebinding), landet
   auf einem Knoten, der die Verbindung nicht kennt, und verbindet sich neu; nichts bricht,
   Host-Schlüssel pro Knoten genügen; eine Kapkan-Datenebene vor dem Knoten oder auf ihm, für die
   Obergrenze und den Kill.
@@ -377,8 +380,11 @@ QUIC-Verbindung über den Socket, auf dem sie ankam, nicht über die Connection 
   Verbindung nur zwischen den Workern einer Maschine); **TLS-Session-Resumption zwischen Knoten** —
   eine Session ist ein zustandsbehafteter Eintrag im eigenen Cache des Knotens, kein zustandsloses
   Ticket trägt sie, und kein Ticket-Key wird geteilt; ein Client, der den Knoten wechselt, macht
-  also einen vollen Handshake (selten unter einem 4-Tuple-Hash; gemeinsame Ticket-Keys wurden in E5
-  untersucht und werden nicht angeboten — siehe edge-spec §3). Auf dem Knoten, der sie ausgestellt
+  also einen vollen Handshake (unter einem 4-Tuple-Hash landet rund (N−1)/N der neuen Verbindungen
+  auf einem anderen Knoten — bei zwei Knoten jede zweite; unter einem Adress-Hash nur dann, wenn
+  sich die eigene Adresse des Clients ändert — siehe
+  [die Hash-Formen](/docs/edge-anycast#auf-welchem-knoten-ein-client-landet-der-hash); gemeinsame
+  Ticket-Keys wurden in E5 untersucht und werden nicht angeboten — siehe edge-spec §3). Auf dem Knoten, der sie ausgestellt
   hat, wird eine Session wie gewohnt wieder aufgenommen, denn der gemeinsame Cache ist auch auf dem
   Catch-all-Default-Server deklariert, wo nginx Sessions nachschlägt. Ebenfalls nicht unterstützt:
   WebSocket über HTTP/3 (nginx implementiert RFC 9220 nicht — es bleibt auf TCP);
@@ -494,7 +500,7 @@ Knoten nicht mehr bedient.
 | Dokument abgelehnt (Renderer, oder `nginx -t` schlägt fehl) | Die vorherige Generation bedient weiter; der Knoten bleibt gesund, aber `converged: false`, meldet den ETag des **gerenderten** Dokuments (nicht des akzeptierten) und versucht es lokal alle 1 → 10 Minuten erneut, bis es angewendet wird oder ein neueres Dokument eintrifft. Der schnelle Pfad — Raten, Stufen, der Hebel — wird unterdessen aus dem **akzeptierten** Dokument angewendet. |
 | nginx stirbt | systemd startet es neu; mit gesetztem `terminator.pid_file` meldet der Knoten `alive: false` und antwortet unterdessen mit `503` auf seinem `/healthz`. Kapkan überwacht den Terminator selbst niemals. |
 | Zertifikat nicht erneuerbar | Das aktuelle Zertifikat bedient, bis es abläuft; `kapkan_edge_cert_not_after_seconds` ist der T−30-d-Alarm; nach drei Fehlschlägen versucht der Knoten die Fallback-CA. |
-| Knoten stirbt | Das Gehirn sieht den Poll ausbleiben (`edge.stale_after_seconds`) und zeigt es im Inventar; den Verkehr wegzulenken ist Aufgabe Ihres Netzwerks (Anycast-Withdraw, DNS). |
+| Knoten stirbt | Das Gehirn sieht den Poll ausbleiben (`edge.stale_after_seconds`) und zeigt es im Inventar; den Verkehr wegzulenken ist Aufgabe Ihres Netzwerks ([Anycast-Rückzug](/docs/edge-anycast#rückzug-was-zieh-mich-zurück-sagt), DNS) — und das `alive` des Inventars ist nicht das Signal, anhand dessen Sie zurückziehen; das sind `/healthz` plus eine lokale TLS-Probe des eigenen Listeners des Knotens. |
 
 ## Den Knoten auslesen
 
@@ -588,6 +594,7 @@ Knoten nicht mehr bedient.
 ## Verwandte Themen
 
 - [Einen Edge-Knoten installieren](/docs/edge-install) — Gehirn-Seite, nginx-Seite, die Unit, Echtbetrieb
+- [Eine Adresse, viele Knoten](/docs/edge-anycast) — ECMP und Anycast: der Hash, Obergrenzen pro Knoten, Rückzug
 - [Zonen-Referenz](/docs/zones) — jeder Schlüssel der `zones.yaml`, und was eine Richtlinie mit einer Anfrage macht
 - [`kapkan edge`](/docs/cli#edge) — der Befehl, seine Flags und die `edge.yaml`
 - [Der Edge-Kanal](/docs/api#der-edge-kanal) — die Routen des Gehirns, der Zonenstatus und der Hebel

@@ -287,6 +287,10 @@ an einem Nachmittag die Duplikat-Zertifikat-Obergrenze einer CA verbrennt, und d
 pro Knoten mit Jitter versehen. All das ist beratend: Ohne Gehirn erneuert jeder Knoten weiterhin
 selbstständig.
 
+Die Routing-Seite derselben Flotte — die VIP auf `lo`, die ECMP-Route des Routers, welche Hash-Form
+Sie wählen und was sie mit einer Ratenobergrenze pro Knoten macht, und auf welches Signal hin Sie
+zurückziehen, wenn ein Knoten stirbt — steht unter [Eine Adresse, viele Knoten](/docs/edge-anycast).
+
 ## Fehlerbehebung
 
 | Symptom | Ursache und Behebung |
@@ -314,6 +318,7 @@ selbstständig.
 ## Verwandte Themen
 
 - [Edge-Knoten](/docs/edge) — Funktionsweise und was wie ausfällt
+- [Eine Adresse, viele Knoten](/docs/edge-anycast) — mehrere Knoten hinter einer Anycast-/ECMP-Adresse
 - [Zonen-Referenz](/docs/zones)
 - [`kapkan edge`](/docs/cli#edge) — Flags und jeder Schlüssel der `edge.yaml`
 - [Der Edge-Kanal](/docs/api#der-edge-kanal)

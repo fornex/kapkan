@@ -101,6 +101,30 @@ El panel de control sondea la API JSON y representa todo lo que Kapkan rastrea e
   cuyo nodo colocado está vivo pero no ha mencionado la zona — un arranque reciente, un reporte más
   antiguo que la ventana, o una zona que el nodo recortó de su reporte.
 
+  La columna de desafío es también donde se acciona [la palanca](/docs/edge#la-palanca). Un
+  operador ve un botón **Comprobar…** en cada zona con `policy.mode: decide`; abre un pequeño panel
+  que pide el peldaño (*manual* — «Cada petición sin un pase válido se envía a la página de pase» —
+  o *auto*), cuánto tiempo mantenerlo (15 minutos, 1 hora, 6 horas o 24 horas) y un motivo opcional
+  para la fila de auditoría y los logs de los nodos. Antes de que la acciones, el panel dice qué le
+  impediría actuar: *«Todos los nodos que informan de esta zona solo hacen una vista previa de su
+  peldaño: la comprobación se contará y no se enviará a nadie a la página»* cuando el peldaño está
+  en solo observación en toda la flota, y *«Ningún nodo vivo sirve esta zona, así que nadie aplicará
+  la palanca hasta que vuelva uno»* para una zona sin servir. Una palanca en curso se muestra
+  entonces en la celda como **palanca · manual · quedan 14min 58s** — una más larga dice
+  **palanca · manual · quedan 5h 42min** — y cuenta atrás hasta el momento en que la zona vuelva a
+  seguir su archivo de zonas, con el motivo del operador al pasar el cursor; el mismo botón pasa a
+  ser **Terminar**, que la retira al instante. La cuenta atrás se calcula con el reloj del propio
+  cerebro, tomado de la respuesta en la que llegó el estado de las zonas, y **Terminar** se mantiene
+  mientras el cerebro reporte la palanca, diga lo que diga el reloj de este navegador sobre el
+  tiempo que queda: una máquina con el reloj adelantado nunca oculta el control de algo que la flota
+  sigue aplicando. Un rechazo se muestra en el panel en lugar de descartarse — incluida la única
+  respuesta que cubre a propósito dos casos, *«Esta zona no está en el archivo de zonas, o este
+  token no llega a ella»*, porque el cerebro responde ante una zona fuera del alcance de un tenant
+  exactamente igual que ante una zona que no existe. La palanca es una acción de operador: un token
+  `viewer` ve el estado y ningún control. A una consola que habla con un Kapkan anterior a la fusión
+  con el archivo de zonas tampoco se le ofrece **Comprobar…** — esa tabla es la de siempre, más,
+  cuando hay una palanca en vigor, su insignia y el **Terminar** que la retira.
+
   Con [multi-tenancy](/docs/multi-tenancy), un token sin acotar ve además el `tenant` de cada zona
   bajo su nombre y una fila de **chips de tenant** sobre la tabla que reduce tanto las zonas como el
   panel **Quién sería comprobado** a un solo cliente (se recuerda durante la sesión del navegador;

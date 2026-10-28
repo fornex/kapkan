@@ -110,6 +110,32 @@ Das Dashboard fragt die JSON-API ab und stellt alles dar, was Kapkan im Speicher
   hat — ein frischer Start, ein Report, der älter ist als das Fenster, oder eine Zone, die der
   Knoten aus seinem Report geschnitten hat.
 
+  In der Challenge-Spalte wird auch [der Hebel](/docs/edge#der-hebel) gezogen. Ein Betreiber sieht
+  bei jeder Zone in `policy.mode: decide` eine Schaltfläche **Prüfen…**; sie öffnet ein kleines
+  Panel, das nach der Stufe fragt (*manuell* — „Jede Anfrage ohne gültige Freigabe wird auf die
+  Freigabeseite geschickt“ — oder *auto*), danach, wie lange sie gelten soll (15 Minuten, 1 Stunde,
+  6 Stunden oder 24 Stunden), und nach einem optionalen Grund für den Audit-Eintrag und die Logs
+  der Knoten. Bevor Sie den Hebel ziehen, sagt das Panel, was ihn am Greifen hindern würde: *„Jeder
+  Knoten, der diese Zone meldet, zeigt ihre Stufe nur als Vorschau: Die Prüfung wird gezählt,
+  niemand wird auf die Seite geschickt“*, wenn die Stufe auf der ganzen Flotte nur beobachtend ist,
+  und *„Kein lebender Knoten bedient diese Zone, also wendet niemand den Hebel an, bis einer
+  zurückkommt“* für eine unbediente Zone. Ein laufender Hebel erscheint dann in der Zelle als
+  **Hebel · manuell · noch 14Min 58Sek** — ein längerer lautet **Hebel · manuell · noch 5Std 42Min** —
+  und zählt bis zu dem Moment herunter, in dem die Zone wieder ihrer Zonendatei folgt; fahren Sie mit
+  der Maus über das Abzeichen, um den Grund des Betreibers zu sehen. Dieselbe Schaltfläche wird zu
+  **Beenden** und hebt den Hebel sofort auf. Der Countdown richtet sich nach der eigenen Uhr des
+  Gehirns, abgelesen an der Antwort, die den Zonenstatus brachte, und **Beenden** bleibt stehen,
+  solange das Gehirn den Hebel meldet, was auch immer die Uhr dieses Browsers aus der Restzeit macht:
+  Ein Rechner, dessen Uhr vorgeht, blendet nie die Steuerung für etwas aus, das die Flotte noch
+  anwendet. Eine Ablehnung wird im Panel angezeigt, statt verworfen zu werden — auch die eine
+  Antwort, die bewusst zwei Fälle abdeckt, *„Diese Zone steht nicht in der Zonendatei, oder dieses
+  Token erreicht sie nicht“*, denn das Gehirn beantwortet eine Zone außerhalb der Reichweite eines
+  Mandanten genauso wie eine Zone, die es nicht gibt. Der Hebel ist eine Aktion des Betreibers: Ein
+  `viewer`-Token sieht den Zustand, aber keine Steuerung. Eine Konsole, die mit einer Kapkan-Version
+  von vor der Zusammenführung mit der Zonendatei spricht, bekommt ebenfalls kein **Prüfen…**
+  angeboten — ihre Tabelle ist die, die sie immer war, plus, wenn ein Hebel in Kraft ist, sein
+  Abzeichen und die Schaltfläche **Beenden**, die ihn aufhebt.
+
   Mit [Mandantenfähigkeit](/docs/multi-tenancy) sieht ein ungebundenes Token außerdem den `tenant`
   jeder Zone unter ihrem Namen und über der Tabelle eine Reihe von **Mandanten-Chips**, die sowohl
   die Zonen als auch das Panel **Wer geprüft würde** auf einen Kunden eingrenzen (für die

@@ -12,8 +12,8 @@ certificats des zones sur la machine, génère la configuration du terminateur, 
 requête s'il faut laisser passer un client — ou lui demander d'abord de prouver qu'il est un
 navigateur — et rend compte au cerveau. Kapkan **ne relaie jamais les octets d'un client** — nginx
 termine le TLS et fait le proxy vers vos origines ; Kapkan lui dit quoi servir et, pour chaque
-requête, s'il faut la servir. Vous apportez le réseau (anycast, transit, DNS) et les machines ;
-Kapkan apporte la boucle de protection.
+requête, s'il faut la servir. Vous apportez le réseau ([anycast](/docs/edge-anycast), transit,
+DNS) et les machines ; Kapkan apporte la boucle de protection.
 </Callout>
 
 En clair : vous listez vos sites web (les zones) dans un fichier sur le cerveau, vous pointez leur
@@ -222,10 +222,11 @@ compter doit être repéré avant de faire confiance au levier. C'est une action
 `operator` ; un operator [rattaché à un tenant](/docs/multi-tenancy) ne peut l'actionner que sur ses
 propres zones — toute autre zone est un `404 unknown zone` pour lui), auditée comme
 `edge_challenge`, nommée `override` par
-[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) — la vue Edge de la console
-montre le mode que les nœuds appliquent sous lui (`manual`, `auto`), pas le levier lui-même — et
-tenue dans la mémoire du cerveau comme le coordinateur d'émission : un outil d'incident, disparu
-après un redémarrage du cerveau (les nœuds l'abandonnent avec le premier document que sert le
+[`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) — la
+[vue Edge](/docs/dashboard#ce-quil-affiche) de la console permet de l'actionner depuis la colonne
+défi de toute zone en `policy.mode: decide`, et y affiche un levier en cours avec le temps qui lui
+reste — et tenue dans la mémoire du cerveau comme le coordinateur d'émission : un outil d'incident,
+disparu après un redémarrage du cerveau (les nœuds l'abandonnent avec le premier document que sert le
 cerveau redémarré ; actionnez-le de nouveau). Le `dry_run` propre au cerveau ne le
 conditionne pas : actionner le levier est une modification de politique ; l'observation seule vit
 sur le nœud et la zone. Un nœud qui exécute une version antérieure au levier ne connaît pas la
@@ -369,7 +370,8 @@ n'a que le levier lent : `h3: false` dans le fichier de zones, ou le pare-feu de
 connexion QUIC par le socket sur lequel elle est arrivée, non par l'identifiant de connexion
 (connection ID), d'où :
 
-- *Pris en charge :* un nœud par adresse ; plusieurs nœuds derrière un ECMP ou un hachage anycast
+- *Pris en charge :* un nœud par adresse ; plusieurs nœuds derrière un
+  [ECMP ou un hachage anycast](/docs/edge-anycast#sur-quel-nœud-atterrit-un-client--le-hachage)
   sur le quadruplet — un client dont l'adresse change (Wi-Fi vers LTE, une réattribution NAT)
   atterrit sur un nœud qui ne connaît pas la connexion et se reconnecte ; rien ne casse, des clés
   d'hôte par nœud suffisent ; un plan de données Kapkan devant le nœud ou sur celui-ci, pour le
@@ -379,9 +381,13 @@ connexion QUIC par le socket sur lequel elle est arrivée, non par l'identifiant
   contexte `main` de nginx, ne transporte une connexion qu'entre les workers d'une même machine) ;
   **la reprise de session TLS entre nœuds** — une session est une entrée à état dans le cache
   propre du nœud, aucun ticket sans état ne la transporte et aucune clé de tickets n'est partagée :
-  un client qui change de nœud refait donc un handshake complet (rare sous un hachage sur le
-  quadruplet ; les clés de tickets partagées ont été étudiées en E5 et ne sont pas proposées — voir
-  edge-spec §3). Sur le nœud qui l'a émise, une session reprend normalement, le cache partagé étant
+  un client qui change de nœud refait donc un handshake complet (sous un hachage sur le
+  quadruplet, une nouvelle connexion atterrit sur un nœud différent du précédent dans environ
+  (N−1)/N des cas — une sur deux avec deux nœuds ; sous un hachage sur les adresses, seulement
+  quand l'adresse du client lui-même change — voir
+  [les formes de hachage](/docs/edge-anycast#sur-quel-nœud-atterrit-un-client--le-hachage) ; les
+  clés de tickets partagées ont été étudiées en E5 et ne sont pas proposées — voir edge-spec §3).
+  Sur le nœud qui l'a émise, une session reprend normalement, le cache partagé étant
   déclaré aussi sur le serveur par défaut fourre-tout, là où nginx cherche les sessions. Ne sont
   pas pris en charge non plus : WebSocket sur HTTP/3 (nginx
   n'implémente pas la RFC 9220 — cela reste sur TCP) ; 0-RTT.
@@ -492,7 +498,7 @@ renouvelle un certificat pour une zone que le nœud ne sert plus.
 | Document refusé (générateur, ou échec de `nginx -t`) | La génération précédente continue de servir ; le nœud reste sain mais `converged: false`, rapporte l'ETag du document **généré** (pas celui accepté), et réessaie localement toutes les 1 → 10 minutes jusqu'à ce qu'il s'applique ou qu'un document plus récent arrive. Le chemin rapide — débits, paliers, le levier — est appliqué entre-temps depuis le document **accepté**. |
 | nginx meurt | systemd le redémarre ; avec `terminator.pid_file` défini, le nœud rapporte `alive: false` et répond `503` sur son `/healthz` entre-temps. Kapkan ne supervise jamais le terminateur lui-même. |
 | Certificat non renouvelable | Le certificat courant sert jusqu'à son expiration ; `kapkan_edge_cert_not_after_seconds` est l'alarme à J−30 ; après trois échecs le nœud essaie la CA de repli. |
-| Le nœud meurt | Le cerveau voit l'interrogation s'arrêter (`edge.stale_after_seconds`) et l'affiche dans l'inventaire ; détourner le trafic est le travail de votre réseau (retrait anycast, DNS). |
+| Le nœud meurt | Le cerveau voit l'interrogation s'arrêter (`edge.stale_after_seconds`) et l'affiche dans l'inventaire ; détourner le trafic est le travail de votre réseau ([retrait anycast](/docs/edge-anycast#retrait--ce-qui-dit--retire-moi-), DNS) — et le signal sur lequel retirer n'est pas l'`alive` de l'inventaire, mais `/healthz` plus une sonde TLS locale de l'écouteur du nœud lui-même. |
 
 ## Lire l'état du nœud
 
@@ -583,6 +589,7 @@ renouvelle un certificat pour une zone que le nœud ne sert plus.
 ## Voir aussi
 
 - [Installer un nœud edge](/docs/edge-install) — côté cerveau, côté nginx, l'unité, la mise en production
+- [Une adresse, plusieurs nœuds](/docs/edge-anycast) — ECMP et anycast : le hachage, les plafonds par nœud, le retrait
 - [Référence des zones](/docs/zones) — chaque clé de `zones.yaml`, et ce qu'une politique fait d'une requête
 - [`kapkan edge`](/docs/cli#edge) — la commande, ses options et `edge.yaml`
 - [Le canal edge](/docs/api#le-canal-edge) — les routes du cerveau, l'état des zones et le levier
