@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,6 +118,100 @@ func TestReloadDuringStartupIsAppliedOnceUp(t *testing.T) {
 	}
 	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 		t.Fatalf("pid file left behind after a clean stop: %v", err)
+	}
+}
+
+// A reload and then a stop, both while the daemon is still starting: the stop
+// wins, and the reload that waited in hup is never applied, least of all
+// alongside the shutdown. Go's select picks at random between two ready cases,
+// so a loop that let the reload race the stop would apply it about half the
+// time; the scenario runs several times to make that visible.
+func TestStopDuringStartupDropsAWaitingReload(t *testing.T) {
+	for i := 0; i < 6; i++ {
+		dir := t.TempDir()
+		cfgPath, pidPath := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "kapkan.pid")
+		sflowPort, apiPort := freePort(t, "udp"), freePort(t, "tcp")
+		write := func(pps int) {
+			t.Helper()
+			if err := os.WriteFile(cfgPath, []byte(daemonYAML(pps, sflowPort, apiPort)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write(1000)
+
+		entered, release := make(chan *config.Store, 1), make(chan struct{})
+		orig := newApp
+		newApp = func(store *config.Store, log *slog.Logger) (*app.App, error) {
+			entered <- store
+			<-release
+			return orig(store, log)
+		}
+
+		done := make(chan error, 1)
+		go func() { done <- run(cfgPath, pidPath, slog.New(slog.DiscardHandler)) }()
+		var store *config.Store
+		select {
+		case store = <-entered:
+		case err := <-done:
+			newApp = orig
+			t.Fatalf("run %d returned before startup reached app.New: %v", i, err)
+		case <-time.After(10 * time.Second):
+			newApp = orig
+			t.Fatalf("run %d: startup never reached app.New", i)
+		}
+
+		write(2000)
+		if err := runSignalCommand("reload", pidPath); err != nil {
+			t.Fatalf("run %d: kapkan -s reload: %v", i, err)
+		}
+		if err := runSignalCommand("stop", pidPath); err != nil {
+			t.Fatalf("run %d: kapkan -s stop: %v", i, err)
+		}
+		time.Sleep(50 * time.Millisecond) // both signals delivered before startup resumes
+		close(release)
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("run %d: %v", i, err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("run %d: the daemon did not stop", i)
+		}
+		newApp = orig
+		time.Sleep(200 * time.Millisecond) // a reload racing the shutdown would have landed by now
+		if got := store.Get().Thresholds.PPS; got != 1000 {
+			t.Fatalf("run %d: the reload sent before the stop was applied (thresholds.pps = %d)", i, got)
+		}
+	}
+}
+
+// An API listener that cannot serve (its address taken) ends the daemon with
+// an error, so main exits 1 and systemd's Restart=on-failure brings it back.
+// It used to return nil: exit 0, a deliberate stop to systemd, and the daemon
+// stayed down. The bind fails after Start has returned, on the API's own
+// goroutine, which is why this is not a Start error.
+func TestAPIListenerFailureEndsRunWithAnError(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = busy.Close() }()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	yaml := daemonYAML(1000, freePort(t, "udp"), busy.Addr().(*net.TCPAddr).Port)
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- run(cfgPath, "", slog.New(slog.DiscardHandler)) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "api server") {
+			t.Fatalf("run = %v, want the API server's error", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("run did not return after its API listener failed")
 	}
 }
 

@@ -14,7 +14,7 @@ Type=simple
 User=kapkan
 Group=kapkan
 ExecStart=/usr/local/bin/kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info -pid-file /run/kapkan/kapkan.pid
-ExecReload=/bin/kill -HUP $MAINPID
+ExecReload=/usr/local/bin/kapkan -s reload -pid-file /run/kapkan/kapkan.pid
 Restart=on-failure
 RestartSec=5s
 
@@ -22,7 +22,10 @@ RestartSec=5s
 # auto-created on start and removed on stop). The daemon writes its pid here so
 # operators can run `kapkan -s reload` / `kapkan -s stop` — the nginx-style
 # local control path — without looking up the pid. `systemctl reload kapkan`
-# (ExecReload above) and `kapkan -s reload` both deliver SIGHUP.
+# runs that same `kapkan -s reload` (ExecReload above), which delivers SIGHUP.
+# The pid file is written only once the daemon catches SIGHUP, so a reload
+# sent while it is still starting fails ("no pid file") and leaves it running;
+# a bare `kill -HUP $MAINPID` could land first and end it.
 RuntimeDirectory=kapkan
 RuntimeDirectoryMode=0755
 
