@@ -39,8 +39,9 @@ security-relevant.
   shows the `IDLE` and `OPENSENT` steps, which gobgp v4 does not report.
 
   gobgp v4.10.0 also carries the upstream fix for GO-2026-4736, the crafted NEXT_HOP attribute
-  (gobgp#3305, fixed in v4.4.0). govulncheck still reports it, because the Go vulnerability
-  database lists every v4 release as affected, so it stays on the CI allowlist until that record
+  (gobgp#3305): v4 is fixed from 4.4.0 per GHSA-4p9m-8gc4-rw2h, and no v3 release has the fix. The
+  Go vulnerability database has not caught up (its record still lists every v4 release as
+  affected), so govulncheck still reports it, and it stays on the CI allowlist until that record
   names the fix. The published proof of concept is now a test too: the brain treats the UPDATE as a
   withdraw (RFC 7606) and keeps the session, and it did not crash v3.37.0 either.
 - **Built with Go 1.26.10**, which fixes twelve reachable standard-library advisories
