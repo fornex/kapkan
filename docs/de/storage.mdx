@@ -29,7 +29,7 @@ ClickHouse, das keine Zeilen annehmen kann, verliert sie, anstatt den Hot Path d
 blockieren: ein ausgefallenes lässt jeden Insert schnell scheitern und zählt als `result="error"`
 in `kapkan_storage_rows_total`; eine hängende Senke lässt jeden Insert in sein Timeout laufen,
 ebenfalls `result="error"`, während die Zeilen dahinter die Warteschlange füllen und als
-`result="dropped"` zählen (siehe Backpressure weiter unten).
+`result="dropped"` zählen (siehe [Backpressure](#backpressure)).
 </Callout>
 
 ## Aktivierung
@@ -93,7 +93,8 @@ Jede trägt eine `ttl_days`-TTL pro Zeile, sodass die Aufbewahrung ohne Eingriff
 begrenzt bleibt.
 
 Dieselben Anmeldedaten schreiben und lesen: Auch die Verlaufsabfragen hinter `/api/v1/traffic`,
-`/api/v1/audit`, `/api/v1/edge/history` und `/api/v1/edge/events` laufen unter ihnen und
+`/api/v1/audit`, `/api/v1/edge/history`, `/api/v1/edge/history/sources` und `/api/v1/edge/events`
+laufen unter ihnen und
 antworten ohne `SELECT` mit `502`. Sie benötigen beim ersten Lauf `CREATE`-Rechte (Datenbank +
 Tabellen), `INSERT`- und `SELECT`-Rechte — `CREATE` erneut beim ersten Start eines Releases, das
 Tabellen hinzufügt (dieses hier fügt die drei `edge_*`-Tabellen hinzu); dazwischen genügen
@@ -111,7 +112,7 @@ Die `reason`-Spalte der `attack_events`-Tabelle enthält das kompakte JSON des E
 [reason](/docs/detection) — warum der Angriff ausgelöst wurde (Herkunft des Schwellenwerts,
 Warm-up, Protokollanteile) — und ist in der Zeile zum Angriffsende leer. Bestehende Installationen
 erhalten die Spalte automatisch: Die Schema-Initialisierung führt ein `ADD COLUMN IF NOT EXISTS`
-aus, das stillschweigend übersprungen wird, wenn die Schreib-Anmeldedaten keine `ALTER`-Rechte
+aus, das mit der Warnung `clickhouse: column upgrade skipped` übersprungen wird, wenn die Schreib-Anmeldedaten keine `ALTER`-Rechte
 haben (Neuinstallationen verfügen bereits darüber).
 
 ## Edge-Historie

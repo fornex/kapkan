@@ -87,7 +87,8 @@ On start it idempotently creates six MergeTree tables:
 Each carries a `ttl_days` per-row TTL, so retention is bounded without operator intervention.
 
 One credential both writes and reads: the history reads behind `/api/v1/traffic`,
-`/api/v1/audit`, `/api/v1/edge/history` and `/api/v1/edge/events` run under it too, and answer
+`/api/v1/audit`, `/api/v1/edge/history`, `/api/v1/edge/history/sources` and `/api/v1/edge/events`
+run under it too, and answer
 `502` without `SELECT`. It needs `CREATE` (database + tables), `INSERT` and `SELECT` rights on
 first run — `CREATE` again on the first start of a release that adds tables (this one adds the
 three `edge_*` tables); between those, `INSERT` and `SELECT` are enough. Schema init attempts
@@ -102,8 +103,8 @@ the statement in `engine/internal/storage/edge_rows.go`.
 The `attack_events` table's `reason` column holds the compact JSON of the detection
 [reason](/docs/detection) — why the attack fired (threshold provenance,
 warm-up, protocol shares) — and is empty on the attack-ended row. Existing deployments gain the
-column automatically: schema init runs an `ADD COLUMN IF NOT EXISTS`, skipped silently if the
-writer credential lacks `ALTER` rights (fresh installs already have it).
+column automatically: schema init runs an `ADD COLUMN IF NOT EXISTS`, skipped with a
+`clickhouse: column upgrade skipped` warning if the writer credential lacks `ALTER` rights (fresh installs already have it).
 
 ## Edge history
 

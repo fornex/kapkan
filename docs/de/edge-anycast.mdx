@@ -67,7 +67,7 @@ Vier Regeln, und der Aufbau ist genau daraus gebaut:
 1. **Die VIP liegt auf dem Loopback jedes Knotens**, als `/32`:
 
    ```sh
-   # auf jedem Knoten hinter der Adresse
+   # on every node behind the address
    ip addr add 198.51.100.7/32 dev lo
    ```
 
@@ -78,7 +78,7 @@ Vier Regeln, und der Aufbau ist genau daraus gebaut:
 2. **Der Router trägt eine Route mit einem Nexthop pro Knoten**, nicht eine Route pro Knoten:
 
    ```sh
-   # auf dem Router davor
+   # on the router in front of them
    ip route replace 198.51.100.7/32 \
      nexthop via 10.0.1.2 dev leg-a weight 1 \
      nexthop via 10.0.2.2 dev leg-b weight 1
@@ -96,7 +96,7 @@ Vier Regeln, und der Aufbau ist genau daraus gebaut:
    aus, und ein gemeinsames Token hinter einer gemeinsamen Adresse macht beides bedeutungslos.
 
    ```yaml
-   # kapkan.yaml auf dem Gehirn
+   # kapkan.yaml on the brain
    api:
      tokens:
        - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
@@ -135,7 +135,7 @@ konfigurieren. Zwei Dinge brauchen aber Sorgfalt:
   als Quelle seinen eigenen Routing-Kontext, zuerst die portable Form:
 
   ```sh
-  # eine eigene Tabelle für Verkehr mit der gemeinsamen Adresse als Quelle
+  # a dedicated table for traffic sourced from the shared address
   ip route add default via 10.0.1.1 dev leg-a table 100
   ip rule  add from 198.51.100.7 lookup 100
   ```

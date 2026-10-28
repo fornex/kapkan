@@ -185,7 +185,7 @@ kapkan edge -config /etc/kapkan/edge.yaml -check
 тогда `-check` называет готовность `node_off` и перестаёт повторять бюллетень, а отчёт узла
 продолжает нести его как факт о сборке.
 
-Установите поставляемый юнит — `deploy/kapkan-edge.service` в архиве релиза, `/usr/share/kapkan/kapkan-edge.service` из пакета — и запустите его:
+Установите поставляемый юнит — `deploy/kapkan-edge.service` в архиве релиза, `/usr/share/kapkan/kapkan-edge.service` из пакета или, для 1.8.0, где его не было ни там, ни там, [из тега v1.8.0](https://github.com/fornex/kapkan/blob/v1.8.0/engine/deploy/kapkan-edge.service) — и запустите его:
 
 ```sh
 install -m 644 deploy/kapkan-edge.service /etc/systemd/system/

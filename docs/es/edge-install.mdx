@@ -185,7 +185,7 @@ cae en el rango de un aviso de seguridad de QUIC publicado recibe una advertenci
 entonces la disponibilidad como `node_off` y deja de repetir el aviso, mientras el informe del nodo
 sigue llevándolo como un hecho sobre la build.
 
-Instala la unidad incluida — `deploy/kapkan-edge.service` en el archivo de la versión, `/usr/share/kapkan/kapkan-edge.service` desde un paquete — y arráncala:
+Instala la unidad incluida — `deploy/kapkan-edge.service` en el archivo de la versión, `/usr/share/kapkan/kapkan-edge.service` desde un paquete o, con la 1.8.0, que no traía ninguno de los dos, [desde la etiqueta v1.8.0](https://github.com/fornex/kapkan/blob/v1.8.0/engine/deploy/kapkan-edge.service) — y arráncala:
 
 ```sh
 install -m 644 deploy/kapkan-edge.service /etc/systemd/system/

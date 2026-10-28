@@ -29,7 +29,7 @@ qui ne peut pas prendre de lignes les perd plutôt que de ralentir le chemin cri
 un serveur indisponible fait échouer chaque insertion aussitôt et compte `result="error"` dans
 `kapkan_storage_rows_total` ; un puits bloqué mène chaque insertion jusqu'à son délai d'expiration,
 également `result="error"`, pendant que les lignes suivantes remplissent la file et comptent
-`result="dropped"` (voir Backpressure plus bas).
+`result="dropped"` (voir [Contre-pression](#contre-pression)).
 </Callout>
 
 ## Activation
@@ -93,7 +93,8 @@ Chacune porte un TTL par ligne `ttl_days`, ce qui borne la rétention sans inter
 l'opérateur.
 
 Un seul identifiant écrit et lit : les lectures d'historique derrière `/api/v1/traffic`,
-`/api/v1/audit`, `/api/v1/edge/history` et `/api/v1/edge/events` s'exécutent aussi sous lui, et
+`/api/v1/audit`, `/api/v1/edge/history`, `/api/v1/edge/history/sources` et `/api/v1/edge/events`
+s'exécutent aussi sous lui, et
 répondent `502` sans `SELECT`. Il a besoin des droits `CREATE` (base de données + tables),
 `INSERT` et `SELECT` lors de la première exécution — de `CREATE` de nouveau au premier démarrage
 d'une version qui ajoute des tables (celle-ci ajoute les trois tables `edge_*`) ; entre les deux,
@@ -111,7 +112,7 @@ La colonne `reason` de la table `attack_events` contient le JSON compact du
 [reason](/docs/detection) de la détection — pourquoi l'attaque s'est déclenchée (provenance du
 seuil, montée en charge, parts de protocole) — et est vide sur la ligne de fin d'attaque. Les
 déploiements existants acquièrent la colonne automatiquement : l'initialisation du schéma exécute
-un `ADD COLUMN IF NOT EXISTS`, ignoré silencieusement si l'identifiant d'écriture ne dispose pas
+un `ADD COLUMN IF NOT EXISTS`, ignoré avec l'avertissement `clickhouse: column upgrade skipped` si l'identifiant d'écriture ne dispose pas
 des droits `ALTER` (les installations neuves la possèdent déjà).
 
 ## Historique edge

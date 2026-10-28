@@ -189,7 +189,7 @@ Mettez `quic.h3: off` dans l'`edge.yaml` pour garder HTTP/3 désactivé sur ce n
 qualifie alors la disponibilité de `node_off` et cesse de répéter l'avis, tandis que le rapport du
 nœud continue de le porter comme un fait sur le build.
 
-Installez l'unité livrée — `deploy/kapkan-edge.service` dans l'archive de la version, `/usr/share/kapkan/kapkan-edge.service` depuis un paquet — et démarrez-la :
+Installez l'unité livrée — `deploy/kapkan-edge.service` dans l'archive de la version, `/usr/share/kapkan/kapkan-edge.service` depuis un paquet ou, pour la 1.8.0, qui ne contenait ni l'un ni l'autre, [depuis le tag v1.8.0](https://github.com/fornex/kapkan/blob/v1.8.0/engine/deploy/kapkan-edge.service) — et démarrez-la :
 
 ```sh
 install -m 644 deploy/kapkan-edge.service /etc/systemd/system/

@@ -178,7 +178,7 @@ naming the CVE (check your distribution's changelog: backports do not move the v
 readiness as `node_off` and stops repeating the advisory, while the node's report keeps
 carrying it as a fact about the build.
 
-Install the shipped unit — `deploy/kapkan-edge.service` in the release archive, `/usr/share/kapkan/kapkan-edge.service` from a package — and start it:
+Install the shipped unit — `deploy/kapkan-edge.service` in the release archive, `/usr/share/kapkan/kapkan-edge.service` from a package, or [from the v1.8.0 tag](https://github.com/fornex/kapkan/blob/v1.8.0/engine/deploy/kapkan-edge.service) with 1.8.0, which shipped neither — and start it:
 
 ```sh
 install -m 644 deploy/kapkan-edge.service /etc/systemd/system/

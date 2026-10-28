@@ -65,7 +65,7 @@ Quatre règles, et le banc est bâti exactement là-dessus :
 1. **La VIP vit sur la loopback de chaque nœud**, en `/32` :
 
    ```sh
-   # sur chaque nœud derrière l'adresse
+   # on every node behind the address
    ip addr add 198.51.100.7/32 dev lo
    ```
 
@@ -76,7 +76,7 @@ Quatre règles, et le banc est bâti exactement là-dessus :
 2. **Le routeur porte une route avec un nexthop par nœud**, pas une route par nœud :
 
    ```sh
-   # sur le routeur en amont
+   # on the router in front of them
    ip route replace 198.51.100.7/32 \
      nexthop via 10.0.1.2 dev leg-a weight 1 \
      nexthop via 10.0.2.2 dev leg-b weight 1
@@ -94,7 +94,7 @@ Quatre règles, et le banc est bâti exactement là-dessus :
    partagé derrière une adresse partagée vide les deux de leur sens.
 
    ```yaml
-   # kapkan.yaml sur le cerveau
+   # kapkan.yaml on the brain
    api:
      tokens:
        - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
@@ -133,7 +133,7 @@ choses demandent tout de même du soin :
   partagée son propre contexte de routage, la forme portable d'abord :
 
   ```sh
-  # une table dédiée au trafic émis depuis l'adresse partagée
+  # a dedicated table for traffic sourced from the shared address
   ip route add default via 10.0.1.1 dev leg-a table 100
   ip rule  add from 198.51.100.7 lookup 100
   ```

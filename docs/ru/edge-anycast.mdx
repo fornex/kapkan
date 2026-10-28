@@ -66,7 +66,7 @@ nginx, настоящим HTTP/3 и настоящим удостоверяющ�
 1. **VIP живёт на loopback каждого узла**, как `/32`:
 
    ```sh
-   # на каждом узле за этим адресом
+   # on every node behind the address
    ip addr add 198.51.100.7/32 dev lo
    ```
 
@@ -77,7 +77,7 @@ nginx, настоящим HTTP/3 и настоящим удостоверяющ�
 2. **Маршрутизатор несёт один маршрут с одним nexthop на узел**, а не по маршруту на узел:
 
    ```sh
-   # на маршрутизаторе перед ними
+   # on the router in front of them
    ip route replace 198.51.100.7/32 \
      nexthop via 10.0.1.2 dev leg-a weight 1 \
      nexthop via 10.0.2.2 dev leg-b weight 1
@@ -94,7 +94,7 @@ nginx, настоящим HTTP/3 и настоящим удостоверяющ�
    обесценивает и то и другое.
 
    ```yaml
-   # kapkan.yaml на мозге
+   # kapkan.yaml on the brain
    api:
      tokens:
        - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
@@ -132,7 +132,7 @@ nginx, настоящим HTTP/3 и настоящим удостоверяющ�
   контекст, сначала переносимая форма:
 
   ```sh
-  # отдельная таблица для трафика, исходящего с общего адреса
+  # a dedicated table for traffic sourced from the shared address
   ip route add default via 10.0.1.1 dev leg-a table 100
   ip rule  add from 198.51.100.7 lookup 100
   ```

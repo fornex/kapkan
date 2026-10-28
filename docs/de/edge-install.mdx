@@ -190,7 +190,7 @@ bewegen die Version nicht). Setzen Sie `quic.h3: off` in der `edge.yaml`, um HTT
 Knoten abzuschalten; `-check` nennt die Bereitschaft dann `node_off` und wiederholt den Hinweis
 nicht mehr, während der Report des Knotens ihn weiterhin als Tatsache über den Build trägt.
 
-Installieren Sie die mitgelieferte Unit — `deploy/kapkan-edge.service` im Release-Archiv, `/usr/share/kapkan/kapkan-edge.service` aus einem Paket — und starten Sie sie:
+Installieren Sie die mitgelieferte Unit — `deploy/kapkan-edge.service` im Release-Archiv, `/usr/share/kapkan/kapkan-edge.service` aus einem Paket oder, bei 1.8.0, das beides nicht enthielt, [aus dem Tag v1.8.0](https://github.com/fornex/kapkan/blob/v1.8.0/engine/deploy/kapkan-edge.service) — und starten Sie sie:
 
 ```sh
 install -m 644 deploy/kapkan-edge.service /etc/systemd/system/

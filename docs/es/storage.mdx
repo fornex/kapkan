@@ -29,7 +29,7 @@ que no puede aceptar filas las pierde en lugar de frenar la ruta crítica del mo
 caído hace fallar cada inserción de inmediato y cuenta como `result="error"` en
 `kapkan_storage_rows_total`; uno atascado lleva cada inserción hasta su tiempo de espera, también
 `result="error"`, mientras las filas de detrás llenan la cola y cuentan como `result="dropped"`
-(véase Backpressure más abajo).
+(véase [Contrapresión](#contrapresión)).
 </Callout>
 
 ## Activación
@@ -92,7 +92,8 @@ Cada una lleva un TTL por fila de `ttl_days`, de modo que la retención queda ac
 intervención del operador.
 
 Una sola credencial escribe y lee: las lecturas de historial detrás de `/api/v1/traffic`,
-`/api/v1/audit`, `/api/v1/edge/history` y `/api/v1/edge/events` también se ejecutan con ella, y
+`/api/v1/audit`, `/api/v1/edge/history`, `/api/v1/edge/history/sources` y `/api/v1/edge/events`
+también se ejecutan con ella, y
 responden `502` sin `SELECT`. Necesita derechos `CREATE` (base de datos + tablas), `INSERT` y
 `SELECT` en la primera ejecución — `CREATE` de nuevo en el primer arranque de una versión que añade
 tablas (esta añade las tres tablas `edge_*`); entre medias bastan `INSERT` y `SELECT`. La
@@ -109,7 +110,7 @@ La columna `reason` de la tabla `attack_events` contiene el JSON compacto del
 [reason](/docs/detection) de la detección — por qué se disparó el ataque (procedencia del
 umbral, calentamiento, cuotas de protocolo) — y está vacía en la fila de fin de ataque. Las
 implementaciones existentes obtienen la columna automáticamente: la inicialización del esquema
-ejecuta un `ADD COLUMN IF NOT EXISTS`, que se omite en silencio si la credencial de escritura
+ejecuta un `ADD COLUMN IF NOT EXISTS`, que se omite con el aviso `clickhouse: column upgrade skipped` si la credencial de escritura
 carece de derechos `ALTER` (las instalaciones nuevas ya la tienen).
 
 ## Historial edge

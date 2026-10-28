@@ -64,7 +64,7 @@ Cuatro reglas, y el banco está construido exactamente sobre ellas:
 1. **La VIP vive en el loopback de cada nodo**, como un `/32`:
 
    ```sh
-   # en cada nodo detrás de la dirección
+   # on every node behind the address
    ip addr add 198.51.100.7/32 dev lo
    ```
 
@@ -75,7 +75,7 @@ Cuatro reglas, y el banco está construido exactamente sobre ellas:
 2. **El router lleva una ruta con un nexthop por nodo**, no una ruta por nodo:
 
    ```sh
-   # en el router que hay delante
+   # on the router in front of them
    ip route replace 198.51.100.7/32 \
      nexthop via 10.0.1.2 dev leg-a weight 1 \
      nexthop via 10.0.2.2 dev leg-b weight 1
@@ -93,7 +93,7 @@ Cuatro reglas, y el banco está construido exactamente sobre ellas:
    compartido detrás de una dirección compartida deja ambas cosas sin sentido.
 
    ```yaml
-   # kapkan.yaml en el cerebro
+   # kapkan.yaml on the brain
    api:
      tokens:
        - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
@@ -132,7 +132,7 @@ cosas sí requieren cuidado:
   dirección compartida su propio contexto de enrutamiento, primero la forma portable:
 
   ```sh
-  # una tabla dedicada al tráfico originado en la dirección compartida
+  # a dedicated table for traffic sourced from the shared address
   ip route add default via 10.0.1.1 dev leg-a table 100
   ip rule  add from 198.51.100.7 lookup 100
   ```
