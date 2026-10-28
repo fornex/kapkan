@@ -24,7 +24,7 @@ Binden Sie den Listener entsprechend — siehe [Authentifizierung](/docs/authent
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Insgesamt aufgenommene Flows, nach Flow-Protokoll. |
 | `kapkan_ingest_packets_total` | `exporter`, `proto` | Insgesamt empfangene Telemetrie-Datagramme, nach Quell-Exporter (kardinalitätsbegrenzt; siehe [`flow_sources`](/docs/configuration)) und Protokoll. |
-| `kapkan_ingest_decode_errors_total` | `proto` | Telemetrie-Datagramme, deren Dekodierung fehlgeschlagen ist, nach Protokoll. |
+| `kapkan_ingest_decode_errors_total` | `proto` | Telemetrie-Datagramme, deren Dekodierung fehlgeschlagen ist, nach Listener: `sflow` oder `netflow` (der NetFlow v5, v9 und IPFIX gleichermaßen annimmt). Jedes wird gezählt, auch während eines Floods aus Datenmüll — anders als im Log, das pro Listener und Minute höchstens fünf Dekodierfehler jeder Art festhält und meldet, wenn es die übrigen auslässt. NetFlow-v9- und IPFIX-Daten, die vor ihrem Template eintreffen, zählen ebenfalls hier: Nach einem Neustart von Kapkan oder eines Exporters steigt der Zähler, bis der Exporter seine Templates das nächste Mal sendet. Ein Datagramm, das sich dekodieren ließ, dessen Flow-Datensätze sich danach aber nicht umwandeln ließen, zählt sowohl hier als auch in `kapkan_ingest_packets_total`. |
 | `kapkan_ingest_dropped_flows_total` | — | Flows, die verworfen wurden, weil die Eingangs-Queue der Engine voll war. |
 | `kapkan_engine_active_attacks` | — | Gauge der aktuell laufenden Angriffe. |
 | `kapkan_engine_attacks_total` | — | Zähler der seit dem Start erkannten Angriffe. |
