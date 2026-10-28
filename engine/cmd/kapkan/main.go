@@ -280,6 +280,41 @@ func ladderString(stages []config.EscalationStage) string {
 // startup open and deliver the signals that land in it.
 var newApp = app.New
 
+// errPIDFileHeld says another kapkan holds the pid file's lock.
+var errPIDFileHeld = errors.New("pid file held by another kapkan")
+
+// claimPIDFile writes our pid to path while holding an exclusive lock on
+// path+".lock", and returns the function that removes the pid file and then
+// drops the lock. A second kapkan pointed at the same path gets errPIDFileHeld
+// and must leave the file alone. The lock file stays behind on purpose:
+// removing it while another process may be opening it would let two processes
+// each lock a different file. Under the unit it lives in /run/kapkan, which
+// systemd clears on every stop.
+func claimPIDFile(path string) (release func() error, err error) {
+	lock, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errPIDFileHeld
+		}
+		return nil, fmt.Errorf("lock %s: %w", lock.Name(), err)
+	}
+	if err := writePIDFile(path); err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return func() error {
+		defer func() { _ = lock.Close() }()
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}, nil
+}
+
 func run(configPath, pidPath string, log *slog.Logger) error {
 	// SIGHUP, the reload, is caught before anything else. Until signal.Notify
 	// it keeps its default action and ends the process, and systemd's
@@ -303,16 +338,24 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 	// agent token is never a warning only -check-config would have shown.
 	app.WarnUnboundAgentTokens(log, cfg)
 
-	// Record our pid so `kapkan -s reload|stop` can find us. A failure here is
-	// not fatal — the daemon runs fine, only the CLI signalling shortcut is
-	// unavailable (e.g. in dev, where /run/kapkan does not exist). The file is
-	// removed on clean shutdown.
+	// Record our pid so `kapkan -s reload|stop`, and the unit's ExecReload that
+	// runs it, can find us. A failure here is not fatal — the daemon runs fine,
+	// only the signalling shortcut is unavailable (e.g. in dev, where
+	// /run/kapkan does not exist). The file is claimed under a lock: a second
+	// kapkan pointed at the same path, such as a foreground run on a box whose
+	// service is up, leaves it to the daemon that holds it, instead of
+	// overwriting it and deleting it when that second run fails. It is removed
+	// on shutdown.
 	if pidPath != "" {
-		if err := writePIDFile(pidPath); err != nil {
+		release, err := claimPIDFile(pidPath)
+		switch {
+		case errors.Is(err, errPIDFileHeld):
+			log.Warn("another kapkan holds the pid file; leaving it to that one", "path", pidPath)
+		case err != nil:
 			log.Warn("could not write pid file; `kapkan -s reload` will not work", "path", pidPath, "err", err)
-		} else {
+		default:
 			defer func() {
-				if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if err := release(); err != nil {
 					log.Warn("could not remove pid file on shutdown", "path", pidPath, "err", err)
 				}
 			}()

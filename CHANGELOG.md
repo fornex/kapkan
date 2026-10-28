@@ -38,10 +38,12 @@ security-relevant.
   `kapkan -s reload` once the pid file existed took the signal's default action and ended the
   process — which systemd's `Restart=on-failure` counts as a clean exit, so nothing brought it
   back. `SIGHUP` is now caught before the pid file is written, and the shipped unit's `ExecReload`
-  runs `kapkan -s reload` instead of `kill -HUP $MAINPID`. A reload that comes before the handler
-  fails with `no pid file` and leaves the daemon running; one that comes after waits and is
-  applied once the daemon is up, unless a stop also arrived during startup. A unit copied from an
-  earlier release still sends `kill -HUP`: install the new one.
+  runs `kapkan -s reload` instead of `kill -HUP $MAINPID`. A reload sent before the pid file exists
+  fails with `no pid file` and leaves the daemon running; one sent after waits and is applied once
+  the daemon is up, unless a stop also arrived during startup. A unit copied from an earlier
+  release still sends `kill -HUP`: install the new one. A second `kapkan` pointed at the same pid
+  file, a foreground run on a box whose service is up, now leaves it to the running daemon instead
+  of overwriting it and, when that run fails, deleting it.
 - **daemon:** an API listener that fails, its address taken for instance, now ends the daemon
   with exit status 1 after the same graceful shutdown. It exited 0, which `Restart=on-failure`
   treats as a deliberate stop, so the daemon stayed down.
