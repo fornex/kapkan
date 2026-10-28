@@ -151,17 +151,21 @@ func TestRealClickHouse(t *testing.T) {
 		t.Fatalf("top_asns after the upgrade pass: %q columns, want 1", out)
 	}
 
-	// 3. Every table takes its rows through the writer.
+	// 3. Every table takes its rows through the writer. TTL merges on
+	// edge_windows are held off first, until step 4 has counted what landed.
+	if _, err := chExec(base, fmt.Sprintf("SYSTEM STOP TTL MERGES %s.%s", db, tableEdgeWindows)); err != nil {
+		t.Fatal(err)
+	}
 	wctx, cancel := context.WithCancel(ctx)
 	w.Start(wctx)
 	now := time.Now().UTC().Truncate(time.Second)
 	at := now.Format(chDateTime)
-	// Fresh timestamps everywhere a row must survive: ClickHouse filters rows
-	// whose TTL has already expired while writing the part, so the fixtures'
-	// June dates would land as nothing (and did, on the first run of this
-	// suite). The windows sit at half past the previous hour — away from
-	// every hour boundary, so the 3600 s bucket assertions below never depend
-	// on when the suite runs.
+	// Fresh timestamps everywhere a row must survive: a row whose TTL has
+	// already expired is gone moments after the insert (step 4 says how), so
+	// the fixtures' June dates would count as nothing (and did, on the first
+	// run of this suite). The windows sit at half past the previous hour —
+	// away from every hour boundary, so the 3600 s bucket assertions below
+	// never depend on when the suite runs.
 	mid := now.Add(-time.Hour).Truncate(time.Hour).Add(30 * time.Minute)
 	e1At, e2At := mid, mid.Add(-10*time.Second)
 	attack := sampleAttack()
@@ -189,22 +193,34 @@ func TestRealClickHouse(t *testing.T) {
 	w.WriteEdgeEvent(EdgeEventRow{EventTime: at, Node: "e1", Zone: "shop.example", Kind: "cert_renewed", Detail: "not_after=2026-12-01T00:00:00Z"})
 	cancel()
 	w.Stop()
-	// 4. The TTL holds: the window older than ttl_days never lands (expired
-	// rows are filtered as the part is written — three were sent, two exist),
-	// and a merge keeps it that way.
-	for table, want := range map[string]int{tableAttacks: 1, tableTraffic: 1, tableAudit: 1, tableEdgeWindows: 2, tableEdgeSources: 3, tableEdgeEvents: 2} {
+	// 4. The TTL holds. ClickHouse keeps an expired row on INSERT — the part
+	// lands with all three windows — and drops it in a TTL merge, which the
+	// server starts within milliseconds of a part holding one. A count
+	// straight after the insert raced that merge (CI, 2026-10-28: "rows = 3,
+	// want 2"), so it runs while TTL merges are held: three sent, three
+	// landed, one older than ttl_days. Then they run, OPTIMIZE FINAL forces
+	// one (waiting out a background merge already under way), and two remain,
+	// none stale.
+	for table, want := range map[string]int{tableAttacks: 1, tableTraffic: 1, tableAudit: 1, tableEdgeWindows: 3, tableEdgeSources: 3, tableEdgeEvents: 2} {
 		if got := chCount(t, base, db, table); got != want {
 			t.Fatalf("%s rows = %d, want %d", table, got, want)
 		}
 	}
-	if out, err := chExec(base, fmt.Sprintf("SELECT count() FROM %s.%s WHERE ts < now() - INTERVAL %d DAY FORMAT TabSeparated", db, tableEdgeWindows, cfg.TTLDays)); err != nil || out != "0" {
-		t.Fatalf("a window older than ttl_days survived: %q %v", out, err)
+	staleWindows := fmt.Sprintf("SELECT count() FROM %s.%s WHERE ts < now() - INTERVAL %d DAY FORMAT TabSeparated", db, tableEdgeWindows, cfg.TTLDays)
+	if out, err := chExec(base, staleWindows); err != nil || out != "1" {
+		t.Fatalf("windows older than ttl_days before the TTL merge: %q %v, want 1", out, err)
+	}
+	if _, err := chExec(base, fmt.Sprintf("SYSTEM START TTL MERGES %s.%s", db, tableEdgeWindows)); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := chExec(base, fmt.Sprintf("OPTIMIZE TABLE %s.%s FINAL", db, tableEdgeWindows)); err != nil {
 		t.Fatal(err)
 	}
 	if got := chCount(t, base, db, tableEdgeWindows); got != 2 {
-		t.Fatalf("edge_windows after OPTIMIZE FINAL = %d, want 2", got)
+		t.Fatalf("edge_windows after the TTL merge = %d, want 2", got)
+	}
+	if out, err := chExec(base, staleWindows); err != nil || out != "0" {
+		t.Fatalf("a window older than ttl_days survived the TTL merge: %q %v", out, err)
 	}
 
 	// 5. The read client cannot write: readonly=2 is enforced by the server.
