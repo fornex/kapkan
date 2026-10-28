@@ -69,7 +69,9 @@ jobs:
 
       # Release gate: a security tool must not ship a release with a reachable,
       # non-accepted vulnerability. Mirrors the CI govulncheck job; revisit every
-      # ACCEPTED advisory at each release (each must have no upstream fix).
+      # ACCEPTED advisory at each release (each must have no upstream fix, or one
+      # adopted that the Go vulnerability database does not record yet; the CI
+      # job says which, and why).
       - name: govulncheck (release gate)
         working-directory: engine
         env:
