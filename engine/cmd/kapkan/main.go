@@ -276,7 +276,59 @@ func ladderString(stages []config.EscalationStage) string {
 	return "mitigation=" + strings.Join(parts, " -> ")
 }
 
+// newApp builds the daemon's application; a package var so a test can hold
+// startup open and deliver the signals that land in it.
+var newApp = app.New
+
+// errPIDFileHeld says another kapkan holds the pid file's lock.
+var errPIDFileHeld = errors.New("pid file held by another kapkan")
+
+// claimPIDFile writes our pid to path while holding an exclusive lock on
+// path+".lock", and returns the function that removes the pid file and then
+// drops the lock. A second kapkan pointed at the same path gets errPIDFileHeld
+// and must leave the file alone. The lock file stays behind on purpose:
+// removing it while another process may be opening it would let two processes
+// each lock a different file. Under the unit it lives in /run/kapkan, which
+// systemd clears on every stop.
+func claimPIDFile(path string) (release func() error, err error) {
+	lock, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errPIDFileHeld
+		}
+		return nil, fmt.Errorf("lock %s: %w", lock.Name(), err)
+	}
+	if err := writePIDFile(path); err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return func() error {
+		defer func() { _ = lock.Close() }()
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}, nil
+}
+
 func run(configPath, pidPath string, log *slog.Logger) error {
+	// SIGHUP, the reload, is caught before anything else. Until signal.Notify
+	// it keeps its default action and ends the process, and systemd's
+	// Restart=on-failure counts death by SIGHUP as a clean exit, so the daemon
+	// would stay down. Both reload paths wait for this line: `kapkan -s reload`
+	// needs the pid file written below, and the shipped unit's ExecReload runs
+	// `kapkan -s reload` (a bare `kill -HUP $MAINPID` could land before it). A
+	// reload sent while the daemon is still starting therefore either fails
+	// for want of a pid file or waits in hup and is applied once startup is
+	// done.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -286,16 +338,24 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 	// agent token is never a warning only -check-config would have shown.
 	app.WarnUnboundAgentTokens(log, cfg)
 
-	// Record our pid so `kapkan -s reload|stop` can find us. A failure here is
-	// not fatal — the daemon runs fine, only the CLI signalling shortcut is
-	// unavailable (e.g. in dev, where /run/kapkan does not exist). The file is
-	// removed on clean shutdown.
+	// Record our pid so `kapkan -s reload|stop`, and the unit's ExecReload that
+	// runs it, can find us. A failure here is not fatal — the daemon runs fine,
+	// only the signalling shortcut is unavailable (e.g. in dev, where
+	// /run/kapkan does not exist). The file is claimed under a lock: a second
+	// kapkan pointed at the same path, such as a foreground run on a box whose
+	// service is up, leaves it to the daemon that holds it, instead of
+	// overwriting it and deleting it when that second run fails. It is removed
+	// on shutdown.
 	if pidPath != "" {
-		if err := writePIDFile(pidPath); err != nil {
+		release, err := claimPIDFile(pidPath)
+		switch {
+		case errors.Is(err, errPIDFileHeld):
+			log.Warn("another kapkan holds the pid file; leaving it to that one", "path", pidPath)
+		case err != nil:
 			log.Warn("could not write pid file; `kapkan -s reload` will not work", "path", pidPath, "err", err)
-		} else {
+		default:
 			defer func() {
-				if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if err := release(); err != nil {
 					log.Warn("could not remove pid file on shutdown", "path", pidPath, "err", err)
 				}
 			}()
@@ -313,7 +373,7 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	application, err := app.New(store, log)
+	application, err := newApp(store, log)
 	if err != nil {
 		return err
 	}
@@ -321,16 +381,23 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 		return err
 	}
 
-	// SIGHUP triggers config hot-reload.
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
+	// SIGHUP triggers config hot-reload, starting with one that arrived during
+	// startup and has been waiting in hup. The loop is stopped and joined before
+	// shutdown, so a reload never runs alongside StopForRestart.
+	reloadCtx, stopReloads := context.WithCancel(ctx)
+	reloadsDone := make(chan struct{})
 	go func() {
+		defer close(reloadsDone)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-reloadCtx.Done():
 				return
 			case <-hup:
+				// select picks at random when both are ready: a stop that
+				// arrived during startup, after a reload, wins.
+				if reloadCtx.Err() != nil {
+					return
+				}
 				cfg, err := store.Reload()
 				if err != nil {
 					log.Error("config reload failed; keeping previous config", "err", err)
@@ -346,19 +413,25 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 	}()
 
 	log.Info("kapkan running")
+	var runErr error
 	select {
 	case <-ctx.Done():
 		log.Info("shutdown signal received")
 	case err := <-application.APIError():
 		if err != nil {
 			log.Error("api server stopped", "err", err)
+			// Not a clean stop: an exit 0 would read as one to systemd's
+			// Restart=on-failure, and the daemon would stay down.
+			runErr = fmt.Errorf("api server: %w", err)
 		}
 	}
+	stopReloads()
+	<-reloadsDone
 
 	// Shut down asking BGP peers to retain kapkan's mitigation routes (Graceful
 	// Restart) rather than flushing them the instant the session drops, so an
 	// upgrade restart does not immediately un-mitigate active attacks.
 	application.StopForRestart()
 	log.Info("kapkan stopped")
-	return nil
+	return runErr
 }

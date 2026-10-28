@@ -36,7 +36,7 @@ of them.
 | `-dump-zones-schema` | `false` | Print the JSON schema of the [zones file](/docs/zones) an edge brain serves (`edge.zones_file`) to stdout and exit. |
 | `-version` | `false` | Print the build version and exit. The same version is exposed at runtime via `/api/v1/status` and the `kapkan_build_info` [metric](/docs/metrics). |
 | `-check-update` | `false` | Run the opt-in [update check](/docs/configuration) once and exit — `0` up to date, `10` an update is available, `1` on error. Polls the GitHub Releases API; sends only the request itself, never node identity or config. |
-| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Where the daemon writes its process id on start (removed on clean shutdown); read by `-s` to locate the running daemon. A write failure is non-fatal — the daemon still runs, only `-s` is unavailable. |
+| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Where the daemon writes its process id on start (removed on clean shutdown); read by `-s` to locate the running daemon. A write failure is non-fatal — the daemon still runs, only `-s` is unavailable. A daemon that finds the pid file held by another kapkan leaves it alone and logs a warning. |
 | `-s <signal>` | — | Signal a running daemon and exit, by reading `-pid-file`: `reload`, `stop` or `quit`. Does **not** start a daemon. See [below](#controlling-a-running-daemon). |
 
 <Callout type="info" title="json or text?">
@@ -61,7 +61,7 @@ kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
 The config file is reloadable at runtime without a restart — run [`kapkan -s reload`](#controlling-a-running-daemon),
-send `SIGHUP` directly (`systemctl reload kapkan`), or `POST /api/v1/config/reload`. See the
+which is what `systemctl reload kapkan` runs, send `SIGHUP` directly (`kill -HUP`), or `POST /api/v1/config/reload`. See the
 [configuration reference](/docs/configuration) for what reloads and what is fixed at startup.
 
 ## Controlling a running daemon

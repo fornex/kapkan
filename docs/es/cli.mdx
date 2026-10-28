@@ -36,7 +36,7 @@ una de ellas.
 | `-dump-zones-schema` | `false` | Imprime en stdout el esquema JSON del [archivo de zonas](/docs/zones) que sirve un cerebro edge (`edge.zones_file`) y termina. |
 | `-version` | `false` | Imprime la versión de compilación y termina. La misma versión se expone en tiempo de ejecución mediante `/api/v1/status` y la [métrica](/docs/metrics) `kapkan_build_info`. |
 | `-check-update` | `false` | Ejecuta la [comprobación de actualizaciones](/docs/configuration) opcional una vez y termina: `0` actualizado, `10` hay una actualización disponible, `1` ante un error. Consulta la API de Releases de GitHub; envía solo la propia solicitud, nunca la identidad del nodo ni la configuración. |
-| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Dónde escribe el demonio su id de proceso al arrancar (se elimina al apagarse limpiamente); lo lee `-s` para localizar el demonio en ejecución. Un fallo de escritura no es fatal: el demonio sigue ejecutándose, solo que `-s` no está disponible. |
+| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Dónde escribe el demonio su id de proceso al arrancar (se elimina al apagarse limpiamente); lo lee `-s` para localizar el demonio en ejecución. Un fallo de escritura no es fatal: el demonio sigue ejecutándose, solo que `-s` no está disponible. Si otro kapkan tiene el archivo pid, el demonio no lo toca y registra una advertencia. |
 | `-s <signal>` | — | Envía una señal a un demonio en ejecución y termina, leyendo `-pid-file`: `reload`, `stop` o `quit`. **No** inicia un demonio. Consulta [más abajo](#controlar-un-demonio-en-ejecución). |
 
 <Callout type="info" title="¿json o text?">
@@ -62,8 +62,8 @@ kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
 El archivo de configuración se puede recargar en tiempo de ejecución sin reiniciar: ejecuta
-[`kapkan -s reload`](#controlar-un-demonio-en-ejecución), envía `SIGHUP` directamente
-(`systemctl reload kapkan`) o `POST /api/v1/config/reload`. Consulta la
+[`kapkan -s reload`](#controlar-un-demonio-en-ejecución), que es lo que ejecuta
+`systemctl reload kapkan`, envía `SIGHUP` directamente (`kill -HUP`) o `POST /api/v1/config/reload`. Consulta la
 [referencia de configuración](/docs/configuration) para saber qué se recarga y qué queda fijado al arrancar.
 
 ## Controlar un demonio en ejecución

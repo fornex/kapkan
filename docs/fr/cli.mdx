@@ -37,7 +37,7 @@ plutôt que d'en honorer silencieusement une seule.
 | `-dump-zones-schema` | `false` | Affiche sur stdout le schéma JSON du [fichier de zones](/docs/zones) qu'un cerveau edge sert (`edge.zones_file`) puis se termine. |
 | `-version` | `false` | Affiche la version de build puis se termine. La même version est exposée à l'exécution via `/api/v1/status` et la [métrique](/docs/metrics) `kapkan_build_info`. |
 | `-check-update` | `false` | Exécute une fois la [vérification de mise à jour](/docs/configuration) optionnelle puis se termine — `0` à jour, `10` une mise à jour est disponible, `1` en cas d'erreur. Interroge l'API GitHub Releases ; n'envoie que la requête elle-même, jamais l'identité du nœud ni la configuration. |
-| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Emplacement où le démon écrit son identifiant de processus au démarrage (supprimé lors d'un arrêt propre) ; lu par `-s` pour localiser le démon en cours d'exécution. Un échec d'écriture n'est pas fatal — le démon tourne quand même, seul `-s` devient indisponible. |
+| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Emplacement où le démon écrit son identifiant de processus au démarrage (supprimé lors d'un arrêt propre) ; lu par `-s` pour localiser le démon en cours d'exécution. Un échec d'écriture n'est pas fatal — le démon tourne quand même, seul `-s` devient indisponible. Si un autre kapkan détient le fichier pid, le démon n'y touche pas et journalise un avertissement. |
 | `-s <signal>` | — | Envoie un signal à un démon en cours d'exécution puis se termine, en lisant `-pid-file` : `reload`, `stop` ou `quit`. Ne démarre **pas** de démon. Voir [ci-dessous](#contrôler-un-démon-en-cours-dexécution). |
 
 <Callout type="info" title="json ou text ?">
@@ -63,8 +63,8 @@ kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
 Le fichier de configuration est rechargeable à l'exécution sans redémarrage — exécutez
-[`kapkan -s reload`](#contrôler-un-démon-en-cours-dexécution), envoyez directement `SIGHUP`
-(`systemctl reload kapkan`) ou `POST /api/v1/config/reload`. Voir la
+[`kapkan -s reload`](#contrôler-un-démon-en-cours-dexécution), que lance aussi
+`systemctl reload kapkan`, envoyez directement `SIGHUP` (`kill -HUP`) ou `POST /api/v1/config/reload`. Voir la
 [référence de configuration](/docs/configuration) pour ce qui se recharge et ce qui est figé au
 démarrage.
 

@@ -37,7 +37,7 @@ stillschweigend nur eines von beiden zu befolgen.
 | `-dump-zones-schema` | `false` | Gibt das JSON-Schema der [Zonendatei](/docs/zones), die ein Edge-Gehirn ausliefert (`edge.zones_file`), auf stdout aus und beendet sich. |
 | `-version` | `false` | Gibt die Build-Version aus und beendet sich. Dieselbe Version wird zur Laufzeit über `/api/v1/status` und die `kapkan_build_info`-[Metrik](/docs/metrics) bereitgestellt. |
 | `-check-update` | `false` | Führt die optionale [Update-Prüfung](/docs/configuration) einmalig aus und beendet sich — `0` aktuell, `10` ein Update ist verfügbar, `1` bei einem Fehler. Fragt die GitHub-Releases-API ab; sendet nur die Anfrage selbst, niemals Knotenidentität oder Konfiguration. |
-| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Wohin der Daemon beim Start seine Prozess-ID schreibt (bei sauberem Herunterfahren entfernt); wird von `-s` gelesen, um den laufenden Daemon zu finden. Ein Schreibfehler ist nicht fatal — der Daemon läuft trotzdem, nur `-s` ist nicht verfügbar. |
+| `-pid-file <path>` | `/run/kapkan/kapkan.pid` | Wohin der Daemon beim Start seine Prozess-ID schreibt (bei sauberem Herunterfahren entfernt); wird von `-s` gelesen, um den laufenden Daemon zu finden. Ein Schreibfehler ist nicht fatal — der Daemon läuft trotzdem, nur `-s` ist nicht verfügbar. Hält ein anderer kapkan die PID-Datei, lässt der Daemon sie unangetastet und protokolliert eine Warnung. |
 | `-s <signal>` | — | Signalisiert einen laufenden Daemon und beendet sich, indem `-pid-file` gelesen wird: `reload`, `stop` oder `quit`. Startet **keinen** Daemon. Siehe [unten](#einen-laufenden-daemon-steuern). |
 
 <Callout type="info" title="json oder text?">
@@ -64,8 +64,8 @@ kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
 Die Konfigurationsdatei ist zur Laufzeit ohne Neustart neu ladbar — führen Sie
-[`kapkan -s reload`](#einen-laufenden-daemon-steuern) aus, senden Sie `SIGHUP` direkt
-(`systemctl reload kapkan`) oder `POST /api/v1/config/reload`. Siehe die
+[`kapkan -s reload`](#einen-laufenden-daemon-steuern) aus, das auch von `systemctl reload kapkan`
+aufgerufen wird, senden Sie `SIGHUP` direkt (`kill -HUP`) oder `POST /api/v1/config/reload`. Siehe die
 [Konfigurationsreferenz](/docs/configuration) dazu, was neu geladen wird und was beim Start
 fixiert ist.
 
