@@ -141,16 +141,52 @@ bei Flow-Raten in Angriffsgröße schnell zu bleiben:
 - **Allokationsfreier Hot Path.** Puffer werden vorab allokiert und Zähler sind atomar; der
   Per-Flow-Pfad vermeidet Heap-Allokationen, sodass der Garbage Collector nicht in die Quere kommt.
 
-Zwei Kennzahlen beschreiben ihn, und beide stammen aus denselben Benchmarks — `make bench`, die den
-In-Memory-Folding-Schritt pro Flow über vorab erzeugte Flows messen, ohne Socket und ohne Decoder
-in der Schleife:
+`make bench` liefert zwei Arten von Kennzahlen. Die erste misst den In-Memory-Folding-Schritt pro
+Flow für sich allein, über vorab erzeugte Flows, ohne Socket und ohne Decoder in der Schleife:
 
 - **Die Messlatte:** Eine Hot-Path-Änderung gilt erst als fertig, wenn sie dort
   **≥200k flows/sec auf 8 Cores** schafft.
 - **Ein Referenzpunkt:** Auf einem Apple M3 Max verarbeitet der Folding-Schritt etwa
   **10 Mio. flows/sec auf einem Core** und **24 Mio. auf acht**.
 
-Eine End-to-End-Zahl — Socket, Dekodierung und Folding zusammen — wird nicht veröffentlicht.
+Die zweite misst den Empfang End-to-End. `BenchmarkIngestSFlow` und `BenchmarkIngestNetFlowV9`
+schicken Datagramme durch den Decoder von goflow2, die Konvertierung von Kapkan und den
+Folding-Schritt — alles, was ein Listener mit einem Datagramm tut, außer es vom Socket zu lesen. Die
+Datagramme sind wie die echter Exporter aufgebaut: sFlow v5 von einem Switch, 8 Samples pro
+Datagramm, jedes aus einem Paket-Header und einem Extended-Switch-Datensatz; NetFlow v9 von einem
+Router, 30 Datensätze pro Datagramm im klassischen Template mit 18 Feldern plus Fragment-Offset,
+gesendet nach dem Template selbst. Auf demselben Apple M3 Max, in einem nativen arm64-Build, mit
+einem Worker auf einem Core und den vier Workern eines Listeners mit Zugriff auf alle vierzehn:
+
+| Telemetrie | Ein Core | Ein Listener (vier Worker) |
+| --- | --- | --- |
+| sFlow v5 | etwa **0,6 Mio. flows/sec** | etwa **2,1 Mio. flows/sec** |
+| NetFlow v9 | etwa **0,33 Mio. flows/sec** | etwa **1,35 Mio. flows/sec** |
+
+**Das Dekodieren dominiert.** goflow2 — sein Decoder und der Producer, der jeden Datensatz abbildet
+— braucht mehr als vier Fünftel dieser Zeit, bei NetFlow v9 neun Zehntel, und ein guter Teil davon
+geht auf das Allokieren von Speicher und dessen Garbage Collection. Kapkans eigene Arbeit —
+Konvertierung, zwei Zähler und Folding-Schritt — ist das verbleibende Zehntel oder so. Deshalb
+kostet ein Flow End-to-End etwa 20- bis 30-mal so viel wie im Folding-Schritt allein. Außerdem
+kostet ein Datensatz umso mehr, je mehr Felder sein Template trägt — goflow2 dekodiert jedes Feld,
+ob es gelesen wird oder nicht —, sodass Flows eines Routers, der ein breiteres Template exportiert
+(IPv6-Adressen, MPLS-Labels, BGP-Attribute), langsamer aufgenommen werden, als die Tabelle zeigt.
+
+**Was die vier Worker eines Listeners bedeuten.** Jeder Listener — einer für sFlow, einer für
+NetFlow und IPFIX — dekodiert mit vier Workern, die Datagramme reihum aus einer gemeinsamen
+Warteschlange nehmen, gleich welcher Exporter sie geschickt hat. Die Datagramme eines Exporters
+verteilen sich auf alle vier, und viele Exporter teilen sich dieselben vier: Ein Listener schafft
+also höchstens etwa die rechte Spalte, ob ihn ein Router speist oder fünfzig, und mehr Cores heben
+diese Grenze nicht an. Der andere Listener hat seine eigenen vier Worker.
+
+Das sind die Zahlen einer einzigen Maschine. Ein Server-Core ist kein M3-Max-Core, und Ihre Router
+exportieren womöglich breitere Templates als dieses — messen Sie deshalb auf Ihrer eigenen Hardware,
+bevor Sie eine Maschine dimensionieren: `make -C engine bench` führt alle Benchmarks aus, und dieser
+Befehl nur die Spalte „Ein Core“:
+
+```sh
+cd engine && go test -run '^$' -bench 'Ingest/workers=1' -cpu 1 ./internal/ingest/
+```
 
 <Callout type="info" title="Erst benchmarken, dann vertrauen">
 Die Engine bringt `go test -bench`-Benchmarks mit (`make bench`). Die Projektregel lautet, diese

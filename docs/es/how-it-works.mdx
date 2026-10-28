@@ -136,15 +136,52 @@ rápida bajo tasas de flow a escala de ataque:
   atómicos; la ruta por flow evita asignaciones en el heap para que el recolector de basura (garbage
   collector) no estorbe.
 
-Dos cifras la describen, y ambas salen de los mismos benchmarks — `make bench`, que miden la
-acumulación en memoria por flow sobre flows preconstruidos, sin socket ni decodificador en el bucle:
+`make bench` mide de dos maneras. La primera cronometra solo la acumulación en memoria por flow,
+sobre flows preconstruidos, sin socket ni decodificador en el bucle:
 
 - **El listón:** un cambio en la ruta caliente solo se da por terminado cuando allí supera
   **≥200k flows/sec en 8 núcleos**.
 - **Un punto de referencia:** en un Apple M3 Max la acumulación procesa unos
   **10M flows/sec en un núcleo** y **24M en ocho**.
 
-No se publica ninguna cifra de extremo a extremo — socket, decodificación y acumulación juntos.
+La segunda cronometra la recepción de extremo a extremo. `BenchmarkIngestSFlow` y
+`BenchmarkIngestNetFlowV9` pasan datagramas por el decodificador de goflow2, la conversión de Kapkan
+y la acumulación — todo lo que un listener hace con un datagrama salvo leerlo del socket. Los
+datagramas imitan los de exportadores reales: sFlow v5 de un switch, 8 muestras por datagrama, cada
+una con una cabecera de paquete y un registro extended switch; NetFlow v9 de un router, 30 registros
+por datagrama en la plantilla clásica de 18 campos más el desplazamiento de fragmento, enviados
+después de la propia plantilla. En el mismo Apple M3 Max, con una compilación nativa para arm64, un
+worker limitado a un núcleo y los cuatro workers de un listener libres de usar los catorce:
+
+| Telemetría | Un núcleo | Un listener (cuatro workers) |
+| --- | --- | --- |
+| sFlow v5 | unos **0,6M flows/sec** | unos **2,1M flows/sec** |
+| NetFlow v9 | unos **0,33M flows/sec** | unos **1,35M flows/sec** |
+
+**Domina la decodificación.** goflow2 — su decodificador y el productor que traduce cada registro —
+se lleva más de cuatro quintas partes de ese tiempo, nueve décimas en NetFlow v9, buena parte en
+asignar memoria y volver a recolectarla. El trabajo propio de Kapkan — la conversión, dos contadores
+y la acumulación — es la décima parte restante, más o menos. Por eso un flow cuesta unas 20 a 30
+veces más de extremo a extremo que en la acumulación sola. Además, un registro cuesta más cuantos
+más campos lleve su plantilla — goflow2 decodifica cada campo, se lea o no —, así que los flows de
+un router que exporta una plantilla más ancha (direcciones IPv6, etiquetas MPLS, atributos BGP) se
+reciben más despacio de lo que muestra la tabla.
+
+**Qué significan los cuatro workers de un listener.** Cada listener — uno para sFlow, otro para
+NetFlow e IPFIX — decodifica con cuatro workers que toman por turnos los datagramas de una misma
+cola, sin importar qué exportador los envió. Los datagramas de un exportador se reparten entre los
+cuatro, y muchos exportadores comparten los mismos cuatro: un listener toca techo más o menos en la
+columna derecha, lo alimente un router o cincuenta, y más núcleos no suben ese techo. El otro
+listener tiene sus propios cuatro workers.
+
+Son las cifras de una sola máquina. Un núcleo de servidor no es un núcleo de M3 Max, y tus routers
+pueden exportar plantillas más anchas que esta, así que mide en tu propio hardware antes de
+dimensionar un equipo: `make -C engine bench` ejecuta todos los benchmarks, y este comando solo la
+columna «Un núcleo»:
+
+```sh
+cd engine && go test -run '^$' -bench 'Ingest/workers=1' -cpu 1 ./internal/ingest/
+```
 
 <Callout type="info" title="Haz benchmark antes de confiar en ello">
 El motor incluye benchmarks de `go test -bench` (`make bench`). La regla del proyecto es ejecutarlos
