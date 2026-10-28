@@ -64,6 +64,13 @@ archives:
       # is true (see deploy/dataplane-operations.md §1).
       - src: engine/deploy/kapkan-dataplane.conf
         dst: deploy/kapkan-dataplane.conf
+      # The edge-node role (`kapkan edge`): its systemd unit and annotated
+      # config. Shipped, not installed — a brain host does not run the role
+      # (docs/en/edge-install.mdx installs them on the boxes that do).
+      - src: engine/deploy/kapkan-edge.service
+        dst: deploy/kapkan-edge.service
+      - src: engine/deploy/edge.example.yaml
+        dst: deploy/edge.example.yaml
       - src: engine/deploy/dataplane-operations.md
         dst: deploy/dataplane-operations.md
       - src: engine/deploy/config.example.yaml
@@ -109,6 +116,16 @@ nfpms:
       # start on a host where they turned it on and did not.
       - src: engine/deploy/kapkan-dataplane.conf
         dst: /usr/share/kapkan/kapkan-dataplane.conf
+        file_info: { mode: 0644 }
+      # The edge-node unit and its annotated config go to /usr/share for the
+      # same reason: installing a root unit for the edge role on every host
+      # that merely installed the package would be wrong for a brain. An
+      # operator copies them into place on the boxes that run `kapkan edge`.
+      - src: engine/deploy/kapkan-edge.service
+        dst: /usr/share/kapkan/kapkan-edge.service
+        file_info: { mode: 0644 }
+      - src: engine/deploy/edge.example.yaml
+        dst: /usr/share/kapkan/edge.example.yaml
         file_info: { mode: 0644 }
       - src: engine/deploy/dataplane-operations.md
         dst: /usr/share/doc/kapkan/dataplane-operations.md
