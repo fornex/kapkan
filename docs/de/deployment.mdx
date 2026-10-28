@@ -166,11 +166,15 @@ für den Dienst niemals beschreibbar ist.
 Kapkan lädt seine Konfiguration bei `SIGHUP` im laufenden Betrieb neu (das Unix-Signal, das den
 Daemon anweist, seine Konfiguration ohne Neustart erneut einzulesen) — ohne Neustart, ohne
 verlorenen flow-Status. Die systemd-Unit verdrahtet dies mit
-`ExecReload=/bin/kill -HUP $MAINPID`, sodass Sie folgendermaßen neu laden:
+`ExecReload=/usr/local/bin/kapkan -s reload -pid-file /run/kapkan/kapkan.pid`, sodass Sie folgendermaßen neu laden:
 
 ```sh
 sudo systemctl reload kapkan
 ```
+
+Der Daemon schreibt seine PID-Datei erst, wenn er `SIGHUP` abfängt. Ein Neuladen, das noch während
+des Starts kommt, scheitert daher mit `no pid file` und lässt ihn weiterlaufen: Laden Sie erneut
+neu, sobald er läuft.
 
 Außerhalb des Dienstmanagers der Maschine versteht der Daemon auch das nginx-artige lokale
 Steuerungsflag, das die pid-Datei liest, die die Unit nach `/run/kapkan/kapkan.pid` schreibt:

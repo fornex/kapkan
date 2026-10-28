@@ -64,8 +64,8 @@ kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
 Die Konfigurationsdatei ist zur Laufzeit ohne Neustart neu ladbar — führen Sie
-[`kapkan -s reload`](#einen-laufenden-daemon-steuern) aus, senden Sie `SIGHUP` direkt
-(`systemctl reload kapkan`) oder `POST /api/v1/config/reload`. Siehe die
+[`kapkan -s reload`](#einen-laufenden-daemon-steuern) aus, das auch `systemctl reload kapkan`
+aufruft, senden Sie `SIGHUP` direkt (`kill -HUP`) oder `POST /api/v1/config/reload`. Siehe die
 [Konfigurationsreferenz](/docs/configuration) dazu, was neu geladen wird und was beim Start
 fixiert ist.
 

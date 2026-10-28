@@ -282,12 +282,14 @@ var newApp = app.New
 
 func run(configPath, pidPath string, log *slog.Logger) error {
 	// SIGHUP, the reload, is caught before anything else. Until signal.Notify
-	// it keeps its default action and ends the process, and a reload can land
-	// while the daemon is still starting: `systemctl reload` as soon as the
-	// unit is up (Type=simple), `kapkan -s reload` as soon as the pid file
-	// below exists. systemd's Restart=on-failure counts death by SIGHUP as a
-	// clean exit, so the daemon would stay down. Caught here, the reload waits
-	// in hup and is applied once startup is done.
+	// it keeps its default action and ends the process, and systemd's
+	// Restart=on-failure counts death by SIGHUP as a clean exit, so the daemon
+	// would stay down. Both reload paths wait for this line: `kapkan -s reload`
+	// needs the pid file written below, and the shipped unit's ExecReload runs
+	// `kapkan -s reload` (a bare `kill -HUP $MAINPID` could land before it). A
+	// reload sent while the daemon is still starting therefore either fails
+	// for want of a pid file or waits in hup and is applied once startup is
+	// done.
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
@@ -337,13 +339,22 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 	}
 
 	// SIGHUP triggers config hot-reload, starting with one that arrived during
-	// startup and has been waiting in hup.
+	// startup and has been waiting in hup. The loop is stopped and joined before
+	// shutdown, so a reload never runs alongside StopForRestart.
+	reloadCtx, stopReloads := context.WithCancel(ctx)
+	reloadsDone := make(chan struct{})
 	go func() {
+		defer close(reloadsDone)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-reloadCtx.Done():
 				return
 			case <-hup:
+				// select picks at random when both are ready: a stop that
+				// arrived during startup, after a reload, wins.
+				if reloadCtx.Err() != nil {
+					return
+				}
 				cfg, err := store.Reload()
 				if err != nil {
 					log.Error("config reload failed; keeping previous config", "err", err)
@@ -359,19 +370,25 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 	}()
 
 	log.Info("kapkan running")
+	var runErr error
 	select {
 	case <-ctx.Done():
 		log.Info("shutdown signal received")
 	case err := <-application.APIError():
 		if err != nil {
 			log.Error("api server stopped", "err", err)
+			// Not a clean stop: an exit 0 would read as one to systemd's
+			// Restart=on-failure, and the daemon would stay down.
+			runErr = fmt.Errorf("api server: %w", err)
 		}
 	}
+	stopReloads()
+	<-reloadsDone
 
 	// Shut down asking BGP peers to retain kapkan's mitigation routes (Graceful
 	// Restart) rather than flushing them the instant the session drops, so an
 	// upgrade restart does not immediately un-mitigate active attacks.
 	application.StopForRestart()
 	log.Info("kapkan stopped")
-	return nil
+	return runErr
 }

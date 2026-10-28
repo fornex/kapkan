@@ -161,12 +161,16 @@ le fichier d'environnement n'est jamais accessible en écriture par le service.
 ## Rechargement de la configuration
 
 Kapkan recharge sa configuration à chaud sur `SIGHUP` — sans redémarrage, sans perte de l'état des
-flow. L'unité systemd met cela en place avec `ExecReload=/bin/kill -HUP $MAINPID`, de sorte que vous
+flow. L'unité systemd met cela en place avec `ExecReload=/usr/local/bin/kapkan -s reload -pid-file /run/kapkan/kapkan.pid`, de sorte que vous
 rechargez avec :
 
 ```sh
 sudo systemctl reload kapkan
 ```
+
+Le démon n'écrit son fichier pid qu'une fois qu'il intercepte `SIGHUP` : un rechargement envoyé
+pendant son démarrage échoue donc avec `no pid file` et le laisse tourner. Rechargez de nouveau une
+fois qu'il est démarré.
 
 En dehors du gestionnaire de services de la machine, le démon répond aussi au drapeau de
 contrôle local de style nginx, qui lit le pid file que l'unité écrit dans

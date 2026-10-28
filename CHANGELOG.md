@@ -37,8 +37,14 @@ security-relevant.
   so a `systemctl reload kapkan` right after a start (the unit is `Type=simple`) or a
   `kapkan -s reload` once the pid file existed took the signal's default action and ended the
   process — which systemd's `Restart=on-failure` counts as a clean exit, so nothing brought it
-  back. `SIGHUP` is now caught first thing; a reload sent during startup waits and is applied once
-  the daemon is up.
+  back. `SIGHUP` is now caught before the pid file is written, and the shipped unit's `ExecReload`
+  runs `kapkan -s reload` instead of `kill -HUP $MAINPID`. A reload that comes before the handler
+  fails with `no pid file` and leaves the daemon running; one that comes after waits and is
+  applied once the daemon is up, unless a stop also arrived during startup. A unit copied from an
+  earlier release still sends `kill -HUP`: install the new one.
+- **daemon:** an API listener that fails, its address taken for instance, now ends the daemon
+  with exit status 1 after the same graceful shutdown. It exited 0, which `Restart=on-failure`
+  treats as a deliberate stop, so the daemon stayed down.
 - **storage:** a ClickHouse older than 21.4 is named at start — one `ERROR` line with the
   server's version, the floor and what to do — instead of six `Syntax error ... TTL` refusals
   that said nothing about why ([#122](https://github.com/fornex/kapkan/issues/122): the

@@ -63,8 +63,8 @@ kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
 Le fichier de configuration est rechargeable à l'exécution sans redémarrage — exécutez
-[`kapkan -s reload`](#contrôler-un-démon-en-cours-dexécution), envoyez directement `SIGHUP`
-(`systemctl reload kapkan`) ou `POST /api/v1/config/reload`. Voir la
+[`kapkan -s reload`](#contrôler-un-démon-en-cours-dexécution), que lance aussi
+`systemctl reload kapkan`, envoyez directement `SIGHUP` (`kill -HUP`) ou `POST /api/v1/config/reload`. Voir la
 [référence de configuration](/docs/configuration) pour ce qui se recharge et ce qui est figé au
 démarrage.
 

@@ -62,8 +62,8 @@ kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
 El archivo de configuración se puede recargar en tiempo de ejecución sin reiniciar: ejecuta
-[`kapkan -s reload`](#controlar-un-demonio-en-ejecución), envía `SIGHUP` directamente
-(`systemctl reload kapkan`) o `POST /api/v1/config/reload`. Consulta la
+[`kapkan -s reload`](#controlar-un-demonio-en-ejecución), que es lo que ejecuta
+`systemctl reload kapkan`, envía `SIGHUP` directamente (`kill -HUP`) o `POST /api/v1/config/reload`. Consulta la
 [referencia de configuración](/docs/configuration) para saber qué se recarga y qué queda fijado al arrancar.
 
 ## Controlar un demonio en ejecución

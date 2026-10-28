@@ -160,12 +160,16 @@ lo que el archivo de entorno nunca es escribible por el servicio.
 
 Kapkan recarga su configuración en caliente al recibir `SIGHUP` (la señal Unix que indica al
 daemon que vuelva a leer su configuración sin reiniciar): sin reinicio y sin pérdida del estado
-de flows. La unidad systemd conecta esto mediante `ExecReload=/bin/kill -HUP $MAINPID`,
+de flows. La unidad systemd conecta esto mediante `ExecReload=/usr/local/bin/kapkan -s reload -pid-file /run/kapkan/kapkan.pid`,
 de modo que puedes recargar con:
 
 ```sh
 sudo systemctl reload kapkan
 ```
+
+El daemon escribe su archivo pid solo cuando ya captura `SIGHUP`, así que una recarga enviada
+mientras aún arranca falla con `no pid file` y lo deja en marcha: vuelve a recargar cuando esté
+arriba.
 
 Fuera del gestor de servicios de la máquina, el daemon también responde al flag de control local
 al estilo de nginx, que lee el pid file que la unidad escribe en `/run/kapkan/kapkan.pid`:

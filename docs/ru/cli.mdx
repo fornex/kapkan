@@ -61,7 +61,7 @@ kapkan -config /etc/kapkan/config.yaml -log-format json -log-level info
 ```
 
 Файл конфигурации можно перечитывать во время работы без перезапуска — выполните [`kapkan -s reload`](#управление-работающим-демоном),
-отправьте `SIGHUP` напрямую (`systemctl reload kapkan`) или сделайте `POST /api/v1/config/reload`. См.
+который запускает и `systemctl reload kapkan`, отправьте `SIGHUP` напрямую (`kill -HUP`) или сделайте `POST /api/v1/config/reload`. См.
 [справочник конфигурации](/docs/configuration), чтобы узнать, что перечитывается, а что фиксируется при запуске.
 
 ## Управление работающим демоном

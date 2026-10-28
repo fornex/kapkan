@@ -157,11 +157,14 @@ unprivileged user, so the env file is never writable by the service.
 
 Kapkan hot-reloads its configuration on `SIGHUP` (the Unix signal that tells the daemon to
 re-read its config without restarting) — no restart, no dropped flow state. The
-systemd unit wires this up with `ExecReload=/bin/kill -HUP $MAINPID`, so you reload with:
+systemd unit wires this up with `ExecReload=/usr/local/bin/kapkan -s reload -pid-file /run/kapkan/kapkan.pid`, so you reload with:
 
 ```sh
 sudo systemctl reload kapkan
 ```
+
+The daemon writes its pid file only once it catches `SIGHUP`, so a reload sent while it is still
+starting fails with `no pid file` and leaves it running: reload again once it is up.
 
 Off the box's service manager, the daemon also answers the nginx-style local control flag,
 which reads the pid file the unit writes to `/run/kapkan/kapkan.pid`:
