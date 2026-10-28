@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { IBM_Plex_Mono, IBM_Plex_Sans, Poppins } from "next/font/google";
 import "./globals.css";
 import { site } from "@/lib/site";
+import { LocaleHtml } from "@/components/LocaleHtml";
 
 // Body and code faces. IBM Plex (not the framework's default Geist) so the
 // site does not read as an untouched starter template; the cyrillic subset
@@ -62,14 +63,15 @@ export const viewport: Viewport = {
 // Set the theme class before paint to avoid a flash of the wrong theme.
 const themeScript = `(function(){try{var t=localStorage.getItem('theme');var d=t?t==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;if(d)document.documentElement.classList.add('dark');}catch(e){}})();`;
 
+// <html> comes from LocaleHtml, which sets lang from the route's [lang] param —
+// this layout sits above that segment and never receives it.
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
+    <LocaleHtml
       suppressHydrationWarning
       className={`${plexSans.variable} ${plexMono.variable} ${poppins.variable} h-full antialiased`}
     >
@@ -77,6 +79,6 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
       <body className="min-h-full bg-background font-sans text-foreground">{children}</body>
-    </html>
+    </LocaleHtml>
   );
 }

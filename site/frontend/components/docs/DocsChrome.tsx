@@ -124,11 +124,6 @@ export function DocsChrome({ lang, children }: { lang: Locale; children: React.R
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
 
-  // Reflect the active locale on the document for accessibility/SEO.
-  useEffect(() => {
-    document.documentElement.lang = lang;
-  }, [lang]);
-
   // Click-to-copy for the per-heading "#" anchors (added by
   // rehype-autolink-headings). Clicking copies the absolute section URL to
   // the clipboard, updates the address bar via replaceState (so the fragment
