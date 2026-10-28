@@ -158,6 +158,11 @@ worker limitado a un núcleo y los cuatro workers de un listener libres de usar 
 | sFlow v5 | unos **0,6M flows/sec** | unos **2,1M flows/sec** |
 | NetFlow v9 | unos **0,33M flows/sec** | unos **1,35M flows/sec** |
 
+En x86, los mismos benchmarks se ejecutaron en un runner de GitHub Actions con un AMD EPYC 7763 (Zen
+3): un núcleo recibe unos **0,3M flows/sec** de sFlow o **0,19M** de NetFlow v9. Ese runner tiene
+dos núcleos (cuatro hilos SMT), así que sus cuatro workers solo llegan a unos 0,68M y 0,44M — una
+cifra de dos núcleos, no el techo de un listener.
+
 **Domina la decodificación.** goflow2 — su decodificador y el productor que traduce cada registro —
 se lleva más de cuatro quintas partes de ese tiempo, nueve décimas en NetFlow v9, buena parte en
 asignar memoria y volver a recolectarla. El trabajo propio de Kapkan — la conversión, dos contadores
@@ -174,10 +179,9 @@ cuatro, y muchos exportadores comparten los mismos cuatro: un listener toca tech
 columna derecha, lo alimente un router o cincuenta, y más núcleos no suben ese techo. El otro
 listener tiene sus propios cuatro workers.
 
-Son las cifras de una sola máquina. Un núcleo de servidor no es un núcleo de M3 Max, y tus routers
-pueden exportar plantillas más anchas que esta, así que mide en tu propio hardware antes de
-dimensionar un equipo: `make -C engine bench` ejecuta todos los benchmarks, y este comando solo la
-columna «Un núcleo»:
+Tu servidor no es ninguna de estas dos máquinas, y tus routers pueden exportar plantillas más anchas
+que esta, así que mide en tu propio hardware antes de dimensionar un equipo: `make -C engine bench`
+ejecuta todos los benchmarks, y este comando solo la columna «Un núcleo»:
 
 ```sh
 cd engine && go test -run '^$' -bench 'Ingest/workers=1' -cpu 1 ./internal/ingest/

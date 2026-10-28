@@ -163,6 +163,11 @@ einem Worker auf einem Core und den vier Workern eines Listeners mit Zugriff auf
 | sFlow v5 | etwa **0,6 Mio. flows/sec** | etwa **2,1 Mio. flows/sec** |
 | NetFlow v9 | etwa **0,33 Mio. flows/sec** | etwa **1,35 Mio. flows/sec** |
 
+Auf x86 liefen dieselben Benchmarks auf einem GitHub-Actions-Runner mit AMD EPYC 7763 (Zen 3): Ein
+Core nimmt etwa **0,3 Mio. flows/sec** sFlow oder **0,19 Mio.** NetFlow v9 auf. Dieser Runner hat
+zwei Cores (vier SMT-Threads), daher kommen seine vier Worker nur auf etwa 0,68 Mio. bzw. 0,44 Mio.
+— eine Zahl für zwei Cores, nicht die Grenze eines Listeners.
+
 **Das Dekodieren dominiert.** goflow2 — sein Decoder und der Producer, der jeden Datensatz abbildet
 — braucht mehr als vier Fünftel dieser Zeit, bei NetFlow v9 neun Zehntel, und ein guter Teil davon
 geht auf das Allokieren von Speicher und dessen Garbage Collection. Kapkans eigene Arbeit —
@@ -179,10 +184,10 @@ verteilen sich auf alle vier, und viele Exporter teilen sich dieselben vier: Ein
 also höchstens etwa die rechte Spalte, ob ihn ein Router speist oder fünfzig, und mehr Cores heben
 diese Grenze nicht an. Der andere Listener hat seine eigenen vier Worker.
 
-Das sind die Zahlen einer einzigen Maschine. Ein Server-Core ist kein M3-Max-Core, und Ihre Router
-exportieren womöglich breitere Templates als dieses — messen Sie deshalb auf Ihrer eigenen Hardware,
-bevor Sie eine Maschine dimensionieren: `make -C engine bench` führt alle Benchmarks aus, und dieser
-Befehl nur die Spalte „Ein Core“:
+Ihr Server ist keine dieser beiden Maschinen, und Ihre Router exportieren womöglich breitere
+Templates als dieses — messen Sie deshalb auf Ihrer eigenen Hardware, bevor Sie eine Maschine
+dimensionieren: `make -C engine bench` führt alle Benchmarks aus, und dieser Befehl nur die Spalte
+„Ein Core“:
 
 ```sh
 cd engine && go test -run '^$' -bench 'Ingest/workers=1' -cpu 1 ./internal/ingest/

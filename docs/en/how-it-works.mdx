@@ -156,6 +156,11 @@ use all fourteen:
 | sFlow v5 | about **0.6M flows/sec** | about **2.1M flows/sec** |
 | NetFlow v9 | about **0.33M flows/sec** | about **1.35M flows/sec** |
 
+On x86 the same benchmarks ran on a GitHub Actions runner with an AMD EPYC 7763 (Zen 3): one
+core ingests about **0.3M** sFlow or **0.19M** NetFlow v9 flows/sec. That runner has two cores
+(four SMT threads), so its four workers reach only about 0.68M and 0.44M — a two-core figure,
+not a listener's ceiling.
+
 **Decoding dominates.** goflow2 — its decoder and the producer that maps each record — takes
 more than four fifths of that time, nine tenths for NetFlow v9, much of it allocating memory
 and collecting it again. Kapkan's own work — the conversion, two counters and the fold — is the
@@ -170,9 +175,9 @@ sent them. One exporter's datagrams spread over all four, and many exporters sha
 four: a listener tops out at about the right-hand column whether one router feeds it or fifty,
 and more cores do not raise that ceiling. The other listener has four workers of its own.
 
-These are one machine's figures. A server core is not an M3 Max core, and your routers may
-export wider templates than this one, so measure on your own hardware before you size a box:
-`make -C engine bench` runs every benchmark, and this runs the one-core column alone:
+Your server is neither of these machines, and your routers may export wider templates than this
+one, so measure on your own hardware before you size a box: `make -C engine bench` runs every
+benchmark, and this runs the one-core column alone:
 
 ```sh
 cd engine && go test -run '^$' -bench 'Ingest/workers=1' -cpu 1 ./internal/ingest/

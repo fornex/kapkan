@@ -168,6 +168,11 @@ les quatre workers d'un écouteur libres d'utiliser les quatorze :
 | sFlow v5 | environ **0,6M flows/sec** | environ **2,1M flows/sec** |
 | NetFlow v9 | environ **0,33M flows/sec** | environ **1,35M flows/sec** |
 
+Sur x86, les mêmes benchmarks ont tourné sur un runner GitHub Actions doté d'un AMD EPYC 7763
+(Zen 3) : un cœur reçoit environ **0,3M flows/sec** en sFlow ou **0,19M** en NetFlow v9. Ce
+runner n'a que deux cœurs (quatre threads SMT) ; ses quatre workers n'atteignent donc
+qu'environ 0,68M et 0,44M — un chiffre à deux cœurs, pas le plafond d'un écouteur.
+
 **Le décodage domine.** goflow2 — son décodeur et le producteur qui traduit chaque
 enregistrement — prend plus des quatre cinquièmes de ce temps, neuf dixièmes pour NetFlow v9,
 dont une bonne part à allouer de la mémoire puis à la récupérer. Le travail propre de Kapkan —
@@ -186,10 +191,10 @@ quatre : un écouteur plafonne à peu près à la colonne de droite, qu'un seul 
 ou cinquante, et davantage de cœurs ne relèvent pas ce plafond. L'autre écouteur a ses propres
 quatre workers.
 
-Ce sont les chiffres d'une seule machine. Un cœur de serveur n'est pas un cœur de M3 Max, et
-vos routeurs exportent peut-être des templates plus larges que celui-ci : mesurez donc sur
-votre propre matériel avant de dimensionner une machine. `make -C engine bench` exécute tous
-les benchmarks, et cette commande la seule colonne « Un cœur » :
+Votre serveur n'est aucune de ces deux machines, et vos routeurs exportent peut-être des
+templates plus larges que celui-ci : mesurez donc sur votre propre matériel avant de
+dimensionner une machine. `make -C engine bench` exécute tous les benchmarks, et cette commande
+la seule colonne « Un cœur » :
 
 ```sh
 cd engine && go test -run '^$' -bench 'Ingest/workers=1' -cpu 1 ./internal/ingest/
