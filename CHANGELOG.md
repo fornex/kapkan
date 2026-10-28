@@ -32,6 +32,13 @@ security-relevant.
 
 ### Fixed
 
+- **daemon:** a reload that lands while the daemon is still starting no longer stops it. The
+  `SIGHUP` handler was installed only after the data plane, BGP and ban rehydration had come up,
+  so a `systemctl reload kapkan` right after a start (the unit is `Type=simple`) or a
+  `kapkan -s reload` once the pid file existed took the signal's default action and ended the
+  process — which systemd's `Restart=on-failure` counts as a clean exit, so nothing brought it
+  back. `SIGHUP` is now caught first thing; a reload sent during startup waits and is applied once
+  the daemon is up.
 - **storage:** a ClickHouse older than 21.4 is named at start — one `ERROR` line with the
   server's version, the floor and what to do — instead of six `Syntax error ... TTL` refusals
   that said nothing about why ([#122](https://github.com/fornex/kapkan/issues/122): the
