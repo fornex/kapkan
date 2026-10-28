@@ -194,12 +194,16 @@ export function DocsChrome({ lang, children }: { lang: Locale; children: React.R
           </button>
           <Logo href="/" label={docsLabel} />
           <div className="ml-auto flex items-center gap-3 text-sm">
-            <LanguageSwitcher lang={lang} />
+            {/* Below sm the row has no room for the language select and the
+                GitHub link; the drawer carries them there instead. */}
+            <div className="max-sm:hidden">
+              <LanguageSwitcher lang={lang} />
+            </div>
             <a
               href={site.repo}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-muted-foreground hover:text-foreground"
+              className="text-muted-foreground hover:text-foreground max-sm:hidden"
             >
               GitHub
             </a>
@@ -238,6 +242,18 @@ export function DocsChrome({ lang, children }: { lang: Locale; children: React.R
                     <path d="M18 6 6 18M6 6l12 12" />
                   </svg>
                 </button>
+              </div>
+              {/* What the top bar drops below sm. */}
+              <div className="mb-6 flex items-center justify-between border-b border-border pb-6 text-sm sm:hidden">
+                <LanguageSwitcher lang={lang} />
+                <a
+                  href={site.repo}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  GitHub
+                </a>
               </div>
               <SidebarNav lang={lang} onNavigate={() => setOpen(false)} />
             </div>
