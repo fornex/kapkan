@@ -6,7 +6,7 @@ the whole pipeline:
 
 - **Overview** — active attacks, tracked hosts, announced routes (real), FlowSpec rules (real).
 - **Ingestion** — flow records/s, telemetry datagrams/s, decode errors/s (all by protocol),
-  and dropped flows/s (engine queue full).
+  and dropped datagrams/s (a listener's receive queue full).
 - **Detection / Engine** — active attacks, attacks started/s, tracked hosts, and hot-path
   processing latency (p50 / p95 / p99).
 - **Mitigation** — announced routes and FlowSpec rules by `mode` (real vs dry_run), bans

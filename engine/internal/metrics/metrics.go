@@ -21,15 +21,21 @@ var (
 		Help:      "Normalized flow records produced, by wire protocol.",
 	}, []string{"proto"})
 
-	// PacketsTotal counts received UDP datagrams per exporter address. The
-	// exporter label is cardinality-bounded (the source address is spoofable):
+	// PacketsTotal counts telemetry datagrams that decoded, once per datagram
+	// however many flow records it carried — none, for a counter-only sFlow or
+	// a template-only NetFlow datagram, which still shows the exporter is
+	// alive. FlowsTotal counts the records; a datagram that fails to decode is
+	// in DecodeErrorsTotal instead. DroppedFlowsTotal is in the same unit, so
+	// the two give the share of telemetry ingest is losing.
+	//
+	// The exporter label is cardinality-bounded (the address is spoofable):
 	// sources outside the configured flow_sources allowlist — or beyond an
 	// internal cap when none is set — are bucketed under "other".
 	PacketsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "ingest",
 		Name:      "packets_total",
-		Help:      "Telemetry UDP datagrams received, by exporter address (cardinality-bounded; see flow_sources) and protocol.",
+		Help:      "Telemetry datagrams decoded, one per datagram however many flow records it carried, by exporter address (cardinality-bounded; see flow_sources) and protocol.",
 	}, []string{"exporter", "proto"})
 
 	// DecodeErrorsTotal counts datagrams that failed to decode.
@@ -40,12 +46,18 @@ var (
 		Help:      "Telemetry datagrams that failed to decode, by protocol.",
 	}, []string{"proto"})
 
-	// DroppedFlowsTotal counts flows dropped because the engine queue was full.
+	// DroppedFlowsTotal counts telemetry DATAGRAMS, not flows: each one a
+	// listener's UDP receiver dropped unread because its queue to the decode
+	// workers was full — the workers are not keeping up. A dropped datagram is
+	// never decoded, so how many flows it carried is unknown. The name says
+	// flows for history's sake and stays so dashboards and alerts survive.
+	// There is no engine queue behind it: the engine folds each flow inline in
+	// the decode worker.
 	DroppedFlowsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "ingest",
 		Name:      "dropped_flows_total",
-		Help:      "Flows dropped because the engine input queue was full.",
+		Help:      "Telemetry datagrams (not flows) dropped before decoding because a listener's receive queue was full.",
 	})
 )
 

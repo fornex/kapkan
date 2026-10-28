@@ -761,8 +761,11 @@ Prometheus metrics under the `kapkan_` namespace, on `/metrics`. The families, w
 full table (labels, values and what to alert on) at
 [kapkan.io/docs/metrics](https://kapkan.io/docs/metrics):
 
-- **Ingest** — `ingest_flows_total` (by protocol), `ingest_packets_total` (by
-  exporter/protocol), `ingest_decode_errors_total`, `ingest_dropped_flows_total`.
+- **Ingest** — `ingest_flows_total` (flow records, by protocol), `ingest_packets_total`
+  (datagrams decoded, by exporter/protocol — one per datagram however many records it
+  carried), `ingest_decode_errors_total`, and `ingest_dropped_flows_total` (datagrams, not
+  flows, dropped before decoding because a listener's receive queue was full — should sit
+  at zero).
 - **Engine** — `engine_active_attacks`, `engine_attacks_total`,
   `engine_process_latency_seconds`, `engine_tracked_hosts`, `engine_events_dropped_total`
   (by `kind` — should sit at zero), and `engine_boundary_debug_bytes_total` while

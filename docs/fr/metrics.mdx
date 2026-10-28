@@ -25,9 +25,9 @@ d'API avec `api.token_env`. Seuls les points de terminaison de données `/api/v1
 | Métrique | Labels | Signification |
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Total des flows ingérés, par protocole de flow. |
-| `kapkan_ingest_packets_total` | `exporter`, `proto` | Total des datagrammes de télémétrie reçus, par exporteur source (cardinalité bornée ; voir [`flow_sources`](/docs/configuration)) et par protocole. |
+| `kapkan_ingest_packets_total` | `exporter`, `proto` | Datagrammes de télémétrie décodés, par exporteur source (cardinalité bornée ; voir [`flow_sources`](/docs/configuration)) et par protocole — un par datagramme, quel que soit le nombre d'enregistrements de flow qu'il portait. Un exporteur qui n'envoie que des compteurs sFlow ou des templates NetFlow apparaît donc ici aussi ; `kapkan_ingest_flows_total` compte les enregistrements. Un datagramme qui ne se décode pas est compté dans `kapkan_ingest_decode_errors_total` à la place. |
 | `kapkan_ingest_decode_errors_total` | `proto` | Datagrammes de télémétrie dont le décodage a échoué, par protocole. |
-| `kapkan_ingest_dropped_flows_total` | — | Flows abandonnés parce que la file d'entrée du moteur était pleine. |
+| `kapkan_ingest_dropped_flows_total` | — | Datagrammes de télémétrie abandonnés avant décodage parce que la file de réception d'un écouteur (`listen.sflow` ou `listen.netflow`) était pleine — les workers de décodage, qui transmettent aussi chaque flow au moteur de détection, ne suivent pas. Malgré son nom, la métrique compte des datagrammes, pas des flows : un datagramme abandonné n'est jamais décodé, on ne sait donc pas combien de flows il portait. Elle a la même unité que `kapkan_ingest_packets_total` : à elles deux, elles donnent la part de télémétrie perdue. Devrait rester à zéro. Les datagrammes que le noyau rejette avant que Kapkan ne les lise ne sont pas comptés ici ; ils apparaissent dans les erreurs de tampon de réception UDP de l'hôte (`netstat -su`). |
 | `kapkan_engine_active_attacks` | — | Jauge des attaques actuellement en cours. |
 | `kapkan_engine_attacks_total` | — | Compteur des attaques détectées depuis le démarrage. |
 | `kapkan_engine_process_latency_seconds` | — | Histogramme de la latence de traitement sur le chemin critique, observée une fois par lot d'ingestion (et non par flow). |
@@ -286,7 +286,7 @@ curl -s localhost:8080/metrics | grep kapkan_
 Un dashboard Grafana officiel pour l'ensemble `kapkan_*` est disponible en téléchargement direct à
 [`kapkan-overview.json`](/kapkan-overview.json) (sa source se trouve dans le dépôt sous
 [`engine/deploy/grafana/`](https://github.com/fornex/kapkan/tree/main/engine/deploy/grafana)).
-Il couvre l'ensemble du pipeline — taux d'ingestion des flows/datagrammes/décodage et flows abandonnés,
+Il couvre l'ensemble du pipeline — taux d'ingestion des flows/datagrammes/décodage et datagrammes abandonnés,
 attaques actives et démarrées, hôtes suivis, quantiles de latence du chemin critique, routes annoncées
 et règles FlowSpec par `mode`, bannissements refusés par `reason`, replis d'atténuation, ainsi que les
 résultats des notifications et du stockage. Une rangée **Data plane** couvre les métriques XDP
