@@ -128,10 +128,11 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
   return (
     <div className="flex min-h-screen flex-col">
       {/* ---------------------------------------------------------- header */}
+      {/* Breakpoints as on the home page: inline nav from lg, GitHub from xl. */}
       <header className="sticky top-0 z-50 border-b border-border bg-background">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
+        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-6 px-6">
           <Logo href={homeHref} />
-          <nav className="hidden items-center gap-8 text-sm font-medium text-muted-foreground md:flex">
+          <nav className="hidden items-center gap-8 text-sm font-medium text-muted-foreground lg:flex">
             {navLinks.map((l) => (
               <Link
                 key={l.label}
@@ -148,7 +149,7 @@ export function XdpLanding({ locale, basePath }: { locale: Locale; basePath: str
               href={site.repo}
               target="_blank"
               rel="noopener noreferrer"
-              className="hidden items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground lg:flex"
+              className="hidden items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground xl:flex"
             >
               GitHub
             </a>

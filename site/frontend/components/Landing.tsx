@@ -113,10 +113,14 @@ export function Landing({ locale, basePath = "" }: { locale: Locale; basePath?: 
   return (
     <div className="flex min-h-screen flex-col">
       {/* ---------------------------------------------------------- header */}
+      {/* Logo, inline nav and CTA take ~900px in ru, the longest locale, so
+          the nav starts at lg; below that MobileNav carries it. The GitHub
+          text link fits beside them in every locale only from xl. gap-6 is
+          a floor that keeps the logo off the nav if a label grows. */}
       <header className="sticky top-0 z-50 border-b border-border bg-background">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
+        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-6 px-6">
           <Logo href={basePath || "/"} />
-          <nav className="hidden items-center gap-8 text-sm font-medium text-muted-foreground md:flex">
+          <nav className="hidden items-center gap-8 text-sm font-medium text-muted-foreground lg:flex">
             {navLinks.map((l) =>
               l.href.startsWith("#") ? (
                 <a key={l.label} href={l.href} className="transition-colors hover:text-foreground">{l.label}</a>
@@ -130,7 +134,7 @@ export function Landing({ locale, basePath = "" }: { locale: Locale; basePath?: 
               href={site.repo}
               target="_blank"
               rel="noopener noreferrer"
-              className="hidden items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground lg:flex"
+              className="hidden items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground xl:flex"
             >
               <GithubIcon className="h-4 w-4" /> GitHub
             </a>
@@ -138,7 +142,10 @@ export function Landing({ locale, basePath = "" }: { locale: Locale; basePath?: 
               <LanguageSwitcher lang={locale} />
             </div>
             <ThemeToggle />
-            <Link href={docsHref} className={`hidden sm:inline-flex ${BTN_PRIMARY} py-2`}>
+            {/* max-sm:hidden, not hidden sm:inline-flex: BTN carries
+                inline-flex, which Tailwind emits after hidden, so a bare
+                hidden lost and the button showed on phones. */}
+            <Link href={docsHref} className={`max-sm:hidden ${BTN_PRIMARY} py-2`}>
               {t.nav.readDocs}
             </Link>
             <MobileNav links={mobileLinks} cta={{ label: t.nav.readDocs, href: docsHref }} menuLabel={t.nav.menu}>
