@@ -1,6 +1,7 @@
 package flowgen
 
 import (
+	"encoding/binary"
 	"net/netip"
 	"testing"
 	"time"
@@ -22,6 +23,12 @@ type decoded struct {
 	packets      uint64
 	samplingRate uint64
 	fragOffset   uint32
+	// What RouterTemplate and ExtendedSwitch add.
+	inIf, outIf      uint32
+	nextHop          netip.Addr
+	srcAS, dstAS     uint32
+	srcMask, dstMask uint32
+	srcVLAN, dstVLAN uint32
 }
 
 // collector implements producer wrapping to capture decoded messages.
@@ -40,6 +47,7 @@ func (c *collector) Produce(msg interface{}, args *producer.ProduceArgs) ([]prod
 		src, _ := netip.AddrFromSlice(pm.SrcAddr)
 		dst, _ := netip.AddrFromSlice(pm.DstAddr)
 		smp, _ := netip.AddrFromSlice(pm.SamplerAddress)
+		nh, _ := netip.AddrFromSlice(pm.NextHop)
 		*c.out = append(*c.out, decoded{
 			src:          src.Unmap(),
 			dst:          dst.Unmap(),
@@ -52,6 +60,15 @@ func (c *collector) Produce(msg interface{}, args *producer.ProduceArgs) ([]prod
 			packets:      pm.Packets,
 			samplingRate: pm.SamplingRate,
 			fragOffset:   pm.FragmentOffset,
+			inIf:         pm.InIf,
+			outIf:        pm.OutIf,
+			nextHop:      nh.Unmap(),
+			srcAS:        pm.SrcAs,
+			dstAS:        pm.DstAs,
+			srcMask:      pm.SrcNet,
+			dstMask:      pm.DstNet,
+			srcVLAN:      pm.SrcVlan,
+			dstVLAN:      pm.DstVlan,
 		})
 	}
 	return set, err
@@ -61,6 +78,13 @@ func (c *collector) Commit(set []producer.ProducerMessage) { c.inner.Commit(set)
 func (c *collector) Close()                                { c.inner.Close() }
 
 func decode(t *testing.T, payload []byte, sflow bool, exporter netip.Addr) []decoded {
+	t.Helper()
+	return decodeAll(t, [][]byte{payload}, sflow, exporter)
+}
+
+// decodeAll feeds payloads through one pipe, in order, the way one exporter's
+// datagrams reach a collector, so a template sent in one is there for the next.
+func decodeAll(t *testing.T, payloads [][]byte, sflow bool, exporter netip.Addr) []decoded {
 	t.Helper()
 	var got []decoded
 	cfg, err := (&protoproducer.ProducerConfig{}).Compile()
@@ -79,14 +103,16 @@ func decode(t *testing.T, payload []byte, sflow bool, exporter netip.Addr) []dec
 		pipe = utils.NewNetFlowPipe(&utils.PipeConfig{Producer: prod})
 	}
 	defer pipe.Close()
-	msg := &utils.Message{
-		Src:      netip.AddrPortFrom(exporter, 5000),
-		Dst:      netip.AddrPortFrom(netip.MustParseAddr("10.0.0.1"), 2055),
-		Payload:  payload,
-		Received: time.Now(),
-	}
-	if err := pipe.DecodeFlow(msg); err != nil {
-		t.Fatalf("DecodeFlow error = %v", err)
+	for _, payload := range payloads {
+		msg := &utils.Message{
+			Src:      netip.AddrPortFrom(exporter, 5000),
+			Dst:      netip.AddrPortFrom(netip.MustParseAddr("10.0.0.1"), 2055),
+			Payload:  payload,
+			Received: time.Now(),
+		}
+		if err := pipe.DecodeFlow(msg); err != nil {
+			t.Fatalf("DecodeFlow error = %v", err)
+		}
 	}
 	return got
 }
@@ -214,6 +240,115 @@ func TestNetFlowV9NoSamplingRate(t *testing.T) {
 	}
 	if got[0].samplingRate != 0 {
 		t.Errorf("samplingRate = %d, want 0 (no options record)", got[0].samplingRate)
+	}
+}
+
+// TestNetFlowV9RouterTemplate decodes the router-shaped record in both
+// address families: the ten extra elements must come back with their fixed
+// values, and the eight kapkan reads must be unchanged by sharing a template
+// with them — including the fragment element, which follows them.
+func TestNetFlowV9RouterTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		src, dst netip.Addr
+		nextHop  netip.Addr
+		mask     uint32
+	}{
+		{"ipv4", netip.MustParseAddr("192.0.2.20"), netip.MustParseAddr("203.0.113.6"), netip.MustParseAddr("192.0.2.1"), 24},
+		{"ipv6", netip.MustParseAddr("2001:db8::20"), netip.MustParseAddr("2001:db8::6"), netip.MustParseAddr("2001:db8::1"), 48},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recs := []Record{
+				{SrcAddr: tc.src, DstAddr: tc.dst, SrcPort: 12345, DstPort: 443, Proto: ProtoTCP, TCPFlags: TCPSyn, Bytes: 1500, Packets: 3},
+				{SrcAddr: tc.src, DstAddr: tc.dst, Proto: ProtoICMP, Fragment: true, Bytes: 600, Packets: 1},
+			}
+			payload := BuildNetFlowV9(recs, NetFlowV9Options{SourceID: 256, Uptime: 60_000, SamplingRate: 2000, RouterTemplate: true})
+			got := decode(t, payload, false, netip.MustParseAddr("198.51.100.9"))
+			if len(got) != 2 {
+				t.Fatalf("decoded %d flows, want 2", len(got))
+			}
+			d := got[0]
+			if d.src != tc.src || d.dst != tc.dst {
+				t.Errorf("addrs = %v->%v, want %v->%v", d.src, d.dst, tc.src, tc.dst)
+			}
+			if d.srcPort != 12345 || d.dstPort != 443 || d.proto != ProtoTCP || d.tcpFlags != TCPSyn {
+				t.Errorf("ports/proto/flags = %d/%d/%d/%#x, want 12345/443/%d/%#x", d.srcPort, d.dstPort, d.proto, d.tcpFlags, ProtoTCP, TCPSyn)
+			}
+			if d.bytes != 1500 || d.packets != 3 || d.samplingRate != 2000 {
+				t.Errorf("bytes/packets/rate = %d/%d/%d, want 1500/3/2000", d.bytes, d.packets, d.samplingRate)
+			}
+			if d.inIf != 5 || d.outIf != 8 {
+				t.Errorf("interfaces = %d/%d, want 5/8", d.inIf, d.outIf)
+			}
+			if d.nextHop != tc.nextHop {
+				t.Errorf("next hop = %v, want %v", d.nextHop, tc.nextHop)
+			}
+			if d.srcAS != 64500 || d.dstAS != 64501 {
+				t.Errorf("AS = %d/%d, want 64500/64501", d.srcAS, d.dstAS)
+			}
+			if d.srcMask != tc.mask || d.dstMask != tc.mask {
+				t.Errorf("masks = %d/%d, want %d/%d", d.srcMask, d.dstMask, tc.mask, tc.mask)
+			}
+			if d.fragOffset != 0 || got[1].fragOffset == 0 {
+				t.Errorf("fragment offsets = %d/%d, want 0 then non-zero", d.fragOffset, got[1].fragOffset)
+			}
+		})
+	}
+}
+
+// TestNetFlowV9DataOnly sends what an exporter sends between template
+// refreshes: data only, decodable because the template — and the sampling
+// rate — came in an earlier datagram from the same exporter.
+func TestNetFlowV9DataOnly(t *testing.T) {
+	victim := netip.MustParseAddr("203.0.113.8")
+	recs := PatternParams{Pattern: FragmentFlood, Victim: victim, Records: 3}.Build()
+	opts := NetFlowV9Options{SourceID: 256, SamplingRate: 2000, RouterTemplate: true}
+	first := BuildNetFlowV9(recs[:1], opts)
+	opts.DataOnly = true
+	data := BuildNetFlowV9(recs[1:], opts)
+
+	if flowsets := binary.BigEndian.Uint16(data[2:4]); flowsets != 1 {
+		t.Fatalf("data-only datagram carries %d flowsets, want 1", flowsets)
+	}
+	got := decodeAll(t, [][]byte{first, data}, false, netip.MustParseAddr("198.51.100.9"))
+	if len(got) != 3 {
+		t.Fatalf("decoded %d flows, want 3", len(got))
+	}
+	for _, d := range got[1:] {
+		if d.dst != victim || d.fragOffset == 0 || d.inIf != 5 {
+			t.Errorf("data-only flow = dst %v, fragOffset %d, inIf %d; want %v, non-zero, 5", d.dst, d.fragOffset, d.inIf, victim)
+		}
+		if d.samplingRate != 2000 {
+			t.Errorf("samplingRate = %d, want 2000 (learned from the first datagram)", d.samplingRate)
+		}
+	}
+}
+
+// TestSFlowV5ExtendedSwitch decodes samples that carry an extended switch
+// record after the raw header: the VLANs come back, and the flow read from
+// the header is unchanged by the second record.
+func TestSFlowV5ExtendedSwitch(t *testing.T) {
+	rec := Record{
+		SrcAddr: netip.MustParseAddr("192.0.2.10"),
+		DstAddr: netip.MustParseAddr("203.0.113.5"),
+		SrcPort: 123, DstPort: 40000, Proto: ProtoUDP, Bytes: 1400, Packets: 1,
+	}
+	exporter := netip.MustParseAddr("198.51.100.7")
+	got := decode(t, BuildSFlowV5([]Record{rec, rec}, SFlowOptions{AgentIP: exporter, SamplingRate: 1024, ExtendedSwitch: true}), true, exporter)
+	if len(got) != 2 {
+		t.Fatalf("decoded %d flows, want 2", len(got))
+	}
+	for _, d := range got {
+		if d.src != rec.SrcAddr || d.dst != rec.DstAddr || d.dstPort != 40000 || d.bytes != 1400 || d.samplingRate != 1024 {
+			t.Errorf("flow = %v->%v:%d, %d bytes, rate %d; want %v->%v:40000, 1400 bytes, rate 1024",
+				d.src, d.dst, d.dstPort, d.bytes, d.samplingRate, rec.SrcAddr, rec.DstAddr)
+		}
+		if d.srcVLAN != 10 || d.dstVLAN != 20 {
+			t.Errorf("VLANs = %d/%d, want 10/20", d.srcVLAN, d.dstVLAN)
+		}
+	}
+	if plain := decode(t, BuildSFlowV5([]Record{rec}, SFlowOptions{AgentIP: exporter}), true, exporter); plain[0].srcVLAN != 0 {
+		t.Errorf("srcVLAN = %d without ExtendedSwitch, want 0", plain[0].srcVLAN)
 	}
 }
 

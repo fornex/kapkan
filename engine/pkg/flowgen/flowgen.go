@@ -19,15 +19,48 @@ const (
 	ieInBytes          = 1
 	ieInPkts           = 2
 	ieProtocol         = 4
+	ieSrcTOS           = 5
 	ieTCPFlags         = 6
 	ieL4SrcPort        = 7
 	ieIPv4Src          = 8
+	ieSrcMask          = 9
+	ieInputSNMP        = 10
 	ieL4DstPort        = 11
 	ieIPv4Dst          = 12
+	ieDstMask          = 13
+	ieOutputSNMP       = 14
+	ieIPv4NextHop      = 15
+	ieSrcAS            = 16
+	ieDstAS            = 17
+	ieLastSwitched     = 21
+	ieFirstSwitched    = 22
 	ieIPv6Src          = 27
 	ieIPv6Dst          = 28
+	ieIPv6SrcMask      = 29
+	ieIPv6DstMask      = 30
 	ieSamplingInterval = 34 // honored only in an options-data record
+	ieIPv6NextHop      = 62
 	ieFragmentOffset   = 88 // NFV9_FIELD_FRAGMENT_OFFSET
+)
+
+// The fixed values a router-shaped record (NetFlowV9Options.RouterTemplate)
+// and an sFlow extended switch record (SFlowOptions.ExtendedSwitch) carry.
+// The interfaces are the ones every sFlow sample reports.
+const (
+	routerInIf    = 5
+	routerOutIf   = 8
+	routerSrcAS   = 64500 // RFC 5398 documentation ASNs
+	routerDstAS   = 64501
+	routerMask4   = 24
+	routerMask6   = 48
+	routerFlowAge = 1000 // ms between a record's first and last packet
+	switchSrcVLAN = 10
+	switchDstVLAN = 20
+)
+
+var (
+	routerNextHop4 = netip.MustParseAddr("192.0.2.1")
+	routerNextHop6 = netip.MustParseAddr("2001:db8::1")
 )
 
 // IP protocol numbers used by the generated records.
@@ -113,6 +146,21 @@ type NetFlowV9Options struct {
 	// data record (the only way goflow2 reports a v9 sampling rate). It is
 	// keyed to SourceID, so send it at least once before/with data records.
 	SamplingRate uint32
+	// RouterTemplate exports the record a router's classic v9 cache sends —
+	// the NetFlow v5 field set, eighteen elements — instead of the eight
+	// kapkan reads: ToS, the input and output interfaces, the next hop, the
+	// source and destination AS and mask, and the first- and last-switched
+	// times join them, with fixed plausible values. A collector decodes every
+	// element a template declares, read or not, so a load test standing in
+	// for a router should set it.
+	RouterTemplate bool
+	// DataOnly leaves out the template and options flowsets, as an exporter
+	// does between template refreshes; SamplingRate is then not sent. The
+	// collector must already hold the template: an earlier datagram from the
+	// same exporter, with the same SourceID and RouterTemplate, and with a
+	// Fragment record exactly when this one has one (a fragment adds an
+	// element to the template).
+	DataOnly bool
 }
 
 // BuildNetFlowV9 encodes one NetFlow v9 datagram carrying recs as a single
@@ -130,12 +178,14 @@ func BuildNetFlowV9(recs []Record, opts NetFlowV9Options) []byte {
 	const optTemplateID = 258
 
 	var flowsets [][]byte
-	flowsets = append(flowsets, buildDataTemplate(dataTemplateID, isV6, frag))
-	if opts.SamplingRate > 0 {
-		flowsets = append(flowsets, buildOptionsTemplate(optTemplateID))
-		flowsets = append(flowsets, buildOptionsData(optTemplateID, opts.SamplingRate))
+	if !opts.DataOnly {
+		flowsets = append(flowsets, buildDataTemplate(dataTemplateID, isV6, frag, opts.RouterTemplate))
+		if opts.SamplingRate > 0 {
+			flowsets = append(flowsets, buildOptionsTemplate(optTemplateID))
+			flowsets = append(flowsets, buildOptionsData(optTemplateID, opts.SamplingRate))
+		}
 	}
-	flowsets = append(flowsets, buildDataFlowSet(dataTemplateID, recs, isV6, frag))
+	flowsets = append(flowsets, buildDataFlowSet(dataTemplateID, recs, isV6, frag, opts.RouterTemplate, opts.Uptime))
 
 	pkt := &bytes.Buffer{}
 	beU16(pkt, 9)                     // Version
@@ -151,8 +201,9 @@ func BuildNetFlowV9(recs []Record, opts NetFlowV9Options) []byte {
 }
 
 // dataTemplateFields returns the field specifiers for the data template,
-// choosing IPv4 or IPv6 address elements.
-func dataTemplateFields(isV6, frag bool) [][2]uint16 {
+// choosing IPv4 or IPv6 address elements. buildDataFlowSet writes the values
+// in this order.
+func dataTemplateFields(isV6, frag, router bool) [][2]uint16 {
 	srcIE, dstIE, addrLen := uint16(ieIPv4Src), uint16(ieIPv4Dst), uint16(4)
 	if isV6 {
 		srcIE, dstIE, addrLen = ieIPv6Src, ieIPv6Dst, 16
@@ -167,14 +218,32 @@ func dataTemplateFields(isV6, frag bool) [][2]uint16 {
 		{ieInBytes, 4},
 		{ieInPkts, 4},
 	}
+	if router {
+		nextHopIE, srcMaskIE, dstMaskIE := uint16(ieIPv4NextHop), uint16(ieSrcMask), uint16(ieDstMask)
+		if isV6 {
+			nextHopIE, srcMaskIE, dstMaskIE = ieIPv6NextHop, ieIPv6SrcMask, ieIPv6DstMask
+		}
+		fields = append(fields,
+			[2]uint16{ieSrcTOS, 1},
+			[2]uint16{ieInputSNMP, 2},
+			[2]uint16{ieOutputSNMP, 2},
+			[2]uint16{nextHopIE, addrLen},
+			[2]uint16{ieSrcAS, 2},
+			[2]uint16{ieDstAS, 2},
+			[2]uint16{srcMaskIE, 1},
+			[2]uint16{dstMaskIE, 1},
+			[2]uint16{ieFirstSwitched, 4},
+			[2]uint16{ieLastSwitched, 4},
+		)
+	}
 	if frag {
 		fields = append(fields, [2]uint16{ieFragmentOffset, 2})
 	}
 	return fields
 }
 
-func buildDataTemplate(templateID uint16, isV6, frag bool) []byte {
-	fields := dataTemplateFields(isV6, frag)
+func buildDataTemplate(templateID uint16, isV6, frag, router bool) []byte {
+	fields := dataTemplateFields(isV6, frag, router)
 	body := &bytes.Buffer{}
 	beU16(body, templateID)
 	beU16(body, uint16(len(fields)))
@@ -185,7 +254,7 @@ func buildDataTemplate(templateID uint16, isV6, frag bool) []byte {
 	return wrapFlowSet(0, body.Bytes())
 }
 
-func buildDataFlowSet(templateID uint16, recs []Record, isV6, frag bool) []byte {
+func buildDataFlowSet(templateID uint16, recs []Record, isV6, frag, router bool, uptime uint32) []byte {
 	body := &bytes.Buffer{}
 	for _, r := range recs {
 		if isV6 {
@@ -205,6 +274,9 @@ func buildDataFlowSet(templateID uint16, recs []Record, isV6, frag bool) []byte 
 		body.WriteByte(r.TCPFlags)
 		beU32(body, r.Bytes)
 		beU32(body, r.Packets)
+		if router {
+			writeRouterValues(body, isV6, uptime)
+		}
 		if frag {
 			// Every record must carry the element the template declares, so a
 			// non-fragment record in a fragment-bearing set encodes offset 0.
@@ -216,6 +288,30 @@ func buildDataFlowSet(templateID uint16, recs []Record, isV6, frag bool) []byte 
 		}
 	}
 	return wrapFlowSet(templateID, body.Bytes())
+}
+
+// writeRouterValues writes the router elements of one record, in the order
+// dataTemplateFields declares them. The flow ends at the export's uptime and
+// began routerFlowAge earlier (or at boot, for an exporter younger than that).
+func writeRouterValues(body *bytes.Buffer, isV6 bool, uptime uint32) {
+	body.WriteByte(0) // ToS
+	beU16(body, routerInIf)
+	beU16(body, routerOutIf)
+	mask := byte(routerMask4)
+	if isV6 {
+		nh := routerNextHop6.As16()
+		body.Write(nh[:])
+		mask = routerMask6
+	} else {
+		nh := routerNextHop4.As4()
+		body.Write(nh[:])
+	}
+	beU16(body, routerSrcAS)
+	beU16(body, routerDstAS)
+	body.WriteByte(mask)                           // source mask
+	body.WriteByte(mask)                           // destination mask
+	beU32(body, uptime-min(uptime, routerFlowAge)) // FIRST_SWITCHED
+	beU32(body, uptime)                            // LAST_SWITCHED
 }
 
 // buildOptionsTemplate builds a v9 options template (FlowSet Id=1) with one
@@ -263,6 +359,11 @@ type SFlowOptions struct {
 	Sequence     uint32
 	Uptime       uint32
 	SamplingRate uint32 // per-sample rate, reported directly by the decoder
+	// ExtendedSwitch follows each sample's raw packet header with an extended
+	// switch data record (VLANs and priorities), the second record a switch
+	// exports with every sample. A collector decodes it whether or not it
+	// uses it, so a load test standing in for a switch should set it.
+	ExtendedSwitch bool
 }
 
 // BuildSFlowV5 encodes one sFlow v5 datagram with one flow sample per record,
@@ -279,7 +380,7 @@ func BuildSFlowV5(recs []Record, opts SFlowOptions) []byte {
 
 	samples := &bytes.Buffer{}
 	for i, r := range recs {
-		samples.Write(buildFlowSample(uint32(i+1), rate, r))
+		samples.Write(buildFlowSample(uint32(i+1), rate, r, opts.ExtendedSwitch))
 	}
 
 	pkt := &bytes.Buffer{}
@@ -305,7 +406,7 @@ func BuildSFlowV5(recs []Record, opts SFlowOptions) []byte {
 	return pkt.Bytes()
 }
 
-func buildFlowSample(seq, rate uint32, r Record) []byte {
+func buildFlowSample(seq, rate uint32, r Record, extSwitch bool) []byte {
 	header := buildRawHeader(r)
 
 	// Raw packet header record (data_format = 1). FrameLength is the
@@ -329,6 +430,16 @@ func buildFlowSample(seq, rate uint32, r Record) []byte {
 	beU32(record, 1) // record DataFormat = 1 (raw packet header)
 	beU32(record, uint32(recBody.Len()))
 	record.Write(recBody.Bytes())
+	records := uint32(1)
+	if extSwitch {
+		beU32(record, 1001) // record DataFormat = 1001 (extended switch data)
+		beU32(record, 16)
+		beU32(record, switchSrcVLAN)
+		beU32(record, 0) // source priority
+		beU32(record, switchDstVLAN)
+		beU32(record, 0) // destination priority
+		records++
+	}
 
 	// Flow sample body (format = 1).
 	body := &bytes.Buffer{}
@@ -339,7 +450,7 @@ func buildFlowSample(seq, rate uint32, r Record) []byte {
 	beU32(body, 0)         // Drops
 	beU32(body, 5)         // Input ifIndex
 	beU32(body, 8)         // Output ifIndex
-	beU32(body, 1)         // FlowRecordsCount
+	beU32(body, records)   // FlowRecordsCount
 	body.Write(record.Bytes())
 
 	sample := &bytes.Buffer{}
