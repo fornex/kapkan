@@ -115,7 +115,7 @@ const en: LandingDict = {
     learnMore: "See how in-kernel drop works",
     cards: [
       { title: "Reads the flows you already export", body: "sFlow v5, NetFlow v5/v9 and IPFIX over UDP, read by Kapkan itself. No extra service to run." },
-      { title: "Spots floods in under a second", body: "Packet, bit and flow-per-second limits over a sliding window, corrected for sampling. On an Apple M3 Max, one core counts about 10M flows/sec, eight cores about 24M." },
+      { title: "Spots floods in seconds", body: "Packet, bit and flow-per-second limits over a sliding window, corrected for sampling. On an Apple M3 Max, one core counts about 10M flows/sec, eight cores about 24M." },
       { title: "Blackhole, or drop just the attack", body: "Null-route the whole target IP (RTBH), or drop only the attack traffic and keep the rest (FlowSpec). Full IPv6 support, on par with IPv4." },
       { title: "Tells you what kind of attack", body: "Amplification (NTP/DNS/memcached), SYN/UDP/ICMP floods, each with a plain 'why this fired' breakdown." },
       { title: "Learns each host's normal", body: "Kapkan learns what normal traffic looks like for every host and tightens the limits on its own. No hand-tuning." },
@@ -231,7 +231,7 @@ const ru: LandingDict = {
     learnMore: "Как работает отброс в ядре",
     cards: [
       { title: "Читает потоки, которые вы уже экспортируете", body: "sFlow v5, NetFlow v5/v9 и IPFIX по UDP — читает сам Kapkan, без отдельного сервиса." },
-      { title: "Замечает флуд меньше чем за секунду", body: "Пределы по пакетам, битам и потокам в секунду на скользящем окне, с поправкой на сэмплинг. На Apple M3 Max одно ядро считает около 10M потоков/с, восемь ядер — около 24M." },
+      { title: "Замечает флуд за секунды", body: "Пределы по пакетам, битам и потокам в секунду на скользящем окне, с поправкой на сэмплинг. На Apple M3 Max одно ядро считает около 10M потоков/с, восемь ядер — около 24M." },
       { title: "Blackhole или только атаку", body: "Закрыть весь адрес-жертву (RTBH) или сбросить только атакующий трафик, оставив остальной (FlowSpec). Полная поддержка IPv6, наравне с IPv4." },
       { title: "Говорит, что за атака", body: "Усиление (NTP/DNS/memcached), SYN/UDP/ICMP-флуды — и по каждой понятный разбор «почему сработало»." },
       { title: "Учит норму каждого хоста", body: "Kapkan сам изучает, как выглядит обычный трафик каждого хоста, и подтягивает пределы. Руками крутить не нужно." },
@@ -361,7 +361,7 @@ const de: LandingDict = {
         "body": "sFlow v5, NetFlow v5/v9 und IPFIX über UDP, von Kapkan selbst gelesen — kein zusätzlicher Dienst nötig."
       },
       {
-        "title": "Erkennt Fluten in unter einer Sekunde",
+        "title": "Erkennt Fluten in Sekunden",
         "body": "Sampling-korrigierte Grenzwerte für Pakete, Bits und Flows pro Sekunde über ein gleitendes Fenster. Auf einem Apple M3 Max zählt ein Kern etwa 10M Flows/s, acht Kerne etwa 24M."
       },
       {
@@ -544,7 +544,7 @@ const fr: LandingDict = {
         "body": "sFlow v5, NetFlow v5/v9 et IPFIX sur UDP, lus par Kapkan lui-même — aucun service supplémentaire à faire tourner."
       },
       {
-        "title": "Repère les floods en moins d'une seconde",
+        "title": "Repère les floods en quelques secondes",
         "body": "Limites de paquets, de bits et de flux par seconde sur une fenêtre glissante, corrigées de l'échantillonnage. Sur un Apple M3 Max, un cœur compte environ 10M flux/s, huit cœurs environ 24M."
       },
       {
@@ -727,7 +727,7 @@ const es: LandingDict = {
         "body": "sFlow v5, NetFlow v5/v9 e IPFIX sobre UDP, leídos por el propio Kapkan — sin ningún servicio extra que ejecutar."
       },
       {
-        "title": "Detecta avalanchas en menos de un segundo",
+        "title": "Detecta avalanchas en segundos",
         "body": "Límites de paquetes, bits y flujos por segundo sobre una ventana deslizante, corregidos por muestreo. En un Apple M3 Max, un núcleo cuenta unos 10M flujos/s y ocho núcleos, unos 24M."
       },
       {
