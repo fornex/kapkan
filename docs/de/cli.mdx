@@ -184,6 +184,11 @@ dieser Einstellung.
 
 ## Befehle
 
+Von den folgenden Befehlen sind `scrub`, `edge` und `nginx-exporter` langlaufende Rollen: Jede läuft,
+bis sie `SIGINT` oder `SIGTERM` empfängt, und kann ihre Konfiguration nicht neu laden — ein `SIGHUP`
+wird protokolliert und ignoriert, die Rolle läuft weiter; starten Sie sie neu, um ihre Konfiguration
+zu ändern.
+
 ### `dataplane status`
 
 ```sh

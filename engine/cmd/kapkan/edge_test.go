@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"flag"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -197,6 +200,53 @@ func TestEdgeCheckProbesTheTerminator(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The edge role run whole, against a brain that does not know the node and a
+// terminator that only answers -V: SIGHUP — nginx's reload, sent to the wrong
+// pid — is logged and ignored while the decision service keeps answering, and
+// SIGTERM stops the node cleanly.
+func TestEdgeRoleOutlivesSIGHUP(t *testing.T) {
+	brain := httptest.NewServer(http.NotFoundHandler())
+	defer brain.Close()
+	// Unix socket paths are short (104 bytes on darwin); t.TempDir is long.
+	base, err := os.MkdirTemp("", "ke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	sockets := filepath.Join(base, "r")
+	ec, err := config.ParseEdgeNode([]byte(`
+controller:
+  url: ` + brain.URL + `
+  token_env: KAPKAN_TEST_EDGE_TOKEN
+  name: edge-1
+state_dir: ` + filepath.Join(base, "s") + `
+sockets_dir: ` + sockets + `
+terminator:
+  binary: ` + fakeTerminator(t, "nginx version: nginx/1.26.3\n") + `
+acme:
+  disabled: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logs syncBuffer
+	done := make(chan error, 1)
+	go func() { done <- runEdge(ec, "agent-token", slog.New(slog.NewTextHandler(&logs, nil))) }()
+	logs.waitFor(t, "kapkan edge running", 1)
+
+	hupIgnored(t, "edge", &logs, done)
+	c, err := net.Dial("unix", filepath.Join(sockets, "edge-decide.sock"))
+	if err != nil {
+		t.Fatalf("the decision service is gone after SIGHUP: %v", err)
+	}
+	_ = c.Close()
+	termStops(t, "edge", done)
+	if !strings.Contains(logs.String(), "kapkan edge stopped") {
+		t.Fatalf("no clean stop in the log:\n%s", logs.String())
 	}
 }
 
