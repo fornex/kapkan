@@ -5,7 +5,7 @@ import Link from "next/link";
 
 export type NavLink = { label: string; href: string; external?: boolean };
 
-// Hamburger menu shown below the md breakpoint, where the inline nav is hidden.
+// Hamburger menu shown below the lg breakpoint, where the inline nav is hidden.
 // Links + the primary CTA collapse into a slide-down panel; `children` (e.g. a
 // language switcher) render at the panel's foot.
 export function MobileNav({
@@ -48,7 +48,7 @@ export function MobileNav({
     "block rounded-lg px-3 py-2.5 text-base font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground";
 
   return (
-    <div className="md:hidden">
+    <div className="lg:hidden">
       <button
         type="button"
         aria-label={menuLabel}
