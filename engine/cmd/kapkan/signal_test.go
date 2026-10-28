@@ -136,7 +136,11 @@ func TestRoleSignalsIgnoreSIGHUP(t *testing.T) {
 			termStops(t, role, done)
 			// Cancelled but not yet stopped is where a role runs its own
 			// shutdown (scrub's on_exit, the edge node's finish): a SIGHUP
-			// there must still be ignored, not end the process.
+			// there must still be ignored, not end the process. NotifyContext
+			// cancels from its own goroutine, so a roleSignals that dropped
+			// SIGHUP on cancel would do it asynchronously too: wait before
+			// raising, or the SIGHUP outruns the drop and the check is moot.
+			time.Sleep(100 * time.Millisecond)
 			raise(t, syscall.SIGHUP)
 			logs.waitFor(t, "SIGHUP ignored: the "+role+" role has no reload; restart the unit to change its configuration", 3)
 			stop() // and again by the defer: stop is idempotent
