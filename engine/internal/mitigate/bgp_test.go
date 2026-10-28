@@ -12,10 +12,10 @@ import (
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/engine"
 
-	api "github.com/osrg/gobgp/v3/api"
-	"github.com/osrg/gobgp/v3/pkg/apiutil"
-	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
-	"github.com/osrg/gobgp/v3/pkg/server"
+	api "github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/apiutil"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/server"
 
 	"log/slog"
 )
@@ -60,8 +60,8 @@ api:
 
 func bothFamilies() []*api.AfiSafi {
 	return []*api.AfiSafi{
-		{Config: &api.AfiSafiConfig{Family: familyV4, Enabled: true}},
-		{Config: &api.AfiSafiConfig{Family: familyV6, Enabled: true}},
+		{Config: &api.AfiSafiConfig{Family: apiFamily(familyV4), Enabled: true}},
+		{Config: &api.AfiSafiConfig{Family: apiFamily(familyV6), Enabled: true}},
 	}
 }
 
@@ -70,8 +70,8 @@ func bothFamilies() []*api.AfiSafi {
 // routes when the session drops. Mirrors bothFamilies() with per-AFI MP GR on.
 func grHelperFamilies() []*api.AfiSafi {
 	return []*api.AfiSafi{
-		{Config: &api.AfiSafiConfig{Family: familyV4, Enabled: true}, MpGracefulRestart: &api.MpGracefulRestart{Config: &api.MpGracefulRestartConfig{Enabled: true}}},
-		{Config: &api.AfiSafiConfig{Family: familyV6, Enabled: true}, MpGracefulRestart: &api.MpGracefulRestart{Config: &api.MpGracefulRestartConfig{Enabled: true}}},
+		{Config: &api.AfiSafiConfig{Family: apiFamily(familyV4), Enabled: true}, MpGracefulRestart: &api.MpGracefulRestart{Config: &api.MpGracefulRestartConfig{Enabled: true}}},
+		{Config: &api.AfiSafiConfig{Family: apiFamily(familyV6), Enabled: true}, MpGracefulRestart: &api.MpGracefulRestart{Config: &api.MpGracefulRestartConfig{Enabled: true}}},
 	}
 }
 
@@ -81,7 +81,7 @@ func recvEstablished(t *testing.T, srv *server.BgpServer) bool {
 	t.Helper()
 	established := false
 	_ = srv.ListPeer(context.Background(), &api.ListPeerRequest{}, func(p *api.Peer) {
-		if p.State != nil && p.State.SessionState == api.PeerState_ESTABLISHED {
+		if p.State != nil && p.State.SessionState == api.PeerState_SESSION_STATE_ESTABLISHED {
 			established = true
 		}
 	})
@@ -100,21 +100,21 @@ func waitRecvSession(t *testing.T, srv *server.BgpServer, want bool) bool {
 	return false
 }
 
-// listV4 returns the GLOBAL-RIB IPv4 prefixes currently held by srv.
-func listPrefixes(t *testing.T, srv *server.BgpServer, family *api.Family) map[string]*api.Destination {
+// listPrefixes returns the GLOBAL-RIB paths srv holds in family, by prefix.
+func listPrefixes(t *testing.T, srv *server.BgpServer, family bgp.Family) map[string][]*apiutil.Path {
 	t.Helper()
-	out := map[string]*api.Destination{}
-	err := srv.ListPath(context.Background(), &api.ListPathRequest{
-		TableType: api.TableType_GLOBAL,
+	out := map[string][]*apiutil.Path{}
+	err := srv.ListPath(apiutil.ListPathRequest{
+		TableType: api.TableType_TABLE_TYPE_GLOBAL,
 		Family:    family,
-	}, func(d *api.Destination) { out[d.Prefix] = d })
+	}, func(prefix bgp.NLRI, paths []*apiutil.Path) { out[prefix.String()] = paths })
 	if err != nil {
 		t.Fatalf("ListPath: %v", err)
 	}
 	return out
 }
 
-func waitForPrefix(t *testing.T, srv *server.BgpServer, family *api.Family, prefix string, want bool) bool {
+func waitForPrefix(t *testing.T, srv *server.BgpServer, family bgp.Family, prefix string, want bool) bool {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -237,7 +237,7 @@ func grStartPair(t *testing.T, recvPort uint32) (*server.BgpServer, *config.Stor
 
 // assertPrefixHeld fails if prefix disappears from srv within d — the assertion
 // that a GR helper RETAINS a route rather than flushing it.
-func assertPrefixHeld(t *testing.T, srv *server.BgpServer, family *api.Family, prefix string, d time.Duration) {
+func assertPrefixHeld(t *testing.T, srv *server.BgpServer, family bgp.Family, prefix string, d time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
@@ -303,11 +303,11 @@ func TestBGPAnnounceWithdrawLifecycle(t *testing.T) {
 	}
 
 	// Verify community and next-hop on the received path.
-	dst := listPrefixes(t, recv, familyV4)[prefix]
-	if dst == nil || len(dst.Paths) == 0 {
+	paths := listPrefixes(t, recv, familyV4)[prefix]
+	if len(paths) == 0 {
 		t.Fatalf("no path for %s on receiver", prefix)
 	}
-	assertBlackholeAttrs(t, dst.Paths[0])
+	assertBlackholeAttrs(t, paths[0])
 
 	// Withdraw via attack ended.
 	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Target: ban.Target, At: time.Now()})
@@ -316,14 +316,10 @@ func TestBGPAnnounceWithdrawLifecycle(t *testing.T) {
 	}
 }
 
-func assertBlackholeAttrs(t *testing.T, p *api.Path) {
+func assertBlackholeAttrs(t *testing.T, p *apiutil.Path) {
 	t.Helper()
-	attrs, err := apiutil.GetNativePathAttributes(p)
-	if err != nil {
-		t.Fatalf("GetNativePathAttributes: %v", err)
-	}
 	var sawNextHop, sawCommunity bool
-	for _, a := range attrs {
+	for _, a := range p.Attrs {
 		switch v := a.(type) {
 		case *bgp.PathAttributeNextHop:
 			sawNextHop = true
@@ -414,11 +410,11 @@ func TestBGPAnnounceWithdrawLifecycleV6(t *testing.T) {
 	}
 
 	// Verify the IPv6 NLRI, MP_REACH next-hop and community on the received path.
-	dst := listPrefixes(t, recv, familyV6)[prefix]
-	if dst == nil || len(dst.Paths) == 0 {
+	paths := listPrefixes(t, recv, familyV6)[prefix]
+	if len(paths) == 0 {
 		t.Fatalf("no path for %s on receiver", prefix)
 	}
-	assertBlackholeAttrs6(t, dst.Paths[0], prefix)
+	assertBlackholeAttrs6(t, paths[0], prefix)
 
 	// Withdraw via attack ended.
 	m.OnAttackEnded(engine.Event{Kind: engine.AttackEnded, Target: ban.Target, At: time.Now()})
@@ -431,24 +427,16 @@ func TestBGPAnnounceWithdrawLifecycleV6(t *testing.T) {
 // decode to wantPrefix, the next-hop rides inside MP_REACH_NLRI (not a plain
 // NEXT_HOP attribute) carrying the configured next_hop6, and the blackhole
 // community must be present. This is the IPv6 counterpart to assertBlackholeAttrs.
-func assertBlackholeAttrs6(t *testing.T, p *api.Path, wantPrefix string) {
+func assertBlackholeAttrs6(t *testing.T, p *apiutil.Path, wantPrefix string) {
 	t.Helper()
 
 	// The IPv6 NLRI round-trips through gobgp's MP_REACH wire codec.
-	nlri, err := apiutil.GetNativeNlri(p)
-	if err != nil {
-		t.Fatalf("GetNativeNlri: %v", err)
-	}
-	if nlri.String() != wantPrefix {
-		t.Errorf("decoded NLRI = %s, want %s", nlri.String(), wantPrefix)
+	if p.Nlri.String() != wantPrefix {
+		t.Errorf("decoded NLRI = %s, want %s", p.Nlri.String(), wantPrefix)
 	}
 
-	attrs, err := apiutil.GetNativePathAttributes(p)
-	if err != nil {
-		t.Fatalf("GetNativePathAttributes: %v", err)
-	}
 	var sawMpReach, sawCommunity bool
-	for _, a := range attrs {
+	for _, a := range p.Attrs {
 		switch v := a.(type) {
 		case *bgp.PathAttributeMpReachNLRI:
 			sawMpReach = true
@@ -461,7 +449,7 @@ func assertBlackholeAttrs6(t *testing.T, p *api.Path, wantPrefix string) {
 			if v.Nexthop.String() != "100::1" {
 				t.Errorf("MP_REACH next-hop = %s, want 100::1", v.Nexthop.String())
 			}
-			if len(v.Value) == 0 || v.Value[0].String() != wantPrefix {
+			if len(v.Value) == 0 || v.Value[0].NLRI.String() != wantPrefix {
 				t.Errorf("MP_REACH NLRI = %v, want %s", v.Value, wantPrefix)
 			}
 		case *bgp.PathAttributeCommunities:
@@ -492,20 +480,15 @@ func assertBlackholeAttrs6(t *testing.T, p *api.Path, wantPrefix string) {
 // decoded NLRI string mapped to its action (decoded from the traffic-rate
 // extended community). This round-trips our encoding through gobgp's real
 // wire encoder and decoder — the strongest check on the op-byte encoding.
-func flowSpecPaths(t *testing.T, srv *server.BgpServer, family *api.Family) map[string]string {
+func flowSpecPaths(t *testing.T, srv *server.BgpServer, family bgp.Family) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	err := srv.ListPath(context.Background(), &api.ListPathRequest{
-		TableType: api.TableType_GLOBAL, Family: family,
-	}, func(d *api.Destination) {
-		for _, p := range d.Paths {
-			nlri, err := apiutil.GetNativeNlri(p)
-			if err != nil {
-				continue
-			}
+	err := srv.ListPath(apiutil.ListPathRequest{
+		TableType: api.TableType_TABLE_TYPE_GLOBAL, Family: family,
+	}, func(_ bgp.NLRI, paths []*apiutil.Path) {
+		for _, p := range paths {
 			action := ""
-			attrs, _ := apiutil.GetNativePathAttributes(p)
-			for _, a := range attrs {
+			for _, a := range p.Attrs {
 				if ext, ok := a.(*bgp.PathAttributeExtendedCommunities); ok {
 					for _, c := range ext.Value {
 						if tr, ok := c.(*bgp.TrafficRateExtended); ok {
@@ -514,7 +497,7 @@ func flowSpecPaths(t *testing.T, srv *server.BgpServer, family *api.Family) map[
 					}
 				}
 			}
-			out[nlri.String()] = action
+			out[p.Nlri.String()] = action
 		}
 	})
 	if err != nil {
@@ -523,7 +506,7 @@ func flowSpecPaths(t *testing.T, srv *server.BgpServer, family *api.Family) map[
 	return out
 }
 
-func waitFlowSpec(t *testing.T, srv *server.BgpServer, family *api.Family, match func(map[string]string) bool) map[string]string {
+func waitFlowSpec(t *testing.T, srv *server.BgpServer, family bgp.Family, match func(map[string]string) bool) map[string]string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	var last map[string]string
@@ -573,8 +556,8 @@ func TestFlowSpecAnnounceWithdraw(t *testing.T) {
 		Transport: &api.Transport{PassiveMode: true},
 		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
 		AfiSafis: []*api.AfiSafi{
-			{Config: &api.AfiSafiConfig{Family: familyV4FS, Enabled: true}},
-			{Config: &api.AfiSafiConfig{Family: familyV6FS, Enabled: true}},
+			{Config: &api.AfiSafiConfig{Family: apiFamily(familyV4FS), Enabled: true}},
+			{Config: &api.AfiSafiConfig{Family: apiFamily(familyV6FS), Enabled: true}},
 		},
 	}}); err != nil {
 		t.Fatalf("receiver AddPeer: %v", err)

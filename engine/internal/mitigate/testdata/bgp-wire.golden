@@ -1,0 +1,293 @@
+## eBGP session
+
+# the speaker's OPEN
+OPEN version 4, AS 65001, hold time 90, BGP identifier 1.1.1.1
+  capability Route Refresh (2): (empty)
+  capability FQDN (73): <this host's name>
+  capability Extended Message (6): (empty)
+  capability Multiprotocol (1): 00 01 00 01
+  capability Multiprotocol (1): 00 02 00 01
+  capability Multiprotocol (1): 00 01 00 85
+  capability Multiprotocol (1): 00 02 00 85
+  capability 4-octet AS (65): 00 00 fd e9
+  capability Graceful Restart (64): 40 78 00 01 01 00 00 02 01 00 00 01 85 00 00 02 85 00
+  capability Extended Next Hop Encoding (5): 00 01 00 01 00 02 00 01 00 85 00 02 00 02 00 85 00 02
+
+# initial advertisement, IPv4 unicast
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  NEXT_HOP, flags 40: c0 00 02 01
+  COMMUNITIES, flags c0: fd e8 02 9a
+  NLRI: 20 cb 00 71 63
+UPDATE: End-of-RIB
+
+# initial advertisement, IPv6 unicast
+UPDATE: End-of-RIB
+  MP_UNREACH_NLRI, flags 80: IPv6 unicast, withdrawn (empty)
+
+# initial advertisement, IPv4 FlowSpec
+UPDATE: End-of-RIB
+  MP_UNREACH_NLRI, flags 80: IPv4 FlowSpec, withdrawn (empty)
+
+# initial advertisement, IPv6 FlowSpec
+UPDATE: End-of-RIB
+  MP_UNREACH_NLRI, flags 80: IPv6 FlowSpec, withdrawn (empty)
+
+# RTBH 203.0.113.66/32 with the blackhole community
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  NEXT_HOP, flags 40: c0 00 02 01
+  COMMUNITIES, flags c0: fd e8 02 9a
+  NLRI: 20 cb 00 71 42
+
+# RTBH 2001:db8::beef/128 via next_hop6 (rides MP_REACH_NLRI)
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  COMMUNITIES, flags c0: fd e8 02 9a
+  MP_REACH_NLRI, flags 80: IPv6 unicast, next hop 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01, reserved 00, NLRI 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 be ef
+
+# hostgroup override: its own next-hop, two communities, LOCAL_PREF 200 (sent on iBGP only)
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  NEXT_HOP, flags 40: c0 00 02 07
+  COMMUNITIES, flags c0: fd e8 02 9a fd e8 03 09
+  NLRI: 20 cb 00 71 43
+
+# divert 203.0.113.68/32: scrubbing next-hop, no community, LOCAL_PREF 300
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  NEXT_HOP, flags 40: c0 00 02 09
+  NLRI: 20 cb 00 71 44
+
+# divert 2001:db8::68/128: scrubbing next_hop6, no community
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  MP_REACH_NLRI, flags 80: IPv6 unicast, next hop 20 01 0d b8 ff ff 00 00 00 00 00 00 00 00 00 09, reserved 00, NLRI 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 68
+
+# escalation re-announces 203.0.113.66/32 as a divert: one UPDATE replaces the RTBH route (implicit withdraw)
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  NEXT_HOP, flags 40: c0 00 02 09
+  NLRI: 20 cb 00 71 42
+
+# FlowSpec discard: dst 203.0.113.66/32, UDP, source port 123
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 0c 01 20 cb 00 71 42 03 81 11 06 81 7b
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# FlowSpec rate-limit 1250000 B/s: dst 2001:db8::42/128, TCP, SYN
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  MP_REACH_NLRI, flags 80: IPv6 FlowSpec, next hop (empty), reserved 00, NLRI 19 01 80 00 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 42 03 81 06 09 81 02
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 49 98 96 80
+
+# FlowSpec discard: dst 203.0.113.67/32, fragments
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 09 01 20 cb 00 71 43 0c 81 02
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# FlowSpec discard, source-anchored (outgoing): src 203.0.113.88/32, UDP
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 09 02 20 cb 00 71 58 03 81 11
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# FlowSpec discard, victim and attacker: dst 203.0.113.70/32, src 198.51.100.10/32
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 0c 01 20 cb 00 71 46 02 20 c6 33 64 0a
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# FlowSpec discard, source-anchored IPv6: src 2001:db8::88/128, UDP, destination port 53
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  MP_REACH_NLRI, flags 80: IPv6 FlowSpec, next hop (empty), reserved 00, NLRI 19 02 80 00 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 88 03 81 11 05 81 35
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# withdraw 203.0.113.66/32
+UPDATE
+  withdrawn routes: 20 cb 00 71 42
+
+# withdraw 2001:db8::beef/128 (MP_UNREACH_NLRI)
+UPDATE
+  MP_UNREACH_NLRI, flags 80: IPv6 unicast, withdrawn 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 be ef
+
+# withdraw FlowSpec dst 203.0.113.66/32, UDP, source port 123
+UPDATE
+  MP_UNREACH_NLRI, flags 80: IPv4 FlowSpec, withdrawn 0c 01 20 cb 00 71 42 03 81 11 06 81 7b
+
+# withdraw FlowSpec dst 2001:db8::42/128, TCP, SYN
+UPDATE
+  MP_UNREACH_NLRI, flags 80: IPv6 FlowSpec, withdrawn 19 01 80 00 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 42 03 81 06 09 81 02
+
+# SignalRestart: Cease / Administrative Reset, which a Graceful Restart helper retains routes across
+NOTIFICATION code 6 subcode 4, data: (empty)
+
+## iBGP session
+
+# the speaker's OPEN
+OPEN version 4, AS 65001, hold time 90, BGP identifier 1.1.1.1
+  capability Route Refresh (2): (empty)
+  capability FQDN (73): <this host's name>
+  capability Software Version (75): <gobgp's version string>
+  capability Extended Message (6): (empty)
+  capability Multiprotocol (1): 00 01 00 01
+  capability Multiprotocol (1): 00 02 00 01
+  capability Multiprotocol (1): 00 01 00 85
+  capability Multiprotocol (1): 00 02 00 85
+  capability 4-octet AS (65): 00 00 fd e9
+  capability Graceful Restart (64): 40 78 00 01 01 00 00 02 01 00 00 01 85 00 00 02 85 00
+  capability Extended Next Hop Encoding (5): 00 01 00 01 00 02 00 01 00 85 00 02 00 02 00 85 00 02
+
+# initial advertisement, IPv4 unicast
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  NEXT_HOP, flags 40: c0 00 02 01
+  LOCAL_PREF, flags 40: 00 00 00 64
+  COMMUNITIES, flags c0: fd e8 02 9a
+  NLRI: 20 cb 00 71 63
+UPDATE: End-of-RIB
+
+# initial advertisement, IPv6 unicast
+UPDATE: End-of-RIB
+  MP_UNREACH_NLRI, flags 80: IPv6 unicast, withdrawn (empty)
+
+# initial advertisement, IPv4 FlowSpec
+UPDATE: End-of-RIB
+  MP_UNREACH_NLRI, flags 80: IPv4 FlowSpec, withdrawn (empty)
+
+# initial advertisement, IPv6 FlowSpec
+UPDATE: End-of-RIB
+  MP_UNREACH_NLRI, flags 80: IPv6 FlowSpec, withdrawn (empty)
+
+# RTBH 203.0.113.66/32 with the blackhole community
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  NEXT_HOP, flags 40: c0 00 02 01
+  LOCAL_PREF, flags 40: 00 00 00 64
+  COMMUNITIES, flags c0: fd e8 02 9a
+  NLRI: 20 cb 00 71 42
+
+# RTBH 2001:db8::beef/128 via next_hop6 (rides MP_REACH_NLRI)
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  COMMUNITIES, flags c0: fd e8 02 9a
+  MP_REACH_NLRI, flags 80: IPv6 unicast, next hop 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01, reserved 00, NLRI 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 be ef
+
+# hostgroup override: its own next-hop, two communities, LOCAL_PREF 200 (sent on iBGP only)
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  NEXT_HOP, flags 40: c0 00 02 07
+  LOCAL_PREF, flags 40: 00 00 00 c8
+  COMMUNITIES, flags c0: fd e8 02 9a fd e8 03 09
+  NLRI: 20 cb 00 71 43
+
+# divert 203.0.113.68/32: scrubbing next-hop, no community, LOCAL_PREF 300
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  NEXT_HOP, flags 40: c0 00 02 09
+  LOCAL_PREF, flags 40: 00 00 01 2c
+  NLRI: 20 cb 00 71 44
+
+# divert 2001:db8::68/128: scrubbing next_hop6, no community
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  MP_REACH_NLRI, flags 80: IPv6 unicast, next hop 20 01 0d b8 ff ff 00 00 00 00 00 00 00 00 00 09, reserved 00, NLRI 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 68
+
+# escalation re-announces 203.0.113.66/32 as a divert: one UPDATE replaces the RTBH route (implicit withdraw)
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  NEXT_HOP, flags 40: c0 00 02 09
+  LOCAL_PREF, flags 40: 00 00 00 64
+  NLRI: 20 cb 00 71 42
+
+# FlowSpec discard: dst 203.0.113.66/32, UDP, source port 123
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 0c 01 20 cb 00 71 42 03 81 11 06 81 7b
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# FlowSpec rate-limit 1250000 B/s: dst 2001:db8::42/128, TCP, SYN
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  MP_REACH_NLRI, flags 80: IPv6 FlowSpec, next hop (empty), reserved 00, NLRI 19 01 80 00 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 42 03 81 06 09 81 02
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 49 98 96 80
+
+# FlowSpec discard: dst 203.0.113.67/32, fragments
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 09 01 20 cb 00 71 43 0c 81 02
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# FlowSpec discard, source-anchored (outgoing): src 203.0.113.88/32, UDP
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 09 02 20 cb 00 71 58 03 81 11
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# FlowSpec discard, victim and attacker: dst 203.0.113.70/32, src 198.51.100.10/32
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 0c 01 20 cb 00 71 46 02 20 c6 33 64 0a
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# FlowSpec discard, source-anchored IPv6: src 2001:db8::88/128, UDP, destination port 53
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  MP_REACH_NLRI, flags 80: IPv6 FlowSpec, next hop (empty), reserved 00, NLRI 19 02 80 00 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 88 03 81 11 05 81 35
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
+
+# withdraw 203.0.113.66/32
+UPDATE
+  withdrawn routes: 20 cb 00 71 42
+
+# withdraw 2001:db8::beef/128 (MP_UNREACH_NLRI)
+UPDATE
+  MP_UNREACH_NLRI, flags 80: IPv6 unicast, withdrawn 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 be ef
+
+# withdraw FlowSpec dst 203.0.113.66/32, UDP, source port 123
+UPDATE
+  MP_UNREACH_NLRI, flags 80: IPv4 FlowSpec, withdrawn 0c 01 20 cb 00 71 42 03 81 11 06 81 7b
+
+# withdraw FlowSpec dst 2001:db8::42/128, TCP, SYN
+UPDATE
+  MP_UNREACH_NLRI, flags 80: IPv6 FlowSpec, withdrawn 19 01 80 00 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 42 03 81 06 09 81 02
+
+# Stop: Cease / Peer De-configured, sent as a Hard Reset because the N bit was negotiated
+NOTIFICATION code 6 subcode 9, data: (empty)

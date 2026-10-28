@@ -24,9 +24,7 @@ import (
 	"github.com/kapkan-io/kapkan/internal/dataplane"
 	"github.com/kapkan-io/kapkan/internal/engine"
 
-	api "github.com/osrg/gobgp/v3/api"
-	"github.com/osrg/gobgp/v3/pkg/apiutil"
-	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 )
 
 const testTTL = 5 * time.Minute
@@ -375,11 +373,12 @@ func TestEncodersAgree(t *testing.T) {
 }
 
 // flowSpecComponents runs a rule through the real BGP encoder and decodes the
-// components back out, so the comparison is against what a peer would receive
-// rather than against the intermediate values this package built.
+// components back out of the wire bytes, so the comparison is against what a
+// peer would receive rather than against the intermediate values this package
+// built.
 func flowSpecComponents(t *testing.T, r FlowSpecRule) []bgp.FlowSpecComponentInterface {
 	t.Helper()
-	any, family, err := flowSpecNLRI(r)
+	nlri, family, err := flowSpecNLRI(r)
 	if err != nil {
 		t.Fatalf("flowSpecNLRI(%v): %v", r, err)
 	}
@@ -389,15 +388,19 @@ func flowSpecComponents(t *testing.T, r FlowSpecRule) []bgp.FlowSpecComponentInt
 	if gotV6 := encodeOne(t, r).Flags&dataplane.RuleIPv6 != 0; gotV6 != wantV6 {
 		t.Fatalf("FlowSpec family is v6=%v but the kernel rule says v6=%v", wantV6, gotV6)
 	}
-	var nlri api.FlowSpecNLRI
-	if err := any.UnmarshalTo(&nlri); err != nil {
-		t.Fatalf("unmarshal FlowSpecNLRI: %v", err)
-	}
-	comps, err := apiutil.UnmarshalFlowSpecRules(nlri.Rules)
+	wire, err := nlri.Serialize()
 	if err != nil {
-		t.Fatalf("UnmarshalFlowSpecRules: %v", err)
+		t.Fatalf("serialize the FlowSpec NLRI: %v", err)
 	}
-	return comps
+	decoded, err := bgp.NLRIFromSlice(family, wire)
+	if err != nil {
+		t.Fatalf("decode the FlowSpec NLRI % x: %v", wire, err)
+	}
+	fs, ok := decoded.(*bgp.FlowSpecNLRI)
+	if !ok {
+		t.Fatalf("the FlowSpec NLRI decoded as %T", decoded)
+	}
+	return fs.Value
 }
 
 func checkComponentAgrees(t *testing.T, c bgp.FlowSpecComponentInterface, k dataplane.Rule) {
