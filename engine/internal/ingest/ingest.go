@@ -9,6 +9,7 @@
 package ingest
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/flow"
@@ -115,22 +117,63 @@ func (i *Ingester) startReceiver(family, listen string, pipe utils.FlowPipe) err
 	if err != nil {
 		return fmt.Errorf("%s receiver: %w", family, err)
 	}
-	// PanicDecoderWrapper recovers panics in the decode path into errors.
-	decode := debug.PanicDecoderWrapper(pipe.DecodeFlow)
-	if err := recv.Start(host, port, decode); err != nil {
+	if err := recv.Start(host, port, decoder(family, pipe)); err != nil {
 		return fmt.Errorf("%s start %s: %w", family, listen, err)
 	}
 	i.recvs[family] = recv
 	i.pipes = append(i.pipes, pipe)
-	go i.drainErrors(family, recv)
+	go i.drainErrors(family, recv.Errors())
 	i.log.Info("ingest listener started", "proto", family, "listen", listen)
 	return nil
 }
 
-// drainErrors consumes the receiver error channel (the sender side is
-// non-blocking, so unread errors are silently dropped) and records metrics.
-func (i *Ingester) drainErrors(family string, recv *utils.UDPReceiver) {
-	errs := recv.Errors()
+// decoder is what a listener's decode workers run on every datagram: the
+// pipe's decode, with a panic recovered into an error (a datagram that trips
+// a parser must not crash the process), and every error counted in
+// DecodeErrorsTotal right there, in the worker. goflow2 also hands each error
+// to drainErrors, but over an unbuffered channel it sends to without
+// blocking, so an error that arrives while drainErrors is busy is dropped:
+// counting there fell furthest behind exactly under a flood of junk.
+func decoder(family string, pipe utils.FlowPipe) utils.DecoderFunc {
+	decode := debug.PanicDecoderWrapper(pipe.DecodeFlow)
+	counter := metrics.DecodeErrorsTotal.WithLabelValues(family)
+	return func(msg interface{}) error {
+		err := decode(msg)
+		if err != nil {
+			counter.Inc()
+		}
+		return err
+	}
+}
+
+const (
+	// decodeErrLogBurst is how many lines of each kind of decode error a
+	// listener logs per decodeErrLogWindow. Telemetry is unauthenticated UDP,
+	// so a flood of junk datagrams must not become a flood of journal lines;
+	// DecodeErrorsTotal counts every one regardless. Each kind (template
+	// warm-up, recovered panic, any other) has its own budget, so a flood of
+	// junk cannot hide a recovered panic.
+	decodeErrLogBurst  = 5
+	decodeErrLogWindow = time.Minute
+)
+
+// drainErrors logs what goflow2 reports on a receiver's error channel: decode
+// errors, and the sockets' own errors (a socket closed by Stop is not one). It
+// only logs, because the channel drops errors (see decoder), and it logs at
+// most decodeErrLogBurst lines of each kind per decodeErrLogWindow.
+func (i *Ingester) drainErrors(family string, errs <-chan error) {
+	var warmup, panics, other logLimit
+	// logf logs msg if lim allows it. On the first line lim refuses in a
+	// window it says, once, that the rest of the window goes unlogged.
+	logf := func(lim *logLimit, level slog.Level, msg string, args ...any) {
+		ok, muted := lim.allow(time.Now())
+		if ok {
+			i.log.Log(context.Background(), level, msg, args...)
+		} else if muted {
+			i.log.Log(context.Background(), level, "too many flow decode errors to log; muting this kind until the window ends — kapkan_ingest_decode_errors_total counts every one",
+				"proto", family, "muted", msg, "window", decodeErrLogWindow)
+		}
+	}
 	for {
 		select {
 		case <-i.stopC:
@@ -143,17 +186,32 @@ func (i *Ingester) drainErrors(family string, recv *utils.UDPReceiver) {
 			case errors.Is(err, net.ErrClosed):
 				// Socket closed during Stop; not an error.
 			case errors.Is(err, netflow.ErrorTemplateNotFound):
-				metrics.DecodeErrorsTotal.WithLabelValues(family).Inc()
-				i.log.Warn("flow data before template (exporter warm-up)", "proto", family)
+				logf(&warmup, slog.LevelWarn, "flow data before template (exporter warm-up)", "proto", family)
 			case errors.Is(err, debug.ErrPanic):
-				metrics.DecodeErrorsTotal.WithLabelValues(family).Inc()
-				i.log.Error("recovered panic decoding flow", "proto", family, "err", err)
+				logf(&panics, slog.LevelError, "recovered panic decoding flow", "proto", family, "err", err)
 			default:
-				metrics.DecodeErrorsTotal.WithLabelValues(family).Inc()
-				i.log.Warn("flow decode error", "proto", family, "err", err)
+				logf(&other, slog.LevelWarn, "flow decode error", "proto", family, "err", err)
 			}
 		}
 	}
+}
+
+// logLimit is drainErrors' budget for one kind of line: at most
+// decodeErrLogBurst per decodeErrLogWindow. Each drainErrors goroutine owns
+// its limits, so they need no lock.
+type logLimit struct {
+	start time.Time // when the current window opened
+	n     int       // lines asked for in the current window
+}
+
+// allow reports whether a line asked for at now may be logged, and muted for
+// the first line it refuses in a window.
+func (l *logLimit) allow(now time.Time) (ok, muted bool) {
+	if now.Sub(l.start) >= decodeErrLogWindow {
+		l.start, l.n = now, 0
+	}
+	l.n++
+	return l.n <= decodeErrLogBurst, l.n == decodeErrLogBurst+1
 }
 
 // Stop shuts down all receivers and the decode pipeline.

@@ -32,6 +32,13 @@ security-relevant.
 
 ### Fixed
 
+- **metrics:** `kapkan_ingest_decode_errors_total` counts every telemetry datagram that fails
+  to decode, a flood of junk included. It used to count the errors goflow2 reports on a channel
+  that drops one whenever its reader is busy, and the reader logged each error before taking the
+  next — so the counter fell furthest behind exactly when junk floods a listener. The decode
+  workers count each failure now. The log of those errors keeps its three kinds (template warm-up,
+  recovered panic, any other) and records at most five of each per listener per minute, plus one
+  line saying when it starts skipping the rest, so junk no longer floods the journal either.
 - **storage:** a ClickHouse older than 21.4 is named at start — one `ERROR` line with the
   server's version, the floor and what to do — instead of six `Syntax error ... TTL` refusals
   that said nothing about why ([#122](https://github.com/fornex/kapkan/issues/122): the
