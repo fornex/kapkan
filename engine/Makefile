@@ -72,9 +72,13 @@ lint: console-sync
 
 # The edge decision service's numbers are here too: BenchmarkDecide (in-process
 # floor) and BenchmarkDecideOverUnixSocket (the auth_request round trip edge-spec
-# §5 asks to have measured, in µs/decision).
+# §5 asks to have measured, in µs/decision). So are the ingest benchmarks:
+# BenchmarkIngestSFlow and BenchmarkIngestNetFlowV9 time a datagram through
+# goflow2's decoder, the conversion and Engine.Process — everything but the
+# socket — on one decode worker and on a listener's four. Run them with -cpu 1
+# for the cost of a flow on one core.
 bench: console-sync
-	go test -run '^$$' -bench . -benchmem ./internal/engine/... ./internal/edge/...
+	go test -run '^$$' -bench . -benchmem ./internal/engine/... ./internal/edge/... ./internal/ingest/...
 
 run-dev: build
 	./$(BINARY) -config configs/dev.yaml -log-format text

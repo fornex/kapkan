@@ -145,16 +145,60 @@ rester rapide à des débits de flows à l'échelle d'une attaque :
   le chemin par flow évite les allocations sur le tas afin que le ramasse-miettes reste à
   l'écart.
 
-Deux chiffres le décrivent, et tous deux viennent des mêmes benchmarks — `make bench`, qui
-mesurent l'agrégation en mémoire par flow sur des flows préconstruits, sans socket ni décodeur
-dans la boucle :
+`make bench` fournit deux mesures. La première chronomètre l'agrégation en mémoire par flow
+seule, sur des flows préconstruits, sans socket ni décodeur dans la boucle :
 
 - **La barre :** une modification du hot path n'est terminée que lorsqu'elle y atteint
   **≥200k flows/sec sur 8 cœurs**.
 - **Un point de repère :** sur un Apple M3 Max, l'agrégation traite environ
   **10M flows/sec sur un cœur** et **24M sur huit**.
 
-Aucun chiffre de bout en bout — socket, décodage et agrégation ensemble — n'est publié.
+La seconde chronomètre la réception de bout en bout. `BenchmarkIngestSFlow` et
+`BenchmarkIngestNetFlowV9` font passer des datagrammes par le décodeur de goflow2, la
+conversion de Kapkan et l'agrégation — tout ce qu'un écouteur fait d'un datagramme, sauf le
+lire sur le socket. Les datagrammes sont construits comme ceux de vrais exportateurs : sFlow v5
+d'un switch, 8 échantillons par datagramme, chacun fait d'un en-tête de paquet et d'un
+enregistrement extended switch ; NetFlow v9 d'un routeur, 30 enregistrements par datagramme
+dans le template classique à 18 champs plus l'offset de fragment, envoyés après le template
+lui-même. Sur le même Apple M3 Max, en build arm64 natif, un worker étant limité à un cœur et
+les quatre workers d'un écouteur libres d'utiliser les quatorze :
+
+| Télémétrie | Un cœur | Un écouteur (quatre workers) |
+| --- | --- | --- |
+| sFlow v5 | environ **0,6M flows/sec** | environ **2,1M flows/sec** |
+| NetFlow v9 | environ **0,33M flows/sec** | environ **1,35M flows/sec** |
+
+Sur x86, les mêmes benchmarks ont tourné sur un runner GitHub Actions doté d'un AMD EPYC 7763
+(Zen 3) : un cœur reçoit environ **0,3M flows/sec** en sFlow ou **0,19M** en NetFlow v9. Ce
+runner n'a que deux cœurs (quatre threads SMT) ; ses quatre workers n'atteignent donc
+qu'environ 0,68M et 0,44M — un chiffre à deux cœurs, pas le plafond d'un écouteur.
+
+**Le décodage domine.** goflow2 — son décodeur et le producteur qui traduit chaque
+enregistrement — prend plus des quatre cinquièmes de ce temps, neuf dixièmes pour NetFlow v9,
+dont une bonne part à allouer de la mémoire puis à la récupérer. Le travail propre de Kapkan —
+la conversion, deux compteurs et l'agrégation — représente le dixième restant, à peu près.
+C'est pourquoi un flow coûte environ 20 à 30 fois plus de bout en bout que dans l'agrégation
+seule. Un enregistrement coûte aussi d'autant plus cher que son template compte davantage de
+champs — goflow2 décode chaque champ, lu ou non —, si bien que les flows d'un routeur qui
+exporte un template plus large (adresses IPv6, labels MPLS, attributs BGP) sont reçus plus
+lentement que ne l'indique le tableau.
+
+**Ce que signifient les quatre workers d'un écouteur.** Chaque écouteur — un pour sFlow, un
+pour NetFlow et IPFIX — décode avec quatre workers qui prennent à tour de rôle les datagrammes
+d'une même file, quel que soit l'exportateur qui les a envoyés. Les datagrammes d'un
+exportateur se répartissent sur les quatre, et de nombreux exportateurs se partagent les mêmes
+quatre : un écouteur plafonne à peu près à la colonne de droite, qu'un seul routeur l'alimente
+ou cinquante, et davantage de cœurs ne relèvent pas ce plafond. L'autre écouteur a ses propres
+quatre workers.
+
+Votre serveur n'est aucune de ces deux machines, et vos routeurs exportent peut-être des
+templates plus larges que celui-ci : mesurez donc sur votre propre matériel avant de
+dimensionner une machine. `make -C engine bench` exécute tous les benchmarks, et cette commande
+la seule colonne « Un cœur » :
+
+```sh
+cd engine && go test -run '^$' -bench 'Ingest/workers=1' -cpu 1 ./internal/ingest/
+```
 
 <Callout type="info" title="Mesurez avant de vous y fier">
 Le moteur est livré avec des benchmarks `go test -bench` (`make bench`). La règle du projet est

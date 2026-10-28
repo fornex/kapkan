@@ -134,15 +134,54 @@ under attack-scale flow rates:
 - **Allocation-free hot path.** Buffers are pre-allocated and counters are atomic; the
   per-flow path avoids heap allocations so the garbage collector stays out of the way.
 
-Two figures describe it, and both come from the same benchmarks — `make bench`, which time
-the in-memory per-flow fold over pre-built flows, with no socket and no decoder in the loop:
+`make bench` gives two kinds of figure. The first times that in-memory per-flow fold alone,
+over pre-built flows, with no socket and no decoder in the loop:
 
 - **The bar:** a hot-path change is done only when it clears **≥200k flows/sec on 8 cores**
   there.
 - **A reference point:** on an Apple M3 Max the fold runs at about **10M flows/sec on one
   core** and **24M on eight**.
 
-No end-to-end figure — socket, decode and fold together — is published.
+The second times ingest end to end. `BenchmarkIngestSFlow` and `BenchmarkIngestNetFlowV9` run
+datagrams through goflow2's decoder, Kapkan's conversion and the fold — everything a listener
+does with a datagram except read it from the socket. The datagrams are shaped like real
+exporters': sFlow v5 from a switch, 8 samples to a datagram, each a packet header and an
+extended switch record; NetFlow v9 from a router, 30 records to a datagram in the classic
+18-field template plus a fragment offset, sent after the template itself. On the same Apple M3
+Max, in a native arm64 build, with one worker held to one core and a listener's four free to
+use all fourteen:
+
+| Telemetry | One core | One listener (four workers) |
+| --- | --- | --- |
+| sFlow v5 | about **0.6M flows/sec** | about **2.1M flows/sec** |
+| NetFlow v9 | about **0.33M flows/sec** | about **1.35M flows/sec** |
+
+On x86 the same benchmarks ran on a GitHub Actions runner with an AMD EPYC 7763 (Zen 3): one
+core ingests about **0.3M** sFlow or **0.19M** NetFlow v9 flows/sec. That runner has two cores
+(four SMT threads), so its four workers reach only about 0.68M and 0.44M — a two-core figure,
+not a listener's ceiling.
+
+**Decoding dominates.** goflow2 — its decoder and the producer that maps each record — takes
+more than four fifths of that time, nine tenths for NetFlow v9, much of it allocating memory
+and collecting it again. Kapkan's own work — the conversion, two counters and the fold — is the
+remaining tenth or so. That is why a flow costs some 20 to 30 times more end to end than in the
+fold alone. A record also costs more the more fields its template carries — goflow2 decodes
+every field, read or not — so flows from a router that exports a wider template (IPv6
+addresses, MPLS labels, BGP attributes) ingest more slowly than the table shows.
+
+**What a listener's four workers mean.** Each listener — one for sFlow, one for NetFlow and
+IPFIX — decodes on four workers that take datagrams from one queue in turn, whichever exporter
+sent them. One exporter's datagrams spread over all four, and many exporters share the same
+four: a listener tops out at about the right-hand column whether one router feeds it or fifty,
+and more cores do not raise that ceiling. The other listener has four workers of its own.
+
+Your server is neither of these machines, and your routers may export wider templates than this
+one, so measure on your own hardware before you size a box: `make -C engine bench` runs every
+benchmark, and this runs the one-core column alone:
+
+```sh
+cd engine && go test -run '^$' -bench 'Ingest/workers=1' -cpu 1 ./internal/ingest/
+```
 
 <Callout type="info" title="Benchmark before you trust it">
 The engine ships with `go test -bench` benchmarks (`make bench`). The project rule is to run
