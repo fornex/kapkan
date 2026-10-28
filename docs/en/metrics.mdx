@@ -24,7 +24,7 @@ Bind the listener accordingly — see [Authentication](/docs/authentication).
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Total flows ingested, by flow protocol. |
 | `kapkan_ingest_packets_total` | `exporter`, `proto` | Total telemetry datagrams received, by source exporter (cardinality-bounded; see [`flow_sources`](/docs/configuration)) and protocol. |
-| `kapkan_ingest_decode_errors_total` | `proto` | Telemetry datagrams that failed to decode, by protocol. |
+| `kapkan_ingest_decode_errors_total` | `proto` | Telemetry datagrams that failed to decode, by listener: `sflow` or `netflow` (which takes NetFlow v5, v9 and IPFIX alike). Every one is counted, a flood of junk included — unlike the log, which records at most five of each kind of decode error per listener per minute and says when it starts skipping the rest. NetFlow v9 and IPFIX data that arrives before its template counts here too: after Kapkan or an exporter restarts, expect it to climb until the exporter next sends its templates. A datagram that decoded but whose flow records then failed to convert counts both here and in `kapkan_ingest_packets_total`. |
 | `kapkan_ingest_dropped_flows_total` | — | Flows dropped because the engine input queue was full. |
 | `kapkan_engine_active_attacks` | — | Gauge of attacks currently in progress. |
 | `kapkan_engine_attacks_total` | — | Counter of attacks detected since start. |

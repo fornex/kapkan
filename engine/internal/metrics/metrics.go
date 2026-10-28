@@ -32,12 +32,19 @@ var (
 		Help:      "Telemetry UDP datagrams received, by exporter address (cardinality-bounded; see flow_sources) and protocol.",
 	}, []string{"exporter", "proto"})
 
-	// DecodeErrorsTotal counts datagrams that failed to decode.
+	// DecodeErrorsTotal counts telemetry datagrams that failed to decode, by
+	// listener: proto is the listener's family (sflow, netflow), not the wire
+	// protocol PacketsTotal names. The decode worker counts each failure as it
+	// happens, so a flood of junk is counted in full; NetFlow v9/IPFIX data
+	// that arrives before its template and a panic recovered in the decode
+	// path count too. A datagram that decoded but whose flow records then
+	// failed to convert is in PacketsTotal as well, which counts it on its way
+	// into conversion: it did arrive and parse, and it lost records.
 	DecodeErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "ingest",
 		Name:      "decode_errors_total",
-		Help:      "Telemetry datagrams that failed to decode, by protocol.",
+		Help:      "Telemetry datagrams that failed to decode, by listener (sflow, netflow); one whose flow records failed to convert after it decoded is in packets_total too.",
 	}, []string{"proto"})
 
 	// DroppedFlowsTotal counts flows dropped because the engine queue was full.

@@ -26,7 +26,7 @@ d'API avec `api.token_env`. Seuls les points de terminaison de données `/api/v1
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Total des flows ingérés, par protocole de flow. |
 | `kapkan_ingest_packets_total` | `exporter`, `proto` | Total des datagrammes de télémétrie reçus, par exporteur source (cardinalité bornée ; voir [`flow_sources`](/docs/configuration)) et par protocole. |
-| `kapkan_ingest_decode_errors_total` | `proto` | Datagrammes de télémétrie dont le décodage a échoué, par protocole. |
+| `kapkan_ingest_decode_errors_total` | `proto` | Datagrammes de télémétrie dont le décodage a échoué, par écouteur : `sflow` ou `netflow` (qui reçoit aussi bien NetFlow v5 et v9 qu'IPFIX). Chacun est compté, y compris pendant un flood de datagrammes invalides — contrairement au journal, qui consigne au plus cinq erreurs de décodage de chaque type par écouteur et par minute, puis signale qu'il omet les suivantes. Les données NetFlow v9 et IPFIX arrivées avant leur template sont aussi comptées ici : après un redémarrage de Kapkan ou d'un exporteur, le compteur monte jusqu'à ce que l'exporteur renvoie ses templates. Un datagramme décodé dont les enregistrements de flow n'ont ensuite pas pu être convertis est compté à la fois ici et dans `kapkan_ingest_packets_total`. |
 | `kapkan_ingest_dropped_flows_total` | — | Flows abandonnés parce que la file d'entrée du moteur était pleine. |
 | `kapkan_engine_active_attacks` | — | Jauge des attaques actuellement en cours. |
 | `kapkan_engine_attacks_total` | — | Compteur des attaques détectées depuis le démarrage. |

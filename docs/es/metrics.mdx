@@ -25,7 +25,7 @@ Vincula (bind) el listener en consecuencia — consulta [Autenticación](/docs/a
 | --- | --- | --- |
 | `kapkan_ingest_flows_total` | `proto` | Total de flows ingeridos, por protocolo de flow. |
 | `kapkan_ingest_packets_total` | `exporter`, `proto` | Total de datagramas de telemetría recibidos, por exportador de origen (con cardinalidad acotada; consulta [`flow_sources`](/docs/configuration)) y protocolo. |
-| `kapkan_ingest_decode_errors_total` | `proto` | Datagramas de telemetría que no se pudieron decodificar, por protocolo. |
+| `kapkan_ingest_decode_errors_total` | `proto` | Datagramas de telemetría que no se pudieron decodificar, por listener: `sflow` o `netflow` (que recibe por igual NetFlow v5, v9 e IPFIX). Se cuenta cada uno, también durante un flood de datagramas basura — a diferencia del log, que registra como mucho cinco errores de decodificación de cada tipo por listener y por minuto, y avisa cuando empieza a omitir el resto. Los datos NetFlow v9 e IPFIX que llegan antes que su plantilla también se cuentan aquí: tras reiniciarse Kapkan o un exportador, el contador sube hasta que el exportador vuelve a enviar sus plantillas. Un datagrama que se decodificó pero cuyos registros de flow no se pudieron convertir después se cuenta aquí y también en `kapkan_ingest_packets_total`. |
 | `kapkan_ingest_dropped_flows_total` | — | Flows descartados porque la cola de entrada del motor estaba llena. |
 | `kapkan_engine_active_attacks` | — | Gauge de ataques actualmente en curso. |
 | `kapkan_engine_attacks_total` | — | Contador de ataques detectados desde el arranque. |
