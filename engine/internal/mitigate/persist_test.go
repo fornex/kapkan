@@ -12,8 +12,8 @@ import (
 	"github.com/kapkan-io/kapkan/internal/config"
 	"github.com/kapkan-io/kapkan/internal/engine"
 
-	api "github.com/osrg/gobgp/v3/api"
-	"github.com/osrg/gobgp/v3/pkg/server"
+	api "github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/server"
 
 	"log/slog"
 )

@@ -21,14 +21,37 @@ security-relevant.
 
 ### Security
 
+- **A BGP neighbor can no longer crash the brain.** gobgp v3.37.0, the BGP speaker the brain
+  embeds, dereferenced a nil message when a configured neighbor sent a well-formed header with a
+  message type no RFC defines, and the panic, in a gobgp goroutine with no recover, ended the whole
+  process: 19 bytes from a router with a firmware bug, or from a compromised one, and detection and
+  mitigation stopped together. v3.37.0 is the last v3 release, so the speaker moves to **gobgp
+  v4.10.0**, which answers the way RFC 4271 §6.1 asks: a NOTIFICATION (Message Header Error / Bad
+  Message Type), a session reset, and the speaker dials back in. A regression test sends that
+  message in OpenSent, OpenConfirm and Established, to a brain running in a child process.
+
+  Routers see one difference. A new test records every byte the speaker sends — the OPEN, the
+  initial advertisement and its End-of-RIB, the RTBH, divert and FlowSpec UPDATEs and withdrawals,
+  and the Cease NOTIFICATIONs of a restart (Administrative Reset) and a stop (Hard Reset), over
+  eBGP and iBGP — and against v3.37.0 only the OPEN differs: gobgp v4 always advertises the
+  Extended Message capability (RFC 8654), which a router that does not implement it ignores (RFC
+  5492). The `bgp peer state` log line still reads `state=ESTABLISHED`; at start-up it no longer
+  shows the `IDLE` and `OPENSENT` steps, which gobgp v4 does not report.
+
+  gobgp v4.10.0 also carries the upstream fix for GO-2026-4736, the crafted NEXT_HOP attribute
+  (gobgp#3305): v4 is fixed from 4.4.0 per GHSA-4p9m-8gc4-rw2h, and no v3 release has the fix. The
+  Go vulnerability database has not caught up (its record still lists every v4 release as
+  affected), so govulncheck still reports it, and it stays on the CI allowlist until that record
+  names the fix. The published proof of concept is now a test too: the brain treats the UPDATE as a
+  withdraw (RFC 7606) and keeps the session, and it did not crash v3.37.0 either.
 - **Built with Go 1.26.10**, which fixes twelve reachable standard-library advisories
   (`crypto/x509` GO-2026-6809; `net/http` GO-2026-6617, -6613, -6612, -6611, -6610, -6605, -6603;
   `net/textproto` -6608; `crypto/tls` -6607; `html/template` -6600, -6599) — and
   `golang.org/x/net` 0.58.0 → 0.61.0 (an indirect dependency, through gobgp's gRPC server), which
   carries the `x/net/http2` side of five of them. No code change; the toolchain floor in
   `engine/go.mod` moves from 1.26.6 to 1.26.10. The govulncheck gate caught them on the first CI
-  run after their publication; the only advisory left is the accepted GO-2026-4736 (gobgp
-  NEXT_HOP, no upstream fix).
+  run after their publication; the only advisory left is GO-2026-4736 (gobgp NEXT_HOP), accepted
+  for the reason in the entry above.
 
 ### Fixed
 

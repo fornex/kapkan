@@ -468,12 +468,19 @@ jobs:
         # that is NOT in the accepted allowlist. Non-reachable findings (a vuln is
         # imported/required but never called) are printed but do not fail the job.
         #
-        # Accepted advisories — must have no upstream fix; revisit each release:
-        #   GO-2026-4736  gobgp DoS via a crafted NEXT_HOP path attribute. Only
-        #                 reachable from a *configured* BGP peer (the operator's
-        #                 own router), which is trusted in kapkan's threat model.
-        #                 No fixed gobgp release exists. Drop from ACCEPTED once
-        #                 a patched gobgp ships and is adopted.
+        # Accepted advisories — revisit each release. Each must have no upstream
+        # fix, or a fix we have adopted that the Go vulnerability database does
+        # not record yet:
+        #   GO-2026-4736  gobgp DoS via a crafted NEXT_HOP path attribute
+        #                 (gobgp#3305, CVE-2026-30405). No v3 release has the
+        #                 fix; v4 has it from 4.4.0 (commit 583080a, per
+        #                 GHSA-4p9m-8gc4-rw2h), and the engine builds against
+        #                 v4.10.0. The Go vulnerability database has not caught
+        #                 up: its record lists every v4 release as affected, with
+        #                 no fixed version, so govulncheck still reports it.
+        #                 TestBGPSurvivesMalformedNextHop replays the published
+        #                 proof of concept. Drop from ACCEPTED once the record
+        #                 names v4.4.0.
         env:
           ACCEPTED: "GO-2026-4736"
         run: |
