@@ -177,6 +177,10 @@ identidad del nodo, la configuración ni datos de ataques. La comprobación peri
 
 ## Comandos
 
+De los comandos que siguen, `scrub`, `edge` y `nginx-exporter` son roles de larga duración: cada uno
+se ejecuta hasta que recibe `SIGINT` o `SIGTERM` y no puede recargar su configuración; un `SIGHUP`
+se registra y se ignora, y el rol sigue en marcha, así que reinícialo para cambiar su configuración.
+
 ### `dataplane status`
 
 ```sh

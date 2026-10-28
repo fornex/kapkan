@@ -171,6 +171,10 @@ setting.
 
 ## Commands
 
+Of the commands below, `scrub`, `edge` and `nginx-exporter` are long-running roles: each runs
+until `SIGINT` or `SIGTERM` and has no reload — a `SIGHUP` is logged and ignored, and the role
+keeps running; restart it to change its configuration.
+
 ### `dataplane status`
 
 ```sh

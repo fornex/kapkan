@@ -9,9 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
@@ -185,6 +183,8 @@ func edgeNodeOptions(ec *config.EdgeNodeConfig, token string, eab map[string]con
 
 // runEdge builds and runs the node; split out so the CLI layer stays thin.
 func runEdge(ec *config.EdgeNodeConfig, token string, log *slog.Logger) error {
+	ctx, stop := roleSignals("edge", log)
+	defer stop()
 	// EAB HMAC keys are secrets and live in the environment, like the token.
 	eab, err := ec.ACME.ResolveEAB()
 	if err != nil {
@@ -203,8 +203,6 @@ func runEdge(ec *config.EdgeNodeConfig, token string, log *slog.Logger) error {
 	if strings.HasPrefix(ec.Controller.URL, "http://") {
 		log.Warn("controller.url is plaintext http: the agent token crosses the network unencrypted — use https outside a lab")
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	err = n.Run(ctx)
 	log.Info("kapkan edge stopped")
 	if err != nil {

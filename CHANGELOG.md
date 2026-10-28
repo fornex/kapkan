@@ -39,6 +39,19 @@ security-relevant.
   `TTL` clause, and it lacks production `LowCardinality`, query parameters and
   `toStartOfInterval` besides). The floor, and what each release of it is for, is on the
   Storage page.
+- **roles:** a `SIGHUP` no longer stops `kapkan scrub`, `kapkan edge` or `kapkan nginx-exporter`.
+  They handled only `SIGINT` and `SIGTERM`, so a `kill -HUP` or `systemctl kill -s HUP` — the
+  reflex nginx operators have — ended the process, and systemd's `Restart=on-failure` counts death
+  by `SIGHUP` as a clean exit, so nothing brought it back. An edge node's nginx kept serving its
+  last generation while the decision service and the clearance page went away (zones fell to their
+  `failure_mode`), the lever stopped reaching the node and certificates stopped renewing; a scrub
+  node's pinned program kept enforcing, whatever its `on_exit` (only a clean stop applies it), but
+  stopped receiving rules; the exporter
+  stopped posting verdicts. Each role now logs one `WARN` line,
+  `SIGHUP ignored: the <role> role has no reload; restart the unit to change its configuration`,
+  and keeps running. The handler is in place before the role's own startup work, so a `SIGHUP`
+  that lands while the data plane loads is ignored too. None of them gained a reload: a
+  configuration change still takes a restart.
 
 ## [1.8.0] - 2026-09-18
 

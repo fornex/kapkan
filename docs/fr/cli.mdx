@@ -182,6 +182,11 @@ processus est **désactivée par défaut** ; cette option fonctionne indépendam
 
 ## Commandes
 
+Parmi les commandes ci-dessous, `scrub`, `edge` et `nginx-exporter` sont des rôles de longue durée :
+chacun tourne jusqu'à ce qu'il reçoive `SIGINT` ou `SIGTERM` et ne sait pas recharger sa
+configuration — un `SIGHUP` est journalisé puis ignoré, et le rôle continue de tourner ;
+redémarrez-le pour changer sa configuration.
+
 ### `dataplane status`
 
 ```sh
