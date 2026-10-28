@@ -85,7 +85,7 @@ const en: LandingDict = {
     sub: "Kapkan reads the traffic stats your routers already export (NetFlow, IPFIX, sFlow), spots a flood against the IPs you protect within seconds, and stops it: by telling your router to drop the attack, or by dropping it itself in the Linux kernel. Free, open source, and in watch-only mode until you say otherwise.",
     trust: ["One Go binary", "Nothing else to install", "Watch-only by default", "IPv4 + IPv6"],
   },
-  stats: ["~10M flows/sec on one core", "Detects in seconds", "IPv4 + IPv6 blackhole", "FlowSpec RFC 8955/8956", "One static binary"],
+  stats: ["NetFlow · IPFIX · sFlow", "Detects in seconds", "IPv4 + IPv6 blackhole", "FlowSpec RFC 8955/8956", "One static binary"],
   how: {
     heading: "How it works",
     diagram: { routers: "Your routers", flows: "NetFlow · IPFIX · sFlow", announce: "BGP RTBH / FlowSpec", announceNote: "your router drops it", drop: "XDP", dropNote: "this machine drops it" },
@@ -115,7 +115,7 @@ const en: LandingDict = {
     learnMore: "See how in-kernel drop works",
     cards: [
       { title: "Reads the flows you already export", body: "sFlow v5, NetFlow v5/v9 and IPFIX over UDP, read by Kapkan itself. No extra service to run." },
-      { title: "Spots floods in seconds", body: "Packet, bit and flow-per-second limits over a sliding window, corrected for sampling. On an Apple M3 Max, one core counts about 10M flows/sec, eight cores about 24M." },
+      { title: "Spots floods in seconds", body: "Packet, bit and flow-per-second limits over a sliding window, corrected for sampling." },
       { title: "Blackhole, or drop just the attack", body: "Null-route the whole target IP (RTBH), or drop only the attack traffic and keep the rest (FlowSpec). Full IPv6 support, on par with IPv4." },
       { title: "Tells you what kind of attack", body: "Amplification (NTP/DNS/memcached), SYN/UDP/ICMP floods, each with a plain 'why this fired' breakdown." },
       { title: "Learns each host's normal", body: "Kapkan learns what normal traffic looks like for every host and tightens the limits on its own. No hand-tuning." },
@@ -201,7 +201,7 @@ const ru: LandingDict = {
     sub: "Kapkan читает статистику трафика, которую ваши маршрутизаторы и так экспортируют (NetFlow, IPFIX, sFlow), за секунды замечает флуд на защищаемые вами адреса и останавливает его — командой маршрутизатору сбросить атаку или сбрасывая её сам, прямо в ядре Linux. Бесплатно, открытый код, и в безопасном режиме «только наблюдение», пока вы не решите иначе.",
     trust: ["Один Go-бинарник", "Больше ничего ставить не нужно", "«Только наблюдение» по умолчанию", "IPv4 + IPv6"],
   },
-  stats: ["~10M потоков/с на одном ядре", "Обнаружение за секунды", "Blackhole для IPv4 + IPv6", "FlowSpec RFC 8955/8956", "Один статический бинарник"],
+  stats: ["NetFlow · IPFIX · sFlow", "Обнаружение за секунды", "Blackhole для IPv4 + IPv6", "FlowSpec RFC 8955/8956", "Один статический бинарник"],
   how: {
     heading: "Как это работает",
     diagram: { routers: "Ваши маршрутизаторы", flows: "NetFlow · IPFIX · sFlow", announce: "BGP RTBH / FlowSpec", announceNote: "сбрасывает маршрутизатор", drop: "XDP", dropNote: "сбрасывает эта машина" },
@@ -231,7 +231,7 @@ const ru: LandingDict = {
     learnMore: "Как работает отброс в ядре",
     cards: [
       { title: "Читает потоки, которые вы уже экспортируете", body: "sFlow v5, NetFlow v5/v9 и IPFIX по UDP — читает сам Kapkan, без отдельного сервиса." },
-      { title: "Замечает флуд за секунды", body: "Пределы по пакетам, битам и потокам в секунду на скользящем окне, с поправкой на сэмплинг. На Apple M3 Max одно ядро считает около 10M потоков/с, восемь ядер — около 24M." },
+      { title: "Замечает флуд за секунды", body: "Пределы по пакетам, битам и потокам в секунду на скользящем окне, с поправкой на сэмплинг." },
       { title: "Blackhole или только атаку", body: "Закрыть весь адрес-жертву (RTBH) или сбросить только атакующий трафик, оставив остальной (FlowSpec). Полная поддержка IPv6, наравне с IPv4." },
       { title: "Говорит, что за атака", body: "Усиление (NTP/DNS/memcached), SYN/UDP/ICMP-флуды — и по каждой понятный разбор «почему сработало»." },
       { title: "Учит норму каждого хоста", body: "Kapkan сам изучает, как выглядит обычный трафик каждого хоста, и подтягивает пределы. Руками крутить не нужно." },
@@ -322,7 +322,7 @@ const de: LandingDict = {
     ]
   },
   "stats": [
-    "~10M Flows/s auf einem Kern",
+    "NetFlow · IPFIX · sFlow",
     "Erkennung in Sekunden",
     "Blackhole für IPv4 + IPv6",
     "FlowSpec RFC 8955/8956",
@@ -362,7 +362,7 @@ const de: LandingDict = {
       },
       {
         "title": "Erkennt Fluten in Sekunden",
-        "body": "Sampling-korrigierte Grenzwerte für Pakete, Bits und Flows pro Sekunde über ein gleitendes Fenster. Auf einem Apple M3 Max zählt ein Kern etwa 10M Flows/s, acht Kerne etwa 24M."
+        "body": "Sampling-korrigierte Grenzwerte für Pakete, Bits und Flows pro Sekunde über ein gleitendes Fenster."
       },
       {
         "title": "Blackhole — oder nur den Angriff verwerfen",
@@ -505,7 +505,7 @@ const fr: LandingDict = {
     ]
   },
   "stats": [
-    "~10M flux/s sur un cœur",
+    "NetFlow · IPFIX · sFlow",
     "Détection en quelques secondes",
     "Blackhole IPv4 + IPv6",
     "FlowSpec RFC 8955/8956",
@@ -545,7 +545,7 @@ const fr: LandingDict = {
       },
       {
         "title": "Repère les floods en quelques secondes",
-        "body": "Limites de paquets, de bits et de flux par seconde sur une fenêtre glissante, corrigées de l'échantillonnage. Sur un Apple M3 Max, un cœur compte environ 10M flux/s, huit cœurs environ 24M."
+        "body": "Limites de paquets, de bits et de flux par seconde sur une fenêtre glissante, corrigées de l'échantillonnage."
       },
       {
         "title": "Trou noir, ou rejeter juste l'attaque",
@@ -688,7 +688,7 @@ const es: LandingDict = {
     ]
   },
   "stats": [
-    "~10M flujos/s en un núcleo",
+    "NetFlow · IPFIX · sFlow",
     "Detecta en segundos",
     "Blackhole IPv4 + IPv6",
     "FlowSpec RFC 8955/8956",
@@ -728,7 +728,7 @@ const es: LandingDict = {
       },
       {
         "title": "Detecta avalanchas en segundos",
-        "body": "Límites de paquetes, bits y flujos por segundo sobre una ventana deslizante, corregidos por muestreo. En un Apple M3 Max, un núcleo cuenta unos 10M flujos/s y ocho núcleos, unos 24M."
+        "body": "Límites de paquetes, bits y flujos por segundo sobre una ventana deslizante, corregidos por muestreo."
       },
       {
         "title": "Blackhole, o descartar solo el ataque",
