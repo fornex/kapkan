@@ -19,6 +19,15 @@ security-relevant.
 
 ## [Unreleased]
 
+### Added
+
+- **packaging:** the release archive and the `.deb`/`.rpm` now carry the edge node's systemd
+  unit and annotated config — `deploy/kapkan-edge.service` and `deploy/edge.example.yaml` in the
+  archive, `/usr/share/kapkan/` in the packages (copied into place on the boxes that run
+  `kapkan edge`, never installed on every host, like the data-plane drop-in). 1.8.0's notes said
+  they shipped; `.goreleaser.yaml` never listed them. The example's `quic` comments no longer say
+  that nothing renders HTTP/3 — that changed in 1.8.0 (E5.3).
+
 ### Security
 
 - **Built with Go 1.26.10**, which fixes twelve reachable standard-library advisories
@@ -28,7 +37,7 @@ security-relevant.
   carries the `x/net/http2` side of five of them. No code change; the toolchain floor in
   `engine/go.mod` moves from 1.26.6 to 1.26.10. The govulncheck gate caught them on the first CI
   run after their publication; the only advisory left is the accepted GO-2026-4736 (gobgp
-  NEXT_HOP, no upstream fix).
+  NEXT_HOP, fixed upstream only in the v4 line, from 4.4.0; the engine is still on v3).
 
 ### Fixed
 
@@ -39,12 +48,6 @@ security-relevant.
   `TTL` clause, and it lacks production `LowCardinality`, query parameters and
   `toStartOfInterval` besides). The floor, and what each release of it is for, is on the
   Storage page.
-- **packaging:** the release archive and the `.deb`/`.rpm` now carry the edge node's systemd
-  unit and annotated config — `deploy/kapkan-edge.service` and `deploy/edge.example.yaml` in the
-  archive, `/usr/share/kapkan/` in the packages (copied into place on the boxes that run
-  `kapkan edge`, never installed on every host, like the data-plane drop-in). 1.8.0's notes said
-  they shipped; `.goreleaser.yaml` never listed them. The example's `quic` comments no longer say
-  that nothing renders HTTP/3 — that changed in 1.8.0 (E5.3).
 
 ## [1.8.0] - 2026-09-18
 

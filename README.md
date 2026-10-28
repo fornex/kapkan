@@ -1203,8 +1203,10 @@ sudo install -m 0640 -o kapkan -g kapkan deploy/config.example.yaml /etc/kapkan/
 echo "KAPKAN_API_TOKEN=$(openssl rand -hex 32)" | sudo install -m 0600 /dev/stdin /etc/kapkan/kapkan.env   # inert until api.token_env names it
 sudo install -m 0644 deploy/kapkan.service /etc/systemd/system/kapkan.service
 sudo systemctl daemon-reload && sudo systemctl enable --now kapkan
-sudo systemctl reload kapkan   # SIGHUP: hot-reload config
 ```
+
+Later edits to the config apply with `sudo systemctl reload kapkan`, a hot reload (`SIGHUP`) that
+keeps flow state. Run it once the daemon is up, never chained to the start.
 
 The unit is hardened for BGP-only boxes and deliberately does not grant what the XDP data
 plane needs: on a host with a `dataplane` block, also install the shipped drop-in, or the
