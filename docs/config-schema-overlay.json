@@ -5,6 +5,7 @@
 
     "listen.sflow": { "tier": "basic", "format": "hostport", "reloadImmutable": true, "description": "UDP listen address for sFlow, e.g. \":6343\". At least one of sflow/netflow is required." },
     "listen.netflow": { "tier": "basic", "format": "hostport", "reloadImmutable": true, "description": "UDP listen address for NetFlow v5/v9 and IPFIX (shared socket), e.g. \":2055\"." },
+    "listen.queue": { "tier": "advanced", "reloadImmutable": true, "defaultWhenAbsent": 16384, "description": "Datagrams each listener holds while its decode workers are behind (1..1048576, default 16384); past that it drops them and counts them in kapkan_ingest_dropped_flows_total. Every queued datagram takes about 10 KB of memory, so the default costs up to ~160 MB per listener — count it in a MemoryMax=." },
 
     "sampling.default_rate": { "tier": "basic", "description": "Sampling rate assumed when an exporter does not report its own. Wrong here scales EVERY threshold — set it to what your routers actually export." },
     "sampling.boundary_debug": { "tier": "advanced", "description": "Temporarily export the kapkan_engine_boundary_debug_bytes_total{exporter,iface,dir} metric (bytes toward/from protected hosts per exporter+interface) to discover which interfaces are the external boundary. Not cardinality-bounded — enable briefly, then turn off." },

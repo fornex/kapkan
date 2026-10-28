@@ -671,6 +671,63 @@ func TestReloadAcceptsUnchangedAndDisabledSampleEdits(t *testing.T) {
 	}
 }
 
+// listen.queue sizes each listener's receive queue, and every queued datagram
+// holds about 10 KB, so the default is a memory budget and a stray digit must
+// not slip through.
+func TestListenQueue(t *testing.T) {
+	withQueue := func(v string) string {
+		return strings.Replace(validYAML, "  netflow: \":2055\"\n", "  netflow: \":2055\"\n  queue: "+v+"\n", 1)
+	}
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.Listen.Queue != 16384 {
+		t.Errorf("listen.queue absent resolved to %d, want 16384", cfg.Listen.Queue)
+	}
+	for v, want := range map[string]int{"0": 16384, "1": 1, "4096": 4096, "1048576": 1048576} {
+		cfg, err := Parse([]byte(withQueue(v)))
+		if err != nil {
+			t.Errorf("listen.queue: %s: Parse() error = %v", v, err)
+			continue
+		}
+		if cfg.Listen.Queue != want {
+			t.Errorf("listen.queue: %s resolved to %d, want %d", v, cfg.Listen.Queue, want)
+		}
+	}
+	for _, v := range []string{"-1", "1048577"} {
+		if _, err := Parse([]byte(withQueue(v))); err == nil || !strings.Contains(err.Error(), "listen.queue") {
+			t.Errorf("listen.queue: %s: error = %v, want bound rejection", v, err)
+		}
+	}
+}
+
+// The receivers are sized when they start, so a new queue needs a restart;
+// spelling out the default is the same queue and reloads.
+func TestReloadListenQueue(t *testing.T) {
+	path := writeTemp(t, validYAML)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	store := NewStore(path, cfg)
+	withQueue := func(v string) []byte {
+		return []byte(strings.Replace(validYAML, "  netflow: \":2055\"\n", "  netflow: \":2055\"\n  queue: "+v+"\n", 1))
+	}
+	if err := os.WriteFile(path, withQueue("16384"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reload(); err != nil {
+		t.Errorf("Reload() spelling out the default queue: error = %v, want success", err)
+	}
+	if err := os.WriteFile(path, withQueue("4096"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Reload(); err == nil || !strings.Contains(err.Error(), "queue") {
+		t.Errorf("Reload() with a queue change: error = %v, want restart-required rejection", err)
+	}
+}
+
 func TestBufferFlowsUpperBound(t *testing.T) {
 	if _, err := Parse([]byte(validYAML + "\nsamples:\n  buffer_flows: 16777216\n")); err == nil || !strings.Contains(err.Error(), "buffer_flows") {
 		t.Errorf("oversized buffer_flows: error = %v, want bound rejection", err)

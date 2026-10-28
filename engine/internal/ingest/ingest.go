@@ -89,19 +89,24 @@ func (dropCounter) Dropped(utils.Message) { metrics.DroppedFlowsTotal.Inc() }
 func (i *Ingester) Start() error {
 	cfg := i.store.Get()
 	if cfg.Listen.SFlow != "" {
-		if err := i.startReceiver("sflow", cfg.Listen.SFlow, utils.NewSFlowPipe(&utils.PipeConfig{Producer: i.prod})); err != nil {
+		if err := i.startReceiver("sflow", cfg.Listen.SFlow, cfg.Listen.Queue, utils.NewSFlowPipe(&utils.PipeConfig{Producer: i.prod})); err != nil {
 			return err
 		}
 	}
 	if cfg.Listen.NetFlow != "" {
-		if err := i.startReceiver("netflow", cfg.Listen.NetFlow, utils.NewNetFlowPipe(&utils.PipeConfig{Producer: i.prod})); err != nil {
+		if err := i.startReceiver("netflow", cfg.Listen.NetFlow, cfg.Listen.Queue, utils.NewNetFlowPipe(&utils.PipeConfig{Producer: i.prod})); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (i *Ingester) startReceiver(family, listen string, pipe utils.FlowPipe) error {
+// startReceiver binds one listener. queue (listen.queue) is how many datagrams
+// wait for the decode workers before the receiver drops, and it is a memory
+// bound too: every queued datagram pins one of goflow2's pooled 9000-byte
+// receive buffers (utils/udp.go packetPool), whatever its real size, so a full
+// queue holds queue × ~10 KB.
+func (i *Ingester) startReceiver(family, listen string, queue int, pipe utils.FlowPipe) error {
 	host, port, err := splitListen(listen)
 	if err != nil {
 		return fmt.Errorf("%s listen %q: %w", family, listen, err)
@@ -109,7 +114,7 @@ func (i *Ingester) startReceiver(family, listen string, pipe utils.FlowPipe) err
 	recv, err := utils.NewUDPReceiver(&utils.UDPReceiverConfig{
 		Sockets:          2,
 		Workers:          4,
-		QueueSize:        1_000_000, // 0 would mean an UNBUFFERED dispatch channel
+		QueueSize:        queue, // validated >= 1: 0 would mean an UNBUFFERED dispatch channel
 		ReceiverCallback: dropCounter{},
 	})
 	if err != nil {

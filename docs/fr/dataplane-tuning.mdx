@@ -348,6 +348,12 @@ non, et la table des seaux par source domine le total. La mémoire des maps est 
 mémoire du service (noyau 5.11+), donc si vous définissez `MemoryMax=` sur l'unité, dimensionnez-le
 en tenant compte des maps.
 
+Les maps ne sont pas tout le budget. La file de réception de chaque écouteur de télémétrie contient
+jusqu'à [`listen.queue`](/docs/configuration) datagrammes d'environ 10 Ko chacun — jusqu'à ~160 Mo
+par écouteur avec la valeur par défaut — et elle se remplit précisément quand la télémétrie arrive
+plus vite qu'elle n'est décodée, c'est-à-dire pendant une attaque. Avec une limite qui ne laisse pas
+de place aux files, l'OOM killer tue le daemon avant que l'écouteur ne rejette un seul datagramme.
+
 ## Voir aussi
 
 - [Exploitation & surveillance](/docs/dataplane-operate) — les compteurs et alertes que ces réglages

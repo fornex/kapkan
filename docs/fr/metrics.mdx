@@ -212,6 +212,12 @@ supposer :
 sum(kapkan_dataplane_map_bytes)
 ```
 
+Les maps ne sont pas tout. La file de réception de chaque écouteur de télémétrie contient jusqu'à
+[`listen.queue`](/docs/configuration) datagrammes d'environ 10 Ko chacun (jusqu'à ~160 Mo par
+écouteur avec la valeur par défaut) tant que ses workers de décodage sont en retard ; prévoyez donc
+aussi les files : un `MemoryMax=` où elles ne tiennent pas tue le daemon avant que
+`kapkan_ingest_dropped_flows_total` ne bouge.
+
 ### Paquets rejetés par blocage
 
 Ce que le noyau a rejeté **pour une victime donnée** ne figure délibérément pas ici. `/metrics`

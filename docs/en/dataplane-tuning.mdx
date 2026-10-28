@@ -343,6 +343,12 @@ Because the maps are allocated up front, the memory is reserved whether or not a
 way, and the per-source bucket table dominates the total. Map memory is charged to the service's
 memory cgroup (kernel 5.11+), so if you set `MemoryMax=` on the unit, size it with the maps in mind.
 
+The maps are not the whole budget. Each telemetry listener's receive queue holds up to
+[`listen.queue`](/docs/configuration) datagrams at about 10 KB each — up to ~160 MB per listener at
+the default — and it fills exactly when telemetry outruns decoding, which is to say under attack. A
+limit that leaves no room for the queues gets the daemon OOM-killed before the listener drops a
+single datagram.
+
 ## Related
 
 - [Operating & monitoring](/docs/dataplane-operate) — the counters and alerts these settings drive.

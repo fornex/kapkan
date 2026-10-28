@@ -72,6 +72,7 @@ reference, key by key, is [kapkan.io/docs/configuration](https://kapkan.io/docs/
 | --- | --- |
 | `dry_run` | When true (default), blackholes are logged and tracked but **never announced**. |
 | `listen.sflow` / `listen.netflow` | UDP listen addresses. NetFlow v5/v9 and IPFIX share the netflow socket. At least one is required. |
+| `listen.queue` | Datagrams each listener holds while its decode workers are behind (default 16384, range 1–1048576); past that they are dropped and counted in `kapkan_ingest_dropped_flows_total`. Each queued datagram takes about 10 KB of memory, so the default costs up to ~160 MB per listener — count it in a systemd `MemoryMax=`. Restart required. |
 | `sampling.default_rate` | Sampling rate used when an exporter does not report its own (must be ≥ 1). |
 | `sampling.boundary[]` | Optional per-exporter boundary interfaces (`exporter`, `external_ifindexes`, `egress_sampling`). Telemetry from several vantage points counts the same packet once per exporter that sees it; naming the edge interfaces makes kapkan count traffic only where it crosses your border. `sampling.boundary_debug: true` temporarily emits a per-exporter/per-interface byte breakdown to find those ifIndexes. |
 | `flow_sources` | Optional allowlist of exporter addresses. Telemetry arrives over unauthenticated UDP, so the source address is spoofable: with this list set, only listed exporters get their own `exporter` metric label and everything else buckets under `other`, bounding metric cardinality. Does not affect detection. |

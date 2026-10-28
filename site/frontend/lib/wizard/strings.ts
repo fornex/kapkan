@@ -792,6 +792,7 @@ export const wizardLabels: Record<Locale, Record<string, string>> = {
   en: {
     "listen.sflow": "sFlow listen address",
     "listen.netflow": "NetFlow / IPFIX listen address",
+    "listen.queue": "Receive queue (datagrams)",
     "sampling.default_rate": "Default sampling rate",
     networks: "Protected prefixes",
     protected_whitelist: "Never-ban addresses",
@@ -909,6 +910,7 @@ export const wizardLabels: Record<Locale, Record<string, string>> = {
   ru: {
     "listen.sflow": "Адрес приёма sFlow",
     "listen.netflow": "Адрес приёма NetFlow / IPFIX",
+    "listen.queue": "Очередь приёма (датаграмм)",
     "sampling.default_rate": "Частота сэмплирования по умолчанию",
     networks: "Защищаемые префиксы",
     protected_whitelist: "Никогда не банить",
@@ -1026,6 +1028,7 @@ export const wizardLabels: Record<Locale, Record<string, string>> = {
   de: {
     "listen.sflow": "sFlow-Empfangsadresse",
     "listen.netflow": "NetFlow-/IPFIX-Empfangsadresse",
+    "listen.queue": "Empfangswarteschlange (Datagramme)",
     "sampling.default_rate": "Standard-Sampling-Rate",
     networks: "Geschützte Präfixe",
     protected_whitelist: "Nie bannen",
@@ -1143,6 +1146,7 @@ export const wizardLabels: Record<Locale, Record<string, string>> = {
   fr: {
     "listen.sflow": "Adresse d'écoute sFlow",
     "listen.netflow": "Adresse d'écoute NetFlow / IPFIX",
+    "listen.queue": "File de réception (datagrammes)",
     "sampling.default_rate": "Taux d'échantillonnage par défaut",
     networks: "Préfixes protégés",
     protected_whitelist: "Ne jamais bannir",
@@ -1260,6 +1264,7 @@ export const wizardLabels: Record<Locale, Record<string, string>> = {
   es: {
     "listen.sflow": "Dirección de escucha sFlow",
     "listen.netflow": "Dirección de escucha NetFlow / IPFIX",
+    "listen.queue": "Cola de recepción (datagramas)",
     "sampling.default_rate": "Tasa de muestreo por defecto",
     networks: "Prefijos protegidos",
     protected_whitelist: "Nunca banear",
@@ -1383,6 +1388,7 @@ export const wizardHelp: Partial<Record<Locale, Record<string, string>>> = {
     dry_run: "Если включено (по умолчанию, в т.ч. при отсутствии ключа), митигация имитируется и никогда не анонсируется. Держите включённым, пока детект не выверен на живой телеметрии.",
     "listen.sflow": 'UDP-адрес для приёма sFlow, напр. ":6343". Нужен хотя бы один из sflow/netflow.',
     "listen.netflow": 'UDP-адрес для NetFlow v5/v9 и IPFIX (общий сокет), напр. ":2055".',
+    "listen.queue": "Сколько датаграмм слушатель держит, пока его обработчики не успевают (1..1048576, по умолчанию 16384); сверх этого он их отбрасывает и считает в kapkan_ingest_dropped_flows_total. Каждая датаграмма в очереди занимает около 10 КБ памяти, так что по умолчанию это до ~160 МБ на слушатель — заложите их в MemoryMax=.",
     "sampling.default_rate": "Частота сэмплирования, когда экспортёр не сообщает свою. Ошибка здесь масштабирует ВСЕ пороги — ставьте значение, которое реально экспортируют роутеры.",
     networks: "Защищаемые префиксы. Детект применяется только внутри них; они не должны пересекаться.",
     protected_whitelist: "Адреса, которые никогда не банятся независимо от трафика (шлюзы, NS).",
@@ -1481,6 +1487,7 @@ export const wizardHelp: Partial<Record<Locale, Record<string, string>>> = {
     dry_run: "Wenn aktiv (Standard, auch bei fehlendem Schlüssel), wird Mitigation simuliert und nie angekündigt. Lassen Sie es an, bis die Erkennung an Live-Telemetrie validiert ist.",
     "listen.sflow": 'UDP-Adresse für sFlow, z. B. ":6343". Mindestens eines von sflow/netflow ist nötig.',
     "listen.netflow": 'UDP-Adresse für NetFlow v5/v9 und IPFIX (gemeinsamer Socket), z. B. ":2055".',
+    "listen.queue": "Datagramme, die ein Listener zurückhält, solange seine Decoder-Worker nicht nachkommen (1..1048576, Standard 16384); darüber hinaus verwirft er sie und zählt sie in kapkan_ingest_dropped_flows_total. Jedes wartende Datagramm belegt etwa 10 KB Speicher, der Standard also bis zu ~160 MB pro Listener — rechnen Sie das in ein MemoryMax= ein.",
     "sampling.default_rate": "Sampling-Rate, wenn ein Exporter seine eigene nicht meldet. Ein Fehler hier skaliert JEDEN Schwellenwert — setzen Sie, was Ihre Router tatsächlich exportieren.",
     networks: "Geschützte Präfixe. Erkennung gilt nur innerhalb davon; sie dürfen sich nicht überlappen.",
     protected_whitelist: "Adressen, die nie gebannt werden, unabhängig vom Verkehr (Gateways, Nameserver).",
@@ -1579,6 +1586,7 @@ export const wizardHelp: Partial<Record<Locale, Record<string, string>>> = {
     dry_run: "Si activé (par défaut, y compris clé absente), l'atténuation est simulée et jamais annoncée. Gardez-le activé jusqu'à validation de la détection sur la télémétrie réelle.",
     "listen.sflow": 'Adresse UDP d\'écoute pour sFlow, p. ex. ":6343". Au moins un de sflow/netflow est requis.',
     "listen.netflow": 'Adresse UDP pour NetFlow v5/v9 et IPFIX (socket partagé), p. ex. ":2055".',
+    "listen.queue": "Datagrammes qu'un écouteur garde en attente tant que ses workers de décodage sont en retard (1..1048576, défaut 16384) ; au-delà, il les rejette et les compte dans kapkan_ingest_dropped_flows_total. Chaque datagramme en file occupe environ 10 Ko de mémoire : le défaut coûte jusqu'à ~160 Mo par écouteur — à prévoir dans un MemoryMax=.",
     "sampling.default_rate": "Taux d'échantillonnage supposé quand un exporteur ne signale pas le sien. Une erreur ici met à l'échelle TOUS les seuils — mettez ce que vos routeurs exportent réellement.",
     networks: "Préfixes protégés. La détection ne s'applique qu'à l'intérieur ; ils ne doivent pas se chevaucher.",
     protected_whitelist: "Adresses jamais bannies, quel que soit le trafic (passerelles, serveurs de noms).",
@@ -1677,6 +1685,7 @@ export const wizardHelp: Partial<Record<Locale, Record<string, string>>> = {
     dry_run: "Si está activo (por defecto, incluso sin la clave), la mitigación se simula y nunca se anuncia. Mantenlo activado hasta validar la detección con telemetría real.",
     "listen.sflow": 'Dirección UDP de escucha para sFlow, p. ej. ":6343". Se requiere al menos uno de sflow/netflow.',
     "listen.netflow": 'Dirección UDP para NetFlow v5/v9 e IPFIX (socket compartido), p. ej. ":2055".',
+    "listen.queue": "Datagramas que cada listener retiene mientras sus workers de decodificación van por detrás (1..1048576, por defecto 16384); por encima los descarta y los cuenta en kapkan_ingest_dropped_flows_total. Cada datagrama en cola ocupa unos 10 KB de memoria, así que el valor por defecto cuesta hasta ~160 MB por listener: inclúyelo en un MemoryMax=.",
     "sampling.default_rate": "Tasa de muestreo asumida cuando un exportador no informa la suya. Un error aquí escala TODOS los umbrales — pon lo que tus routers exportan realmente.",
     networks: "Prefijos protegidos. La detección solo aplica dentro de ellos; no deben solaparse.",
     protected_whitelist: "Direcciones que nunca se banean, sin importar el tráfico (gateways, servidores de nombres).",

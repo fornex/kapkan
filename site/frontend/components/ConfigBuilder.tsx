@@ -108,6 +108,7 @@ const FIELDS: Record<SectionId, FieldDef[]> = {
   telemetry: [
     { kind: "text", key: "sflow", path: "listen.sflow", mono: true },
     { kind: "text", key: "netflow", path: "listen.netflow", mono: true },
+    { kind: "number", key: "listen_queue", path: "listen.queue", advanced: true },
     { kind: "number", key: "default_rate", path: "sampling.default_rate", required: true },
     { kind: "bool", key: "boundary_debug", path: "sampling.boundary_debug", advanced: true },
     { kind: "boundary", key: "boundary", path: "sampling.boundary", advanced: true },
