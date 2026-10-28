@@ -38,6 +38,14 @@ security-relevant.
   `kapkan edge`, never installed on every host, like the data-plane drop-in). 1.8.0's notes said
   they shipped; `.goreleaser.yaml` never listed them. The example's `quic` comments no longer say
   that nothing renders HTTP/3 — that changed in 1.8.0 (E5.3).
+- **ingest benchmarks:** `BenchmarkIngestSFlow` and `BenchmarkIngestNetFlowV9`, run by
+  `make bench`, time a datagram through goflow2's decoder, the conversion and the fold —
+  everything but the socket — on one decode worker and on a listener's four, over datagrams
+  shaped like a switch's sFlow and a router's NetFlow v9. How it works → Performance and the
+  README publish what they measure: on an Apple M3 Max one core ingests about 0.6M sFlow or
+  0.33M NetFlow v9 flows/sec, and decoding, not the fold, is most of the cost. `pkg/flowgen`
+  gains the options that shape those datagrams: a router's 18-element v9 template, data-only
+  v9 datagrams and sFlow extended switch records.
 
 ### Fixed
 
