@@ -185,7 +185,7 @@ cae en el rango de un aviso de seguridad de QUIC publicado recibe una advertenci
 entonces la disponibilidad como `node_off` y deja de repetir el aviso, mientras el informe del nodo
 sigue llevándolo como un hecho sobre la build.
 
-Instala la unidad incluida, `deploy/kapkan-edge.service`, y arráncala:
+Instala la unidad incluida — `deploy/kapkan-edge.service` en el archivo de la versión, `/usr/share/kapkan/kapkan-edge.service` desde un paquete o, con la 1.8.0, que no traía ninguno de los dos, [desde la etiqueta v1.8.0](https://github.com/fornex/kapkan/blob/v1.8.0/engine/deploy/kapkan-edge.service) — y arráncala:
 
 ```sh
 install -m 644 deploy/kapkan-edge.service /etc/systemd/system/
@@ -277,6 +277,10 @@ emisión se serializa por zona a través del turno del cerebro para que una flot
 tarde el límite de certificados duplicados de una CA, y la renovación lleva jitter por nodo. Todo
 ello es orientativo: con el cerebro ausente, cada nodo sigue renovando por su cuenta.
 
+El lado del enrutamiento de esa misma flota — la VIP en `lo`, la ruta ECMP del router, qué forma de
+hash elegir y qué le hace a un techo de tasa por nodo, y según qué señal retirar un nodo cuando
+muere — se explica en [Una dirección, muchos nodos](/docs/edge-anycast).
+
 ## Solución de problemas
 
 | Síntoma | Causa y solución |
@@ -304,6 +308,7 @@ ello es orientativo: con el cerebro ausente, cada nodo sigue renovando por su cu
 ## Relacionado
 
 - [Nodos edge](/docs/edge) — cómo funciona y qué falla y cómo
+- [Una dirección, muchos nodos](/docs/edge-anycast) — varios nodos detrás de una sola dirección anycast/ECMP
 - [Referencia de zonas](/docs/zones)
 - [`kapkan edge`](/docs/cli#edge) — flags y cada clave de `edge.yaml`
 - [El canal edge](/docs/api#el-canal-edge)

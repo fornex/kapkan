@@ -23,9 +23,10 @@ first line to look for when the tables never appear.
 
 <Callout type="info" title="Best-effort, never blocks detection">
 Persistence runs off a bounded queue with a non-blocking send. A ClickHouse that cannot take rows loses them
-rather than stalling the engine's hot path — a stalled sink fills the queue and counts
-`result="dropped"` in `kapkan_storage_rows_total`, a down one fails each insert fast and counts
-`result="error"` (see [Backpressure](#backpressure)).
+rather than stalling the engine's hot path — a down sink fails each insert fast and counts
+`result="error"` in `kapkan_storage_rows_total`; a stalled one times each insert out, also
+`result="error"`, while the rows behind it fill the queue and count `result="dropped"` (see
+[Backpressure](#backpressure)).
 </Callout>
 
 ## Enabling
@@ -85,9 +86,13 @@ On start it idempotently creates six MergeTree tables:
 
 Each carries a `ttl_days` per-row TTL, so retention is bounded without operator intervention.
 
-The writer credential needs `CREATE` (database + tables) and `INSERT` rights on first run — and
-again on the first start of a release that adds tables (this one adds the three `edge_*`
-tables); between those, `INSERT` is enough. Schema init attempts every statement and logs each
+One credential both writes and reads: the history reads behind `/api/v1/traffic`,
+`/api/v1/audit`, `/api/v1/edge/history`, `/api/v1/edge/history/sources` and `/api/v1/edge/events`
+run under it too, and answer
+`502` without `SELECT`. It needs `CREATE` (database + tables), `INSERT` and `SELECT` rights on
+first run — `CREATE` again on the first start of a release that adds tables (this one adds the
+three `edge_*` tables); between those, `INSERT` and `SELECT` are enough. Schema init attempts
+every statement and logs each
 refusal on its own (a credential that may `INSERT` but not `CREATE` sees those lines on every
 start; they are harmless once the tables exist), so the three edge tables and the column upgrades
 below are tried even when an earlier statement was refused, and an upgrade whose credential can
@@ -98,8 +103,8 @@ the statement in `engine/internal/storage/edge_rows.go`.
 The `attack_events` table's `reason` column holds the compact JSON of the detection
 [reason](/docs/detection) — why the attack fired (threshold provenance,
 warm-up, protocol shares) — and is empty on the attack-ended row. Existing deployments gain the
-column automatically: schema init runs an `ADD COLUMN IF NOT EXISTS`, skipped silently if the
-writer credential lacks `ALTER` rights (fresh installs already have it).
+column automatically: schema init runs an `ADD COLUMN IF NOT EXISTS`, skipped with a
+`clickhouse: column upgrade skipped` warning if the writer credential lacks `ALTER` rights (fresh installs already have it).
 
 ## Edge history
 
@@ -182,7 +187,8 @@ which of the two losses it was, and they do not mean the same thing:
 
 - `result="error"` — the insert itself failed. The batch is logged (`clickhouse insert failed`)
   and discarded. **A ClickHouse that is down counts here**, not under `dropped`: a refused
-  connection fails immediately, so each flush empties the queue as fast as it fills.
+  connection fails immediately, so each flush empties the queue as fast as it fills. An insert
+  that outlives its send timeout against a stalled server counts here too.
 - `result="dropped"` — the queue was full when a row was handed over, so it never reached an
   insert. That needs a sink that *stalls* rather than refuses — a server holding the connection,
   a network dropping the packets, a flush waiting out its timeout — or a burst larger than

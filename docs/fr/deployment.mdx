@@ -210,7 +210,7 @@ délibérément aucun délai d'écriture, pour la même raison.
 
 ## Compilation depuis les sources
 
-La compilation requiert **Go 1.26 ou une version plus récente**. Le `Makefile` fournit les cibles
+La compilation requiert **Go 1.26.10 ou une version plus récente** — la ligne `go` de `engine/go.mod`, relevée à chaque version de sécurité ; avec `GOTOOLCHAIN=auto` (la valeur par défaut), un Go 1.26 plus ancien la télécharge à la première compilation. Le `Makefile` fournit les cibles
 standard :
 
 ```sh

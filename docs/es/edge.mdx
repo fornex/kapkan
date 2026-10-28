@@ -12,7 +12,8 @@ los certificados de las zonas en la propia máquina, genera la configuración de
 en cada petición si deja pasar a un cliente — o si primero le pide que demuestre que es un
 navegador — e informa de vuelta. Kapkan **nunca reenvía los bytes de un cliente** — nginx termina el
 TLS y hace de proxy hacia tus orígenes; Kapkan le dice qué servir y, para cada petición, si servirla.
-Tú aportas la red (anycast, tránsito, DNS) y las máquinas; Kapkan aporta el bucle de protección.
+Tú aportas la red ([anycast](/docs/edge-anycast), tránsito, DNS) y las máquinas; Kapkan aporta el
+bucle de protección.
 </Callout>
 
 En términos simples: enumeras tus sitios web (zonas) en un archivo en el cerebro, apuntas su DNS a
@@ -215,9 +216,10 @@ la palanca *previsualiza* en lugar de actuar) y cada nodo configurado con su vit
 acción de operador (rango `operator`; un operator [acotado a un tenant](/docs/multi-tenancy) puede
 accionarla solo en sus propias zonas — cualquier otra zona es `404 unknown zone` para él), auditada
 como `edge_challenge`, llamada
-`override` por [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) — la vista
-Edge de la consola muestra el modo que los nodos aplican bajo ella (`manual`, `auto`), no la
-palanca en sí — y guardada en la memoria del cerebro como el coordinador de emisión: una
+`override` por [`GET /api/v1/edge/zones/status`](/docs/api#get-apiv1edgezonesstatus) — la
+[vista Edge](/docs/dashboard#qué-muestra) de la consola permite accionarla desde la columna de
+desafío de cualquier zona en `policy.mode: decide` y muestra allí la que esté en curso con el tiempo
+que le queda — y guardada en la memoria del cerebro como el coordinador de emisión: una
 herramienta para incidentes, que desaparece tras un reinicio del cerebro (los nodos la descartan
 con el primer documento que sirve el cerebro reiniciado; acciónala de nuevo). El `dry_run` propio
 del cerebro no la condiciona: accionar la palanca es una edición de política; la solo observación
@@ -359,7 +361,8 @@ máquina.
 **Lo que nginx no puede hacer, y las topologías que Kapkan admite.** nginx enruta una conexión QUIC
 por el socket en el que llegó, no por el identificador de conexión (connection ID), así que:
 
-- *Admitido:* un nodo por dirección; varios nodos detrás de un ECMP o un hash anycast por la
+- *Admitido:* un nodo por dirección; varios nodos detrás de un
+  [ECMP o un hash anycast](/docs/edge-anycast#en-qué-nodo-aterriza-un-cliente-el-hash) por la
   cuádrupla — un cliente cuya dirección cambia (Wi-Fi a LTE, una revinculación de NAT) aterriza en
   un nodo que no conoce la conexión y se reconecta; nada se rompe, bastan claves de host por nodo;
   un plano de datos de Kapkan delante del nodo o en él mismo, para el techo y el corte.
@@ -368,8 +371,11 @@ por el socket en el que llegó, no por el identificador de conexión (connection
   contexto `main` de nginx, solo lleva una conexión entre los workers de una misma máquina); **la
   reanudación de sesión TLS entre nodos** — una sesión es una entrada con estado en la caché propia
   del nodo, ningún ticket sin estado la transporta y ninguna clave de tickets se comparte, así que
-  un cliente que cambia de nodo hace un handshake completo (raro con un hash por la cuádrupla; las
-  claves de ticket compartidas se investigaron en E5 y no se ofrecen — ver edge-spec §3). En el nodo
+  un cliente que cambia de nodo hace un handshake completo (con un hash por la cuádrupla, una
+  conexión nueva aterriza en un nodo distinto en aproximadamente (N−1)/N de los casos — una de cada
+  dos con dos nodos; con un hash por direcciones, solo cuando cambia la propia dirección del
+  cliente — ver [las formas de hash](/docs/edge-anycast#en-qué-nodo-aterriza-un-cliente-el-hash);
+  las claves de ticket compartidas se investigaron en E5 y no se ofrecen — ver edge-spec §3). En el nodo
   que la emitió, una sesión se reanuda con normalidad: la caché compartida está declarada también en
   el servidor por defecto catch-all, que es donde nginx busca las sesiones. Tampoco se admiten:
   WebSocket sobre HTTP/3 (nginx no
@@ -477,7 +483,7 @@ una zona que el nodo ya no sirve.
 | Documento rechazado (el renderizador, o `nginx -t` falla) | La generación anterior sigue sirviendo; el nodo se mantiene sano pero con `converged: false`, reporta el ETag del documento **renderizado** (no el aceptado) y reintenta localmente cada 1 → 10 minutos hasta que se aplique o llegue un documento más nuevo. La ruta rápida — tasas, peldaños, la palanca — se aplica mientras tanto desde el documento **aceptado**. |
 | nginx muere | systemd lo reinicia; con `terminator.pid_file` configurado, el nodo reporta `alive: false` y responde `503` en su `/healthz` mientras tanto. Kapkan nunca supervisa el terminador por sí mismo. |
 | Certificado no renovable | El certificado actual sirve hasta que caduca; `kapkan_edge_cert_not_after_seconds` es la alarma a T−30 d; tras tres fallos el nodo prueba la CA de respaldo. |
-| El nodo muere | El cerebro ve que el sondeo se detiene (`edge.stale_after_seconds`) y lo muestra en el inventario; desviar el tráfico a otro sitio es tarea de tu red (retirada anycast, DNS). |
+| El nodo muere | El cerebro ve que el sondeo se detiene (`edge.stale_after_seconds`) y lo muestra en el inventario; desviar el tráfico a otro sitio es tarea de tu red ([retirada anycast](/docs/edge-anycast#retirada-qué-dice-retírame), DNS) — y el `alive` del inventario no es la señal por la que retirar; lo es `/healthz` más una sonda TLS local del propio listener del nodo. |
 
 ## Leer el nodo
 
@@ -567,6 +573,7 @@ una zona que el nodo ya no sirve.
 ## Relacionado
 
 - [Instalar un nodo edge](/docs/edge-install) — el lado del cerebro, el lado de nginx, la unidad, pasar a producción
+- [Una dirección, muchos nodos](/docs/edge-anycast) — ECMP y anycast: el hash, los techos por nodo, la retirada
 - [Referencia de zonas](/docs/zones) — cada clave de `zones.yaml`, y qué hace una política con una petición
 - [`kapkan edge`](/docs/cli#edge) — el comando, sus flags y `edge.yaml`
 - [El canal edge](/docs/api#el-canal-edge) — las rutas del cerebro, el estado de las zonas y la palanca

@@ -50,10 +50,10 @@ Kapkan **по умолчанию работает в режиме dry-run**. П�
    (исходный интерфейс, ACL межсетевого экрана).
 
    ```sh
-   # Читайте журналы запущенного демона (Kapkan пишет в stderr, который перехватывает systemd):
+   # Tail the running daemon's logs (Kapkan logs to stderr, which systemd captures):
    journalctl -u kapkan -f | grep "bgp peer state"
 
-   # Только для разработки — запустите экземпляр в foreground (2>&1, так как логи идут в stderr):
+   # Dev only — run a foreground instance instead (2>&1 because logs go to stderr):
    ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
 

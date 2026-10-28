@@ -185,7 +185,7 @@ kapkan edge -config /etc/kapkan/edge.yaml -check
 тогда `-check` называет готовность `node_off` и перестаёт повторять бюллетень, а отчёт узла
 продолжает нести его как факт о сборке.
 
-Установите поставляемый юнит `deploy/kapkan-edge.service` и запустите его:
+Установите поставляемый юнит — `deploy/kapkan-edge.service` в архиве релиза, `/usr/share/kapkan/kapkan-edge.service` из пакета или, для 1.8.0, где его не было ни там, ни там, [из тега v1.8.0](https://github.com/fornex/kapkan/blob/v1.8.0/engine/deploy/kapkan-edge.service) — и запустите его:
 
 ```sh
 install -m 644 deploy/kapkan-edge.service /etc/systemd/system/
@@ -275,6 +275,11 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 по узлам. Всё это вспомогательно: без мозга каждый узел всё равно продлевает сертификат
 самостоятельно.
 
+Всё, что касается маршрутизации того же парка, — VIP на `lo`, ECMP-маршрут на маршрутизаторе,
+какую форму хеширования выбрать и что она делает с потолком частоты на узел и по какому сигналу
+снимать узел с маршрута, когда он умирает, — описано на странице
+[Один адрес, много узлов](/docs/edge-anycast).
+
 ## Устранение неполадок
 
 | Симптом | Причина и исправление |
@@ -302,6 +307,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 ## Связанные разделы
 
 - [Граничные узлы](/docs/edge) — как это работает и что отказывает как
+- [Один адрес, много узлов](/docs/edge-anycast) — несколько узлов за одним адресом anycast/ECMP
 - [Справочник зон](/docs/zones)
 - [`kapkan edge`](/docs/cli#edge) — флаги и каждый ключ `edge.yaml`
 - [Канал граничных узлов](/docs/api#канал-граничных-узлов)

@@ -54,12 +54,12 @@ Satz, den Sie im Kopf behalten sollten: **Das Gehirn verteilt Policy, niemals Ur
 ## Die Topologie
 
 ```
-                     ┌── Strecke A (10.0.1.0/30) ──▶ edge-1  198.51.100.7/32 auf lo
- Client ──▶ Router ──┤                                        kapkan edge · nginx · Token a1
-   198.51.100.7      └── Strecke B (10.0.2.0/30) ──▶ edge-2  198.51.100.7/32 auf lo
-   (eine ECMP-Route,                                          kapkan edge · nginx · Token a2
-    zwei Nexthops)                                                  │
-                                                                    └── Unicast ──▶ Gehirn (API)
+                     ┌── leg A (10.0.1.0/30) ──▶ edge-1   198.51.100.7/32 on lo
+ client ──▶ router ──┤                                      kapkan edge · nginx · token a1
+   198.51.100.7      └── leg B (10.0.2.0/30) ──▶ edge-2   198.51.100.7/32 on lo
+   (one ECMP route,                                         kapkan edge · nginx · token a2
+    two nexthops)                                                │
+                                                                 └── unicast ──▶ brain (API)
 ```
 
 Vier Regeln, und der Aufbau ist genau daraus gebaut:
@@ -67,7 +67,7 @@ Vier Regeln, und der Aufbau ist genau daraus gebaut:
 1. **Die VIP liegt auf dem Loopback jedes Knotens**, als `/32`:
 
    ```sh
-   # auf jedem Knoten hinter der Adresse
+   # on every node behind the address
    ip addr add 198.51.100.7/32 dev lo
    ```
 
@@ -78,7 +78,7 @@ Vier Regeln, und der Aufbau ist genau daraus gebaut:
 2. **Der Router trägt eine Route mit einem Nexthop pro Knoten**, nicht eine Route pro Knoten:
 
    ```sh
-   # auf dem Router davor
+   # on the router in front of them
    ip route replace 198.51.100.7/32 \
      nexthop via 10.0.1.2 dev leg-a weight 1 \
      nexthop via 10.0.2.2 dev leg-b weight 1
@@ -96,7 +96,7 @@ Vier Regeln, und der Aufbau ist genau daraus gebaut:
    aus, und ein gemeinsames Token hinter einer gemeinsamen Adresse macht beides bedeutungslos.
 
    ```yaml
-   # kapkan.yaml auf dem Gehirn
+   # kapkan.yaml on the brain
    api:
      tokens:
        - { name: edge-1, token_env: KAPKAN_EDGE_1_TOKEN, role: agent, node: edge-1 }
@@ -135,7 +135,7 @@ konfigurieren. Zwei Dinge brauchen aber Sorgfalt:
   als Quelle seinen eigenen Routing-Kontext, zuerst die portable Form:
 
   ```sh
-  # eine eigene Tabelle für Verkehr mit der gemeinsamen Adresse als Quelle
+  # a dedicated table for traffic sourced from the shared address
   ip route add default via 10.0.1.1 dev leg-a table 100
   ip rule  add from 198.51.100.7 lookup 100
   ```
@@ -176,9 +176,9 @@ Der Kernel wählt einen Nexthop, indem er das Paket hasht, und **welche Felder e
 sysctl, das Sie setzen**, keine Eigenschaft von Anycast:
 
 ```sh
-sysctl -w net.ipv4.fib_multipath_hash_policy=0   # Layer 3: Quell- und Zieladresse
-sysctl -w net.ipv4.fib_multipath_hash_policy=1   # Layer 4: das 4-Tupel, Ports inklusive
-ip route flush cache                             # der laufende Cache behält die alte Entscheidung
+sysctl -w net.ipv4.fib_multipath_hash_policy=0   # layer 3: source and destination address
+sysctl -w net.ipv4.fib_multipath_hash_policy=1   # layer 4: the 4-tuple, ports included
+ip route flush cache                             # the running cache keeps the old decision
 ```
 
 | Policy | Was sie hasht | Was ein Client bekommt | Wann Sie sie nehmen |
@@ -309,7 +309,7 @@ Terminator-Prozess für lebendig hält, die Probe sagt, dass die Box tatsächlic
 abschließt und die Zone bedient. Auf dem Knoten selbst:
 
 ```sh
-# bedient diese Box die Zone wirklich? — vom Knoten aus, gegen seinen eigenen Listener
+# is this box really serving the zone? — from the node, against its own listener
 curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 -o /dev/null https://shop.example.com/
 ```
 
@@ -357,7 +357,7 @@ Routing unsichtbar, und genau deshalb brauchen Sie einen gesundheitsgetriebenen 
 Der Rückzug selbst ist eine RIB-Änderung und nichts weiter:
 
 ```sh
-# auf dem Router: den kaputten Knoten nicht mehr benutzen
+# on the router: stop using the broken node
 ip route replace 198.51.100.7/32 via 10.0.1.2 dev leg-a
 ip route flush cache
 ```
@@ -399,8 +399,8 @@ hinter `ANYCAST_BGP=1`, also standardmäßig übersprungen und ohne aufgezeichne
 
 ```sh
 #!/bin/sh
-# auf jedem Knoten: ankündigen, solange gesund, zurückziehen, sobald nicht
-# 9101 unten ist der status_listen-Port dieses Knotens — nehmen Sie Ihren eigenen
+# on each node: announce while healthy, withdraw the moment it is not
+# 9101 below is this node's status_listen port — use your own
 while :; do
   if curl -sf -m1 -o /dev/null http://127.0.0.1:9101/healthz \
      && curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 \
@@ -481,23 +481,23 @@ Führen Sie das von einem Client aus, der die Adresse erreicht, und mit einem Op
 Gehirn.
 
 ```sh
-# 1. Eine Route, zwei Nexthops — nicht zwei Routen
+# 1. One route, two nexthops — not two routes
 ip route show 198.51.100.7/32
 
-# 2. Welche Hash-Form tatsächlich gilt
+# 2. The hash form actually in force
 sysctl net.ipv4.fib_multipath_hash_policy
 
-# 3. Beide Knoten bedienen den Namen, jeder mit seinem EIGENEN Zertifikat
+# 3. Both nodes serve the name, each with its OWN certificate
 openssl s_client -connect 10.0.1.2:443 -servername shop.example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha256
 openssl s_client -connect 10.0.2.2:443 -servername shop.example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha256
 
-# 4. Die gemeinsame Adresse bedient, über TCP und über HTTP/3
+# 4. The shared address serves, over TCP and over HTTP/3
 curl -s -o /dev/null -w '%{http_code}\n' https://shop.example.com/
 curl --http3-only -s -o /dev/null -w '%{http_code} %{http_version}\n' https://shop.example.com/
 
-# 5. Jeder Knoten ist lebendig, verteilt und meldet sein eigenes Dokument
+# 5. Every node is alive, placed and reporting its own document
 curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1/edge/nodes
 ```
 
@@ -531,7 +531,7 @@ Es gibt bewusst keinen Produkt-Header, der den Knoten nennt. Wenn Sie für einen
 Fehlersuche einen brauchen, gibt Ihnen die Hintertür der Zonendatei einen:
 
 ```nginx
-# /etc/kapkan/debug-node.conf, referenziert über extra_directives_file einer Zone
+# /etc/kapkan/debug-node.conf, referenced by a zone's extra_directives_file
 add_header X-Kapkan-Node $hostname always;
 ```
 

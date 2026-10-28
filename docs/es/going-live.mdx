@@ -49,10 +49,10 @@ pipeline real, no una simulación.
    firewall).
 
    ```sh
-   # Sigue los logs del daemon en ejecución (Kapkan registra en stderr, que systemd captura):
+   # Tail the running daemon's logs (Kapkan logs to stderr, which systemd captures):
    journalctl -u kapkan -f | grep "bgp peer state"
 
-   # Solo para desarrollo: ejecuta una instancia en primer plano (2>&1 porque los logs van a stderr):
+   # Dev only — run a foreground instance instead (2>&1 because logs go to stderr):
    ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
 

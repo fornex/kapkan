@@ -136,13 +136,15 @@ rápida bajo tasas de flow a escala de ataque:
   atómicos; la ruta por flow evita asignaciones en el heap para que el recolector de basura (garbage
   collector) no estorbe.
 
-Dos cifras describen el objetivo, en distintos ámbitos — preséntalas tal como son:
+Dos cifras la describen, y ambas salen de los mismos benchmarks — `make bench`, que miden la
+acumulación en memoria por flow sobre flows preconstruidos, sin socket ni decodificador en el bucle:
 
-- El README indica que el motor sostiene **≥20M flows/sec/core** en la ruta caliente — el rendimiento
-  por núcleo del paso de acumulación en memoria de forma aislada.
-- El objetivo de ingeniería del proyecto es **≥200k flows/sec en 8 núcleos** para el procesamiento
-  por flow de extremo a extremo — el listón que un cambio en la ruta caliente debe superar en los
-  benchmarks de `make bench` antes de considerarse terminado.
+- **El listón:** un cambio en la ruta caliente solo se da por terminado cuando allí supera
+  **≥200k flows/sec en 8 núcleos**.
+- **Un punto de referencia:** en un Apple M3 Max la acumulación procesa unos
+  **10M flows/sec en un núcleo** y **24M en ocho**.
+
+No se publica ninguna cifra de extremo a extremo — socket, decodificación y acumulación juntos.
 
 <Callout type="info" title="Haz benchmark antes de confiar en ello">
 El motor incluye benchmarks de `go test -bench` (`make bench`). La regla del proyecto es ejecutarlos

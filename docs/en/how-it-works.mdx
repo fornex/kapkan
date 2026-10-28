@@ -134,13 +134,15 @@ under attack-scale flow rates:
 - **Allocation-free hot path.** Buffers are pre-allocated and counters are atomic; the
   per-flow path avoids heap allocations so the garbage collector stays out of the way.
 
-Two figures describe the target, at different scopes — present them as what they are:
+Two figures describe it, and both come from the same benchmarks — `make bench`, which time
+the in-memory per-flow fold over pre-built flows, with no socket and no decoder in the loop:
 
-- The README states the engine sustains **≥20M flows/sec/core** on the hot path — the
-  per-core throughput of the in-memory folding step in isolation.
-- The project's engineering target is **≥200k flows/sec on 8 cores** for end-to-end
-  per-flow processing — the bar a hot-path change must clear in the `make bench` benchmarks
-  before it is considered done.
+- **The bar:** a hot-path change is done only when it clears **≥200k flows/sec on 8 cores**
+  there.
+- **A reference point:** on an Apple M3 Max the fold runs at about **10M flows/sec on one
+  core** and **24M on eight**.
+
+No end-to-end figure — socket, decode and fold together — is published.
 
 <Callout type="info" title="Benchmark before you trust it">
 The engine ships with `go test -bench` benchmarks (`make bench`). The project rule is to run

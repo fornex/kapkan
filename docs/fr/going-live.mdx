@@ -50,10 +50,10 @@ sessions BGP. Vous validez le pipeline réel, pas une simulation.
    du voisin), ou le côté routeur/hôte (interface source, ACL de pare-feu).
 
    ```sh
-   # Suivez les journaux du démon en cours d'exécution (Kapkan journalise sur stderr, capturé par systemd) :
+   # Tail the running daemon's logs (Kapkan logs to stderr, which systemd captures):
    journalctl -u kapkan -f | grep "bgp peer state"
 
-   # Dev uniquement — exécutez plutôt une instance au premier plan (2>&1 car les journaux vont sur stderr) :
+   # Dev only — run a foreground instance instead (2>&1 because logs go to stderr):
    ./kapkan -config /etc/kapkan/config.yaml -log-format text 2>&1 | grep "bgp peer state"
    ```
 
@@ -72,10 +72,10 @@ sessions BGP. Vous validez le pipeline réel, pas une simulation.
    valide, de sorte qu'une faute de frappe ne peut pas vous faire tomber en pleine attaque.
 
    ```sh
-   # Soit en signalant le processus :
+   # Either signal the process:
    sudo systemctl reload kapkan      # sends SIGHUP
 
-   # ...soit en appelant l'API :
+   # ...or call the API:
    curl -s -X POST -H 'Content-Type: application/json' \
      localhost:8080/api/v1/config/reload
    ```
