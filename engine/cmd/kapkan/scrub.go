@@ -9,15 +9,12 @@ package main
 // kapkan.yaml and flags are not read.
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"log/slog"
@@ -80,6 +77,11 @@ func runScrubCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
 }
 
 func runScrubAgent(sc *config.ScrubConfig, token string, log *slog.Logger) error {
+	// Signals first: a SIGHUP while the data plane loads is ignored like any
+	// other, and a SIGTERM then still ends in on_exit below.
+	ctx, stop := roleSignals("scrub", log)
+	defer stop()
+
 	opts, err := dataplane.OptionsFromScrub(sc)
 	if err != nil {
 		return err
@@ -117,8 +119,6 @@ func runScrubAgent(sc *config.ScrubConfig, token string, log *slog.Logger) error
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	log.Info("kapkan scrub running")
 	agent.Run(ctx)
 

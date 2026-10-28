@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestPIDFileRoundTrip(t *testing.T) {
@@ -110,6 +114,97 @@ func TestRunSignalCommandNotRunning(t *testing.T) {
 	}
 	if err := runSignalCommand("reload", path); err == nil || !strings.Contains(err.Error(), "stale pid file") {
 		t.Errorf("stale pid: err = %v, want 'stale pid file'", err)
+	}
+}
+
+// The roles' signal handling under each role's name: SIGHUP is logged and
+// ignored, SIGTERM still stops the role. Only this seam is checked for scrub —
+// running that role whole needs an XDP-capable host for its data plane; edge
+// and nginx-exporter are also run whole by their own tests.
+func TestRoleSignalsIgnoreSIGHUP(t *testing.T) {
+	for _, role := range []string{"scrub", "edge", "nginx-exporter"} {
+		t.Run(role, func(t *testing.T) {
+			var logs syncBuffer
+			ctx, stop := roleSignals(role, slog.New(slog.NewTextHandler(&logs, nil)))
+			defer stop()
+			done := make(chan error, 1)
+			go func() { <-ctx.Done(); done <- nil }()
+
+			hupIgnored(t, role, &logs, done)
+			termStops(t, role, done)
+			stop() // and again by the defer: stop is idempotent
+		})
+	}
+}
+
+// hupIgnored sends this test binary two SIGHUPs — real ones, so a role that
+// left the signal unhandled kills the whole binary — and requires a line for
+// each and a role still running after each: done, which carries the role's
+// return, must stay silent.
+func hupIgnored(t *testing.T, role string, logs *syncBuffer, done <-chan error) {
+	t.Helper()
+	line := "SIGHUP ignored: the " + role + " role has no reload; restart the unit to change its configuration"
+	for n := 1; n <= 2; n++ {
+		raise(t, syscall.SIGHUP)
+		logs.waitFor(t, line, n)
+		select {
+		case err := <-done:
+			t.Fatalf("the %s role returned after SIGHUP (err %v)", role, err)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// termStops sends this test binary SIGTERM and requires the role to return
+// without an error.
+func termStops(t *testing.T, role string, done <-chan error) {
+	t.Helper()
+	raise(t, syscall.SIGTERM)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the %s role failed on SIGTERM: %v", role, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the %s role did not stop on SIGTERM", role)
+	}
+}
+
+func raise(t *testing.T, sig syscall.Signal) {
+	t.Helper()
+	if err := syscall.Kill(os.Getpid(), sig); err != nil {
+		t.Fatalf("raise %v: %v", sig, err)
+	}
+}
+
+// syncBuffer collects a logger's output for a test that reads it while the
+// role is still writing.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// waitFor waits until want has been written at least n times.
+func (s *syncBuffer) waitFor(t *testing.T, want string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for strings.Count(s.String(), want) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %q ×%d; the log so far:\n%s", want, n, s.String())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
