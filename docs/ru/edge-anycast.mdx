@@ -53,12 +53,12 @@ nginx, настоящим HTTP/3 и настоящим удостоверяющ�
 ## Топология
 
 ```
-                     ┌── линк A (10.0.1.0/30) ──▶ edge-1   198.51.100.7/32 на lo
- клиент ──▶ маршр. ──┤                                      kapkan edge · nginx · токен a1
-   198.51.100.7      └── линк B (10.0.2.0/30) ──▶ edge-2   198.51.100.7/32 на lo
-   (один ECMP-маршрут,                                      kapkan edge · nginx · токен a2
-    два nexthop)                                                 │
-                                                                 └── unicast ──▶ мозг (API)
+                     ┌── leg A (10.0.1.0/30) ──▶ edge-1   198.51.100.7/32 on lo
+ client ──▶ router ──┤                                      kapkan edge · nginx · token a1
+   198.51.100.7      └── leg B (10.0.2.0/30) ──▶ edge-2   198.51.100.7/32 on lo
+   (one ECMP route,                                         kapkan edge · nginx · token a2
+    two nexthops)                                                │
+                                                                 └── unicast ──▶ brain (API)
 ```
 
 Четыре правила, и стенд построен ровно по ним:
@@ -172,9 +172,9 @@ nginx, настоящим HTTP/3 и настоящим удостоверяющ�
 вы**, а не свойство anycast:
 
 ```sh
-sysctl -w net.ipv4.fib_multipath_hash_policy=0   # уровень 3: адрес источника и назначения
-sysctl -w net.ipv4.fib_multipath_hash_policy=1   # уровень 4: 4-кортеж, порты включительно
-ip route flush cache                             # работающий кеш хранит прежнее решение
+sysctl -w net.ipv4.fib_multipath_hash_policy=0   # layer 3: source and destination address
+sysctl -w net.ipv4.fib_multipath_hash_policy=1   # layer 4: the 4-tuple, ports included
+ip route flush cache                             # the running cache keeps the old decision
 ```
 
 | Политика | Что хеширует | Что получает один клиент | Когда её брать |
@@ -299,7 +299,7 @@ edge-2 на всё время выпуска, так что сертификат
 узле:
 
 ```sh
-# действительно ли эта машина обслуживает зону? — с узла, к его собственному слушателю
+# is this box really serving the zone? — from the node, against its own listener
 curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 -o /dev/null https://shop.example.com/
 ```
 
@@ -344,7 +344,7 @@ curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 -o /dev/null https://shop.
 Само снятие — это изменение RIB и ничего больше:
 
 ```sh
-# на маршрутизаторе: перестать пользоваться сломанным узлом
+# on the router: stop using the broken node
 ip route replace 198.51.100.7/32 via 10.0.1.2 dev leg-a
 ip route flush cache
 ```
@@ -385,8 +385,8 @@ ip route flush cache
 
 ```sh
 #!/bin/sh
-# на каждом узле: объявлять, пока здоров, и снять, как только нет
-# 9101 ниже — порт status_listen этого узла, подставьте свой
+# on each node: announce while healthy, withdraw the moment it is not
+# 9101 below is this node's status_listen port — use your own
 while :; do
   if curl -sf -m1 -o /dev/null http://127.0.0.1:9101/healthz \
      && curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 \
@@ -462,23 +462,23 @@ QUIC никогда не фрагментирует и сдаётся на пу�
 Выполняйте это с клиента, который дотягивается до адреса, и с операторского токена на мозге.
 
 ```sh
-# 1. Один маршрут, два nexthop — не два маршрута
+# 1. One route, two nexthops — not two routes
 ip route show 198.51.100.7/32
 
-# 2. Какая форма хеша действует на самом деле
+# 2. The hash form actually in force
 sysctl net.ipv4.fib_multipath_hash_policy
 
-# 3. Оба узла обслуживают имя, каждый со СВОИМ сертификатом
+# 3. Both nodes serve the name, each with its OWN certificate
 openssl s_client -connect 10.0.1.2:443 -servername shop.example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha256
 openssl s_client -connect 10.0.2.2:443 -servername shop.example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha256
 
-# 4. Общий адрес обслуживает, и по TCP, и по HTTP/3
+# 4. The shared address serves, over TCP and over HTTP/3
 curl -s -o /dev/null -w '%{http_code}\n' https://shop.example.com/
 curl --http3-only -s -o /dev/null -w '%{http_code} %{http_version}\n' https://shop.example.com/
 
-# 5. Каждый узел жив, размещён и сообщает свой собственный документ
+# 5. Every node is alive, placed and reporting its own document
 curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1/edge/nodes
 ```
 
@@ -511,7 +511,7 @@ curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1
 даст лазейка из файла зон:
 
 ```nginx
-# /etc/kapkan/debug-node.conf, на который ссылается extra_directives_file зоны
+# /etc/kapkan/debug-node.conf, referenced by a zone's extra_directives_file
 add_header X-Kapkan-Node $hostname always;
 ```
 

@@ -52,12 +52,12 @@ cache. La phrase à garder en tête : **le cerveau distribue la politique, jamai
 ## La topologie
 
 ```
-                     ┌── lien A (10.0.1.0/30) ──▶ edge-1   198.51.100.7/32 sur lo
- client ──▶ routeur ─┤                                      kapkan edge · nginx · token a1
-   198.51.100.7      └── lien B (10.0.2.0/30) ──▶ edge-2   198.51.100.7/32 sur lo
-   (une route ECMP,                                         kapkan edge · nginx · token a2
-    deux nexthops)                                                │
-                                                                  └── unicast ──▶ cerveau (API)
+                     ┌── leg A (10.0.1.0/30) ──▶ edge-1   198.51.100.7/32 on lo
+ client ──▶ router ──┤                                      kapkan edge · nginx · token a1
+   198.51.100.7      └── leg B (10.0.2.0/30) ──▶ edge-2   198.51.100.7/32 on lo
+   (one ECMP route,                                         kapkan edge · nginx · token a2
+    two nexthops)                                                │
+                                                                 └── unicast ──▶ brain (API)
 ```
 
 Quatre règles, et le banc est bâti exactement là-dessus :
@@ -173,9 +173,9 @@ Le noyau choisit un nexthop en hachant le paquet, et **les champs qu'il hache so
 vous réglez**, pas une propriété de l'anycast :
 
 ```sh
-sysctl -w net.ipv4.fib_multipath_hash_policy=0   # couche 3 : adresses source et destination
-sysctl -w net.ipv4.fib_multipath_hash_policy=1   # couche 4 : le quadruplet, ports compris
-ip route flush cache                             # le cache en cours garde l'ancienne décision
+sysctl -w net.ipv4.fib_multipath_hash_policy=0   # layer 3: source and destination address
+sysctl -w net.ipv4.fib_multipath_hash_policy=1   # layer 4: the 4-tuple, ports included
+ip route flush cache                             # the running cache keeps the old decision
 ```
 
 | Politique | Ce qu'elle hache | Ce qu'obtient un client | Quand la prendre |
@@ -305,7 +305,7 @@ processus terminateur vivant, la sonde dit que la machine mène réellement une 
 son terme et sert la zone. Sur le nœud lui-même :
 
 ```sh
-# cette machine sert-elle vraiment la zone ? — depuis le nœud, contre son propre écouteur
+# is this box really serving the zone? — from the node, against its own listener
 curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 -o /dev/null https://shop.example.com/
 ```
 
@@ -353,7 +353,7 @@ vous faut un retrait piloté par la santé.
 Le retrait lui-même est un changement de RIB, rien de plus :
 
 ```sh
-# sur le routeur : cesser d'utiliser le nœud cassé
+# on the router: stop using the broken node
 ip route replace 198.51.100.7/32 via 10.0.1.2 dev leg-a
 ip route flush cache
 ```
@@ -396,8 +396,8 @@ supplémentaire qui exécute la moitié `/healthz` de cette boucle avec bird2, *
 
 ```sh
 #!/bin/sh
-# sur chaque nœud : annoncer tant qu'il est sain, retirer dès qu'il ne l'est plus
-# 9101 ci-dessous est le port status_listen de ce nœud — mettez le vôtre
+# on each node: announce while healthy, withdraw the moment it is not
+# 9101 below is this node's status_listen port — use your own
 while :; do
   if curl -sf -m1 -o /dev/null http://127.0.0.1:9101/healthz \
      && curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 \
@@ -476,23 +476,23 @@ ensuite.
 Exécutez ceci depuis un client qui atteint l'adresse, et avec un token opérateur sur le cerveau.
 
 ```sh
-# 1. Une route, deux nexthops — pas deux routes
+# 1. One route, two nexthops — not two routes
 ip route show 198.51.100.7/32
 
-# 2. La forme de hachage réellement en vigueur
+# 2. The hash form actually in force
 sysctl net.ipv4.fib_multipath_hash_policy
 
-# 3. Les deux nœuds servent le nom, chacun avec SON PROPRE certificat
+# 3. Both nodes serve the name, each with its OWN certificate
 openssl s_client -connect 10.0.1.2:443 -servername shop.example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha256
 openssl s_client -connect 10.0.2.2:443 -servername shop.example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha256
 
-# 4. L'adresse partagée sert, en TCP et en HTTP/3
+# 4. The shared address serves, over TCP and over HTTP/3
 curl -s -o /dev/null -w '%{http_code}\n' https://shop.example.com/
 curl --http3-only -s -o /dev/null -w '%{http_code} %{http_version}\n' https://shop.example.com/
 
-# 5. Chaque nœud est vivant, placé et rapporte son propre document
+# 5. Every node is alive, placed and reporting its own document
 curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1/edge/nodes
 ```
 
@@ -525,7 +525,7 @@ Il n'existe pas d'en-tête produit nommant le nœud, et c'est délibéré. Quand
 un après-midi de débogage, l'échappatoire du fichier de zones vous en donnera un :
 
 ```nginx
-# /etc/kapkan/debug-node.conf, référencé par l'extra_directives_file d'une zone
+# /etc/kapkan/debug-node.conf, referenced by a zone's extra_directives_file
 add_header X-Kapkan-Node $hostname always;
 ```
 

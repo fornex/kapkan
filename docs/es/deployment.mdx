@@ -209,7 +209,7 @@ defecto de 15 s para esa ruta. La propia API deliberadamente no fija write timeo
 
 ## Compilar desde el código fuente
 
-La compilación requiere **Go 1.26 o más reciente**. El `Makefile` ofrece los objetivos
+La compilación requiere **Go 1.26.10 o más reciente** — la línea `go` de `engine/go.mod`, que sube con cada versión de seguridad; con `GOTOOLCHAIN=auto` (el valor predeterminado), un Go 1.26 más antiguo la descarga en la primera compilación. El `Makefile` ofrece los objetivos
 estándar:
 
 ```sh

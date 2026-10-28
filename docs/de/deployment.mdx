@@ -214,7 +214,7 @@ Write-Timeout.
 
 ## Aus dem Quellcode bauen
 
-Zum Bauen wird **Go 1.26 oder neuer** benötigt. Das `Makefile` stellt die üblichen Targets bereit:
+Zum Bauen wird **Go 1.26.10 oder neuer** benötigt — die `go`-Zeile in `engine/go.mod`, die mit jedem Sicherheitsrelease angehoben wird; mit dem voreingestellten `GOTOOLCHAIN=auto` lädt ein älteres Go 1.26 sie beim ersten Build nach. Das `Makefile` stellt die üblichen Targets bereit:
 
 ```sh
 make build  # static binary

@@ -51,12 +51,12 @@ conviene tener en la cabeza: **el cerebro reparte política, nunca veredictos.**
 ## La topología
 
 ```
-                     ┌── enlace A (10.0.1.0/30) ──▶ edge-1  198.51.100.7/32 en lo
- cliente ──▶ router ─┤                                       kapkan edge · nginx · token a1
-   198.51.100.7      └── enlace B (10.0.2.0/30) ──▶ edge-2  198.51.100.7/32 en lo
-   (una ruta ECMP,                                           kapkan edge · nginx · token a2
-    dos nexthops)                                                 │
-                                                                  └── unicast ──▶ cerebro (API)
+                     ┌── leg A (10.0.1.0/30) ──▶ edge-1   198.51.100.7/32 on lo
+ client ──▶ router ──┤                                      kapkan edge · nginx · token a1
+   198.51.100.7      └── leg B (10.0.2.0/30) ──▶ edge-2   198.51.100.7/32 on lo
+   (one ECMP route,                                         kapkan edge · nginx · token a2
+    two nexthops)                                                │
+                                                                 └── unicast ──▶ brain (API)
 ```
 
 Cuatro reglas, y el banco está construido exactamente sobre ellas:
@@ -171,9 +171,9 @@ El kernel elige un nexthop calculando el hash del paquete, y **qué campos usa p
 sysctl que usted ajusta**, no una propiedad de anycast:
 
 ```sh
-sysctl -w net.ipv4.fib_multipath_hash_policy=0   # capa 3: dirección de origen y destino
-sysctl -w net.ipv4.fib_multipath_hash_policy=1   # capa 4: la cuádrupla, puertos incluidos
-ip route flush cache                             # la caché en uso conserva la decisión anterior
+sysctl -w net.ipv4.fib_multipath_hash_policy=0   # layer 3: source and destination address
+sysctl -w net.ipv4.fib_multipath_hash_policy=1   # layer 4: the 4-tuple, ports included
+ip route flush cache                             # the running cache keeps the old decision
 ```
 
 | Política | Qué usa para el hash | Qué obtiene un cliente | Cuándo usarla |
@@ -298,7 +298,7 @@ la sonda dice que la máquina completa de verdad un apretón de manos TLS y sirv
 propio nodo:
 
 ```sh
-# ¿está esta máquina sirviendo la zona de verdad? — desde el nodo, contra su propio escuchador
+# is this box really serving the zone? — from the node, against its own listener
 curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 -o /dev/null https://shop.example.com/
 ```
 
@@ -346,7 +346,7 @@ justamente por eso hace falta una retirada guiada por la salud.
 La retirada en sí es un cambio en la RIB y nada más:
 
 ```sh
-# en el router: dejar de usar el nodo roto
+# on the router: stop using the broken node
 ip route replace 198.51.100.7/32 via 10.0.1.2 dev leg-a
 ip route flush cache
 ```
@@ -388,8 +388,8 @@ detrás de `ANYCAST_BGP=1`, de modo que por defecto se salta y no aporta ninguna
 
 ```sh
 #!/bin/sh
-# en cada nodo: anunciar mientras esté sano, retirar en cuanto no lo esté
-# 9101 de abajo es el puerto status_listen de este nodo — ponga el suyo
+# on each node: announce while healthy, withdraw the moment it is not
+# 9101 below is this node's status_listen port — use your own
 while :; do
   if curl -sf -m1 -o /dev/null http://127.0.0.1:9101/healthz \
      && curl -sf -m2 --resolve shop.example.com:443:127.0.0.1 \
@@ -468,23 +468,23 @@ después.
 Ejecute esto desde un cliente que alcance la dirección, y con un token de operador en el cerebro.
 
 ```sh
-# 1. Una ruta, dos nexthops — no dos rutas
+# 1. One route, two nexthops — not two routes
 ip route show 198.51.100.7/32
 
-# 2. Qué forma de hash está realmente en vigor
+# 2. The hash form actually in force
 sysctl net.ipv4.fib_multipath_hash_policy
 
-# 3. Ambos nodos sirven el nombre, cada uno con SU PROPIO certificado
+# 3. Both nodes serve the name, each with its OWN certificate
 openssl s_client -connect 10.0.1.2:443 -servername shop.example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha256
 openssl s_client -connect 10.0.2.2:443 -servername shop.example.com </dev/null 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha256
 
-# 4. La dirección compartida sirve, por TCP y por HTTP/3
+# 4. The shared address serves, over TCP and over HTTP/3
 curl -s -o /dev/null -w '%{http_code}\n' https://shop.example.com/
 curl --http3-only -s -o /dev/null -w '%{http_code} %{http_version}\n' https://shop.example.com/
 
-# 5. Cada nodo está vivo, colocado e informando de su propio documento
+# 5. Every node is alive, placed and reporting its own document
 curl -s -H "Authorization: Bearer $TOKEN" https://kapkan.example.net:8443/api/v1/edge/nodes
 ```
 
@@ -517,7 +517,7 @@ No hay ninguna cabecera de producto que nombre el nodo, y es deliberado. Cuando 
 una tarde de depuración, la vía de escape del archivo de zonas le dará una:
 
 ```nginx
-# /etc/kapkan/debug-node.conf, referenciado por el extra_directives_file de una zona
+# /etc/kapkan/debug-node.conf, referenced by a zone's extra_directives_file
 add_header X-Kapkan-Node $hostname always;
 ```
 

@@ -203,7 +203,7 @@ no write timeout for the same reason.
 
 ## Building from source
 
-Building requires **Go 1.26 or newer**. The `Makefile` provides the standard targets:
+Building requires **Go 1.26.10 or newer** — the `go` line of `engine/go.mod`, raised with each security release; with the default `GOTOOLCHAIN=auto`, an older Go 1.26 fetches it on the first build. The `Makefile` provides the standard targets:
 
 ```sh
 make build  # static binary
