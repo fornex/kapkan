@@ -76,6 +76,11 @@ func runScrubCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
 	return exitOK
 }
 
+// openDataplane is dataplane.Open behind a package var, so a test can stand in
+// for the XDP load (seconds on a real host) and deliver the signals that land
+// in it.
+var openDataplane = dataplane.Open
+
 func runScrubAgent(sc *config.ScrubConfig, token string, log *slog.Logger) error {
 	// Signals first: a SIGHUP while the data plane loads is ignored like any
 	// other, and a SIGTERM then still ends in on_exit below.
@@ -100,7 +105,7 @@ func runScrubAgent(sc *config.ScrubConfig, token string, log *slog.Logger) error
 		log.Warn("controller.url is plaintext http: the agent token crosses the network unencrypted — use https outside a lab")
 	}
 
-	mgr, err := dataplane.Open(opts)
+	mgr, err := openDataplane(opts)
 	if err != nil {
 		return fmt.Errorf("open data plane: %w", err)
 	}

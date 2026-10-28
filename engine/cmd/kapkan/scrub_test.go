@@ -2,12 +2,42 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+
+	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/dataplane"
 )
+
+// The scrub role takes its signals before its data plane loads, and an XDP
+// attach can take seconds: a SIGHUP that lands mid-load must be ignored like
+// any other. openDataplane stands in for the load, which needs an XDP-capable
+// host, and raises a real SIGHUP from inside it, so a handler installed only
+// after the load kills the whole test binary.
+func TestScrubRoleIgnoresSIGHUPWhileTheDataPlaneLoads(t *testing.T) {
+	sc, err := config.ParseScrub([]byte("controller:\n  url: \"https://kapkan.example.net:8443\"\n  token_env: KAPKAN_TEST_SCRUB_TOKEN\n  name: scrub-fra1\ndataplane:\n  interfaces: [eth0]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs syncBuffer
+	orig := openDataplane
+	t.Cleanup(func() { openDataplane = orig })
+	openDataplane = func(dataplane.Options) (*dataplane.Manager, error) {
+		raise(t, syscall.SIGHUP)
+		logs.waitFor(t, "SIGHUP ignored: the scrub role has no reload", 1)
+		return nil, errors.New("stub: no XDP here")
+	}
+	err = runScrubAgent(sc, "tok", slog.New(slog.NewTextHandler(&logs, nil)))
+	if err == nil || !strings.Contains(err.Error(), "stub: no XDP here") {
+		t.Fatalf("runScrubAgent = %v, want the stub's error", err)
+	}
+}
 
 func runScrubCLI(t *testing.T, args ...string) (int, string) {
 	t.Helper()
