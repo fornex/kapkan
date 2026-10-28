@@ -163,8 +163,9 @@ systemd unit wires this up with `ExecReload=/usr/local/bin/kapkan -s reload -pid
 sudo systemctl reload kapkan
 ```
 
-The daemon writes its pid file only once it catches `SIGHUP`, so a reload sent while it is still
-starting fails with `no pid file` and leaves it running: reload again once it is up.
+The daemon writes its pid file only once it catches `SIGHUP`, first thing at start. A reload sent
+before that fails with `no pid file` and leaves the daemon running, so send it again; one sent later
+in startup waits and is applied once the daemon is up.
 
 Off the box's service manager, the daemon also answers the nginx-style local control flag,
 which reads the pid file the unit writes to `/run/kapkan/kapkan.pid`:

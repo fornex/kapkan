@@ -168,9 +168,9 @@ rechargez avec :
 sudo systemctl reload kapkan
 ```
 
-Le démon n'écrit son fichier pid qu'une fois qu'il intercepte `SIGHUP` : un rechargement envoyé
-pendant son démarrage échoue donc avec `no pid file` et le laisse tourner. Rechargez de nouveau une
-fois qu'il est démarré.
+Le démon n'écrit son fichier pid qu'une fois qu'il intercepte `SIGHUP`, tout au début du démarrage.
+Un rechargement envoyé avant échoue avec `no pid file` et le laisse tourner : renvoyez-le. Un
+rechargement envoyé plus tard pendant le démarrage attend et s'applique une fois le démon démarré.
 
 En dehors du gestionnaire de services de la machine, le démon répond aussi au drapeau de
 contrôle local de style nginx, qui lit le pid file que l'unité écrit dans

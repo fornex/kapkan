@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -127,6 +129,8 @@ func TestReloadDuringStartupIsAppliedOnceUp(t *testing.T) {
 // so a loop that let the reload race the stop would apply it about half the
 // time; the scenario runs several times to make that visible.
 func TestStopDuringStartupDropsAWaitingReload(t *testing.T) {
+	orig := newApp
+	t.Cleanup(func() { newApp = orig })
 	for i := 0; i < 6; i++ {
 		dir := t.TempDir()
 		cfgPath, pidPath := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "kapkan.pid")
@@ -140,7 +144,6 @@ func TestStopDuringStartupDropsAWaitingReload(t *testing.T) {
 		write(1000)
 
 		entered, release := make(chan *config.Store, 1), make(chan struct{})
-		orig := newApp
 		newApp = func(store *config.Store, log *slog.Logger) (*app.App, error) {
 			entered <- store
 			<-release
@@ -153,10 +156,8 @@ func TestStopDuringStartupDropsAWaitingReload(t *testing.T) {
 		select {
 		case store = <-entered:
 		case err := <-done:
-			newApp = orig
 			t.Fatalf("run %d returned before startup reached app.New: %v", i, err)
 		case <-time.After(10 * time.Second):
-			newApp = orig
 			t.Fatalf("run %d: startup never reached app.New", i)
 		}
 
@@ -178,7 +179,6 @@ func TestStopDuringStartupDropsAWaitingReload(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			t.Fatalf("run %d: the daemon did not stop", i)
 		}
-		newApp = orig
 		time.Sleep(200 * time.Millisecond) // a reload racing the shutdown would have landed by now
 		if got := store.Get().Thresholds.PPS; got != 1000 {
 			t.Fatalf("run %d: the reload sent before the stop was applied (thresholds.pps = %d)", i, got)
@@ -212,6 +212,100 @@ func TestAPIListenerFailureEndsRunWithAnError(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("run did not return after its API listener failed")
+	}
+}
+
+// The pid file is claimed under a lock: a second claim on the same path is
+// refused, the file stays the first one's, and release frees it for the next.
+func TestClaimPIDFileIsExclusive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kapkan.pid")
+	release, err := claimPIDFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claimPIDFile(path); !errors.Is(err, errPIDFileHeld) {
+		t.Fatalf("second claim = %v, want errPIDFileHeld", err)
+	}
+	if pid, err := readPIDFile(path); err != nil || pid != os.Getpid() {
+		t.Fatalf("pid file after the refused claim: pid %d, err %v", pid, err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("pid file left behind by release: %v", err)
+	}
+	again, err := claimPIDFile(path)
+	if err != nil {
+		t.Fatalf("claim after release: %v", err)
+	}
+	if err := again(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A second daemon pointed at the running one's pid file (a foreground run on a
+// box whose service is up) must leave that file alone, even when it then fails
+// to start: the running daemon's `kapkan -s reload`, and the unit's ExecReload
+// that runs it, depend on the file. Both daemons run in this test binary, so
+// they share a pid; what is checked is that the second run neither removes the
+// file nor stops the first from being reached through it.
+func TestSecondDaemonLeavesTheRunningOnesPIDFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath, pidPath := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "kapkan.pid")
+	if err := os.WriteFile(cfgPath, []byte(daemonYAML(1000, freePort(t, "udp"), freePort(t, "tcp"))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := newApp
+	t.Cleanup(func() { newApp = orig })
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	var calls sync.Mutex
+	n := 0
+	newApp = func(store *config.Store, log *slog.Logger) (*app.App, error) {
+		calls.Lock()
+		n++
+		first := n == 1
+		calls.Unlock()
+		if !first {
+			return nil, errors.New("the second daemon fails to start")
+		}
+		entered <- struct{}{}
+		<-release
+		return orig(store, log)
+	}
+
+	first := make(chan error, 1)
+	go func() { first <- run(cfgPath, pidPath, slog.New(slog.DiscardHandler)) }()
+	select {
+	case <-entered:
+	case err := <-first:
+		t.Fatalf("the first daemon returned before app.New: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first daemon never reached app.New")
+	}
+
+	if err := run(cfgPath, pidPath, slog.New(slog.DiscardHandler)); err == nil {
+		t.Fatal("the second daemon started; want its stub failure")
+	}
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Fatalf("the second daemon took the running one's pid file with it: %v", err)
+	}
+
+	close(release)
+	if err := runSignalCommand("stop", pidPath); err != nil {
+		t.Fatalf("kapkan -s stop to the first daemon: %v", err)
+	}
+	select {
+	case err := <-first:
+		if err != nil {
+			t.Fatalf("the first daemon: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the first daemon did not stop")
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("pid file left behind after the first daemon stopped: %v", err)
 	}
 }
 

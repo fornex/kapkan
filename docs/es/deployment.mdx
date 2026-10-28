@@ -167,9 +167,9 @@ de modo que puedes recargar con:
 sudo systemctl reload kapkan
 ```
 
-El daemon escribe su archivo pid solo cuando ya captura `SIGHUP`, así que una recarga enviada
-mientras aún arranca falla con `no pid file` y lo deja en marcha: vuelve a recargar cuando esté
-arriba.
+El daemon escribe su archivo pid solo cuando ya captura `SIGHUP`, nada más empezar el arranque. Una
+recarga enviada antes falla con `no pid file` y lo deja en marcha, así que vuelve a enviarla; una
+enviada más tarde durante el arranque espera y se aplica cuando el daemon está arriba.
 
 Fuera del gestor de servicios de la máquina, el daemon también responde al flag de control local
 al estilo de nginx, que lee el pid file que la unidad escribe en `/run/kapkan/kapkan.pid`:

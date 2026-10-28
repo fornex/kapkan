@@ -23,9 +23,10 @@ RestartSec=5s
 # operators can run `kapkan -s reload` / `kapkan -s stop` — the nginx-style
 # local control path — without looking up the pid. `systemctl reload kapkan`
 # runs that same `kapkan -s reload` (ExecReload above), which delivers SIGHUP.
-# The pid file is written only once the daemon catches SIGHUP, so a reload
-# sent while it is still starting fails ("no pid file") and leaves it running;
-# a bare `kill -HUP $MAINPID` could land first and end it.
+# The pid file is written only once the daemon catches SIGHUP, first thing at
+# start: a reload sent before that fails ("no pid file") and leaves it running,
+# a later one waits and is applied once it is up. A bare `kill -HUP $MAINPID`
+# could land before the handler and end it.
 RuntimeDirectory=kapkan
 RuntimeDirectoryMode=0755
 

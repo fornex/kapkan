@@ -172,9 +172,10 @@ verlorenen flow-Status. Die systemd-Unit verdrahtet dies mit
 sudo systemctl reload kapkan
 ```
 
-Der Daemon schreibt seine PID-Datei erst, wenn er `SIGHUP` abfängt. Ein Neuladen, das noch während
-des Starts kommt, scheitert daher mit `no pid file` und lässt ihn weiterlaufen: Laden Sie erneut
-neu, sobald er läuft.
+Der Daemon schreibt seine PID-Datei erst, wenn er `SIGHUP` abfängt, gleich zu Beginn des Starts.
+Ein Neuladen davor scheitert mit `no pid file` und lässt ihn weiterlaufen, senden Sie es also
+erneut; ein späteres Neuladen während des Starts wartet und wird angewendet, sobald der Daemon
+läuft.
 
 Außerhalb des Dienstmanagers der Maschine versteht der Daemon auch das nginx-artige lokale
 Steuerungsflag, das die pid-Datei liest, die die Unit nach `/run/kapkan/kapkan.pid` schreibt:
