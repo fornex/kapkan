@@ -10,6 +10,11 @@ dry_run: true
 listen:
   sflow: ":6343"
   netflow: ":2055" # NetFlow v5/v9 + IPFIX share this socket
+  # queue: datagrams each listener holds while its decode workers are behind
+  # (default 16384); past it they are dropped and counted in
+  # kapkan_ingest_dropped_flows_total. Each one takes ~10 KB of memory, so the
+  # default costs up to ~160 MB per listener: count it in a MemoryMax=.
+  # queue: 16384
 
 sampling:
   default_rate: 1000 # used only when an exporter does not report its own rate

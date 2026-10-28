@@ -344,6 +344,12 @@ nicht, und die Bucket-Tabelle pro Quelle dominiert den Gesamtwert. Der Map-Speic
 Memory-cgroup des Dienstes zugerechnet (Kernel 5.11+), sodass Sie, wenn Sie `MemoryMax=` auf der Unit
 setzen, ihn mit Blick auf die Maps dimensionieren sollten.
 
+Die Maps sind nicht das ganze Budget. Die Empfangswarteschlange jedes Telemetrie-Listeners fasst
+bis zu [`listen.queue`](/docs/configuration) Datagramme zu je etwa 10 KB — bis zu ~160 MB pro
+Listener beim Standardwert — und sie füllt sich genau dann, wenn die Telemetrie schneller ankommt,
+als sie dekodiert wird, also während eines Angriffs. Lässt das Limit den Warteschlangen keinen Platz,
+beendet der OOM-Killer den Daemon, bevor der Listener ein einziges Datagramm verwirft.
+
 ## Verwandtes
 
 - [Betrieb & Überwachung](/docs/dataplane-operate) — die Zähler und Alarme, die diese Einstellungen antreiben.

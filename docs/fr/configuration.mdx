@@ -33,7 +33,7 @@ les seuils, `networks`, les hostgroups, les baselines, les paramètres de notifi
 d'eux est **rejeté** (et non silencieusement ignoré), vous devez donc redémarrer le démon pour les
 modifier :
 
-- les adresses `listen` ;
+- le bloc `listen` — les deux adresses et `listen.queue` ;
 - l'identité BGP (`bgp.local_asn`, `bgp.router_id`) ;
 - `api.listen` ;
 - les paramètres `samples` ;
@@ -108,6 +108,7 @@ optionnel.
 | --- | --- |
 | `dry_run` | Lorsqu'elle vaut `true` (valeur par défaut, y compris en cas d'absence), les blackholes sont journalisés et suivis mais **jamais annoncés**. |
 | `listen.sflow` / `listen.netflow` | Adresses d'écoute UDP. NetFlow v5/v9 et IPFIX partagent le socket `netflow`. Au moins un écouteur est requis. Voir [Fonctionnement](/docs/how-it-works). |
+| `listen.queue` | Nombre de datagrammes que chaque écouteur garde en file tant que ses workers de décodage sont en retard (défaut `16384`, plage `1`–`1048576`). Au-delà, l'écouteur les rejette et les compte dans `kapkan_ingest_dropped_flows_total`. Chaque datagramme en file occupe environ 10 Ko de mémoire quelle que soit sa taille : le défaut coûte donc jusqu'à ~160 Mo par écouteur — à prévoir dans un `MemoryMax=` systemd. Une file plus longue absorbe un blocage plus long mais n'ajoute aucun débit : un écouteur qui rejette en continu manque de CPU, pas de file. Voir [Métriques](/docs/metrics). |
 | `sampling.default_rate` | Taux d'échantillonnage utilisé lorsqu'un exportateur ne déclare pas le sien. Doit être `>= 1`. |
 | `sampling.boundary` | Comptage optionnel à la frontière des interfaces, par exportateur, qui déduplique un flow vu à plusieurs points d'observation (exportateurs redondants, échantillonnage en ingress+egress, liens de transit). Chaque entrée indique les `external_ifindexes` d'un exportateur (et un `egress_sampling` optionnel) ; un flow n'est alors compté que lorsqu'il franchit une interface externe. Les exportateurs sans entrée comptent chaque échantillon. Voir Correction de l'échantillonnage ci-dessous. |
 | `sampling.boundary_debug` | Lorsqu'elle vaut `true`, exporte `kapkan_engine_boundary_debug_bytes_total` (octets par exportateur et par interface) pour aider à identifier les interfaces externes. Sans borne de cardinalité — activez-la brièvement, puis désactivez-la. |

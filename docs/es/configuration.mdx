@@ -33,7 +33,7 @@ caliente, incluidos `dry_run`, los umbrales, `networks`, los hostgroups, las lí
 arrancar — una recarga que cambie cualquiera de ellas se **rechaza** (no se ignora en silencio), así
 que debes reiniciar el demonio para cambiarlas:
 
-- las direcciones de `listen`;
+- el bloque `listen`: ambas direcciones y `listen.queue`;
 - la identidad BGP (`bgp.local_asn`, `bgp.router_id`);
 - `api.listen`;
 - las opciones de `samples`;
@@ -108,6 +108,7 @@ opcional.
 | --- | --- |
 | `dry_run` | Cuando es `true` (el valor predeterminado, incluso cuando está ausente), los blackholes se registran y se rastrean, pero **nunca se anuncian**. |
 | `listen.sflow` / `listen.netflow` | Direcciones de escucha UDP. NetFlow v5/v9 e IPFIX comparten el socket `netflow`. Se requiere al menos un listener. Consulta [Cómo funciona](/docs/how-it-works). |
+| `listen.queue` | Cuántos datagramas retiene cada listener mientras sus workers de decodificación van por detrás (predeterminado `16384`, rango `1`–`1048576`). Por encima de eso, el listener los descarta y los cuenta en `kapkan_ingest_dropped_flows_total`. Cada datagrama en cola ocupa unos 10 KB de memoria sea cual sea su tamaño, así que el valor predeterminado cuesta hasta ~160 MB por listener: inclúyelo en el `MemoryMax=` de systemd. Una cola más larga aguanta una parada más larga, pero no añade rendimiento: a un listener que descarta de forma sostenida le falta CPU, no cola. Consulta [Métricas](/docs/metrics). |
 | `sampling.default_rate` | Tasa de muestreo que se usa cuando un exportador no informa la suya propia. Debe ser `>= 1`. |
 | `sampling.boundary` | Conteo opcional por límite de interfaz (interface-boundary) y por exportador que deduplica un flow visto en varios puntos de muestreo (exportadores redundantes, muestreo en ingress+egress, enlaces de tránsito). Cada entrada indica los `external_ifindexes` de un exportador (y `egress_sampling` opcional); entonces un flow solo se cuenta cuando cruza una interfaz externa. Los exportadores sin una entrada cuentan cada muestra. Consulta «Corrección de muestreo» más abajo. |
 | `sampling.boundary_debug` | Cuando es `true`, exporta `kapkan_engine_boundary_debug_bytes_total` (bytes por exportador e interfaz) para ayudar a identificar las interfaces externas. No está acotado en cardinalidad — actívalo brevemente y luego desactívalo. |

@@ -67,6 +67,7 @@ export type WizardState = {
   // telemetry
   sflow: string;
   netflow: string;
+  listen_queue: string;
   default_rate: string;
   boundary_debug: boolean;
   boundary: BoundaryRow[];
@@ -190,6 +191,7 @@ export const initialState: WizardState = {
   dry_run: true,
   sflow: ":6343",
   netflow: ":2055",
+  listen_queue: "",
   default_rate: "1000",
   boundary_debug: false,
   boundary: [],
@@ -340,6 +342,7 @@ export function emitConfig(s: WizardState): string {
   L.push("listen:");
   if (s.sflow.trim()) L.push(`  sflow: ${q(s.sflow)}`);
   if (s.netflow.trim()) L.push(c(`  netflow: ${q(s.netflow)}`, "NetFlow v5/v9 + IPFIX"));
+  if (num(s.listen_queue)) L.push(c(`  queue: ${num(s.listen_queue)}`, "datagrams, ~10 KB each"));
   L.push("");
 
   L.push("sampling:");

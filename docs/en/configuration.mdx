@@ -31,7 +31,7 @@ thresholds, `networks`, hostgroups, baselines, notification settings and
 `sampling.default_rate`. Seven things are fixed at startup — a reload that changes any of them is
 **rejected** (not silently ignored), so you must restart the daemon to change them:
 
-- the `listen` addresses;
+- the `listen` block — both addresses and `listen.queue`;
 - BGP identity (`bgp.local_asn`, `bgp.router_id`);
 - `api.listen`;
 - the `samples` settings;
@@ -104,6 +104,7 @@ refinement.
 | --- | --- |
 | `dry_run` | When `true` (the default, including when absent), blackholes are logged and tracked but **never announced**. |
 | `listen.sflow` / `listen.netflow` | UDP listen addresses. NetFlow v5/v9 and IPFIX share the `netflow` socket. At least one listener is required. See [How it works](/docs/how-it-works). |
+| `listen.queue` | How many datagrams each listener holds while its decode workers are behind (default `16384`, range `1`–`1048576`). Past that the listener drops them and counts them in `kapkan_ingest_dropped_flows_total`. Every queued datagram takes about 10 KB of memory whatever its size, so the default costs up to ~160 MB per listener — count it in a systemd `MemoryMax=`. A longer queue rides out a longer stall but adds no throughput: a listener that drops steadily is short of CPU, not of queue. See [Metrics](/docs/metrics). |
 | `sampling.default_rate` | Sampling rate used when an exporter does not report its own. Must be `>= 1`. |
 | `sampling.boundary` | Optional per-exporter interface-boundary counting that deduplicates a flow seen at multiple sampling vantage points (redundant exporters, ingress+egress sampling, transit links). Each entry gives an exporter's `external_ifindexes` (and optional `egress_sampling`); a flow is then counted only when it crosses an external interface. Exporters without an entry count every sample. See Sampling correction below. |
 | `sampling.boundary_debug` | When `true`, exports `kapkan_engine_boundary_debug_bytes_total` (bytes per exporter and interface) to help identify external interfaces. Not cardinality-bounded — enable briefly, then disable. |

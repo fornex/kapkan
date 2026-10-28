@@ -211,6 +211,12 @@ es zu vermuten:
 sum(kapkan_dataplane_map_bytes)
 ```
 
+Die Maps sind nicht alles. Die Empfangswarteschlange jedes Telemetrie-Listeners fasst bis zu
+[`listen.queue`](/docs/configuration) Datagramme zu je etwa 10 KB (bis zu ~160 MB pro Listener beim
+Standardwert), solange seine Decoder-Worker nicht nachkommen; planen Sie die Warteschlangen also mit
+ein: Ein `MemoryMax=`, in das sie nicht passen, beendet den Daemon, bevor sich
+`kapkan_ingest_dropped_flows_total` bewegt.
+
 ### Verworfene Pakete pro Sperre
 
 Wie viel der Kernel **für ein einzelnes Opfer** verworfen hat, steht absichtlich nicht hier.

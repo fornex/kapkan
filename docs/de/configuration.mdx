@@ -34,7 +34,7 @@ Benachrichtigungseinstellungen und `sampling.default_rate`. Sieben Dinge sind be
 ein Reload, der eines davon ändert, wird **abgelehnt** (nicht stillschweigend ignoriert), sodass Sie
 den Daemon neu starten müssen, um sie zu ändern:
 
-- die `listen`-Adressen;
+- der `listen`-Block — beide Adressen und `listen.queue`;
 - die BGP-Identität (`bgp.local_asn`, `bgp.router_id`);
 - `api.listen`;
 - die `samples`-Einstellungen;
@@ -110,6 +110,7 @@ eine optionale Verfeinerung.
 | --- | --- |
 | `dry_run` | Wenn `true` (der Standard, auch bei Abwesenheit), werden Blackholes protokolliert und nachverfolgt, aber **niemals angekündigt**. |
 | `listen.sflow` / `listen.netflow` | UDP-Lauschadressen. NetFlow v5/v9 und IPFIX teilen sich den `netflow`-Socket. Mindestens ein Listener ist erforderlich. Siehe [Funktionsweise](/docs/how-it-works). |
+| `listen.queue` | Wie viele Datagramme jeder Listener zurückhält, solange seine Decoder-Worker nicht nachkommen (Standard `16384`, Bereich `1`–`1048576`). Darüber hinaus verwirft der Listener sie und zählt sie in `kapkan_ingest_dropped_flows_total`. Jedes wartende Datagramm belegt unabhängig von seiner Größe etwa 10 KB Speicher, der Standard kostet also bis zu ~160 MB pro Listener — rechnen Sie das in ein systemd-`MemoryMax=` ein. Eine längere Warteschlange überbrückt einen längeren Stillstand, bringt aber keinen Durchsatz: Einem Listener, der laufend verwirft, fehlt CPU, nicht Warteschlange. Siehe [Metriken](/docs/metrics). |
 | `sampling.default_rate` | Sampling-Rate, die verwendet wird, wenn ein Exporter seine eigene nicht meldet. Muss `>= 1` sein. |
 | `sampling.boundary` | Optionale Interface-Boundary-Zählung pro Exporter, die einen Flow dedupliziert, der an mehreren Sampling-Beobachtungspunkten gesehen wird (redundante Exporter, gleichzeitiges ingress+egress-Sampling, Transit-Links). Jeder Eintrag gibt die `external_ifindexes` eines Exporters (und optional `egress_sampling`) an; ein Flow wird dann nur gezählt, wenn er ein externes Interface überquert. Exporter ohne Eintrag zählen jedes Sample. Siehe Sampling-Korrektur weiter unten. |
 | `sampling.boundary_debug` | Wenn `true`, wird `kapkan_engine_boundary_debug_bytes_total` (Bytes pro Exporter und Interface) exportiert, um externe Interfaces zu identifizieren. Nicht kardinalitätsbegrenzt — kurz aktivieren, dann wieder deaktivieren. |

@@ -210,6 +210,12 @@ en lugar de inferirlo:
 sum(kapkan_dataplane_map_bytes)
 ```
 
+Los mapas no lo son todo. La cola de recepción de cada listener de telemetría guarda hasta
+[`listen.queue`](/docs/configuration) datagramas de unos 10 KB cada uno (hasta ~160 MB por listener
+con el valor predeterminado) mientras sus workers de decodificación van por detrás, así que
+presupuesta también las colas: un `MemoryMax=` en el que no caben mata al daemon antes de que
+`kapkan_ingest_dropped_flows_total` se mueva.
+
 ### Paquetes descartados por bloqueo
 
 Cuánto descartó el kernel **para una víctima concreta** deliberadamente no está aquí. `/metrics` no

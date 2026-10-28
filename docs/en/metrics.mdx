@@ -203,6 +203,11 @@ off these gauges rather than inferring it:
 sum(kapkan_dataplane_map_bytes)
 ```
 
+The maps are not all of it. Each telemetry listener's receive queue holds up to
+[`listen.queue`](/docs/configuration) datagrams at about 10 KB each (up to ~160 MB per listener at
+the default) while its decode workers are behind, so budget for the queues too: a `MemoryMax=`
+they do not fit in kills the daemon before `kapkan_ingest_dropped_flows_total` moves.
+
 ### Per-ban drop counts
 
 How much the kernel dropped **for one victim** is deliberately not here. `/metrics` is

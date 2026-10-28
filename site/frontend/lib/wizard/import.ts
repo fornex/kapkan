@@ -75,6 +75,7 @@ export function docToState(doc: unknown): WizardState {
 
   s.sflow = str(get(doc, "listen.sflow"));
   s.netflow = str(get(doc, "listen.netflow"));
+  s.listen_queue = str(get(doc, "listen.queue"));
   s.default_rate = str(get(doc, "sampling.default_rate"));
   s.boundary_debug = boolOr(get(doc, "sampling.boundary_debug"), false);
   const boundary = get(doc, "sampling.boundary");

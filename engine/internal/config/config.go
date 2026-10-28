@@ -144,7 +144,21 @@ type Config struct {
 type Listen struct {
 	SFlow   string `yaml:"sflow"`
 	NetFlow string `yaml:"netflow"`
+	// Queue is how many datagrams each listener holds for its decode workers
+	// while they are behind; past it the listener drops datagrams and counts
+	// them in kapkan_ingest_dropped_flows_total. Every queued datagram pins one
+	// of goflow2's 9000-byte receive buffers whatever its size, about 10 KB, so
+	// the queue is a memory bound: the default 16384 is ~160 MB per listener.
+	// 0 selects the default, then 1..1048576. Resolved in place by validate().
+	Queue int `yaml:"queue"`
 }
+
+const (
+	defaultListenQueue = 1 << 14
+	// maxListenQueue is the size the queue had before it was configurable,
+	// ~10 GB per listener when full; a larger value is a typo.
+	maxListenQueue = 1 << 20
+)
 
 // Sampling controls sampling-rate handling.
 type Sampling struct {
@@ -1578,6 +1592,12 @@ func (c *Config) validate() error {
 		if _, err := netip.ParseAddrPort(normalizeListen(addr)); err != nil {
 			return fmt.Errorf("listen.%s: invalid address %q: %w", name, addr, err)
 		}
+	}
+	if c.Listen.Queue == 0 {
+		c.Listen.Queue = defaultListenQueue
+	}
+	if c.Listen.Queue < 1 || c.Listen.Queue > maxListenQueue {
+		return fmt.Errorf("listen.queue must be in 1..1048576, got %d", c.Listen.Queue)
 	}
 
 	if c.Sampling.DefaultRate < 1 {
@@ -3585,7 +3605,7 @@ func NewStore(path string, cfg *Config) *Store {
 func (s *Store) Get() *Config { return s.cur.Load() }
 
 // Reload re-reads the config file. On any error the previous configuration
-// stays active and the error is returned. Listen addresses and BGP identity
+// stays active and the error is returned. The listen block and BGP identity
 // cannot change at runtime; a reload that alters them is rejected.
 func (s *Store) Reload() (*Config, error) {
 	next, err := Load(s.path)
@@ -3594,7 +3614,7 @@ func (s *Store) Reload() (*Config, error) {
 	}
 	prev := s.cur.Load()
 	if next.Listen != prev.Listen {
-		return nil, fmt.Errorf("reload: listen addresses cannot change at runtime (restart required)")
+		return nil, fmt.Errorf("reload: listen settings (sflow, netflow, queue) cannot change at runtime (restart required)")
 	}
 	if next.BGP.LocalASN != prev.BGP.LocalASN || next.BGP.RouterID != prev.BGP.RouterID {
 		return nil, fmt.Errorf("reload: bgp identity (local_asn, router_id) cannot change at runtime (restart required)")

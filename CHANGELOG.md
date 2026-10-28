@@ -19,6 +19,13 @@ security-relevant.
 
 ## [Unreleased]
 
+### Config changes
+
+- **Added `listen.queue`** (optional, default `16384`, range `1`–`1048576`, restart required): how
+  many datagrams each telemetry listener holds while its decode workers are behind. Migration:
+  none; the queue used to be a fixed 1,000,000 (see Fixed) — raise it only with the memory to
+  match, about 10 KB per datagram per listener.
+
 ### Security
 
 - **Built with Go 1.26.10**, which fixes twelve reachable standard-library advisories
@@ -32,6 +39,15 @@ security-relevant.
 
 ### Fixed
 
+- **ingest:** a telemetry listener no longer holds ~10 GB before it drops a datagram. Its receive
+  queue took up to a fixed 1,000,000 datagrams, and goflow2 pins a 9000-byte buffer to each one
+  whatever its size — measured at 10,049 B of cgroup memory per queued datagram — so a listener
+  whose decode workers fell behind could grow to ~9.4 GiB (two listeners, ~19 GiB) before
+  `kapkan_ingest_dropped_flows_total` moved. Under a systemd `MemoryMax=` the kernel got there
+  first: in a 1 GiB cgroup the daemon was OOM-killed 0.7 s into a flood with the counter still
+  at 0. The queue is now `listen.queue`, 16,384 datagrams by default (~157 MiB per listener),
+  and the data-plane `MemoryMax=` guidance counts it: the suggested starting point moves from
+  512M to 1G.
 - **storage:** a ClickHouse older than 21.4 is named at start — one `ERROR` line with the
   server's version, the floor and what to do — instead of six `Syntax error ... TTL` refusals
   that said nothing about why ([#122](https://github.com/fornex/kapkan/issues/122): the
