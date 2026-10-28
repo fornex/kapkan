@@ -276,7 +276,22 @@ func ladderString(stages []config.EscalationStage) string {
 	return "mitigation=" + strings.Join(parts, " -> ")
 }
 
+// newApp builds the daemon's application; a package var so a test can hold
+// startup open and deliver the signals that land in it.
+var newApp = app.New
+
 func run(configPath, pidPath string, log *slog.Logger) error {
+	// SIGHUP, the reload, is caught before anything else. Until signal.Notify
+	// it keeps its default action and ends the process, and a reload can land
+	// while the daemon is still starting: `systemctl reload` as soon as the
+	// unit is up (Type=simple), `kapkan -s reload` as soon as the pid file
+	// below exists. systemd's Restart=on-failure counts death by SIGHUP as a
+	// clean exit, so the daemon would stay down. Caught here, the reload waits
+	// in hup and is applied once startup is done.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -313,7 +328,7 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	application, err := app.New(store, log)
+	application, err := newApp(store, log)
 	if err != nil {
 		return err
 	}
@@ -321,10 +336,8 @@ func run(configPath, pidPath string, log *slog.Logger) error {
 		return err
 	}
 
-	// SIGHUP triggers config hot-reload.
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
+	// SIGHUP triggers config hot-reload, starting with one that arrived during
+	// startup and has been waiting in hup.
 	go func() {
 		for {
 			select {
