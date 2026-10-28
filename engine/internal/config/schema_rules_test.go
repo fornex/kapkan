@@ -46,6 +46,16 @@ dataplane:
   interfaces: ["eth0"]
 `
 
+// withTokens returns validBase with an api.tokens list (the given YAML item
+// lines, indented under tokens:) — the E6 binding rules need named tokens.
+func withTokens(items string) string {
+	return strings.Replace(validBase, "api:\n  listen: \"127.0.0.1:8080\"\n",
+		"api:\n  listen: \"127.0.0.1:8080\"\n  tokens:\n"+items, 1)
+}
+
+// edgeOneNode is a minimal edge block with one unscoped node, e1.
+const edgeOneNode = "\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  nodes:\n    - name: e1\n"
+
 func TestParseAcceptsValidBase(t *testing.T) {
 	if _, err := Parse([]byte(validBase)); err != nil {
 		t.Fatalf("validBase should parse, got: %v", err)
@@ -236,6 +246,50 @@ hostgroups:
 			name:    "edge state_file shared with edge.zones_file",
 			yaml:    validBase + "\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  state_file: /etc/kapkan/../kapkan/zones.yaml\n",
 			wantErr: "must not be the same file as edge.zones_file",
+		},
+		{
+			// E6.1: a node binding is an agent token's — a viewer or operator is
+			// not a node and has no node-identified route to refuse.
+			name:    "node binding on a non-agent token",
+			yaml:    withTokens("    - {name: op, token_env: K_OP, role: operator, node: e1}\n") + edgeOneNode,
+			wantErr: "may only be set on an agent token",
+		},
+		{
+			// E6.1: the binding must name a node the brain knows, or every poll
+			// from that token is refused and nothing says why at load time.
+			name:    "node binding that names no node",
+			yaml:    withTokens("    - {name: a1, token_env: K_A1, role: agent, node: ghost}\n") + edgeOneNode,
+			wantErr: "is neither an edge.nodes[] nor a scrubbing.nodes[] entry",
+		},
+		{
+			// E6.1: a name in both node lists would make the binding ambiguous
+			// between the scrub and the edge channels.
+			name: "node binding to a name present in both node lists",
+			yaml: withTokens("    - {name: a1, token_env: K_A1, role: agent, node: e1}\n") + edgeOneNode +
+				"\nscrubbing:\n  nodes:\n    - {name: e1, next_hop: \"192.0.2.9\"}\n",
+			wantErr: "is both an edge.nodes[] and a scrubbing.nodes[] entry",
+		},
+		{
+			// E6.3: a placement scope names hostgroups of this file or the
+			// literal global — anything else would place zones on no node.
+			name: "edge node scoped to a hostgroup that does not exist",
+			yaml: withTokens("    - {name: a1, token_env: K_A1, role: agent, node: e1}\n") +
+				"\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  nodes:\n    - {name: e1, hostgroups: [nosuch]}\n",
+			wantErr: "is not a hostgroup of this configuration",
+		},
+		{
+			name: "edge node scope listing a hostgroup twice",
+			yaml: withTokens("    - {name: a1, token_env: K_A1, role: agent, node: e1}\n") +
+				"\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  nodes:\n    - {name: e1, hostgroups: [global, global]}\n",
+			wantErr: "is listed twice",
+		},
+		{
+			// E6.3: a scope enforced against a shared (unbound) agent token is a
+			// promise nothing keeps — scoping requires every agent token bound.
+			name: "edge placement scopes with an unbound agent token",
+			yaml: withTokens("    - {name: a1, token_env: K_A1, role: agent}\n") +
+				"\nedge:\n  zones_file: /etc/kapkan/zones.yaml\n  nodes:\n    - {name: e1, hostgroups: [global]}\n",
+			wantErr: "is an agent token bound to no node",
 		},
 		{
 			name:    "static rule ratelimit without a profile",
