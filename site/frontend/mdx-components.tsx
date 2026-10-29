@@ -74,9 +74,13 @@ const components: MDXComponents = {
   ),
   hr: () => <hr className="my-10 border-border" />,
   strong: (props) => <strong className="font-semibold text-foreground" {...props} />,
+  // wrap-break-word: a token wider than the column (a metric with its labels,
+  // codes joined by slashes) wraps instead of scrolling a phone-width page
+  // sideways. Unlike wrap-anywhere it leaves min-content alone, so table
+  // columns keep their width; code blocks keep white-space: pre and scroll.
   code: (props) => (
     <code
-      className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] text-foreground"
+      className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] text-foreground wrap-break-word"
       {...props}
     />
   ),
