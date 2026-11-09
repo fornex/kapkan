@@ -4,14 +4,21 @@
 // config, SIGTERM shuts down gracefully. It is a thin, local-only wrapper over
 // kill(2): no network, no API token, works even if the REST API is down, and
 // the muscle memory of `nginx -s reload` carries straight over.
+//
+// The long-running roles (scrub, edge, nginx-exporter) have no reload; their
+// signal handling is roleSignals below.
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -97,4 +104,41 @@ func runSignalCommand(name, pidPath string) error {
 		return fmt.Errorf("signal pid %d: %w", pid, err)
 	}
 	return nil
+}
+
+// roleSignals is the signal handling the long-running roles share: SIGINT and
+// SIGTERM cancel the returned context, and the role shuts down cleanly.
+//
+// SIGHUP is handled too, and deliberately does nothing but say so. It is the
+// daemon's reload and nginx's, so an operator sends it to a role as well —
+// `kill -HUP`, `systemctl kill -s HUP` — and left unhandled its default action
+// ends the process, which systemd's Restart=on-failure counts as a clean exit:
+// the node would stay down. No role re-reads its configuration, so the signal
+// is logged and ignored.
+//
+// Call it before the role's startup work, so a signal that arrives during
+// startup is handled the same way, and defer stop: SIGHUP stays handled until
+// the role's shutdown has finished. stop may be called more than once.
+func roleSignals(role string, log *slog.Logger) (context.Context, func()) {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	quit, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-quit:
+				return
+			case <-hup:
+				log.Warn("SIGHUP ignored: the " + role + " role has no reload; restart the unit to change its configuration")
+			}
+		}
+	}()
+	return ctx, sync.OnceFunc(func() {
+		signal.Stop(hup)
+		close(quit)
+		<-done
+		cancel()
+	})
 }
