@@ -20,6 +20,12 @@ Type=simple
 User=root
 Group=root
 ExecStart=/usr/local/bin/kapkan edge -config /etc/kapkan/edge.yaml -log-format json -log-level info
+# No ExecReload=, on purpose: the role reads edge.yaml once, at start, and has
+# no reload. `systemctl reload kapkan-edge` is refused, and a SIGHUP sent by
+# hand (`kill -HUP`, `systemctl kill -s HUP`) is logged and ignored — it
+# neither reloads nor stops the node. Edit edge.yaml, then `systemctl restart
+# kapkan-edge`. A reload meant for nginx goes to nginx (`systemctl reload
+# nginx`); the role reloads it itself for every generation it installs.
 Restart=on-failure
 RestartSec=5s
 

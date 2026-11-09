@@ -13,10 +13,9 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"log/slog"
 	"net/netip"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/exporter"
@@ -85,12 +84,20 @@ func runExporterCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
 
 	log := logging.New(*logFormat, *logLevel)
 	cfg.Log = log
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	if err := exporter.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+	if err := runExporter(cfg, log); err != nil {
 		log.Error("nginx-exporter exited", "err", err)
 		return 1
 	}
 	return exitOK
+}
+
+// runExporter runs the exporter until SIGINT or SIGTERM; split out, like
+// runEdge, so the CLI layer stays thin.
+func runExporter(cfg exporter.Config, log *slog.Logger) error {
+	ctx, stop := roleSignals("nginx-exporter", log)
+	defer stop()
+	if err := exporter.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
 }

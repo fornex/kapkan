@@ -39,6 +39,21 @@ security-relevant.
 
 ### Fixed
 
+- **daemon:** a reload that lands while the daemon is still starting no longer stops it. The
+  `SIGHUP` handler was installed only after the data plane, BGP and ban rehydration had come up,
+  so a `systemctl reload kapkan` right after a start (the unit is `Type=simple`) or a
+  `kapkan -s reload` once the pid file existed took the signal's default action and ended the
+  process — which systemd's `Restart=on-failure` counts as a clean exit, so nothing brought it
+  back. `SIGHUP` is now caught before the pid file is written, and the shipped unit's `ExecReload`
+  runs `kapkan -s reload` instead of `kill -HUP $MAINPID`. A reload sent before the pid file exists
+  fails with `no pid file` and leaves the daemon running; one sent after waits and is applied once
+  the daemon is up, unless a stop also arrived during startup. A unit copied from an earlier
+  release still sends `kill -HUP`: install the new one. A second `kapkan` pointed at the same pid
+  file, a foreground run on a box whose service is up, now leaves it to the running daemon instead
+  of overwriting it and, when that run fails, deleting it.
+- **daemon:** an API listener that fails, its address taken for instance, now ends the daemon
+  with exit status 1 after the same graceful shutdown. It exited 0, which `Restart=on-failure`
+  treats as a deliberate stop, so the daemon stayed down.
 - **ingest:** a telemetry listener no longer holds ~10 GB before it drops a datagram. Its receive
   queue took up to a fixed 1,000,000 datagrams, and goflow2 pins a 9000-byte buffer to each one
   whatever its size — measured at 10,049 B of cgroup memory per queued datagram — so a listener
@@ -55,6 +70,19 @@ security-relevant.
   `TTL` clause, and it lacks production `LowCardinality`, query parameters and
   `toStartOfInterval` besides). The floor, and what each release of it is for, is on the
   Storage page.
+- **roles:** a `SIGHUP` no longer stops `kapkan scrub`, `kapkan edge` or `kapkan nginx-exporter`.
+  They handled only `SIGINT` and `SIGTERM`, so a `kill -HUP` or `systemctl kill -s HUP` — the
+  reflex nginx operators have — ended the process, and systemd's `Restart=on-failure` counts death
+  by `SIGHUP` as a clean exit, so nothing brought it back. An edge node's nginx kept serving its
+  last generation while the decision service and the clearance page went away (zones fell to their
+  `failure_mode`), the lever stopped reaching the node and certificates stopped renewing; a scrub
+  node's pinned program kept enforcing, whatever its `on_exit` (only a clean stop applies it), but
+  stopped receiving rules; the exporter
+  stopped posting verdicts. Each role now logs one `WARN` line,
+  `SIGHUP ignored: the <role> role has no reload; restart the unit to change its configuration`,
+  and keeps running. The handler is in place before the role's own startup work, so a `SIGHUP`
+  that lands while the data plane loads is ignored too. None of them gained a reload: a
+  configuration change still takes a restart.
 
 ## [1.8.0] - 2026-09-18
 
