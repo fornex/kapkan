@@ -248,6 +248,31 @@ func assertPrefixHeld(t *testing.T, srv *server.BgpServer, family bgp.Family, pr
 	}
 }
 
+// TestBGPSpeakerStartsUnderCanceledContext pins what a stop that lands while
+// the daemon is still starting sees: app.Start has already cancelled the
+// context the speaker starts under, and the start must still succeed, so the
+// stop that follows is a clean shutdown rather than a failed startup (the
+// daemon side is cmd/kapkan's TestStopDuringStartupDropsAWaitingReload).
+// gobgp v3's StartBgp ignored its context. v4 hands it to the BFD server,
+// whose start returns ctx.Err() at random once the context is done, so a
+// single attempt proves little; fifty make a pass by chance a 2^-50 event.
+func TestBGPSpeakerStartsUnderCanceledContext(t *testing.T) {
+	cfg := storeFrom(t, bgpYAML(17993)).Get()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 50; i++ {
+		sp, err := newBGPSpeaker(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatalf("newBGPSpeaker: %v", err)
+		}
+		err = sp.start(ctx)
+		sp.stop()
+		if err != nil {
+			t.Fatalf("start %d under a cancelled context: %v", i, err)
+		}
+	}
+}
+
 // TestBGPAnnounceWithdrawLifecycle stands up a receiving gobgp peer in-process
 // and verifies that a live (non-dry-run) ban announces a /32 blackhole with
 // the configured community and next-hop, and that ending the attack withdraws

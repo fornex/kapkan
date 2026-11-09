@@ -69,7 +69,13 @@ func (b *bgpSpeaker) start(ctx context.Context) error {
 		// and accidental exposure; production runs dial-out only.
 		global.ListenAddresses = []string{"127.0.0.1"}
 	}
-	if err := b.srv.StartBgp(ctx, &api.StartBgpRequest{Global: global}); err != nil {
+	// gobgp v3's StartBgp ignored its context. v4 hands it to the BFD server,
+	// whose start returns ctx.Err() at random once the context is done, even
+	// when starting would succeed. The daemon cancels this context when a stop
+	// lands while it is still starting, and reads a start error as a failed
+	// startup, so the speaker starts regardless and the stop that follows tears
+	// it down, as it did with v3.
+	if err := b.srv.StartBgp(context.WithoutCancel(ctx), &api.StartBgpRequest{Global: global}); err != nil {
 		return fmt.Errorf("StartBgp: %w", err)
 	}
 
