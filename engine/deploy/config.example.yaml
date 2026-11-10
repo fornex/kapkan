@@ -12,8 +12,10 @@ listen:
   netflow: ":2055" # NetFlow v5/v9 + IPFIX share this socket
   # queue: datagrams each listener holds while its decode workers are behind
   # (default 16384); past it they are dropped and counted in
-  # kapkan_ingest_dropped_flows_total. Each one takes ~10 KB of memory, so the
-  # default costs up to ~160 MB per listener: count it in a MemoryMax=.
+  # kapkan_ingest_dropped_flows_total. Each one takes ~10 KB of live heap, and
+  # the process up to twice that without GOMEMLIMIT (Go's collector lets the
+  # heap grow to twice its live size), so the default costs ~160 MB live and up
+  # to ~320 MB per listener: count it in a MemoryMax=.
   # queue: 16384
 
 sampling:

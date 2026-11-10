@@ -105,7 +105,10 @@ func (i *Ingester) Start() error {
 // wait for the decode workers before the receiver drops, and it is a memory
 // bound too: every queued datagram pins one of goflow2's pooled 9000-byte
 // receive buffers (utils/udp.go packetPool), whatever its real size, so a full
-// queue holds queue × ~10 KB.
+// queue holds queue × ~10 KB of live heap. The process holds up to twice that
+// without GOMEMLIMIT: GOGC=100 lets the heap grow to twice its live size before
+// a collection, and a flood keeps producing garbage even while every datagram
+// is dropped, because goflow2's read loop allocates a *net.UDPAddr for each.
 func (i *Ingester) startReceiver(family, listen string, queue int, pipe utils.FlowPipe) error {
 	host, port, err := splitListen(listen)
 	if err != nil {

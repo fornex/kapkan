@@ -152,6 +152,7 @@ RestrictAddressFamilies=AF_NETLINK
 MemoryAccounting=yes
 LimitMEMLOCK=infinity
 # MemoryMax=<map footprint + receive queues + heap + headroom; see section 2>
+# Environment=GOMEMLIMIT=<MemoryMax minus the maps and a margin; see section 2>
 ```
 
 **Measured, end to end, on systemd 255 (Ubuntu 24.04, kernel 6.12.76-linuxkit),
@@ -291,21 +292,45 @@ What an operator needs to take from that table:
 
   | queue | result |
   |---|---|
-  | 65,536 datagrams | full at +628 MiB of `memory.current` — **10,049 B per datagram** — after which every further datagram was dropped and counted |
+  | 65,536 datagrams | full at +628 MiB of `memory.current`, read the moment it filled — **10,049 B per datagram** — after which every further datagram was dropped and counted |
   | 1,000,000 (the old fixed size) | **OOM-killed 0.7 s** into the flood, ~100,000 datagrams queued, `kapkan_ingest_dropped_flows_total` still **0** |
 
   The second row is why `listen.queue` exists: the saturation counter was
   never going to move before the kernel killed the process. The default is
-  16,384 datagrams, ~157 MiB per listener, both listeners ~314 MiB. Budget
-  `listen.queue × 10 KB` per listener, and remember that a quiet week's
+  16,384 datagrams, ~157 MiB of live heap per listener, both listeners
+  ~314 MiB.
+
+  **That is the live size, and the process can hold twice as much.** kapkan
+  sets no `GOMEMLIMIT`, and Go's collector, which does not see `MemoryMax=`,
+  lets the heap grow to twice its live size before a collection
+  (`GOGC=100`). A full queue is live heap, and a flood keeps producing
+  garbage even while every datagram is dropped: goflow2's read loop allocates
+  a `*net.UDPAddr` (~52 B) for each datagram it reads, and the decode workers
+  allocate as they decode. **Measured** as the Go runtime's committed memory
+  (`runtime/metrics` total minus released; a runtime figure, not a cgroup
+  one), one listener at the default queue, decode workers blocked, a
+  sustained loopback flood: live heap ~151 MiB, GC goal ~302 MiB, committed
+  memory **~316 MiB**; the same run with `GOMEMLIMIT=200MiB` peaked at
+  **~193 MiB**, at the cost of a collection every 1–3 s. Budget
+  `2 × listen.queue × 10 KB` per listener without a `GOMEMLIMIT` (~315 MiB
+  per listener at the default, both listeners ~630 MiB) and
+  `listen.queue × 10 KB` with one, and remember that a quiet week's
   `memory.peak` never saw a full queue.
 
-- **A practical starting point** for the default limits is `MemoryMax=1G` on a
-  ≤16-core box: ~235 MiB of maps, ~314 MiB for two full receive queues at the
-  default `listen.queue`, plus the Go heap, plus room for the LPM tries under a
-  large allowlist. Leave `MemoryAccounting=yes` on and watch `memory.peak` for
-  a week before tightening it — and tighten it to the peak plus the queues,
-  not to the peak.
+- **A practical starting point** for the default limits is `MemoryMax=1G`
+  with `GOMEMLIMIT=700MiB` on a ≤16-core box. `GOMEMLIMIT` bounds only the Go
+  runtime's own memory, so it sits below `MemoryMax=` by the ~235 MiB of maps
+  and a ~10% margin for the rest of what the cgroup charges: the LPM tries
+  under a large allowlist, socket buffers, page cache. The 700 MiB holds
+  ~314 MiB for two full receive queues at the default `listen.queue` and the
+  rest of the Go heap, and the collector runs as it nears the limit instead
+  of letting the heap double. Without a `GOMEMLIMIT`, start at
+  `MemoryMax=1536M`: ~235 MiB of maps, ~630 MiB for the two full queues with
+  the collector's headroom, twice the rest of the live heap, and the LPM
+  tries. Leave `MemoryAccounting=yes` on and watch `memory.peak` for a week
+  before tightening it — and tighten it to the peak plus the queues (twice
+  the queues without a `GOMEMLIMIT`), not to the peak, moving `GOMEMLIMIT`
+  down with it.
 
 - **`LimitMEMLOCK=infinity` is still worth setting** even though 5.11+ ignores
   it for maps: it costs nothing, and it is what keeps the unit working if kapkan
@@ -611,6 +636,7 @@ filter, and the two look identical until you check the source.
 | `create pin directory /sys/fs/bpf/kapkan: read-only file system` | `ProtectKernelTunables=yes` is still in force; the drop-in sets it to `false` and `ReadWritePaths=` cannot substitute for that |
 | unit OOM-killed at startup | `MemoryMax=` below the ~235 MiB of maps; see section 2 |
 | unit OOM-killed under a telemetry burst, `kapkan_ingest_dropped_flows_total` still 0 | `MemoryMax=` leaves no room for the receive queues, `listen.queue` × ~10 KB per listener; see section 2 |
+| unit OOM-killed in a sustained flood, after `kapkan_ingest_dropped_flows_total` started moving | `MemoryMax=` fits the full queues but not Go's GC headroom: without a `GOMEMLIMIT` the heap grows to twice its live size, so budget `listen.queue` × ~20 KB per listener or set `GOMEMLIMIT` below `MemoryMax=` minus the maps; see section 2 |
 | `pin path is not safe to use: ... is on filesystem type 0x…, not bpffs` | `pin_path` is an ordinary directory: bpffs is not mounted, or the unit made `/sys/fs/bpf` read-only |
 | `pin path is not safe to use: ... is mode 0777` / `owned by uid N` | the pin directory is writable by, or owned by, somebody else. A local user who can write it can pre-create a program kapkan would ADOPT, so this is a refusal to start. `chown` it to the kapkan user and `chmod 0700` |
 | `kernel too old: running X, the XDP data plane needs 5.15 or newer` | below the supported floor; set `dataplane.enabled: false` and use a flowspec/blackhole ladder |

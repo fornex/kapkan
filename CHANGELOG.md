@@ -24,7 +24,8 @@ security-relevant.
 - **Added `listen.queue`** (optional, default `16384`, range `1`–`1048576`, restart required): how
   many datagrams each telemetry listener holds while its decode workers are behind. Migration:
   none; the queue used to be a fixed 1,000,000 (see Fixed) — raise it only with the memory to
-  match, about 10 KB per datagram per listener.
+  match: about 10 KB of live heap per datagram per listener, and up to twice that in process
+  memory without a `GOMEMLIMIT`.
 
 ### Security
 
@@ -60,9 +61,12 @@ security-relevant.
   whose decode workers fell behind could grow to ~9.4 GiB (two listeners, ~19 GiB) before
   `kapkan_ingest_dropped_flows_total` moved. Under a systemd `MemoryMax=` the kernel got there
   first: in a 1 GiB cgroup the daemon was OOM-killed 0.7 s into a flood with the counter still
-  at 0. The queue is now `listen.queue`, 16,384 datagrams by default (~157 MiB per listener),
-  and the data-plane `MemoryMax=` guidance counts it: the suggested starting point moves from
-  512M to 1G.
+  at 0. The queue is now `listen.queue`, 16,384 datagrams by default: ~157 MiB of live heap per
+  listener, and up to about twice that in process memory under a sustained flood without a
+  `GOMEMLIMIT`, since Go's collector lets the heap grow to twice its live size before it
+  collects (~316 MiB measured for one full default queue, ~193 MiB with `GOMEMLIMIT=200MiB`).
+  The data-plane `MemoryMax=` guidance counts both: the suggested starting point moves from
+  512M to 1G with `GOMEMLIMIT=700MiB`, or to 1536M without one.
 - **storage:** a ClickHouse older than 21.4 is named at start — one `ERROR` line with the
   server's version, the floor and what to do — instead of six `Syntax error ... TTL` refusals
   that said nothing about why ([#122](https://github.com/fornex/kapkan/issues/122): the

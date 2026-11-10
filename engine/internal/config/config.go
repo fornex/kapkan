@@ -147,16 +147,20 @@ type Listen struct {
 	// Queue is how many datagrams each listener holds for its decode workers
 	// while they are behind; past it the listener drops datagrams and counts
 	// them in kapkan_ingest_dropped_flows_total. Every queued datagram pins one
-	// of goflow2's 9000-byte receive buffers whatever its size, about 10 KB, so
-	// the queue is a memory bound: the default 16384 is ~160 MB per listener.
-	// 0 selects the default, then 1..1048576. Resolved in place by validate().
+	// of goflow2's 9000-byte receive buffers whatever its size, about 10 KB of
+	// live heap, so the queue is a memory bound: the default 16384 is ~160 MB
+	// live per listener, and the process holds up to twice that without
+	// GOMEMLIMIT, because GOGC=100 lets the heap grow to twice its live size
+	// before a collection. 0 selects the default, then 1..1048576. Resolved in
+	// place by validate().
 	Queue int `yaml:"queue"`
 }
 
 const (
 	defaultListenQueue = 1 << 14
-	// maxListenQueue is the size the queue had before it was configurable,
-	// ~10 GB per listener when full; a larger value is a typo.
+	// maxListenQueue is just above the 1,000,000 the queue had before it was
+	// configurable, ~10 GB of live heap per listener when full; a larger value
+	// is a typo.
 	maxListenQueue = 1 << 20
 )
 
