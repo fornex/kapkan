@@ -298,10 +298,12 @@ func writeWireStep(out *strings.Builder, name string, typ byte, body []byte) {
 	fmt.Fprintf(out, "\n# %s\n%s", name, wireText(typ, body))
 }
 
-// goldenPeerOpen is a router that negotiates what the speaker offers but
-// Extended Message: IPv4 and IPv6 unicast and FlowSpec, route refresh, 4-octet
-// AS, and Graceful Restart as a helper with the N bit (RFC 8538), so
-// End-of-RIB and the Hard Reset escalation reach the wire to be pinned.
+// goldenPeerOpen is a router that negotiates IPv4 and IPv6 unicast and
+// FlowSpec, route refresh, 4-octet AS, and Graceful Restart as a helper with
+// the N bit (RFC 8538), so End-of-RIB and the Hard Reset escalation reach the
+// wire to be pinned. It does not advertise the other capabilities the speaker
+// offers: Extended Message, Extended Next Hop Encoding, FQDN and, on the iBGP
+// session, Software Version.
 func goldenPeerOpen(asn uint16) []byte { return bgpOpen(asn, goldenPeerCaps(asn)) }
 
 func goldenPeerCaps(asn uint16) []byte {
@@ -419,8 +421,10 @@ func TestBGPExtendedMessage(t *testing.T) {
 // wireText renders one message for the golden file. It splits the message
 // into the fields the speaker chose (capabilities, path attributes, NLRI) and
 // leaves each value as the bytes on the wire, so the file pins the encoding
-// itself rather than what a decoder makes of it. The one liberty it takes is
-// the order of several routes in one UPDATE, which it sorts (nlriText).
+// itself rather than what a decoder makes of it. It takes two liberties: it
+// sorts the routes of an UPDATE that carries several (nlriText), and it masks
+// the values of the FQDN (73) and Software Version (75) capabilities, which
+// name the host and the gobgp release (capabilityValue).
 func wireText(typ byte, body []byte) string {
 	var b strings.Builder
 	switch typ {
