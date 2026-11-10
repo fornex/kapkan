@@ -21,10 +21,11 @@ import (
 
 // The ingest benchmarks time a listener's decode path end to end, short of
 // the socket: goflow2's pipe decodes a datagram, the conversion producer
-// (newDecodeProducer: goflow2's proto producer, convert and the two per-flow
-// counters) turns each record into a flow.Flow, and Engine.Process folds it —
-// the path internal/app wires, run inline in each decode worker. Left out are
-// the socket reads that fill the listener's queue.
+// (newDecodeProducer: goflow2's proto producer, convert, packets_total once per
+// datagram and flows_total once per flow) turns each record into a flow.Flow,
+// and Engine.Process folds it — the path internal/app wires, run inline in
+// each decode worker. Left out are the socket reads that fill the listener's
+// queue.
 //
 // Each runs twice: workers=1 is one decode worker, and workers=4 is a
 // listener's decodeWorkers taking datagrams off the queue in turn. GOMAXPROCS
