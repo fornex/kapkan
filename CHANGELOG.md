@@ -28,7 +28,16 @@ security-relevant.
   carries the `x/net/http2` side of five of them. No code change; the toolchain floor in
   `engine/go.mod` moves from 1.26.6 to 1.26.10. The govulncheck gate caught them on the first CI
   run after their publication; the only advisory left is the accepted GO-2026-4736 (gobgp
-  NEXT_HOP, no upstream fix).
+  NEXT_HOP, fixed upstream only in the v4 line, from 4.4.0; the engine is still on v3).
+
+### Added
+
+- **packaging:** the release archive and the `.deb`/`.rpm` now carry the edge node's systemd
+  unit and annotated config — `deploy/kapkan-edge.service` and `deploy/edge.example.yaml` in the
+  archive, `/usr/share/kapkan/` in the packages (copied into place on the boxes that run
+  `kapkan edge`, never installed on every host, like the data-plane drop-in). 1.8.0's notes said
+  they shipped; `.goreleaser.yaml` never listed them. The example's `quic` comments no longer say
+  that nothing renders HTTP/3 — that changed in 1.8.0 (E5.3).
 
 ### Fixed
 
@@ -74,6 +83,16 @@ security-relevant.
   and keeps running. The handler is in place before the role's own startup work, so a `SIGHUP`
   that lands while the data plane loads is ignored too. None of them gained a reload: a
   configuration change still takes a restart.
+- **metrics:** `kapkan_ingest_packets_total` counts what its help text always said — telemetry
+  datagrams, one per decoded datagram however many flow records it carried — instead of one per
+  flow record. Its name and labels are unchanged, but its rate falls by your exporters' records
+  per datagram (tens for NetFlow v9), so revisit any alert threshold on it;
+  `kapkan_ingest_flows_total` still counts the records. An exporter that sends only sFlow
+  counters or NetFlow templates now shows up in it. `kapkan_ingest_dropped_flows_total` keeps
+  its name and its counting and is now described as what it is: datagrams, not flows, that a
+  listener's receive queue dropped before decoding (there is no engine input queue) — the same
+  unit as `packets_total`, so the two give the share being lost. The bundled Grafana dashboard's
+  panels say the same.
 
 ## [1.8.0] - 2026-09-18
 
