@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,16 @@ const wireGolden = "testdata/bgp-wire.golden"
 // own decoder, so they cannot see a change that gobgp makes to its encoder and
 // decoder together, which is what a gobgp upgrade can do. This test compares
 // against bytes the upgrade cannot rewrite, so a change in what reaches the
-// router shows up as a diff in testdata/bgp-wire.golden, in review.
+// router shows up as a diff in testdata/bgp-wire.golden, in review, for what
+// the file covers: a router that does not negotiate Extended Message, the
+// routes a restart re-announces, and then one change at a time, each read off
+// the wire before the next is made.
+//
+// It does not cover changes made back to back. gobgp v4 merges the ones that
+// queue up between two sends into fewer UPDATEs, and how many it merges
+// depends on when its send loop runs, so no file can pin it. The longer
+// UPDATEs a router that negotiates Extended Message may get are pinned by
+// TestBGPExtendedMessage.
 //
 // `go test ./internal/mitigate -run TestBGPWireGolden -update` rewrites the
 // file; review the diff like any other change to what a router receives.
@@ -94,6 +104,26 @@ type wireStep struct {
 }
 
 var blackholeComm = []uint32{65000<<16 | 666}
+
+// rehydrated are the bans the speaker holds before its peer comes up, as
+// Mitigator.Start re-announces them after a restart. Two pairs of them share
+// a family and attributes, one pair in IPv6 unicast and one in IPv4 FlowSpec,
+// so the file shows how the speaker packs such routes: gobgp v4 puts each
+// pair into one MP_REACH_NLRI, where v3 sent an UPDATE for each route.
+var rehydrated = []wireStep{
+	{"RTBH 203.0.113.99/32",
+		announceStep("203.0.113.99/32", blackholeAttrs{nextHop: "192.0.2.1", communities: blackholeComm})},
+	{"RTBH 2001:db8::99/128",
+		announceStep("2001:db8::99/128", blackholeAttrs{nextHop: "100::1", communities: blackholeComm})},
+	{"RTBH 2001:db8::98/128",
+		announceStep("2001:db8::98/128", blackholeAttrs{nextHop: "100::1", communities: blackholeComm})},
+	{"FlowSpec discard: dst 203.0.113.99/32, UDP, source port 123",
+		flowSpecStep(true, FlowSpecRule{Dst: netip.MustParsePrefix("203.0.113.99/32"), Proto: 17, SrcPort: 123,
+			Action: config.FlowSpecDiscard})},
+	{"FlowSpec discard: dst 203.0.113.99/32, UDP, source port 19",
+		flowSpecStep(true, FlowSpecRule{Dst: netip.MustParsePrefix("203.0.113.99/32"), Proto: 17, SrcPort: 19,
+			Action: config.FlowSpecDiscard})},
+}
 
 // wireSteps are the announcements the brain makes, each answered by exactly
 // one UPDATE. A per-hostgroup override and a divert reach the speaker as the
@@ -187,9 +217,10 @@ func recordWireSession(t *testing.T, out *strings.Builder, peerASN uint16, end w
 	// Mitigator.Start re-announces the bans it rehydrated before it adds the
 	// peers, so they ride the initial advertisement ahead of End-of-RIB and a
 	// Graceful Restart helper refreshes them instead of purging them.
-	if err := sp.Announce(ctx, netip.MustParsePrefix("203.0.113.99/32"),
-		blackholeAttrs{nextHop: "192.0.2.1", communities: blackholeComm}); err != nil {
-		t.Fatalf("Announce before the peer: %v", err)
+	for _, st := range rehydrated {
+		if err := st.act(ctx, sp); err != nil {
+			t.Fatalf("%s, before the peer: %v", st.name, err)
+		}
 	}
 	if err := sp.addPeers(ctx); err != nil {
 		t.Fatalf("addPeers: %v", err)
@@ -267,12 +298,14 @@ func writeWireStep(out *strings.Builder, name string, typ byte, body []byte) {
 	fmt.Fprintf(out, "\n# %s\n%s", name, wireText(typ, body))
 }
 
-// goldenPeerOpen is a router that negotiates everything the speaker offers:
-// IPv4 and IPv6 unicast and FlowSpec, route refresh, 4-octet AS, and Graceful
-// Restart as a helper with the N bit (RFC 8538), so End-of-RIB and the Hard
-// Reset escalation reach the wire to be pinned.
-func goldenPeerOpen(asn uint16) []byte {
-	caps := []byte{
+// goldenPeerOpen is a router that negotiates what the speaker offers but
+// Extended Message: IPv4 and IPv6 unicast and FlowSpec, route refresh, 4-octet
+// AS, and Graceful Restart as a helper with the N bit (RFC 8538), so
+// End-of-RIB and the Hard Reset escalation reach the wire to be pinned.
+func goldenPeerOpen(asn uint16) []byte { return bgpOpen(asn, goldenPeerCaps(asn)) }
+
+func goldenPeerCaps(asn uint16) []byte {
+	return []byte{
 		1, 4, 0, 1, 0, 1, // Multiprotocol: IPv4 unicast
 		1, 4, 0, 2, 0, 1, // Multiprotocol: IPv6 unicast
 		1, 4, 0, 1, 0, 133, // Multiprotocol: IPv4 FlowSpec
@@ -283,7 +316,102 @@ func goldenPeerOpen(asn uint16) []byte {
 		// no forwarding state preserved.
 		64, 18, 0x40, 120, 0, 1, 1, 0, 0, 2, 1, 0, 0, 1, 133, 0, 0, 2, 133, 0,
 	}
-	return bgpOpen(asn, caps)
+}
+
+// TestBGPExtendedMessage pins what gobgp v4's Extended Message capability (RFC
+// 8654) changes on the wire: how long an UPDATE may be. The speaker always
+// advertises the capability. A router that does not advertise it back must
+// never get a message longer than 4096 octets (RFC 4271 §4.1); a router that
+// does may get UPDATEs of up to 65535, and the speaker uses them to pack the
+// bans a restart re-announces into fewer UPDATEs.
+//
+// 810 /32s with the eBGP attributes take 4100 octets in one UPDATE, four more
+// than 4096 allows, so the first router gets them in two UPDATEs and the
+// second in one.
+func TestBGPExtendedMessage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping BGP integration test in -short mode")
+	}
+	const bans = 810
+	for _, tc := range []struct {
+		name     string
+		extended bool // the router advertises Extended Message
+		updates  int  // the UPDATEs the bans arrive in
+	}{
+		{"router without Extended Message", false, 2},
+		{"router with Extended Message", true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ln := listenPeer(t)
+			sp, err := newBGPSpeaker(storeFrom(t, bgpYAML(uint32(ln.Addr().(*net.TCPAddr).Port))).Get(),
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatalf("newBGPSpeaker: %v", err)
+			}
+			if err := sp.start(ctx); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			t.Cleanup(sp.stop)
+
+			// Re-announced before the peer, as Mitigator.Start does, so the bans
+			// all ride the initial advertisement.
+			attrs := blackholeAttrs{nextHop: "192.0.2.1", communities: blackholeComm}
+			for i := range bans {
+				dst := netip.PrefixFrom(netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)}), 32)
+				if err := sp.Announce(ctx, dst, attrs); err != nil {
+					t.Fatalf("Announce %s before the peer: %v", dst, err)
+				}
+			}
+			if err := sp.addPeers(ctx); err != nil {
+				t.Fatalf("addPeers: %v", err)
+			}
+
+			p := acceptPeer(t, ln, inProcess{})
+			p.expect(bgpMsgOpen)
+			caps := goldenPeerCaps(65000)
+			if tc.extended {
+				caps = append(caps, 6, 0) // Extended Message
+				p.extendedMessage = true
+			}
+			p.send(bgpOpen(65000, caps))
+			p.send(bgpMessage(bgpMsgKeepalive, nil))
+
+			// Every ban is a /32, five octets of NLRI. IPv4 unicast's End-of-RIB
+			// follows its last route; the other families only signal theirs.
+			var sizes []int
+			got := 0
+			for {
+				typ, body := p.next(10 * time.Second)
+				if typ != bgpMsgUpdate {
+					t.Fatalf("initial advertisement: the speaker sent its %s: % x", bgpMsgName(typ), body)
+				}
+				if updateFamily(body) != "IPv4 unicast" {
+					continue
+				}
+				if isEndOfRIB(body) {
+					break
+				}
+				_, _, nlri, ok := splitUpdate(body)
+				if !ok {
+					t.Fatalf("initial advertisement: malformed UPDATE: % x", body)
+				}
+				sizes = append(sizes, 19+len(body))
+				got += len(nlri) / 5
+			}
+			if got != bans {
+				t.Errorf("the initial advertisement carried %d of the %d bans", got, bans)
+			}
+			if len(sizes) != tc.updates {
+				t.Errorf("the bans arrived in %d UPDATEs of %v octets, want %d", len(sizes), sizes, tc.updates)
+			}
+			for _, n := range sizes {
+				if n > 4096 && !tc.extended {
+					t.Errorf("a router without Extended Message got an UPDATE of %d octets", n)
+				}
+			}
+		})
+	}
 }
 
 /* --------------------------------------------- rendering the golden file */
@@ -291,7 +419,8 @@ func goldenPeerOpen(asn uint16) []byte {
 // wireText renders one message for the golden file. It splits the message
 // into the fields the speaker chose (capabilities, path attributes, NLRI) and
 // leaves each value as the bytes on the wire, so the file pins the encoding
-// itself rather than what a decoder makes of it.
+// itself rather than what a decoder makes of it. The one liberty it takes is
+// the order of several routes in one UPDATE, which it sorts (nlriText).
 func wireText(typ byte, body []byte) string {
 	var b strings.Builder
 	switch typ {
@@ -436,14 +565,43 @@ func writeUpdate(b *strings.Builder, body []byte) {
 		b.WriteString("UPDATE\n")
 	}
 	if len(withdrawn) > 0 {
-		fmt.Fprintf(b, "  withdrawn routes: %s\n", wireHex(withdrawn))
+		fmt.Fprintf(b, "  withdrawn routes: %s\n", nlriText(1, withdrawn))
 	}
 	for _, a := range attrs {
 		fmt.Fprintf(b, "  %s, flags %02x: %s\n", attrName(a.code), a.flags, attrValue(a))
 	}
 	if len(nlri) > 0 {
-		fmt.Fprintf(b, "  NLRI: %s\n", wireHex(nlri))
+		fmt.Fprintf(b, "  NLRI: %s\n", nlriText(1, nlri))
 	}
+}
+
+// nlriText renders an NLRI field one route at a time, sorted and joined by
+// " + ". An UPDATE that carries several routes carries them in an order that
+// means nothing to a router and that gobgp does not fix. A unicast route is
+// its length in bits and that many bits, in whole octets (RFC 4271 §4.3); a
+// FlowSpec rule is its length, in one octet below 240 and in two (0xfnnn)
+// from there (RFC 8955 §4). A field that does not split is left whole.
+func nlriText(safi byte, b []byte) string {
+	var routes []string
+	for rest := b; len(rest) > 0; {
+		n := 1 + (int(rest[0])+7)/8
+		if safi == 133 {
+			n = 1 + int(rest[0])
+			if rest[0] >= 0xf0 && len(rest) >= 2 {
+				n = 2 + int(binary.BigEndian.Uint16(rest)&0x0fff)
+			}
+		}
+		if len(rest) < n {
+			return wireHex(b)
+		}
+		routes = append(routes, wireHex(rest[:n]))
+		rest = rest[n:]
+	}
+	if len(routes) == 0 {
+		return wireHex(b)
+	}
+	slices.Sort(routes)
+	return strings.Join(routes, " + ")
 }
 
 func attrName(code byte) string {
@@ -479,9 +637,9 @@ func attrValue(a wireAttr) string {
 	case a.code == 14 && len(v) >= 5 && len(v) >= 5+int(v[3]):
 		nh := v[4 : 4+int(v[3])]
 		return fmt.Sprintf("%s, next hop %s, reserved %02x, NLRI %s",
-			familyName(binary.BigEndian.Uint16(v[:2]), v[2]), wireHex(nh), v[4+len(nh)], wireHex(v[5+len(nh):]))
+			familyName(binary.BigEndian.Uint16(v[:2]), v[2]), wireHex(nh), v[4+len(nh)], nlriText(v[2], v[5+len(nh):]))
 	case a.code == 15 && len(v) >= 3:
-		return fmt.Sprintf("%s, withdrawn %s", familyName(binary.BigEndian.Uint16(v[:2]), v[2]), wireHex(v[3:]))
+		return fmt.Sprintf("%s, withdrawn %s", familyName(binary.BigEndian.Uint16(v[:2]), v[2]), nlriText(v[2], v[3:]))
 	}
 	return wireHex(v)
 }

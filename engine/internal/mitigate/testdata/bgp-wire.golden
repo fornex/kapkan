@@ -23,10 +23,20 @@ UPDATE
 UPDATE: End-of-RIB
 
 # initial advertisement, IPv6 unicast
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  COMMUNITIES, flags c0: fd e8 02 9a
+  MP_REACH_NLRI, flags 80: IPv6 unicast, next hop 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01, reserved 00, NLRI 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 98 + 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 99
 UPDATE: End-of-RIB
   MP_UNREACH_NLRI, flags 80: IPv6 unicast, withdrawn (empty)
 
 # initial advertisement, IPv4 FlowSpec
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: 02 01 00 00 fd e9
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 0c 01 20 cb 00 71 63 03 81 11 06 81 13 + 0c 01 20 cb 00 71 63 03 81 11 06 81 7b
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
 UPDATE: End-of-RIB
   MP_UNREACH_NLRI, flags 80: IPv4 FlowSpec, withdrawn (empty)
 
@@ -165,10 +175,22 @@ UPDATE
 UPDATE: End-of-RIB
 
 # initial advertisement, IPv6 unicast
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  COMMUNITIES, flags c0: fd e8 02 9a
+  MP_REACH_NLRI, flags 80: IPv6 unicast, next hop 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01, reserved 00, NLRI 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 98 + 80 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 99
 UPDATE: End-of-RIB
   MP_UNREACH_NLRI, flags 80: IPv6 unicast, withdrawn (empty)
 
 # initial advertisement, IPv4 FlowSpec
+UPDATE
+  ORIGIN, flags 40: 02
+  AS_PATH, flags 40: (empty)
+  LOCAL_PREF, flags 40: 00 00 00 64
+  MP_REACH_NLRI, flags 80: IPv4 FlowSpec, next hop (empty), reserved 00, NLRI 0c 01 20 cb 00 71 63 03 81 11 06 81 13 + 0c 01 20 cb 00 71 63 03 81 11 06 81 7b
+  EXTENDED_COMMUNITIES, flags c0: 80 06 00 00 00 00 00 00
 UPDATE: End-of-RIB
   MP_UNREACH_NLRI, flags 80: IPv4 FlowSpec, withdrawn (empty)
 

@@ -30,13 +30,32 @@ security-relevant.
   Message Type), a session reset, and the speaker dials back in. A regression test sends that
   message in OpenSent, OpenConfirm and Established, to a brain running in a child process.
 
-  Routers see one difference. A new test records every byte the speaker sends — the OPEN, the
-  initial advertisement and its End-of-RIB, the RTBH, divert and FlowSpec UPDATEs and withdrawals,
-  and the Cease NOTIFICATIONs of a restart (Administrative Reset) and a stop (Hard Reset), over
-  eBGP and iBGP — and against v3.37.0 only the OPEN differs: gobgp v4 always advertises the
-  Extended Message capability (RFC 8654), which a router that does not implement it ignores (RFC
-  5492). The `bgp peer state` log line still reads `state=ESTABLISHED`; at start-up it no longer
-  shows the `IDLE` and `OPENSENT` steps, which gobgp v4 does not report.
+  Routers see two differences; the routes they end up with are the same. gobgp v4 always
+  advertises the Extended Message capability (RFC 8654): a router that does not implement it
+  ignores it (RFC 5492), and one that does negotiates it, after which an UPDATE may run past 4096
+  octets, so a restart that re-announces many bans sends fewer, larger UPDATEs. And v4 puts
+  several routes into one UPDATE where v3 sent one each: IPv6 unicast and FlowSpec routes that
+  share attributes go out in one MP_REACH_NLRI, and their withdrawals in one MP_UNREACH_NLRI; and
+  changes that queue up between two sends are merged, so bans or withdrawals made back to back (a
+  TTL sweep, a scrubbing-node failover), IPv4 ones included, can arrive in one UPDATE, and of two
+  queued changes to the same prefix only the later one is sent. A new test records every byte the
+  speaker sends — the OPEN, the initial advertisement and its End-of-RIB, the RTBH, divert and
+  FlowSpec UPDATEs and withdrawals, and the Cease NOTIFICATIONs of a restart (Administrative
+  Reset) and a stop (Hard Reset), over eBGP and iBGP — and against v3.37.0 it differs only in the
+  OPEN and in the initial advertisement, where the two re-announced IPv6 routes go out in one
+  UPDATE, as do the two FlowSpec rules; every change made one at a time is byte-identical. A
+  second test pins the 4096-octet limit for a router without the capability, and the longer
+  UPDATE for one with it.
+
+  The `bgp peer state` log line still reads `state=ESTABLISHED`, but gobgp v4 runs the TCP
+  connect and the OPEN exchange of the outgoing connection outside the state machine that line
+  reports. A session goes `ACTIVE` → `OPENCONFIRM` → `ESTABLISHED`, where v3 began at `IDLE` and
+  passed `OPENSENT`, and `IDLE` appears only when a session that got as far as `OPENCONFIRM`
+  fails. A session that fails earlier leaves a single `state=ACTIVE` line, just as an unreachable
+  router does. That includes a router whose AS is not the neighbor's `remote_asn`: gobgp now logs
+  it as `sent notification` at info level with `Code` 2 and `Subcode` 2, where v3 logged a
+  warning naming both AS numbers. The troubleshooting page now says how to tell these cases
+  apart.
 
   gobgp v4.10.0 also carries the upstream fix for GO-2026-4736, the crafted NEXT_HOP attribute
   (gobgp#3305): v4 is fixed from 4.4.0 per GHSA-4p9m-8gc4-rw2h, and no v3 release has the fix. The

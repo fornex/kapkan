@@ -353,6 +353,10 @@ type testPeer struct {
 	t    *testing.T
 	host speakerHost
 	conn net.Conn
+	// extendedMessage is set by a test whose OPEN advertises Extended Message
+	// (RFC 8654), which lets the speaker send messages of up to 65535 octets
+	// rather than 4096.
+	extendedMessage bool
 }
 
 // listenPeer opens the test peer's listening socket on an ephemeral loopback
@@ -447,8 +451,11 @@ func (p *testPeer) read(deadline time.Time) (byte, []byte, error) {
 	if !bytes.Equal(hdr[:16], bytes.Repeat([]byte{0xff}, 16)) {
 		p.t.Fatalf("the speaker sent a header without the all-ones marker: % x", hdr)
 	}
-	n := int(binary.BigEndian.Uint16(hdr[16:18]))
-	if n < len(hdr) || n > 4096 {
+	n, limit := int(binary.BigEndian.Uint16(hdr[16:18])), 4096
+	if p.extendedMessage {
+		limit = 65535
+	}
+	if n < len(hdr) || n > limit {
 		p.t.Fatalf("the speaker sent a message of length %d", n)
 	}
 	body := make([]byte, n-len(hdr))
