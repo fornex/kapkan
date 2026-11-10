@@ -25,8 +25,9 @@ var (
 	// however many flow records it carried — none, for a counter-only sFlow or
 	// a template-only NetFlow datagram, which still shows the exporter is
 	// alive. FlowsTotal counts the records; a datagram that fails to decode is
-	// in DecodeErrorsTotal instead. DroppedFlowsTotal is in the same unit, so
-	// the two give the share of telemetry ingest is losing.
+	// in DecodeErrorsTotal instead, and one that decodes but whose records
+	// then fail to convert is in both. DroppedFlowsTotal is in the same unit,
+	// so the two give the share of telemetry ingest is losing.
 	//
 	// The exporter label is cardinality-bounded (the address is spoofable):
 	// sources outside the configured flow_sources allowlist — or beyond an
