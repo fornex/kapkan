@@ -245,8 +245,8 @@ func TestNetFlowV9NoSamplingRate(t *testing.T) {
 
 // TestNetFlowV9RouterTemplate decodes the router-shaped record in both
 // address families: the ten extra elements must come back with their fixed
-// values, and the eight kapkan reads must be unchanged by sharing a template
-// with them — including the fragment element, which follows them.
+// values, and the minimal eight — and the fragment element, which follows
+// the ten — must be unchanged by sharing a template with them.
 func TestNetFlowV9RouterTemplate(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

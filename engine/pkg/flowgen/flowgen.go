@@ -147,19 +147,26 @@ type NetFlowV9Options struct {
 	// keyed to SourceID, so send it at least once before/with data records.
 	SamplingRate uint32
 	// RouterTemplate exports the record a router's classic v9 cache sends —
-	// the NetFlow v5 field set, eighteen elements — instead of the eight
-	// kapkan reads: ToS, the input and output interfaces, the next hop, the
-	// source and destination AS and mask, and the first- and last-switched
-	// times join them, with fixed plausible values. A collector decodes every
-	// element a template declares, read or not, so a load test standing in
-	// for a router should set it.
+	// the NetFlow v5 field set, eighteen elements — instead of the minimal
+	// eight (addresses, ports, protocol, TCP flags, bytes, packets). ToS, the
+	// input and output interfaces, the next hop, the source and destination
+	// AS and mask, and the first- and last-switched times join them, with
+	// fixed plausible values. Kapkan reads the interfaces — sampling.boundary
+	// decides by them which samples count — and only this template carries
+	// them; without it both decode as 0. A collector decodes every element a
+	// template declares, read or not, so a load test standing in for a router
+	// should set it.
 	RouterTemplate bool
 	// DataOnly leaves out the template and options flowsets, as an exporter
 	// does between template refreshes; SamplingRate is then not sent. The
-	// collector must already hold the template: an earlier datagram from the
-	// same exporter, with the same SourceID and RouterTemplate, and with a
-	// Fragment record exactly when this one has one (a fragment adds an
-	// element to the template).
+	// collector must already hold the matching template: the last datagram
+	// that carried one from the same exporter (source address and port) and
+	// SourceID must have had the same RouterTemplate, records of the same
+	// address family, and a Fragment record exactly when this one has one (a
+	// fragment adds an element to the template). Every data template has ID
+	// 256, whatever the family, RouterTemplate or fragment, so each replaces
+	// the one before it, and data read against the wrong one decodes without
+	// an error — into wrong values, with records lost or invented.
 	DataOnly bool
 }
 
