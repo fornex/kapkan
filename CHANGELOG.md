@@ -21,14 +21,56 @@ security-relevant.
 
 ### Security
 
+- **A BGP neighbor can no longer crash the brain.** gobgp v3.37.0, the BGP speaker the brain
+  embeds, dereferenced a nil message when a configured neighbor sent a well-formed header with a
+  message type no RFC defines, and the panic, in a gobgp goroutine with no recover, ended the whole
+  process: 19 bytes from a router with a firmware bug, or from a compromised one, and detection and
+  mitigation stopped together. v3.37.0 is the last v3 release, so the speaker moves to **gobgp
+  v4.10.0**, which answers the way RFC 4271 §6.1 asks: a NOTIFICATION (Message Header Error / Bad
+  Message Type), a session reset, and the speaker dials back in. A regression test sends that
+  message in OpenSent, OpenConfirm and Established, to a brain running in a child process.
+
+  Routers see two differences; the routes they end up with are the same. gobgp v4 always
+  advertises the Extended Message capability (RFC 8654): a router that does not implement it
+  ignores it (RFC 5492), and one that does negotiates it, after which an UPDATE may run past 4096
+  octets, so a restart that re-announces many bans sends fewer, larger UPDATEs. And v4 puts
+  several routes into one UPDATE where v3 sent one each: IPv6 unicast and FlowSpec routes that
+  share attributes go out in one MP_REACH_NLRI, and their withdrawals in one MP_UNREACH_NLRI; and
+  changes that queue up between two sends are merged, so bans or withdrawals made back to back (a
+  TTL sweep, a scrubbing-node failover), IPv4 ones included, can arrive in one UPDATE, and of two
+  queued changes to the same prefix only the later one is sent. A new test records every byte the
+  speaker sends — the OPEN, the initial advertisement and its End-of-RIB, the RTBH, divert and
+  FlowSpec UPDATEs and withdrawals, and the Cease NOTIFICATIONs of a restart (Administrative
+  Reset) and a stop (Hard Reset), over eBGP and iBGP — and against v3.37.0 it differs only in the
+  OPEN and in the initial advertisement, where the two re-announced IPv6 routes go out in one
+  UPDATE, as do the two FlowSpec rules; every change made one at a time is byte-identical. A
+  second test pins the 4096-octet limit for a router without the capability, and the longer
+  UPDATE for one with it.
+
+  The `bgp peer state` log line still reads `state=ESTABLISHED`, but gobgp v4 runs the TCP
+  connect and the OPEN exchange of the outgoing connection outside the state machine that line
+  reports. A session goes `ACTIVE` → `OPENCONFIRM` → `ESTABLISHED`, where v3 began at `IDLE` and
+  passed `OPENSENT`, and `IDLE` appears only when a session that got as far as `OPENCONFIRM`
+  fails. A session that fails earlier leaves a single `state=ACTIVE` line, just as an unreachable
+  router does. That includes a router whose AS is not the neighbor's `remote_asn`: gobgp now logs
+  it as `sent notification` at info level with `Code` 2 and `Subcode` 2, where v3 logged a
+  warning naming both AS numbers. The troubleshooting page now says how to tell these cases
+  apart.
+
+  gobgp v4.10.0 also carries the upstream fix for GO-2026-4736, the crafted NEXT_HOP attribute
+  (gobgp#3305): v4 is fixed from 4.4.0 per GHSA-4p9m-8gc4-rw2h, and no v3 release has the fix. The
+  Go vulnerability database has not caught up (its record still lists every v4 release as
+  affected), so govulncheck still reports it, and it stays on the CI allowlist until that record
+  names the fix. The published proof of concept is now a test too: the brain treats the UPDATE as a
+  withdraw (RFC 7606) and keeps the session, and it did not crash v3.37.0 either.
 - **Built with Go 1.26.10**, which fixes twelve reachable standard-library advisories
   (`crypto/x509` GO-2026-6809; `net/http` GO-2026-6617, -6613, -6612, -6611, -6610, -6605, -6603;
   `net/textproto` -6608; `crypto/tls` -6607; `html/template` -6600, -6599) — and
   `golang.org/x/net` 0.58.0 → 0.61.0 (an indirect dependency, through gobgp's gRPC server), which
   carries the `x/net/http2` side of five of them. No code change; the toolchain floor in
   `engine/go.mod` moves from 1.26.6 to 1.26.10. The govulncheck gate caught them on the first CI
-  run after their publication; the only advisory left is the accepted GO-2026-4736 (gobgp
-  NEXT_HOP, fixed upstream only in the v4 line, from 4.4.0; the engine is still on v3).
+  run after their publication; the only advisory left is GO-2026-4736 (gobgp NEXT_HOP), accepted
+  for the reason in the entry above.
 
 ### Added
 
