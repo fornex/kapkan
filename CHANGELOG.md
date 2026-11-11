@@ -485,8 +485,8 @@ security-relevant.
   bindings, `readonly=2`, time and row caps, 64-bit integers unquoted). A real-ClickHouse suite
   (`KAPKAN_CLICKHOUSE=require`) runs in CI on a pinned `clickhouse/clickhouse-server:25.8`:
   schema idempotent twice, a dropped column comes back, every table takes rows, a row already
-  past `ttl_days` never lands (ClickHouse drops expired rows as the part is written) and
-  `OPTIMIZE … FINAL` keeps it so, the read client's INSERT is refused as read-only, the three
+  past `ttl_days` lands (ClickHouse never filters expired rows at INSERT) and a TTL merge removes
+  it (`OPTIMIZE … FINAL` forces one), the read client's INSERT is refused as read-only, the three
   queries answer in shape — the time range applied to the windows, not to the buckets they fall
   into, and the strongest source state won by rank. Schema init now attempts every statement
   and reports the first failure instead of stopping at it, so a credential that may INSERT but
