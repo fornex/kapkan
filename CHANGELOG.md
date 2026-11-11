@@ -118,6 +118,16 @@ security-relevant.
   and keeps running. The handler is in place before the role's own startup work, so a `SIGHUP`
   that lands while the data plane loads is ignored too. None of them gained a reload: a
   configuration change still takes a restart.
+- **metrics:** `kapkan_ingest_packets_total` counts what its help text always said — telemetry
+  datagrams, one per decoded datagram however many flow records it carried — instead of one per
+  flow record. Its name and labels are unchanged, but its rate falls by your exporters' records
+  per datagram (tens for NetFlow v9), so revisit any alert threshold on it;
+  `kapkan_ingest_flows_total` still counts the records. An exporter that sends only sFlow
+  counters or NetFlow templates now shows up in it. `kapkan_ingest_dropped_flows_total` keeps
+  its name and its counting and is now described as what it is: datagrams, not flows, that a
+  listener's receive queue dropped before decoding (there is no engine input queue) — the same
+  unit as `packets_total`, so the two give the share being lost. The bundled Grafana dashboard's
+  panels say the same.
 
 ## [1.8.0] - 2026-09-18
 

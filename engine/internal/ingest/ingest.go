@@ -22,6 +22,8 @@ import (
 	"github.com/kapkan-io/kapkan/internal/metrics"
 
 	"github.com/netsampler/goflow2/v2/decoders/netflow"
+	"github.com/netsampler/goflow2/v2/decoders/netflowlegacy"
+	"github.com/netsampler/goflow2/v2/decoders/sflow"
 	flowpb "github.com/netsampler/goflow2/v2/pb"
 	"github.com/netsampler/goflow2/v2/producer"
 	protoproducer "github.com/netsampler/goflow2/v2/producer/proto"
@@ -79,7 +81,10 @@ func New(store *config.Store, sink SinkFunc, log *slog.Logger) (*Ingester, error
 	return ing, nil
 }
 
-// dropCounter implements utils.ReceiverCallback, recording UDP queue drops.
+// dropCounter implements utils.ReceiverCallback. The receiver calls it once
+// per DATAGRAM it drops unread because its dispatch queue to the decode workers
+// is full, so DroppedFlowsTotal counts datagrams despite its name: the datagram
+// is never decoded, and how many flows it carried is unknown.
 type dropCounter struct{}
 
 func (dropCounter) Dropped(utils.Message) { metrics.DroppedFlowsTotal.Inc() }
@@ -180,9 +185,19 @@ type flowProducer struct {
 	exporters *exporterLabeler
 }
 
+// Produce is called once per datagram that decoded, so this is where a
+// datagram is counted: once, however many flows it carries. A counter-only
+// sFlow datagram or a template-only NetFlow one carries none and still shows
+// the exporter is alive.
 func (p *flowProducer) Produce(msg interface{}, args *producer.ProduceArgs) ([]producer.ProducerMessage, error) {
-	set, err := p.inner.Produce(msg, args)
 	cfg := p.store.Get()
+	if wire, exporter := datagramSource(msg, args); exporter.IsValid() {
+		// The exporter address is unauthenticated and trivially spoofable, so
+		// the metric label is cardinality-bounded to keep a flood of spoofed
+		// sources from exhausting memory. See exporterLabeler.
+		metrics.PacketsTotal.WithLabelValues(p.exporters.label(exporter, cfg.FlowSourceSet), wire.String()).Inc()
+	}
+	set, err := p.inner.Produce(msg, args)
 	for _, m := range set {
 		pm, ok := m.(*protoproducer.ProtoProducerMessage)
 		if !ok {
@@ -193,13 +208,6 @@ func (p *flowProducer) Produce(msg interface{}, args *producer.ProduceArgs) ([]p
 			continue
 		}
 		metrics.FlowsTotal.WithLabelValues(f.Wire.String()).Inc()
-		if f.Exporter.IsValid() {
-			// The exporter is the telemetry UDP source address, which is
-			// unauthenticated and trivially spoofable, so the metric label is
-			// cardinality-bounded to keep a flood of spoofed sources from
-			// exhausting memory. See exporterLabeler.
-			metrics.PacketsTotal.WithLabelValues(p.exporters.label(f.Exporter, cfg.FlowSourceSet), f.Wire.String()).Inc()
-		}
 		p.sink(f)
 	}
 	// Return the original set (even on error: partial results may exist) so
@@ -209,6 +217,26 @@ func (p *flowProducer) Produce(msg interface{}, args *producer.ProduceArgs) ([]p
 
 func (p *flowProducer) Commit(set []producer.ProducerMessage) { p.inner.Commit(set) }
 func (p *flowProducer) Close()                                { p.inner.Close() }
+
+// datagramSource returns the wire protocol and exporter of one decoded
+// datagram — the same exporter convert puts on the flows it carries, so a
+// datagram is labeled the way its flows are: an sFlow datagram by the agent
+// address it names, NetFlow and IPFIX by their UDP source.
+func datagramSource(msg interface{}, args *producer.ProduceArgs) (flow.Proto, netip.Addr) {
+	switch m := msg.(type) {
+	case *sflow.Packet:
+		agent, _ := netip.AddrFromSlice(m.AgentIP)
+		return flow.ProtoSFlow5, agent.Unmap()
+	case *netflowlegacy.PacketNetFlowV5:
+		return flow.ProtoNetFlow5, args.SamplerAddress.Unmap()
+	case *netflow.NFv9Packet:
+		return flow.ProtoNetFlow9, args.SamplerAddress.Unmap()
+	case *netflow.IPFIXPacket:
+		return flow.ProtoIPFIX, args.SamplerAddress.Unmap()
+	default:
+		return flow.ProtoUnknown, netip.Addr{}
+	}
+}
 
 const (
 	// maxExporterLabels bounds the number of distinct exporter addresses that
