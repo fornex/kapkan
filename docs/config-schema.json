@@ -860,6 +860,11 @@
         "netflow": {
           "type": "string"
         },
+        "queue": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "type": "integer"
+        },
         "sflow": {
           "type": "string"
         }
