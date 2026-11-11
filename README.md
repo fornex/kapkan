@@ -1271,7 +1271,7 @@ kapkan -check-update -config /etc/kapkan/config.yaml   # 10 = newer release exis
 
 ## Development
 
-Building needs **Go 1.26.10 or newer** — the `go` line of [`engine/go.mod`](engine/go.mod),
+Building needs **Go 1.26.11 or newer** — the `go` line of [`engine/go.mod`](engine/go.mod),
 raised with each security release; with the default `GOTOOLCHAIN=auto`, an older Go 1.26
 fetches it on the first build. From the repo root (the root Makefile delegates to `engine/`):
 

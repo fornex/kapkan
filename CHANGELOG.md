@@ -71,12 +71,12 @@ security-relevant.
   affected), so govulncheck still reports it, and it stays on the CI allowlist until that record
   names the fix. The published proof of concept is now a test too: the brain treats the UPDATE as a
   withdraw (RFC 7606) and keeps the session, and it did not crash v3.37.0 either.
-- **Built with Go 1.26.10**, which fixes twelve reachable standard-library advisories
-  (`crypto/x509` GO-2026-6809; `net/http` GO-2026-6617, -6613, -6612, -6611, -6610, -6605, -6603;
-  `net/textproto` -6608; `crypto/tls` -6607; `html/template` -6600, -6599) — and
+- **Built with Go 1.26.11**, which fixes thirteen reachable standard-library advisories
+  (`crypto/x509` GO-2026-6809; `net/http` GO-2026-6859, -6617, -6613, -6612, -6611, -6610, -6605,
+  -6603; `net/textproto` -6608; `crypto/tls` -6607; `html/template` -6600, -6599) — and
   `golang.org/x/net` 0.58.0 → 0.61.0 (an indirect dependency, through gobgp's gRPC server), which
   carries the `x/net/http2` side of five of them. No code change; the toolchain floor in
-  `engine/go.mod` moves from 1.26.6 to 1.26.10. The govulncheck gate caught them on the first CI
+  `engine/go.mod` moves from 1.26.6 to 1.26.11. The govulncheck gate caught them on the first CI
   run after their publication; the only advisory left is GO-2026-4736 (gobgp NEXT_HOP), accepted
   for the reason in the entry above.
 
