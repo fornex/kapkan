@@ -25,9 +25,11 @@ var (
 	// however many flow records it carried — none, for a counter-only sFlow or
 	// a template-only NetFlow datagram, which still shows the exporter is
 	// alive. FlowsTotal counts the records; a datagram that fails to decode is
-	// in DecodeErrorsTotal instead, and one that decodes but whose records
-	// then fail to convert is in both. DroppedFlowsTotal is in the same unit,
-	// so the two give the share of telemetry ingest is losing.
+	// in DecodeErrorsTotal instead, and one that decodes but whose records the
+	// decoder then rejects is in both; a record with no destination address is
+	// skipped without an error, so its datagram is in PacketsTotal only.
+	// DroppedFlowsTotal is in the same unit, so the two give the share of
+	// telemetry ingest is losing.
 	//
 	// The exporter label is cardinality-bounded (the address is spoofable):
 	// sources outside the configured flow_sources allowlist — or beyond an
@@ -39,12 +41,19 @@ var (
 		Help:      "Telemetry datagrams decoded, one per datagram however many flow records it carried, by exporter address (cardinality-bounded; see flow_sources) and protocol.",
 	}, []string{"exporter", "proto"})
 
-	// DecodeErrorsTotal counts datagrams that failed to decode.
+	// DecodeErrorsTotal counts telemetry datagrams that failed to decode, by
+	// listener: proto is the listener's family (sflow, netflow), not the wire
+	// protocol PacketsTotal names. The decode worker counts each failure as it
+	// happens, so a flood of junk is counted in full; NetFlow v9/IPFIX data
+	// that arrives before its template and a panic recovered in the decode
+	// path count too. A datagram that decoded but whose flow records then
+	// failed to convert is in PacketsTotal as well, which counts it on its way
+	// into conversion: it did arrive and parse, and it lost records.
 	DecodeErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "ingest",
 		Name:      "decode_errors_total",
-		Help:      "Telemetry datagrams that failed to decode, by protocol.",
+		Help:      "Telemetry datagrams that failed to decode, by listener (sflow, netflow); one whose flow records failed to convert after it decoded is in packets_total too.",
 	}, []string{"proto"})
 
 	// DroppedFlowsTotal counts telemetry DATAGRAMS, not flows: each one a

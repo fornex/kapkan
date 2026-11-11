@@ -1020,7 +1020,7 @@ say "ARM S9 — retention"
 chq "SHOW CREATE TABLE kapkan.edge_windows" | grep -q 'TTL ts + toIntervalDay(1)' && ok "edge_windows carries TTL ts + toIntervalDay(1)" || bad "TTL clause: $(chq "SHOW CREATE TABLE kapkan.edge_windows" | grep -oE 'TTL[^\\]*' | head -1)"
 ins=$(chq_code "INSERT INTO kapkan.edge_windows (ts, received_at, zone, node) VALUES (now() - INTERVAL 2 DAY, now(), 'ttl.test', 'rig-old'), (now(), now(), 'ttl.test', 'rig-fresh')")
 chq "OPTIMIZE TABLE kapkan.edge_windows FINAL" >/dev/null
-[ "$ins" = "200" ] && [ "$(chq "SELECT count() FROM kapkan.edge_windows WHERE zone='ttl.test'")" = "1" ] && [ "$(chq "SELECT node FROM kapkan.edge_windows WHERE zone='ttl.test'")" = "rig-fresh" ] && ok "of two rows inserted in one statement (200), the fresh one landed and the two-day-old one never did (TTL filters at insert; OPTIMIZE FINAL leaves it out)" || bad "TTL: insert $ins, ttl.test rows $(chq "SELECT node FROM kapkan.edge_windows WHERE zone='ttl.test'" | tr '\n' ' ')"
+[ "$ins" = "200" ] && [ "$(chq "SELECT count() FROM kapkan.edge_windows WHERE zone='ttl.test'")" = "1" ] && [ "$(chq "SELECT node FROM kapkan.edge_windows WHERE zone='ttl.test'")" = "rig-fresh" ] && ok "of two rows inserted in one statement (200), OPTIMIZE FINAL left only the fresh one (ClickHouse keeps an expired row at INSERT; a TTL merge drops it, and OPTIMIZE FINAL forces one)" || bad "TTL: insert $ins, ttl.test rows $(chq "SELECT node FROM kapkan.edge_windows WHERE zone='ttl.test'" | tr '\n' ' ')"
 
 # ================================================================ ARM S8
 say "ARM S8 — storage off is byte-identical"
