@@ -83,6 +83,13 @@ security-relevant.
 
 ### Fixed
 
+- **metrics:** `kapkan_ingest_decode_errors_total` counts every telemetry datagram that fails
+  to decode, a flood of junk included. It used to count the errors goflow2 reports on a channel
+  that drops one whenever its reader is busy, and the reader logged each error before taking the
+  next — so the counter fell furthest behind exactly when junk floods a listener. The decode
+  workers count each failure now. The log of those errors keeps its three kinds (template warm-up,
+  recovered panic, any other) and records at most five of each per listener per minute, plus one
+  line saying when it starts skipping the rest, so junk no longer floods the journal either.
 - **daemon:** a reload that lands while the daemon is still starting no longer stops it. The
   `SIGHUP` handler was installed only after the data plane, BGP and ban rehydration had come up,
   so a `systemctl reload kapkan` right after a start (the unit is `Type=simple`) or a
