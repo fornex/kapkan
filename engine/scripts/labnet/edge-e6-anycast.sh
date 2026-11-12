@@ -110,8 +110,9 @@
 #      out on the third, 2.5-3.5 loop periods after the kill (the second
 #      would read about two periods, the fourth about four), and back with
 #      nginx. A refused document and arm E2's two common causes withdraw
-#      nothing, and both loops are seen calling `birdc enable` all through
-#      each of those looks.
+#      nothing, while both loops stay alive and are each seen calling
+#      `birdc enable` at least three times over each five-second look (a
+#      loop that announces every period makes about five).
 #
 # Build the binaries for the container arch first (every command below runs
 # from the REPO ROOT), then run this inside ONE privileged debian:13-slim
@@ -123,7 +124,7 @@
 #     && (cd /tmp/pebble-src && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/pebble ./cmd/pebble)
 #   docker run --privileged --rm -v /tmp/lab:/lab -v "$PWD:/w" -w /w debian:13-slim \
 #     sh -c 'apt-get update -qq && apt-get install -y -qq \
-#              iproute2 nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump util-linux >/dev/null \
+#              iproute2 iptables nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump util-linux >/dev/null \
 #            && KAPKAN=/lab/kapkan PEBBLE=/lab/pebble bash engine/scripts/labnet/edge-e6-anycast.sh'
 #
 set -uo pipefail
@@ -162,6 +163,7 @@ arm_verdict() {
 nginx -V 2>&1 | grep -q -- --with-http_v3_module || { echo "this nginx has no http_v3_module: $(nginx -v 2>&1)"; exit 2; }
 curl -V | grep -q HTTP3 || { echo "this curl has no HTTP3: $(curl -V | head -1)"; exit 2; }
 command -v unshare >/dev/null || { echo "unshare is required (each node's nginx runs in its own UTS namespace so \$hostname names the node)"; exit 2; }
+command -v iptables >/dev/null || { echo "iptables is required (arm E2c, the ss gate's negative control: a loopback REJECT with nginx serving must not withdraw)"; exit 2; }
 
 # Addressing. The VIP is the only address a client ever uses; every leg is a
 # /30 so a leg can be taken down or given a small MTU on its own.
@@ -1319,10 +1321,7 @@ e2_vip_200
 # this from a dead nginx; the kernel's listener table can, and the E7.0 rule
 # counts a refusal only when `ss` lists no :443 listener either. The rule
 # matches `-i lo` only, so the VIP's traffic (in on the leg) is untouched.
-apt-get install -y -qq iptables >/tmp/iptables-install.log 2>&1
-if ! command -v iptables >/dev/null; then
-  echo "  (E2c skipped: iptables is not installable in this container — $(tail -1 /tmp/iptables-install.log))"
-elif ! ip netns exec "$(ns_of 2)" iptables -I INPUT -i lo -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/tmp/e2c-ipt.err; then
+if ! ip netns exec "$(ns_of 2)" iptables -I INPUT -i lo -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/tmp/e2c-ipt.err; then
   bad "E2c: could not add the loopback REJECT in edge-2: $(cat /tmp/e2c-ipt.err)"
 else
   N3=$(e70_rule 2); E2C_NEW=${N3%% *}; E2C_RC=${N3#* }
@@ -1633,7 +1632,7 @@ SH
     # The kill is phased to edge-2's loop, so that the figure counts refusals
     # rather than where in a period the kill happened to fall. The rig waits
     # for two fresh `birdc enable` replies in a row in the loop's log — each
-    # seen within 150 ms of the look before it — and takes the loop's period
+    # seen within 50 ms of the look before it — and takes the loop's period
     # P (about 1.06 s here: `sleep 1`, the probe, /healthz, birdc) from the
     # time between them; the kill follows the second at once, as the loop's
     # `sleep 1` begins. The next probe, about a period later, is then the
@@ -1647,13 +1646,18 @@ SH
     # 4·P. The bounds are half a period either side of the third: 2.5·P and
     # 3.5·P (about 2650 and 3710 ms at P = 1060). They scale with P, so a
     # slow host moves them with the loop instead of failing a sound one.
+    # A late sighting counts twice: the kill lands that much into the sleep,
+    # so I_MS reads short by it, and I_P reads long by it, so 3.5·P grows by
+    # 3.5 times it; the fourth refusal reads only about 0.45 s above 3.5·P,
+    # so a sighting ~100 ms late could pass it as the third. Hence the 50 ms
+    # cap (run 3's look: 27 ms); a slow look is retried on the next period.
     # nginx has the whole period to die before that first probe; were it
     # still listening then, the loop would announce once more after the kill —
     # so no enable may come between the kill and the withdrawal, and the
     # withdrawal must be the loop's own `birdc disable`.
     #
     # i_phase — returns as soon as a fresh enable reply is in edge-2's log,
-    # its sighting time in I_PH_T: 0 when it was seen within 150 ms of the
+    # its sighting time in I_PH_T: 0 when it was seen within 50 ms of the
     # look before it, 2 when this rig itself was too slow to tell (the next
     # period is tried), 1 when none came within ~3 s.
     i_phase() {
@@ -1664,7 +1668,7 @@ SH
         t1=$(date +%s%N); b=$(ann_enables 2)
         if [ "$b" -gt "$a" ]; then
           I_EN0=$b; I_PH_T=$(date +%s%N); I_PH_LAG=$(( (I_PH_T - t0) / 1000000 ))
-          [ "$I_PH_LAG" -le 150 ] && return 0
+          [ "$I_PH_LAG" -le 50 ] && return 0
           return 2
         fi
         t0=$t1

@@ -208,7 +208,7 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
     && (cd /tmp/pebble-src && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/pebble ./cmd/pebble)
   docker run --privileged --rm -v /tmp/lab:/lab -v "$PWD:/w" -w /w debian:13-slim \
     sh -c 'apt-get update -qq && apt-get install -y -qq \
-             iproute2 nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump util-linux >/dev/null \
+             iproute2 iptables nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump util-linux >/dev/null \
            && KAPKAN=/lab/kapkan PEBBLE=/lab/pebble bash engine/scripts/labnet/edge-e6-anycast.sh'
   ```
 
@@ -221,8 +221,9 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   third, 2.5–3.5 loop periods after the kill (the period measured on the loop
   itself; the second refusal would read about two periods, the fourth about
   four), and returns with nginx. A refused document and arm E2's two causes
-  withdraw nothing, while both loops are seen calling `birdc enable` every
-  period. The run's logs and the recorded numbers land in `/tmp/lab/logs/`
+  withdraw nothing, while both loops stay alive and are each seen calling
+  `birdc enable` at least three times over each five-second look (a loop that
+  announces every period makes about five). The run's logs and the recorded numbers land in `/tmp/lab/logs/`
   (`numbers.txt` and `arm-c.txt` are what the guide quotes); each arm's lines
   in `numbers.txt` end with its pass/fail count, so quote nothing from an arm
   marked `FAILED`.
