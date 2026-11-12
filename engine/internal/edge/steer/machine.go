@@ -24,13 +24,24 @@ const (
 	autoMaxLevel = 64
 )
 
-// AsOf is the verdict as a reader at now must take it: unchanged while
-// now-At is at most staleAfter (Config.StaleAfter), and past that — or when
-// At is zero — StateUnknown with ReasonStale, Since At, and no RejoinAt or
-// Warning. So a sampler that stopped reads as unknown after three intervals,
-// never as withdraw.
+// AsOf is the verdict as a reader at now must take it: unchanged while now-At
+// is at most staleAfter (Config.StaleAfter) and At is at most one interval
+// (staleAfter/StaleIntervals) ahead of now; otherwise — or when At is zero —
+// StateUnknown with ReasonStale, Since At, and no RejoinAt or Warning. So a
+// sampler that stopped reads as unknown after three intervals, never as
+// withdraw. A verdict may be stamped a moment after the reader looked at its
+// clock; one stamped further ahead than an interval says the two clocks
+// disagree — a wall clock that stepped back — and reads as unknown, as an old
+// one does, rather than staying definite until the clock catches up.
+//
+// Pass Step and AsOf time.Now() as it comes, with its monotonic reading — not
+// after UTC, Round, Truncate or a JSON round trip: then no clock step moves an
+// age at all. With wall-clock times, a stopped sampler's last verdict still
+// reads as fresh while a stepped-back clock passes its At again — for four
+// intervals at most, not for the whole step.
 func (v Verdict) AsOf(now time.Time, staleAfter time.Duration) Verdict {
-	if !v.At.IsZero() && now.Sub(v.At) <= staleAfter {
+	age := now.Sub(v.At)
+	if !v.At.IsZero() && age <= staleAfter && age >= -staleAfter/StaleIntervals {
 		return v
 	}
 	return Verdict{State: StateUnknown, Reason: ReasonStale, Since: v.At, At: v.At}
@@ -142,10 +153,14 @@ func (c Config) StaleAfter() time.Duration {
 // unexported method whose inputs are a Triggers value, the time and — to name
 // a drain, never to cause one — the drain's reason; gates, the probe class and
 // the report reach the join path and nothing else. The method is out, the
-// join path is join, and a test reads this file to keep it so. The window is
-// the one thing both touch: out enters the hard samples, join the ok ones,
-// and an ok sample can only push a hard one out of the window — so what join
-// reads may delay a withdrawal and never brings one about.
+// join path is join, and Step's verdict is the automaton's own state, which
+// enter alone sets. The window is the one thing both touch: out enters the
+// hard samples, join the ok ones, and an ok sample — like age — can only push
+// a hard one out of the window, so what join reads may delay a withdrawal and
+// never brings one about. Evaluate, which keeps no state, names StateDrain and
+// StateWithdraw only for the drain trigger, a hard trigger and a running
+// hold-down, which out alone arms. A test reads every file of the package to
+// keep all of this so.
 type Automaton struct {
 	cfg Config
 
@@ -153,15 +168,24 @@ type Automaton struct {
 	reason Reason
 	// since is when state was entered; zero until the first Step.
 	since time.Time
-	// window holds the last FailWindow decisive samples, oldest first: true
-	// for a hard one, false for an ok one.
-	window []bool
+	// tick counts the Steps taken. window holds the decisive samples that
+	// still count, oldest first: the last FailWindow of them, none taken
+	// 2×FailWindow ticks ago or earlier.
+	tick   int
+	window []autoSample
 	// streak counts the ok samples in a row.
 	streak int
 	// level counts the flaps LevelReset has not yet forgiven; until is when
 	// the running hold-down ends, zero when none runs.
 	level int
 	until time.Time
+}
+
+// autoSample is one decisive sample in the window: the tick it was taken at,
+// and whether it was hard (or ok).
+type autoSample struct {
+	tick int
+	hard bool
 }
 
 // NewAutomaton returns a target's automaton in StateUnknown, its hold-down
@@ -172,13 +196,16 @@ func NewAutomaton(cfg Config, saved Saved) *Automaton {
 	return &Automaton{
 		cfg:    cfg,
 		reason: ReasonStarting,
-		window: make([]bool, 0, cfg.FailWindow),
+		window: make([]autoSample, 0, cfg.FailWindow),
 		level:  min(max(saved.Level, 0), autoMaxLevel),
 		until:  saved.Until,
 	}
 }
 
-// Step feeds one tick's inputs and returns the verdict. In order:
+// Step feeds one tick's inputs and returns the verdict. Each call is one tick:
+// the window ages by Steps, not by the clock, so a clock that jumps or a
+// sampler that falls behind moves only the hold-down and the level reset. In
+// order:
 //
 //  1. Drain. While in.Triggers.Drained, the state is StateDrain (entered at
 //     once, reason ReasonNewNode when in.Drain.Reason is NewNodeReason, else
@@ -187,28 +214,35 @@ func NewAutomaton(cfg Config, saved Saved) *Automaton {
 //     StateUnknown (ReasonStarting) with the window and the streak cleared,
 //     as at a start, and that tick goes on to step 2.
 //  2. Sample. A tick with in.Triggers.Hard() is a hard sample; one without,
-//     whose in.Probe is ClassOK, is an ok sample; both enter the window (the
-//     last FailWindow of them). Anything else — soft, blind, none, a refusal
-//     with a listener behind it — does not. A hard sample resets the streak
-//     and an ok one extends it; of the rest, ClassBlind and ClassNone leave it
-//     as it is and every other class resets it.
+//     whose in.Probe is ClassOK, is an ok sample; both enter the window,
+//     which counts the last FailWindow of them and none taken 2×FailWindow
+//     ticks ago or earlier — so a stretch of ticks that are not decisive
+//     cannot keep an old hard sample counting. Anything else — soft, blind,
+//     none, a refusal with a listener behind it — does not enter it. A hard
+//     sample resets the streak and an ok one extends it; of the rest,
+//     ClassBlind and ClassNone leave it as it is and every other class resets
+//     it.
 //  3. Out. Not withdrawn, and FailAfter hard samples in the window: enter
 //     StateWithdraw with this tick's trigger as the reason (ReasonUnbound,
 //     then ReasonRefused, then ReasonNotTLS). From StateAnnounce that is a
 //     flap: Level+1, and the hold-down runs until now+HoldDown(Level). From
 //     StateUnknown neither moves; a hold-down already running still applies.
-//  4. In. StateUnknown or StateWithdraw, a streak of at least RecoverAfter,
-//     fewer than FailAfter hard samples in the window, in.Gates.Holding() ==
-//     "", and now not before the hold-down's end: enter StateAnnounce
-//     (ReasonOK). Nothing but step 3 leaves StateAnnounce (and step 1 drains
-//     it): a gate that closes on an announced target is a Warning, not a way
-//     out. The window clause costs nothing under the defaults — ten ok
-//     samples in a row have pushed every hard one out of a window of five —
-//     but with RecoverAfter set below the window it keeps a target out
-//     exactly as long as its window says so, instead of joining one hard
-//     sample away from the next withdrawal.
+//  4. In. StateUnknown or StateWithdraw, this tick an ok sample, a streak of
+//     at least RecoverAfter, fewer than FailAfter hard samples in the window,
+//     in.Gates.Holding() == "", and now not before the hold-down's end: enter
+//     StateAnnounce (ReasonOK). A blind or none tick never joins — it is no
+//     evidence the box serves now — so a release that falls on one (the
+//     hold-down's end, a gate opening, ResetHoldDown) waits for the next ok
+//     tick. Nothing but step 3 leaves StateAnnounce (and step 1 drains it): a
+//     gate that closes on an announced target is a Warning, not a way out.
+//     The window clause costs nothing under the defaults — ten ok samples in
+//     a row have pushed every hard one out of a window of five — but with
+//     RecoverAfter set below the window it keeps a target out exactly as long
+//     as its window says so, instead of joining one hard sample away from the
+//     next withdrawal.
 //  5. Level reset. LevelReset or longer in StateAnnounce: Level and the
-//     hold-down return to zero.
+//     hold-down return to zero. Time withdrawn, unknown or drained forgives
+//     nothing.
 //
 // The verdict carries Since (when State was entered; the first Step's now for
 // the initial StateUnknown), RejoinAt (the hold-down's end while it runs and
@@ -221,6 +255,8 @@ func (a *Automaton) Step(in Inputs, now time.Time) Verdict {
 	if !a.until.IsZero() && !now.Before(a.until) {
 		a.until = time.Time{} // over: no longer a hold-down, nor in Saved
 	}
+	a.tick++
+	a.age()
 	if !a.out(in.Triggers, in.Drain.Reason, now) {
 		a.join(in.Triggers.Hard(), in.Probe, in.Gates, now)
 		a.forgive(now)
@@ -267,23 +303,26 @@ func (a *Automaton) out(t Triggers, drainReason string, now time.Time) (drained 
 // and the gates reach this method and nothing else, and it can enter
 // StateAnnounce only — so whatever they say may delay a join and never takes
 // an address out. hard says the tick was a hard sample, which out has
-// already counted.
+// already counted. A join is made on an ok sample only: what lets it through
+// at last — the hold-down ending, a gate opening — may fall on a tick the
+// probe could not look, and that tick is no evidence the box serves now.
 func (a *Automaton) join(hard bool, probe Class, g Gates, now time.Time) {
+	ok := !hard && probe == ClassOK
 	switch {
 	case hard:
 		a.streak = 0
-	case probe == ClassOK:
+	case ok:
 		a.sample(false)
 		a.streak++
 	case probe == ClassBlind || probe == ClassNone:
 		// The probe could not look, or did not run: no evidence either way,
-		// so the run neither grows nor breaks.
+		// so the run neither grows nor breaks — and no join is made on it.
 	default:
 		// Soft, or a refusal with a listener behind it: the box did not
 		// answer TLS this tick, and a join needs an unbroken run of answers.
 		a.streak = 0
 	}
-	if a.state == StateAnnounce || a.streak < a.cfg.RecoverAfter ||
+	if !ok || a.state == StateAnnounce || a.streak < a.cfg.RecoverAfter ||
 		a.hardSamples() >= a.cfg.FailAfter || g.Holding() != "" || now.Before(a.until) {
 		return
 	}
@@ -307,20 +346,36 @@ func (a *Automaton) enter(s State, r Reason, now time.Time) {
 	a.reason = r
 }
 
-// sample enters one decisive sample — true for a hard one — into the window,
-// which keeps the last FailWindow of them.
+// sample enters this tick's decisive sample — true for a hard one — into the
+// window, which keeps the last FailWindow of them.
 func (a *Automaton) sample(hard bool) {
 	if len(a.window) == a.cfg.FailWindow {
 		a.window = append(a.window[:0], a.window[1:]...)
 	}
-	a.window = append(a.window, hard)
+	a.window = append(a.window, autoSample{tick: a.tick, hard: hard})
+}
+
+// age drops the samples taken 2×FailWindow ticks ago or earlier. A window
+// that only a newer decisive sample could empty would let a load (soft), a
+// firewall's refusal or a blind probe — none of them decisive — keep old hard
+// samples counting for good: two restarts shorter than two ticks, a week
+// apart, would add up to a crash-loop. Like an ok sample, aging only removes
+// samples: it may delay a withdrawal and never brings one about.
+func (a *Automaton) age() {
+	i := 0
+	for i < len(a.window) && a.tick-a.window[i].tick >= 2*a.cfg.FailWindow {
+		i++
+	}
+	if i > 0 {
+		a.window = append(a.window[:0], a.window[i:]...)
+	}
 }
 
 // hardSamples counts the hard samples in the window.
 func (a *Automaton) hardSamples() int {
 	n := 0
-	for _, hard := range a.window {
-		if hard {
+	for _, s := range a.window {
+		if s.hard {
 			n++
 		}
 	}
@@ -354,19 +409,20 @@ func (a *Automaton) verdict(now time.Time, warning Reason) Verdict {
 //  4. Otherwise StateAnnounce, ReasonUnmanaged, with Warning =
 //     in.Gates.Holding(): a gate may not take an address out, and without a
 //     history Evaluate cannot tell a join from a stay — so a closed gate
-//     announces, named.
+//     announces, named. A drain that could not be read is such a gate
+//     (ReasonDrainUnknown): it is not a drain.
 //
 // Since and At are now. A withdraw carries RejoinAt while a hold-down runs,
-// and every answer but a drain carries the Warning, as in Step.
+// and every answer but a drain carries the Warning, as in Step. Nothing in
+// this package calls Evaluate: Step's verdict is the automaton's state.
 func (a *Automaton) Evaluate(in Inputs, now time.Time) Verdict {
 	v := Verdict{Since: now, At: now}
-	t := in.Triggers
 	switch {
-	case t.Drained:
+	case in.Triggers.Drained:
 		v.State, v.Reason = StateDrain, autoDrainReason(in.Drain.Reason)
 		return v
-	case t.Hard():
-		v.State, v.Reason = StateWithdraw, autoWithdrawReason(t)
+	case in.Triggers.Hard():
+		v.State, v.Reason = StateWithdraw, autoWithdrawReason(in.Triggers)
 	case now.Before(a.until):
 		v.State, v.Reason = StateWithdraw, ReasonHoldDown
 	default:
@@ -387,7 +443,7 @@ func (a *Automaton) Saved() Saved {
 // ResetHoldDown forgets the level and any running hold-down — E7.2's `-s
 // reset-holddown`, for the return after a fleet-wide incident (D8). A
 // withdrawn target with a full streak and open gates announces on the next
-// Step.
+// Step that is an ok sample.
 func (a *Automaton) ResetHoldDown() {
 	a.level, a.until = 0, time.Time{}
 }

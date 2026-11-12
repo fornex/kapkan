@@ -1,10 +1,6 @@
 package steer
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"math"
 	"math/rand/v2"
 	"reflect"
@@ -19,7 +15,7 @@ import (
 var autoT0 = time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 
 // autoOpen is every join gate open.
-var autoOpen = Gates{GenerationLive: true, Zones: 1}
+var autoOpen = Gates{GenerationLive: true, Zones: 1, DrainKnown: true}
 
 // autoTick spells one tick's inputs, every gate open:
 //
@@ -122,7 +118,8 @@ func TestAutomatonStartsUnknown(t *testing.T) {
 }
 
 // TestAutomatonWindow is the withdraw window, 3 hard of the last 5 decisive
-// samples (the DESIGN-NOTES' W1–W6), with the reason and Since it carries.
+// samples taken within the last 10 ticks (the DESIGN-NOTES' W1–W6), with the
+// reason and Since it carries.
 func TestAutomatonWindow(t *testing.T) {
 	tests := []struct {
 		name, ticks, want string
@@ -141,6 +138,27 @@ func TestAutomatonWindow(t *testing.T) {
 		{"W6 a restart shorter than two ticks", "RR" + autoOK(10), strings.Repeat("u", 11) + "A", ""},
 		{"a withdrawal stays while the window holds", "RRRRRRR", "uuWWWWW", ReasonRefused},
 		{"a withdrawal keeps the reason that tipped it", "RRRUUU", "uuWWWW", ReasonRefused},
+
+		// Only a hard tick can withdraw, so a row that ends on ticks that are
+		// not decisive passes however the window counts them. These end on a
+		// hard tick: the ticks before it must count as neither ok nor hard.
+		{"W5 blind is not an ok sample", "RRbbbR", "uuuuuW", ReasonRefused},
+		{"W5 none is not an ok sample", "RRnnnR", "uuuuuW", ReasonRefused},
+		{"W4 soft is not an ok sample", "RRsssR", "uuuuuW", ReasonRefused},
+		{"W5 blind is not a hard sample", "RbbOR", "uuuuu", ""},
+		{"W5 none is not a hard sample", "RnnOR", "uuuuu", ""},
+		{"W4 soft is not a hard sample", "RssOR", "uuuuu", ""},
+		{"a refusal with a listener is not a hard sample", "RrrOR", "uuuuu", ""},
+
+		// The window ages by ticks: what no newer decisive sample pushes out,
+		// 2×FailWindow ticks do — so short restarts far apart are no
+		// crash-loop, whatever the ticks between them were.
+		{"two short restarts behind a load", "RR" + strings.Repeat("s", 100) + "R", strings.Repeat("u", 103), ""},
+		{"two short restarts behind a firewall's refusals", "RR" + strings.Repeat("r", 100) + "R", strings.Repeat("u", 103), ""},
+		{"two short restarts behind a blind probe", "RR" + strings.Repeat("b", 100) + "R", strings.Repeat("u", 103), ""},
+		{"three one-tick restarts behind a load", "R" + strings.Repeat("s", 20) + "R" + strings.Repeat("s", 20) + "R", strings.Repeat("u", 43), ""},
+		{"a hard sample counts for 2×FailWindow ticks", "RR" + strings.Repeat("s", 7) + "R", "uuuuuuuuuW", ReasonRefused},
+		{"and not one tick longer", "RR" + strings.Repeat("s", 8) + "R", strings.Repeat("u", 11), ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,6 +179,37 @@ func TestAutomatonWindow(t *testing.T) {
 				t.Fatalf("withdrawal from unknown %+v, saved %+v: it is no flap, so no hold-down", last, a.Saved())
 			}
 		})
+	}
+}
+
+// TestAutomatonWindowForgetsOldRestarts is the window's age from announce: a
+// firewall that REJECTs the probe on loopback (a refusal with a listener every
+// tick), a load (soft), a blind probe or none keeps no restart counting past
+// 2×FailWindow ticks, so short restarts far apart keep a serving target in —
+// while a crash-loop, three restarts within the window, still takes it out.
+func TestAutomatonWindowForgetsOldRestarts(t *testing.T) {
+	tests := []struct{ name, ticks, want string }{
+		{"two short restarts behind a load", "RR" + strings.Repeat("s", 100) + "R", strings.Repeat("A", 103)},
+		{"two short restarts behind a firewall's refusals", "RR" + strings.Repeat("r", 100) + "R", strings.Repeat("A", 103)},
+		{"three one-tick restarts behind a load", "R" + strings.Repeat("s", 20) + "R" + strings.Repeat("s", 20) + "R", strings.Repeat("A", 43)},
+		{"W4 a crash-loop behind a load", "RsRsR", "AAAAW"},
+	}
+	for _, tc := range tests {
+		a, at := autoAnnounced(t, DefaultConfig())
+		if vs, _ := autoRun(a, at, tc.ticks); autoStates(vs) != tc.want {
+			t.Errorf("announced, %s: states %s, want %s", tc.name, autoStates(vs), tc.want)
+		}
+	}
+	for _, filler := range []string{"r", "s", "b", "n"} {
+		a, at := autoAnnounced(t, DefaultConfig())
+		hour := strings.Repeat(filler, 3600)
+		vs, at := autoRun(a, at, "R"+hour+"R"+hour+"R")
+		if i := strings.IndexFunc(autoStates(vs), func(s rune) bool { return s != 'A' }); i >= 0 {
+			t.Fatalf("announced, three one-tick restarts an hour apart behind %q: tick %d %+v, want announce throughout", filler, i+1, vs[i])
+		}
+		if vs, _ = autoRun(a, at, "RR"); autoStates(vs) != "AW" || vs[1].Reason != ReasonRefused {
+			t.Fatalf("behind %q, the last restart and two more refusals: %s %+v, want the third withdraw", filler, autoStates(vs), vs[1])
+		}
 	}
 }
 
@@ -229,9 +278,10 @@ func TestAutomatonGatesHoldTheJoin(t *testing.T) {
 		closed  Gates
 		warning Reason
 	}{
-		{"generation not live", Gates{Zones: 3}, ReasonGenerationNotLive},
-		{"no zones", Gates{GenerationLive: true}, ReasonNoZones},
-		{"both, the generation named first", Gates{}, ReasonGenerationNotLive},
+		{"generation not live", Gates{Zones: 3, DrainKnown: true}, ReasonGenerationNotLive},
+		{"no zones", Gates{GenerationLive: true, DrainKnown: true}, ReasonNoZones},
+		{"the drain files unreadable", Gates{GenerationLive: true, Zones: 3}, ReasonDrainUnknown},
+		{"all three, the generation named first", Gates{}, ReasonGenerationNotLive},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -263,8 +313,9 @@ func TestAutomatonKeepsAnAnnouncedTargetWhenAGateCloses(t *testing.T) {
 		gates   Gates
 		warning Reason
 	}{
-		{Gates{Zones: 4}, ReasonGenerationNotLive},   // a `nginx -t` in progress
-		{Gates{GenerationLive: true}, ReasonNoZones}, // the document emptied
+		{Gates{Zones: 4, DrainKnown: true}, ReasonGenerationNotLive},   // a `nginx -t` in progress
+		{Gates{GenerationLive: true, DrainKnown: true}, ReasonNoZones}, // the document emptied
+		{Gates{GenerationLive: true, Zones: 4}, ReasonDrainUnknown},    // the drain files unreadable
 		{Gates{}, ReasonGenerationNotLive},
 		{autoOpen, ""},
 	} {
@@ -275,6 +326,101 @@ func TestAutomatonKeepsAnAnnouncedTargetWhenAGateCloses(t *testing.T) {
 			}
 			at = at.Add(time.Second)
 		}
+	}
+}
+
+// TestAutomatonJoinsOnlyOnAnOkTick: a full streak waiting behind a restored
+// hold-down, behind a closed gate, or behind a hold-down ResetHoldDown
+// forgets, joins on the next tick the probe answers TLS — never on a blind or
+// none tick that happens to be the first the join is let through: that tick
+// is no evidence the box serves now.
+func TestAutomatonJoinsOnlyOnAnOkTick(t *testing.T) {
+	closed := autoOpen
+	closed.GenerationLive = false
+	for _, blank := range []string{"bb", "nn"} {
+		// A restored hold-down ends on the blank ticks.
+		until := autoT0.Add(30 * time.Second)
+		a := NewAutomaton(DefaultConfig(), Saved{Level: 2, Until: until})
+		autoRun(a, autoT0, autoOK(10))
+		if vs, _ := autoRun(a, until, blank+"O"); autoStates(vs) != "uuA" || !vs[2].Since.Equal(vs[2].At) {
+			t.Errorf("a full streak, the hold-down ends on %q: states %s (%+v), want the join on the ok tick after", blank, autoStates(vs), vs[2])
+		}
+
+		// A gate opens on them: from unknown, and from withdraw.
+		for start, want := range map[string]string{"": "uuA", "RRR": "WWA"} {
+			b := NewAutomaton(DefaultConfig(), Saved{})
+			_, now := autoRun(b, autoT0, start)
+			for range 10 {
+				b.Step(Inputs{Probe: ClassOK, Gates: closed}, now)
+				now = now.Add(time.Second)
+			}
+			if vs, _ := autoRun(b, now, blank+"O"); autoStates(vs) != want {
+				t.Errorf("after %q, a full streak, the gate opens on %q: states %s, want %s", start, blank, autoStates(vs), want)
+			}
+		}
+
+		// ResetHoldDown lets a withdrawn target through on them.
+		c, at := autoAnnounced(t, DefaultConfig())
+		w, _ := autoFlap(t, c, at)
+		for k := 1; k <= 10; k++ {
+			c.Step(autoTick('O'), w.At.Add(time.Duration(k)*500*time.Millisecond))
+		}
+		c.ResetHoldDown()
+		if vs, _ := autoRun(c, w.At.Add(5500*time.Millisecond), blank+"O"); autoStates(vs) != "WWA" {
+			t.Errorf("reset with a full streak, then %q: states %s, want the join on the ok tick after", blank, autoStates(vs))
+		}
+	}
+}
+
+// TestAutomatonUnknownDrainHolds: a drain whose existence cannot be read is no
+// drain and no lift. It takes nothing out — an announced target stays, with
+// the gate named — and it lets nothing in: not a fresh target, and not one
+// whose drain stood, which leaves StateDrain for unknown (the consumer holds)
+// and joins only once the drain files read again, without a drain.
+func TestAutomatonUnknownDrainHolds(t *testing.T) {
+	unread := autoOpen
+	unread.DrainKnown = false
+	ticks := 3 * DefaultRecoverAfter
+
+	a, at := autoAnnounced(t, DefaultConfig())
+	since := at.Add(-time.Second)
+	for range ticks {
+		if v := a.Step(Inputs{Probe: ClassOK, Gates: unread}, at); v.State != StateAnnounce || !v.Since.Equal(since) || v.Warning != ReasonDrainUnknown {
+			t.Fatalf("announced, the drain unreadable: %+v, want announce since %v, warning %s", v, since, ReasonDrainUnknown)
+		}
+		at = at.Add(time.Second)
+	}
+
+	b := NewAutomaton(DefaultConfig(), Saved{})
+	now := autoT0
+	for range ticks {
+		if v := b.Step(Inputs{Probe: ClassOK, Gates: unread}, now); v.State != StateUnknown || v.Warning != ReasonDrainUnknown {
+			t.Fatalf("fresh, the drain unreadable: %+v, want unknown, warning %s", v, ReasonDrainUnknown)
+		}
+		now = now.Add(time.Second)
+	}
+
+	c, at := autoAnnounced(t, DefaultConfig())
+	_, at = autoRun(c, at, "DDD")
+	unreadable := func(what string) {
+		t.Helper()
+		lift := at
+		for i := range ticks {
+			v := c.Step(Inputs{Probe: ClassOK, Gates: unread}, at)
+			if v.State != StateUnknown || v.Reason != ReasonStarting || !v.Since.Equal(lift) || v.Warning != ReasonDrainUnknown {
+				t.Fatalf("%s, then the drain unreadable for %d ticks: %+v, want unknown since %v, warning %s", what, i+1, v, lift, ReasonDrainUnknown)
+			}
+			at = at.Add(time.Second)
+		}
+	}
+	unreadable("drained")
+	if v := c.Step(autoTick('D'), at); v.State != StateDrain || !v.Since.Equal(at) {
+		t.Fatalf("the drain reads again, standing: %+v, want drain at once", v)
+	}
+	at = at.Add(time.Second)
+	unreadable("drained again")
+	if v := c.Step(autoTick('O'), at); v.State != StateAnnounce || !v.Since.Equal(at) || v.Warning != "" {
+		t.Fatalf("the drain reads again, gone: %+v, want the join at once — the streak counts from the lift", v)
 	}
 }
 
@@ -369,6 +515,61 @@ func TestAutomatonLevelResetsAfterLevelResetAnnounced(t *testing.T) {
 	if a.Saved().Level != 1 || w.RejoinAt.Sub(w.At) != 10*time.Second {
 		t.Fatalf("the flap after the reset: saved %+v, hold-down %v, want the first rung again", a.Saved(), w.RejoinAt.Sub(w.At))
 	}
+}
+
+// TestAutomatonLevelResetCountsOnlyAnnouncedTime is L3's other half: time out
+// of service — withdrawn, or held unknown behind a gate — forgives nothing,
+// however long; the count starts at the join, and the ladder is forgiven at
+// 600 s announced, not at 599.
+func TestAutomatonLevelResetCountsOnlyAnnouncedTime(t *testing.T) {
+	forgives := func(t *testing.T, a *Automaton, joined time.Time) {
+		t.Helper()
+		a.Step(autoTick('O'), joined.Add(DefaultLevelReset-time.Second))
+		if a.Saved().Level != 2 {
+			t.Fatalf("599 s announced: saved %+v, want level 2 still", a.Saved())
+		}
+		a.Step(autoTick('O'), joined.Add(DefaultLevelReset))
+		if !a.Saved().Equal(Saved{}) {
+			t.Fatalf("600 s announced: saved %+v, want the ladder forgiven", a.Saved())
+		}
+	}
+	t.Run("withdrawn 700 s", func(t *testing.T) {
+		a, at := autoAnnounced(t, DefaultConfig())
+		w, _ := autoFlap(t, a, at)
+		_, at = autoRun(a, w.RejoinAt.Add(-9*time.Second), autoOK(10))
+		w, at = autoFlap(t, a, at)
+		if a.Saved().Level != 2 || w.RejoinAt.Sub(w.At) != 20*time.Second {
+			t.Fatalf("second flap: saved %+v, hold-down %v, want level 2 and 20 s", a.Saved(), w.RejoinAt.Sub(w.At))
+		}
+		vs, at := autoRun(a, at, strings.Repeat("R", 700))
+		if v := vs[len(vs)-1]; v.State != StateWithdraw || v.At.Sub(v.Since) < DefaultLevelReset || a.Saved().Level != 2 {
+			t.Fatalf("700 refusals: %+v, saved %+v, want withdrawn past %v at level 2 still", v, a.Saved(), DefaultLevelReset)
+		}
+		vs, _ = autoRun(a, at, autoOK(10))
+		if v := vs[9]; v.State != StateAnnounce || a.Saved().Level != 2 {
+			t.Fatalf("a full streak after them: %+v, saved %+v, want the join at level 2", v, a.Saved())
+		}
+		forgives(t, a, vs[9].Since)
+	})
+	t.Run("held unknown 700 s", func(t *testing.T) {
+		a := NewAutomaton(DefaultConfig(), Saved{Level: 2})
+		closed := autoOpen
+		closed.Zones = 0
+		now := autoT0
+		for range 700 {
+			if v := a.Step(Inputs{Probe: ClassOK, Gates: closed}, now); v.State != StateUnknown {
+				t.Fatalf("behind a closed gate: %+v, want unknown", v)
+			}
+			now = now.Add(time.Second)
+		}
+		if a.Saved().Level != 2 {
+			t.Fatalf("700 s unknown: saved %+v, want level 2 still", a.Saved())
+		}
+		if v := a.Step(autoTick('O'), now); v.State != StateAnnounce {
+			t.Fatalf("the gate opens: %+v, want the join", v)
+		}
+		forgives(t, a, now)
+	})
 }
 
 // TestAutomatonWithdrawFromUnknownIsNoFlap is L4: a target that was never in
@@ -576,6 +777,12 @@ func TestVerdictAsOf(t *testing.T) {
 		{"three intervals old", at.Add(3 * time.Second), v},
 		{"past three intervals", at.Add(3*time.Second + time.Nanosecond), stale},
 		{"long stopped", at.Add(time.Hour), stale},
+		// Stamped after the reader looked at its clock: a moment is a race
+		// between the two, more than an interval a clock that stepped back.
+		{"stamped a moment ahead", at.Add(-time.Millisecond), v},
+		{"one interval ahead", at.Add(-time.Second), v},
+		{"more than one interval ahead", at.Add(-time.Second - time.Nanosecond), stale},
+		{"a clock stepped back past it", at.Add(-time.Hour), stale},
 	}
 	for _, tc := range tests {
 		if got := v.AsOf(tc.now, DefaultConfig().StaleAfter()); !autoSame(got, tc.want) {
@@ -587,11 +794,14 @@ func TestVerdictAsOf(t *testing.T) {
 	}
 
 	// A sampler that stopped on a withdrawal: its readers hold, they never
-	// keep withdrawing on its last word.
+	// keep withdrawing on its last word — read late, or read by a clock that
+	// has since stepped back an hour.
 	a := NewAutomaton(DefaultConfig(), Saved{})
 	vs, at := autoRun(a, autoT0, "RRR")
-	if got := vs[2].AsOf(at.Add(DefaultConfig().StaleAfter()), DefaultConfig().StaleAfter()); got.State != StateUnknown {
-		t.Errorf("a stopped sampler's withdrawal, read late: %+v, want unknown", got)
+	for _, now := range []time.Time{at.Add(DefaultConfig().StaleAfter()), at.Add(-time.Hour), at.Add(-30 * time.Minute)} {
+		if got := vs[2].AsOf(now, DefaultConfig().StaleAfter()); got.State != StateUnknown {
+			t.Errorf("a stopped sampler's withdrawal, read at %v: %+v, want unknown", now.Sub(vs[2].At), got)
+		}
 	}
 }
 
@@ -624,10 +834,12 @@ func TestEvaluate(t *testing.T) {
 			Verdict{State: StateAnnounce, Reason: ReasonUnmanaged, Since: now, At: now}},
 		{"E4 soft announces", idle, Inputs{Probe: ClassSoft, Gates: autoOpen},
 			Verdict{State: StateAnnounce, Reason: ReasonUnmanaged, Since: now, At: now}},
-		{"E4 a refusal with a listener announces", idle, Inputs{Probe: ClassRefused, Gates: autoOpen},
+		{"E4 a refusal with a listener announces", idle, Inputs{Probe: ClassRefused, Gates: autoOpen, Report: Report{Listening: TriYes}},
 			Verdict{State: StateAnnounce, Reason: ReasonUnmanaged, Since: now, At: now}},
-		{"E4 a closed gate announces, named", idle, Inputs{Probe: ClassOK, Gates: Gates{GenerationLive: true}},
+		{"E4 a closed gate announces, named", idle, Inputs{Probe: ClassOK, Gates: Gates{GenerationLive: true, DrainKnown: true}},
 			Verdict{State: StateAnnounce, Reason: ReasonUnmanaged, Since: now, At: now, Warning: ReasonNoZones}},
+		{"E4 an unreadable drain is no drain: it announces, named", idle, Inputs{Probe: ClassOK, Gates: Gates{GenerationLive: true, Zones: 1}},
+			Verdict{State: StateAnnounce, Reason: ReasonUnmanaged, Since: now, At: now, Warning: ReasonDrainUnknown}},
 	}
 	for _, tc := range tests {
 		if got := tc.a.Evaluate(tc.in, now); !autoSame(got, tc.want) {
@@ -805,78 +1017,16 @@ func TestConfigStaleAfter(t *testing.T) {
 	}
 }
 
-// TestAutomatonOnlyOutTakesATargetOut reads machine.go and pins I2's shape
-// (Automaton's doc comment): StateDrain and StateWithdraw are entered in out
-// and nowhere else, out takes a Triggers value, the drain's reason and the
-// time — nothing a gate, the probe class or the report could steer — and the
-// state field is assigned in enter alone. A second way out of service fails
-// here, whether or not a behavioural test happens to walk it.
-func TestAutomatonOnlyOutTakesATargetOut(t *testing.T) {
-	const rule = "\nI2: withdraw is reachable only from Triggers. The code that enters StateWithdraw or StateDrain\n" +
-		"sits in one unexported method, out, whose inputs are a Triggers value, the drain's reason and\n" +
-		"the time; gates, the probe class and the report reach the join path and nothing else."
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "machine.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var outs []string
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		name := fn.Name.Name
-		if name == "out" {
-			var params []string
-			for _, f := range fn.Type.Params.List {
-				for range max(len(f.Names), 1) {
-					params = append(params, types.ExprString(f.Type))
-				}
-			}
-			if want := []string{"Triggers", "string", "time.Time"}; !slices.Equal(params, want) {
-				t.Errorf("out takes (%s), want (%s)%s", strings.Join(params, ", "), strings.Join(want, ", "), rule)
-			}
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.AssignStmt:
-				for _, lhs := range n.Lhs {
-					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "state" && name != "enter" {
-						t.Errorf("%s: %s assigns the automaton's state; only enter may%s", fset.Position(n.Pos()), name, rule)
-					}
-				}
-			case *ast.CallExpr:
-				sel, ok := n.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "enter" || len(n.Args) == 0 {
-					return true
-				}
-				id, ok := n.Args[0].(*ast.Ident)
-				if !ok {
-					t.Errorf("%s: %s calls enter with a computed state, which this pin cannot read; name it%s", fset.Position(n.Pos()), name, rule)
-					return true
-				}
-				if id.Name == "StateDrain" || id.Name == "StateWithdraw" {
-					outs = append(outs, name+":"+id.Name)
-				}
-			}
-			return true
-		})
-	}
-	slices.Sort(outs)
-	if want := []string{"out:StateDrain", "out:StateWithdraw"}; !slices.Equal(outs, want) {
-		t.Errorf("the calls that enter StateDrain or StateWithdraw are %v, want exactly %v%s", outs, want, rule)
-	}
-}
-
 // T3 (DESIGN-NOTES §5.4): no non-trigger input changes a withdrawal. Per tick,
 // the triggers and whether the probe answered TLS are held fixed; the gates,
 // the report, the drain content without the drain and the class of a probe
 // that did not answer TLS vary.
 var (
 	autoGateChoices = []Gates{
-		autoOpen, {GenerationLive: true, Zones: 5}, {GenerationLive: true}, {Zones: 5}, {},
-		{GenerationLive: true, Zones: -1},
+		autoOpen, {GenerationLive: true, Zones: 5, DrainKnown: true},
+		{GenerationLive: true, DrainKnown: true}, {Zones: 5, DrainKnown: true},
+		{GenerationLive: true, Zones: 5}, {DrainKnown: true}, {},
+		{GenerationLive: true, Zones: -1, DrainKnown: true},
 	}
 	autoReportChoices = []Report{
 		{},
@@ -951,27 +1101,35 @@ func autoHard(r *rand.Rand) Triggers {
 }
 
 // autoWindowSays is T3's oracle, computed from the fixed pairs alone and never
-// from the automaton: at each tick, whether FailAfter of the last FailWindow
-// decisive samples since the start or the last drain are hard.
+// from the automaton: at each tick, whether FailAfter of the decisive samples
+// that still count — the last FailWindow since the start or the last drain,
+// none taken 2×FailWindow ticks ago or earlier — are hard.
 func autoWindowSays(seq []autoPair, cfg Config) []bool {
+	type sample struct {
+		i    int
+		hard bool
+	}
 	says := make([]bool, len(seq))
-	var window []bool
+	var window []sample
 	for i, p := range seq {
+		for len(window) > 0 && i-window[0].i >= 2*cfg.FailWindow {
+			window = window[1:]
+		}
 		switch {
 		case p.t.Drained:
 			window = nil
 			continue
 		case p.t.Hard():
-			window = append(window, true)
+			window = append(window, sample{i, true})
 		case p.ok:
-			window = append(window, false)
+			window = append(window, sample{i, false})
 		}
 		if len(window) > cfg.FailWindow {
 			window = window[1:]
 		}
 		n := 0
-		for _, hard := range window {
-			if hard {
+		for _, s := range window {
+			if s.hard {
 				n++
 			}
 		}
@@ -1007,10 +1165,12 @@ func autoVary(r *rand.Rand, k int, p autoPair, gates *Gates) Inputs {
 // autoT3Counts shows the variations walked what they claim to leave alone.
 type autoT3Counts struct{ entries, flaps, joins, drains, differs int }
 
-// autoRunT3 steps one variation through seq and asserts, at every tick: a
-// drain is exactly the drain trigger; where the oracle's window has tipped the
-// state is withdraw; and an entry into withdraw happens only on a hard tick
-// that tips the oracle's window. It returns the states.
+// autoRunT3 steps one variation through seq and asserts, at every tick: the
+// verdict is the automaton's own state, which only out takes out of service;
+// a drain is exactly the drain trigger; where the oracle's window has tipped
+// the state is withdraw; an entry into withdraw happens only on a hard tick
+// that tips the oracle's window; and a join only on a tick whose probe
+// answered TLS. It returns the states.
 func autoRunT3(t *testing.T, cfg Config, seq []autoPair, says []bool, input func(autoPair) Inputs, n *autoT3Counts) []State {
 	t.Helper()
 	a := NewAutomaton(cfg, Saved{})
@@ -1021,12 +1181,16 @@ func autoRunT3(t *testing.T, cfg Config, seq []autoPair, says []bool, input func
 		states[i] = v.State
 		entered := v.State != prev
 		switch {
+		case v.State != a.state || v.Reason != a.reason:
+			t.Errorf("tick %d: Step returned %s (%s) while the automaton is in %s (%s): its verdict is its own state", i, v.State, v.Reason, a.state, a.reason)
 		case p.t.Drained != (v.State == StateDrain):
 			t.Errorf("tick %d: drained %v, verdict %+v: a drain is the drain trigger, and nothing else", i, p.t.Drained, v)
 		case says[i] && v.State != StateWithdraw:
 			t.Errorf("tick %d: the triggers' window has tipped, and the verdict is %+v, not withdraw", i, v)
 		case entered && v.State == StateWithdraw && (!says[i] || !p.t.Hard()):
 			t.Errorf("tick %d: entered withdraw (%s) on no hard sample that tipped the triggers' window", i, v.Reason)
+		case entered && v.State == StateAnnounce && (!p.ok || p.t.Hard()):
+			t.Errorf("tick %d: joined (%+v) on a tick whose probe did not answer TLS", i, v)
 		}
 		if t.Failed() {
 			return states
@@ -1153,14 +1317,20 @@ func TestNonTriggerInputsKeepAnAnnouncedTargetIn(t *testing.T) {
 // TestNonTriggerInputsKeepAWithdrawalAsItIs is T3 from withdraw: after a flap,
 // with no trigger, no variation drains the target, re-enters or renames its
 // withdrawal, moves its rejoin time or its ladder; the one way on is a join,
-// and only once the hold-down is over.
+// and only once the hold-down is over, with every gate open, on a tick whose
+// probe answered TLS. A full streak waits at the hold-down's end, so the join
+// is there for any variation to take wrongly.
 func TestNonTriggerInputsKeepAWithdrawalAsItIs(t *testing.T) {
+	joins := 0
 	for _, probe := range append([]Class{ClassOK}, autoNonOK...) {
 		for _, gates := range autoGateChoices {
 			for _, rep := range autoReportChoices {
 				for _, d := range autoDrainChoices {
 					a, at := autoAnnounced(t, DefaultConfig())
 					w, at := autoFlap(t, a, at)
+					for k := 1; k <= DefaultRecoverAfter; k++ {
+						a.Step(autoTick('O'), w.At.Add(time.Duration(k)*50*time.Millisecond))
+					}
 					for range 15 {
 						v := a.Step(Inputs{Probe: probe, Gates: gates, Report: rep, Drain: d}, at)
 						switch v.State {
@@ -1177,6 +1347,9 @@ func TestNonTriggerInputsKeepAWithdrawalAsItIs(t *testing.T) {
 							if at.Before(w.RejoinAt) || probe != ClassOK || gates.Holding() != "" {
 								t.Fatalf("withdrawn; probe %s, gates %+v: joined at %v, hold-down until %v", probe, gates, at, w.RejoinAt)
 							}
+							if v.Since.Equal(at) {
+								joins++
+							}
 						default:
 							t.Fatalf("withdrawn; probe %s, gates %+v, report %+v, drain content %+v: %+v; no trigger, so no way but in",
 								probe, gates, rep, d, v)
@@ -1186,6 +1359,72 @@ func TestNonTriggerInputsKeepAWithdrawalAsItIs(t *testing.T) {
 				}
 			}
 		}
+	}
+	// Not vacuous: an ok probe behind open gates took the join each time.
+	if want := 2 * len(autoReportChoices) * len(autoDrainChoices); joins != want {
+		t.Fatalf("%d joins at the hold-down's end, want %d: one per report and drain content, for each of the two open gate choices", joins, want)
+	}
+}
+
+// TestNonTriggerInputsNeverMoveEvaluate is T3 for Evaluate, the one-shot
+// `kapkan edge -steer` answers when the daemon does not (E7.2) — at restarts
+// and upgrades, on every node at once. Over T3's variations (the gates, the
+// report, the drain content without the drain, the class of a probe that did
+// not answer TLS), and over automata of every history — fresh, withdrawn,
+// announced, drained, flapped — on three ladders (none, a hold-down running,
+// one over), the answer is the drain trigger's, else withdraw exactly on a
+// hard trigger or a running hold-down, else announce. The oracle reads the
+// triggers and the saved hold-down, nothing else.
+func TestNonTriggerInputsNeverMoveEvaluate(t *testing.T) {
+	now := autoT0.Add(time.Hour)
+	r := rand.New(rand.NewPCG(2026, 1114))
+	histories := map[State]int{}
+	var n struct{ drain, withdraw, hold, announce int }
+	for _, saved := range []Saved{{}, {Level: 1, Until: now.Add(5 * time.Second)}, {Level: 2, Until: now.Add(-time.Second)}} {
+		for _, history := range []string{"", "RRR", autoOK(10), "D", autoOK(10) + "RRR"} {
+			a := NewAutomaton(DefaultConfig(), saved)
+			autoRun(a, now.Add(-time.Duration(len(history))*time.Second), history)
+			histories[a.state]++
+			ladder := a.Saved()
+			for range 100 {
+				var g Gates
+				for _, p := range autoScript(r) {
+					inputs := autoVary(r, 1+r.IntN(5), p, &g)
+					want := Verdict{State: StateAnnounce, Reason: ReasonUnmanaged, Since: now, At: now, Warning: inputs.Gates.Holding()}
+					switch {
+					case p.t.Drained:
+						want = Verdict{State: StateDrain, Reason: autoDrainReason(inputs.Drain.Reason), Since: now, At: now}
+						n.drain++
+					case p.t.Hard():
+						want.State, want.Reason = StateWithdraw, autoWithdrawReason(p.t)
+						n.withdraw++
+					case now.Before(ladder.Until):
+						want.State, want.Reason = StateWithdraw, ReasonHoldDown
+						n.hold++
+					default:
+						n.announce++
+					}
+					if want.State == StateWithdraw && now.Before(ladder.Until) {
+						want.RejoinAt = ladder.Until
+					}
+					if got := a.Evaluate(inputs, now); !autoSame(got, want) {
+						t.Fatalf("after %q from %+v (%s, ladder %+v), inputs %+v: Evaluate = %+v, want %+v; only Triggers and the hold-down take an address out",
+							history, saved, a.state, ladder, inputs, got, want)
+					}
+				}
+			}
+			if !a.Saved().Equal(ladder) {
+				t.Fatalf("after %q from %+v: Evaluate moved the ladder from %+v to %+v", history, saved, ladder, a.Saved())
+			}
+		}
+	}
+	for _, s := range []State{StateUnknown, StateAnnounce, StateWithdraw, StateDrain} {
+		if histories[s] == 0 {
+			t.Fatalf("no automaton was in %s when evaluated: %v", s, histories)
+		}
+	}
+	if n.drain < 1000 || n.withdraw < 1000 || n.hold < 1000 || n.announce < 1000 {
+		t.Fatalf("walked too little to prove anything: %+v", n)
 	}
 }
 

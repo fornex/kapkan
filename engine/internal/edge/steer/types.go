@@ -21,7 +21,10 @@ type Triggers struct {
 	NotTLS bool
 	// Unbound: the kernel does not hold the address.
 	Unbound bool
-	// Drained: a drain file applies — the operator's, or the new-node drain.
+	// Drained: a drain file is known to apply — the operator's, or the
+	// new-node drain (Store.DrainFor's TriYes). A drain that cannot be read is
+	// not one: it closes Gates.DrainKnown, which holds a join and takes
+	// nothing out.
 	Drained bool
 }
 
@@ -116,21 +119,26 @@ func (s *PIDState) UnmarshalText(b []byte) (err error) {
 
 // NodeKey names the node's implicit verdict — the one target when
 // steering.vips is empty (D6) — in state.json, in E7.2's /steer and, for its
-// drain, the node-wide drain file. A VIP's key is its canonical text.
+// drain, the node-wide drain file. A VIP's key is VIPTarget's: its canonical
+// text, unmapped and without a zone.
 const NodeKey = "node"
 
 // Target is what one verdict is about: a VIP, or the node itself.
 type Target struct {
-	// Key names the verdict (NodeKey, or the VIP's canonical text).
+	// Key names the verdict (NodeKey, or VIPTarget's key for the VIP).
 	Key string
 	// Addrs are what the probe tries: the VIP alone, or the loopback pair.
 	Addrs []netip.Addr
 }
 
 // VIPTarget is the target for one steering.vips entry. An IPv4-mapped IPv6
-// address is the IPv4 address it maps.
+// address is the IPv4 address it maps, and a zone is dropped, as Locals.Has
+// and Listeners.Covers drop it: the kernel holds a global address whatever
+// zone the text names. So every spelling of one address is one target with
+// one key — the name of its drain file — and no key carries a zone's free
+// text, a "/" or a "..", into a path.
 func VIPTarget(vip netip.Addr) Target {
-	vip = vip.Unmap()
+	vip = vip.Unmap().WithZone("")
 	return Target{Key: vip.String(), Addrs: []netip.Addr{vip}}
 }
 
@@ -161,12 +169,13 @@ type Observation struct {
 	ProbeErr string
 }
 
-// Triggers applies the trigger rules to the observation; drained is the drain
-// files' answer (Store.DrainFor), the one trigger the kernel does not give.
-// The refusal rule lives here: a refused probe counts only when the kernel
-// lists no listener covering the address — a listener behind the refusal (a
-// firewall's REJECT) or a table that could not be read (TriUnknown) is not
-// Refused.
+// Triggers applies the trigger rules to the observation; drained is whether
+// the drain files show a drain (Store.DrainFor's TriYes), the one trigger the
+// kernel does not give — an unknown drain is not one, and closes
+// Gates.DrainKnown instead. The refusal rule lives here: a refused probe
+// counts only when the kernel lists no listener covering the address — a
+// listener behind the refusal (a firewall's REJECT) or a table that could not
+// be read (TriUnknown) is not Refused.
 func (o Observation) Triggers(drained bool) Triggers {
 	return Triggers{
 		Refused: o.Probe == ClassRefused && o.Listening == TriNo,
@@ -177,7 +186,8 @@ func (o Observation) Triggers(drained bool) Triggers {
 }
 
 // Gates may hold an address out — delay its join — and never take one out
-// (I2). The other two join gates live elsewhere: the first entry is a drain
+// (I2). Each is closed at its zero value, as every unknown here holds. The
+// other two join gates live elsewhere: the first entry is a drain
 // (Triggers.Drained, reason new_node), and the hold-down is the automaton's
 // own.
 type Gates struct {
@@ -187,6 +197,12 @@ type Gates struct {
 	// Zones is the number of zones in the node's live document; none holds a
 	// join.
 	Zones int
+	// DrainKnown: the drain files' existence was established this tick —
+	// Store.DrainFor answered TriYes or TriNo, not TriUnknown. A drain that
+	// cannot be read is no drain, so it takes nothing out; nor is it a lift,
+	// so it holds a join: a standing drain the disk stopped showing does not
+	// let the address back in.
+	DrainKnown bool
 }
 
 // Holding names the first gate that holds a join, "" when every gate is open.
@@ -196,6 +212,8 @@ func (g Gates) Holding() Reason {
 		return ReasonGenerationNotLive
 	case g.Zones <= 0:
 		return ReasonNoZones
+	case !g.DrainKnown:
+		return ReasonDrainUnknown
 	}
 	return ""
 }
@@ -234,10 +252,11 @@ type Inputs struct {
 	// Triggers are the only input that takes an address out.
 	Triggers Triggers
 	// Probe is this tick's class: ClassOK (with no hard trigger) extends the
-	// join streak and is the window's good sample; ClassBlind and ClassNone
-	// are skipped; any other class breaks the streak — and a hard trigger
-	// breaks it whatever the class (an Unbound tick has ClassNone). Nothing
-	// else of it is read.
+	// join streak, is the window's good sample, and is the only class a join
+	// is made on; ClassBlind and ClassNone are skipped — they neither extend
+	// nor break the run, and complete no join; any other class breaks the
+	// streak — and a hard trigger breaks it whatever the class (an Unbound
+	// tick has ClassNone). Nothing else of it is read.
 	Probe Class
 	// Gates may hold a join.
 	Gates Gates
@@ -303,6 +322,7 @@ const (
 	// Gates (Gates.Holding, Verdict.Warning).
 	ReasonGenerationNotLive Reason = "generation_not_live"
 	ReasonNoZones           Reason = "no_zones"
+	ReasonDrainUnknown      Reason = "drain_unknown"
 )
 
 // Verdict is one target's answer at one tick.
@@ -353,9 +373,9 @@ const (
 type Config struct {
 	// Interval is the sampling tick: 1 s, within 1..10 s.
 	Interval time.Duration
-	// FailAfter hard samples among the last FailWindow decisive ones withdraw:
-	// 3 of 5, with FailWindow within 1..60 and FailAfter within
-	// 1..FailWindow.
+	// FailAfter hard samples among the last FailWindow decisive ones, taken
+	// within the last 2×FailWindow ticks, withdraw: 3 of 5 within 10, with
+	// FailWindow within 1..60 and FailAfter within 1..FailWindow.
 	FailAfter, FailWindow int
 	// RecoverAfter ok samples in a row (with the gates open and the hold-down
 	// over) announce: 10, within 3..120.

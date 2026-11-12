@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -301,6 +302,23 @@ func TestProbeAnAddressTheKernelDoesNotHoldIsBlind(t *testing.T) {
 func probeNonlocalBind() bool {
 	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_nonlocal_bind")
 	return err == nil && strings.TrimSpace(string(b)) == "1"
+}
+
+// The IPv6 sibling. On Linux the source is bound with IP_FREEBIND, so the
+// bind of an address nobody holds goes through; the SYN finds no route, or
+// leaves carrying that address as its source, and nothing answers it here:
+// soft. Elsewhere the bind refuses it: blind. Never ok, never refused.
+func TestProbeAnIPv6AddressTheKernelDoesNotHoldIsNeverAnswered(t *testing.T) {
+	port := probeClosed(t, probeV6)              // skips a host without IPv6
+	gone := netip.MustParseAddr("2001:db8:9::9") // the documentation prefix: nobody's
+	r := Prober{Port: port, ConnectTimeout: 200 * time.Millisecond}.Probe(context.Background(), gone)
+	want := ClassBlind
+	if runtime.GOOS == "linux" {
+		want = ClassSoft
+	}
+	if r.Class != want || r.HasFirst {
+		t.Fatalf("probe from an IPv6 address this host does not hold: %+v, want %v", r, want)
+	}
 }
 
 // The source is bound to the probed address. On Linux all of 127.0.0.0/8 is

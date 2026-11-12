@@ -140,7 +140,7 @@ func TestObserveRefusalNeedsAnEmptyListenerTable(t *testing.T) {
 			fsys["net/tcp"] = &fstest.MapFile{Data: tc.tcp}
 		}
 		fsys["net/tcp6"] = &fstest.MapFile{Data: tc.tcp6}
-		tick := Proc{FS: fsys}.Tick(port)
+		tick := Proc{FS: fsys}.Tick(context.Background(), port)
 		o := Prober{Port: port}.Observe(context.Background(), tick, VIPTarget(probeV4))
 		if o.Local != TriYes || o.Probe != ClassRefused || o.Listening != tc.listen {
 			t.Errorf("%s: %+v, want a held address, refused, listening %v", tc.name, o, tc.listen)
@@ -156,7 +156,7 @@ func TestObserveRefusalNeedsAnEmptyListenerTable(t *testing.T) {
 // nothing triggers, whatever listens.
 func TestObserveWithoutProcHolds(t *testing.T) {
 	port := probeClosed(t, probeV4)
-	tick := Proc{FS: fstest.MapFS{}}.Tick(port)
+	tick := Proc{FS: fstest.MapFS{}}.Tick(context.Background(), port)
 	var dials atomic.Int32
 	for _, target := range []Target{VIPTarget(probeV4), NodeTarget(true)} {
 		o := probeCounting(port, &dials).Observe(context.Background(), tick, target)

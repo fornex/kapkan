@@ -58,8 +58,9 @@ type Prober struct {
 	// defaults (300 ms, 600 ms, 2 s).
 	ConnectTimeout, FirstByteTimeout, HandshakeTimeout time.Duration
 	// Control, when set, runs on every socket the Prober opens, before its
-	// bind and connect (net.Dialer.ControlContext): the seam through which a
-	// test injects EMFILE and its kin. Nil on a node.
+	// bind and connect (net.Dialer.ControlContext) and after the Prober's own
+	// option (IP_FREEBIND on an IPv6 socket, on Linux): the seam through
+	// which a test injects EMFILE and its kin. Nil on a node.
 	Control func(ctx context.Context, network, address string, c syscall.RawConn) error
 }
 
@@ -77,17 +78,20 @@ type Result struct {
 }
 
 // Probe makes one attempt at addr: a TCP connect from addr (the source is
-// bound to it, port 0) to addr:Port within ConnectTimeout, a TLS ClientHello
-// naming ProbeSNI, and one read for the answer's first byte within
-// FirstByteTimeout. Then it closes: it never completes a handshake, so it
-// never makes a session in the terminator's cache, and it never sends a byte
-// of HTTP.
+// bound to it, port 0; an IPv6 source with IP_FREEBIND, so that a VIP in an
+// AnyIP range can be probed from itself) to addr:Port within ConnectTimeout,
+// a TLS ClientHello naming ProbeSNI, and one read for the answer's first byte
+// within FirstByteTimeout. Then it closes: it never completes a handshake, so
+// it never makes a session in the terminator's cache, and it never sends a
+// byte of HTTP.
 //
 // Classes, in the order they are decided:
 //
-//   - the socket, the bind or Control failed, or the connect returned EMFILE,
-//     ENFILE, ENOBUFS, EADDRINUSE or EADDRNOTAVAIL: ClassBlind — decided
-//     first, so it is never ClassRefused, whatever the error wraps;
+//   - the socket, setting IP_FREEBIND, the bind or Control failed, or the
+//     connect returned EMFILE, ENFILE, ENOBUFS, EADDRINUSE or EADDRNOTAVAIL:
+//     ClassBlind — decided first, so it is never ClassRefused, whatever the
+//     error wraps. An IPv4 address the kernel dropped fails its bind here; an
+//     IPv6 one binds, and reads soft (see dial);
 //   - the connect itself returned ECONNREFUSED: ClassRefused (whether that is
 //     a trigger is Observation.Triggers' business, after the listener table);
 //   - any other failure before a byte arrived — a connect or first-byte
@@ -154,32 +158,40 @@ func (c *probeFirstByte) Read(b []byte) (int, error) {
 	return 0, errProbeAnswered
 }
 
-// dial connects from addr to addr:Port within ConnectTimeout, running Control
-// on the socket; controlFailed reports that the error is Control's own.
+// dial connects from addr to addr:Port within ConnectTimeout, setting
+// IP_FREEBIND on an IPv6 socket and then running Control; controlFailed
+// reports that the error is one of those two's.
 func (p Prober) dial(ctx context.Context, addr netip.Addr) (conn net.Conn, controlFailed bool, err error) {
 	network := "tcp4"
 	if addr.Is6() {
 		network = "tcp6"
 	}
 	d := net.Dialer{
-		// The source is the target address itself, so the SYN goes from a
-		// local address to a local address and never leaves lo. Should the
-		// kernel have dropped the address since /proc listed it, bind()
-		// refuses (EADDRNOTAVAIL: blind); and under ip_nonlocal_bind=1 a SYN
-		// that does leave carries the VIP as its source, which another node
-		// holding the VIP drops as a martian — so no other node can answer
-		// for this one.
+		// The source is the target address itself, so while the kernel holds
+		// it the SYN goes from a local address to a local address and never
+		// leaves lo. Whether the kernel holds it is for /proc to say
+		// (Observe), not bind(): an IPv6 socket is bound with IP_FREEBIND
+		// (probeFreebind, on Linux), because IPv6 bind() takes only an
+		// address on an interface and an AnyIP range is a route. Should the
+		// kernel have dropped the address since /proc listed it, an IPv4
+		// bind() still refuses (EADDRNOTAVAIL: blind). An IPv6 bind, or any
+		// under ip_nonlocal_bind=1, goes through, and the SYN — if a route
+		// lets it out at all — carries the VIP as its source. A node that
+		// holds the VIP drops it (an IPv4 martian) or answers the VIP, which
+		// is its own address: the answer never reaches this socket, so the
+		// probe reads soft, and no other node can answer for this one.
 		LocalAddr: net.TCPAddrFromAddrPort(netip.AddrPortFrom(addr, 0)),
 		Timeout:   probeDuration(p.ConnectTimeout, DefaultConnectTimeout),
 		// The connection lives under a second; keepalive is a wasted syscall.
 		KeepAlive: -1,
-	}
-	if p.Control != nil {
-		d.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
-			err := p.Control(ctx, network, address, c)
+		ControlContext: func(ctx context.Context, network, address string, c syscall.RawConn) error {
+			err := probeFreebind(network, c)
+			if err == nil && p.Control != nil {
+				err = p.Control(ctx, network, address, c)
+			}
 			controlFailed = err != nil
 			return err
-		}
+		},
 	}
 	conn, err = d.DialContext(ctx, network, netip.AddrPortFrom(addr, p.port()).String())
 	return conn, controlFailed, err
@@ -268,8 +280,8 @@ func (p Prober) Handshake(ctx context.Context, addr netip.Addr, sni string) erro
 
 // Kernel is what Observe asks the kernel: whether it holds an address, and —
 // only after a refused probe — whether a LISTEN socket on the probed port
-// covers it. *Tick (proc.go) is the real one, reading each /proc table at
-// most once per tick; tests fake it.
+// covers it. *Tick (proc.go) is the real one, reading in a tick only what
+// the asked addresses need; tests fake it.
 type Kernel interface {
 	Local(addr netip.Addr) Tri
 	Listening(addr netip.Addr) Tri
