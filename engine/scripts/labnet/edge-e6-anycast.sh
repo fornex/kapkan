@@ -1386,13 +1386,17 @@ else
     ok "bird2 installed ($(bird --version 2>&1 | head -1))"
     # The router accepts both announcements and merges them into one ECMP
     # route; each node announces the VIP /32 with itself as the next hop.
+    # Direct eBGP over each /30 leg, never `multihop`: a multihop session
+    # resolves its next hop recursively through bird's own table, which here
+    # holds no connected routes (`learn off`, no `protocol direct`), so the
+    # VIP would land in rtr's FIB as `unreachable` instead of two nexthops.
     cat > /tmp/bird-rtr.conf <<CONF
 router id 10.0.0.254;
 log stderr all;
 protocol device { }
 protocol kernel { ipv4 { export all; }; merge paths on; learn off; }
-protocol bgp e1 { local as 65100; neighbor $E1 as 65001; ipv4 { import all; export none; }; multihop 2; }
-protocol bgp e2 { local as 65100; neighbor $E2 as 65002; ipv4 { import all; export none; }; multihop 2; }
+protocol bgp e1 { local as 65100; neighbor $E1 as 65001; ipv4 { import all; export none; }; }
+protocol bgp e2 { local as 65100; neighbor $E2 as 65002; ipv4 { import all; export none; }; }
 CONF
     # The announce protocol is declared `disabled`: a box that boots, or a bird
     # that restarts, is withdrawn until its loop's first definite announce —
@@ -1408,7 +1412,7 @@ protocol static announce {
   route $VIP/32 via "lo";
   disabled;
 }
-protocol bgp rtr { local as $2; neighbor $4 as 65100; ipv4 { import none; export all; }; multihop 2; }
+protocol bgp rtr { local as $2; neighbor $4 as 65100; ipv4 { import none; export all; }; }
 CONF
       mkdir -p /run/bird-e$1
       ip netns exec "$(ns_of "$1")" bird -c /tmp/bird-e$1.conf -s /run/bird-e$1/ctl -P /run/bird-e$1/pid -f >>/tmp/bird-e$1.log 2>&1 &
