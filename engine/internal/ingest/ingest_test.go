@@ -62,7 +62,7 @@ func (s *sink) snapshot() []flow.Flow {
 	return out
 }
 
-func testStore(t *testing.T) *config.Store {
+func testStore(t testing.TB) *config.Store {
 	t.Helper()
 	cfg, err := config.Parse([]byte(ingestYAML))
 	if err != nil {

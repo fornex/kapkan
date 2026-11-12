@@ -83,6 +83,13 @@ func New(store *config.Store, sink SinkFunc, log *slog.Logger) (*Ingester, error
 	return ing, nil
 }
 
+// decodeWorkers is how many goroutines decode a listener's datagrams. Both of
+// its sockets feed one queue and the workers take from it in turn, so one
+// exporter's datagrams spread over all of them and many exporters share them.
+// Each worker runs the whole path inline: decode, convert, and the sink
+// (Engine.Process in the daemon).
+const decodeWorkers = 4
+
 // dropCounter implements utils.ReceiverCallback. The receiver calls it once
 // per DATAGRAM it drops unread because its dispatch queue to the decode workers
 // is full, so DroppedFlowsTotal counts datagrams despite its name: the datagram
@@ -123,7 +130,7 @@ func (i *Ingester) startReceiver(family, listen string, queue int, pipe utils.Fl
 	}
 	recv, err := utils.NewUDPReceiver(&utils.UDPReceiverConfig{
 		Sockets:          2,
-		Workers:          4,
+		Workers:          decodeWorkers,
 		QueueSize:        queue, // validated >= 1: 0 would mean an UNBUFFERED dispatch channel
 		ReceiverCallback: dropCounter{},
 	})
