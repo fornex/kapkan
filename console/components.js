@@ -132,6 +132,19 @@
       ? badge("badge--dry", I.t("mode.dryrun"), "shield-alert")
       : badge("badge--calm", I.t("mode.live"), "shield-check");
   }
+  /* The duty light (the brand's DutyLight chip), the top bar's mode: Kapkan is
+     on duty, and in which mode. A night plate with the ember light, which stays
+     lit and never blinks or pulses: it means presence, not alarm (only the
+     under-attack dot blinks). It is shown only while the engine answers;
+     otherwise noContact() takes its place, because a lit light over a dead
+     connection would be a false claim. */
+  function dutyChip(dry) {
+    return h("span", { class: "duty " + (dry ? "duty--watch" : "duty--live"), attrs: { title: dry ? I.t("mode.dryrun.full") : null } }, [
+      h("span", { class: "duty__light", attrs: { "aria-hidden": "true" } }),
+      h("span", {}, [I.t("duty.on") + " ", h("span", { class: "duty__mode", text: "· " + I.t(dry ? "duty.watch" : "duty.live") })])
+    ]);
+  }
+  function noContact() { return badge("badge--muted", I.t("duty.offline")); }
   function posturePill(state) {
     var map = { calm: "posture--calm", attack: "posture--attack", mitigating: "posture--mitigating" };
     var key = { calm: "posture.calm", attack: "posture.attack", mitigating: "posture.mitigating" }[state];
@@ -549,7 +562,7 @@
 
   w.K = {
     h: h, svg: svg, clear: clear, mount: mount, append: append,
-    badge: badge, dirBadge: dirBadge, modeBadge: modeBadge, posturePill: posturePill,
+    badge: badge, dirBadge: dirBadge, modeBadge: modeBadge, dutyChip: dutyChip, noContact: noContact, posturePill: posturePill,
     sparkline: sparkline, areaChart: areaChart,
     ladder: ladder, gauge: gauge, confidence: confidence, baselineBar: baselineBar,
     routeDisplay: routeDisplay, shareGroup: shareGroup, timeline: timeline,

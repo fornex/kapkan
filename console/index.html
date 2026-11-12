@@ -41,11 +41,11 @@
     <header class="topbar" id="topbar">
       <div class="topbar__left">
         <button class="icon-btn" id="collapseBtn" aria-label="Toggle sidebar"></button>
-        <div class="topbar__status">
-          <span id="posturePill"></span>
-          <span id="modeBadge"></span>
-        </div>
+        <span id="posturePill"></span>
       </div>
+      <!-- the duty light: on duty, and in which mode (or "no connection").
+           role=status, so a mode change or a lost engine is announced. -->
+      <span class="topbar__duty" id="modeBadge" role="status"></span>
       <div class="topbar__spacer"></div>
       <div class="counters" id="counters"></div>
       <span class="counter__sep" aria-hidden="true"></span>

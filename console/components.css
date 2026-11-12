@@ -541,15 +541,18 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
 .demo-ctl { display: flex; align-items: center; gap: var(--s-2); }
 
 /* responsive */
-/* Laptop widths. With the rail expanded, the top bar needs up to 1340px (fr:
-   "Atténuation en cours" beside "Observation seule"); narrower, its min-content
-   forces the 1fr column past the window and .app's overflow:hidden cuts off the
-   right end of the bar. The networks count goes first: it is config, changes
-   only on a reload, and Overview shows it too. Measured per locale, without it
-   the bar fits wherever it did before the mode label became "watch-only". */
-@media (max-width: 1400px) {
-  .counters .counter:nth-child(n+4) { display: none; }
-}
+/* Laptop widths. The top bar holds the posture, the duty chip ("На дежурстве ·
+   только наблюдение" alone is 270px), four counters, the clock and the reload
+   button: with the rail expanded, the widest case (ru or fr, mitigating) needs
+   1489px on one line. Narrower, the bar sheds what is shown elsewhere, in this
+   order: the networks count (config, also on Overview), the hosts count (also
+   on Overview and Hosts), then the word "Live" (the duty chip already says the
+   engine answers; the clock stays). Measured per locale and posture: from
+   1367px up everything fits on one line, and below that the bar needs less
+   room than it did before the chip. */
+@media (max-width: 1500px) { .counters .counter:nth-child(4) { display: none; } }
+@media (max-width: 1440px) { .counters .counter:nth-child(3) { display: none; } }
+@media (max-width: 1366px) { .live__txt { display: none; } }
 
 @media (max-width: 1180px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
@@ -598,16 +601,23 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
   .counters, .counter__sep, .live__txt, .live__time { display: none; }
   .topbar { gap: var(--s-2); padding: var(--s-2) var(--s-3); min-height: var(--topbar-h); }
   .topbar__left { gap: var(--s-2); min-width: 0; }
-  /* posture + mode wrap onto a second row rather than run under the buttons:
-     on a phone, "Под атакой" beside "Только наблюдение" is wider than what the
-     buttons leave. The grid row above is auto, so the bar grows to fit (60px
-     at least) and stays one row whenever everything fits. */
-  .topbar__status { gap: var(--s-2); flex-wrap: wrap; }
   #reloadBtn span { display: none; }
 
   .view { padding: var(--s-4) var(--s-4) var(--s-8); }
   .host-row { grid-template-columns: 1.4fr 64px 1.2fr; }
   .host-rates { display: none; }
+}
+
+/* Phone: the duty chip ("На дежурстве · только наблюдение") does not fit
+   beside the posture and the buttons, so it takes a row of its own under them.
+   The left cluster grows from a zero basis, so the line breaks before the chip
+   and never before the buttons; the grid row is auto (above), so the bar grows
+   to fit. */
+@media (max-width: 700px) {
+  .topbar { flex-wrap: wrap; row-gap: var(--s-2); }
+  .topbar__left { flex: 1 1 0; }
+  .topbar__spacer { display: none; }
+  .topbar__duty { order: 1; flex: 0 0 100%; }
 }
 
 @media (max-width: 560px) {
