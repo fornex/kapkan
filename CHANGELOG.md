@@ -21,16 +21,21 @@ security-relevant.
 
 ### Fixed
 
-- **edge:** if you run the withdraw loop from 1.8.0's anycast guide, replace it with the one the
-  guide carries now. The old loop withdraws a node whenever `/healthz` answers anything but `200`,
-  no answer included, or an HTTPS request for one of its zones fails, and a zone put under
-  challenge (a `403`), a dead origin or a `kapkan edge` upgrade rolled out to the fleet at once
-  fails those on every node together: it withdraws the whole address while nginx is serving. The
-  new loop withdraws a node only when its own `:443` refuses connections three times in a row, and
-  changes nothing when it cannot tell. The old loop's `birdc -s /run/bird/ctl` also named a socket
-  that Debian's `bird2` package does not use; the new one calls `birdc` on bird's default socket.
+- **edge:** if you run the withdraw loop the anycast guide carried in 1.8.0 and 1.9.0, replace it
+  with the one the guide carries now. The old loop withdraws a node whenever `/healthz` answers
+  anything but `200`, no answer included, or an HTTPS request for one of its zones fails, and a
+  zone put under challenge (a `403`), a dead origin or a `kapkan edge` upgrade rolled out to the
+  fleet at once fails those on every node together: it withdraws the whole address while nginx is
+  serving. The new loop withdraws a node only when nothing listens on its own `:443` three checks
+  in a row — its loopback probe refused and `ss` listing no `:443` listener, so a firewall rule or
+  a proxy that refuses the probe holds instead — and changes nothing when it cannot tell. Two
+  things it leaves to you, and the guide says why: start a new or rebuilt node's loop only once
+  the node holds its certificates, and under `omit_catch_all` give nginx a `:443` default server
+  of your own with `ssl_reject_handshake on`. The old loop's `birdc -s /run/bird/ctl` also named a
+  socket that Debian's `bird2` package does not use; the new one calls `birdc` on bird's default
+  socket.
 - **edge:** `/healthz` no longer answers `200` before the node has checked the terminator, as it
-  could for up to `controller.report_interval_seconds` after a start. It reads
+  could in 1.8.0 and 1.9.0 for up to `controller.report_interval_seconds` after a start. It reads
   `terminator.pid_file` once before the status listener starts and then every second on a tick of
   its own, so a self-report stuck on an unreachable brain no longer delays a dead nginx's `503`.
 

@@ -194,11 +194,11 @@ The channel is the one the scrub node already uses, with a second document famil
 | Failure | Behavior |
 |---|---|
 | Brain dies / partition | Node keeps serving: last zone doc + certs are on disk, ACME renewals continue autonomously, challenge policy freezes as-is, XDP dynamic rules age out on in-kernel TTL. Fail-static, indefinitely. Caveat: without the brain there is no challenge fan-out, so under a shared/anycast VIP a renewal succeeds only when the CA's validation lands on the ordering node (about 1/N per attempt); such attempts retry hourly and do not count toward the fallback CA. |
-| nginx dies | systemd restarts it. Kapkan reports the gap (`/healthz` condition + report field); it never supervises or respawns the terminator itself. |
+| nginx dies | systemd restarts it when its unit says `Restart=` — Debian's stock `nginx.service` does not, so the docs give a `Restart=on-failure` drop-in. Kapkan reports the gap (`/healthz` condition + report field); it never supervises or respawns the terminator itself. |
 | Decision service dies / times out | Per-zone `failure_mode: open` (default — requests pass undecided, counted) or `closed` (503). Default is open: the edge analog of default-PASS. |
 | Renders produce a broken config | `nginx -t` against the candidate file gates every reload; a failing candidate is never installed, the old config keeps serving, the failure is a report field + metric. Mirrors the validate-before-apply gate the config package already enforces (the same validator that ships as `cmd/kapkan-validate`). |
 | Cert unrenewable (CA down, attack outlasts retries) | Serve the current cert until expiry; alarm from T−30 d (metric + console badge + notify). With a 90-day cert renewed from day 60, an attack must outlast ~30 days of retries before expiry is threatened. |
-| Node dies | Brain sees the poll stop (stale_after, as with scrub nodes) and surfaces it. Steering traffic away stays the operator's network, on the interim contract the anycast deployment guide records (shipped with E6, amended by E7.0): an external speaker on the node withdraws the zone address only when the node's own loopback `:443` refuses the connection three periods in a row (`curl -sk -o /dev/null -m2 https://127.0.0.1/` exits 7); it announces when `/healthz` answers 200 and that probe was answered (exit 0, or 35 — with no SNI the catch-all's `ssl_reject_handshake` answers with an alert); every other case — `/healthz` 503 or silent, a timeout (28), any other exit — holds, and the announce protocol is declared `disabled`, so a booted box stays out until the first definite announce. The principle: only an observation of the box's own kernel (nothing listening on `:443`) withdraws it; what Kapkan computes, the brain sends or a client can provoke may delay a join and never causes a withdrawal; Kapkan's silence means hold. `/healthz` is a pid sample (`terminator.pid_file`, read once before the status listener starts, then on its own 1 s tick, independent of the report), so it gates the announce only. E6's first contract — withdraw on `/healthz` 503 or silent, or on an HTTPS probe with the zone's SNI — failed on every node at once (a live rung's 403, an origin's failure, the trust store, a zone placed away, a `kapkan edge` restart or parallel upgrade) and is replaced. The brain withdraws nothing and its inventory is not the signal. A node announcing its own zone VIPs is **self-steering**, moved out to E7 in the E6 design round — see §8's E6 entry. The operator-facing recipe, with the rule and what is NOT a withdrawal signal, is /docs/edge-anycast (E6.9, amended by E7.0). |
+| Node dies | Brain sees the poll stop (stale_after, as with scrub nodes) and surfaces it. Steering traffic away stays the operator's network, on the interim contract the anycast deployment guide records (shipped with E6, amended by E7.0): an external speaker on the node withdraws the zone address only when nothing listens on the node's own `:443` three periods in a row: the loopback probe `curl -q --noproxy '*' -sk -o /dev/null -m2 https://127.0.0.1/` exits 7 and `ss -Hltn 'sport = :443'` lists no listener (curl's 7 is any connection it could not make — a host firewall REJECT on loopback or a proxy in the environment gives it while nginx listens, which is why a 7 beside a listed listener holds, and why the probe carries `-q --noproxy '*'`); it announces when `/healthz` answers 200 and that probe was answered (exit 0, or 35 — with no SNI the catch-all's `ssl_reject_handshake` answers with an alert); every other case — `/healthz` 503 or silent, a timeout (28), any other exit — holds, and the announce protocol is declared `disabled`, so a booted box stays out until the first definite announce. A node with no certificate yet passes that announce too (the catch-all answers it, and `/healthz` reads no certificate), so the guide starts a node's loop only once a `--resolve` request for each of its zones completes the handshake, and has the first node of a new address announced by hand until it is issued, HTTP-01 needing the address routed; E7.1 gates a node's first entry on its certificates. The rule needs a `:443` listener that exists whatever the document says — Kapkan's catch-all, or under `omit_catch_all` the operator's own `:443` default server with `ssl_reject_handshake on`, which the guide prescribes: without one, a document that leaves a node no zone with a certificate leaves its `:443` refusing on every node it reaches, and the document decides the withdrawal (E7.2 refuses `omit_catch_all` under steering for this reason). The principle: only an observation of the box's own kernel (nothing listening on `:443`) withdraws it; what Kapkan computes, the brain sends or a client can provoke may delay a join and never causes a withdrawal; Kapkan's silence means hold. `/healthz` is a pid sample (`terminator.pid_file`, read once before the status listener starts, then on its own 1 s tick, independent of the report), so it gates the announce only. E6's first contract — withdraw on `/healthz` 503 or silent, or on an HTTPS probe with the zone's SNI — failed on every node at once (a live rung's 403, an origin's failure, the trust store, a zone placed away, `kapkan edge` restarting on every node at once: a parallel upgrade, a configuration rollout — the edge role has no reload — or a crash on a document every node receives), withdrew its node on every lone `kapkan edge` restart, and is replaced. The brain withdraws nothing and its inventory is not the signal. A node announcing its own zone VIPs is **self-steering**, moved out to E7 in the E6 design round — see §8's E6 entry. The operator-facing recipe, with the rule and what is NOT a withdrawal signal, is /docs/edge-anycast (E6.9, amended by E7.0). |
 
 ---
 
@@ -613,8 +613,8 @@ headline and the long pole.
   *Decided in the E6 design round (2026-09-09):* E6 is the fleet and product tail; self-steering
   is its own milestone (E7) with a recorded design note, and E6 ships the interim — the anycast
   deployment guide with an external-speaker recipe driven by the node's `/healthz` and a local
-  TLS probe. [Superseded by E7.0: the recipe withdraws only when the node's own `:443` refuses
-  connections, and `/healthz` only gates the announce — §2.4.]
+  TLS probe. [Superseded by E7.0: the recipe withdraws only when nothing listens on the node's
+  own `:443`, and `/healthz` only gates the announce — §2.4.]
   *Decided in E6.1 (`internal/api/node_binding.go`, `config.APIToken.Node`):* an agent
   token belongs to one node — `api.tokens[].node` names exactly one `edge.nodes[]` or
   `scrubbing.nodes[]` entry (a name in both lists is refused; several tokens may bind one node
@@ -822,14 +822,20 @@ headline and the long pole.
   failed) until `ip route flush cache` on the client, after which 20/20 succeeded from both. **Arm
   I** (a real bird2 speaker per node, driven by a `/healthz` loop) is a stretch arm behind
   `ANYCAST_BGP=1`, outside the acceptance path and skipped by default: it asserts the same
-  withdrawal contract and contributes no number here. Corrections the rig forced on the plan: the
-  per-node multiplier is a range set by the batch duration, not "N×"; the L3 hash's real cost is
-  a table denial rather than a slow client; a path MTU is cached per destination, so one bad leg
-  is an h3 outage for the whole address; and the withdraw predicate needs a local TLS probe beside
-  `/healthz`, which samples a pid on the report tick. [Superseded by E7.0: a probe with the
-  zone's SNI fails on every node at once, so only the loopback `:443` refusing the connection
-  withdraws, and `/healthz` — its pid now on its own 1 s tick — gates only the announce; §2.4.]
-  The operator-facing write-up is /docs/edge-anycast (E6.9 guide).
+  withdrawal contract and contributes no number here. [Superseded by E7.0: arm I runs the guide's
+  E7.0 loop verbatim but for its status port and bird socket — withdraw only when nothing listens
+  on the node's own `:443` three periods in a row (the loopback probe refused and `ss` listing no
+  listener), announce on exit 0 or 35 plus `/healthz` 200, hold otherwise — over direct eBGP
+  rather than multihop, asserts that the zone's rung on `manual` with its origin stopped on both
+  nodes (the rig's negative control, arm E2) withdraws neither node, and records the time from the
+  kill to the withdrawal in rtr's FIB; §2.4.] Corrections the rig forced on the plan: the per-node
+  multiplier is a range set by the batch duration, not "N×"; the L3 hash's real cost is a table
+  denial rather than a slow client; a path MTU is cached per destination, so one bad leg is an h3
+  outage for the whole address; and the withdraw predicate needs a local TLS probe beside
+  `/healthz`, which samples a pid on the report tick. [Superseded by E7.0: a probe with the zone's
+  SNI fails on every node at once, so only nothing listening on the loopback `:443` withdraws, and
+  `/healthz` — its pid now on its own 1 s tick — gates only the announce; §2.4.] The
+  operator-facing write-up is /docs/edge-anycast (E6.9 guide).
 
 Dependency notes: E1/E2 need nothing from E3 and ship on the existing data plane. E3 blocks
 E4; E5 rides on E3; E6 rides on everything. The SYN-proxy design round is orthogonal and
