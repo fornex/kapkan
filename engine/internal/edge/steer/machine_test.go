@@ -1141,7 +1141,10 @@ func autoWindowSays(seq []autoPair, cfg Config) []bool {
 // autoVary builds T3 variation k's inputs for one tick over the fixed pair p.
 // Variation 0 is the reference — every gate open, nothing in the report or the
 // drain content, soft for a probe that did not answer TLS; the others draw all
-// of that, odd ones the gates afresh each tick, even ones in stretches.
+// of that, odd ones the gates afresh each tick, even ones in stretches. The
+// gates and the report are drawn field by field (autoGates, autoReport), so
+// facts meet in every combination — a master gone beside a silent log among
+// them, the picture of a dead or hung nginx that stays report-only.
 func autoVary(r *rand.Rand, k int, p autoPair, gates *Gates) Inputs {
 	in := Inputs{Triggers: p.t, Probe: ClassSoft, Gates: autoOpen}
 	if p.ok {
@@ -1154,12 +1157,35 @@ func autoVary(r *rand.Rand, k int, p autoPair, gates *Gates) Inputs {
 		in.Probe = autoNonOK[r.IntN(len(autoNonOK))]
 	}
 	if k%2 == 1 || r.IntN(10) == 0 {
-		*gates = autoGateChoices[r.IntN(len(autoGateChoices))]
+		*gates = autoGates(r)
 	}
 	in.Gates = *gates
-	in.Report = autoReportChoices[r.IntN(len(autoReportChoices))]
+	in.Report = autoReport(r)
 	in.Drain = autoDrainChoices[r.IntN(len(autoDrainChoices))]
 	return in
+}
+
+// autoGates draws T3's gates field by field.
+func autoGates(r *rand.Rand) Gates {
+	return Gates{
+		GenerationLive: r.IntN(2) == 0,
+		Zones:          []int{-1, 0, 1, 5}[r.IntN(4)],
+		DrainKnown:     r.IntN(2) == 0,
+	}
+}
+
+// autoReport draws T3's report field by field.
+func autoReport(r *rand.Rand) Report {
+	tri := []Tri{TriUnknown, TriYes, TriNo}
+	pick := func(s ...string) string { return s[r.IntN(len(s))] }
+	return Report{
+		Terminator:  Process{State: []PIDState{PIDUnknown, PIDAlive, PIDGone}[r.IntN(3)], Frozen: r.IntN(2) == 0},
+		Listening:   tri[r.IntN(3)],
+		ProbeErr:    pick("", "dial tcp 192.0.2.10:443: connect: connection refused", "read tcp: i/o timeout"),
+		ProcErr:     pick("", "open net/tcp: permission denied"),
+		DrainErr:    pick("", "drain: unexpected end of JSON input"),
+		LogProgress: tri[r.IntN(3)],
+	}
 }
 
 // autoT3Counts shows the variations walked what they claim to leave alone.
@@ -1430,8 +1456,9 @@ func TestNonTriggerInputsNeverMoveEvaluate(t *testing.T) {
 
 // TestNonTriggerInputsCoverEveryField keeps T3 honest as the types grow: Inputs
 // has the five fields T3 knows how to hold or vary, and T3's choices set every
-// field of the gates, the report and the drain somewhere. A new input is
-// either a trigger — a design round — or something T3 must vary.
+// field of the gates, the report and the drain somewhere — the listed choices
+// the exhaustive arms iterate, and the random draws the scripted arms take. A
+// new input is either a trigger — a design round — or something T3 must vary.
 func TestNonTriggerInputsCoverEveryField(t *testing.T) {
 	var names []string
 	for i := range reflect.TypeOf(Inputs{}).NumField() {
@@ -1455,6 +1482,19 @@ func TestNonTriggerInputsCoverEveryField(t *testing.T) {
 		for _, leaf := range autoLeaves(reflect.TypeOf(root), reflect.TypeOf(root).Name()) {
 			if !covered[leaf] {
 				missing = append(missing, leaf)
+			}
+		}
+	}
+	drawn := map[string]bool{}
+	r := rand.New(rand.NewPCG(2026, 1115))
+	for range 1000 {
+		autoMarkSet(reflect.ValueOf(autoGates(r)), "Gates", drawn)
+		autoMarkSet(reflect.ValueOf(autoReport(r)), "Report", drawn)
+	}
+	for _, root := range []any{Gates{}, Report{}} {
+		for _, leaf := range autoLeaves(reflect.TypeOf(root), reflect.TypeOf(root).Name()) {
+			if !drawn[leaf] {
+				missing = append(missing, leaf+" (in the random draws)")
 			}
 		}
 	}

@@ -627,6 +627,30 @@ func TestStoreDrainForUnknown(t *testing.T) {
 // TestStoreDrainForDanglingSymlink: a drain file that is a symlink to nothing
 // exists all the same — only the operator makes one — so it drains, dated by
 // the link, with the failed read for the report. The new_node marker too.
+// TestStoreDrainForUnlistable: a steering directory that can be searched but
+// not listed hides a VIP's hand-made spellings, so the VIP's drain is
+// unknown, not absent; the node's, which has one name, is known, and the
+// listing failure is reported either way.
+func TestStoreDrainForUnlistable(t *testing.T) {
+	listErr := errors.New("listing failed")
+	if _, tri, err := drainFold(storeNew(t).vipDrainReads(storeVIP, nil, listErr)); tri != TriUnknown || !errors.Is(err, listErr) {
+		t.Fatalf("a VIP's drain with the listing failed = (%v, %v), want unknown, with the listing's error", tri, err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root lists any directory")
+	}
+	s := storeNew(t)
+	storeRaw(t, s, "drain.::ffff:192.0.2.10", "", storeT0)
+	storeMust(t, os.Chmod(s.Dir, 0o311))
+	t.Cleanup(func() { _ = os.Chmod(s.Dir, 0o755) })
+	if _, tri, err := s.DrainFor(storeVIP); tri != TriUnknown || err == nil {
+		t.Fatalf("DrainFor(%s), the directory unlistable = (%v, %v), want unknown, with an error", storeVIP, tri, err)
+	}
+	if _, tri, err := s.DrainFor(NodeKey); tri != TriNo || err == nil {
+		t.Fatalf("DrainFor(%s), the directory unlistable = (%v, %v), want no drain, with the listing's error", NodeKey, tri, err)
+	}
+}
+
 func TestStoreDrainForDanglingSymlink(t *testing.T) {
 	for _, tc := range []struct{ name, key, reason string }{
 		{drainFileName, storeVIP, ""},
