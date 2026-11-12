@@ -1056,7 +1056,7 @@ func (n *Node) Status() Status {
 		Terminator: strings.TrimSpace(n.term.Kind + " " + n.term.Version), TerminatorAlive: n.termAlive,
 		H3: n.h3Locked(),
 	}
-	st.Healthy = n.last.Generation != 0 && n.doc != nil && (n.termAlive == nil || *n.termAlive)
+	st.Healthy = n.last.Generation != 0 && n.doc != nil && (n.opt.Terminator.PIDFile == "" || (n.termAlive != nil && *n.termAlive))
 	st.Converged = st.Healthy && n.lastErr == "" && n.renderedETag == n.acceptedETag
 	if n.doc != nil {
 		st.Zones = len(n.doc.Zones)
