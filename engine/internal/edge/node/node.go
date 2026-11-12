@@ -36,7 +36,10 @@
 // HEALTH. /healthz answers 200 while a tested generation of ours is live
 // (and the terminator, when a pid file is configured, is alive), 503
 // otherwise; a refused document does not flip it — the previous generation
-// keeps serving (§2.4) — but shows as converged=false with the error.
+// keeps serving (§2.4) — but shows as converged=false with the error. The
+// pid is read before the status listener starts and every second after, on
+// a ticker of its own: neither the report's cadence nor a brain that does
+// not answer delays it.
 //
 // DRY-RUN is the node's default, as for every remote role: decisions are
 // counted and marked, none enforced, until edge.yaml says otherwise.
@@ -226,6 +229,9 @@ type Node struct {
 	retryBackoff time.Duration
 	// term is what the `-V` probe learned about the binary; termProbed says
 	// the probe succeeded (a zero term with termProbed false is "unknown").
+	// termAlive is the last pid-file sample (nil without a pid file), taken
+	// before the status listener starts and then every second by Run's
+	// terminator-liveness ticker — its only writer.
 	term       apply.Terminator
 	termProbed bool
 	termAlive  *bool
@@ -497,6 +503,28 @@ func (n *Node) Run(ctx context.Context) error {
 	n.mu.Lock()
 	n.poller = p
 	n.mu.Unlock()
+	// The terminator's liveness, behind /healthz and the report: one sample
+	// now, before the status listener and the reporter exist, so the first
+	// answer either gives has looked at the pid file; then one a second on a
+	// ticker of its own. Never on the report's tick: that comes a whole
+	// ReportInterval after start, and then waits on a document retry and on
+	// postReport, which a brain that does not answer holds for the client's
+	// 30 s timeout.
+	if n.opt.Terminator.PIDFile != "" {
+		n.sampleTerminator()
+		spawn("terminator liveness", func(ctx context.Context) error {
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-t.C:
+					n.sampleTerminator()
+				}
+			}
+		})
+	}
 	spawn("poller", func(ctx context.Context) error { p.Run(ctx); return nil })
 	spawn("reporter", n.reportLoop)
 	if n.certs != nil {
@@ -766,6 +794,15 @@ func (n *Node) terminatorAlive() *bool {
 	return &alive
 }
 
+// sampleTerminator refreshes the liveness verdict /healthz and the report
+// carry; the pid file is read and signalled outside n.mu.
+func (n *Node) sampleTerminator() {
+	alive := n.terminatorAlive()
+	n.mu.Lock()
+	n.termAlive = alive
+	n.mu.Unlock()
+}
+
 // buildReport assembles the self-report, untrimmed; report cuts it to the
 // brain's body limit.
 func (n *Node) buildReport() api.EdgeReport {
@@ -909,9 +946,11 @@ func trimReport(rep api.EdgeReport) api.EdgeReport {
 }
 
 // reportLoop posts the self-report on a fixed cadence; on the same tick it
-// refreshes the terminator-liveness check and retries a refused document
-// when due. Best-effort: a report never affects the poll, and the poll — not
-// the report — is liveness.
+// samples the UDP :443 listener and retries a refused document when due.
+// Best-effort: a report never affects the poll, and the poll — not the
+// report — is liveness. The terminator's pid is not sampled here but on
+// Run's own one-second ticker: a post the brain does not answer holds this
+// loop for the client's timeout.
 func (n *Node) reportLoop(ctx context.Context) error {
 	t := time.NewTicker(n.opt.ReportInterval)
 	defer t.Stop()
@@ -920,12 +959,10 @@ func (n *Node) reportLoop(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			alive := n.terminatorAlive()
 			// Sampled here, outside n.mu: h3Locked (on the hot mutex, and
 			// behind /healthz) only copies the result.
 			listening := udpListeningFn(443)
 			n.mu.Lock()
-			n.termAlive = alive
 			n.udpListening = listening
 			n.mu.Unlock()
 			n.retryIfDue(ctx)
@@ -1019,7 +1056,7 @@ func (n *Node) Status() Status {
 		Terminator: strings.TrimSpace(n.term.Kind + " " + n.term.Version), TerminatorAlive: n.termAlive,
 		H3: n.h3Locked(),
 	}
-	st.Healthy = n.last.Generation != 0 && n.doc != nil && (n.termAlive == nil || *n.termAlive)
+	st.Healthy = n.last.Generation != 0 && n.doc != nil && (n.opt.Terminator.PIDFile == "" || (n.termAlive != nil && *n.termAlive))
 	st.Converged = st.Healthy && n.lastErr == "" && n.renderedETag == n.acceptedETag
 	if n.doc != nil {
 		st.Zones = len(n.doc.Zones)
