@@ -60,7 +60,7 @@ No build step — grab a prebuilt, signed release (see [Install](#install) to ve
 
 ```sh
 # Download and unpack a release (linux amd64/arm64) — or `apt install ./kapkan_*.deb`.
-VER=v1.8.0
+VER=v1.9.0
 curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.tar.gz"
 tar xzf "kapkan_${VER#v}_linux_amd64.tar.gz"   # yields ./kapkan and ./deploy/
 
@@ -1159,7 +1159,7 @@ Every release ships prebuilt and signed for `linux/amd64` and `linux/arm64` — 
 build toolchain needed. The simplest path is a native package:
 
 ```sh
-VER=v1.8.0
+VER=v1.9.0
 # Debian / Ubuntu — sets up the kapkan user, /etc/kapkan and the systemd unit.
 curl -fLO "https://github.com/fornex/kapkan/releases/download/$VER/kapkan_${VER#v}_linux_amd64.deb"
 sudo apt install "./kapkan_${VER#v}_linux_amd64.deb"
@@ -1172,7 +1172,7 @@ release ships `checksums.txt` with a cosign-keyless signature; verifying is two
 commands (authenticity then integrity):
 
 ```sh
-VER=v1.8.0   # the release you want
+VER=v1.9.0   # the release you want
 base="https://github.com/fornex/kapkan/releases/download/$VER"
 curl -fLO "$base/kapkan_${VER#v}_linux_amd64.tar.gz"   # archive names drop the leading "v"
 curl -fLO "$base/checksums.txt" -O "$base/checksums.txt.sig" -O "$base/checksums.txt.pem"
@@ -1230,7 +1230,7 @@ and an edge can share a host) — [kapkan.io/docs/edge-install](https://kapkan.i
 signed upgrade on the host; it needs `cosign` installed:
 
 ```sh
-sudo deploy/update.sh v1.8.0   # or: sudo deploy/update.sh   (latest stable)
+sudo deploy/update.sh v1.9.0   # or: sudo deploy/update.sh   (latest stable)
 ```
 
 It verifies the download (cosign signature over `checksums.txt`, then the
