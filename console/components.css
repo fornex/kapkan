@@ -541,11 +541,20 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
 .demo-ctl { display: flex; align-items: center; gap: var(--s-2); }
 
 /* responsive */
+/* Laptop widths. With the rail expanded, the top bar needs up to 1340px (fr:
+   "Atténuation en cours" beside "Observation seule"); narrower, its min-content
+   forces the 1fr column past the window and .app's overflow:hidden cuts off the
+   right end of the bar. The networks count goes first: it is config, changes
+   only on a reload, and Overview shows it too. Measured per locale, without it
+   the bar fits wherever it did before the mode label became "watch-only". */
+@media (max-width: 1400px) {
+  .counters .counter:nth-child(n+4) { display: none; }
+}
+
 @media (max-width: 1180px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
   .attack-card__grid, .cols-2, .shares, .traffic-strip { grid-template-columns: 1fr; }
   .cols-3 { grid-template-columns: 1fr 1fr; }
-  .counters .counter:nth-child(n+5) { display: none; }
 }
 
 /* ===== Tablet / phone: sidebar becomes an off-canvas drawer =====
@@ -555,7 +564,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
    rail's width is also what stops the topbar's min-content from forcing the
    `1fr` column wider than the viewport (which clipped every view on the right). */
 @media (max-width: 900px) {
-  .app { grid-template-columns: 1fr; grid-template-areas: "top" "main"; }
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; grid-template-areas: "top" "main"; }
   /* let both items shrink below their content so the column can never exceed
      the viewport (otherwise .app's overflow:hidden chops the right edge off) */
   .main, .topbar { min-width: 0; }
@@ -587,8 +596,13 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
   /* topbar: trim to what fits a phone — posture + mode + language stay; the
      live label/clock and counters drop (the pulsing dot keeps the heartbeat) */
   .counters, .counter__sep, .live__txt, .live__time { display: none; }
-  .topbar { gap: var(--s-2); padding: 0 var(--s-3); }
+  .topbar { gap: var(--s-2); padding: var(--s-2) var(--s-3); min-height: var(--topbar-h); }
   .topbar__left { gap: var(--s-2); min-width: 0; }
+  /* posture + mode wrap onto a second row rather than run under the buttons:
+     on a phone, "Под атакой" beside "Только наблюдение" is wider than what the
+     buttons leave. The grid row above is auto, so the bar grows to fit (60px
+     at least) and stays one row whenever everything fits. */
+  .topbar__status { gap: var(--s-2); flex-wrap: wrap; }
   #reloadBtn span { display: none; }
 
   .view { padding: var(--s-4) var(--s-4) var(--s-8); }

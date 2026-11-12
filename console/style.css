@@ -13,12 +13,12 @@
   --elevated:    #222b36;   /* drawers / popovers      */
   --border:      #2a323d;   /* hairlines               */
   --border-soft: #222a34;   /* quieter hairlines       */
-  --border-strong:#3a4756;  /* focus-adjacent borders  */
+  --border-strong:#64727f;  /* control borders: >=3:1 on base, surface and inset (brand line-strong) */
 
-  /* --- Text --- */
-  --text:        #d6dde6;
+  /* --- Text: the brand's night ink and ink-muted (>=4.5:1 on every surface) --- */
+  --text:        #e6e4df;
   --text-strong: #f2f6fb;
-  --muted:       #8b97a5;
+  --muted:       #9a9a94;
   --faint:       #828e9c;  /* meets WCAG AA (>=4.5:1) on base/surface */
 
   /* --- Brand accent --- */
@@ -130,7 +130,7 @@ body {
 
 /* base icon sizing — every inline SVG defaults to 16px unless a context overrides */
 .ico { width: 16px; height: 16px; flex: none; display: inline-block; vertical-align: middle; }
-.brand__mark .ico { width: 32px; height: 32px; }
+.brand__mark .ico { width: 1.5em; height: 1.5em; }
 
 h1, h2, h3, h4 { margin: 0; color: var(--text-strong); font-weight: 650; line-height: var(--lh-tight); }
 p { margin: 0; }
@@ -165,24 +165,26 @@ button { font-family: inherit; }
   min-height: 0;
   z-index: 30;
 }
+/* The logo lockup, in the brand's proportions — em of the lockup size, which
+   is set so the mark is 32px: mark 1.5em; .49em from the mark to the
+   wordmark's ink; wordmark .94em tall, dropped .09em so the mark's centre sits
+   .36em above its baseline (as in the brand mark). The wordmark is outlined
+   paths, never typed: the console's CSP (default-src 'none', no font-src)
+   loads no web font, and the brand draws it from one file in one colour. */
 .brand {
-  display: flex; align-items: center; gap: var(--s-3);
+  display: flex; align-items: center; gap: .49em;
   height: var(--topbar-h);
   padding: 0 var(--s-4);
   border-bottom: 1px solid var(--border-soft);
   flex: none;
+  font-size: calc(32px / 1.5);
 }
 .brand__mark {
-  width: 38px; height: 38px; flex: none;
+  width: 1.5em; height: 1.5em; flex: none;
   display: grid; place-items: center;
-  color: var(--accent);
 }
-.brand__name {
-  font-size: var(--t-xl); font-weight: 700; letter-spacing: -0.02em;
-  color: var(--text-strong); white-space: nowrap;
-}
-/* wordmark tail "kan" — brand light accent (#9cccff), the lightest ramp packet */
-.brand__name b { color: #9cccff; font-weight: 700; }
+.brand__name { flex: none; color: var(--text); }
+.brand__word { display: block; height: .94em; width: auto; transform: translateY(.09em); }
 .is-collapsed .brand__name { display: none; }
 
 .nav { padding: var(--s-3) var(--s-3); display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; }
@@ -244,6 +246,8 @@ button { font-family: inherit; }
   z-index: 20;
 }
 .topbar__left { display: flex; align-items: center; gap: var(--s-3); min-width: 0; }
+/* posture + mode: one row here; on a phone they may wrap (components.css) */
+.topbar__status { display: flex; align-items: center; gap: var(--s-3); min-width: 0; }
 .topbar__spacer { flex: 1; }
 .topbar__right { display: flex; align-items: center; gap: var(--s-3); }
 

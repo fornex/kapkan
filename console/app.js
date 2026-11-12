@@ -134,6 +134,7 @@
   /* ---------- shell (built once / on locale change) ---------- */
   function buildShell() {
     K.clear(document.getElementById("brandMark")).appendChild(w.icon("brandmark"));
+    K.clear(document.getElementById("brandName")).appendChild(w.icon("wordmark"));
 
     /* nav */
     var nav = K.clear(document.getElementById("nav"));

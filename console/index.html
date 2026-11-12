@@ -28,7 +28,8 @@
     <aside class="sidebar" id="sidebar">
       <div class="brand">
         <span class="brand__mark" aria-hidden="true" id="brandMark"></span>
-        <span class="brand__name">kap<b>kan</b></span>
+        <span class="brand__name" aria-hidden="true" id="brandName"></span>
+        <span class="sr-only">Kapkan</span>
       </div>
       <nav class="nav" id="nav" aria-label="Primary"></nav>
       <div class="sidebar__foot">
@@ -40,8 +41,10 @@
     <header class="topbar" id="topbar">
       <div class="topbar__left">
         <button class="icon-btn" id="collapseBtn" aria-label="Toggle sidebar"></button>
-        <span id="posturePill"></span>
-        <span id="modeBadge"></span>
+        <div class="topbar__status">
+          <span id="posturePill"></span>
+          <span id="modeBadge"></span>
+        </div>
       </div>
       <div class="topbar__spacer"></div>
       <div class="counters" id="counters"></div>
