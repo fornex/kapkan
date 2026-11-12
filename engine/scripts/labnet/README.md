@@ -162,11 +162,26 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   recommended L3 hash has to know; a node **dying with nobody withdrawing**,
   then the same node behind a downed link (a dead nexthop needs no operator, a
   dead node does) and the withdrawal as the RIB effect it is, timed; the
-  **withdrawal signal** — `/healthz` 503 yes (within one
-  `controller.report_interval_seconds`, the tick that check rides: 1 s in this
-  rig, 10 s by default, so it is the knob an operator withdrawing on
-  `/healthz` sets to their probe period), `converged:false` no, the
-  inventory's `alive` no; the brain dead, and back at the nodes' next poll —
+  **withdrawal rule** the guide carries since E7.0: nothing listening on the
+  node's own `:443`, three periods running, is the one withdrawal — the
+  loopback probe (`curl -q --noproxy '*' -sk -o /dev/null -m2
+  https://127.0.0.1/`) refused while `ss -Hltn 'sport = :443'` lists no
+  listener, the loop doing hold, hold, withdraw on a dead nginx — and
+  `/healthz` 503 only holds back an announce: it turns 503 within 1.5 s of
+  nginx dying, also with the brain black-holed from that node and its report
+  stuck in flight, which is the one case that shows the liveness check on a
+  one-second tick of its own, whatever `controller.report_interval_seconds`
+  says (this rig reports every second, so the plain kill met that bound on
+  1.8's report tick too); `converged:false` no, the inventory's `alive` no;
+  the **negative control** (arm E2), on both nodes at once: the zone's rung
+  `manual` by the lever and the origin stopped, where the 1.8.0 loop's
+  predicate (`/healthz` 200 and a `curl -sf` of the zone through the node's
+  own `:443`) gets the rung's 403 and says withdraw on both while the VIP
+  completes every TLS handshake through the hash, then (E2b) the lever lifted
+  with the origin still stopped, where the same probe reaches the dead
+  origin, gets nginx's 502 and says withdraw on both again, the E7.0 rule
+  announcing on both throughout; the brain dead, and back at the nodes' next
+  poll —
   bounded by the poll's own backoff, 1 s doubling to 30 s, never by
   `stale_after`; the two **cross-node facts** (a TLS session is not resumable
   on the other node, whose own cache is shown to resume first so the claim is
@@ -198,10 +213,19 @@ Two scripts, run in a privileged container on the Docker Desktop linuxkit kernel
   ```
 
   `ANYCAST_BGP=1` adds a stretch arm, **outside** the acceptance path, that
-  installs bird2 and drives the same withdrawal contract with a real speaker on
-  each node, enabled and disabled by a once-a-second `/healthz` probe. The run's
-  logs and the recorded numbers land in `/tmp/lab/logs/` (`numbers.txt` and
-  `arm-c.txt` are what the guide quotes).
+  installs bird2 and runs the guide's E7.0 loop verbatim (but for the status
+  port and the birdc socket) against a real speaker on each node, peering with
+  the router over direct eBGP from an announce protocol declared `disabled`.
+  nginx is killed on one node just as its loop begins a `sleep 1`, so the
+  withdrawal is timed in refusals: the node leaves the router's FIB on the
+  third, 2.5–3.5 loop periods after the kill (the period measured on the loop
+  itself; the second refusal would read about two periods, the fourth about
+  four), and returns with nginx. A refused document and arm E2's two causes
+  withdraw nothing, while both loops are seen calling `birdc enable` every
+  period. The run's logs and the recorded numbers land in `/tmp/lab/logs/`
+  (`numbers.txt` and `arm-c.txt` are what the guide quotes); each arm's lines
+  in `numbers.txt` end with its pass/fail count, so quote nothing from an arm
+  marked `FAILED`.
 
 - **`edge-e6.sh`** — the edge track's E6 acceptance ("the fleet as a product",
   [`engine/docs/edge-spec.md`](../../docs/edge-spec.md) §8): tenancy,
