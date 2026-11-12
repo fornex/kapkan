@@ -83,9 +83,12 @@ acme:
 # it on loopback or a private address.
 status_listen: 127.0.0.1:9102
 
-# Only when the operator's nginx.conf already declares default servers on
-# :80/:443 (Debian's default site does): kapkan's catch-all would then fail
-# `nginx -t` with "a duplicate default server".
+# Only when the operator's nginx.conf already declares a default server on
+# :80 or :443 (Debian's default site declares one on :80): kapkan's catch-all
+# would then fail `nginx -t` with "a duplicate default server". Then declare a
+# :443 default server of your own with ssl_reject_handshake on — the anycast
+# guide's withdraw rule needs something listening on :443 whatever the
+# document says.
 omit_catch_all: false
 # Hosts without an IPv6 stack (binding [::] fails at start, not at -t).
 disable_ipv6: false

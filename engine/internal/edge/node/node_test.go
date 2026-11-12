@@ -734,7 +734,7 @@ func TestTerminatorLiveness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No pid file: not alive. Our own pid: alive. A pid nobody has: not alive.
+	// No pid file: not alive. Our own pid: alive. A reaped child's: not alive.
 	if alive := n.terminatorAlive(); alive == nil || *alive {
 		t.Fatalf("missing pid file reported alive: %v", alive)
 	}
@@ -744,11 +744,11 @@ func TestTerminatorLiveness(t *testing.T) {
 	if alive := n.terminatorAlive(); alive == nil || !*alive {
 		t.Fatal("own pid reported dead")
 	}
-	if err := os.WriteFile(pidFile, []byte("4194303\n"), 0o644); err != nil {
+	if err := os.WriteFile(pidFile, []byte(itoa(deadPID(t))+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if alive := n.terminatorAlive(); alive == nil || *alive {
-		t.Fatal("a pid nobody has reported alive")
+		t.Fatal("a reaped child's pid reported alive")
 	}
 	// Without a pid file configured there is no verdict at all.
 	n.opt.Terminator.PIDFile = ""

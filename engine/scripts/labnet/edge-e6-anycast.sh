@@ -57,12 +57,31 @@
 #      is served without any operator action ("a directly connected router
 #      notices link loss, a routed hop does not"), then the withdrawal as
 #      what it really is, a RIB effect: `ip route replace`, recovery timed;
-#   E. the withdrawal SIGNAL without a BGP daemon: a refused document is not
-#      one (`converged:false`, /healthz 200, the VIP serving), a dead
-#      terminator is (/healthz 503 within one `controller.report_interval_
-#      seconds` — the liveness check rides that ticker, 1 s here, 10 s by
-#      default — while the brain's inventory still says `alive:true`: the
-#      node's signal fires, the inventory's does not);
+#   E. the node's own signals without a BGP daemon: a refused document is not
+#      a withdrawal (`converged:false`, /healthz 200, the VIP serving); a dead
+#      terminator turns /healthz 503 within 1.5 s while the brain's inventory
+#      still says `alive:true` — a bound 1.8's report-tick sampling met as
+#      well, since this rig reports every second; the same 1.5 s holds with
+#      the brain black-holed from that node and its report stuck in flight,
+#      the case the old shared tick could not cover and so the one measurement
+#      (E_BH_MS) that shows the liveness check on a tick of its own (E7.0);
+#      and on the dead terminator the E7.0 probe of the node's own :443 is
+#      refused three periods running while `ss` lists no :443 listener — the
+#      one observation the E7.0 loop withdraws on;
+#  E2. the negative control for the v1.8 guide's withdraw predicate, on both
+#      nodes at once: the zone's rung in `manual` by the lever AND the origin
+#      stopped. The v1.8 predicate (/healthz 200 and a `curl -sf` of the zone
+#      through the node's own :443) gets the rung's 403, served before
+#      anything is forwarded, and says withdraw on BOTH nodes while the VIP
+#      completes every TLS handshake through the hash. E2b then lifts the
+#      lever with the origin still stopped: the same probe reaches the dead
+#      origin, gets nginx's 502 and says withdraw on both again — a dead
+#      origin alone takes the whole fleet out. The E7.0 probe (`curl -q
+#      --noproxy '*' -sk https://127.0.0.1/`, 35 from the catch-all's TLS
+#      alert) never says withdraw in either state. E2c adds a REJECT of
+#      :443 on edge-2's loopback while nginx serves: the probe is refused,
+#      but `ss` still lists the listener, so the E7.0 rule holds — a firewall
+#      rule pushed to every node withdraws none;
 #   F. the brain dead: both nodes serve TCP and h3 through the VIP, /healthz
 #      200, and a restarted brain has them back at the nodes' next poll —
 #      what bounds that is the poll's own backoff after a failed poll (1 s
@@ -82,10 +101,18 @@
 #      shared address — a path MTU is cached per destination and the
 #      destination is the VIP — and it stays broken after the leg is repaired
 #      until `ip route flush cache`, while TCP is untouched;
-#   I. (stretch, ANYCAST_BGP=1, OUTSIDE the acceptance path) the same
-#      withdrawal contract driven by a real speaker: bird2 on each node
-#      announcing the VIP /32, enabled and disabled by a once-a-second
-#      /healthz probe.
+#   I. (stretch, ANYCAST_BGP=1, OUTSIDE the acceptance path) the E7.0 loop
+#      driving a real speaker, the guide's text verbatim but for the status
+#      port and the birdc socket: bird2 on each node announcing the VIP /32
+#      from a protocol declared `disabled` (a box that boots stays withdrawn
+#      until the loop's first definite announce). nginx is killed as edge-2's
+#      loop begins its `sleep 1`, so the time to rtr's FIB counts refusals:
+#      out on the third, 2.5-3.5 loop periods after the kill (the second
+#      would read about two periods, the fourth about four), and back with
+#      nginx. A refused document and arm E2's two common causes withdraw
+#      nothing, while both loops stay alive and are each seen calling
+#      `birdc enable` at least three times over each five-second look (a
+#      loop that announces every period makes about five).
 #
 # Build the binaries for the container arch first (every command below runs
 # from the REPO ROOT), then run this inside ONE privileged debian:13-slim
@@ -97,7 +124,7 @@
 #     && (cd /tmp/pebble-src && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/lab/pebble ./cmd/pebble)
 #   docker run --privileged --rm -v /tmp/lab:/lab -v "$PWD:/w" -w /w debian:13-slim \
 #     sh -c 'apt-get update -qq && apt-get install -y -qq \
-#              iproute2 nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump util-linux >/dev/null \
+#              iproute2 iptables nginx openssl curl python3 procps iputils-ping ca-certificates tcpdump util-linux >/dev/null \
 #            && KAPKAN=/lab/kapkan PEBBLE=/lab/pebble bash engine/scripts/labnet/edge-e6-anycast.sh'
 #
 set -uo pipefail
@@ -106,9 +133,26 @@ KAPKAN=${KAPKAN:-/lab/kapkan}
 PEBBLE=${PEBBLE:-/lab/pebble}
 ANYCAST_BGP=${ANYCAST_BGP:-0}
 PASS=0; FAIL=0
-ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
-bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
-say() { echo; echo "== $1 =="; }
+# Every check is also counted against the arm it ran in — `say "ARM X — …"`
+# opens arm X — so the summary can print each arm's verdict beside its
+# figures: an arm that failed does not get to narrate a passing run.
+declare -A ARM_P=() ARM_F=()
+CUR_ARM=setup
+ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); ARM_P[$CUR_ARM]=$(( ${ARM_P[$CUR_ARM]:-0} + 1 )); }
+bad() { echo "  FAIL  $1"; FAIL=$((FAIL+1)); ARM_F[$CUR_ARM]=$(( ${ARM_F[$CUR_ARM]:-0} + 1 )); }
+say() {
+  echo; echo "== $1 =="
+  case $1 in "ARM "*) CUR_ARM=${1#ARM }; CUR_ARM=${CUR_ARM%% *};; esac
+}
+# arm_verdict X — the line the summary prints under arm X's figures
+arm_verdict() {
+  local p=${ARM_P[$1]:-0} f=${ARM_F[$1]:-0}
+  if [ "$f" -eq 0 ]; then
+    echo "       [arm $1: PASS, $p of $p checks]"
+  else
+    echo "       [arm $1: FAILED $f of $((p + f)) checks — the lines above describe a passing run, not this one; read the FAIL lines]"
+  fi
+}
 [ -f /.dockerenv ] || { echo "this rig builds netns, bridges and routes: run it inside the privileged container from the header, not on your host"; exit 2; }
 [ -x "$KAPKAN" ] || { echo "kapkan binary not found at $KAPKAN"; exit 2; }
 [ -x "$PEBBLE" ] || { echo "pebble binary not found at $PEBBLE"; exit 2; }
@@ -119,6 +163,7 @@ say() { echo; echo "== $1 =="; }
 nginx -V 2>&1 | grep -q -- --with-http_v3_module || { echo "this nginx has no http_v3_module: $(nginx -v 2>&1)"; exit 2; }
 curl -V | grep -q HTTP3 || { echo "this curl has no HTTP3: $(curl -V | head -1)"; exit 2; }
 command -v unshare >/dev/null || { echo "unshare is required (each node's nginx runs in its own UTS namespace so \$hostname names the node)"; exit 2; }
+command -v iptables >/dev/null || { echo "iptables is required (arm E2c, the ss gate's negative control: a loopback REJECT with nginx serving must not withdraw)"; exit 2; }
 
 # Addressing. The VIP is the only address a client ever uses; every leg is a
 # /30 so a leg can be taken down or given a small MTU on its own.
@@ -128,6 +173,7 @@ E2=10.0.2.2;  R2=10.0.2.1          # edge-2's unicast, rtr's end of its leg
 CLI=10.1.0.2; RC=10.1.0.1          # the client behind the router
 BURST3=10.1.0.50                   # arm C's L3 source: it gets laddered, the client must not
 BURST4=10.1.0.51                   # arm C's L4 source: and the L3 one's ladder must not reach it
+RUNGSRC=10.1.0.52                  # arm E2's source: every request it sends meets the rung
 BRAIN=203.0.113.20; ORIGIN=203.0.113.30; CA=203.0.113.40; RSVC=203.0.113.1
 ZONE=shop.test                     # global: both nodes serve it, through the VIP
 ZONEB=nodeb.test                   # placed on pop-b: only edge-2 serves it
@@ -139,7 +185,11 @@ EXTRA_BROKEN=/tmp/extra-broken.conf
 # The figures the guide quotes. Pre-set so the summary is printed even when an
 # arm fell over before recording its own.
 D_FAIL=0; D_OK=0; D_LOST_MS=0; D2_MS=0; E_MS=0; F_MS=0; H_FAIL=0
-ANN_PIDS=""                        # arm I's /healthz->birdc loops, killed by pid
+E_BH_MS=n/a; E_BH_NOTE="no black hole was put in"; E_PROBE="n/a n/a"
+E2_OLD=n/a; E2_HTTP=n/a; E2_RC=n/a; E2_NEW=n/a; E2_TLS_OK=n/a; E2_TLS_MIX=""
+E2B_OLD=n/a; E2B_HTTP=n/a; E2B_RC=n/a; E2B_NEW=n/a
+E2C_RC=n/a; E2C_NEW=n/a; E2C_LISTEN=n/a
+ANN_PIDS=""                        # arm I's announce loops (the E7.0 loop -> birdc), killed by pid
 export KAPKAN_OP=optok KAPKAN_A1=a1tok KAPKAN_A2=a2tok
 tok() { case $1 in op) echo optok;; a1) echo a1tok;; a2) echo a2tok;; *) echo "$1";; esac; }
 
@@ -207,6 +257,11 @@ leg cli   cli-r $CLI/24 r-cli $RC/24
 # window closes — two seconds later, in the middle of the L4 half.
 ip netns exec cli ip addr add $BURST3/24 dev cli-r
 ip netns exec cli ip addr add $BURST4/24 dev cli-r
+# And one for arm E2, whose requests all meet the zone's rung under the lever.
+# A challenged client is not a refused one (the flood rule counts ceilings,
+# never pages), but nothing the later arms read should ride an address that
+# spent the arm being challenged.
+ip netns exec cli ip addr add $RUNGSRC/24 dev cli-r
 # The service network (brain, origin, CA) hangs off the router on a bridge:
 # the nodes reach the brain by UNICAST, over the same router, and the CA
 # reaches the zone through the VIP — so validation crosses the hash.
@@ -939,8 +994,69 @@ SLOT2=$(grep -c 'slot requested.*node=edge-2' /tmp/brain.log)
 [ "$A2M" = "0" ] && [ "$SLOT2" = "$SLOT2_0" ] && [ "$(certs_seen 2)" = "$C2_0" ] && ok "the restarted node ordered nothing: its certificates came back from disk (its own kapkan_edge_acme_attempts_total is 0, it asked the brain for no issuance slot, \`certificate issued\` still $C2_0)" || bad "edge-2 after a restart: acme_attempts $A2M, slot requests $SLOT2_0 -> $SLOT2, certificate issued $C2_0 -> $(certs_seen 2)"
 route_both
 
+# ---------------------------------------------------------------- the two withdraw rules (arms E, E2, I)
+# What a node's own announce loop decides, evaluated as each guide's loop
+# runs it on the node, with the birdc call replaced by the word it would have
+# been given.
+#
+# old_rule N — one pass of the v1.8 guide's loop, the predicate E7.0 retires:
+# announce only while /healthz answers 200 AND the zone answers through the
+# node's own :443 without an error status (`curl -sf --resolve zone:443:
+# 127.0.0.1 https://zone/`), withdraw on anything else — /healthz unreachable
+# included. The guide's probe trusts the system store; this zone is issued by
+# Pebble, so the probe is handed Pebble's root, as an operator's store holds
+# their CA's (arm E2 shows it says announce on a healthy fleet before reading
+# anything into a withdraw). Prints the verdict and the HTTP status the zone
+# probe saw.
+old_rule() {
+  local n=$1 ns st hrc zrc
+  ns=$(ns_of "$n")
+  ip netns exec "$ns" curl -sf -m1 -o /dev/null "http://127.0.0.1:910$n/healthz"; hrc=$?
+  st=$(ip netns exec "$ns" curl -sf -m2 --cacert /tmp/pebble-root.crt --resolve "$ZONE:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$ZONE/" 2>/dev/null); zrc=$?
+  if [ "$hrc" -eq 0 ] && [ "$zrc" -eq 0 ]; then echo "announce ${st:-000}"; else echo "withdraw ${st:-000}"; fi
+}
+# e70_rule N — three periods of the E7.0 loop: the same probe, counter and
+# branches as the text arm I runs verbatim, run in the node's netns, `hold`
+# where that loop calls nothing. Withdraw only when nothing listens on the
+# node's own :443 three periods in a row: the probe refused (curl exit 7) AND
+# `ss` listing no :443 listener — curl's 7 is any connect it could not make, a
+# host firewall's REJECT on loopback included, so a refusal while ss still
+# lists a listener counts for nothing. Announce when a TLS listener answered —
+# 0, or 35: with no SNI the catch-all's `ssl_reject_handshake on` answers with
+# an alert — and /healthz is 200; hold on anything else. `-q` (first) skips a
+# .curlrc and `--noproxy '*'` keeps an environment proxy off loopback, as in
+# the guide's loop. Prints the three actions and the three exit codes, e.g.
+# "announce,announce,announce 35,35,35".
+e70_rule() {
+  local n=$1 ns rc l refused=0 act acts="" codes="" i
+  ns=$(ns_of "$n")
+  for i in 1 2 3; do
+    ip netns exec "$ns" curl -q --noproxy '*' -sk -o /dev/null -m2 https://127.0.0.1/; rc=$?
+    if [ "$rc" -eq 7 ] && l=$(ip netns exec "$ns" ss -Hltn 'sport = :443') && [ -z "$l" ]; then
+      refused=$((refused + 1))
+    else
+      refused=0
+    fi
+    if [ "$refused" -ge 3 ]; then
+      act=withdraw
+    elif { [ "$rc" -eq 0 ] || [ "$rc" -eq 35 ]; } &&
+         ip netns exec "$ns" curl -q --noproxy '*' -sf -m1 -o /dev/null "http://127.0.0.1:910$n/healthz"; then
+      act=announce
+    else
+      act=hold
+    fi
+    acts="$acts${acts:+,}$act"; codes="$codes${codes:+,}$rc"
+    [ "$i" -lt 3 ] && sleep 1
+  done
+  echo "$acts $codes"
+}
+# uniq_list "a,b,a" -> "a,b"; tls_answered "35,0,35" — every exit code in the
+# list is 0 or 35, a TLS listener answering each time
+uniq_list()    { tr ',' '\n' <<< "$1" | sort -u | paste -sd, -; }
+tls_answered() { [ -n "$1" ] && ! grep -qvxE '0|35' <<< "${1//,/$'\n'}"; }
+
 # ================================================================ ARM E
-say "ARM E — the withdrawal signal: a refused document is not one, a dead terminator is"
+say "ARM E — the node's own signals: a refused document is not a withdrawal, a dead terminator shows within 1.5 s"
 # (i) A broken extra_directives_file on the zone only edge-2 serves: only
 # edge-2 renders it, so only edge-2's `nginx -t` fails. Its previous
 # generation keeps serving (§2.4) — and that is exactly why converged:false
@@ -955,24 +1071,274 @@ batch 20 tcp /tmp/e-refused.txt
 [ "$(n200 /tmp/e-refused.txt)" = "20" ] && [ "$(served edge-2 /tmp/e-refused.txt)" -ge 1 ] && ok "20 of 20 requests served through the VIP, edge-2 among them ($(served edge-1 /tmp/e-refused.txt)/$(served edge-2 /tmp/e-refused.txt)) — NOT a reason to withdraw" || bad "VIP under a refused document: $(mix /tmp/e-refused.txt), edge-2 served $(served edge-2 /tmp/e-refused.txt)"
 ZONEB_EXTRA=""; zones_yaml; reload_brain
 wait_eq 40 true sfield 2 converged && ok "the file fixed: edge-2 converges again" || bad "edge-2 did not converge after the fix"
-# (ii) The terminator itself gone, with terminator.pid_file set: THAT is the
-# signal — and the brain's inventory does not have it, because the node is
-# still polling perfectly well.
-# What bounds the 503 is `controller.report_interval_seconds`, not a health
-# timer: the pid check is sampled on the report ticker (one second here, TEN
-# by default), so an operator who withdraws on /healthz must set that interval
-# to the probe period they want. Asserted at one interval plus 300 ms.
+# (ii) The terminator itself gone, with terminator.pid_file set: THAT is what
+# /healthz reports — and the brain's inventory does not have it, because the
+# node is still polling perfectly well.
+# What bounds the 503 is the liveness check's own clock (E7.0): the pid file
+# is read once before the status listener starts and then every second, on a
+# ticker of its own — no longer on the report's tick, which
+# `controller.report_interval_seconds` sets (one second here, TEN by default)
+# and which also waits on postReport. Asserted at 1.5 s: one tick plus this
+# loop's own step. With the report every second here, this sub-arm passes on
+# 1.8's report-tick sampling as well, so E_MS alone tells the two apart in
+# nothing: (iii) below, with the report stuck in flight, is the case that
+# does, and E_BH_MS is the figure that shows the tick of its own.
 kill "$(cat /tmp/edge2-nginx.pid 2>/dev/null)" 2>/dev/null
 T0=$(date +%s%N)
 for i in $(seq 1 50); do [ "$(hcode 2)" = "503" ] && break; sleep 0.1; done
 E_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
-[ "$(hcode 2)" = "503" ] && [ "$E_MS" -le 1300 ] && ok "/healthz on edge-2 turned 503 ${E_MS} ms after nginx died — within one controller.report_interval_seconds (1 s in this rig; the product default is 10), the tick the liveness check rides; terminator.pid_file is what makes it observable at all" || bad "/healthz after killing nginx: $(hcode 2) after ${E_MS} ms (bound: one report interval + 300 ms)"
+if [ "$(hcode 2)" = "503" ] && [ "$E_MS" -le 1500 ]; then
+  ok "/healthz on edge-2 turned 503 ${E_MS} ms after nginx died — within 1.5 s; this rig reports every second, so 1.8's report-tick sampling met this bound too, and (iii) below, with the report stuck, is what shows the liveness check on a tick of its own; terminator.pid_file is what makes it observable at all"
+else
+  bad "/healthz after killing nginx: $(hcode 2) after ${E_MS} ms (bound: 1500 ms, one tick of the liveness check plus this loop's step)"
+fi
 [ "$(node_f edge-2 "n['alive']")" = "true" ] && ok "…while the brain's inventory still says alive:true — the node's own signal fired, the inventory's did not (never withdraw on \`alive\`)" || bad "inventory alive after the nginx kill: $(node_f edge-2 "n['alive']")"
-[ "$(node_f edge-2 "n['report']['terminator']['alive']")" = "false" ] && ok "the node's report does say terminator.alive:false (the honest field, one poll behind)" || bad "report terminator.alive: $(node_f edge-2 "n['report']['terminator']['alive']")"
+# The report carries the same sample, posted on the report's own tick: now
+# that the two no longer share a tick it trails /healthz by up to one report
+# interval, so it is waited for rather than read once.
+if wait_eq 5 false node_f edge-2 "n['report']['terminator']['alive']"; then
+  ok "the node's report does say terminator.alive:false (the honest field, one report behind)"
+else
+  bad "report terminator.alive: $(node_f edge-2 "n['report']['terminator']['alive']")"
+fi
+# The E7.0 probe on the same dead node, three periods as the guide's loop runs
+# them. It is the one input that loop withdraws on, so here it must fire —
+# refused (7) every time with `ss` listing no :443 listener, withdraw on the
+# third refusal and not before — or arm E2's "never says withdraw" would be
+# the silence of a probe that cannot speak. It is also the positive control
+# of the ss gate: an ss that is missing, fails or still lists a listener
+# counts nothing, and the loop would hold here.
+E_PROBE=$(e70_rule 2)
+if [ "${E_PROBE#* }" = "7,7,7" ] && [ "${E_PROBE%% *}" = "hold,hold,withdraw" ]; then
+  ok "the E7.0 probe of edge-2's own :443 is refused three periods running (exit codes ${E_PROBE#* }) with ss listing no :443 listener, and the loop withdraws on the third refusal, not before (${E_PROBE%% *}): the one input that may withdraw does fire on a dead terminator"
+else
+  bad "the E7.0 loop on a dead terminator: ${E_PROBE%% *} on exit codes ${E_PROBE#* } (want hold,hold,withdraw on 7,7,7); ss in edge-2's netns now lists '$(ip netns exec edge2 ss -Hltn 'sport = :443' 2>&1 | tr -s ' \n' ' ')'"
+fi
 node_nginx 2 edge2 $STATE2; wait_nginx 2
 wait_eq 20 200 hcode 2 && ok "nginx restarted on its live configuration: /healthz 200 again" || bad "/healthz after the nginx restart: $(hcode 2)"
+# (iii) The same death with the brain black-holed from edge-2 — the case the
+# old shared tick could not cover: there the pid was sampled right before
+# postReport, so a report the brain never answered held the next sample for
+# the client's 30 s timeout, and /healthz said 200 over a dead nginx all that
+# time. The router drops edge-2's packets to the brain and nothing else (a
+# policy rule on edge-2's leg: a black hole in the PATH, where a new
+# connection hangs exactly as an established one does — a blackhole route on
+# the node itself would fail a new connect at once instead). The next report
+# tick fires into it and hangs, and only then is nginx killed. /healthz must
+# turn 503 within the same 1.5 s, and the brain must have had no report from
+# edge-2 meanwhile: the proof that the report really was stuck, without which
+# the figure says nothing.
+if ip netns exec rtr ip rule add pref 100 iif r-e2 to $BRAIN/32 blackhole 2>/tmp/e-bh.err; then
+  BH_T0=$(date -u +%s)
+  sleep 2
+  kill "$(cat /tmp/edge2-nginx.pid 2>/dev/null)" 2>/dev/null
+  T0=$(date +%s%N)
+  for i in $(seq 1 50); do [ "$(hcode 2)" = "503" ] && break; sleep 0.1; done
+  E_BH_MS=$(( ($(date +%s%N) - T0) / 1000000 )); BH_CODE=$(hcode 2)
+  # Read while the hole is still in, and late enough that a flowing report
+  # would be stamped two seconds past it: a report landing after the hole
+  # lifts is the stuck one coming home, not evidence that it never stuck.
+  sleep 1.5
+  RA=$(node_f edge-2 "n.get('reported_at','')"); RA_E=$(date -u -d "$RA" +%s 2>/dev/null || echo 0)
+  ip netns exec rtr ip rule del pref 100
+  BH_END=$(date -u +%s)
+  if [ "$BH_CODE" = "503" ] && [ "$E_BH_MS" -le 1500 ]; then
+    ok "with the brain black-holed from edge-2 and its report stuck in flight, /healthz still turned 503 ${E_BH_MS} ms after nginx died — the liveness check waits on neither the report nor the brain"
+  else
+    bad "/healthz with the brain black-holed from edge-2: $BH_CODE after ${E_BH_MS} ms (bound: 1500 ms; before E7.0 the stuck report held the pid sample for the client's 30 s)"
+  fi
+  if [ -n "$RA" ] && [ "$RA_E" -le $(( BH_T0 + 1 )) ]; then
+    E_BH_NOTE="its report stuck in flight"
+    ok "…and the report really was stuck: the brain's last report from edge-2 is stamped $RA, no later than the second the black hole went in ($(date -u -d "@$BH_T0" +%H:%M:%S))"
+  else
+    E_BH_NOTE="its report NOT shown stuck (last report '$RA'): a figure that measured nothing"
+    bad "edge-2's report was not stuck in the black hole (last report '$RA', the hole in from $(date -u -d "@$BH_T0" +%H:%M:%S)): the figure above measured nothing"
+  fi
+  node_nginx 2 edge2 $STATE2; wait_nginx 2
+  wait_eq 20 200 hcode 2 || bad "/healthz after the black hole and the nginx restart: $(hcode 2)"
+  # Back before the next arm, by condition: a report stamped after the hole
+  # lifted, and a poll of edge-2's parked at the brain. A request stuck in the
+  # hole goes out on its next retransmission — seconds, for a gap this short.
+  BACK=""
+  for i in $(seq 1 150); do
+    RA_E=$(date -u -d "$(node_f edge-2 "n.get('reported_at','')")" +%s 2>/dev/null || echo 0)
+    if [ "$RA_E" -ge "$BH_END" ] && [ "$(node_f edge-2 "n['holding']")" = "true" ]; then BACK=yes; break; fi
+    sleep 0.2
+  done
+  if [ -n "$BACK" ]; then
+    ok "edge-2 is back in touch with the brain: a report stamped $(node_f edge-2 "n.get('reported_at','')") after the hole lifted, and a poll parked again"
+  else
+    bad "edge-2 after the black hole: last report '$(node_f edge-2 "n.get('reported_at','')")', holding $(node_f edge-2 "n['holding']") (the hole lifted at $(date -u -d "@$BH_END" +%H:%M:%S))"
+  fi
+else
+  bad "could not black-hole the brain from edge-2 at the router: $(cat /tmp/e-bh.err)"
+fi
 batch_until 10 tcp /tmp/e-back.txt 50 10
 [ "$(n200 /tmp/e-back.txt)" = "10" ] && [ "$(served edge-2 /tmp/e-back.txt)" -ge 1 ] && ok "the VIP serves from both nodes again ($(served edge-1 /tmp/e-back.txt)/$(served edge-2 /tmp/e-back.txt))" || bad "after the nginx restart: $(mix /tmp/e-back.txt), edge-2 $(served edge-2 /tmp/e-back.txt)"
+
+# ================================================================ ARM E2
+say "ARM E2 — the negative control: two causes every node shares, and what each withdraw rule makes of them"
+# The v1.8 guide withdrew a node when /healthz failed OR when a probe of the
+# zone through the node's own :443 did (old_rule above). That probe asks the
+# zone's whole request path, and most of that path is the same on every node:
+# the rung's page (a 403 under `manual`, the lever or `auto` — decide has no
+# loopback exception), the origin's own failure (passed through as it is), a
+# trust store, a zone placed elsewhere. Any one of them turns the probe false
+# on EVERY node at once — a fleet-wide withdrawal of a fleet that is serving.
+# Two of them here, each shown on its own. First both at once: the zone's
+# rung in `manual` by the brain's lever (E4.6) and the origin stopped — the
+# rung's 403 is served before anything is forwarded, so what the old probe
+# sees there is the rung alone. Then E2b: the lever lifted, the origin still
+# stopped — the probe now gets past the rung, nginx forwards it to the dead
+# origin and answers 502, so what it sees is the origin alone. The E7.0 rule
+# asks the node's kernel one question — does anything listen on :443 — and
+# must never say withdraw while the answer is yes.
+#
+# The two causes are switched by the helpers below, each step waited for by
+# condition and asserted; arm I uses them again. e2_causes_on REASON: the
+# lever first (one poll to both nodes, no reload) until the rung's page
+# answers on both, then the origin stopped. e2_causes_off, in the order that
+# never shows a client the dead origin: the origin back first, then the lever
+# lifted (the zone was on its file before, `challenge: off`, and goes back to
+# exactly that), then 200s through the VIP. E2b takes the same steps in the
+# other order, on purpose: the lever off first, the origin back after.
+ntls() { awk '$1!="000"' "$1" 2>/dev/null | wc -l | tr -d ' '; }   # answered = the TLS handshake completed
+rung_both() { is_page "$(ubody 1 --interface $RUNGSRC)" && is_page "$(ubody 2 --interface $RUNGSRC)"; }
+zcode() { local r; r=$(uget "$1" --interface $RUNGSRC); echo "${r%% *}"; }   # the zone's status through node N
+e2_lever_on() {
+  local et1 et2 i got=""
+  et1=$(sfield 1 accepted_etag); et2=$(sfield 2 accepted_etag)
+  if [ "$(lever POST $ZONE "{\"mode\":\"manual\",\"ttl_seconds\":300,\"reason\":\"$1\"}")" = "200" ] &&
+     wait_ne 15 "$et1" sfield 1 accepted_etag && wait_ne 15 "$et2" sfield 2 accepted_etag; then
+    ok "the zone's rung is manual by the lever ($1), taken by both nodes in one poll"
+  else
+    bad "the lever ($1) did not reach both nodes: accepted_etag edge-1 $(sfield 1 accepted_etag) (was $et1), edge-2 $(sfield 2 accepted_etag) (was $et2)"
+  fi
+  for i in $(seq 1 25); do if rung_both; then got=yes; break; fi; sleep 0.2; done
+  if [ -n "$got" ]; then ok "…and both nodes answer a plain request with the rung's page"; else bad "the rung's page is not served by both nodes under the lever"; fi
+}
+e2_lever_off() {
+  local et1 et2
+  et1=$(sfield 1 accepted_etag); et2=$(sfield 2 accepted_etag)
+  if [ "$(lever DELETE $ZONE)" = "200" ] && wait_ne 15 "$et1" sfield 1 accepted_etag && wait_ne 15 "$et2" sfield 2 accepted_etag; then
+    ok "the lever lifted: both nodes follow the zone's file again (challenge: off)"
+  else
+    bad "lifting the lever: accepted_etag edge-1 $(sfield 1 accepted_etag) (was $et1), edge-2 $(sfield 2 accepted_etag) (was $et2)"
+  fi
+}
+e2_origin_off() {
+  local i got=""
+  pkill -f '^python3 /tmp/origin.py'
+  for i in $(seq 1 25); do if [ "$(ip netns exec cli curl -s -o /dev/null -w '%{http_code}' -m1 "http://$ORIGIN:8081/" 2>/dev/null)" = "000" ]; then got=yes; break; fi; sleep 0.2; done
+  if [ -n "$got" ]; then ok "the origin is stopped: $ORIGIN:8081 refuses"; else bad "the origin still answers after it was stopped"; fi
+}
+e2_origin_on() {
+  local i got=""
+  ip netns exec origin python3 /tmp/origin.py &
+  for i in $(seq 1 25); do if grep -q '"path"' <<< "$(ip netns exec cli curl -s -m1 "http://$ORIGIN:8081/" 2>/dev/null)"; then got=yes; break; fi; sleep 0.2; done
+  if [ -n "$got" ]; then ok "the origin is back and answers directly"; else bad "the origin did not come back"; fi
+}
+e2_vip_200() {
+  batch_until 10 tcp /tmp/e2-back.txt 50 10
+  if [ "$(n200 /tmp/e2-back.txt)" = "10" ]; then ok "the zone serves 200 through the VIP again ($(served edge-1 /tmp/e2-back.txt)/$(served edge-2 /tmp/e2-back.txt))"; else bad "after lifting both causes: $(mix /tmp/e2-back.txt)"; fi
+}
+e2_causes_on()  { e2_lever_on "$1"; e2_origin_off; }
+e2_causes_off() { e2_origin_on; e2_lever_off; e2_vip_200; }
+hashpol 1
+# The precondition, and the positive control the old rule's verdict rests on:
+# no lever on the zone (lifted back to exactly that below), and on a healthy
+# fleet the v1.8 predicate says announce on both nodes — so its "withdraw"
+# below is the two causes', not the rig's trust store or a broken probe.
+E2_LEV0=$(doc op edge-1 | jx "((([z for z in d.get('zones',[]) if z.get('name')=='$ZONE']+[{}])[0].get('challenge_override')) or {}).get('mode','')")
+O1=$(old_rule 1); O2=$(old_rule 2)
+if [ -z "$E2_LEV0" ] && [ "${O1%% *}/${O2%% *}" = "announce/announce" ]; then
+  ok "before: no lever on $ZONE, and the v1.8 predicate says announce on both nodes of a healthy fleet (its zone probe got ${O1#* }/${O2#* })"
+else
+  bad "arm E2's precondition: lever '$E2_LEV0' (want none); the v1.8 predicate '$O1' / '$O2' on a healthy fleet (want announce on both)"
+fi
+e2_causes_on "rig arm E2"
+HZ1=$(hcode 1); HZ2=$(hcode 2)
+O1=$(old_rule 1); O2=$(old_rule 2)
+E2_OLD="${O1%% *}/${O2%% *}"; E2_HTTP="${O1#* }/${O2#* }"
+N1=$(e70_rule 1); N2=$(e70_rule 2)
+E2_RC="$(uniq_list "${N1#* }")/$(uniq_list "${N2#* }")"
+E2_NEW="$(uniq_list "${N1%% *}")/$(uniq_list "${N2%% *}")"
+batch 20 tcp /tmp/e2-tls.txt --interface $RUNGSRC
+E2_TLS_OK="$(ntls /tmp/e2-tls.txt)/20"; E2_TLS_MIX=$(mix /tmp/e2-tls.txt)
+TLS1=$(served edge-1 /tmp/e2-tls.txt); TLS2=$(served edge-2 /tmp/e2-tls.txt)
+if [ "$HZ1/$HZ2" = "200/200" ]; then ok "/healthz answers 200 on both nodes under both causes: neither the rung nor the origin is in it"; else bad "/healthz under arm E2's causes: edge-1 $HZ1, edge-2 $HZ2"; fi
+if [ "$E2_OLD" = "withdraw/withdraw" ] && [ "$E2_HTTP" = "403/403" ]; then
+  ok "the v1.8 predicate says WITHDRAW on both nodes at once: its zone probe got the rung's page, $E2_HTTP, served before anything is forwarded to the stopped origin — a cause every node shares withdraws the whole fleet, the defect E7.0 retires"
+else
+  bad "the v1.8 predicate under the rung and a stopped origin: $E2_OLD (its zone probe got $E2_HTTP) — want withdraw on both on the rung's 403, or this control shows nothing"
+fi
+case ",${N1%% *},${N2%% *}," in *,withdraw,*) E2_NEWW=yes;; *) E2_NEWW="";; esac
+if [ -z "$E2_NEWW" ] && tls_answered "${N1#* },${N2#* }"; then
+  ok "the E7.0 rule never says withdraw: its probe exited $E2_RC (edge-1/edge-2), a TLS listener answering every time, and with /healthz 200 the rule says $E2_NEW"
+else
+  bad "the E7.0 rule under the rung and a stopped origin: edge-1 ${N1%% *} on exit codes ${N1#* }, edge-2 ${N2%% *} on ${N2#* } (want no withdraw, every exit code 0 or 35)"
+fi
+if [ "$E2_TLS_OK" = "20/20" ] && [ "$TLS1" -ge 1 ] && [ "$TLS2" -ge 1 ]; then
+  ok "…while the VIP completes TLS through the hash on both nodes: $E2_TLS_OK handshakes answered ($E2_TLS_MIX; edge-1 $TLS1, edge-2 $TLS2) — the fleet the v1.8 rule withdraws is serving"
+else
+  bad "TLS through the VIP under arm E2's causes: $E2_TLS_OK answered ($E2_TLS_MIX), edge-1 $TLS1, edge-2 $TLS2"
+fi
+# E2b — the lever lifted, the origin still stopped. With the rung gone the
+# zone's requests are decided, allowed and forwarded to the stopped origin,
+# and nginx answers them 502: now the old probe sees the dead origin and
+# nothing else. Waited for by condition — a plain request through each node
+# answering 502 — and then the same two rules as above.
+e2_lever_off
+got=""
+for i in $(seq 1 25); do if [ "$(zcode 1)/$(zcode 2)" = "502/502" ]; then got=yes; break; fi; sleep 0.2; done
+if [ -n "$got" ]; then
+  ok "E2b: with the rung gone both nodes forward the zone to the stopped origin — a plain request through each answers 502"
+else
+  bad "E2b: the zone through edge-1/edge-2 answers $(zcode 1)/$(zcode 2) with the lever lifted and the origin stopped (want 502/502)"
+fi
+HZB="$(hcode 1)/$(hcode 2)"
+O1=$(old_rule 1); O2=$(old_rule 2)
+E2B_OLD="${O1%% *}/${O2%% *}"; E2B_HTTP="${O1#* }/${O2#* }"
+N1=$(e70_rule 1); N2=$(e70_rule 2)
+E2B_RC="$(uniq_list "${N1#* }")/$(uniq_list "${N2#* }")"
+E2B_NEW="$(uniq_list "${N1%% *}")/$(uniq_list "${N2%% *}")"
+if [ "$E2B_OLD" = "withdraw/withdraw" ] && [ "$E2B_HTTP" = "502/502" ] && [ "$HZB" = "200/200" ]; then
+  ok "E2b: the v1.8 predicate says WITHDRAW on both nodes again — its zone probe reached the dead origin and got nginx's 502 on each ($E2B_HTTP), /healthz 200/200: a dead origin alone withdraws the whole fleet, and withdrawing brings no origin back"
+else
+  bad "E2b, the origin stopped and no lever: the v1.8 predicate said $E2B_OLD, its zone probe got $E2B_HTTP, /healthz $HZB (want withdraw on both on a 502 each, /healthz 200/200)"
+fi
+case ",${N1%% *},${N2%% *}," in *,withdraw,*) E2B_NEWW=yes;; *) E2B_NEWW="";; esac
+if [ -z "$E2B_NEWW" ] && tls_answered "${N1#* },${N2#* }"; then
+  ok "E2b: the E7.0 rule never says withdraw: its probe exited $E2B_RC (edge-1/edge-2) — it ends at the catch-all's alert and never reaches an origin — and with /healthz 200 the rule says $E2B_NEW"
+else
+  bad "E2b, the E7.0 rule with the origin stopped: edge-1 ${N1%% *} on exit codes ${N1#* }, edge-2 ${N2%% *} on ${N2#* } (want no withdraw, every exit code 0 or 35)"
+fi
+e2_origin_on
+e2_vip_200
+
+# E2c — a firewall rule that REJECTs :443 on the loopback while nginx serves.
+# curl's 7 is any connection it could not make, so the probe alone cannot tell
+# this from a dead nginx; the kernel's listener table can, and the E7.0 rule
+# counts a refusal only when `ss` lists no :443 listener either. The rule
+# matches `-i lo` only, so the VIP's traffic (in on the leg) is untouched.
+if ! ip netns exec "$(ns_of 2)" iptables -I INPUT -i lo -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/tmp/e2c-ipt.err; then
+  bad "E2c: could not add the loopback REJECT in edge-2: $(cat /tmp/e2c-ipt.err)"
+else
+  N3=$(e70_rule 2); E2C_NEW=${N3%% *}; E2C_RC=${N3#* }
+  E2C_LISTEN=$(ip netns exec "$(ns_of 2)" ss -Hltn 'sport = :443' | grep -c .)
+  ip netns exec "$(ns_of 2)" iptables -D INPUT -i lo -p tcp --dport 443 -j REJECT --reject-with tcp-reset
+  if [ "$E2C_RC" = "7,7,7" ] && [ "$E2C_LISTEN" -ge 1 ] && [ "$E2C_NEW" = "hold,hold,hold" ]; then
+    ok "E2c: a REJECT on edge-2's loopback :443 with nginx serving — the probe was refused three periods running ($E2C_RC) while ss listed $E2C_LISTEN :443 listener(s), so the E7.0 rule held ($E2C_NEW): a firewall rule pushed to every node withdraws none of them"
+  else
+    bad "E2c: a loopback REJECT with nginx up: exit codes $E2C_RC, ss listed $E2C_LISTEN listener(s), the rule said $E2C_NEW (want 7,7,7, at least one listener, hold,hold,hold)"
+  fi
+  N4=$(e70_rule 2)
+  if [ "$N4" = "announce,announce,announce 35,35,35" ]; then
+    ok "E2c: the REJECT removed, edge-2's rule announces again on 35s"
+  else
+    bad "E2c: after removing the REJECT edge-2's rule says $N4 (want announce,announce,announce 35,35,35)"
+  fi
+fi
 
 # ================================================================ ARM F
 say "ARM F — the brain dead: the fleet is fail-static behind one address"
@@ -1129,7 +1495,7 @@ batch 20 h3 /tmp/h-back.txt
 [ "$(n200 /tmp/h-back.txt)" = "20" ] && [ "$(served edge-2 /tmp/h-back.txt)" -ge 1 ] && ok "after \`ip route flush cache\` on the client: 20 of 20 over HTTP/3, both nodes serving again" || bad "h3 after the MTU restore and flush: $(mix /tmp/h-back.txt), edge-2 $(served edge-2 /tmp/h-back.txt)"
 
 # ================================================================ ARM I (stretch)
-say "ARM I — the withdrawal contract driven by a real speaker (stretch, ANYCAST_BGP=$ANYCAST_BGP, outside the acceptance path)"
+say "ARM I — the E7.0 loop driving a real speaker (stretch, ANYCAST_BGP=$ANYCAST_BGP, outside the acceptance path)"
 if [ "$ANYCAST_BGP" != "1" ]; then
   echo "  (skipped: set ANYCAST_BGP=1 to install bird2 and run it — the guide's example, never a Kapkan component)"
 else
@@ -1140,14 +1506,22 @@ else
     ok "bird2 installed ($(bird --version 2>&1 | head -1))"
     # The router accepts both announcements and merges them into one ECMP
     # route; each node announces the VIP /32 with itself as the next hop.
+    # Direct eBGP over each /30 leg, never `multihop`: a multihop session
+    # resolves its next hop recursively through bird's own table, which here
+    # holds no connected routes (`learn off`, no `protocol direct`), so the
+    # VIP would land in rtr's FIB as `unreachable` instead of two nexthops.
     cat > /tmp/bird-rtr.conf <<CONF
 router id 10.0.0.254;
 log stderr all;
 protocol device { }
 protocol kernel { ipv4 { export all; }; merge paths on; learn off; }
-protocol bgp e1 { local as 65100; neighbor $E1 as 65001; ipv4 { import all; export none; }; multihop 2; }
-protocol bgp e2 { local as 65100; neighbor $E2 as 65002; ipv4 { import all; export none; }; multihop 2; }
+protocol bgp e1 { local as 65100; neighbor $E1 as 65001; ipv4 { import all; export none; }; }
+protocol bgp e2 { local as 65100; neighbor $E2 as 65002; ipv4 { import all; export none; }; }
 CONF
+    # The announce protocol is declared `disabled`: a box that boots, or a bird
+    # that restarts, is withdrawn until its loop's first definite announce —
+    # nothing but a listener that answered and a /healthz 200 ever puts a node
+    # into the route.
     node_bird() { # N ASN OWNIP PEERIP
       cat > /tmp/bird-e$1.conf <<CONF
 router id $3;
@@ -1158,7 +1532,7 @@ protocol static announce {
   route $VIP/32 via "lo";
   disabled;
 }
-protocol bgp rtr { local as $2; neighbor $4 as 65100; ipv4 { import none; export all; }; multihop 2; }
+protocol bgp rtr { local as $2; neighbor $4 as 65100; ipv4 { import none; export all; }; }
 CONF
       mkdir -p /run/bird-e$1
       ip netns exec "$(ns_of "$1")" bird -c /tmp/bird-e$1.conf -s /run/bird-e$1/ctl -P /run/bird-e$1/pid -f >>/tmp/bird-e$1.log 2>&1 &
@@ -1168,21 +1542,73 @@ CONF
     mkdir -p /run/bird-rtr
     ip netns exec rtr bird -c /tmp/bird-rtr.conf -s /run/bird-rtr/ctl -P /run/bird-rtr/pid -f >>/tmp/bird-rtr.log 2>&1 &
     node_bird 1 65001 $E1 $R1; node_bird 2 65002 $E2 $R2
-    sleep 2
-    # The health loop the guide prescribes: announce while /healthz answers
-    # 200 on the node's OWN address, withdraw the moment it does not.
-    for n in 1 2; do
-      cat > /tmp/announce-$n.sh <<SH
+    # Both sessions up and no loop running yet: with the announce protocols
+    # declared `disabled`, rtr has no route for the VIP at all.
+    for i in $(seq 1 60); do [ "$(birdc -s /run/bird-rtr/ctl show protocols 2>/dev/null | grep -c Established)" -ge 2 ] && break; sleep 0.5; done
+    if [ "$(birdc -s /run/bird-rtr/ctl show protocols 2>/dev/null | grep -c Established)" -ge 2 ] && [ -z "$(vip_route | tr -d ' ')" ]; then
+      ok "both BGP sessions are Established and rtr has no route for the VIP: the announce protocols are declared disabled, so a node that boots announces nothing before its loop's first definite answer"
+    else
+      bad "before the loops: $(birdc -s /run/bird-rtr/ctl show protocols 2>/dev/null | grep -c Established) of 2 sessions Established, VIP route '$(vip_route)' (want 2, and no route)"
+    fi
+    # fib_held S — rtr's VIP route keeps BOTH nexthops at every 0.2 s look for
+    # S seconds: a withdrawal and a re-announce between two single looks would
+    # otherwise pass for "never withdrew".
+    fib_held() { local i; for i in $(seq 1 $(( $1 * 5 ))); do [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] || return 1; sleep 0.2; done; return 0; }
+    # ann_enables N / ann_disables N — how many times edge-N's loop has called
+    # `birdc enable` / `birdc disable` so far. bird answers each call with a
+    # line in the loop's log ending in "announce: enabled" or "…: already
+    # enabled" (the disabled pair for disable), and nothing else the loop runs
+    # writes a line ending that way.
+    ann_enables()  { local c; c=$(grep -c ' enabled$' "/tmp/announce-$1.log" 2>/dev/null); echo "${c:-0}"; }
+    ann_disables() { local c; c=$(grep -c ' disabled$' "/tmp/announce-$1.log" 2>/dev/null); echo "${c:-0}"; }
+    # held_announcing S — fib_held S, and over the same look both loops alive
+    # and calling `birdc enable` at least three times each. The FIB alone
+    # cannot tell an announcing loop from a holding or a dead one: bird keeps
+    # the protocol enabled while nobody calls birdc at all. A loop calls enable
+    # only on a listener's answer (0 or 35) AND /healthz 200, so each call
+    # proves both for its period; at one call a period the loops make about
+    # five in a five-second look, and three is the floor that still holds on a
+    # host slowed to a 1.6 s period. What it saw is left in HA_SEEN.
+    held_announcing() {
+      local b1 b2 d1 d2 p fib=yes
+      b1=$(ann_enables 1); b2=$(ann_enables 2)
+      fib_held "$1" || fib=""
+      d1=$(( $(ann_enables 1) - b1 )); d2=$(( $(ann_enables 2) - b2 ))
+      HA_SEEN="birdc enable called $d1/$d2 times by the edge-1/edge-2 loops over the $1 s look"
+      for p in $ANN_PIDS; do kill -0 "$p" 2>/dev/null || HA_SEEN="$HA_SEEN, loop pid $p GONE"; done
+      [ -n "$fib" ] || HA_SEEN="$HA_SEEN, a nexthop LOST (rtr: $(vip_route))"
+      [ -n "$fib" ] && [ "$d1" -ge 3 ] && [ "$d2" -ge 3 ] && [[ "$HA_SEEN" != *GONE* ]]
+    }
+    # The E7.0 loop as the guide prints it, VERBATIM: the rig writes the
+    # guide's text and changes two things per node, nothing else — the
+    # status port (each node here has its own status_listen, 9101 and 9102)
+    # and the birdc socket (three birds share this container's /run, so each
+    # has its own control socket where a node of the guide has the one).
+    cat > /tmp/announce.sh.in <<'SH'
 #!/bin/sh
+# on each node: withdraw only when nothing listens on this box's :443, three times running
+# 9101 below is this node's status_listen port — use your own
+refused=0
 while :; do
-  if curl -sf -m1 -o /dev/null http://127.0.0.1:910$n/healthz; then
-    birdc -s /run/bird-e$n/ctl enable announce >/dev/null 2>&1
+  curl -q --noproxy '*' -sk -o /dev/null -m2 https://127.0.0.1/; rc=$?
+  if [ "$rc" -eq 7 ] && l=$(ss -Hltn 'sport = :443') && [ -z "$l" ]; then
+    refused=$((refused + 1))
   else
-    birdc -s /run/bird-e$n/ctl disable announce >/dev/null 2>&1
+    refused=0
   fi
+  if [ "$refused" -ge 3 ]; then
+    birdc disable announce
+  elif { [ "$rc" -eq 0 ] || [ "$rc" -eq 35 ]; } &&
+       curl -q --noproxy '*' -sf -m1 -o /dev/null http://127.0.0.1:9101/healthz; then
+    birdc enable announce
+  fi
+  # anything else holds, with no birdc call at all: a timeout, /healthz 503
+  # or silent, a refusal while ss still lists a :443 listener
   sleep 1
 done
 SH
+    for n in 1 2; do
+      sed -e "s/9101/910$n/g" -e "s#birdc disable#birdc -s /run/bird-e$n/ctl disable#" -e "s#birdc enable#birdc -s /run/bird-e$n/ctl enable#" /tmp/announce.sh.in > /tmp/announce-$n.sh
       chmod 755 /tmp/announce-$n.sh
       ip netns exec "$(ns_of "$n")" /tmp/announce-$n.sh >>/tmp/announce-$n.log 2>&1 &
       # Recorded, because these loops cannot be found by name later: a script
@@ -1190,24 +1616,141 @@ SH
       ANN_PIDS="$ANN_PIDS $!"
     done
     for i in $(seq 1 60); do [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && break; sleep 0.5; done
-    [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && ok "both announcements are in the router's FIB as one multipath route ($(vip_route))" || bad "bird did not produce a multipath route: $(vip_route)"
+    if [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ]; then
+      ok "both announcements are in the router's FIB as one multipath route ($(vip_route)): each loop announced on its first definite answer, a TLS listener and /healthz 200"
+    else
+      bad "bird did not produce a multipath route: $(vip_route)"
+    fi
     batch 20 tcp /tmp/i-both.txt
     [ "$(n200 /tmp/i-both.txt)" = "20" ] && [ "$(served edge-2 /tmp/i-both.txt)" -ge 1 ] && ok "20 of 20 served over the announced route, both nodes" || bad "over the announced route: $(mix /tmp/i-both.txt)"
+    # A killed nginx: nothing listens on edge-2's :443 any more, the probe is
+    # refused (7) with ss listing no :443 listener, and the third such period
+    # in a row disables the protocol. The clock is rtr's FIB, not a batch of
+    # requests — under an L4 hash five requests can all land on edge-1 by
+    # luck before anything was withdrawn.
+    #
+    # The kill is phased to edge-2's loop, so that the figure counts refusals
+    # rather than where in a period the kill happened to fall. The rig waits
+    # for two fresh `birdc enable` replies in a row in the loop's log — each
+    # seen within 50 ms of the look before it — and takes the loop's period
+    # P (about 1.06 s here: `sleep 1`, the probe, /healthz, birdc) from the
+    # time between them; the kill follows the second at once, as the loop's
+    # `sleep 1` begins. The next probe, about a period later, is then the
+    # first refusal, and each later one comes a refusal period after it (a
+    # refused connect, an ss, `sleep 1`: a little shorter than P). So the
+    # loop's third refusal takes edge-2 out of rtr's FIB about 3·P after the
+    # kill — birdc, the BGP update, the FIB and this poll's 0.1 s step add a
+    # little, the short refusal periods and the lag between the reply and
+    # the kill take a little off — where a loop that withdrew on the second
+    # refusal would read about 2·P and one that waited for the fourth about
+    # 4·P. The bounds are half a period either side of the third: 2.5·P and
+    # 3.5·P (about 2650 and 3710 ms at P = 1060). They scale with P, so a
+    # slow host moves them with the loop instead of failing a sound one.
+    # A late sighting counts twice: the kill lands that much into the sleep,
+    # so I_MS reads short by it, and I_P reads long by it, so 3.5·P grows by
+    # 3.5 times it; the fourth refusal reads only about 0.45 s above 3.5·P,
+    # so a sighting ~100 ms late could pass it as the third. Hence the 50 ms
+    # cap (run 3's look: 27 ms); a slow look is retried on the next period.
+    # nginx has the whole period to die before that first probe; were it
+    # still listening then, the loop would announce once more after the kill —
+    # so no enable may come between the kill and the withdrawal, and the
+    # withdrawal must be the loop's own `birdc disable`.
+    #
+    # i_phase — returns as soon as a fresh enable reply is in edge-2's log,
+    # its sighting time in I_PH_T: 0 when it was seen within 50 ms of the
+    # look before it, 2 when this rig itself was too slow to tell (the next
+    # period is tried), 1 when none came within ~3 s.
+    i_phase() {
+      local a b t0 t1 i
+      t0=$(date +%s%N); a=$(ann_enables 2)
+      for i in $(seq 1 150); do
+        sleep 0.02
+        t1=$(date +%s%N); b=$(ann_enables 2)
+        if [ "$b" -gt "$a" ]; then
+          I_EN0=$b; I_PH_T=$(date +%s%N); I_PH_LAG=$(( (I_PH_T - t0) / 1000000 ))
+          [ "$I_PH_LAG" -le 50 ] && return 0
+          return 2
+        fi
+        t0=$t1
+      done
+      return 1
+    }
+    I_PH=""; I_PH_LAG=n/a; I_PH_TRY=0; I_P=0; I_EN0=$(ann_enables 2); I_DIS0=$(ann_disables 2)
+    tp=""
+    for k in 1 2 3 4 5 6; do
+      I_PH_TRY=$k; i_phase; r=$?
+      [ "$r" -eq 1 ] && break     # no enable for ~3 s: the loop is not announcing at all
+      if [ "$r" -eq 0 ] && [ -n "$tp" ]; then I_P=$(( (I_PH_T - tp) / 1000000 )); I_PH=yes; break; fi
+      if [ "$r" -eq 0 ]; then tp=$I_PH_T; else tp=""; fi
+    done
+    I_LO=$(( I_P * 5 / 2 )); I_HI=$(( I_P * 7 / 2 ))
     T0=$(date +%s%N)
     kill "$(cat /tmp/edge2-nginx.pid 2>/dev/null)" 2>/dev/null
-    for i in $(seq 1 200); do batch 5 tcp /tmp/i-probe.txt; [ "$(n200 /tmp/i-probe.txt)" = "5" ] && [ "$(served edge-1 /tmp/i-probe.txt)" = "5" ] && break; sleep 0.2; done
+    for i in $(seq 1 200); do vip_route | grep -qF "via $E2 " || break; sleep 0.1; done
     I_MS=$(( ($(date +%s%N) - T0) / 1000000 ))
+    # birdc's reply reaches the log as birdc exits, a hair after bird acted on
+    # it: give it a moment rather than race it.
+    for i in $(seq 1 10); do [ "$(ann_disables 2)" -gt "$I_DIS0" ] && break; sleep 0.1; done
+    I_EN=$(( $(ann_enables 2) - I_EN0 )); I_DIS=$(( $(ann_disables 2) - I_DIS0 ))
+    if [ -n "$I_PH" ] && ! vip_route | grep -qF "via $E2 " && vip_route | grep -qF "via $E1 " &&
+       [ "$I_EN" -eq 0 ] && [ "$I_DIS" -ge 1 ] && [ "$I_MS" -ge "$I_LO" ] && [ "$I_MS" -le "$I_HI" ]; then
+      I_WD="its nexthop out of rtr's FIB ${I_MS} ms later (I_MS): the third refusal"
+      I_WHY="the loop's period measured at ${I_P} ms (I_P); bounds 2.5-3.5 periods, ${I_LO}-${I_HI} ms"
+      ok "nginx killed on edge-2 as its loop began a \`sleep 1\` (the loop's period measured at ${I_P} ms, the reply seen ${I_PH_LAG} ms after the look before): no announce after the kill, then the loop's own \`birdc disable\` — edge-2's nexthop out of rtr's FIB ${I_MS} ms after the kill, inside 2.5-3.5 periods (${I_LO}-${I_HI} ms): the third refusal, where the second would read about 2 periods and the fourth about 4 ($(vip_route))"
+    else
+      I_WD="the withdrawal check FAILED: ${I_MS} ms (I_MS), rtr's route '$(vip_route)', birdc enable/disable since the kill $I_EN/$I_DIS, kill phased: ${I_PH:-NO}"
+      I_WHY=""
+      bad "after killing nginx on edge-2: rtr's route '$(vip_route)' after ${I_MS} ms; kill phased to the loop's sleep: ${I_PH:-NO} (period ${I_P} ms, lag ${I_PH_LAG} ms, attempt $I_PH_TRY of 6); since the kill edge-2's loop called birdc enable $I_EN and disable $I_DIS times (want edge-1 alone after 2.5-3.5 periods, ${I_LO}-${I_HI} ms — the third refusal; about 2 periods is the second, about 4 the fourth — with no enable and the loop's own disable)"
+    fi
     batch 40 tcp /tmp/i-withdrawn.txt
-    [ "$(n200 /tmp/i-withdrawn.txt)" = "40" ] && [ "$(served edge-1 /tmp/i-withdrawn.txt)" = "40" ] && ok "nginx killed on edge-2: /healthz 503 -> the protocol disabled -> the nexthop left the FIB -> 40 of 40 on edge-1, ${I_MS} ms from kill to all-edge-1" || bad "after the speaker's withdrawal: $(mix /tmp/i-withdrawn.txt), edge-1 $(served edge-1 /tmp/i-withdrawn.txt)"
-    echo "  bird2: kill -> all-edge-1 in ${I_MS} ms" >> /tmp/arm-i.txt
+    if [ "$(n200 /tmp/i-withdrawn.txt)" = "40" ] && [ "$(served edge-1 /tmp/i-withdrawn.txt)" = "40" ]; then
+      ok "…and 40 of 40 served by edge-1 over the withdrawn route"
+    else
+      bad "after the speaker's withdrawal: $(mix /tmp/i-withdrawn.txt), edge-1 $(served edge-1 /tmp/i-withdrawn.txt)"
+    fi
     node_nginx 2 edge2 $STATE2; wait_nginx 2
     for i in $(seq 1 60); do [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && break; sleep 0.5; done
-    [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && ok "nginx back: the announcement returns and the route is multipath again" || bad "the route did not come back: $(vip_route)"
+    if [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ]; then
+      ok "nginx back: the listener answers and /healthz is 200 again, so the loop announces and the route is multipath again"
+    else
+      bad "the route did not come back: $(vip_route)"
+    fi
     ZONEB_EXTRA=$EXTRA_BROKEN; zones_yaml; reload_brain
     wait_eq 40 false sfield 2 converged || bad "edge-2 did not refuse the broken document (arm I)"
-    sleep 3
-    [ "$(ip netns exec rtr ip route show $VIP/32 | grep -c nexthop)" -ge 2 ] && ok "a refused document did NOT withdraw the route: /healthz stayed 200, so the speaker stayed enabled" || bad "a refused document withdrew the route: $(vip_route)"
+    ip netns exec edge2 curl -q --noproxy '*' -sk -o /dev/null -m2 https://127.0.0.1/; I_DOC_RC=$?
+    held_announcing 5; I_HA=$?
+    I_DOC_HC=$(hcode 2)
+    if [ "$I_HA" -eq 0 ] && [ "$I_DOC_HC" = "200" ] && tls_answered "$I_DOC_RC"; then
+      I_DOC="rtr kept both nexthops, $HA_SEEN"
+      ok "a refused document did NOT withdraw the route: rtr kept both nexthops at every look over 5 s while both loops kept announcing ($HA_SEEN) — the listener answering ($I_DOC_RC) and /healthz 200"
+    else
+      I_DOC="the check FAILED ($HA_SEEN; probe exit $I_DOC_RC, /healthz $I_DOC_HC)"
+      bad "under a refused document: $HA_SEEN; rtr's route '$(vip_route)', probe exit $I_DOC_RC, /healthz on edge-2 $I_DOC_HC"
+    fi
     ZONEB_EXTRA=""; zones_yaml; reload_brain
+    wait_eq 40 true sfield 2 converged || bad "edge-2 did not converge after the fix (arm I)"
+    # And arm E2's two causes over BGP: the rung manual and the origin stopped
+    # on both nodes, which the v1.8 loop answered by withdrawing both.
+    e2_causes_on "rig arm I"
+    if held_announcing 5; then
+      I_E2="rtr kept both nexthops, $HA_SEEN"
+      ok "the rung manual and the origin stopped on both nodes withdrew NEITHER: rtr kept both nexthops at every look over 5 s while both loops kept announcing ($HA_SEEN)"
+    else
+      I_E2="the check FAILED ($HA_SEEN)"
+      bad "arm E2's causes over BGP: $HA_SEEN; rtr's route '$(vip_route)'"
+    fi
+    e2_causes_off
+    {
+      echo "arm I  (bird2 driven by the E7.0 loop, stretch): nginx killed on edge-2 as its loop began a \`sleep 1\`:"
+      echo "       $I_WD;"
+      if [ -n "$I_WHY" ]; then
+        echo "       ($I_WHY:"
+        echo "       the second refusal would read about two periods, the fourth about four);"
+      fi
+      echo "       under a refused document: $I_DOC;"
+      echo "       under the rung manual + the origin stopped on both nodes: $I_E2"
+      arm_verdict I
+    } >> /tmp/arm-i.txt
     # shellcheck disable=SC2086
     kill $ANN_PIDS 2>/dev/null; ANN_PIDS=""
     pkill -f 'announce-[12]\.sh' 2>/dev/null; pkill -f 'bird -c' 2>/dev/null
@@ -1218,24 +1761,46 @@ fi
 # ================================================================ summary
 {
   echo "E6.9 anycast rig — recorded numbers"
+  if [ "$FAIL" -ne 0 ]; then
+    echo "!! THIS RUN FAILED $FAIL check(s): quote nothing from an arm marked FAILED below — its lines describe"
+    echo "!! a passing run, not this one (the FAIL lines above say what happened)"
+  fi
   echo
   cat /tmp/arm-c.txt
+  arm_verdict C
   echo
   echo "arm D  (a node dies, nobody withdraws): $D_FAIL of 40 requests failed, $D_OK served;"
   echo "       the inventory said alive:false ${D_LOST_MS} ms after the kill — stale_after_seconds $STALE"
   echo "       after the dead node's last sighting, which is the whole of that delay"
+  arm_verdict D
   echo "arm D2 (the operator's withdrawal): the first all-200 batch of five completed ${D2_MS} ms after"
   echo "       the \`ip route replace\`, then 40/40 TCP and 20/20 h3 — a withdrawal is a RIB change,"
   echo "       so what bounds recovery is the client's next request, not any Kapkan timer"
-  echo "arm E  (the node's own signal): /healthz turned 503 ${E_MS} ms after nginx died — the bound is one"
-  echo "       controller.report_interval_seconds (1 s in this rig; the product default is 10), the tick the"
-  echo "       terminator-liveness check rides, so an operator withdrawing on /healthz sets it to their probe period"
+  arm_verdict D2
+  echo "arm E  (the node's own signal): /healthz turned 503 ${E_MS} ms after nginx died (E_MS), and ${E_BH_MS} ms"
+  echo "       with the brain black-holed from that node and $E_BH_NOTE (E_BH_MS); bound 1.5 s."
+  echo "       E_MS alone does not tell E7.0's own one-second tick from 1.8's report tick (both 1 s in this"
+  echo "       rig); E_BH_MS, taken with the report stuck, does. The E7.0 probe of the dead node's own :443"
+  echo "       exited ${E_PROBE#* } over three periods, ss listing no :443 listener, the loop doing ${E_PROBE%% *} (E_PROBE)"
+  arm_verdict E
+  echo "arm E2 (the negative control, on both nodes at once) — the rung manual by the lever + the origin stopped:"
+  echo "       the v1.8 predicate said $E2_OLD (edge-1/edge-2) (E2_OLD), its zone probe getting the rung's page,"
+  echo "       HTTP $E2_HTTP (E2_HTTP); the E7.0 probe exited $E2_RC (E2_RC) and the E7.0 rule said $E2_NEW (E2_NEW);"
+  echo "       TLS handshakes answered through the VIP meanwhile: $E2_TLS_OK ($E2_TLS_MIX) (E2_TLS_OK)."
+  echo "       E2b — the lever lifted, the origin still stopped: the v1.8 predicate said $E2B_OLD (E2B_OLD), its"
+  echo "       zone probe now reaching the dead origin, HTTP $E2B_HTTP (E2B_HTTP); the E7.0 probe exited $E2B_RC"
+  echo "       (E2B_RC) and the E7.0 rule said $E2B_NEW (E2B_NEW)."
+  echo "       E2c — a REJECT on edge-2's loopback :443, nginx serving: the probe exited $E2C_RC (E2C_RC) while ss"
+  echo "       listed $E2C_LISTEN :443 listener(s) (E2C_LISTEN), and the E7.0 rule said $E2C_NEW (E2C_NEW)"
+  arm_verdict E2
   echo "arm F  (the brain's return): both nodes alive again ${F_MS} ms after it came back — what bounds this is"
   echo "       the node's own poll backoff (1 s doubling to 30 s) and never stale_after: the nodes were alive"
   echo "       throughout, they simply had nowhere to poll"
+  arm_verdict F
   echo "arm H  (MTU 1200 on one leg): $H_FAIL of 40 h3 requests failed while TCP was 40/40 — not a share:"
   echo "       the client caches that path MTU for the VIP itself, so HTTP/3 fails toward the healthy"
   echo "       node too, and stays broken after the link is repaired until the cache is flushed"
+  arm_verdict H
   [ -f /tmp/arm-i.txt ] && cat /tmp/arm-i.txt
 } > /tmp/numbers.txt
 echo
