@@ -19,6 +19,8 @@ security-relevant.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-12
+
 ### Config changes
 
 - **Added `listen.queue`** (optional, default `16384`, range `1`–`1048576`, restart required): how
