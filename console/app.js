@@ -35,6 +35,9 @@
   var state = {
     view: "overview",
     role: "viewer", /* least privilege until /status reports the caller's role */
+    /* did the last poll reach the engine? Until one does, the top bar shows
+       "no connection" rather than a duty light for a mode it has not read. */
+    online: false,
     collapsed: false,
     hostDir: "incoming",
     filters: { scope: "", dir: "", type: "", group: "", q: "" },
@@ -119,7 +122,7 @@
         bans = API.getBans(), groups = API.getHostgroups(), networks = API.getNetworks(), agg = API.aggregate();
     return {
       status: status, attacks: attacks, hosts: hosts, bans: bans, groups: groups, networks: networks,
-      agg: agg, buf: state.buf, posture: derivePosture(attacks), dryRun: status.dry_run, role: state.role,
+      agg: agg, buf: state.buf, posture: derivePosture(attacks), dryRun: status.dry_run, role: state.role, online: state.online,
       state: state, actions: actions
     };
   }
@@ -134,6 +137,7 @@
   /* ---------- shell (built once / on locale change) ---------- */
   function buildShell() {
     K.clear(document.getElementById("brandMark")).appendChild(w.icon("brandmark"));
+    K.clear(document.getElementById("brandName")).appendChild(w.icon("wordmark"));
 
     /* nav */
     var nav = K.clear(document.getElementById("nav"));
@@ -209,7 +213,12 @@
   /* ---------- dynamic topbar (every poll) ---------- */
   function renderShellDynamic(ctx) {
     K.mount(document.getElementById("posturePill"), K.posturePill(ctx.posture));
-    K.mount(document.getElementById("modeBadge"), K.modeBadge(ctx.status.dry_run));
+    K.mount(document.getElementById("modeBadge"), ctx.online ? K.dutyChip(ctx.status.dry_run) : K.noContact());
+    /* "Live" and its heartbeat would contradict "no connection" beside it: the
+       dot stops and greys, and only the time of the last good poll stays. */
+    var live = document.getElementById("liveInd");
+    live.classList.toggle("is-polling", !!ctx.online);
+    live.classList.toggle("is-down", !ctx.online);
 
     var counters = K.clear(document.getElementById("counters"));
     var defs = [
@@ -568,8 +577,13 @@
     announceRung(ctx);
   }
   function poll() {
-    return API.refresh().then(function () { pushBuf(); render(); })
-      .catch(function (e) { if (w.console) w.console.warn("poll failed", e); });
+    return API.refresh().then(function () {
+      state.online = true; pushBuf(); render();
+    }, function (e) {
+      if (w.console) w.console.warn("poll failed", e);
+      state.online = false;
+      renderShellDynamic(buildCtx());   /* the duty light goes out; the views keep the last good data */
+    }).catch(function (e) { if (w.console) w.console.warn("render failed", e); });
   }
 
   /* ---------- ticker (1s) — countdowns + bars only ---------- */
@@ -609,7 +623,7 @@
     I.init();
     API.init();
     buildShell();
-    API.refresh().then(function () { prefill(); }).catch(function () {}).then(function () {
+    API.refresh().then(function () { state.online = true; prefill(); }).catch(function () {}).then(function () {
       render();
       setInterval(poll, API.POLL_MS);
       setInterval(tick, 1000);

@@ -541,11 +541,23 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
 .demo-ctl { display: flex; align-items: center; gap: var(--s-2); }
 
 /* responsive */
+/* Laptop widths. The top bar holds the posture, the duty chip ("На дежурстве ·
+   только наблюдение" alone is 270px), four counters, the clock and the reload
+   button: with the rail expanded, the widest case (ru or fr, mitigating) needs
+   1489px on one line. Narrower, the bar sheds what is shown elsewhere, in this
+   order: the networks count (config, also on Overview), the hosts count (also
+   on Overview and Hosts), then the word "Live" (the duty chip already says the
+   engine answers; the clock stays). Measured per locale and posture: from
+   1367px up everything fits on one line, and below that the bar needs less
+   room than it did before the chip. */
+@media (max-width: 1500px) { .counters .counter:nth-child(4) { display: none; } }
+@media (max-width: 1440px) { .counters .counter:nth-child(3) { display: none; } }
+@media (max-width: 1366px) { .live__txt { display: none; } }
+
 @media (max-width: 1180px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
   .attack-card__grid, .cols-2, .shares, .traffic-strip { grid-template-columns: 1fr; }
   .cols-3 { grid-template-columns: 1fr 1fr; }
-  .counters .counter:nth-child(n+5) { display: none; }
 }
 
 /* ===== Tablet / phone: sidebar becomes an off-canvas drawer =====
@@ -555,7 +567,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
    rail's width is also what stops the topbar's min-content from forcing the
    `1fr` column wider than the viewport (which clipped every view on the right). */
 @media (max-width: 900px) {
-  .app { grid-template-columns: 1fr; grid-template-areas: "top" "main"; }
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; grid-template-areas: "top" "main"; }
   /* let both items shrink below their content so the column can never exceed
      the viewport (otherwise .app's overflow:hidden chops the right edge off) */
   .main, .topbar { min-width: 0; }
@@ -587,13 +599,25 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--t-base); }
   /* topbar: trim to what fits a phone — posture + mode + language stay; the
      live label/clock and counters drop (the pulsing dot keeps the heartbeat) */
   .counters, .counter__sep, .live__txt, .live__time { display: none; }
-  .topbar { gap: var(--s-2); padding: 0 var(--s-3); }
+  .topbar { gap: var(--s-2); padding: var(--s-2) var(--s-3); min-height: var(--topbar-h); }
   .topbar__left { gap: var(--s-2); min-width: 0; }
   #reloadBtn span { display: none; }
 
   .view { padding: var(--s-4) var(--s-4) var(--s-8); }
   .host-row { grid-template-columns: 1.4fr 64px 1.2fr; }
   .host-rates { display: none; }
+}
+
+/* Phone: the duty chip ("На дежурстве · только наблюдение") does not fit
+   beside the posture and the buttons, so it takes a row of its own under them.
+   The left cluster grows from a zero basis, so the line breaks before the chip
+   and never before the buttons; the grid row is auto (above), so the bar grows
+   to fit. */
+@media (max-width: 700px) {
+  .topbar { flex-wrap: wrap; row-gap: var(--s-2); }
+  .topbar__left { flex: 1 1 0; }
+  .topbar__spacer { display: none; }
+  .topbar__duty { order: 1; flex: 0 0 100%; }
 }
 
 @media (max-width: 560px) {

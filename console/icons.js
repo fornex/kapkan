@@ -6,21 +6,31 @@
   var P = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" class="ico" aria-hidden="true">';
   var F = '<svg viewBox="0 0 24 24" fill="currentColor" class="ico" aria-hidden="true">';
   var ICONS = {
-    /* Brand tile mark — escalation-ramp motif. Intentionally multi-color
-       (not currentColor); uses fill/stroke presentation attributes only, so
-       it stays CSP style-src safe like the rest of this set. */
-    brandmark:    '<svg viewBox="0 0 64 64" class="ico" aria-hidden="true">' +
-      '<rect x="1" y="1" width="62" height="62" rx="15.4" fill="#141a21" stroke="#2a323d" stroke-width="1.5"/>' +
-      '<rect x="40.32" y="15.36" width="6.82" height="6.82" rx="1.08" fill="#9cccff"/>' +
-      '<rect x="32" y="23.68" width="6.82" height="6.82" rx="1.08" fill="#4ea1ff"/>' +
-      '<rect x="40.32" y="23.68" width="6.82" height="6.82" rx="1.08" fill="#9cccff"/>' +
-      '<rect x="23.68" y="32" width="6.82" height="6.82" rx="1.08" fill="#3f8fe0"/>' +
-      '<rect x="32" y="32" width="6.82" height="6.82" rx="1.08" fill="#4ea1ff"/>' +
-      '<rect x="40.32" y="32" width="6.82" height="6.82" rx="1.08" fill="#9cccff"/>' +
-      '<rect x="15.36" y="40.32" width="6.82" height="6.82" rx="1.08" fill="#2f6dab"/>' +
-      '<rect x="23.68" y="40.32" width="6.82" height="6.82" rx="1.08" fill="#3f8fe0"/>' +
-      '<rect x="32" y="40.32" width="6.82" height="6.82" rx="1.08" fill="#4ea1ff"/>' +
-      '<rect x="40.32" y="40.32" width="6.82" height="6.82" rx="1.08" fill="#9cccff"/></svg>',
+    /* The Kapkan mark: an ink tile, a stepped ramp of nine blue modules (the
+       escalation ladder: watch → drop only the attack → null-route the target)
+       and the duty light, a round ember dot, on the top step. Same geometry as
+       the brand mark, on a 64 grid: modules 8×8, gap 2,
+       the grid offset to 12; light r 4.6. Its colours are constant (never
+       currentColor): the light always sits on dark. Presentation attributes
+       only, so it stays CSP style-src safe like the rest of this set. */
+    brandmark:    '<svg viewBox="0 0 64 64" class="ico" aria-hidden="true" focusable="false">' +
+      '<rect width="64" height="64" rx="14" fill="#16181c"/>' +
+      '<rect x="32" y="22" width="8" height="8" rx="1.6" fill="#4ea1ff"/>' +
+      '<rect x="42" y="22" width="8" height="8" rx="1.6" fill="#4ea1ff"/>' +
+      '<rect x="22" y="32" width="8" height="8" rx="1.6" fill="#4ea1ff"/>' +
+      '<rect x="32" y="32" width="8" height="8" rx="1.6" fill="#4ea1ff"/>' +
+      '<rect x="42" y="32" width="8" height="8" rx="1.6" fill="#4ea1ff"/>' +
+      '<rect x="12" y="42" width="8" height="8" rx="1.6" fill="#4ea1ff"/>' +
+      '<rect x="22" y="42" width="8" height="8" rx="1.6" fill="#4ea1ff"/>' +
+      '<rect x="32" y="42" width="8" height="8" rx="1.6" fill="#4ea1ff"/>' +
+      '<rect x="42" y="42" width="8" height="8" rx="1.6" fill="#4ea1ff"/>' +
+      '<circle cx="46" cy="16" r="4.6" fill="#ffb454"/></svg>',
+    /* The wordmark: lowercase "kapkan" in IBM Plex Sans SemiBold at −0.02em,
+       outlined to one path (font units, baseline at y = 0; the viewBox starts
+       at the k's ink), so it looks the same without the font. One colour:
+       currentColor. Not an icon — sized by .brand__word, not .ico. */
+    wordmark:     '<svg viewBox="74 -740 3186 940" class="brand__word" aria-hidden="true" focusable="false">' +
+      '<path fill="currentColor" d="M74 0L74-740L202-740L202-294L207-294L276-388L393-522L538-522L358-320L557 0L405 0L271-234L202-159L202 0L74 0Z M1070 0L999 0Q957 0 932.5-24.5Q908-49 902-90L896-90Q883-39 843-13.5Q803 12 744 12Q664 12 621-30Q578-72 578-142Q578-223 636-262.5Q694-302 801-302L890-302L890-340Q890-384 867-408Q844-432 793-432Q748-432 720.5-412.5Q693-393 674-366L598-434Q627-479 675-506.5Q723-534 802-534Q908-534 963-486Q1018-438 1018-348L1018-102L1070-102L1070 0ZM787-81Q830-81 860-100Q890-119 890-156L890-225L808-225Q708-225 708-161L708-144Q708-112 728.5-96.5Q749-81 787-81Z M1154 200L1154-522L1282-522L1282-436L1286-436Q1300-481 1339-507.5Q1378-534 1430-534Q1530-534 1582.5-463.5Q1635-393 1635-262Q1635-130 1582.5-59Q1530 12 1430 12Q1378 12 1339.5-15Q1301-42 1286-87L1282-87L1282 200L1154 200ZM1389-94Q1439-94 1470-127Q1501-160 1501-216L1501-306Q1501-362 1470-395.5Q1439-429 1389-429Q1343-429 1312.5-406Q1282-383 1282-345L1282-179Q1282-138 1312.5-116Q1343-94 1389-94Z M1734 0L1734-740L1862-740L1862-294L1867-294L1936-388L2053-522L2198-522L2018-320L2217 0L2065 0L1931-234L1862-159L1862 0L1734 0Z M2730 0L2659 0Q2617 0 2592.5-24.5Q2568-49 2562-90L2556-90Q2543-39 2503-13.5Q2463 12 2404 12Q2324 12 2281-30Q2238-72 2238-142Q2238-223 2296-262.5Q2354-302 2461-302L2550-302L2550-340Q2550-384 2527-408Q2504-432 2453-432Q2408-432 2380.5-412.5Q2353-393 2334-366L2258-434Q2287-479 2335-506.5Q2383-534 2462-534Q2568-534 2623-486Q2678-438 2678-348L2678-102L2730-102L2730 0ZM2447-81Q2490-81 2520-100Q2550-119 2550-156L2550-225L2468-225Q2368-225 2368-161L2368-144Q2368-112 2388.5-96.5Q2409-81 2447-81Z M2942 0L2814 0L2814-522L2942-522L2942-435L2947-435Q2963-477 2997.5-505.5Q3032-534 3093-534Q3174-534 3217-481Q3260-428 3260-330L3260 0L3132 0L3132-317Q3132-373 3112-401Q3092-429 3046-429Q3026-429 3007.5-423.5Q2989-418 2974.5-407.5Q2960-397 2951-381.5Q2942-366 2942-345L2942 0Z"/></svg>',
     shield:       P + '<path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg>',
     "shield-check": P + '<path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg>',
     "shield-alert": P + '<path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M12 8v4"/><circle cx="12" cy="15.5" r=".6" fill="currentColor"/></svg>',

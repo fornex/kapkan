@@ -28,7 +28,8 @@
     <aside class="sidebar" id="sidebar">
       <div class="brand">
         <span class="brand__mark" aria-hidden="true" id="brandMark"></span>
-        <span class="brand__name">kap<b>kan</b></span>
+        <span class="brand__name" aria-hidden="true" id="brandName"></span>
+        <span class="sr-only">Kapkan</span>
       </div>
       <nav class="nav" id="nav" aria-label="Primary"></nav>
       <div class="sidebar__foot">
@@ -41,8 +42,10 @@
       <div class="topbar__left">
         <button class="icon-btn" id="collapseBtn" aria-label="Toggle sidebar"></button>
         <span id="posturePill"></span>
-        <span id="modeBadge"></span>
       </div>
+      <!-- the duty light: on duty, and in which mode (or "no connection").
+           role=status, so a mode change or a lost engine is announced. -->
+      <span class="topbar__duty" id="modeBadge" role="status"></span>
       <div class="topbar__spacer"></div>
       <div class="counters" id="counters"></div>
       <span class="counter__sep" aria-hidden="true"></span>

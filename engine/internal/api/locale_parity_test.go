@@ -210,6 +210,11 @@ func TestLocaleParityRegistered(t *testing.T) {
 // the confirm and its working state, the two notes it shows before the lever
 // is pulled, the three strings of the end-dialog, three success toasts and the
 // four refusals the route can answer (406 + 34 = 440).
+//
+// The duty light (the brand's DutyLight chip, which replaced the top bar's mode
+// badge) added 4: duty.{on,watch,live} for "On duty · watch-only" and
+// "· live", and duty.offline, the "no connection" badge shown in its place
+// when a poll fails (440 + 4 = 444).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -220,7 +225,7 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		{"units", 0, 4},
 		{"plurals", 1, 13},
 		{"plurals", 0, 26},  // 13 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5) + edgeUnboundTokens (E6.7)
-		{"strings", 0, 440}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history); +34: ed.lever.* (E6.8)
+		{"strings", 0, 444}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history); +34: ed.lever.* (E6.8); +4: duty.* (the duty light)
 		{"enums", 1, 9},
 		{"enums", 0, 59}, // +16: edgeEventKind (E6.7)
 		{"enumsShort", 1, 1},
