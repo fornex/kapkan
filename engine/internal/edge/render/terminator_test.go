@@ -24,6 +24,10 @@ package render_test
 //     sockets only cross a bind mount when host and container share a kernel,
 //     so Docker Desktop skips this arm.
 //
+// The HTTP/3 arms are in terminator_h3_test.go, and the steering probe's
+// (serve/steer/…: internal/edge/steer against the rendered :443) in
+// terminator_steer_test.go.
+//
 // KAPKAN_EDGE_TERMINATOR_IMAGE names the image (nginx:1.22 is the floor;
 // nginx:stable; docker.angie.software/angie:latest). Unset, the test skips;
 // KAPKAN_EDGE_TERMINATOR=require turns that skip into a failure, so the CI
@@ -155,6 +159,9 @@ func TestRealTerminator(t *testing.T) {
 	})
 	// The HTTP/3 clients against the render (E5.4): terminator_h3_test.go.
 	h.h3Arms(t)
+	// The steering probe against the rendered :443 (E7.1):
+	// terminator_steer_test.go.
+	h.steerArms(t)
 
 	t.Run("serve/decide-open/no-decider", func(t *testing.T) {
 		s := h.serve(t, "decide-open", "no-decider")
@@ -771,24 +778,34 @@ func (h *harness) prepare(t *testing.T, name, arm string, mutate func(*render.In
 	for n, b := range files {
 		writeFile(t, filepath.Join(dir, "conf", n), string(b))
 	}
-	writeFile(t, filepath.Join(dir, "main.conf"), fmt.Sprintf(`# Throwaway main configuration for the real-terminator test. A deployment's
+	writeFile(t, filepath.Join(dir, "main.conf"), mainConf(name, arm, "off"))
+	return dir
+}
+
+// mainConf is an arm's throwaway main configuration. accessLog is the
+// http-level access_log — the one every server without its own inherits,
+// kapkan's catch-all among them: "off", or a file for an arm that counts what
+// the catch-all logged. The stand-in origin never logs, so such a file holds
+// the catch-all's lines alone.
+func mainConf(name, arm, accessLog string) string {
+	return fmt.Sprintf(`# Throwaway main configuration for the real-terminator test. A deployment's
 # nginx.conf differs in every other line; the one that matters is the include.
 pid /tmp/kapkan-terminator.pid;
 error_log /dev/stderr notice;
 worker_processes 1;
 events { worker_connections 256; }
 http {
-    access_log off;
+    access_log %s;
     include %s/%s/%s/conf/*.conf;
     # The stand-in origin echoes what arrived, so the test can see which
     # headers the edge owned, relayed or dropped.
     server {
         listen 127.0.0.1:%d;
+        access_log off;
         location / { return 200 "%s"; }
     }
 }
-`, containerWork, name, arm, originPort, originBody))
-	return dir
+`, accessLog, containerWork, name, arm, originPort, originBody)
 }
 
 // configTest is arm A: `nginx -t` on the prepared fixture.
@@ -842,17 +859,49 @@ type served struct {
 	id      string
 	port443 string
 	port80  string
+	// dir is the arm's directory: its render, its main.conf, its logs.
+	dir string
 }
 
 // serve is arms B/C: start the terminator on the fixture, origins pointed at
 // the stand-in origin.
 func (h *harness) serve(t *testing.T, name, arm string) *served {
 	t.Helper()
+	return h.serveWith(t, name, arm, serveOptions{})
+}
+
+// serveOptions is what an arm may set beyond its fixture.
+type serveOptions struct {
+	// mutate has the last say over the render's inputs, after the origins
+	// are pointed at the stand-in origin.
+	mutate func(*render.Inputs)
+	// accessLog keeps the http-level access log in the arm's access.log
+	// instead of off (mainConf): where the catch-all logs.
+	accessLog bool
+}
+
+// serveWith is serve with options.
+func (h *harness) serveWith(t *testing.T, name, arm string, opts serveOptions) *served {
+	t.Helper()
 	dir := h.prepare(t, name, arm, func(in *render.Inputs) {
 		for i := range in.Doc.Zones {
 			in.Doc.Zones[i].Origins = []string{fmt.Sprintf("127.0.0.1:%d", originPort)}
 		}
+		if opts.mutate != nil {
+			opts.mutate(in)
+		}
 	})
+	if opts.accessLog {
+		writeFile(t, filepath.Join(dir, "main.conf"), mainConf(name, arm, containerWork+"/"+name+"/"+arm+"/access.log"))
+		// Created here and writable by anyone, as the sockets are: the
+		// container's root need not be the host's (rootless Docker), and
+		// nginx opens the file it finds.
+		accessLog := filepath.Join(dir, "access.log")
+		writeFile(t, accessLog, "")
+		if err := os.Chmod(accessLog, 0o666); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// No decider or challenge socket unless a subtest starts one.
 	for _, sock := range []string{"decide.sock", "challenge.sock", "clearance.sock"} {
 		_ = os.Remove(filepath.Join(h.work, "run", sock))
@@ -869,7 +918,7 @@ func (h *harness) serve(t *testing.T, name, arm string) *served {
 		}
 		t.Fatalf("docker run: %v\n%s", err, stderr)
 	}
-	s := &served{h: h, id: strings.TrimSpace(string(out))}
+	s := &served{h: h, id: strings.TrimSpace(string(out)), dir: dir}
 	t.Cleanup(func() {
 		logs := s.logs(t)
 		writeFile(t, filepath.Join(dir, "serve.log"), logs)

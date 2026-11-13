@@ -224,12 +224,3 @@ func dedup(list []string) []string {
 	sort.Strings(out)
 	return out
 }
-
-func contains(list []string, want string) bool {
-	for _, s := range list {
-		if s == want {
-			return true
-		}
-	}
-	return false
-}

@@ -187,6 +187,31 @@ func (a *Applier) Live() (gen uint64, hash string, ok bool) {
 	return st.gen, st.hash, st.ok
 }
 
+// ReadLive reports the generation `live` under root names — 0 when the link
+// is not a generation of ours — and whether that generation carries the
+// tested marker, from one readlink and one stat. It takes no lock, on
+// purpose: Live takes the Applier's mutex, which Apply holds through `nginx
+// -t` and the reload, so a reader on a one-second tick (the steering join
+// gate, internal/edge/steer) would stall behind every apply. A lock-free
+// reader sees the window Apply opens by design (package doc): between the
+// swap and the test, `live` names the untested candidate and tested is
+// false. The marker is looked up in the directory the link named when it was
+// read, not through the link, so a swap between the two calls yields one
+// generation's number with that same generation's marker. err is the
+// readlink's: os.ErrNotExist (errors.Is) on a node that never installed
+// anything.
+func ReadLive(root string) (gen uint64, tested bool, err error) {
+	target, err := os.Readlink(filepath.Join(root, liveLink))
+	if err != nil {
+		return 0, false, err
+	}
+	gen, ok := parseGen(target, genPrefix)
+	if !ok {
+		return 0, false, nil
+	}
+	return gen, fileExists(filepath.Join(root, target, testedMarker)), nil
+}
+
 // Apply installs files as a new generation if they differ from the live one,
 // tests, and reloads. See the package doc for the sequence and its guarantees.
 func (a *Applier) Apply(ctx context.Context, files map[string][]byte) (Result, error) {
