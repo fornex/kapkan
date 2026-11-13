@@ -62,7 +62,8 @@ const (
 	steerMaxMissing = 10
 	// steerReasonMax and steerErrMax bound the free text on the wire (a drain's
 	// reason, the report's errors): /steer must fit the CLI's 64 KiB read, and
-	// E7.4 copies the status into a report the brain caps at 64 KiB.
+	// a drain's reason also goes into E7.4's report, which the brain caps at
+	// 64 KiB.
 	steerReasonMax = 256
 	steerErrMax    = 512
 	// steerVIPEchoMax bounds the vip a 400 echoes back.
@@ -145,6 +146,11 @@ type sampler struct {
 	// saveErr, takeErr, removeErr and liftErr are the last errors logged, so
 	// a failure that repeats every tick is logged once.
 	saveErr, takeErr, removeErr, liftErr string
+	// panicAt is when a tick's panic was last logged, and panicked counts the
+	// ticks that panicked since: a panic that repeats every tick is logged at
+	// once, then at most once a minute, as the skip warning is.
+	panicAt  time.Time
+	panicked int
 }
 
 // steerSnapshot is what one tick published. Nothing in it changes once it is
@@ -284,6 +290,7 @@ func (s *sampler) start() {
 	for i, t := range s.targets {
 		keys[i] = t.Key
 		steerSetVerdict(t.Key, steer.StateUnknown)
+		steerZeroCounters(t.Key)
 	}
 	log.Info("steering on", "targets", keys, "interval", s.interval)
 }
@@ -353,12 +360,24 @@ func (s *sampler) loop(ctx context.Context) {
 func (s *sampler) tick(ctx context.Context) {
 	defer func() {
 		if p := recover(); p != nil {
-			value, stack := p, debug.Stack()
+			// A bug that panics at every tick would log a stack at every
+			// tick, each saying nothing the first did not: the first is
+			// logged at once, then one a minute at most, with the count of
+			// the ticks that panicked since. Time alone spaces them: a
+			// panic's value may carry an index or a length that differs at
+			// every tick.
+			s.panicked++
+			now := time.Now()
+			if !s.panicAt.IsZero() && now.Sub(s.panicAt) < steerSkipWarnEvery {
+				return
+			}
+			value, stack := p, debug.Stack() // still deferred: the stack shows the panic
 			if sp, ok := p.(steerPanic); ok {
 				value, stack = sp.value, sp.stack
 			}
 			s.n.log.Error("steering tick panicked; nothing was published this tick, and verdicts go stale and hold",
-				"panic", fmt.Sprint(value), "stack", string(stack))
+				"panic", fmt.Sprint(value), "ticks", s.panicked, "stack", string(stack))
+			s.panicAt, s.panicked = now, 0
 		}
 	}()
 	// The deadline leaves the rest of the interval for the step, the save and
@@ -471,6 +490,14 @@ func (s *sampler) tick(ctx context.Context) {
 		snap.nodeDrain = steerWireDrain(nodeDrain)
 	case s.birthPending:
 		snap.nodeDrain = steerWireDrain(s.bornDrain())
+	case nodeTri == steer.TriUnknown:
+		// As for a target: a tick that cannot read the drain files keeps
+		// the node-wide drain that stood, and lifts nothing — the targets it
+		// drains and the status must not disagree. A published snapshot
+		// never changes, so the two may share it.
+		if prev := s.snap.Load(); prev != nil {
+			snap.nodeDrain = prev.nodeDrain
+		}
 	}
 
 	// The first entry.
@@ -729,6 +756,40 @@ func steerSetVerdict(key string, state steer.State) {
 			v = 1
 		}
 		metrics.EdgeSteerVerdict.WithLabelValues(key, st.String()).Set(v)
+	}
+}
+
+// steerTransitions are the changes a Step can make — into announce, the three
+// ways out, the two drains, a drain's lift to unknown — as
+// kapkan_edge_steer_transitions_total labels them (to, reason).
+var steerTransitions = [...]struct {
+	to     steer.State
+	reason steer.Reason
+}{
+	{steer.StateAnnounce, steer.ReasonOK},
+	{steer.StateWithdraw, steer.ReasonRefused},
+	{steer.StateWithdraw, steer.ReasonNotTLS},
+	{steer.StateWithdraw, steer.ReasonUnbound},
+	{steer.StateDrain, steer.ReasonDrained},
+	{steer.StateDrain, steer.ReasonNewNode},
+	{steer.StateUnknown, steer.ReasonStarting},
+}
+
+// steerClasses are the probe's classes, as kapkan_edge_steer_probe_total
+// labels them.
+var steerClasses = [...]steer.Class{steer.ClassNone, steer.ClassOK, steer.ClassRefused, steer.ClassNotTLS, steer.ClassSoft, steer.ClassBlind}
+
+// steerZeroCounters publishes a target's counter series at zero before its
+// first tick. Prometheus takes a series' first sample as its baseline, so a
+// series born at 1 reads as no increase: the first withdrawal after a restart
+// — on a stable node, most of them — would never show in increase() or
+// rate().
+func steerZeroCounters(key string) {
+	for _, tr := range steerTransitions {
+		metrics.EdgeSteerTransitionsTotal.WithLabelValues(key, tr.to.String(), string(tr.reason)).Add(0)
+	}
+	for _, c := range steerClasses {
+		metrics.EdgeSteerProbeTotal.WithLabelValues(key, c.String()).Add(0)
 	}
 }
 
@@ -1071,8 +1132,16 @@ func steerWireInputs(in steer.Inputs) SteerInputs {
 }
 
 // steerWireDrain is a drain on the wire: its reason bounded, its time UTC.
+// A drain's since is its file's — hand-written, or the file's mtime — and one
+// JSON cannot carry, its UTC year outside 0..9999, is left out: the file's
+// existence is the drain and its content only explains it, so its content
+// must never keep /steer's answer, or /healthz, from encoding.
 func steerWireDrain(d steer.Drain) *SteerDrain {
-	return &SteerDrain{Reason: steerText(d.Reason, steerReasonMax), Since: d.Since.UTC()}
+	since := d.Since.UTC()
+	if y := since.Year(); y < 0 || y > 9999 {
+		since = time.Time{}
+	}
+	return &SteerDrain{Reason: steerText(d.Reason, steerReasonMax), Since: since}
 }
 
 // steerWireHold is a target's ladder on the wire.

@@ -137,7 +137,9 @@ var (
 
 	// EdgeSteerTransitionsTotal counts verdict changes by target, the verdict
 	// entered (to) and its reason (ok, refused, not_tls, unbound, drained,
-	// new_node, starting).
+	// new_node, starting). The node publishes each of a target's seven series
+	// at 0 when its sampler starts, so the first change after a restart shows
+	// in increase() and rate().
 	EdgeSteerTransitionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "edge",
@@ -147,7 +149,8 @@ var (
 
 	// EdgeSteerProbeTotal counts observations by target and probe class: ok,
 	// refused, not_tls, soft, blind, none (not probed: the kernel does not
-	// hold the address, or could not say).
+	// hold the address, or could not say). Like the transitions, each of a
+	// target's six series is published at 0 when the sampler starts.
 	EdgeSteerProbeTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "edge",

@@ -3,8 +3,15 @@ package node
 // The steering tests (E7.2) run a whole node — brain, render,
 // apply, the status listener — with steering on, against a /proc of fixtures
 // and a TLS listener of their own on 127.0.0.1, so the announce, withdraw,
-// drain and hold paths run on any OS. They are sequential (no t.Parallel):
-// the metrics they read are the process's, so they assert deltas.
+// drain and hold paths run on any OS; a few tick a node's sampler by hand.
+//
+// The metrics they move are the process's. The tests that read one
+// (TestSteerReaders, TestSteerOffStartsNothing, TestSteerMetrics,
+// TestSteerCountersStartAtZero) stay sequential and assert deltas; every
+// other test that runs a node or ticks a sampler calls t.Parallel, and reads
+// no metric. Go starts the parallel tests only once every sequential test has
+// finished, so no other node moves a series while one is measured. A new
+// metric assertion belongs in a sequential test.
 
 import (
 	"bytes"
@@ -38,6 +45,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
@@ -160,12 +168,13 @@ func (l *steerTLS) reopen() error {
 }
 
 // steerIfaddrs is the harness's interface list: 127.0.0.1 — or, switched, a
-// call that blocks until released, or one that panics. It counts its calls.
+// call that blocks until released, or one that panics. It counts its calls,
+// and the calls that returned.
 type steerIfaddrs struct {
-	calls   atomic.Int64
-	mu      sync.Mutex
-	mode    int
-	release chan struct{}
+	calls, returned atomic.Int64
+	mu              sync.Mutex
+	mode            int
+	release         chan struct{}
 }
 
 const (
@@ -182,6 +191,7 @@ func (f *steerIfaddrs) state() (int, chan struct{}) {
 
 func (f *steerIfaddrs) list() ([]netip.Addr, error) {
 	f.calls.Add(1)
+	defer f.returned.Add(1)
 	switch mode, release := f.state(); mode {
 	case ifaddrsBlock:
 		<-release
@@ -234,7 +244,9 @@ type steerRig struct {
 	ifaddrs *steerIfaddrs
 	logs    *steerLog
 	addr    string
-	stop    func() error
+	// stop stops the node, releasing a blocked interface listing first;
+	// stopStuck stops it beside the blocked listing. Either stops it once.
+	stop, stopStuck func() error
 	// gets counts the /steer requests the rig made.
 	gets atomic.Int64
 }
@@ -246,6 +258,59 @@ type steerRig struct {
 // no new_node drain stands. mod runs before New, with nothing running: it may
 // change the options and the files. The node runs until the test ends.
 func steerNode(t *testing.T, mod func(*Options, *steerRig)) *steerRig {
+	t.Helper()
+	r, opt := steerSetup(t, mod)
+	n, err := New(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.n = n
+	stop := run(t, n)
+	var once sync.Once
+	var stopErr error
+	stopOnce := func(release bool) error {
+		once.Do(func() {
+			if release {
+				// Not needed for Run to end — shutdown waits for a stuck tick
+				// at most steerShutdownWait — but it keeps the stop quick.
+				r.ifaddrs.set(ifaddrsList)
+			}
+			stopErr = stop()
+		})
+		return stopErr
+	}
+	r.stop = func() error { return stopOnce(true) }
+	r.stopStuck = func() error { return stopOnce(false) }
+	// A listing left blocked past the stop is released after it: the tick
+	// stuck in it then ends, and publishes nothing.
+	t.Cleanup(func() {
+		_ = r.stop()
+		r.ifaddrs.set(ifaddrsList)
+	})
+	r.addr = statusAddr(t, n)
+	return r
+}
+
+// steerTicks builds the node steerNode runs, without running it, and starts
+// its sampler: the test calls s.tick itself, one tick at a time, with no
+// ticker, brain poll or status listener. A node that never ran has rendered
+// nothing, so its gates hold every join; drains and panics work as on a
+// running node.
+func steerTicks(t *testing.T, mod func(*Options, *steerRig)) (*steerRig, *sampler) {
+	t.Helper()
+	r, opt := steerSetup(t, mod)
+	n, err := New(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.n = n
+	n.steer.start()
+	return r, n.steer
+}
+
+// steerSetup is the rig steerNode and steerTicks build on, and the options
+// they give New, mod applied.
+func steerSetup(t *testing.T, mod func(*Options, *steerRig)) (*steerRig, Options) {
 	t.Helper()
 	r := &steerRig{t: t, brain: &fakeBrain{}, tester: &fakeTester{}, tls: newSteerTLS(t), ifaddrs: &steerIfaddrs{}, logs: &steerLog{}}
 	r.brain.set(testDoc(10), `"v1"`)
@@ -269,24 +334,7 @@ func steerNode(t *testing.T, mod func(*Options, *steerRig)) *steerRig {
 	if mod != nil {
 		mod(&opt, r)
 	}
-	n, err := New(opt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.n = n
-	stop := run(t, n)
-	var once sync.Once
-	var stopErr error
-	r.stop = func() error {
-		once.Do(func() {
-			r.ifaddrs.set(ifaddrsList) // a blocked tick must end for Run to
-			stopErr = stop()
-		})
-		return stopErr
-	}
-	t.Cleanup(func() { _ = r.stop() })
-	r.addr = statusAddr(t, n)
-	return r
+	return r, opt
 }
 
 // steerGot is one /steer answer: the status, the verdict when it carries one
@@ -425,6 +473,7 @@ func exists(path string) bool {
 
 // The codes, the keys and the peers of GET /steer.
 func TestSteerEndpointCodes(t *testing.T) {
+	t.Parallel()
 	// The first tick blocks in the interface listing until released: until
 	// then nothing can be published, so "before the first tick" is certain.
 	r := steerNode(t, func(_ *Options, r *steerRig) { r.ifaddrs.set(ifaddrsBlock) })
@@ -588,7 +637,8 @@ func TestSteerAnswerCodes(t *testing.T) {
 }
 
 // Readers: who read which verdict, bounded, and nothing stamped by
-// /healthz or by an answer that carried no verdict.
+// /healthz or by an answer that carried no verdict. Sequential: it reads a
+// metric.
 func TestSteerReaders(t *testing.T) {
 	for q, want := range map[string]bool{
 		"": false, "dry=0": false, "dry=false": false, "dry=FALSE": false, "dry=False": false,
@@ -697,18 +747,27 @@ func TestSteerReaders(t *testing.T) {
 	}
 }
 
-// A stopped sampler holds: its last verdict ages to 425, never 503.
+// A stopped sampler holds: its last verdict ages to 425 once three intervals
+// old, never 503. Stopping the node beside the stuck tick waits for it at
+// most steerShutdownWait, and that tick, released after Run returned,
+// publishes and saves nothing.
 func TestSteerStoppedSamplerHolds(t *testing.T) {
+	t.Parallel()
 	r := steerNode(t, nil)
 	r.announced("?vip=" + steerVIP)
 	r.ifaddrs.set(ifaddrsBlock)
 	flip := time.Now()
+	staleAfter := r.n.opt.Steering.Config.StaleAfter() // steer's rule, not the sampler's own field
 	for i := 0; ; i++ {
 		g := r.get("?vip=" + steerVIP)
 		if g.code == http.StatusServiceUnavailable {
 			t.Fatalf("a stopped sampler withdrew: %s", g)
 		}
 		if g.code == http.StatusTooEarly && g.ans.Reason == steer.ReasonStale {
+			// The stale answer carries the last tick's time.
+			if age := time.Since(g.ans.At); age < staleAfter-100*time.Millisecond {
+				t.Fatalf("stale %v after the last tick, want three intervals (%v): %s", age, staleAfter, g)
+			}
 			break
 		}
 		if time.Since(flip) > 4500*time.Millisecond {
@@ -727,32 +786,123 @@ func TestSteerStoppedSamplerHolds(t *testing.T) {
 	if !strings.Contains(r.logs.String(), "steering tick skipped") {
 		t.Error("ticks due while one was stuck were not reported as skipped")
 	}
-	r.ifaddrs.set(ifaddrsList)
-	if err := r.stop(); err != nil {
+
+	// Stopping beside the stuck tick: a listing that ignores every ctx, as
+	// SIOCGIFCONF waiting on RTNL does.
+	stateJSON := filepath.Join(r.store.Dir, "state.json")
+	saved, err := os.ReadFile(stateJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := r.n.steer.snap.Load()
+	start := time.Now()
+	if err := r.stopStuck(); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	// An absolute bound: one counted from steerShutdownWait would let the
+	// wait grow unnoticed.
+	took := time.Since(start)
+	if took > 3*time.Second {
+		t.Fatalf("Run returned %v after the cancel beside a stuck tick; shutdown waits for a tick at most %v", took, steerShutdownWait)
+	}
+	t.Logf("Run returned %v after the cancel beside a stuck tick", took)
+	r.ifaddrs.set(ifaddrsList)
+	waitFor(t, "the stuck interface listing to return", func() bool { return r.ifaddrs.returned.Load() == r.ifaddrs.calls.Load() })
+	time.Sleep(500 * time.Millisecond) // the rest of that tick: a probe on a cancelled ctx
+	if r.n.steer.snap.Load() != snap {
+		t.Fatal("the tick released after Run returned published")
+	}
+	if now, err := os.ReadFile(stateJSON); err != nil || !bytes.Equal(now, saved) {
+		t.Fatalf("the tick released after Run returned changed state.json: %q, was %q (%v)", now, saved, err)
+	}
+}
+
+// A published verdict reads as itself until three intervals old, then 425
+// unknown/stale however old it grows: a sampler that stopped on any verdict
+// holds, never sooner than three intervals and never with a 503.
+func TestSteerStaleAgesToHold(t *testing.T) {
+	t.Parallel()
+	brain := httptest.NewServer(&fakeBrain{})
+	defer brain.Close()
+	state, sockets := shortDirs(t)
+	opt := baseOptions(brain, state, sockets, &fakeTester{}, &fakeReloader{})
+	opt.Steering = Steering{Enabled: true, VIPs: []netip.Addr{netip.MustParseAddr(steerVIP)}}
+	n, err := New(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := opt.Steering.Config.StaleAfter() // steer's rule, not the sampler's own field
+	interval := stale / steer.StaleIntervals
+	for _, c := range []struct {
+		state  steer.State
+		reason steer.Reason
+		code   int // while fresh
+	}{
+		{steer.StateAnnounce, steer.ReasonOK, http.StatusOK},
+		{steer.StateWithdraw, steer.ReasonRefused, http.StatusServiceUnavailable},
+		{steer.StateDrain, steer.ReasonDrained, http.StatusServiceUnavailable},
+	} {
+		for _, age := range []time.Duration{interval * 5 / 2, interval * 7 / 2, time.Hour, 30 * 24 * time.Hour} {
+			at := time.Now().Add(-age)
+			n.steer.snap.Store(&steerSnapshot{at: at, targets: map[string]steerTargetSnap{
+				steerVIP: {verdict: steer.Verdict{State: c.state, Reason: c.reason, Since: at, At: at}},
+			}})
+			rec := steerServe(n, "127.0.0.1:40000", "?vip="+steerVIP)
+			var ans SteerAnswer
+			if err := json.Unmarshal(rec.Body.Bytes(), &ans); err != nil {
+				t.Fatalf("%s published %v ago: %d %q: %v", c.state, age, rec.Code, rec.Body, err)
+			}
+			code, reason := c.code, c.reason
+			if age > stale {
+				code, reason = http.StatusTooEarly, steer.ReasonStale
+			}
+			if rec.Code != code || ans.Reason != reason {
+				t.Errorf("%s published %v ago: %d %s, want %d %s", c.state, age, rec.Code, ans.Reason, code, reason)
+			}
+		}
 	}
 }
 
 // A panic in a tick is recovered: the node runs on, and the verdict ages
 // to 425 — for a VIP, and for the node target, whose kernel readings steer
-// runs in goroutines of its own.
+// runs in goroutines of its own; and for a panic outside the kernel
+// readings, in the probe's dial, which only the tick's own goroutines catch.
 func TestSteerPanicIsRecovered(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name  string
 		vips  []netip.Addr
 		v6off bool
 		query string
+		dial  bool // the probe's dial panics, not the interface listing
 	}{
-		{"vip", []netip.Addr{netip.MustParseAddr(steerVIP)}, false, "?vip=" + steerVIP},
-		{"node target", nil, true, ""},
+		{"vip", []netip.Addr{netip.MustParseAddr(steerVIP)}, false, "?vip=" + steerVIP, false},
+		{"node target", nil, true, "", false},
+		{"vip probe dial", []netip.Addr{netip.MustParseAddr(steerVIP)}, false, "?vip=" + steerVIP, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var dialPanics atomic.Bool
 			r := steerNode(t, func(o *Options, _ *steerRig) {
 				o.Steering.VIPs = c.vips
 				o.DisableIPv6 = c.v6off
+				if c.dial {
+					o.Steering.Prober.Control = func(context.Context, string, string, syscall.RawConn) error {
+						if dialPanics.Load() {
+							panic("steering test: an injected panic in the probe's dial")
+						}
+						return nil
+					}
+				}
 			})
 			r.announced(c.query)
-			r.ifaddrs.set(ifaddrsPanic)
+			want := "an injected panic in the interface listing"
+			if c.dial {
+				want = "an injected panic in the probe's dial"
+				dialPanics.Store(true)
+			} else {
+				r.ifaddrs.set(ifaddrsPanic)
+			}
 			flip := time.Now()
 			for {
 				g := r.get(c.query)
@@ -770,8 +920,8 @@ func TestSteerPanicIsRecovered(t *testing.T) {
 			waitFor(t, "the recovered panic in the log", func() bool {
 				return strings.Contains(r.logs.String(), "steering tick panicked")
 			})
-			if !strings.Contains(r.logs.String(), "an injected panic in the interface listing") {
-				t.Error("the log does not carry the panic's own value")
+			if !strings.Contains(r.logs.String(), want) {
+				t.Errorf("the log does not carry the panic's own value, %q", want)
 			}
 			if st := r.n.Status(); st.Steering == nil || !st.Steering.Enabled || !st.Healthy {
 				t.Fatalf("Status after the panics: %+v", st)
@@ -784,10 +934,121 @@ func TestSteerPanicIsRecovered(t *testing.T) {
 				t.Fatalf("the decide socket after the panics: %v", err)
 			}
 			_ = conn.Close()
+			dialPanics.Store(false)
 			if err := r.stop(); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 		})
+	}
+}
+
+// steerPanicOn is a log handler that panics on one message and hands every
+// other record to the handler it wraps — a panic raised from inside the
+// sampler's start, whose last act is to log "steering on".
+type steerPanicOn struct {
+	slog.Handler
+	msg string
+}
+
+func (h steerPanicOn) Handle(ctx context.Context, rec slog.Record) error {
+	if rec.Message == h.msg {
+		panic("steering test: an injected panic at " + h.msg)
+	}
+	return h.Handler.Handle(ctx, rec)
+}
+
+// WithAttrs and WithGroup keep the wrapper: the node logs through
+// Logger.With("component", "edge").
+func (h steerPanicOn) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return steerPanicOn{h.Handler.WithAttrs(attrs), h.msg}
+}
+
+func (h steerPanicOn) WithGroup(name string) slog.Handler {
+	return steerPanicOn{h.Handler.WithGroup(name), h.msg}
+}
+
+// A panic at the sampler's start stops steering, not the node: Run serves
+// on, and every verdict holds (425 starting) until kapkan edge restarts.
+func TestSteerStartPanicIsRecovered(t *testing.T) {
+	t.Parallel()
+	r := steerNode(t, func(o *Options, _ *steerRig) {
+		o.Logger = slog.New(steerPanicOn{o.Logger.Handler(), "steering on"})
+	})
+	waitFor(t, "the recovered start panic in the log", func() bool {
+		return strings.Contains(r.logs.String(), "steering stopped: it panicked")
+	})
+	if !strings.Contains(r.logs.String(), "an injected panic at steering on") {
+		t.Error("the log does not carry the panic's own value")
+	}
+	waitFor(t, "the first install", func() bool { return r.n.Status().Healthy })
+	r.watchSteer("?vip="+steerVIP, 3500*time.Millisecond, func(g steerGot) {
+		if g.code != http.StatusTooEarly || g.ans.Verdict != steer.StateUnknown || g.ans.Reason != steer.ReasonStarting {
+			t.Fatalf("after a panic at the sampler's start: %s, want 425 unknown/starting throughout", g)
+		}
+	})
+	if st := r.n.Status(); st.Steering == nil || !st.Steering.Enabled || !st.Healthy {
+		t.Fatalf("Status after the start panic: %+v", st)
+	}
+	if code, _, body := getHealthz(t, r.addr); code != http.StatusOK {
+		t.Fatalf("/healthz %d after the start panic: %s", code, body)
+	}
+	conn, err := net.Dial("unix", filepath.Join(r.sockets, "edge-decide.sock"))
+	if err != nil {
+		t.Fatalf("the decide socket after the start panic: %v", err)
+	}
+	_ = conn.Close()
+	if err := r.stop(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+// steerLogLines are the captured log's lines that carry msg.
+func steerLogLines(logs *steerLog, msg string) []string {
+	var out []string
+	for line := range strings.Lines(logs.String()) {
+		if strings.Contains(line, `msg="`+msg) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// A tick that panics every time logs its panic, with the stack, once — then
+// at most once a minute, with how many ticks panicked since — as the skip
+// warning is spaced: each stack after the first says nothing new, and one a
+// tick would rotate the node's other logs out of the journal.
+func TestSteerPanicLogIsThrottled(t *testing.T) {
+	t.Parallel()
+	r, s := steerTicks(t, nil)
+	ctx := context.Background()
+	r.ifaddrs.set(ifaddrsPanic)
+	const n = 5
+	for range n {
+		s.tick(ctx)
+	}
+	lines := steerLogLines(r.logs, "steering tick panicked")
+	if len(lines) != 1 || !strings.Contains(lines[0], "an injected panic in the interface listing") ||
+		!strings.Contains(lines[0], "stack=") || !strings.Contains(lines[0], " ticks=1 ") {
+		t.Fatalf("%d panicking ticks logged %d lines, want one with the panic, its stack and ticks=1:\n%s", n, len(lines), strings.Join(lines, ""))
+	}
+
+	// A minute on, the next panicking tick logs again, counting every tick
+	// that panicked since the last line, itself included.
+	s.panicAt = s.panicAt.Add(-steerSkipWarnEvery - time.Second)
+	s.tick(ctx)
+	lines = steerLogLines(r.logs, "steering tick panicked")
+	if want := fmt.Sprintf(" ticks=%d ", n); len(lines) != 2 || !strings.Contains(lines[1], want) || !strings.Contains(lines[1], "stack=") {
+		t.Fatalf("a minute later the panicking tick logged %d lines in all, want 2, the second with%sand its stack:\n%s", len(lines), want, strings.Join(lines, ""))
+	}
+
+	// A healthy tick publishes, and logs no panic.
+	r.ifaddrs.set(ifaddrsList)
+	s.tick(ctx)
+	if s.snap.Load() == nil {
+		t.Fatal("the healthy tick after the panics published nothing")
+	}
+	if lines = steerLogLines(r.logs, "steering tick panicked"); len(lines) != 2 {
+		t.Fatalf("a healthy tick logged a panic: %d lines", len(lines))
 	}
 }
 
@@ -803,7 +1064,7 @@ func (c *steerCountingFS) Open(name string) (fs.File, error) {
 }
 
 // Steering off starts nothing: no goroutine reads the kernel, no
-// file is written, no metric moves.
+// file is written, no metric moves. Sequential: it reads a metric.
 func TestSteerOffStartsNothing(t *testing.T) {
 	counting := &steerCountingFS{inner: fstest.MapFS{"net/tcp": {}, "net/tcp6": {}}}
 	before := probes(steerVIP)
@@ -821,8 +1082,13 @@ func TestSteerOffStartsNothing(t *testing.T) {
 	if r.n.steer != nil {
 		t.Fatal("steering off, and a sampler exists")
 	}
-	if strings.Contains(r.logs.String(), "steering on") {
-		t.Fatal(`steering off logged "steering on"`)
+	// A steering goroutine leaves a line however it ends: "steering on" from
+	// its start, or "steering stopped" from runSteering's recover, had it
+	// started on a nil sampler and panicked — which no other check here sees.
+	// The two messages and not the word: the node logs its directories'
+	// paths, which may hold it.
+	if logs := r.logs.String(); strings.Contains(logs, "steering on") || strings.Contains(logs, "steering stopped") {
+		t.Fatalf("steering off, and a steering goroutine ran:\n%s", logs)
 	}
 	if _, err := os.Lstat(r.store.Dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("steering off made %s: %v", r.store.Dir, err)
@@ -841,6 +1107,7 @@ func TestSteerOffStartsNothing(t *testing.T) {
 // A node without state.json is born drained (new_node), and the drain
 // lifts once every zone's handshake shows its certificate.
 func TestSteerBirthAndFirstEntry(t *testing.T) {
+	t.Parallel()
 	r := steerNode(t, func(o *Options, r *steerRig) {
 		if err := os.RemoveAll(r.store.Dir); err != nil {
 			t.Fatal(err)
@@ -900,6 +1167,7 @@ func TestSteerBirthAndFirstEntry(t *testing.T) {
 // start would be born again; the first tick that can write arms the first
 // entry for real, and it completes as usual.
 func TestSteerBirthRetried(t *testing.T) {
+	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a read-only directory")
 	}
@@ -947,6 +1215,7 @@ func TestSteerBirthRetried(t *testing.T) {
 // reset-holddown: the request file is taken, applied and saved; a
 // malformed one resets nothing; one a crash left taken is applied at start.
 func TestSteerResetHoldDown(t *testing.T) {
+	t.Parallel()
 	r := steerNode(t, func(o *Options, _ *steerRig) {
 		o.Steering.Config.HoldDownMin, o.Steering.Config.HoldDownMax = 8*time.Second, 16*time.Second
 	})
@@ -1053,6 +1322,7 @@ func swapSteeringDir(t *testing.T, dir string) (restore func()) {
 // A tick that cannot read the drain files keeps the drain
 // that stood before it, and lifts nothing; an undrained target stays in.
 func TestSteerKeepsDrainThroughAnUnreadableTick(t *testing.T) {
+	t.Parallel()
 	r := steerNode(t, nil)
 	query := "?vip=" + steerVIP
 	if err := r.store.SetDrain(steerVIP, steer.Drain{Reason: "maintenance", Since: time.Now()}); err != nil {
@@ -1097,9 +1367,70 @@ func TestSteerKeepsDrainThroughAnUnreadableTick(t *testing.T) {
 	}
 }
 
+// The node-wide drain the status shows is kept through a tick that cannot
+// read the drain files, as every target's drain is — the targets it drains
+// and the status never disagree — and only a tick that reads it gone lifts
+// it: with VIPs (a read of its own) and for the node target (the target's).
+func TestSteerKeepsNodeDrainThroughAnUnreadableTick(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		vips  []netip.Addr
+		v6off bool
+	}{
+		{"vip", []netip.Addr{netip.MustParseAddr(steerVIP)}, false},
+		{"node target", nil, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			r, s := steerTicks(t, func(o *Options, _ *steerRig) {
+				o.Steering.VIPs = c.vips
+				o.DisableIPv6 = c.v6off
+			})
+			ctx := context.Background()
+			since := time.Now().Add(-time.Hour)
+			if err := r.store.SetDrain(steer.NodeKey, steer.Drain{Reason: "maintenance", Since: since}); err != nil {
+				t.Fatal(err)
+			}
+			check := func(what string, drained, unread bool) {
+				t.Helper()
+				st := s.status(time.Now())
+				d := st.Drained
+				if drained != (d != nil) || (d != nil && (d.Reason != "maintenance" || !d.Since.Equal(since))) {
+					t.Fatalf("%s: the node-wide drain is %+v, want drained %v (maintenance since %v)", what, d, drained, since)
+				}
+				for _, tg := range st.Targets {
+					if (tg.Verdict == steer.StateDrain) != drained || tg.Inputs == nil || tg.Inputs.Gates.DrainKnown == unread {
+						t.Fatalf("%s: target %s is %s/%s with inputs %+v; want drained %v, the drain files unreadable %v",
+							what, tg.Target, tg.Verdict, tg.Reason, tg.Inputs, drained, unread)
+					}
+				}
+			}
+			s.tick(ctx)
+			check("the node drained", true, false)
+			restore := swapSteeringDir(t, r.store.Dir)
+			for range 2 {
+				s.tick(ctx)
+				check("the node drained, then the drain files unreadable", true, true)
+			}
+			restore()
+			if err := r.store.Undrain(steer.NodeKey); err != nil {
+				t.Fatal(err)
+			}
+			s.tick(ctx)
+			check("undrained", false, false)
+			restore = swapSteeringDir(t, r.store.Dir)
+			s.tick(ctx)
+			check("undrained, then the drain files unreadable", false, true)
+			restore()
+		})
+	}
+}
+
 // A state_dir/steering that is a regular file from the start: the node
 // runs, healthy, and every verdict holds (425) — never 503.
 func TestSteerBrokenStateDirHolds(t *testing.T) {
+	t.Parallel()
 	r := steerNode(t, func(_ *Options, r *steerRig) {
 		if err := os.RemoveAll(r.store.Dir); err != nil {
 			t.Fatal(err)
@@ -1180,6 +1511,7 @@ func sameSteerDir(a, b map[string]steerFile) bool {
 // No route writes (I3, I5): every method but GET is refused on every
 // path, and no GET changes a file.
 func TestSteerStatusAcceptsNoWrite(t *testing.T) {
+	t.Parallel()
 	r := steerNode(t, nil)
 	r.announced("?vip=" + steerVIP)
 	before := steerDirSnapshot(t, r.store.Dir)
@@ -1222,6 +1554,7 @@ func TestSteerStatusAcceptsNoWrite(t *testing.T) {
 // Nothing the brain sends withdraws (I5): an empty document, one the
 // renderer refuses, and one `nginx -t` refuses each at most warn.
 func TestSteerDocumentNeverWithdraws(t *testing.T) {
+	t.Parallel()
 	r := steerNode(t, nil)
 	query := "?vip=" + steerVIP
 	r.announced(query)
@@ -1265,7 +1598,148 @@ func TestSteerDocumentNeverWithdraws(t *testing.T) {
 	stays("a document nginx -t refuses")
 }
 
-// The four metrics.
+// steerSlowTester passes every test; once armed, its next one first takes d
+// (or until ctx ends): `nginx -t` over a node with many zones.
+type steerSlowTester struct {
+	calls atomic.Int64
+	mu    sync.Mutex
+	d     time.Duration
+	began chan struct{}
+}
+
+// arm makes the next test take d; the channel closes when it begins.
+func (s *steerSlowTester) arm(d time.Duration) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.d, s.began = d, make(chan struct{})
+	return s.began
+}
+
+func (s *steerSlowTester) Test(ctx context.Context) error {
+	s.calls.Add(1)
+	s.mu.Lock()
+	d, began := s.d, s.began
+	s.d, s.began = 0, nil
+	s.mu.Unlock()
+	if began == nil {
+		return nil
+	}
+	close(began)
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// The generation gate only holds (I5): while `nginx -t` runs over a new
+// generation, `live` names one not yet tested — on every node at once, since
+// one document reaches them all — and an announced target stays in, warned,
+// through as many closed ticks as it takes hard samples to withdraw.
+func TestSteerGenerationGateNeverWithdraws(t *testing.T) {
+	t.Parallel()
+	slow := &steerSlowTester{}
+	r := steerNode(t, func(o *Options, _ *steerRig) { o.Tester = slow })
+	query := "?vip=" + steerVIP
+	r.announced(query)
+	gen := r.n.Status().Generation
+	began := slow.arm(6 * time.Second)
+	// A new origin renders new bytes, so a new generation is tested; a new
+	// rate alone takes the fast path, and nothing is tested.
+	doc := testDoc(10)
+	doc.Zones[0].Origins = []string{"10.0.0.2:8080"}
+	r.brain.set(doc, `"v2"`)
+	select {
+	case <-began:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the new document's test never began")
+	}
+	closed := map[int64]bool{} // the ticks that read the gate closed
+	r.watchSteer(query, 5*time.Second, func(g steerGot) {
+		if g.code != http.StatusOK || g.ans.Verdict != steer.StateAnnounce {
+			t.Fatalf("while nginx -t runs over a new generation: %s, want announce throughout", g)
+		}
+		if g.ans.Inputs != nil && !g.ans.Inputs.Gates.GenerationLive {
+			if g.ans.Warning != steer.ReasonGenerationNotLive {
+				t.Fatalf("the generation gate is closed, and the warning is %q: %s", g.ans.Warning, g)
+			}
+			closed[g.ans.At.UnixNano()] = true
+		}
+	})
+	// FailAfter (3) closed ticks: were the gate a hard sample, it would have
+	// withdrawn the address.
+	if len(closed) < 3 {
+		t.Fatalf("the generation gate read closed at %d ticks, want at least 3", len(closed))
+	}
+	t.Logf("the generation gate read closed at %d ticks, every answer 200 announce", len(closed))
+	waitFor(t, "the new generation to pass its test", func() bool { return r.n.Status().Generation > gen })
+	r.waitSteer("the gate open again", query, 3*time.Second, func(g steerGot) bool {
+		return g.code == http.StatusOK && g.ans.Inputs != nil && g.ans.Inputs.Gates.GenerationLive
+	})
+	if slow.calls.Load() < 2 {
+		t.Fatalf("nginx -t ran %d times, want the first install's and the new generation's", slow.calls.Load())
+	}
+}
+
+// The terminator's pid is report-only: a master that is gone — its workers
+// may still serve — or one that is frozen takes nothing out, and the report
+// says which.
+func TestSteerTerminatorIsReportOnly(t *testing.T) {
+	t.Parallel()
+	var pidFile string
+	r := steerNode(t, func(o *Options, r *steerRig) {
+		pidFile = filepath.Join(r.state, "nginx.pid")
+		o.Terminator.PIDFile = pidFile
+		o.Steering.Proc.FS = fstest.MapFS{
+			"net/tcp": {}, "net/tcp6": {},
+			// pid 1 listed: the tree shows the whole process table, so a pid
+			// without its stat is gone, not unknown.
+			"1/stat":    {Data: []byte("1 (init) S 0 1 1 0 -1 0 0 0 0 0\n")},
+			"4243/stat": {Data: []byte("4243 (nginx) T 1 4243 4243 0 -1 0 0 0 0 0\n")},
+		}
+		if err := os.WriteFile(pidFile, []byte("4242\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	query := "?vip=" + steerVIP
+	report := func(g steerGot) SteerReport {
+		if g.ans.Inputs == nil {
+			return SteerReport{}
+		}
+		return g.ans.Inputs.Report
+	}
+	r.waitSteer("announce beside a master that is gone", query, 10*time.Second, func(g steerGot) bool {
+		return g.code == http.StatusOK && report(g).Terminator == steer.PIDGone
+	})
+	r.watchSteer(query, 2500*time.Millisecond, func(g steerGot) {
+		if g.code != http.StatusOK || report(g).Terminator != steer.PIDGone {
+			t.Fatalf("the master gone: %s, want 200 announce with terminator gone throughout", g)
+		}
+	})
+
+	// The pid file now names a stopped master.
+	next := pidFile + ".next"
+	if err := os.WriteFile(next, []byte("4243\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(next, pidFile); err != nil {
+		t.Fatal(err)
+	}
+	r.waitSteer("announce beside a frozen master", query, 3*time.Second, func(g steerGot) bool {
+		rep := report(g)
+		return g.code == http.StatusOK && rep.Terminator == steer.PIDAlive && rep.Frozen
+	})
+	r.watchSteer(query, 2500*time.Millisecond, func(g steerGot) {
+		if rep := report(g); g.code != http.StatusOK || rep.Terminator != steer.PIDAlive || !rep.Frozen {
+			t.Fatalf("the master frozen: %s, want 200 announce with terminator alive and frozen throughout", g)
+		}
+	})
+}
+
+// The four metrics. Sequential: it reads them.
 func TestSteerMetrics(t *testing.T) {
 	ok := metrics.EdgeSteerProbeTotal.WithLabelValues(steerVIP, "ok")
 	toAnnounce := metrics.EdgeSteerTransitionsTotal.WithLabelValues(steerVIP, "announce", "ok")
@@ -1299,10 +1773,60 @@ func TestSteerMetrics(t *testing.T) {
 	}
 }
 
+// Every counter series a target can move is there from the sampler's start,
+// at zero: Prometheus takes a series' first sample as its baseline, so one
+// born at 1 reads as no increase, and the first withdrawal after a restart
+// would never show in increase() or rate(). Sequential: it reads metrics.
+func TestSteerCountersStartAtZero(t *testing.T) {
+	const vip = "192.0.2.77" // a target no other test steers
+	steerTicks(t, func(o *Options, _ *steerRig) { o.Steering.VIPs = []netip.Addr{netip.MustParseAddr(vip)} })
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]map[string]float64{}
+	for _, mf := range families {
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				labels[lp.GetName()] = lp.GetValue()
+			}
+			if labels["vip"] != vip {
+				continue
+			}
+			if got[mf.GetName()] == nil {
+				got[mf.GetName()] = map[string]float64{}
+			}
+			switch mf.GetName() {
+			case "kapkan_edge_steer_transitions_total":
+				got[mf.GetName()][labels["to"]+"/"+labels["reason"]] = m.GetCounter().GetValue()
+			case "kapkan_edge_steer_probe_total":
+				got[mf.GetName()][labels["result"]] = m.GetCounter().GetValue()
+			}
+		}
+	}
+	for name, want := range map[string][]string{
+		// The changes a Step makes: into announce, the three ways out, the two
+		// drains, and a drain's lift to unknown.
+		"kapkan_edge_steer_transitions_total": {"announce/ok", "withdraw/refused", "withdraw/not_tls", "withdraw/unbound", "drain/drained", "drain/new_node", "unknown/starting"},
+		"kapkan_edge_steer_probe_total":       {"none", "ok", "refused", "not_tls", "soft", "blind"},
+	} {
+		for _, k := range want {
+			if v, ok := got[name][k]; !ok || v != 0 {
+				t.Errorf("%s{vip=%q, %s} after the start: %v (present %v), want an explicit 0", name, vip, k, v, ok)
+			}
+		}
+		if len(got[name]) != len(want) {
+			t.Errorf("%s{vip=%q} has %d series after the start, want %d: %v", name, vip, len(got[name]), len(want), got[name])
+		}
+	}
+}
+
 // The access log's progress, report-only: unknown on the first tick, which
 // has nothing to compare with; then yes when records arrived since the
 // previous tick, and no when none did.
 func TestSteerLogProgress(t *testing.T) {
+	t.Parallel()
 	var s sampler
 	for i, c := range []struct {
 		count uint64
@@ -1368,8 +1892,10 @@ func (f *steerSlowFile) Read(b []byte) (int, error) {
 func (f *steerSlowFile) Close() error { return nil }
 
 // A full routing table and the first entry: a target whose locality reads a full table until
-// every tick's deadline does not starve the first entry, which runs beside it.
+// every tick's deadline does not starve the first entry, which runs beside it,
+// and leaves every verdict fresh.
 func TestSteerFirstEntryBesideASlowRouteTable(t *testing.T) {
+	t.Parallel()
 	const slow = "192.0.2.20" // not on an interface: fib_trie must answer
 	r := steerNode(t, func(o *Options, r *steerRig) {
 		if err := os.RemoveAll(r.store.Dir); err != nil {
@@ -1378,7 +1904,9 @@ func TestSteerFirstEntryBesideASlowRouteTable(t *testing.T) {
 		o.ACME = ACME{Directory: "http://127.0.0.1:1/never"}
 		selfSignedSet(t, o.StateDir, "example.com")
 		o.Steering.VIPs = []netip.Addr{netip.MustParseAddr(steerVIP), netip.MustParseAddr(slow)}
-		o.Steering.Proc.FS = steerSlowTrie{MapFS: fstest.MapFS{"net/tcp": {}, "net/tcp6": {}}, every: 100 * time.Millisecond}
+		// A short read, so a reading cut at the deadline overruns it by
+		// little: the freshness below is the deadline's, not the read's.
+		o.Steering.Proc.FS = steerSlowTrie{MapFS: fstest.MapFS{"net/tcp": {}, "net/tcp6": {}}, every: 10 * time.Millisecond}
 	})
 	r.wantTLSZones("example.com")
 	newNode := filepath.Join(r.store.Dir, "new_node")
@@ -1416,9 +1944,16 @@ func TestSteerFirstEntryBesideASlowRouteTable(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	r.watchSteer("?vip="+slow, 1200*time.Millisecond, func(g steerGot) {
-		if g.code != http.StatusTooEarly {
-			t.Fatalf("the slow VIP after the lift: %s, want 425", g)
+	// The slow VIP's reading never ends, yet every tick ends at its deadline,
+	// 0.9 of the interval, and publishes before the next is due: for longer
+	// than stale_after, 127.0.0.1 answers 200 at every read, and the slow VIP
+	// 425 that holds, never stale.
+	r.watchSteer("?vip="+steerVIP, 4*time.Second, func(g steerGot) {
+		if g.code != http.StatusOK {
+			t.Fatalf("%s beside a slow route table: %s, want 200 at every read", steerVIP, g)
+		}
+		if g := r.get("?vip=" + slow); g.code != http.StatusTooEarly || g.ans.Reason == steer.ReasonStale {
+			t.Fatalf("the slow VIP after the lift: %s, want 425, never stale", g)
 		}
 	})
 }
@@ -1426,6 +1961,7 @@ func TestSteerFirstEntryBesideASlowRouteTable(t *testing.T) {
 // Free text on the wire is bounded: a hand-written drain reason of
 // 200 KiB and a probe error of 10 KiB stay out of /steer and /healthz.
 func TestSteerWireIsBounded(t *testing.T) {
+	t.Parallel()
 	r := steerNode(t, func(o *Options, r *steerRig) {
 		raw, err := json.Marshal(steer.Drain{Reason: strings.Repeat("r", 200<<10), Since: time.Now()})
 		if err != nil {
@@ -1467,6 +2003,102 @@ func TestSteerWireIsBounded(t *testing.T) {
 		t.Fatal("/healthz shows no node-wide drain")
 	}
 	cut("/healthz's node drain reason", st.Steering.Drained.Reason, 256)
+}
+
+// The wire's other bounds: first_entry.missing keeps the first 10 names and
+// counts them all, and the report's three errors are cut to 512 bytes.
+func TestSteerWireBounds(t *testing.T) {
+	var names []string
+	for i := range 25 {
+		names = append(names, fmt.Sprintf("z%02d.example", i))
+	}
+	fe := steerWireFirstEntry(steer.TriYes, &steer.FirstEntry{Zones: 30, Ready: 5, Missing: names})
+	if fe.Pending != steer.TriYes || fe.Zones != 30 || fe.Ready != 5 || fe.MissingCount != 25 || !slices.Equal(fe.Missing, names[:steerMaxMissing]) {
+		t.Errorf("first entry: %+v; want the first %d names of 25, and 25 counted", fe, steerMaxMissing)
+	}
+	long := strings.Repeat("e", 10<<10)
+	w := steerWireInputs(steer.Inputs{
+		Triggers: steer.Triggers{Drained: true},
+		Drain:    steer.Drain{Reason: strings.Repeat("r", 200<<10)},
+		Report:   steer.Report{ProbeErr: long, ProcErr: long, DrainErr: long},
+	})
+	if w.Drain == nil {
+		t.Fatal("a drained target's inputs carry no drain")
+	}
+	for _, c := range []struct {
+		what, s string
+		n       int
+	}{
+		{"probe_error", w.Report.ProbeError, steerErrMax},
+		{"proc_error", w.Report.ProcError, steerErrMax},
+		{"drain_error", w.Report.DrainError, steerErrMax},
+		{"the drain's reason", w.Drain.Reason, steerReasonMax},
+	} {
+		if !strings.HasSuffix(c.s, "…") || len(strings.TrimSuffix(c.s, "…")) != c.n {
+			t.Errorf("%s is %d bytes; want %d bytes, then …", c.what, len(c.s), c.n)
+		}
+	}
+}
+
+// A drain file's time is its writer's free text, as its reason is: a since
+// JSON cannot carry — its UTC year outside 0..9999 — is left off the wire, and
+// the drain answers 503 all the same; the file's existence is the drain.
+func TestSteerDrainSinceOutOfRange(t *testing.T) {
+	t.Parallel()
+	at := func(s string) time.Time {
+		v, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	for _, c := range []struct {
+		since string
+		kept  bool
+	}{
+		{"0000-01-01T00:00:00Z", true},
+		{"9999-12-31T23:59:59Z", true},
+		{"2026-11-13T08:00:00+03:00", true},
+		{"0000-01-01T00:00:00+00:01", false}, // the year -1 in UTC
+		{"9999-12-31T23:30:00-05:00", false}, // the year 10000 in UTC
+	} {
+		since := at(c.since)
+		w := steerWireDrain(steer.Drain{Reason: "by hand", Since: since})
+		if w.Reason != "by hand" || c.kept != !w.Since.IsZero() || (c.kept && (!w.Since.Equal(since) || w.Since.Location() != time.UTC)) {
+			t.Errorf("a drain since %s on the wire: %+v; kept %v, want %v, in UTC", c.since, w, !w.Since.IsZero(), c.kept)
+		}
+		if _, err := json.Marshal(w); err != nil {
+			t.Errorf("a drain since %s does not encode: %v", c.since, err)
+		}
+	}
+
+	// A hand-written node drain dated the year -1 in UTC, through a tick, /steer
+	// and /healthz.
+	r, s := steerTicks(t, func(_ *Options, r *steerRig) {
+		raw := []byte(`{"reason":"by hand","since":"0000-01-01T00:00:00+00:01"}`)
+		if err := os.WriteFile(filepath.Join(r.store.Dir, "drain"), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	s.tick(context.Background())
+	rec := steerServe(r.n, "127.0.0.1:40000", "?vip="+steerVIP+"&consumer=bird")
+	var ans SteerAnswer
+	if err := json.Unmarshal(rec.Body.Bytes(), &ans); err != nil {
+		t.Fatalf("/steer %d %q: %v", rec.Code, rec.Body, err)
+	}
+	if rec.Code != http.StatusServiceUnavailable || ans.Verdict != steer.StateDrain || ans.Inputs == nil || ans.Inputs.Drain == nil ||
+		ans.Inputs.Drain.Reason != "by hand" || !ans.Inputs.Drain.Since.IsZero() {
+		t.Fatalf("/steer beside a drain dated the year -1: %d %s, want 503 drain by hand with no since", rec.Code, rec.Body)
+	}
+	hz := httptest.NewRecorder()
+	r.n.statusHandler().ServeHTTP(hz, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var st Status
+	if err := json.Unmarshal(hz.Body.Bytes(), &st); err != nil {
+		t.Fatalf("/healthz %d %q: %v", hz.Code, hz.Body, err)
+	}
+	if st.Steering == nil || st.Steering.Drained == nil || st.Steering.Drained.Reason != "by hand" || !st.Steering.Drained.Since.IsZero() {
+		t.Fatalf("/healthz beside a drain dated the year -1: %s, want the node drain by hand with no since", hz.Body)
+	}
 }
 
 // steerText cuts at a rune boundary.

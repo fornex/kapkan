@@ -117,9 +117,14 @@ type SteerReader struct {
 }
 
 // SteeringStatus is /healthz's steering object. Reading it stamps nothing.
-// E7.4 copies it into the report field for field (targets → vips, target →
-// address, hold_down.level → flaps). Every list in it is bounded (64 targets,
-// 8 readers each, 10 missing zones) and every string too.
+// Every list in it is bounded (64 targets, 8 readers each, 10 missing zones)
+// and every string too, yet the whole object is /healthz's, never a
+// report's: at those bounds, every target with its inputs and readers, it is
+// several times the 64 KiB the brain accepts in a report. E7.4 copies a
+// subset of it, field for field: enabled, drained, targets → vips (target →
+// address, verdict, reason, since, rejoin_at, hold_down.level → flaps),
+// consumed_at, and consumer's name and dry. Inputs, readers, first_entry,
+// at and interval_seconds stay on /healthz.
 type SteeringStatus struct {
 	Enabled         bool             `json:"enabled"`
 	IntervalSeconds int              `json:"interval_seconds,omitempty"`
