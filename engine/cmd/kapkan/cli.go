@@ -54,12 +54,22 @@ const (
 	exitUsage = 2
 	// exitNotEnforcing: `dataplane status` found a data plane that is not
 	// filtering, with nothing broken about it — never started, stopped, or
-	// detached. A state, not a fault.
+	// detached. A state, not a fault. With `kapkan edge -s … -wait`, the new
+	// verdict of at least one waited target was read only by consumers in dry
+	// mode, so nothing enforces it there.
 	exitNotEnforcing = 10
 	// exitNeedsAttention: `dataplane status` found something a human has to fix
 	// before the data plane can work: no bpffs, a torn pin set, a schema skew.
 	// The printed reason always names the fix.
 	exitNeedsAttention = 11
+	// exitSteerWithdraw, exitSteerDrain: `kapkan edge -steer` answers withdraw
+	// or drain (exitOK is announce). EVERY other code holds, 1, 2 (usage, or
+	// a Go panic) and exitSteerHold included.
+	exitSteerWithdraw = 100
+	exitSteerDrain    = 101
+	// exitSteerHold: -steer's own definite "hold": steering is off, the
+	// address is not steered, or the daemon disowns it (404/400).
+	exitSteerHold = 102
 )
 
 // cliFlags is the parsed global command line: one field per flag kapkan has

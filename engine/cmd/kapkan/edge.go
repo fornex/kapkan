@@ -22,8 +22,10 @@ import (
 
 // runEdgeCommand parses `kapkan edge` flags and runs the edge role until a
 // signal. As with scrub, the global flags are deliberately not inherited: a
-// node accidentally reading kapkan.yaml must be a loud usage error.
-func runEdgeCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
+// node accidentally reading kapkan.yaml must be a loud usage error. -check,
+// -steer and -s do one thing each and exit; -steer alone writes to out (its
+// one verdict line), everything else to errOut.
+func runEdgeCommand(args []string, f *cliFlags, out, errOut io.Writer) int {
 	for _, name := range []string{"config", "log-format", "log-level"} {
 		if f.wasSet(name) {
 			lineWriter{errOut}.printf(
@@ -38,8 +40,16 @@ func runEdgeCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
 	logFormat := fs.String("log-format", "json", "log format: json|text")
 	logLevel := fs.String("log-level", "info", "log level: debug|info|warn|error")
 	checkOnly := fs.Bool("check", false, "validate the configuration and what it names on this box, then exit")
+	steerOnly := fs.Bool("steer", false, "print this node's steering verdict and exit: 0 announce, 100 withdraw, 101 drain; any other code means hold")
+	vip := fs.String("vip", "", "the steered address -steer and -s act on (one of steering.vips); omit for the node itself")
+	signalCmd := fs.String("s", "", "change this node's steering and exit: drain|undrain|reset-holddown")
+	reason := fs.String("reason", "", "with -s drain: why, recorded in the drain file")
+	wait := fs.Bool("wait", false, "with -s drain|undrain: wait until a consumer has read the new verdict (for undrain: announce)")
+	force := fs.Bool("force", false, "with -s undrain: also lift the new-node drain (the first node of a new address)")
+	consumer := fs.String("consumer", "", "the consumer's name: -steer reads under it (default kapkan-edge-steer); -wait waits for its read (default: any named consumer)")
 	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
+		// For -steer, 0 is announce: help beside it must not read as one.
+		if errors.Is(err, flag.ErrHelp) && !namesSteer(args) {
 			return exitOK
 		}
 		return exitUsage
@@ -48,9 +58,29 @@ func runEdgeCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
 		lineWriter{errOut}.printf("kapkan edge: unexpected argument %q\n", fs.Arg(0))
 		return exitUsage
 	}
+	sf := steerFlags{check: *checkOnly, steer: *steerOnly, signal: *signalCmd, vip: *vip, reason: *reason, wait: *wait, force: *force, consumer: *consumer}
+	fs.Visit(func(fl *flag.Flag) {
+		switch fl.Name {
+		case "s":
+			sf.signalSet = true
+		case "vip":
+			sf.vipSet = true
+		case "reason":
+			sf.reasonSet = true
+		case "consumer":
+			sf.consumerSet = true
+		}
+	})
+	if msg := sf.usageError(); msg != "" {
+		lineWriter{errOut}.printf("kapkan edge: %s\n", msg)
+		return exitUsage
+	}
 
 	ec, err := config.LoadEdgeNode(*cfgPath)
 	if err != nil {
+		if sf.steer {
+			return steerBrokenConfig(*cfgPath, err, sf, out, errOut)
+		}
 		lineWriter{errOut}.printf("kapkan edge: %v\n", err)
 		return 1
 	}
@@ -71,6 +101,14 @@ func runEdgeCommand(args []string, f *cliFlags, _, errOut io.Writer) int {
 		lineWriter{errOut}.printf("kapkan edge: %s is valid (node %s, brain %s, dry_run %v, state_dir %s, sockets_dir %s, terminator %s)\n",
 			*cfgPath, ec.Controller.Name, ec.Controller.URL, ec.DryRunResolved(), ec.StateDir, ec.SocketsDir, ec.Terminator.Binary)
 		return exitOK
+	}
+	// Before the token: a speaker's healthcheck and an operator's drain run
+	// without the agent's secret.
+	if sf.steer {
+		return runSteer(ec, sf, out, errOut)
+	}
+	if sf.signalSet {
+		return runSteerSignal(ec, sf, errOut)
 	}
 	token := os.Getenv(ec.Controller.TokenEnv)
 	if token == "" {
@@ -136,7 +174,8 @@ func edgePreflight(ec *config.EdgeNodeConfig) (problems, warnings, notes []strin
 			warnings = append(warnings, fmt.Sprintf("terminator.command %q is not on PATH here", ec.Terminator.Command[0]))
 		}
 	}
-	return problems, warnings, notes
+	sp, sw, sn := steeringPreflight(ec)
+	return append(problems, sp...), append(warnings, sw...), append(notes, sn...)
 }
 
 func yesNo(b bool) string {
@@ -177,6 +216,7 @@ func edgeNodeOptions(ec *config.EdgeNodeConfig, token string, eab map[string]con
 		OmitCatchAll:   ec.OmitCatchAll,
 		QUIC:           node.QUIC{H3Off: ec.QUIC.H3 == config.EdgeH3Off, Retry: ec.QUIC.Retry, OmitAnchor: ec.QUIC.OmitAnchor},
 		DisableIPv6:    ec.DisableIPv6,
+		Steering:       node.Steering{Enabled: ec.Steering.Enabled, Config: ec.Steering.SteerConfig(), VIPs: ec.Steering.VIPAddrs},
 		Logger:         log,
 	}
 }

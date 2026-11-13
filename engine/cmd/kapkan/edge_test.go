@@ -7,13 +7,16 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kapkan-io/kapkan/internal/config"
+	"github.com/kapkan-io/kapkan/internal/edge/steer"
 )
 
 func runEdgeCLI(t *testing.T, args ...string) (int, string) {
@@ -25,6 +28,19 @@ func runEdgeCLI(t *testing.T, args ...string) (int, string) {
 	var out, errOut bytes.Buffer
 	code := runSubcommand(f, &out, &errOut)
 	return code, errOut.String()
+}
+
+// runEdgeCLIOut is runEdgeCLI with stdout kept: `kapkan edge -steer` prints
+// its one verdict line there, and everything else goes to stderr.
+func runEdgeCLIOut(t *testing.T, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	f, err := parseFlags("kapkan", append([]string{"edge"}, args...), flag.ContinueOnError)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	var out, errOut bytes.Buffer
+	code = runSubcommand(f, &out, &errOut)
+	return code, out.String(), errOut.String()
 }
 
 const edgeTestYAML = `
@@ -309,5 +325,36 @@ quic:
 	}
 	if opt := edgeNodeOptions(def, "tok", nil, slog.New(slog.DiscardHandler)); opt.QUIC.H3Off {
 		t.Fatalf("the default quic.h3 (%q) switched HTTP/3 off: %+v", def.QUIC.H3, opt.QUIC)
+	}
+
+	// Steering maps one to one: the switch, the damping exactly as
+	// SteerConfig gives it, and the VIPs as validate parsed them (unmapped,
+	// in file order). Absent, it is off with steer's defaults and no VIP.
+	if opt := edgeNodeOptions(def, "tok", nil, slog.New(slog.DiscardHandler)); opt.Steering.Enabled || opt.Steering.Config != steer.DefaultConfig() || opt.Steering.VIPs != nil {
+		t.Fatalf("an absent steering block: %+v", opt.Steering)
+	}
+	sc, err := config.ParseEdgeNode([]byte(edgeTestYAML + `status_listen: 127.0.0.1:9102
+steering:
+  enabled: true
+  interval_seconds: 2
+  fail_after: 2
+  fail_window: 4
+  recover_after: 5
+  hold_down:
+    min_seconds: 3
+    max_seconds: 120
+  vips: ["::ffff:192.0.2.10", "2001:db8::10"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opt = edgeNodeOptions(sc, "tok", nil, slog.New(slog.DiscardHandler))
+	want := steer.Config{Interval: 2 * time.Second, FailAfter: 2, FailWindow: 4, RecoverAfter: 5, HoldDownMin: 3 * time.Second, HoldDownMax: 120 * time.Second, LevelReset: steer.DefaultLevelReset}
+	if !opt.Steering.Enabled || opt.Steering.Config != sc.Steering.SteerConfig() || opt.Steering.Config != want {
+		t.Fatalf("steering: %+v, want enabled with %+v", opt.Steering, want)
+	}
+	vips := []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("2001:db8::10")}
+	if !slices.Equal(opt.Steering.VIPs, vips) || !slices.Equal(opt.Steering.VIPs, sc.Steering.VIPAddrs) {
+		t.Fatalf("steering.vips: %v, want %v", opt.Steering.VIPs, vips)
 	}
 }
