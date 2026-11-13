@@ -41,6 +41,12 @@
 // a ticker of its own: neither the report's cadence nor a brain that does
 // not answer delays it.
 //
+// STEERING (E7.2, steering.go), when edge.yaml turns it on, is the node's
+// testimony about itself: a damped verdict per steered address, from this
+// box's kernel and a TLS probe of its own :443, served to readers on this box
+// as GET /steer. It never ends Run, and nothing the brain sends takes an
+// address out.
+//
 // DRY-RUN is the node's default, as for every remote role: decisions are
 // counted and marked, none enforced, until edge.yaml says otherwise.
 package node
@@ -60,6 +66,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -133,8 +140,10 @@ type Options struct {
 	OmitCatchAll bool
 	DisableIPv6  bool
 	// QUIC is the node's HTTP/3 switch (edge.yaml quic.*).
-	QUIC   QUIC
-	Logger *slog.Logger
+	QUIC QUIC
+	// Steering is the node's testimony (E7.2); the zero value is off.
+	Steering Steering
+	Logger   *slog.Logger
 	// HTTPClient talks to the brain (polls, reports, ACME coordination); nil
 	// means a default client. Redirects are never followed on any of them —
 	// a redirect would re-send the bearer wherever Location points. Tests
@@ -209,6 +218,13 @@ type Node struct {
 	// wakeFn asks the ACME manager for a pass; nil when issuance is off. A
 	// field so tests can observe WHEN the node wakes it.
 	wakeFn func()
+
+	// steer is the steering sampler (E7.2, steering.go); nil when steering is
+	// off, and then nothing of steering exists.
+	steer *sampler
+	// logRecords counts the access-log records received: steering's report
+	// tells a loaded node (the log moves) from a silent one by it.
+	logRecords atomic.Uint64
 
 	mu           sync.Mutex
 	poller       *poll.Poller
@@ -297,13 +313,22 @@ func New(opt Options) (*Node, error) {
 	n.files = nodeFiles{
 		docPath:       filepath.Join(opt.StateDir, "zones.json"),
 		etagPath:      filepath.Join(opt.StateDir, "zones.etag"),
-		confRoot:      filepath.Join(opt.StateDir, "conf"),
+		confRoot:      ConfRoot(opt.StateDir),
 		emptyRoot:     filepath.Join(opt.StateDir, "empty"),
 		decideSock:    filepath.Join(opt.SocketsDir, "edge-decide.sock"),
 		challengeSock: filepath.Join(opt.SocketsDir, "edge-challenge.sock"),
 		logSock:       filepath.Join(opt.SocketsDir, "edge-log.sock"),
 		clearanceSock: filepath.Join(opt.SocketsDir, "edge-clearance.sock"),
 		quicHostKey:   filepath.Join(opt.StateDir, "tls", "quic_host.key"),
+	}
+	// Steering's checks come before anything is created on disk; off, nothing
+	// of it exists (n.steer stays nil).
+	if opt.Steering.Enabled {
+		s, err := newSampler(n, opt)
+		if err != nil {
+			return nil, err
+		}
+		n.steer = s
 	}
 	for _, d := range []string{opt.StateDir, opt.SocketsDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -411,7 +436,10 @@ func (n *Node) Run(ctx context.Context) error {
 	spawn("decision service", (&decide.Server{Service: n.svc, Path: n.files.decideSock, SocketGroup: n.opt.SocketGroup, Logger: n.opt.Logger}).ListenAndServe)
 	spawn("challenge answerer", (&acme.ChallengeServer{Table: n.challenges, Path: n.files.challengeSock, SocketGroup: n.opt.SocketGroup, Logger: n.opt.Logger}).ListenAndServe)
 	spawn("clearance page", n.serveClearance)
-	spawn("access-log listener", (&rollup.Listener{Path: n.files.logSock, SocketGroup: n.opt.SocketGroup, Handle: n.agg.Observe, Logger: n.opt.Logger}).Run)
+	spawn("access-log listener", (&rollup.Listener{Path: n.files.logSock, SocketGroup: n.opt.SocketGroup, Handle: func(r rollup.Record) {
+		n.logRecords.Add(1) // steering's report-only log progress
+		n.agg.Observe(r)
+	}, Logger: n.opt.Logger}).Run)
 	spawn("window ticker", func(ctx context.Context) error {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
@@ -535,6 +563,11 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 			return err
 		})
+	}
+	// Steering after start-from-disk, so its first tick sees the document the
+	// node serves; it never ends Run (steering.go).
+	if n.steer != nil {
+		spawn("steering", n.runSteering)
 	}
 	if n.opt.StatusListen != "" {
 		spawn("status listener", n.serveStatus)
@@ -1043,10 +1076,22 @@ type Status struct {
 	TerminatorAlive *bool `json:"terminator_alive,omitempty"`
 	// H3 is the node's HTTP/3 readiness — the same object the report carries.
 	H3 *api.EdgeReportH3 `json:"h3,omitempty"`
+	// Steering is the steering state, read without n.mu; {"enabled":false}
+	// when steering is off.
+	Steering *SteeringStatus `json:"steering,omitempty"`
 }
 
-// Status snapshots the node.
+// Status snapshots the node. Steering is read after n.mu is released: it
+// comes from the sampler's own snapshot, never from the hot mutex.
 func (n *Node) Status() Status {
+	st := n.statusLocked()
+	steering := n.SteeringStatus()
+	st.Steering = &steering
+	return st
+}
+
+// statusLocked is Status without steering, under n.mu.
+func (n *Node) statusLocked() Status {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	st := Status{
@@ -1111,7 +1156,9 @@ func (n *Node) StatusAddr() string {
 }
 
 // statusHandler serves /healthz (200 when Status().Healthy, 503 otherwise,
-// the status as JSON either way) and /metrics.
+// the status as JSON either way), /metrics and /steer (steering.go). Every
+// route is GET (HEAD served as GET); the mux answers 405 to any other method,
+// so nothing here writes.
 func (n *Node) statusHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -1123,6 +1170,7 @@ func (n *Node) statusHandler() http.Handler {
 		_ = json.NewEncoder(w).Encode(st)
 	})
 	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.HandleFunc("GET /steer", n.serveSteer)
 	return mux
 }
 
