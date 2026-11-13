@@ -12,15 +12,19 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/kapkan-io/kapkan/internal/edge/edgedoc"
+	"github.com/kapkan-io/kapkan/internal/edge/steer"
 )
 
 // Default locations of the edge role's own directories — its own, not the
@@ -72,6 +76,9 @@ type EdgeNodeConfig struct {
 	DisableIPv6  bool `yaml:"disable_ipv6"`
 	// QUIC is the node's HTTP/3 switch (edge-spec §8, E5).
 	QUIC EdgeQUIC `yaml:"quic"`
+	// Steering is the node's testimony about itself: should this box carry
+	// each address in vips (edge-spec §8, E7.2)? Off unless enabled.
+	Steering EdgeSteering `yaml:"steering"`
 }
 
 // EdgeQUIC is the node-level HTTP/3 configuration. Whether a ZONE speaks
@@ -104,6 +111,150 @@ const (
 	EdgeH3Auto = "auto"
 	EdgeH3Off  = "off"
 )
+
+// EdgeSteering is edge.yaml's steering block. A key left out (0) takes
+// internal/edge/steer's default. The damping keys map one to one onto
+// steer.Config, whose comments give each default and bound.
+type EdgeSteering struct {
+	Enabled         bool         `yaml:"enabled"`
+	IntervalSeconds int          `yaml:"interval_seconds"`
+	FailAfter       int          `yaml:"fail_after"`
+	FailWindow      int          `yaml:"fail_window"`
+	RecoverAfter    int          `yaml:"recover_after"`
+	HoldDown        EdgeHoldDown `yaml:"hold_down"`
+	// VIPs are the addresses — never prefixes — the operator's speaker
+	// announces from this node; empty means one verdict for the node itself.
+	VIPs []string `yaml:"vips"`
+	// VIPAddrs is VIPs as validate parsed them: unmapped, in file order.
+	VIPAddrs []netip.Addr `yaml:"-"`
+}
+
+// EdgeHoldDown is steering.hold_down.
+type EdgeHoldDown struct {
+	MinSeconds int `yaml:"min_seconds"`
+	MaxSeconds int `yaml:"max_seconds"`
+}
+
+// MaxSteeringVIPs bounds steering.vips: each is a probe per tick and a
+// metric series.
+const MaxSteeringVIPs = 64
+
+// SteerConfig is the block as the automaton takes it: steer.DefaultConfig()
+// with every key the file sets (> 0) in place of its default, so every field
+// is explicit (LevelReset stays steer's default).
+func (s EdgeSteering) SteerConfig() steer.Config {
+	c := steer.DefaultConfig()
+	if s.IntervalSeconds > 0 {
+		c.Interval = steerSeconds(s.IntervalSeconds)
+	}
+	if s.FailAfter > 0 {
+		c.FailAfter = s.FailAfter
+	}
+	if s.FailWindow > 0 {
+		c.FailWindow = s.FailWindow
+	}
+	if s.RecoverAfter > 0 {
+		c.RecoverAfter = s.RecoverAfter
+	}
+	if s.HoldDown.MinSeconds > 0 {
+		c.HoldDownMin = steerSeconds(s.HoldDown.MinSeconds)
+	}
+	if s.HoldDown.MaxSeconds > 0 {
+		c.HoldDownMax = steerSeconds(s.HoldDown.MaxSeconds)
+	}
+	return c
+}
+
+// maxSteerSeconds bounds steering's *_seconds keys before they become
+// durations. n×time.Second overflows int64 near 9.2e9 seconds and wraps to a
+// negative, which steer reads as "use the default": a key that huge would
+// pass for an absent one. A day is far past every bound steer enforces.
+const maxSteerSeconds = 86400
+
+// steerSeconds is n seconds, saturating where the product would wrap.
+// validate refuses anything above maxSteerSeconds first; this keeps a caller
+// that skips validate from turning a huge key into the default.
+func steerSeconds(n int) time.Duration {
+	if int64(n) > math.MaxInt64/int64(time.Second) {
+		return math.MaxInt64
+	}
+	return time.Duration(n) * time.Second
+}
+
+// validateSteering checks the steering block whether or not it is enabled,
+// so a block staged with enabled: false is already valid and turning it on
+// changes nothing else. Only the last two rules bind an enabled block alone,
+// so a node that sets omit_catch_all with steering off stays valid. It fills
+// VIPAddrs. The first error returns.
+func (e *EdgeNodeConfig) validateSteering() error {
+	s := &e.Steering
+	if len(s.VIPs) > MaxSteeringVIPs {
+		return fmt.Errorf("steering.vips lists %d addresses; at most %d", len(s.VIPs), MaxSteeringVIPs)
+	}
+	s.VIPAddrs = nil
+	// seen maps a target key to the spelling that first named it: two
+	// spellings of one address are one target, with one drain file and one
+	// verdict.
+	seen := make(map[string]string, len(s.VIPs))
+	for i, raw := range s.VIPs {
+		a, err := netip.ParseAddr(raw)
+		if err != nil {
+			return fmt.Errorf("steering.vips[%d] %q is not an address (a VIP is one address, never a prefix)", i, raw)
+		}
+		if a.Zone() != "" {
+			return fmt.Errorf("steering.vips[%d] %q carries a zone; a VIP is a global address", i, raw)
+		}
+		a = a.Unmap()
+		if !a.IsGlobalUnicast() {
+			return fmt.Errorf("steering.vips[%d] %s is not a unicast address this box can carry (loopback, unspecified, multicast, link-local and broadcast are refused)", i, a)
+		}
+		// The key is the one the node and the Store use, so "listed twice"
+		// here is exactly "one target" there.
+		key := steer.VIPTarget(a).Key
+		if first, dup := seen[key]; dup {
+			return fmt.Errorf("steering.vips[%d] %s is listed twice (as %q and %q)", i, key, first, raw)
+		}
+		seen[key] = raw
+		if a.Is6() && e.DisableIPv6 {
+			return fmt.Errorf("steering.vips[%d] %s is IPv6 and disable_ipv6 is true: the node renders no [::]:443, so nothing could answer its probe", i, a)
+		}
+		s.VIPAddrs = append(s.VIPAddrs, a)
+	}
+	keys := []struct {
+		name    string
+		v       int
+		seconds bool
+	}{
+		{"interval_seconds", s.IntervalSeconds, true},
+		{"fail_after", s.FailAfter, false},
+		{"fail_window", s.FailWindow, false},
+		{"recover_after", s.RecoverAfter, false},
+		{"hold_down.min_seconds", s.HoldDown.MinSeconds, true},
+		{"hold_down.max_seconds", s.HoldDown.MaxSeconds, true},
+	}
+	// steer reads a negative as its default, so Validate would pass one; and
+	// a huge count of seconds wraps to a negative on its way to a duration.
+	for _, k := range keys {
+		if k.v < 0 {
+			return fmt.Errorf("steering.%s must not be negative (0 means the default), got %d", k.name, k.v)
+		}
+	}
+	for _, k := range keys {
+		if k.seconds && k.v > maxSteerSeconds {
+			return fmt.Errorf("steering.%s %d is out of range", k.name, k.v)
+		}
+	}
+	if err := s.SteerConfig().Validate(); err != nil {
+		return fmt.Errorf("steering: %w", err)
+	}
+	if s.Enabled && e.StatusListen == "" {
+		return errors.New("steering.enabled needs status_listen: GET /steer is served there (keep it on loopback)")
+	}
+	if s.Enabled && e.OmitCatchAll {
+		return errors.New("steering.enabled refuses omit_catch_all: true in this release: without kapkan's catch-all, a document that leaves the node no zone with a certificate leaves :443 refusing on every node, and the document would withdraw the fleet")
+	}
+	return nil
+}
 
 // EdgeTerminator names the terminator and how to test and reload it.
 type EdgeTerminator struct {
@@ -309,7 +460,7 @@ func (e *EdgeNodeConfig) validate() error {
 	if e.QUIC.OmitAnchor && !e.OmitCatchAll {
 		return errors.New("quic.omit_anchor only applies with omit_catch_all: true (kapkan's catch-all carries the QUIC listener otherwise)")
 	}
-	return nil
+	return e.validateSteering()
 }
 
 // validate checks the controller block; peer names the brain-side list the

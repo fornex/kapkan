@@ -93,6 +93,37 @@ omit_catch_all: false
 # Hosts without an IPv6 stack (binding [::] fails at start, not at -t).
 disable_ipv6: false
 
+# Self-steering: this node's own, damped verdict on whether it should carry
+# each address below, answered to readers on this box on status_listen
+# (GET /steer?vip=) and by `kapkan edge -steer`; your BGP speaker, on this
+# box too, announces or withdraws. Kapkan never speaks BGP and never names a
+# prefix. Only this box takes an address out: nothing listening on :443, a
+# non-TLS answer there, the address gone from its kernel, or a drain — yours
+# (`kapkan edge -s drain`), or a new node's own: a node without
+# state_dir/steering/state.json starts drained until every zone answers with
+# its certificate. Anything else, the brain included, at most delays a join.
+# Off by default; needs status_listen and refuses omit_catch_all.
+steering:
+  enabled: false
+  # Seconds between samples (1..10).
+  interval_seconds: 1
+  # Withdraw on fail_after hard samples (refused, not TLS, address gone)
+  # among the last fail_window decisive ones.
+  fail_after: 3
+  fail_window: 5
+  # Announce after this many TLS answers in a row (3..120).
+  recover_after: 10
+  # After a withdrawal from announce, stay out min_seconds, doubling per
+  # flap up to max_seconds (at most 600).
+  hold_down:
+    min_seconds: 10
+    max_seconds: 60
+  # The addresses (never prefixes) your speaker announces from this node;
+  # empty means one verdict for the node itself.
+  vips:
+  #  - 192.0.2.10
+  #  - 2001:db8::10
+
 # HTTP/3 on this node. Whether a ZONE speaks HTTP/3 is the zones file's
 # tls.h3; this says whether this box may render it at all.
 quic:
