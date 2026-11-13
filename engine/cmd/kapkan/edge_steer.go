@@ -11,7 +11,9 @@ package main
 // usage error, or a Go panic). So nothing on these paths recovers a panic:
 // an unrecovered panic exits 2, which holds, and that is exactly right. A
 // recover that turned one into any other code could announce or withdraw an
-// address on a bug. TestEdgeSteerPanicExitsTwo pins it through main().
+// address on a bug. TestEdgeSteerPanicExitsTwo pins the exit code through
+// main(), and TestEdgeNoRecoverInCmdKapkan pins that no file of this package
+// recovers.
 //
 // -s writes the operator's drain files itself (steer.Store), so a drain
 // needs no daemon; reset-holddown leaves a request file the daemon takes on
@@ -32,9 +34,11 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -198,20 +202,27 @@ func steerLabel(vip string) string {
 }
 
 // steerDaemonAddr is where this box reaches its own status listener: a
-// wildcard listen address is dialled on loopback, anything else as written
-// (it is this box's own address, which the node's /steer answers too).
+// wildcard listen address is dialled on 127.0.0.1, anything else as written
+// (it is this box's own address, which the node's /steer answers too). Every
+// wildcard spelling, "[::]" included, is one socket in Go's net.Listen —
+// dual-stack, or IPv4 alone on a host without IPv6 — so 127.0.0.1 reaches it
+// on every host, while ::1 is gone wherever IPv6 is turned off.
 func steerDaemonAddr(statusListen string) (string, error) {
 	host, port, err := net.SplitHostPort(statusListen)
 	if err != nil {
 		return "", fmt.Errorf("status_listen %q is not host:port: %w", statusListen, err)
 	}
-	switch host {
-	case "", "0.0.0.0":
+	if a, err := netip.ParseAddr(host); host == "" || (err == nil && a.Unmap().IsUnspecified()) {
 		host = "127.0.0.1"
-	case "::":
-		host = "::1"
 	}
 	return net.JoinHostPort(host, port), nil
+}
+
+// steerURL is the daemon's URL for path and query at addr. A zone in addr
+// ("[fe80::1%eth0]:9102") is escaped once, as %25, which is how net/url
+// reads it back; pasted into a string it does not parse at all.
+func steerURL(addr, path, query string) string {
+	return (&url.URL{Scheme: "http", Host: addr, Path: path, RawQuery: query}).String()
 }
 
 // steerClient talks to the daemon on this box: one second for the whole
@@ -228,15 +239,37 @@ func steerClient() *http.Client {
 	}
 }
 
-// steerReply is the daemon's answer to GET /steer: the status decides, and
-// the body, when it decodes, names the verdict.
+// steerReply is the daemon's answer to GET /steer. kapkan edge sends a 200 or
+// a 503 only with its answer for the asked target in the body, so those
+// decide only with that answer there: anything else answering on
+// status_listen — another service holding the port while kapkan edge is
+// down, or one an edited status_listen now names — is no answer, never a
+// withdrawal and never an announce.
 type steerReply struct {
 	code int
 	ans  node.SteerAnswer
 	// ok: the body decoded as a SteerAnswer.
 	ok bool
+	// target and verdict are the body's "target" and "verdict", read apart
+	// from ans: a value this binary does not know elsewhere in the body (a
+	// newer daemon's, after a rollback) must not hide them.
+	target, verdict string
 	// msg is the daemon's own error text on a 4xx.
 	msg string
+}
+
+// answers reports whether the body is kapkan edge's answer for key with one
+// of the verdicts vs.
+func (r steerReply) answers(key string, vs ...steer.State) bool {
+	if r.target != key {
+		return false
+	}
+	for _, v := range vs {
+		if r.verdict == v.String() {
+			return true
+		}
+	}
+	return false
 }
 
 // askSteer reads key's verdict from the daemon at addr as reader consumer,
@@ -247,7 +280,7 @@ func askSteer(addr, key, consumer string) (steerReply, error) {
 	if key != steer.NodeKey {
 		q = "vip=" + url.QueryEscape(key) + "&" + q
 	}
-	resp, err := steerClient().Get("http://" + addr + "/steer?" + q)
+	resp, err := steerClient().Get(steerURL(addr, "/steer", q))
 	if err != nil {
 		return steerReply{}, err
 	}
@@ -255,11 +288,18 @@ func askSteer(addr, key, consumer string) (steerReply, error) {
 	r := steerReply{code: resp.StatusCode}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, steerBodyLimit))
 	if err != nil {
-		// The status has arrived and decides; the body only names the verdict.
+		// A body cut short names no target: whatever the status, no answer.
 		return r, nil
 	}
 	// A node always names the target: a body without one is not an answer.
 	r.ok = json.Unmarshal(raw, &r.ans) == nil && r.ans.Target != ""
+	var head struct {
+		Target  string `json:"target"`
+		Verdict string `json:"verdict"`
+	}
+	if json.Unmarshal(raw, &head) == nil {
+		r.target, r.verdict = head.Target, head.Verdict
+	}
 	var refusal struct {
 		Error string `json:"error"`
 	}
@@ -275,7 +315,7 @@ func askSteer(addr, key, consumer string) (steerReply, error) {
 // 200's is. No answer is a transport error, any other status, or a body that
 // does not decode.
 func readHealthz(addr string) (node.Status, error) {
-	resp, err := steerClient().Get("http://" + addr + "/healthz")
+	resp, err := steerClient().Get(steerURL(addr, "/healthz", ""))
 	if err != nil {
 		return node.Status{}, err
 	}
@@ -333,9 +373,10 @@ func steerTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 // never printed shorter than it is.
 func steerSeconds(d time.Duration) int { return int(math.Ceil(d.Seconds())) }
 
-// steerFromDaemon maps a definite daemon answer — 200, 503, 404 or 400 — to
-// -steer's line and exit code. ok is false for anything else, which the
-// daemon did not answer definitely.
+// steerFromDaemon maps a definite daemon answer — a 200 or a 503 carrying
+// kapkan edge's answer for key with the verdict its status means, or a 404
+// or a 400 — to -steer's line and exit code. ok is false for anything else,
+// which the daemon did not answer definitely.
 func steerFromDaemon(out, errOut io.Writer, key string, r steerReply) (code int, ok bool) {
 	reason := "unreadable"
 	if r.ok && r.ans.Reason != "" {
@@ -343,17 +384,21 @@ func steerFromDaemon(out, errOut io.Writer, key string, r steerReply) (code int,
 	}
 	switch r.code {
 	case http.StatusOK:
+		if !r.answers(key, steer.StateAnnounce) {
+			return 0, false
+		}
 		steerLine(out, key, steer.StateAnnounce.String(), reason, r.ans.Warning, r.ans.RejoinAt, "daemon")
 		return exitOK, true
 	case http.StatusServiceUnavailable:
-		// Withdraw and drain both mean "do not carry"; the body only names
-		// which, so a body that does not say drain is a withdraw.
-		if r.ok && r.ans.Verdict == steer.StateDrain {
+		switch {
+		case r.answers(key, steer.StateDrain):
 			steerLine(out, key, steer.StateDrain.String(), reason, "", time.Time{}, "daemon")
 			return exitSteerDrain, true
+		case r.answers(key, steer.StateWithdraw):
+			steerLine(out, key, steer.StateWithdraw.String(), reason, r.ans.Warning, r.ans.RejoinAt, "daemon")
+			return exitSteerWithdraw, true
 		}
-		steerLine(out, key, steer.StateWithdraw.String(), reason, r.ans.Warning, r.ans.RejoinAt, "daemon")
-		return exitSteerWithdraw, true
+		return 0, false
 	case http.StatusNotFound, http.StatusBadRequest:
 		// An older daemon, or an edge.yaml changed and not restarted:
 		// testifying past the daemon's own view would bypass it.
@@ -368,13 +413,17 @@ func steerFromDaemon(out, errOut io.Writer, key string, r steerReply) (code int,
 	return 0, false
 }
 
-// steerWhy says why a daemon's reply was not a definite answer.
-func steerWhy(r steerReply, err error) string {
+// steerWhy says why a daemon's reply was not a definite answer for key.
+func steerWhy(key string, r steerReply, err error) string {
 	if err != nil {
 		return oneLine(err)
 	}
 	why := fmt.Sprintf("HTTP %d", r.code)
-	if r.ok {
+	switch {
+	case r.code == http.StatusOK || r.code == http.StatusServiceUnavailable:
+		// kapkan edge sends these only with its answer for the asked target.
+		why += fmt.Sprintf(", not kapkan edge's answer for %s: is another service on status_listen?", key)
+	case r.ok:
 		why += fmt.Sprintf(", verdict %s (%s)", r.ans.Verdict, r.ans.Reason)
 	}
 	return why
@@ -432,7 +481,7 @@ func runSteer(ec *config.EdgeNodeConfig, sf steerFlags, out, errOut io.Writer) i
 				return code
 			}
 		}
-		why = steerWhy(r, err)
+		why = steerWhy(t.Key, r, err)
 	}
 
 	w.printf("kapkan edge -steer: kapkan edge did not answer (%s); this is the local, undamped evaluation\n", why)
@@ -446,7 +495,7 @@ func runSteer(ec *config.EdgeNodeConfig, sf steerFlags, out, errOut io.Writer) i
 		w.printf("kapkan edge -steer: warning: %s: answering without the saved hold-down\n", oneLine(ev.loadErr))
 	}
 	if !ev.born && !ev.gates.DrainKnown {
-		w.printf("kapkan edge -steer: warning: the drain files could not be read (%s): answering as if no drain stood; give this user read and search access to %s\n", oneLine(ev.drainErr), steer.NewStore(ec.StateDir).Dir)
+		w.printf("kapkan edge -steer: warning: the drain files could not be read (%s): answering as if no drain stood; give this user read and search access to %s, and search access to every directory above it\n", oneLine(ev.drainErr), steer.NewStore(ec.StateDir).Dir)
 	}
 	v := ev.verdict
 	if v.Reason == steer.ReasonHoldDown {
@@ -469,23 +518,20 @@ func steerKeys(ts []steer.Target) string {
 // daemon still serves the configuration it started with, and a config push
 // that broke the file on every node must not read as down on every binary
 // checker at once — a shared cause withdrawing the fleet while nginx serves.
-// So the daemon is asked, with status_listen read leniently; a definite
-// answer stands, and anything else is exit 1: no local evaluation is made
-// from a file that does not load.
+// So the daemon is asked, with status_listen read leniently
+// (lenientStatusListen); a definite answer stands, and anything else is exit
+// 1: no local evaluation is made from a file that does not load.
 func steerBrokenConfig(path string, loadErr error, sf steerFlags, out, errOut io.Writer) int {
 	w := lineWriter{errOut}
-	var lenient struct {
-		StatusListen string `yaml:"status_listen"`
+	listen := ""
+	if raw, err := os.ReadFile(path); err == nil {
+		listen = lenientStatusListen(raw)
 	}
-	raw, err := os.ReadFile(path)
-	if err == nil {
-		err = yaml.Unmarshal(raw, &lenient)
-	}
-	if err != nil || lenient.StatusListen == "" {
+	if listen == "" {
 		w.printf("kapkan edge: %v\n", loadErr)
 		return exitError
 	}
-	addr, err := steerDaemonAddr(lenient.StatusListen)
+	addr, err := steerDaemonAddr(listen)
 	if err != nil {
 		w.printf("kapkan edge: %v\n", loadErr)
 		return exitError
@@ -513,8 +559,41 @@ func steerBrokenConfig(path string, loadErr error, sf steerFlags, out, errOut io
 			return code
 		}
 	}
-	w.printf("kapkan edge -steer: kapkan edge did not answer either (%s); without an edge.yaml that loads there is no local evaluation\n", steerWhy(r, err))
+	w.printf("kapkan edge -steer: kapkan edge did not answer either (%s); without an edge.yaml that loads there is no local evaluation\n", steerWhy(key, r, err))
 	return exitError
+}
+
+// statusListenLine is a top-level status_listen key on a line of its own: a
+// plain or quoted value, then at most a comment. It does not match what it
+// cannot read for certain — an escape, a flow collection, text glued to a
+// '#' — and a value it misreads otherwise only sends -steer to an address
+// that cannot answer as kapkan edge does for the asked target, which is all
+// -steer takes from it.
+var statusListenLine = regexp.MustCompile(`(?m)^status_listen:[ \t]*(?:"([^"\\\n]*)"|'([^'\n]*)'|([^\s"'#\[\]{},]+))(?:[ \t]+#.*)?[ \t]*\r?$`)
+
+// lenientStatusListen is edge.yaml's status_listen read as leniently as is
+// safe: yaml.v3 without KnownFields while the file parses, so a key this
+// binary does not know or a value that does not validate still yields it;
+// and when it does not parse at all — a tab, a key indented one space too
+// far, the commoner way a push breaks a file — the value of its top-level
+// status_listen line. "" when the file names none, or names two that differ:
+// which of them the daemon runs is then unknown.
+func lenientStatusListen(raw []byte) string {
+	var lenient struct {
+		StatusListen string `yaml:"status_listen"`
+	}
+	if yaml.Unmarshal(raw, &lenient) == nil {
+		return lenient.StatusListen
+	}
+	found := ""
+	for i, m := range statusListenLine.FindAllSubmatch(raw, -1) {
+		v := string(m[1]) + string(m[2]) + string(m[3])
+		if i > 0 && v != found {
+			return ""
+		}
+		found = v
+	}
+	return found
 }
 
 // steerEval is one target's local evaluation and what went into it.
@@ -563,6 +642,7 @@ func steerEvaluate(ctx context.Context, ec *config.EdgeNodeConfig, t steer.Targe
 	ev := steerEval{target: t}
 	f, born, err := store.Load(now, cfg.HoldDownMax)
 	ev.born, ev.loadErr, ev.saved = born, err, f.Targets[t.Key]
+	ev.saved.Until = steerWrittenBound(store, ev.saved.Until, now, cfg.HoldDownMax)
 	ev.drain, ev.drainTri, ev.drainErr = store.DrainFor(t.Key)
 	if !born || forCheck {
 		steerObserve(ctx, &ev, forCheck)
@@ -589,6 +669,39 @@ func steerEvaluate(ctx context.Context, ec *config.EdgeNodeConfig, t steer.Targe
 	}
 	ev.verdict = steer.NewAutomaton(cfg, ev.saved).Evaluate(in, now)
 	return ev
+}
+
+// steerWrittenBound is a saved hold-down's end as an evaluation without
+// memory may take it. Load caps the end at now+max, but that cap moves with
+// each run's clock and no run ever reaches it: an end past it — a hand edit,
+// a clock stepped back since the save — would withdraw on every run for as
+// long as the daemon is down. The daemon saves state.json on the tick a
+// hold-down starts, so a real one ends by the file's last write plus max:
+// the end is cut there, at one fixed instant. A file written in this clock's
+// future by more than this run's own asking and reading take (now is read
+// before the daemon is asked, and a daemon may save meanwhile) means the
+// clock stepped back since the save: no hold-down can be established from
+// it, and an unknown takes nothing out.
+func steerWrittenBound(store steer.Store, until, now time.Time, maxHold time.Duration) time.Time {
+	if until.IsZero() {
+		return until
+	}
+	// After Load: a save in between can only move the bound later.
+	fi, err := os.Stat(filepath.Join(store.Dir, "state.json"))
+	if err != nil {
+		return until
+	}
+	written := fi.ModTime()
+	if written.After(now.Add(steerClientTimeout + steerLocalTimeout)) {
+		return time.Time{}
+	}
+	if maxHold <= 0 {
+		maxHold = steer.DefaultHoldDownMax // as Load takes it
+	}
+	if limit := written.Add(min(maxHold, steer.HoldDownCeiling)); until.After(limit) {
+		return limit
+	}
+	return until
 }
 
 // steerObservation is what the bounded goroutine hands back.
@@ -671,7 +784,7 @@ func runSteerSignal(ec *config.EdgeNodeConfig, sf steerFlags, errOut io.Writer) 
 	case "drain":
 		return steerDrain(ec, store, key, sf, now, w)
 	case "undrain":
-		return steerUndrain(ec, store, key, sf, w)
+		return steerUndrain(ec, store, key, sf, now, w)
 	}
 	return steerResetHoldDown(ec, store, key, sf, now, w)
 }
@@ -688,6 +801,12 @@ func steerOffWarning(ec *config.EdgeNodeConfig, w lineWriter) {
 // takes effect at the daemon's next tick, needs no daemon to be written, and
 // is never lost to a restart.
 func steerDrain(ec *config.EdgeNodeConfig, store steer.Store, key string, sf steerFlags, now time.Time, w lineWriter) int {
+	// Before the daemon's first start there may be no state_dir yet, and
+	// steer's Store would make it under this command's umask.
+	if err := steerMkdirKeep(filepath.Clean(ec.StateDir), 0o711); err != nil {
+		w.printf("kapkan edge -s drain: %s\n", oneLine(err))
+		return exitError
+	}
 	if err := store.SetDrain(key, steer.Drain{Reason: sf.reason, Since: now.UTC()}); err != nil {
 		w.printf("kapkan edge -s drain: %s\n", oneLine(err))
 		return exitError
@@ -711,10 +830,35 @@ func steerDrain(ec *config.EdgeNodeConfig, store steer.Store, key string, sf ste
 	return steerWait(ec, keys, steer.StateDrain, sf, w)
 }
 
+// steerMkdirKeep creates dir with mode, and each missing directory above it
+// 0755, whatever this command's umask. Under a hardened one (027, 077) a
+// state_dir made by MkdirAll would be 0750 or 0700, hiding every drain from a
+// -steer run as the speaker's own user, which would then answer announce for
+// the node the operator drained. mode is the unit's StateDirectoryMode,
+// 0711. A directory already there keeps its mode: systemd's, or the
+// operator's.
+func steerMkdirKeep(dir string, mode fs.FileMode) error {
+	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+		return err // there (nil), or not knowable: the write would fail alike
+	}
+	if parent := filepath.Dir(dir); parent != dir {
+		if err := steerMkdirKeep(parent, 0o755); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(dir, mode); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil // made meanwhile by another writer: its mode is theirs
+		}
+		return err
+	}
+	return os.Chmod(dir, mode) // mkdir applied the umask; chmod does not
+}
+
 // steerUndrain is -s undrain: the operator's drain lifted, and with -force
-// the first entry too. It exits 0 only when the target's drain files then
-// answer no drain: the exit code says whether the target is still out.
-func steerUndrain(ec *config.EdgeNodeConfig, store steer.Store, key string, sf steerFlags, w lineWriter) int {
+// the first entry too. It exits 0 only when the target is then not drained:
+// the exit code says whether the target is still out.
+func steerUndrain(ec *config.EdgeNodeConfig, store steer.Store, key string, sf steerFlags, now time.Time, w lineWriter) int {
 	if err := store.Undrain(key); err != nil {
 		w.printf("kapkan edge -s undrain: %s\n", oneLine(err))
 		return exitError
@@ -744,6 +888,15 @@ func steerUndrain(ec *config.EdgeNodeConfig, store steer.Store, key string, sf s
 		}
 		w.printf("kapkan edge: %s stays drained: the node-wide drain stands (kapkan edge -s undrain lifts it)\n", key)
 		return exitError
+	}
+	if ec.Steering.Enabled {
+		// No state.json: kapkan edge births this node drained (new_node), a
+		// drain held in its memory until Birth writes the marker, so no drain
+		// file shows it yet — and -steer answers 101 for it.
+		if _, born, _ := store.Load(now, ec.Steering.SteerConfig().HoldDownMax); born {
+			w.printf("kapkan edge: %s stays drained: %s has no state.json, so kapkan edge starts this node drained (new_node) until every zone answers TLS with its own certificate; once it has started, kapkan edge -s undrain -force lifts that (the first node of a new address)\n", key, store.Dir)
+			return exitError
+		}
 	}
 
 	msg := "kapkan edge: undrained " + key
@@ -817,8 +970,9 @@ func steerFirstEntryCounts(ec *config.EdgeNodeConfig) string {
 
 // steerResetHoldDown is -s reset-holddown: a request file the daemon takes
 // on its next tick (renaming it, so a take and this command's cancel never
-// both succeed). It takes effect now or not at all: a request nobody took is
-// withdrawn rather than left to surprise a later start.
+// both succeed). It takes effect now or not at all: a request nobody took,
+// or one whose command was interrupted, is withdrawn rather than left to
+// surprise a later start.
 func steerResetHoldDown(ec *config.EdgeNodeConfig, store steer.Store, key string, sf steerFlags, now time.Time, w lineWriter) int {
 	if !ec.Steering.Enabled {
 		w.line("kapkan edge: nothing to reset: steering is off")
@@ -835,6 +989,21 @@ func steerResetHoldDown(ec *config.EdgeNodeConfig, store steer.Store, key string
 		w.printf("kapkan edge -s reset-holddown: %s\n", oneLine(err))
 		return exitError
 	}
+	// One request at a time. The daemon takes one name, so a second
+	// command's request would replace a pending one, or its cancel remove
+	// one, while both commands reported on it. Holding the lock until its
+	// outcome is known, each command has the name to itself: gone means
+	// taken, and a cancel withdraws only its own request.
+	unlock, err := steerResetLock(store.Dir)
+	if err != nil {
+		w.printf("kapkan edge -s reset-holddown: %s\n", oneLine(err))
+		return exitError
+	}
+	defer unlock()
+	// Caught only once the lock is held: until then an interrupt ends the
+	// command as it always did, with nothing written.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	req := node.ResetRequest{All: !sf.vipSet, At: now.UTC()}
 	what := "every target"
 	if sf.vipSet {
@@ -847,7 +1016,7 @@ func steerResetHoldDown(ec *config.EdgeNodeConfig, store steer.Store, key string
 	cfg := ec.Steering.SteerConfig()
 	bound := cfg.StaleAfter() + time.Second // three ticks, and a second to spare
 	deadline := time.Now().Add(bound)
-	for {
+	for ctx.Err() == nil {
 		if pending, err := node.ResetRequestPending(store.Dir); err == nil && !pending {
 			w.printf("kapkan edge: kapkan edge took the hold-down reset for %s\n", what)
 			return exitOK
@@ -855,7 +1024,10 @@ func steerResetHoldDown(ec *config.EdgeNodeConfig, store steer.Store, key string
 		if !time.Now().Before(deadline) {
 			break
 		}
-		time.Sleep(steerResetPoll)
+		select {
+		case <-ctx.Done():
+		case <-time.After(steerResetPoll):
+		}
 	}
 	taken, err := node.CancelResetRequest(store.Dir)
 	switch {
@@ -865,9 +1037,28 @@ func steerResetHoldDown(ec *config.EdgeNodeConfig, store steer.Store, key string
 	case taken:
 		w.printf("kapkan edge: kapkan edge took the hold-down reset for %s\n", what)
 		return exitOK
+	case ctx.Err() != nil:
+		w.line("kapkan edge: interrupted; the request is withdrawn and nothing was reset")
+		return exitError
 	}
 	w.printf("kapkan edge: kapkan edge did not take the request within %ds (is it running, with steering on?); nothing was reset\n", steerSeconds(bound))
 	return exitError
+}
+
+// steerResetLock holds dir/reset-holddown.lock exclusively until unlock,
+// waiting for another command that holds it — at most that command's own
+// bound. The daemon never reads the file, and it stays: removing it while
+// another command opens it would let two commands lock two files.
+func steerResetLock(dir string) (unlock func(), err error) {
+	f, err := os.OpenFile(filepath.Join(dir, node.ResetRequestFile+".lock"), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("lock %s: %w", f.Name(), err)
+	}
+	return func() { _ = f.Close() }, nil // the close drops the lock
 }
 
 // steerWaitTarget is one waited target as -wait has seen it.
@@ -875,8 +1066,14 @@ type steerWaitTarget struct {
 	key string
 	// last is the target at the last answered poll.
 	last node.SteerAnswer
-	// live is the qualifying read that enforces the new verdict, once seen.
+	// live is the first qualifying read by a consumer not in dry mode, once
+	// seen.
 	live *node.SteerReader
+	// overruled is the newest qualifying live read -wait did not count:
+	// without -consumer, another named reader of the target was reading in
+	// dry mode beside it, and -wait cannot tell which of the two is the
+	// speaker.
+	overruled *node.SteerReader
 	// dry is the newest qualifying read, all of them dry, and drySeen when
 	// -wait first saw one.
 	dry     *node.SteerReader
@@ -895,27 +1092,50 @@ func steerQualifies(r node.SteerReader, consumer string, awaited steer.State, cu
 	return cur.Verdict == awaited && !cur.Since.IsZero() && r.Verdict == awaited && r.Since.Equal(cur.Since)
 }
 
-// observe folds one answered poll into the target.
-func (t *steerWaitTarget) observe(awaited steer.State, consumer string, now time.Time) {
+// observe folds one answered poll into the target. Without -consumer any
+// named reader may be the speaker, and a live read beside a reader reading
+// in dry mode right now — a monitor's -steer, which is never dry, beside a
+// speaker watching first — does not count: -wait cannot tell it from the
+// speaker's, and counting it would let `drain -wait && systemctl stop nginx`
+// go on while the speaker still announces. A dry name nobody has read under
+// for grace blocks nothing.
+func (t *steerWaitTarget) observe(awaited steer.State, consumer string, now time.Time, grace time.Duration) {
 	if t.live != nil {
 		return
 	}
+	dryBeside := consumer == "" && steerDryReading(t.last.Readers, now, grace)
 	for i := range t.last.Readers {
 		r := t.last.Readers[i]
 		if !steerQualifies(r, consumer, awaited, t.last) {
 			continue
 		}
-		if !r.Dry {
+		switch {
+		case !r.Dry && dryBeside:
+			if t.overruled == nil || r.At.After(t.overruled.At) {
+				t.overruled = &r
+			}
+		case !r.Dry:
 			t.live = &r
 			return
-		}
-		if t.dry == nil || r.At.After(t.dry.At) {
+		case t.dry == nil || r.At.After(t.dry.At):
 			t.dry = &r
 		}
 	}
 	if t.dry != nil && t.drySeen.IsZero() {
 		t.drySeen = now
 	}
+}
+
+// steerDryReading reports whether a named reader read the target in dry mode
+// within grace of now, whatever it was served: a consumer reading dry right
+// now, and so perhaps the speaker.
+func steerDryReading(readers []node.SteerReader, now time.Time, grace time.Duration) bool {
+	for _, r := range readers {
+		if r.Dry && r.Consumer != steerAnonymous && r.Consumer != steerInvalid && now.Sub(r.At) <= grace {
+			return true
+		}
+	}
+	return false
 }
 
 // decided reports whether the target needs no more polls: a live read, or
@@ -927,10 +1147,14 @@ func (t *steerWaitTarget) decided(now time.Time, grace time.Duration) bool {
 
 // steerWait is -wait: it polls /healthz (which stamps nothing) until a
 // consumer has read the new verdict of every waited target, decided per
-// target: enforced (a live read), dry (only dry reads), or unread at the
-// bound. 0 when every target is enforced, 10 when the rest are dry —
-// nothing enforces it there, so `drain -wait && systemctl stop nginx` must
-// not go on — and 1 when one is unread.
+// target: read live, read only in dry mode, or unread at the bound. 0 when
+// every target was read by a consumer not in dry mode; 10 when the rest were
+// read only in dry mode — nothing acts on it there, so `drain -wait &&
+// systemctl stop nginx` must not go on; and 1 when one is unread. A read is
+// all -wait can see, not the speaker's action: the shipped consumer acts on
+// the answer it reads, while a checker with a rise and fall of its own
+// (ExaBGP's healthcheck at its defaults) acts (rise or fall − 1) of its
+// intervals later.
 func steerWait(ec *config.EdgeNodeConfig, keys []string, awaited steer.State, sf steerFlags, w lineWriter) int {
 	if !ec.Steering.Enabled {
 		w.line("kapkan edge: -wait: steering is off in edge.yaml, so no consumer reads a verdict; the change is written and takes effect when it is on")
@@ -960,6 +1184,8 @@ func steerWait(ec *config.EdgeNodeConfig, keys []string, awaited steer.State, sf
 		targets[i] = &steerWaitTarget{key: k}
 	}
 	deadline := time.Now().Add(bound)
+	// An undrain's bound waits for a hold-down still running too, taken once.
+	leadTaken := awaited != steer.StateAnnounce
 	answered := false
 	for {
 		if st, err := readHealthz(addr); err == nil {
@@ -980,30 +1206,39 @@ func steerWait(ec *config.EdgeNodeConfig, keys []string, awaited steer.State, sf
 					return exitError
 				}
 			}
-			if !answered {
-				answered = true
-				if awaited == steer.StateAnnounce {
-					// A hold-down still running keeps the target out until its
-					// rejoin_at: the bound waits for that too.
-					var lead time.Duration
-					var until time.Time
-					wall := edgeSteerNow()
-					for _, t := range targets {
-						if d := t.last.RejoinAt.Sub(wall); d > lead {
-							lead, until = d, t.last.RejoinAt
-						}
+			answered = true
+			if !leadTaken {
+				// A hold-down still running keeps the target out until it ends.
+				// The first answered poll comes before the daemon's next tick, so
+				// it is mostly served the drain, which shows a hold-down only as
+				// hold_down.until (rejoin_at belongs to unknown and withdraw), or,
+				// right after a start, an answer from before any tick, which
+				// shows none: such a poll leaves the lead to the next one.
+				var lead time.Duration
+				var until time.Time
+				ticked := true
+				wall := edgeSteerNow()
+				for _, t := range targets {
+					ticked = ticked && !t.last.At.IsZero()
+					end := t.last.RejoinAt
+					if t.last.HoldDown.Until.After(end) {
+						end = t.last.HoldDown.Until
 					}
-					if lead > 0 {
-						bound += lead
-						deadline = deadline.Add(lead)
-						w.printf("kapkan edge: waiting up to %ds (recover_after %d × %ds, plus the hold-down until %s)\n", steerSeconds(bound), cfg.RecoverAfter, steerSeconds(interval), steerTime(until))
+					if d := end.Sub(wall); d > lead {
+						lead, until = d, end
 					}
+				}
+				leadTaken = lead > 0 || ticked
+				if lead > 0 {
+					bound += lead
+					deadline = deadline.Add(lead)
+					w.printf("kapkan edge: waiting up to %ds (recover_after %d × %ds, plus the hold-down until %s)\n", steerSeconds(bound), cfg.RecoverAfter, steerSeconds(interval), steerTime(until))
 				}
 			}
 			now := time.Now()
 			all := true
 			for _, t := range targets {
-				t.observe(awaited, consumer, now)
+				t.observe(awaited, consumer, now, grace)
 				all = all && t.decided(now, grace)
 			}
 			if all {
@@ -1023,15 +1258,24 @@ func steerWait(ec *config.EdgeNodeConfig, keys []string, awaited steer.State, sf
 	return steerWaitOutcome(targets, awaited, consumer, bound, w)
 }
 
-// steerWaitOutcome prints one line per target — enforced, dry or unread —
-// and returns -wait's exit code. At the bound a target whose qualifying
-// readers are all dry counts as dry, its grace over or not.
+// steerWaitOutcome prints one line per target — read live, read only in dry
+// mode, or unread — and returns -wait's exit code. At the bound a target
+// whose qualifying readers are all dry counts as dry, its grace over or not;
+// one read live only beside a consumer reading dry counts as dry, or as
+// unread, and its line says why.
 func steerWaitOutcome(targets []*steerWaitTarget, awaited steer.State, consumer string, bound time.Duration, w lineWriter) int {
+	const pin = "without -consumer, -wait cannot tell your speaker from a monitor; name the speaker's consumer with -consumer NAME"
 	code := exitOK
 	for _, t := range targets {
 		switch {
 		case t.live != nil:
 			w.printf("kapkan edge: %s: %s read by %s at %s\n", t.key, awaited, t.live.Consumer, steerTime(t.live.At))
+		case t.dry != nil && t.overruled != nil:
+			w.printf("kapkan edge: %s: %s read in dry mode by %s at %s, which changes nothing, and live by %s at %s: %s\n",
+				t.key, awaited, t.dry.Consumer, steerTime(t.dry.At), t.overruled.Consumer, steerTime(t.overruled.At), pin)
+			if code == exitOK {
+				code = exitNotEnforcing
+			}
 		case t.dry != nil:
 			w.printf("kapkan edge: %s: %s read only by a consumer in dry mode (%s at %s): it logs what it would do and changes nothing\n", t.key, awaited, t.dry.Consumer, steerTime(t.dry.At))
 			if code == exitOK {
@@ -1043,8 +1287,12 @@ func steerWaitOutcome(targets []*steerWaitTarget, awaited steer.State, consumer 
 			if !t.last.RejoinAt.IsZero() {
 				rejoin = ", rejoin at " + steerTime(t.last.RejoinAt)
 			}
-			w.printf("kapkan edge: no consumer read %s's %s within %ds; it is %s (%s)%s; last read: %s%s\n",
-				t.key, awaited, steerSeconds(bound), t.last.Verdict, t.last.Reason, rejoin, steerLastRead(t.last.Readers, consumer), steerIgnored(t.last.Readers, consumer))
+			overruled := ""
+			if t.overruled != nil {
+				overruled = fmt.Sprintf("; not counted: %s's live read at %s, beside a consumer reading in dry mode (%s)", t.overruled.Consumer, steerTime(t.overruled.At), pin)
+			}
+			w.printf("kapkan edge: no consumer read %s's %s within %ds; it is %s (%s)%s; last read: %s%s%s\n",
+				t.key, awaited, steerSeconds(bound), t.last.Verdict, t.last.Reason, rejoin, steerLastRead(t.last.Readers, consumer), steerIgnored(t.last.Readers, consumer), overruled)
 		}
 	}
 	return code

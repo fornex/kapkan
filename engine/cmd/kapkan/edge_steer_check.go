@@ -143,8 +143,8 @@ func steeringPreflight(ec *config.EdgeNodeConfig) (problems, warnings, notes []s
 	return problems, warnings, notes
 }
 
-// steerCheckVerdict is a target's N4 line: what the node would answer now,
-// what the daemon says, and the hold-down ladder.
+// steerCheckVerdict is a target's verdict line: what the node would answer
+// now, what the daemon says, and the hold-down ladder.
 func steerCheckVerdict(ev steerEval, cfg steer.Config, st node.Status, stErr error) string {
 	v := ev.verdict
 	line := fmt.Sprintf("steering %s: would %s now (%s)", ev.target.Key, v.State, v.Reason)
@@ -182,8 +182,8 @@ func steerDaemonView(key string, st node.Status, stErr error) string {
 	return "the running kapkan edge does not steer it (edge.yaml changed since it started?): kapkan edge -steer answers hold (102) until it restarts"
 }
 
-// steerCheckKernel is a target's warnings about this box: the address held
-// or not (W2–W4) and what the probe met (W6).
+// steerCheckKernel is a target's warnings about this box: whether its
+// kernel holds the address, and what the probe met.
 func steerCheckKernel(ev steerEval, cfg steer.Config, tickDeadline time.Duration) []string {
 	if !ev.observed {
 		return nil

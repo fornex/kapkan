@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"io/fs"
 	"maps"
@@ -19,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -266,9 +271,12 @@ func steerStatus(targets ...node.SteerAnswer) node.Status {
 	return node.Status{Healthy: true, Steering: &node.SteeringStatus{Enabled: true, IntervalSeconds: 1, Targets: targets}}
 }
 
-// TestEdgeSteerAsksTheDaemon pins -steer's reading of a live daemon:
-// the status decides — 200 announce, 503 withdraw or drain (the body only
-// names which), 404 and 400 hold (102) — and the request is exactly
+// TestEdgeSteerAsksTheDaemon pins -steer's reading of a live daemon: a 200
+// or a 503 decides only with kapkan edge's own answer for the asked target in
+// its body — 200 announce, 503 withdraw or drain — and anything else there
+// (another service holding status_listen, say) is no answer: the local
+// evaluation. 404 and 400 hold (102), a plain-text 404 too: a daemon older
+// than steering has no /steer. The request is exactly
 // ?vip=<key>&consumer=<name>, never dry.
 func TestEdgeSteerAsksTheDaemon(t *testing.T) {
 	withSteerSeams(t, steerProc(nil))
@@ -285,6 +293,12 @@ func TestEdgeSteerAsksTheDaemon(t *testing.T) {
 	warned := ans(steer.StateAnnounce, steer.ReasonOK)
 	warned.Warning = steer.ReasonNoZones
 	announce := steerBody(t, ans(steer.StateAnnounce, steer.ReasonOK))
+	other := ans(steer.StateDrain, steer.ReasonDrained)
+	other.Target = "192.0.2.11"
+	const (
+		local   = "192.0.2.10 announce unmanaged warning=generation_not_live source=local\n"
+		foreign = "not kapkan edge's answer for 192.0.2.10: is another service on status_listen?); this is the local, undamped evaluation"
+	)
 	cases := []struct {
 		name      string
 		code      int
@@ -299,8 +313,15 @@ func TestEdgeSteerAsksTheDaemon(t *testing.T) {
 		{name: "200 announce with a closed gate", code: 200, body: steerBody(t, warned), want: exitOK, line: "192.0.2.10 announce ok warning=no_zones source=daemon\n"},
 		{name: "503 drain", code: 503, body: steerBody(t, ans(steer.StateDrain, steer.ReasonDrained)), want: exitSteerDrain, line: "192.0.2.10 drain drained source=daemon\n"},
 		{name: "503 withdraw", code: 503, body: steerBody(t, withdraw), want: exitSteerWithdraw, line: "192.0.2.10 withdraw refused rejoin_at=2026-11-13T08:00:20Z source=daemon\n"},
-		{name: "503 garbage", code: 503, body: []byte("<html>busy</html>"), want: exitSteerWithdraw, line: "192.0.2.10 withdraw unreadable source=daemon\n"},
+		// Another service on status_listen — kapkan edge down, its port taken
+		// — must neither withdraw a node whose nginx serves nor announce one
+		// whose nginx is dead: its 200 and 503 are no answer.
+		{name: "503 garbage", code: 503, body: []byte("<html>busy</html>"), want: exitOK, line: local, errorText: "kapkan edge did not answer (HTTP 503, " + foreign},
+		{name: "200 garbage", code: 200, body: []byte("<html>exporter</html>"), want: exitOK, line: local, errorText: "kapkan edge did not answer (HTTP 200, " + foreign},
+		{name: "503 for another target", code: 503, body: steerBody(t, other), want: exitOK, line: local, errorText: foreign},
+		{name: "200 whose verdict is not announce", code: 200, body: steerBody(t, withdraw), want: exitOK, line: local, errorText: foreign},
 		{name: "404", code: 404, body: []byte(`{"error":"steering is off on this node"}`), want: exitSteerHold, line: "192.0.2.10 hold daemon_disowns source=daemon\n", errorText: "steering is off on this node"},
+		{name: "404 in plain text", code: 404, body: []byte("404 page not found\n"), want: exitSteerHold, line: "192.0.2.10 hold daemon_disowns source=daemon\n", errorText: "kapkan edge answered 404; it does not steer 192.0.2.10"},
 		{name: "400", code: 400, body: []byte(`{"error":"name the address"}`), want: exitSteerHold, line: "192.0.2.10 hold daemon_disowns source=daemon\n", errorText: "name the address"},
 		{name: "a monitor reads under its own name", code: 200, body: announce, consumer: "nagios", want: exitOK, line: "192.0.2.10 announce ok source=daemon\n"},
 		{name: "a mapped spelling asks for the key", code: 200, body: announce, vip: "::ffff:192.0.2.10", want: exitOK, line: "192.0.2.10 announce ok source=daemon\n"},
@@ -348,16 +369,20 @@ func TestEdgeSteerAsksTheDaemon(t *testing.T) {
 }
 
 // TestEdgeSteerWithoutTheDaemon pins the local evaluation: a daemon
-// that is dead, hung, unknown (425) or broken (500) gets the local, undamped
-// answer from the same inputs — always definite, because a binary checker
-// has no hold — and an interface listing stuck on RTNL cannot hold -steer
-// past its bound.
+// that is dead, hung, unknown (425), refusing this reader (403) or broken
+// (500) gets the local, undamped answer from the same inputs — always
+// definite, because a binary checker has no hold — and an interface listing
+// stuck on RTNL cannot hold -steer past its bound.
 func TestEdgeSteerWithoutTheDaemon(t *testing.T) {
 	withSteerSeams(t, steerProc(nil))
 	const unmanaged = "192.0.2.10 announce unmanaged warning=generation_not_live source=local\n"
 
 	unknown := newFakeSteerd(t)
 	unknown.answer(http.StatusTooEarly, steerBody(t, node.SteerAnswer{Target: "192.0.2.10", Reason: steer.ReasonStarting}))
+	// The node's own refusal of a reader it does not take for this box's: no
+	// verdict was delivered, so it neither withdraws (100) nor holds (102).
+	forbidden := newFakeSteerd(t)
+	forbidden.answer(http.StatusForbidden, []byte(`{"error":"GET /steer answers readers on this box only (loopback, or the listener's own address)"}`))
 	broken := newFakeSteerd(t)
 	broken.answer(http.StatusInternalServerError, []byte("boom"))
 	for _, c := range []struct {
@@ -367,6 +392,7 @@ func TestEdgeSteerWithoutTheDaemon(t *testing.T) {
 		{name: "dead", addr: deadSteerAddr(t)},
 		{name: "hung", addr: hungSteerAddr(t), hung: true},
 		{name: "425", addr: unknown.addr()},
+		{name: "403", addr: forbidden.addr()},
 		{name: "500", addr: broken.addr()},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -379,10 +405,14 @@ func TestEdgeSteerWithoutTheDaemon(t *testing.T) {
 			if code != exitOK || stdout != unmanaged || !strings.Contains(stderr, "this is the local, undamped evaluation") {
 				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
 			}
-			// The client gives up after 1 s; the local evaluation is bounded
-			// by 2 s more.
-			if c.hung && (elapsed < time.Second || elapsed > 3500*time.Millisecond) {
-				t.Fatalf("a hung daemon took %v; want between 1 s and 3.5 s", elapsed)
+			// The client gives up after 1 s. Here the local evaluation takes
+			// milliseconds — the probe's bind fails, or under
+			// ip_nonlocal_bind=1 its connect gives up within 300 ms — so the
+			// upper bound pins the client's one second too: a longer client
+			// timeout is a speaker's healthcheck killed before -steer answers.
+			// The local evaluation's own 2 s bound is the RTNL cases' below.
+			if c.hung && (elapsed < time.Second || elapsed > 2*time.Second) {
+				t.Fatalf("a hung daemon took %v; want between 1 s and 2 s: the 1 s client timeout, then a local evaluation of milliseconds", elapsed)
 			}
 		})
 	}
@@ -455,6 +485,54 @@ func TestEdgeSteerWithoutTheDaemon(t *testing.T) {
 		})
 	}
 
+	// The daemon saves state.json on the tick a hold-down starts, so a real
+	// one ends by that write plus hold_down.max. An end later than that — a
+	// hand edit, or a clock stepped back since the save — is cut there, at one
+	// fixed instant, and not at each run's own clock plus the max, which no
+	// run of a command without memory ever reaches: it would withdraw on every
+	// run for as long as the daemon is down.
+	t.Run("a saved hold-down its write cannot explain", func(t *testing.T) {
+		prev := edgeSteerNow
+		t.Cleanup(func() { edgeSteerNow = prev })
+		state := t.TempDir()
+		store := seedSteerState(t, state, map[string]steer.Saved{"192.0.2.10": {Level: 1, Until: time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)}})
+		stateJSON := filepath.Join(store.Dir, "state.json")
+		written := time.Now().Add(-time.Hour).Truncate(time.Second)
+		if err := os.Chtimes(stateJSON, written, written); err != nil {
+			t.Fatal(err)
+		}
+		cfg := steerYAML(t, dead, state)
+		end := written.Add(steer.DefaultHoldDownMax)
+		held := "192.0.2.10 withdraw hold_down warning=generation_not_live rejoin_at=" + steerTime(end) + " source=local\n"
+		for _, c := range []struct {
+			after time.Duration
+			want  int
+			line  string
+		}{
+			{time.Second, exitSteerWithdraw, held},
+			{59 * time.Second, exitSteerWithdraw, held},
+			{steer.DefaultHoldDownMax, exitOK, unmanaged},
+			{365 * 24 * time.Hour, exitOK, unmanaged},
+		} {
+			edgeSteerNow = func() time.Time { return written.Add(c.after) }
+			code, stdout, stderr := runEdgeCLIOut(t, "-config", cfg, "-steer", "-vip", "192.0.2.10")
+			if code != c.want || stdout != c.line {
+				t.Fatalf("%v after the write: code=%d stdout=%q stderr=%q; want %d %q", c.after, code, stdout, stderr, c.want, c.line)
+			}
+		}
+		// Written in this clock's future, beyond what this run's own asking and
+		// reading take: the clock stepped back since, and no hold-down the file
+		// carries can be established. An unknown takes nothing out.
+		ahead := time.Now().Add(24 * time.Hour)
+		if err := os.Chtimes(stateJSON, ahead, ahead); err != nil {
+			t.Fatal(err)
+		}
+		edgeSteerNow = time.Now
+		if code, stdout, stderr := runEdgeCLIOut(t, "-config", cfg, "-steer", "-vip", "192.0.2.10"); code != exitOK || stdout != unmanaged {
+			t.Fatalf("a state.json written a day ahead: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+	})
+
 	// A drain this user cannot see is no drain to the local
 	// evaluation — it answers announce — so -steer says so on stderr and names
 	// the directory to open.
@@ -474,7 +552,7 @@ func TestEdgeSteerWithoutTheDaemon(t *testing.T) {
 		code, stdout, stderr := runEdgeCLIOut(t, "-config", steerYAML(t, dead, state), "-steer", "-vip", "192.0.2.10")
 		want := "kapkan edge -steer: warning: the drain files could not be read ("
 		if code != exitOK || stdout != unmanaged || !strings.Contains(stderr, want) ||
-			!strings.Contains(stderr, "answering as if no drain stood; give this user read and search access to "+store.Dir+"\n") {
+			!strings.Contains(stderr, "answering as if no drain stood; give this user read and search access to "+store.Dir+", and search access to every directory above it\n") {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
 		}
 	})
@@ -512,8 +590,21 @@ func TestEdgeSteerWithoutTheDaemon(t *testing.T) {
 	}
 }
 
+// serveSteerdOn serves a fakeSteerd answering 200 with body on ln.
+func serveSteerdOn(t *testing.T, ln net.Listener, body []byte) *fakeSteerd {
+	t.Helper()
+	d := &fakeSteerd{steerCode: 200, steerBody: body}
+	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: http.HandlerFunc(d.serve)}}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return d
+}
+
 // TestEdgeSteerWildcardStatusListen pins steerDaemonAddr through -steer: a
-// wildcard status_listen is dialled on loopback, of its own family.
+// wildcard status_listen, "[::]" included, is dialled on 127.0.0.1, which
+// reaches Go's wildcard listener on every host — it is one dual-stack socket,
+// or an IPv4 one where the host has no IPv6 — while ::1 is gone wherever IPv6
+// is off. A zoned address is dialled with its zone.
 func TestEdgeSteerWildcardStatusListen(t *testing.T) {
 	withSteerSeams(t, steerProc(nil))
 	state := t.TempDir()
@@ -532,26 +623,63 @@ func TestEdgeSteerWildcardStatusListen(t *testing.T) {
 		}
 	}
 
-	ln, err := net.Listen("tcp", "[::1]:0")
+	// Listened the node's way, net.Listen("tcp", status_listen), which works
+	// with IPv6 off as well.
+	ln, err := net.Listen("tcp", "[::]:0")
 	if err != nil {
-		t.Skipf("no IPv6 loopback here: %v", err)
+		t.Fatal(err)
 	}
-	d6 := &fakeSteerd{steerCode: 200, steerBody: announce}
-	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: http.HandlerFunc(d6.serve)}}
-	srv.Start()
-	t.Cleanup(srv.Close)
+	d6 := serveSteerdOn(t, ln, announce)
 	_, port6, _ := net.SplitHostPort(ln.Addr().String())
 	code, stdout, stderr := runEdgeCLIOut(t, "-config", steerYAML(t, "[::]:"+port6, state), "-steer", "-vip", "192.0.2.10")
 	if code != exitOK || stdout != "192.0.2.10 announce ok source=daemon\n" || len(d6.requests()) != 1 {
 		t.Fatalf("status_listen [::]:%s: code=%d stdout=%q stderr=%q requests=%q", port6, code, stdout, stderr, d6.requests())
 	}
 
+	t.Run("a zoned address", func(t *testing.T) {
+		lo := ""
+		if ifs, err := net.Interfaces(); err == nil {
+			for _, i := range ifs {
+				if i.Flags&net.FlagLoopback != 0 {
+					lo = i.Name
+					break
+				}
+			}
+		}
+		var zl net.Listener
+		var zoned string
+		lerr := errors.New("no loopback interface")
+		for _, host := range []string{"::1", "fe80::1"} {
+			if lo == "" {
+				break
+			}
+			zoned = host + "%" + lo
+			if zl, lerr = net.Listen("tcp", net.JoinHostPort(zoned, "0")); lerr == nil {
+				break
+			}
+		}
+		if zl == nil {
+			t.Skipf("no zoned IPv6 loopback address here (interface %q): %v", lo, lerr)
+		}
+		dz := serveSteerdOn(t, zl, announce)
+		_, zport, _ := net.SplitHostPort(zl.Addr().String())
+		listen := net.JoinHostPort(zoned, zport)
+		code, stdout, stderr := runEdgeCLIOut(t, "-config", steerYAML(t, listen, state), "-steer", "-vip", "192.0.2.10")
+		if code != exitOK || stdout != "192.0.2.10 announce ok source=daemon\n" || len(dz.requests()) != 1 {
+			t.Fatalf("status_listen %s: code=%d stdout=%q stderr=%q requests=%q", listen, code, stdout, stderr, dz.requests())
+		}
+	})
+
 	for _, c := range []struct{ listen, want string }{
 		{":9102", "127.0.0.1:9102"},
 		{"0.0.0.0:9102", "127.0.0.1:9102"},
-		{"[::]:9102", "[::1]:9102"},
+		{"[::]:9102", "127.0.0.1:9102"},
+		{"[::0]:9102", "127.0.0.1:9102"},
+		{"[::ffff:0.0.0.0]:9102", "127.0.0.1:9102"},
 		{"127.0.0.1:9102", "127.0.0.1:9102"},
+		{"[::1]:9102", "[::1]:9102"},
 		{"[2001:db8::1]:9102", "[2001:db8::1]:9102"},
+		{"[fe80::1%eth0]:9102", "[fe80::1%eth0]:9102"},
 		{"localhost:9102", "localhost:9102"},
 	} {
 		if got, err := steerDaemonAddr(c.listen); err != nil || got != c.want {
@@ -643,25 +771,80 @@ func TestEdgeSteerUsageAndHold(t *testing.T) {
 		if code, stdout, stderr := runEdgeCLIOut(t, "-config", broken, "-steer", "-vip", "192.0.2.10"); code != exitError || stdout != "" {
 			t.Fatalf("425 from a broken config: code=%d stdout=%q stderr=%q; want 1 and no evaluation", code, stdout, stderr)
 		}
+		// Another service on status_listen is no answer here either.
+		d.answer(http.StatusServiceUnavailable, []byte("<html>busy</html>"))
+		if code, stdout, stderr := runEdgeCLIOut(t, "-config", broken, "-steer", "-vip", "192.0.2.10"); code != exitError || stdout != "" {
+			t.Fatalf("a foreign 503 from a broken config: code=%d stdout=%q stderr=%q; want 1 and no evaluation", code, stdout, stderr)
+		}
 		gone := writeEdgeYAML(t, steerYAMLBody(deadSteerAddr(t), state)+"no_such_key: 1\n")
 		if code, stdout, stderr := runEdgeCLIOut(t, "-config", gone, "-steer", "-vip", "192.0.2.10"); code != exitError || stdout != "" || !strings.Contains(stderr, "no local evaluation") {
 			t.Fatalf("no daemon: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 		}
+
+		// A push that breaks the YAML itself — a tab, a bracket left open —
+		// is the commoner break, and the daemon still runs the file it
+		// started with: its top-level status_listen line still names it.
+		d.answer(200, steerBody(t, node.SteerAnswer{Target: "192.0.2.10", Verdict: steer.StateAnnounce, Reason: steer.ReasonOK}))
+		tabbed := writeEdgeYAML(t, strings.Replace(steerYAMLBody(d.addr(), state), "  enabled: true", "\tenabled: true", 1))
+		code, stdout, stderr = runEdgeCLIOut(t, "-config", tabbed, "-steer", "-vip", "192.0.2.10")
+		if code != exitOK || stdout != "192.0.2.10 announce ok source=daemon\n" || !strings.Contains(stderr, "edge.yaml does not load") {
+			t.Fatalf("a tab in the steering block: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
 		n := len(d.requests())
 		garbled := writeEdgeYAML(t, "status_listen: "+d.addr()+"\nsteering: [unclosed\n")
-		if code, stdout, stderr := runEdgeCLIOut(t, "-config", garbled, "-steer", "-vip", "192.0.2.10"); code != exitError || stdout != "" {
+		if code, stdout, stderr := runEdgeCLIOut(t, "-config", garbled, "-steer", "-vip", "192.0.2.10"); code != exitOK || stdout != "192.0.2.10 announce ok source=daemon\n" {
 			t.Fatalf("a file that does not parse: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 		}
+		if got, want := d.requests()[n:], []string{"GET /steer?vip=192.0.2.10&consumer=kapkan-edge-steer"}; !slices.Equal(got, want) {
+			t.Fatalf("a file that does not parse asked the daemon %q, want %q", got, want)
+		}
+		// Without such a line there is nobody to ask.
+		n = len(d.requests())
+		nameless := writeEdgeYAML(t, "steering:\n  status_listen: "+d.addr()+"\n\tenabled: true\n")
+		if code, stdout, stderr := runEdgeCLIOut(t, "-config", nameless, "-steer", "-vip", "192.0.2.10"); code != exitError || stdout != "" {
+			t.Fatalf("a file that does not parse and names no status_listen: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
 		if got := d.requests()[n:]; len(got) != 0 {
-			t.Fatalf("a file that does not parse still asked the daemon: %q", got)
+			t.Fatalf("a file that names no status_listen still asked the daemon: %q", got)
 		}
 	})
 }
 
-// TestEdgeSteerPanicExitsTwo pins a panic's exit code through the whole production path —
-// main, runSubcommand, runEdgeCommand, runSteer — in a child process: a panic
-// on it exits 2, which every consumer reads as hold. A recover added
-// anywhere on it fails this test.
+// TestEdgeSteerLenientStatusListen pins how a broken edge.yaml still names
+// the daemon to ask: yaml.v3 without KnownFields while the file parses, else
+// its one top-level status_listen line — plain or quoted, a comment after it
+// — and nothing when the file names none, or names two that differ.
+func TestEdgeSteerLenientStatusListen(t *testing.T) {
+	for _, c := range []struct{ name, yaml, want string }{
+		{"parses, with a key this binary does not know", "status_listen: 127.0.0.1:9102\nno_such_key: 1\n", "127.0.0.1:9102"},
+		{"parses, and names none", "state_dir: /x\n", ""},
+		{"plain", "status_listen: 127.0.0.1:9102\nsteering: [\n", "127.0.0.1:9102"},
+		{"double-quoted", "status_listen: \"[::]:9102\"\nsteering: [\n", "[::]:9102"},
+		{"single-quoted", "status_listen: '[fe80::1%eth0]:9102'\nsteering: [\n", "[fe80::1%eth0]:9102"},
+		{"a comment after it", "status_listen: \":9102\"   # for Prometheus\nsteering: [\n", ":9102"},
+		{"CRLF", "status_listen: 127.0.0.1:9102\r\nsteering: [\r\n", "127.0.0.1:9102"},
+		{"after the break", "steering:\n\tenabled: true\nstatus_listen: 127.0.0.1:9102\n", "127.0.0.1:9102"},
+		{"two that agree", "status_listen: 127.0.0.1:9102\nstatus_listen: \"127.0.0.1:9102\"\n", "127.0.0.1:9102"},
+		{"two that differ", "status_listen: 127.0.0.1:9102\nstatus_listen: 127.0.0.1:9103\n", ""},
+		{"an empty one beside another", "status_listen: \"\"\nstatus_listen: 127.0.0.1:9103\n", ""},
+		{"indented: not top-level", "steering: [\n  status_listen: 127.0.0.1:9102\n", ""},
+		{"commented out", "# status_listen: 127.0.0.1:9102\nsteering: [\n", ""},
+		{"an unclosed quote", "status_listen: \"127.0.0.1:9102\nsteering: [\n", ""},
+		{"a flow sequence", "status_listen: [a, b]\nsteering: [\n", ""},
+		{"text glued to a comment sign", "status_listen: 127.0.0.1:9102#x\nsteering: [\n", ""},
+		{"an escape in double quotes", "status_listen: \"127.0.0.1:91\\x30\"\nsteering: [\n", ""},
+	} {
+		if got := lenientStatusListen([]byte(c.yaml)); got != c.want {
+			t.Errorf("%s: lenientStatusListen(%q) = %q, want %q", c.name, c.yaml, got, c.want)
+		}
+	}
+}
+
+// TestEdgeSteerPanicExitsTwo pins a panic's exit code through the production
+// entry — main, runSubcommand, runEdgeCommand, into runSteer's first
+// statement — in a child process: a panic there exits 2, which every consumer
+// reads as hold. Only a recover deferred on that stack fails it; a recover
+// anywhere else in this package is TestEdgeNoRecoverInCmdKapkan's to catch.
 func TestEdgeSteerPanicExitsTwo(t *testing.T) {
 	state := t.TempDir()
 	seedSteerState(t, state, nil)
@@ -693,6 +876,45 @@ func TestEdgeSteerPanicHelper(t *testing.T) {
 	os.Args = []string{"kapkan", "edge", "-config", os.Getenv("KAPKAN_STEER_PANIC_CONFIG"), "-steer", "-vip", "192.0.2.10"}
 	main()
 	t.Fatal("main returned")
+}
+
+// TestEdgeNoRecoverInCmdKapkan pins, for every function of this package, what
+// TestEdgeSteerPanicExitsTwo pins for its entry: no non-test file here calls
+// the builtin recover, whatever its build tags. A panic anywhere on -steer's
+// path — the evaluation, the kernel's readings in their goroutine — must exit
+// 2, which every consumer reads as hold; a recover that turned it into any
+// other code could announce or withdraw an address on a bug.
+func TestEdgeNoRecoverInCmdKapkan(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	read := map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		read[name] = true
+		ast.Inspect(f, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "recover" {
+					t.Errorf("%s: recover() in cmd/kapkan: a panic on -steer's path must exit 2, which every consumer reads as hold; a recovered one could announce or withdraw an address on a bug", fset.Position(c.Pos()))
+				}
+			}
+			return true
+		})
+	}
+	for _, must := range []string{"main.go", "cli.go", "edge.go", "edge_steer.go", "edge_steer_check.go"} {
+		if !read[must] {
+			t.Fatalf("read %d files here, and %s is not among them: this pin is reading the wrong directory", len(read), must)
+		}
+	}
 }
 
 // TestEdgeSignalDrainUndrain pins -s drain and -s undrain without -wait:
@@ -852,6 +1074,74 @@ func TestEdgeSignalDrainUndrain(t *testing.T) {
 			t.Fatalf("the CLI wrote state.json: %v", err)
 		}
 	})
+
+	// A node that has never started has no state.json: its first start
+	// births it drained (new_node), a drain that lives in the daemon's memory
+	// until Birth writes its marker, so no drain file shows it. The undrain's
+	// exit code still says the target stays out, as -steer's 101 does.
+	t.Run("never started", func(t *testing.T) {
+		state := t.TempDir()
+		cfg := steerYAML(t, d.addr(), state)
+		for _, args := range [][]string{{}, {"-vip", "192.0.2.10"}, {"-wait"}} {
+			code, stdout, stderr := runEdgeCLIOut(t, append([]string{"-config", cfg, "-s", "undrain"}, args...)...)
+			if code != exitError || stdout != "" || !strings.Contains(stderr, "stays drained: "+filepath.Join(state, "steering")+" has no state.json") ||
+				strings.Contains(stderr, "undrained") {
+				t.Fatalf("undrain %v: code=%d stdout=%q stderr=%q; want 1, stays drained", args, code, stdout, stderr)
+			}
+		}
+		if code, _, stderr := runEdgeCLIOut(t, "-config", cfg, "-s", "undrain", "-force"); code != exitError || !strings.Contains(stderr, "not born yet") {
+			t.Fatalf("undrain -force: code=%d stderr=%q", code, stderr)
+		}
+		code, stdout, stderr := runEdgeCLIOut(t, "-config", steerYAML(t, deadSteerAddr(t), state), "-steer", "-vip", "192.0.2.10")
+		if code != exitSteerDrain || stdout != "192.0.2.10 drain new_node source=local\n" {
+			t.Fatalf("-steer: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		if _, err := os.Lstat(filepath.Join(state, "steering")); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("undrain created the steering directory: %v", err)
+		}
+	})
+}
+
+// TestEdgeSignalDrainMakesStateDir pins -s drain before the daemon's first
+// start, under a hardened umask: it makes the missing state_dir 0711, as the
+// unit's StateDirectoryMode does, and every missing directory above it 0755.
+// steer's Store would make it under the umask (0700 here), and a -steer run
+// as the speaker's own user could then see no drain in it and answer
+// announce for the node the operator drained. A state_dir already there
+// keeps its mode. Not parallel: the umask is the process's.
+func TestEdgeSignalDrainMakesStateDir(t *testing.T) {
+	withSteerSeams(t, steerProc(nil))
+	base := t.TempDir()
+	kept := filepath.Join(base, "kept")
+	if err := os.Mkdir(kept, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(kept, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(base, "lib", "kapkan-edge")
+	freshCfg, keptCfg := steerYAML(t, deadSteerAddr(t), fresh), steerYAML(t, deadSteerAddr(t), kept)
+	defer syscall.Umask(syscall.Umask(0o077))
+	for _, cfg := range []string{freshCfg, keptCfg} {
+		if code, stdout, stderr := runEdgeCLIOut(t, "-config", cfg, "-s", "drain"); code != exitOK || stdout != "" {
+			t.Fatalf("-s drain: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+	}
+	for path, want := range map[string]fs.FileMode{
+		filepath.Join(base, "lib"):             0o755 | fs.ModeDir,
+		fresh:                                  0o711 | fs.ModeDir,
+		filepath.Join(fresh, "steering"):       0o755 | fs.ModeDir,
+		filepath.Join(fresh, "steering/drain"): 0o644,
+		kept:                                   0o700 | fs.ModeDir,
+	} {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode() & (fs.ModePerm | fs.ModeDir); got != want {
+			t.Errorf("%s is %v, want %v", path, got, want)
+		}
+	}
 }
 
 // steerReader is a reader of a target's verdict as /healthz reports it.
@@ -1134,6 +1424,117 @@ func TestEdgeSignalWait(t *testing.T) {
 		}
 	})
 
+	// An undrain's first answered poll comes before the daemon's next tick,
+	// so it is served the drain — which shows a hold-down only as
+	// hold_down.until, rejoin_at belonging to unknown and withdraw — or,
+	// right after a start, nothing yet. The bound still waits for that
+	// hold-down: a rolling `undrain -wait && <drain the next node>` must not
+	// stop while this node is on its way back.
+	undrainThroughHoldDown := func(t *testing.T, first func(now time.Time, hold node.SteerHoldDown) node.SteerAnswer) {
+		t.Helper()
+		t.Parallel()
+		until := time.Now().Add(10 * time.Second).Truncate(time.Second).UTC() // past the 8 s bound
+		hold := node.SteerHoldDown{Level: 3, Until: until}
+		d := newFakeSteerd(t)
+		d.serveHealth(func(poll int) (int, node.Status) {
+			now := time.Now()
+			switch {
+			case poll <= 2:
+				return 200, steerStatus(first(now, hold))
+			case now.Before(until):
+				return 200, steerStatus(node.SteerAnswer{Target: "192.0.2.10", Verdict: steer.StateUnknown, Reason: steer.ReasonStarting, Since: S, At: now, RejoinAt: until, HoldDown: hold})
+			}
+			return 200, steerStatus(node.SteerAnswer{Target: "192.0.2.10", Verdict: steer.StateAnnounce, Reason: steer.ReasonOK, Since: until, At: now,
+				HoldDown: node.SteerHoldDown{Level: 3}, Readers: []node.SteerReader{steerReader("bird", false, now, steer.StateAnnounce, until)}})
+		})
+		state := t.TempDir()
+		seedSteerState(t, state, nil)
+		code, _, stderr := runEdgeCLIOut(t, append([]string{"-config", steerYAML(t, d.addr(), state)}, undrain...)...)
+		if code != exitOK || !strings.Contains(stderr, "plus the hold-down until "+steerTime(until)+")") || !strings.Contains(stderr, "192.0.2.10: announce read by bird at ") {
+			t.Fatalf("code=%d stderr:\n%s\nwant 0, the bound naming the hold-down until %s", code, stderr, steerTime(until))
+		}
+	}
+	t.Run("an undrain from a drain with a hold-down running", func(t *testing.T) {
+		undrainThroughHoldDown(t, func(now time.Time, hold node.SteerHoldDown) node.SteerAnswer {
+			return node.SteerAnswer{Target: "192.0.2.10", Verdict: steer.StateDrain, Reason: steer.ReasonDrained, Since: S, At: now, HoldDown: hold}
+		})
+	})
+	t.Run("an undrain right after the daemon started", func(t *testing.T) {
+		undrainThroughHoldDown(t, func(time.Time, node.SteerHoldDown) node.SteerAnswer {
+			return node.SteerAnswer{Target: "192.0.2.10", Verdict: steer.StateUnknown, Reason: steer.ReasonStarting}
+		})
+	})
+	// A hold-down already over adds nothing to the bound.
+	t.Run("an undrain with no hold-down left", func(t *testing.T) {
+		t.Parallel()
+		d := newFakeSteerd(t)
+		d.serveHealth(func(int) (int, node.Status) {
+			now := time.Now()
+			return 200, steerStatus(node.SteerAnswer{Target: "192.0.2.10", Verdict: steer.StateUnknown, Reason: steer.ReasonStarting, Since: S, At: now,
+				HoldDown: node.SteerHoldDown{Level: 2, Until: now.Add(-time.Minute)}})
+		})
+		state := t.TempDir()
+		seedSteerState(t, state, nil)
+		start := time.Now()
+		code, _, stderr := runEdgeCLIOut(t, append([]string{"-config", steerYAML(t, d.addr(), state)}, undrain...)...)
+		elapsed := time.Since(start)
+		if code != exitError || strings.Contains(stderr, "plus the hold-down") || !strings.Contains(stderr, "no consumer read 192.0.2.10's announce within 8s") {
+			t.Fatalf("code=%d stderr:\n%s\nwant 1 at the 8 s bound", code, stderr)
+		}
+		if elapsed < 8*time.Second || elapsed > 9500*time.Millisecond {
+			t.Errorf("took %v; want the 8 s bound", elapsed)
+		}
+	})
+
+	// Without -consumer any named reader may be the speaker. A live read
+	// beside a reader reading in dry mode right now — a monitor's -steer,
+	// never dry, beside a speaker watching first — cannot be told from the
+	// speaker's, so it does not count, and -wait says so (10): `drain -wait
+	// && systemctl stop nginx` must not go on while the speaker announces.
+	// -consumer names the speaker, and a dry name nobody has read under for
+	// longer than the grace blocks nothing.
+	for _, c := range []struct {
+		name, consumer string
+		dryAgo         time.Duration
+		want           int
+		wantErr        []string
+	}{
+		{name: "a live read beside a consumer reading dry", dryAgo: 200 * time.Millisecond, want: exitNotEnforcing, wantErr: []string{
+			"kapkan edge: 192.0.2.10: drain read in dry mode by bird at ",
+			", and live by nagios at ",
+			"without -consumer, -wait cannot tell your speaker from a monitor; name the speaker's consumer with -consumer NAME",
+		}},
+		{name: "the same, -consumer naming the live one", consumer: "nagios", dryAgo: 200 * time.Millisecond, want: exitOK, wantErr: []string{"192.0.2.10: drain read by nagios at "}},
+		{name: "the same, -consumer naming the dry one", consumer: "bird", dryAgo: 200 * time.Millisecond, want: exitNotEnforcing, wantErr: []string{"192.0.2.10: drain read only by a consumer in dry mode (bird at "}},
+		{name: "a dry name not read for an hour", dryAgo: time.Hour, want: exitOK, wantErr: []string{"192.0.2.10: drain read by nagios at "}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			d := newFakeSteerd(t)
+			d.serveHealth(func(int) (int, node.Status) {
+				now := time.Now()
+				return 200, steerStatus(drainAt(
+					steerReader("nagios", false, now, steer.StateDrain, S),
+					steerReader("bird", true, now.Add(-c.dryAgo), steer.StateDrain, S)))
+			})
+			state := t.TempDir()
+			seedSteerState(t, state, nil)
+			args := []string{"-config", steerYAML(t, d.addr(), state), "-s", "drain", "-vip", "192.0.2.10", "-wait"}
+			if c.consumer != "" {
+				args = append(args, "-consumer", c.consumer)
+			}
+			code, _, stderr := runEdgeCLIOut(t, args...)
+			if code != c.want {
+				t.Fatalf("code=%d, want %d; stderr:\n%s", code, c.want, stderr)
+			}
+			for _, w := range c.wantErr {
+				if !strings.Contains(stderr, w) {
+					t.Errorf("stderr lacks %q:\n%s", w, stderr)
+				}
+			}
+		})
+	}
+
 	t.Run("a daemon that never answers", func(t *testing.T) {
 		t.Parallel()
 		state := t.TempDir()
@@ -1220,6 +1621,7 @@ func TestEdgeSignalResetHoldDown(t *testing.T) {
 	}
 
 	t.Run("nobody takes it", func(t *testing.T) {
+		t.Parallel()
 		state := t.TempDir()
 		store := seedSteerState(t, state, nil)
 		start := time.Now()
@@ -1232,6 +1634,123 @@ func TestEdgeSignalResetHoldDown(t *testing.T) {
 		}
 		if _, err := os.Lstat(filepath.Join(store.Dir, node.ResetRequestFile)); !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("a request nobody took was left behind: %v", err)
+		}
+	})
+
+	// The daemon takes one request name. Two commands at once — automation
+	// resetting each VIP in parallel after an incident — take turns, so each
+	// request is taken whole and each command reports on its own: without
+	// turns the second request replaced the first, and both said "took".
+	t.Run("two at once", func(t *testing.T) {
+		state := t.TempDir()
+		store := seedSteerState(t, state, nil)
+		path := filepath.Join(store.Dir, node.ResetRequestFile)
+		var mu sync.Mutex
+		var keys []string
+		stop := make(chan struct{})
+		var taker sync.WaitGroup
+		taker.Go(func() {
+			// The daemon's take, every 300 ms: a rename, a read, the removal.
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(300 * time.Millisecond):
+				}
+				if os.Rename(path, path+".taken") != nil {
+					continue
+				}
+				var req node.ResetRequest
+				raw, _ := os.ReadFile(path + ".taken")
+				_ = json.Unmarshal(raw, &req)
+				_ = os.Remove(path + ".taken")
+				mu.Lock()
+				keys = append(keys, req.Keys...)
+				mu.Unlock()
+			}
+		})
+		cfg := steerYAML(t, d.addr(), state)
+		vips := []string{"192.0.2.10", "192.0.2.11"}
+		codes, stderrs := make([]int, len(vips)), make([]string, len(vips))
+		var cmds sync.WaitGroup
+		for i, vip := range vips {
+			cmds.Go(func() { codes[i], stderrs[i] = steerCLIGo("-config", cfg, "-s", "reset-holddown", "-vip", vip) })
+		}
+		cmds.Wait()
+		close(stop)
+		taker.Wait()
+		for i, vip := range vips {
+			if codes[i] != exitOK || !strings.Contains(stderrs[i], "kapkan edge: kapkan edge took the hold-down reset for "+vip) {
+				t.Errorf("-vip %s: code=%d stderr=%q", vip, codes[i], stderrs[i])
+			}
+		}
+		slices.Sort(keys)
+		if !slices.Equal(keys, vips) {
+			t.Fatalf("the daemon took the requests for %q, want %q: each command said it took", keys, vips)
+		}
+	})
+
+	// With nobody taking them, the second command's request is its own: the
+	// first command's cancel must not withdraw it and leave the second
+	// reporting a reset that never happened.
+	t.Run("two, and nobody takes them", func(t *testing.T) {
+		t.Parallel()
+		state := t.TempDir()
+		store := seedSteerState(t, state, nil)
+		cfg := steerYAML(t, d.addr(), state)
+		codes, stderrs := make([]int, 2), make([]string, 2)
+		var cmds sync.WaitGroup
+		for i := range 2 {
+			cmds.Go(func() {
+				time.Sleep(time.Duration(i) * 1500 * time.Millisecond)
+				codes[i], stderrs[i] = steerCLIGo("-config", cfg, "-s", "reset-holddown", "-vip", "192.0.2.1"+strconv.Itoa(i))
+			})
+		}
+		cmds.Wait()
+		for i := range 2 {
+			if codes[i] != exitError || !strings.Contains(stderrs[i], "nothing was reset") {
+				t.Errorf("command %d: code=%d stderr=%q; want 1, nothing was reset", i, codes[i], stderrs[i])
+			}
+		}
+		if _, err := os.Lstat(filepath.Join(store.Dir, node.ResetRequestFile)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("a request nobody took was left behind: %v", err)
+		}
+	})
+
+	// An interrupt withdraws the request: left behind, it would reset the
+	// hold-downs at whatever start or tick came next, long after the operator
+	// gave up on it.
+	t.Run("interrupted", func(t *testing.T) {
+		state := t.TempDir()
+		store := seedSteerState(t, state, nil)
+		path := filepath.Join(store.Dir, node.ResetRequestFile)
+		cmd := exec.Command(os.Args[0], "-test.run=^TestEdgeSignalResetHelper$")
+		cmd.Env = append(os.Environ(), "KAPKAN_STEER_RESET_HELPER=1", "KAPKAN_STEER_RESET_CONFIG="+steerYAML(t, d.addr(), state))
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+			if _, err := os.Lstat(path); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				t.Fatalf("the request never appeared; stderr:\n%s", stderr.String())
+			}
+		}
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			t.Fatal(err)
+		}
+		err := cmd.Wait()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != exitError || !strings.Contains(stderr.String(), "kapkan edge: interrupted; the request is withdrawn and nothing was reset") {
+			t.Fatalf("an interrupted reset-holddown exited %v; want 1, withdrawn; stderr:\n%s", err, stderr.String())
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("an interrupted command left its request behind: %v", err)
 		}
 	})
 
@@ -1261,6 +1780,29 @@ func TestEdgeSignalResetHoldDown(t *testing.T) {
 			t.Fatalf("code=%d stderr=%q", code, stderr)
 		}
 	})
+}
+
+// steerCLIGo is runEdgeCLIOut for a goroutine of its own, where a test may
+// not fail itself: the exit code and stderr.
+func steerCLIGo(args ...string) (int, string) {
+	f, err := parseFlags("kapkan", append([]string{"edge"}, args...), flag.ContinueOnError)
+	if err != nil {
+		return -1, err.Error()
+	}
+	var out, errOut bytes.Buffer
+	return runSubcommand(f, &out, &errOut), errOut.String()
+}
+
+// TestEdgeSignalResetHelper is the child of TestEdgeSignalResetHoldDown's
+// "interrupted": -s reset-holddown through main(), with nobody to take the
+// request.
+func TestEdgeSignalResetHelper(t *testing.T) {
+	if os.Getenv("KAPKAN_STEER_RESET_HELPER") != "1" {
+		t.Skip("the child process of TestEdgeSignalResetHoldDown/interrupted")
+	}
+	os.Args = []string{"kapkan", "edge", "-config", os.Getenv("KAPKAN_STEER_RESET_CONFIG"), "-s", "reset-holddown"}
+	main()
+	t.Fatal("main returned")
 }
 
 // slowFS serves net/fib_trie one line per 100 ms, as a kernel walking a full
