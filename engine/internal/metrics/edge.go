@@ -138,8 +138,11 @@ var (
 	// EdgeSteerTransitionsTotal counts verdict changes by target, the verdict
 	// entered (to) and its reason (ok, refused, not_tls, unbound, drained,
 	// new_node, starting). The node publishes each of a target's seven series
-	// at 0 when its sampler starts, so the first change after a restart shows
-	// in increase() and rate().
+	// at 0 when its sampler starts, so a change made once Prometheus has
+	// scraped that 0 (the first withdrawal of a node up for a while) shows in
+	// increase() and rate(). One made before the first scrape after a restart,
+	// such as the restart's own announce, may not: a count equal to the
+	// previous process's reads as no increase.
 	EdgeSteerTransitionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "kapkan",
 		Subsystem: "edge",

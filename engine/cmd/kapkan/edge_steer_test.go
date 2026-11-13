@@ -1720,39 +1720,41 @@ func TestEdgeSignalResetHoldDown(t *testing.T) {
 	// An interrupt withdraws the request: left behind, it would reset the
 	// hold-downs at whatever start or tick came next, long after the operator
 	// gave up on it.
-	t.Run("interrupted", func(t *testing.T) {
-		state := t.TempDir()
-		store := seedSteerState(t, state, nil)
-		path := filepath.Join(store.Dir, node.ResetRequestFile)
-		cmd := exec.Command(os.Args[0], "-test.run=^TestEdgeSignalResetHelper$")
-		cmd.Env = append(os.Environ(), "KAPKAN_STEER_RESET_HELPER=1", "KAPKAN_STEER_RESET_CONFIG="+steerYAML(t, d.addr(), state))
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-			if _, err := os.Lstat(path); err == nil {
-				break
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
+		t.Run("interrupted by "+sig.String(), func(t *testing.T) {
+			state := t.TempDir()
+			store := seedSteerState(t, state, nil)
+			path := filepath.Join(store.Dir, node.ResetRequestFile)
+			cmd := exec.Command(os.Args[0], "-test.run=^TestEdgeSignalResetHelper$")
+			cmd.Env = append(os.Environ(), "KAPKAN_STEER_RESET_HELPER=1", "KAPKAN_STEER_RESET_CONFIG="+steerYAML(t, d.addr(), state))
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
 			}
-			if time.Now().After(deadline) {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-				t.Fatalf("the request never appeared; stderr:\n%s", stderr.String())
+			for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+				if _, err := os.Lstat(path); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+					t.Fatalf("the request never appeared; stderr:\n%s", stderr.String())
+				}
 			}
-		}
-		if err := cmd.Process.Signal(os.Interrupt); err != nil {
-			t.Fatal(err)
-		}
-		err := cmd.Wait()
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() != exitError || !strings.Contains(stderr.String(), "kapkan edge: interrupted; the request is withdrawn and nothing was reset") {
-			t.Fatalf("an interrupted reset-holddown exited %v; want 1, withdrawn; stderr:\n%s", err, stderr.String())
-		}
-		if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
-			t.Fatalf("an interrupted command left its request behind: %v", err)
-		}
-	})
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			err := cmd.Wait()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != exitError || !strings.Contains(stderr.String(), "kapkan edge: interrupted; the request is withdrawn and nothing was reset") {
+				t.Fatalf("an interrupted reset-holddown exited %v; want 1, withdrawn; stderr:\n%s", err, stderr.String())
+			}
+			if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("an interrupted command left its request behind: %v", err)
+			}
+		})
+	}
 
 	t.Run("no state.json", func(t *testing.T) {
 		state := t.TempDir()

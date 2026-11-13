@@ -971,8 +971,10 @@ func steerFirstEntryCounts(ec *config.EdgeNodeConfig) string {
 // steerResetHoldDown is -s reset-holddown: a request file the daemon takes
 // on its next tick (renaming it, so a take and this command's cancel never
 // both succeed). It takes effect now or not at all: a request nobody took,
-// or one whose command was interrupted, is withdrawn rather than left to
-// surprise a later start.
+// or one whose command was interrupted (SIGINT, SIGTERM, a hangup), is
+// withdrawn rather than left to surprise a later start. Only SIGKILL, or
+// SIGQUIT (left uncaught, so Ctrl-\ keeps Go's goroutine dump), still leaves
+// it behind.
 func steerResetHoldDown(ec *config.EdgeNodeConfig, store steer.Store, key string, sf steerFlags, now time.Time, w lineWriter) int {
 	if !ec.Steering.Enabled {
 		w.line("kapkan edge: nothing to reset: steering is off")
@@ -1001,8 +1003,9 @@ func steerResetHoldDown(ec *config.EdgeNodeConfig, store steer.Store, key string
 	}
 	defer unlock()
 	// Caught only once the lock is held: until then an interrupt ends the
-	// command as it always did, with nothing written.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// command as it always did, with nothing written. A hangup (the terminal
+	// or SSH session the command ran in went away) is an interrupt too.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	req := node.ResetRequest{All: !sf.vipSet, At: now.UTC()}
 	what := "every target"
@@ -1047,7 +1050,7 @@ func steerResetHoldDown(ec *config.EdgeNodeConfig, store steer.Store, key string
 
 // steerResetLock holds dir/reset-holddown.lock exclusively until unlock,
 // waiting for another command that holds it — at most that command's own
-// bound. The daemon never reads the file, and it stays: removing it while
+// bound, unless that command is stopped. The daemon never reads the file, and it stays: removing it while
 // another command opens it would let two commands lock two files.
 func steerResetLock(dir string) (unlock func(), err error) {
 	f, err := os.OpenFile(filepath.Join(dir, node.ResetRequestFile+".lock"), os.O_RDWR|os.O_CREATE, 0o644)
@@ -1147,10 +1150,15 @@ func (t *steerWaitTarget) decided(now time.Time, grace time.Duration) bool {
 
 // steerWait is -wait: it polls /healthz (which stamps nothing) until a
 // consumer has read the new verdict of every waited target, decided per
-// target: read live, read only in dry mode, or unread at the bound. 0 when
-// every target was read by a consumer not in dry mode; 10 when the rest were
-// read only in dry mode — nothing acts on it there, so `drain -wait &&
-// systemctl stop nginx` must not go on; and 1 when one is unread. A read is
+// target: read live, read only in dry mode, or unread at the bound. Without
+// -consumer, a live read does not count while another named reader has read
+// the target in dry mode within grace, because -wait cannot tell which of the
+// two is the speaker: the target then ends dry if a reader in dry mode read
+// the new verdict, and unread if none did. 0 when every target has a live
+// read that counts; 10 when the rest were read only in dry mode, or live only
+// beside a dry reader of the new verdict — nothing may act on it there, so
+// `drain -wait && systemctl stop nginx` must not go on; and 1 when one is
+// unread, which includes a live read that did not count. A read is
 // all -wait can see, not the speaker's action: the shipped consumer acts on
 // the answer it reads, while a checker with a rise and fall of its own
 // (ExaBGP's healthcheck at its defaults) acts (rise or fall − 1) of its

@@ -56,7 +56,9 @@ const (
 	// filtering, with nothing broken about it — never started, stopped, or
 	// detached. A state, not a fault. With `kapkan edge -s … -wait`, the new
 	// verdict of at least one waited target was read only by consumers in dry
-	// mode, so nothing enforces it there.
+	// mode, or, without -consumer, read live only beside a consumer reading it
+	// in dry mode, which -wait cannot tell from the speaker: -wait cannot
+	// confirm that anything enforces it there.
 	exitNotEnforcing = 10
 	// exitNeedsAttention: `dataplane status` found something a human has to fix
 	// before the data plane can work: no bpffs, a torn pin set, a schema skew.
