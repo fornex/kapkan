@@ -1,63 +1,54 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="night">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Kapkan — Operator Console</title>
 
   <!-- ============================================================
-       PRODUCTION CSP (set as an HTTP header by the Go binary):
+       The Go binary serves this page with a strict CSP header:
        default-src 'none'; script-src 'self'; style-src 'self';
-       connect-src 'self'; img-src 'self'; base-uri 'none';
-       form-action 'none'; frame-ancestors 'none'
-       This prototype ships ZERO inline styles/scripts and ZERO external
-       resources, so it satisfies that policy as-is. The meta tag is left
-       commented in the dev preview only because the host editor injects
-       its own tooling; uncomment when embedding via go:embed.
-       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+       font-src 'self'; connect-src 'self'; img-src 'self';
+       base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+       So: no inline styles or scripts, no external resources. The fonts
+       are embedded beside the scripts (fonts/, IBM Plex, SIL OFL 1.1).
        ============================================================ -->
 
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 
+  <!-- before the stylesheets: puts the saved theme on <html> pre-paint -->
+  <script src="theme.js"></script>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="components.css">
 </head>
 <body>
   <div class="app" id="app">
-    <!-- ============ SIDEBAR ============ -->
-    <aside class="sidebar" id="sidebar">
-      <div class="brand">
-        <span class="brand__mark" aria-hidden="true" id="brandMark"></span>
-        <span class="brand__name" aria-hidden="true" id="brandName"></span>
-        <span class="sr-only">Kapkan</span>
-      </div>
-      <nav class="nav" id="nav" aria-label="Primary"></nav>
-      <div class="sidebar__foot">
-        <div class="role" id="roleToggle" role="group" aria-label="Demo role"></div>
-      </div>
-    </aside>
-
     <!-- ============ TOP BAR ============ -->
     <header class="topbar" id="topbar">
-      <div class="topbar__left">
-        <button class="icon-btn" id="collapseBtn" aria-label="Toggle sidebar"></button>
-        <span id="posturePill"></span>
+      <button type="button" class="brand" id="brand">
+        <span id="brandMark" aria-hidden="true"></span>
+        <span id="brandName" aria-hidden="true"></span>
+      </button>
+      <div class="topbar__nav">
+        <nav class="nav" id="nav"></nav>
       </div>
-      <!-- the duty light: on duty, and in which mode (or "no connection").
-           role=status, so a mode change or a lost engine is announced. -->
-      <span class="topbar__duty" id="modeBadge" role="status"></span>
       <div class="topbar__spacer"></div>
-      <div class="counters" id="counters"></div>
-      <span class="counter__sep" aria-hidden="true"></span>
+      <div class="topbar__status">
+        <!-- what is happening: calm, under attack, or no connection -->
+        <span id="posturePill"></span>
+        <!-- the mode, shown only when it is watch-only. role=status, so a mode
+             change or a lost engine is announced. -->
+        <span id="modeBadge" role="status"></span>
+      </div>
       <div class="topbar__right">
-        <div class="live" id="liveInd">
-          <span class="live__dot"></span>
-          <span class="live__txt"></span>
-          <span class="live__time mono" id="lastUpdated">--:--:--</span>
-        </div>
-        <div class="menu" id="localeMenu"></div>
-        <div class="demo-ctl" id="demoCtl"></div>
-        <button class="btn btn--ghost btn--sm" id="reloadBtn" data-op="1"></button>
+        <span class="live" id="liveInd">
+          <span class="live__dot" aria-hidden="true"></span>
+          <span class="live__txt sr-only"></span>
+          <span class="live__time" id="lastUpdated">--:--:--</span>
+        </span>
+        <button type="button" class="icon-btn" id="themeBtn"></button>
+        <button type="button" class="icon-btn" id="reloadBtn" data-op="1" hidden></button>
+        <button type="button" class="icon-btn nav__gear" id="gearBtn" data-view="settings"></button>
       </div>
     </header>
 
@@ -68,19 +59,19 @@
       <div class="updbanner-slot" id="updateBanner" hidden></div>
       <section class="view" id="view-overview" data-screen-label="Overview"></section>
       <section class="view" id="view-attacks" data-screen-label="Attacks" hidden></section>
-      <section class="view" id="view-bans" data-screen-label="Bans / Mitigation" hidden></section>
+      <section class="view" id="view-bans" data-screen-label="Mitigation" hidden></section>
       <section class="view" id="view-hosts" data-screen-label="Hosts" hidden></section>
-      <section class="view" id="view-nodes" data-screen-label="Scrubbing nodes" hidden></section>
-      <section class="view" id="view-edge" data-screen-label="Edge" hidden></section>
-      <section class="view" id="view-edgenodes" data-screen-label="Edge nodes" hidden></section>
+      <section class="view" id="view-nodes" data-screen-label="Packet filters" hidden></section>
+      <section class="view" id="view-edge" data-screen-label="Edge zones" hidden></section>
+      <section class="view" id="view-edgenodes" data-screen-label="Request filters" hidden></section>
       <section class="view" id="view-hostgroups" data-screen-label="Hostgroups" hidden></section>
-      <section class="view" id="view-traffic" data-screen-label="Traffic / Reports" hidden></section>
+      <section class="view" id="view-traffic" data-screen-label="Traffic" hidden></section>
       <section class="view" id="view-settings" data-screen-label="Settings" hidden></section>
     </main>
-  </div>
 
-  <!-- nav drawer backdrop (mobile only; tapping it closes the sidebar) -->
-  <div class="nav-scrim" id="navScrim"></div>
+    <!-- ============ PHONE TAB BAR (below 900px) ============ -->
+    <nav class="tabbar" id="tabbar"></nav>
+  </div>
 
   <!-- drawer + scrim -->
   <div class="scrim" id="scrim"></div>

@@ -3,25 +3,36 @@
    adapter: the synchronous getters read its cache, refreshed each 3s poll. */
 (function (w) {
   "use strict";
-  var K = w.K, I = w.I18N, h = K.h, API = w.API, V = w.Views;
+  var K = w.K, I = w.I18N, h = K.h, API = w.API, V = w.Views, Theme = w.KapkanTheme;
 
-  var NAV = [
-    { id: "overview", icon: "shield", key: "nav.overview", section: "monitor" },
-    { id: "attacks", icon: "alert", key: "nav.attacks", section: "monitor", count: "attacks" },
-    { id: "bans", icon: "ban", key: "nav.bans", section: "monitor", count: "bans" },
-    { id: "hosts", icon: "server", key: "nav.hosts", section: "monitor" },
-    /* shown only when /status reports nodes_total > 0 — most deployments have
-       no managed scrubbing nodes and must not carry a permanently-empty view */
-    { id: "nodes", icon: "divert", key: "nav.nodes", section: "monitor", whenNodes: true },
-    /* likewise gated on edge_nodes_total: the Edge view (E4.5) exists only
-       where edge nodes front zones */
-    { id: "edge", icon: "shield-check", key: "nav.edge", section: "monitor", whenEdge: true },
-    /* the fleet's own inventory beside its zones (E6.7): same gate */
-    { id: "edgenodes", icon: "globe", key: "nav.edgenodes", section: "monitor", whenEdge: true },
-    { id: "hostgroups", icon: "layers", key: "nav.hostgroups", section: "config" },
-    { id: "traffic", icon: "chart", key: "nav.traffic", section: "config" },
-    { id: "settings", icon: "settings", key: "nav.settings", section: "config" }
+  /* The console's sections: the pill bar in the top bar, Settings behind the
+     gear. A section with more than one view shows them as tabs in its head
+     (views.js viewHead asks V.section() for them). `views[0]` is where a
+     section opens the first time; after that it reopens on the tab the
+     operator left it on. */
+  var SECTIONS = [
+    { id: "overview", key: "nav.overview", icon: "grid", views: ["overview"] },
+    { id: "attacks", key: "nav.attacks", icon: "activity", views: ["attacks"], count: "attacks" },
+    { id: "mitigation", key: "nav.bans", icon: "ban", views: ["bans", "nodes"], count: "bans" },
+    { id: "hosts", key: "nav.hosts", icon: "server", views: ["hosts"] },
+    { id: "traffic", key: "nav.traffic", icon: "chart", views: ["traffic"] },
+    { id: "edge", key: "nav.edge", icon: "globe", views: ["edge", "edgenodes"] },
+    { id: "settings", key: "nav.settings", icon: "settings", views: ["settings", "hostgroups"], gear: true }
   ];
+  /* a view's tab label, where its section has tabs */
+  var TAB_KEY = { bans: "tab.bans", nodes: "nav.nodes", edge: "nav.edge", edgenodes: "nav.edgenodes", settings: "tab.settings", hostgroups: "nav.hostgroups" };
+  /* Views a deployment may not have. Packet filters show only when /status
+     reports nodes_total > 0 — most deployments have no managed scrubbing nodes
+     and must not carry a permanently-empty tab; the edge zones and their
+     request filters only where edge nodes front zones (edge_nodes_total). A
+     section whose views are all gated off leaves the bar. */
+  var VIEW_GATE = {
+    nodes: function (s) { return s.nodes_total > 0; },
+    edge: function (s) { return s.edge_nodes_total > 0; },
+    edgenodes: function (s) { return s.edge_nodes_total > 0; }
+  };
+  /* the phone's tab bar holds four places; the rest are under More */
+  var PHONE_BAR = ["overview", "attacks", "mitigation"];
   var WINDOW = 60;
 
   /* The Edge view's tenant filter survives a reload of the page but not the
@@ -38,12 +49,13 @@
     /* did the last poll reach the engine? Until one does, the top bar shows
        "no connection" rather than a duty light for a mode it has not read. */
     online: false,
-    collapsed: false,
+    /* the tab each section was left on */
+    lastTab: {},
+    moreOpen: false,
     hostDir: "incoming",
     filters: { scope: "", dir: "", type: "", group: "", q: "" },
     expanded: new Set(),
     drawer: { open: false, live: false, key: null, attack: null },
-    localeOpen: false,
     buf: { aggIn: [], aggOut: [], aggInPps: [], aggOutPps: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {}, hostMbps: {} },
     traffic: { key: null, available: false, points: [], loading: false, fetchedAt: 0 },
     /* scrubbing nodes — fetched on demand with a freshness guard, NOT in the
@@ -127,134 +139,181 @@
     };
   }
 
-  /* ---------- mobile nav drawer ----------
-     Below 900px the sidebar is an off-canvas drawer (see components.css). The
-     hamburger toggles it there; on desktop the same button still collapses the
-     rail. */
-  function isNavMobile() { return !!(w.matchMedia && w.matchMedia("(max-width: 900px)").matches); }
-  function setNavOpen(open) { document.getElementById("app").classList.toggle("is-nav-open", open); }
+  /* ---------- sections ---------- */
+  function sectionOf(view) {
+    for (var i = 0; i < SECTIONS.length; i++) if (SECTIONS[i].views.indexOf(view) >= 0) return SECTIONS[i];
+    return SECTIONS[0];
+  }
+  function sectionById(id) {
+    for (var i = 0; i < SECTIONS.length; i++) if (SECTIONS[i].id === id) return SECTIONS[i];
+    return SECTIONS[0];
+  }
+  /* A gated view shows once /status says the deployment has it — and is never
+     hidden out from under the operator who is LOOKING at it. Before the first
+     /status answer the status is empty and gated views stay hidden, so a
+     zero-node deployment never sees them flash. */
+  function viewShown(view, status) {
+    var gate = VIEW_GATE[view];
+    return !gate || state.view === view || !!(status && gate(status));
+  }
+  function sectionViews(sec, status) {
+    return sec.views.filter(function (v) { return viewShown(v, status); });
+  }
+  /* the operator's choice of language and theme live in Settings; the bar
+     keeps only a quick night/paper switch */
+  function themeLabel() { return I.t(Theme.effective() === "paper" ? "theme.toNight" : "theme.toPaper"); }
+
+  /* The head of a sectioned view: the section's name, and its tabs while it
+     has more than one view to show. views.js viewHead calls this through
+     V.section; null leaves the view's own title alone. Each view renders its
+     own copy, so arrow-key focus lands on the copy in the new view. */
+  function sectionHead() {
+    var sec = sectionOf(state.view), status = API.getStatus();
+    var shown = sectionViews(sec, status);
+    if (shown.length < 2) return null;
+    var tabs = h("div", { class: "seg seg--tabs", attrs: { role: "tablist", "aria-label": I.t(sec.key) } }, shown.map(function (v, i) {
+      var on = v === state.view;
+      return h("button", {
+        class: "seg__btn" + (on ? " is-on" : ""),
+        attrs: { type: "button", role: "tab", "aria-selected": String(on), "aria-controls": "view-" + v, tabindex: on ? "0" : "-1" },
+        dataset: { view: v },
+        text: I.t(TAB_KEY[v]),
+        onclick: function () { actions.setView(v); },
+        onkeydown: function (e) {
+          var step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+          if (!step) return;
+          e.preventDefault();
+          var next = shown[(i + step + shown.length) % shown.length];
+          actions.setView(next);
+          var t = document.querySelector('#view-' + next + ' [role="tab"][data-view="' + next + '"]');
+          if (t) t.focus();
+        }
+      });
+    }));
+    return { title: I.t(sec.key), tabs: tabs };
+  }
+  V.section = sectionHead;
 
   /* ---------- shell (built once / on locale change) ---------- */
   function buildShell() {
+    var brand = document.getElementById("brand");
     K.clear(document.getElementById("brandMark")).appendChild(w.icon("brandmark"));
     K.clear(document.getElementById("brandName")).appendChild(w.icon("wordmark"));
+    brand.setAttribute("aria-label", I.t("nav.home"));
+    brand.onclick = function () { actions.setSection("overview"); };
 
-    /* nav */
+    /* the section pills; data-view is the view each opens first, so a
+       script driving the console can open a view by its id */
     var nav = K.clear(document.getElementById("nav"));
-    var sections = { monitor: I.t("nav.section.monitor"), config: I.t("nav.section.config") };
-    var lastSection = null;
-    NAV.forEach(function (item) {
-      if (item.section !== lastSection) { nav.appendChild(h("div", { class: "nav__label", text: sections[item.section] })); lastSection = item.section; }
-      var countEl = item.count ? h("span", { class: "nav__count", dataset: { count: item.count }, text: "0" }) : null;
-      var btn = h("button", { class: "nav__item" + (state.view === item.id ? " is-active" : ""), dataset: { view: item.id },
-        onclick: function () { actions.setView(item.id); } },
-        [w.icon(item.icon, "ico"), h("span", { class: "nav__item__txt", text: I.t(item.key) }), countEl]);
-      /* node-gated items start hidden so a zero-node deployment never sees
-         them flash before the first /status answer; renderShellDynamic
-         reveals them (CSSOM, not a style attribute — CSP style-src 'self') */
-      if ((item.whenNodes || item.whenEdge) && state.view !== item.id) btn.style.display = "none";
+    nav.setAttribute("aria-label", I.t("nav.label"));
+    SECTIONS.forEach(function (sec) {
+      if (sec.gear) return;
+      var countEl = sec.count ? h("span", { class: "nav__count", dataset: { count: sec.count }, attrs: { hidden: "" }, text: "0" }) : null;
+      var btn = h("button", { class: "nav__item", attrs: { type: "button" }, dataset: { view: sec.views[0], section: sec.id },
+        onclick: function () { actions.setSection(sec.id); } },
+        [h("span", { text: I.t(sec.key) }), countEl]);
+      if (!sectionViews(sec, API.getStatus()).length) btn.hidden = true;
       nav.appendChild(btn);
     });
 
-    /* role indicator slot (read-only; the real role comes from the API token) */
-    K.clear(document.getElementById("roleToggle"));
+    var tb = K.clear(document.getElementById("themeBtn"));
+    tb.appendChild(w.icon(Theme.effective() === "paper" ? "sun" : "moon"));
+    tb.setAttribute("aria-label", themeLabel()); tb.title = themeLabel();
+    tb.onclick = function () { actions.setTheme(Theme.effective() === "paper" ? "night" : "paper"); };
 
-    /* collapse / nav-drawer toggle */
-    var cb = K.clear(document.getElementById("collapseBtn")); cb.appendChild(w.icon("menu"));
-    cb.onclick = function () {
-      var app = document.getElementById("app");
-      if (isNavMobile()) {
-        app.classList.remove("is-collapsed"); /* drawer always shows full labels */
-        setNavOpen(!app.classList.contains("is-nav-open"));
-      } else {
-        state.collapsed = !state.collapsed;
-        app.classList.toggle("is-collapsed", state.collapsed);
-      }
-    };
-
-    /* live indicator label */
-    document.querySelector("#liveInd .live__txt").textContent = I.t("live.label");
-    document.getElementById("liveInd").classList.add("is-polling");
-
-    /* locale menu */
-    buildLocaleMenu();
-
-    /* no demo controls in production */
-    K.clear(document.getElementById("demoCtl"));
-
-    /* reload button (visibility set per-poll from role) */
+    /* operator-only (visibility set per poll from the role) */
     var rb = K.clear(document.getElementById("reloadBtn"));
-    rb.appendChild(w.icon("refresh")); rb.appendChild(h("span", { text: I.t("btn.reload") }));
+    rb.appendChild(w.icon("refresh"));
+    rb.setAttribute("aria-label", I.t("btn.reload")); rb.title = I.t("btn.reload.title");
     rb.onclick = function (e) { actions.reload(e.currentTarget); };
-    rb.style.display = "none";
+
+    var gb = K.clear(document.getElementById("gearBtn"));
+    gb.appendChild(w.icon("settings"));
+    gb.setAttribute("aria-label", I.t("nav.settings")); gb.title = I.t("nav.settings");
+    gb.onclick = function () { actions.setSection("settings"); };
+
+    buildTabbar();
+    markActive();
   }
 
-  function buildLocaleMenu() {
-    var menu = K.clear(document.getElementById("localeMenu"));
-    menu.className = "menu" + (state.localeOpen ? " is-open" : "");
-    var btn = h("button", { class: "icon-btn", attrs: { "aria-haspopup": "true", "aria-expanded": String(state.localeOpen), title: I.t("locale.title") },
-      onclick: function (e) { e.stopPropagation(); state.localeOpen = !state.localeOpen; buildLocaleMenu(); } },
-      [w.icon("globe")]);
-    var loaded = { en: 1, de: 1, ru: 1, fr: 1, es: 1 };
-    var items = I.available.map(function (l) {
-      var on = l.code === I.locale, isLoaded = loaded[l.code];
-      return h("button", { class: "menu__item" + (on ? " is-on" : ""), attrs: isLoaded ? {} : { disabled: "true", title: I.t("locale.soon.title") },
-        onclick: isLoaded ? function () { actions.setLocale(l.code); } : null }, [
-        h("span", { class: "menu__flag", text: l.flag }),
-        h("span", { text: l.label }),
-        isLoaded ? null : K.badge("badge--muted", I.t("locale.soon")),
-        w.icon("check-sm", "check")
-      ]);
+  /* The phone's bar (below 900px): Overview, Attacks, Mitigation, and More for
+     the rest, opened as a sheet above it. */
+  function buildTabbar() {
+    var bar = K.clear(document.getElementById("tabbar"));
+    bar.setAttribute("aria-label", I.t("nav.label"));
+    state.moreOpen = false;
+    function item(icon, label, extra) {
+      var kids = [w.icon(icon)];
+      if (extra) kids.push(extra);
+      return [h("span", { class: "tabbar__icon" }, kids), h("span", { text: label })];
+    }
+    PHONE_BAR.forEach(function (id) {
+      var sec = sectionById(id);
+      var count = sec.count === "attacks" ? h("span", { class: "tabbar__count", attrs: { hidden: "" }, text: "0" }) : null;
+      bar.appendChild(h("button", { class: "tabbar__item", attrs: { type: "button" }, dataset: { section: id },
+        onclick: function () { actions.setSection(id); } }, item(sec.icon, I.t(sec.key), count)));
     });
-    var pop = h("div", { class: "menu__pop" }, items);
-    menu.appendChild(btn); menu.appendChild(pop);
+    var moreItems = SECTIONS.filter(function (s) { return PHONE_BAR.indexOf(s.id) < 0; }).map(function (sec) {
+      return h("button", { class: "more-pop__item", attrs: { type: "button" }, dataset: { section: sec.id },
+        onclick: function () { actions.setSection(sec.id); } }, [w.icon(sec.icon), h("span", { text: I.t(sec.key) })]);
+    });
+    var pop = h("div", { class: "more-pop", id: "morePop", attrs: { hidden: "" } }, moreItems);
+    var more = h("button", { class: "tabbar__item", id: "moreBtn", attrs: { type: "button", "aria-haspopup": "true", "aria-expanded": "false", "aria-controls": "morePop" },
+      onclick: function (e) { e.stopPropagation(); setMore(!state.moreOpen); } }, item("more", I.t("nav.more")));
+    bar.appendChild(more);
+    bar.appendChild(pop);
+  }
+  function setMore(open) {
+    state.moreOpen = open;
+    var pop = document.getElementById("morePop"), btn = document.getElementById("moreBtn");
+    if (!pop || !btn) return;
+    pop.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
   }
 
   /* ---------- dynamic topbar (every poll) ---------- */
   function renderShellDynamic(ctx) {
-    K.mount(document.getElementById("posturePill"), K.posturePill(ctx.posture));
-    K.mount(document.getElementById("modeBadge"), ctx.online ? K.dutyChip(ctx.status.dry_run) : K.noContact());
-    /* "Live" and its heartbeat would contradict "no connection" beside it: the
-       dot stops and greys, and only the time of the last good poll stays. */
+    var s = ctx.status;
+    /* What is happening, then the mode. With no connection neither can be
+       claimed: "no connection" takes the posture's place and the watch-only
+       chip goes, since the mode it names has not been read. */
+    K.mount(document.getElementById("posturePill"), ctx.online
+      ? K.postureChip(ctx.posture, function () { actions.setSection("attacks"); })
+      : K.offlineChip());
+    K.mount(document.getElementById("modeBadge"), ctx.online && s.dry_run
+      ? K.watchChip(function () { actions.setSection("settings"); })
+      : []);
+
+    /* the clock is the time of the last good poll; with no connection the dot
+       greys and the time stays where the data stopped */
     var live = document.getElementById("liveInd");
-    live.classList.toggle("is-polling", !!ctx.online);
     live.classList.toggle("is-down", !ctx.online);
+    if (ctx.online) document.getElementById("lastUpdated").textContent = I.time(new Date());
+    var stamp = document.getElementById("lastUpdated").textContent;
+    live.querySelector(".live__txt").textContent = I.t(ctx.online ? "live.label" : "duty.offline");
+    live.title = I.t(ctx.online ? "live.title" : "live.title.down", { t: stamp });
 
-    var counters = K.clear(document.getElementById("counters"));
-    var defs = [
-      { key: "counter.attacks", val: ctx.status.active_attacks, hot: ctx.status.active_attacks > 0 },
-      { key: "counter.bans", val: ctx.status.active_bans, hot: ctx.status.active_bans > 0 },
-      { key: "counter.hosts", val: ctx.hosts.length },
-      { key: "counter.networks", val: ctx.networks.length }
-    ];
-    defs.forEach(function (d) {
-      counters.appendChild(h("div", { class: "counter" + (d.hot ? " is-hot" : "") }, [
-        h("span", { class: "counter__val", text: I.num(d.val) }), h("span", { class: "counter__lbl", text: I.t(d.key) })
-      ]));
-    });
-
-    /* nav counts */
+    /* section counts: attacks in the alarm tint, mitigations in neutral */
+    var counts = { attacks: s.active_attacks || 0, bans: s.active_bans || 0 };
     document.querySelectorAll(".nav__count").forEach(function (el) {
-      var v = el.dataset.count === "attacks" ? ctx.status.active_attacks : ctx.status.active_bans;
+      var v = counts[el.dataset.count];
       el.textContent = I.num(v);
-      el.classList.toggle("is-hot", v > 0);
-      el.style.display = v > 0 ? "" : "none";
+      el.classList.toggle("is-hot", el.dataset.count === "attacks" && v > 0);
+      el.hidden = !(v > 0);
+    });
+    document.querySelectorAll(".tabbar__count").forEach(function (el) {
+      el.textContent = I.num(counts.attacks);
+      el.hidden = !(counts.attacks > 0);
     });
 
-    /* node-gated nav items: hidden until /status reports managed nodes, but
-       never hidden out from under the operator who is LOOKING at the view */
-    NAV.forEach(function (item) {
-      if (!item.whenNodes && !item.whenEdge) return;
-      var have = item.whenNodes ? ctx.status.nodes_total > 0 : ctx.status.edge_nodes_total > 0;
-      var el = document.querySelector('.nav__item[data-view="' + item.id + '"]');
-      if (el) el.style.display = (have || state.view === item.id) ? "" : "none";
+    /* gated sections leave the bar (and the More sheet) while they have
+       nothing to show */
+    SECTIONS.forEach(function (sec) {
+      var shown = sectionViews(sec, s).length > 0;
+      document.querySelectorAll('[data-section="' + sec.id + '"]').forEach(function (el) { el.hidden = !shown; });
     });
 
-    document.getElementById("lastUpdated").textContent = I.time(new Date());
-
-    /* operator-only reload button */
-    var rb = document.getElementById("reloadBtn");
-    if (rb) rb.style.display = ctx.role === "operator" ? "" : "none";
+    document.getElementById("reloadBtn").hidden = ctx.role !== "operator";
   }
 
   /* ---------- update-available banner (opt-in update check) ---------- */
@@ -281,7 +340,7 @@
       children.push(h("a", { class: "btn btn--ghost btn--sm", href: s.latest_url, target: "_blank", rel: "noopener", text: I.t("update.view") }));
     }
     children.push(h("button", {
-      class: "icon-btn", "aria-label": I.t("update.dismiss"),
+      class: "icon-btn icon-btn--sm", "aria-label": I.t("update.dismiss"),
       onclick: function () {
         try { localStorage.setItem(UPD_DISMISS_KEY, s.latest_version); } catch (e) {}
         renderUpdateBanner(ctx);
@@ -293,15 +352,31 @@
   /* ---------- view render ---------- */
   function renderView(ctx) {
     ctx = ctx || buildCtx();
-    NAV.forEach(function (item) {
-      var el = document.querySelector('.nav__item[data-view="' + item.id + '"]');
-      if (el) el.classList.toggle("is-active", state.view === item.id);
-      var view = document.getElementById("view-" + item.id);
-      if (view) view.hidden = (state.view !== item.id);
-    });
+    markActive();
     var root = document.getElementById("view-" + state.view);
     var fn = V[state.view];
     if (fn) fn(root, ctx);
+  }
+  /* which view is shown, and which section control says so */
+  function markActive() {
+    var cur = sectionOf(state.view);
+    SECTIONS.forEach(function (sec) {
+      var on = sec === cur;
+      sec.views.forEach(function (v) {
+        var view = document.getElementById("view-" + v);
+        if (view) view.hidden = (state.view !== v);
+      });
+      document.querySelectorAll('.nav__item[data-section="' + sec.id + '"], .tabbar__item[data-section="' + sec.id + '"], .more-pop__item[data-section="' + sec.id + '"]').forEach(function (el) {
+        el.classList.toggle("is-active", on);
+        if (on) el.setAttribute("aria-current", "page"); else el.removeAttribute("aria-current");
+      });
+    });
+    var gear = document.getElementById("gearBtn");
+    gear.classList.toggle("is-active", cur.gear === true);
+    if (cur.gear) gear.setAttribute("aria-current", "page"); else gear.removeAttribute("aria-current");
+    /* More lights up for whichever section it holds */
+    var more = document.getElementById("moreBtn");
+    if (more) more.classList.toggle("is-active", PHONE_BAR.indexOf(cur.id) < 0);
   }
 
   /* ---------- drawer ---------- */
@@ -352,8 +427,21 @@
 
   /* ---------- actions ---------- */
   var actions = {
-    setView: function (v) { state.view = v; setNavOpen(false); renderView(); },
-    setLocale: function (loc) { I.set(loc); state.localeOpen = false; buildShell(); renderShellDynamic(buildCtx()); renderView(); if (state.drawer.open) renderDrawer(); },
+    setView: function (v) {
+      state.view = v;
+      state.lastTab[sectionOf(v).id] = v;
+      setMore(false);
+      renderView();
+    },
+    /* a section opens on the tab it was left on, if that tab is still there */
+    setSection: function (id) {
+      var sec = sectionById(id), shown = sectionViews(sec, API.getStatus());
+      var v = state.lastTab[id];
+      actions.setView(shown.indexOf(v) >= 0 ? v : (shown[0] || sec.views[0]));
+      document.getElementById("main").scrollTop = 0;
+    },
+    setLocale: function (loc) { I.set(loc); buildShell(); renderShellDynamic(buildCtx()); renderView(); if (state.drawer.open) renderDrawer(); },
+    setTheme: function (pref) { Theme.set(pref); },
     setFilter: function (k, v) { state.filters[k] = v; renderView(); },
     setHostDir: function (d) { state.hostDir = d; renderView(); },
     toggleHost: function (ip) { if (state.expanded.has(ip)) state.expanded.delete(ip); else state.expanded.add(ip); renderView(); },
@@ -598,14 +686,16 @@
     });
   }
 
-  /* close menus on outside click / esc */
+  /* close the More sheet on an outside click / esc */
   document.addEventListener("click", function (e) {
-    if (state.localeOpen && !document.getElementById("localeMenu").contains(e.target)) { state.localeOpen = false; buildLocaleMenu(); }
+    if (state.moreOpen && !document.getElementById("tabbar").contains(e.target)) setMore(false);
   });
   document.getElementById("scrim").addEventListener("click", closeDrawer);
-  document.getElementById("navScrim").addEventListener("click", function () { setNavOpen(false); });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") { closeDrawer(); setNavOpen(false); K.closeConfirm(); if (state.localeOpen) { state.localeOpen = false; buildLocaleMenu(); } return; }
+    if (e.key === "Escape") {
+      if (state.moreOpen) { setMore(false); var mb = document.getElementById("moreBtn"); if (mb) mb.focus(); }
+      closeDrawer(); K.closeConfirm(); return;
+    }
     /* trap Tab within the open drawer (skip while a confirm popover is up) */
     if (e.key === "Tab" && state.drawer.open && !document.getElementById("__confirm")) {
       var d = document.getElementById("drawer");
@@ -623,6 +713,10 @@
     I.init();
     API.init();
     buildShell();
+    /* a theme change (the bar's switch, Settings, or the OS while "as the
+       system" is chosen) re-labels the switch and redraws the view, so the
+       Settings choice it shows stays true */
+    Theme.onChange(function () { buildShell(); renderShellDynamic(buildCtx()); renderView(); });
     API.refresh().then(function () { state.online = true; prefill(); }).catch(function () {}).then(function () {
       render();
       setInterval(poll, API.POLL_MS);

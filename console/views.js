@@ -9,10 +9,15 @@
   function keyAct(fn) { return function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(e); } }; }
 
   /* ===== shared building blocks ===== */
+  /* A view in a section with tabs (Mitigation, the edge zones, Settings) is headed by
+     the section's name with the tabs on the right; app.js supplies both
+     through Views.section(), and null leaves the view's own title. */
   function viewHead(title, sub, actions) {
+    var sec = w.Views.section ? w.Views.section() : null;
+    var right = [].concat(actions || [], sec ? [sec.tabs] : []);
     return h("div", { class: "view-head" }, [
-      h("div", {}, [h("h1", { class: "view-head__title", text: title }), sub ? h("div", { class: "view-head__sub", text: sub }) : null]),
-      actions ? h("div", { class: "view-head__actions" }, actions) : null
+      h("div", {}, [h("h1", { class: "view-head__title", text: sec ? sec.title : title }), sub ? h("div", { class: "view-head__sub", text: sub }) : null]),
+      right.length ? h("div", { class: "view-head__actions" }, right) : null
     ]);
   }
 
@@ -187,10 +192,10 @@
       if (expanded) rows.push(h("tr", { class: "attack-detail-row" }, h("td", { attrs: { colspan: "7" } }, h("div", { class: "attack-card__body" }, attackBody(a, ctx)))));
     });
 
-    var out = [h("div", { class: "tablewrap" }, h("table", { class: "tbl attacks-tbl" }, [
+    var out = [h("div", { class: "card" }, h("div", { class: "tablewrap" }, h("table", { class: "tbl attacks-tbl" }, [
       h("thead", {}, h("tr", {}, [th("col.target"), th("col.dir"), th("col.type"), thNum("ac.metricvsthreshold"), th("ac.escalation"), th("col.method"), h("th", {})])),
       h("tbody", {}, rows)
-    ]))];
+    ])))];
     if (opts.limit && total > opts.limit) {
       out.push(h("button", { class: "btn btn--ghost btn--sm mt-4", onclick: function () { ctx.actions.setView("attacks"); } },
         [w.icon("alert"), h("span", { text: I.t("nav.attacks") }), K.badge("badge--muted", "+" + (total - opts.limit))]));

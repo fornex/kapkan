@@ -215,6 +215,16 @@ func TestLocaleParityRegistered(t *testing.T) {
 // badge) added 4: duty.{on,watch,live} for "On duty · watch-only" and
 // "· live", and duty.offline, the "no connection" badge shown in its place
 // when a poll fails (440 + 4 = 444).
+//
+// The console redesign's top bar (section pills instead of a sidebar) took 13
+// away — the sidebar's two section labels and its collapse button, the
+// counters strip's three unused labels, the duty light's three words and its
+// long title, the locale menu's two "soon" strings, and the never-read
+// live.updated — and added 18: the bar's label, the brand's "to the overview",
+// More (the phone's tab bar), the Bans and General tab names, the watch-only
+// chip's short label and hint, the clock's two titles, the reload button's
+// title, and Settings' language-and-theme card with its theme switch (eight)
+// (444 − 13 + 18 = 449).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -225,7 +235,7 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		{"units", 0, 4},
 		{"plurals", 1, 13},
 		{"plurals", 0, 26},  // 13 keys × {one, other}: 5 + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5) + edgeUnboundTokens (E6.7)
-		{"strings", 0, 444}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history); +34: ed.lever.* (E6.8); +4: duty.* (the duty light)
+		{"strings", 0, 449}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history); +34: ed.lever.* (E6.8); +4: duty.* (the duty light); −13 +18: the redesigned top bar, tabs and theme
 		{"enums", 1, 9},
 		{"enums", 0, 59}, // +16: edgeEventKind (E6.7)
 		{"enumsShort", 1, 1},
