@@ -27,8 +27,10 @@ security-relevant.
   `GET /steer?vip=` on `status_listen` answers readers on this box `200` announce, `503`
   withdraw or drain, and anything else (`425` unknown, no answer) means hold; `kapkan edge -steer
   -vip A` answers with an exit code (`0` announce, `100` withdraw, `101` drain, any other holds)
-  and evaluates locally when the daemon does not answer. Only nothing listening on `:443`, the
-  address gone from the kernel, a non-TLS answer or your drain withdraws: nothing the brain sends
+  and, when the daemon gives no verdict (`425` unknown, a server error, or no answer), answers
+  its own undamped evaluation of the same inputs instead, so right after a restart or an
+  undrain it can announce while `/steer` still holds. Only nothing listening on `:443`, the
+  address gone from the kernel, a non-TLS answer or a drain withdraws: nothing the brain sends
   can. `kapkan edge -s drain|undrain|reset-holddown [-vip A] [-reason R] [-wait [-consumer NAME]]
   [-force]` drains the node or one address without the daemon, and `-wait` returns once your
   consumer has read the new verdict; a node without `state_dir/steering/state.json` starts drained

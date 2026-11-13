@@ -97,10 +97,12 @@ disable_ipv6: false
 # each address below, answered to readers on this box on status_listen
 # (GET /steer?vip=) and by `kapkan edge -steer`; your BGP speaker, on this
 # box too, announces or withdraws. Kapkan never speaks BGP and never names a
-# prefix. Only this box's kernel (nothing listens on :443, the address is
-# gone) or your drain (`kapkan edge -s drain`) withdraws; anything else, the
-# brain included, at most delays a join. Off by default; needs status_listen
-# and refuses omit_catch_all.
+# prefix. Only this box takes an address out: nothing listening on :443, a
+# non-TLS answer there, the address gone from its kernel, or a drain — yours
+# (`kapkan edge -s drain`), or a new node's own: a node without
+# state_dir/steering/state.json starts drained until every zone answers with
+# its certificate. Anything else, the brain included, at most delays a join.
+# Off by default; needs status_listen and refuses omit_catch_all.
 steering:
   enabled: false
   # Seconds between samples (1..10).
@@ -118,7 +120,7 @@ steering:
     max_seconds: 60
   # The addresses (never prefixes) your speaker announces from this node;
   # empty means one verdict for the node itself.
-  vips: []
+  vips:
   #  - 192.0.2.10
   #  - 2001:db8::10
 

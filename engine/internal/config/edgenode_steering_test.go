@@ -239,4 +239,19 @@ func TestEdgeExampleParses(t *testing.T) {
 	if e, err = ParseEdgeNode([]byte(on)); err != nil || !e.Steering.Enabled {
 		t.Fatalf("the example with steering turned on: %v", err)
 	}
+	// Listing the sample addresses is deleting the comment mark on their
+	// lines, whichever way an editor deletes it. Under `vips: []` each way
+	// is a YAML error that names the `steering:` line, not the `[]`; under
+	// `vips:`, which lists none just as `[]` does, each is a list.
+	wantVIPs := []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("2001:db8::10")}
+	for _, mark := range []string{"#", "# ", "#  "} {
+		listed := strings.ReplaceAll(on, "\n  #  - ", "\n  "+strings.TrimPrefix("#  - ", mark))
+		if e, err = ParseEdgeNode([]byte(listed)); err != nil {
+			t.Errorf("the example with its sample VIPs uncommented (%q deleted): %v", mark, err)
+			continue
+		}
+		if !slices.Equal(e.Steering.VIPAddrs, wantVIPs) {
+			t.Errorf("the example with its sample VIPs uncommented (%q deleted): VIPAddrs %v, want %v", mark, e.Steering.VIPAddrs, wantVIPs)
+		}
+	}
 }
