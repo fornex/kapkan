@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -939,10 +941,34 @@ func TestDashboardServing(t *testing.T) {
 		{"/views2.js", "V.edgenodes = edgeNodes;"},
 		{"/views2.js", "V.nodes = nodes;"},
 		{"/locales/en.js", "w.KAPKAN_LOCALES.en ="},
+		{"/theme.js", "w.KapkanTheme = {"},
 	} {
 		rec := reqWith(h, http.MethodGet, a.path, "", "", "")
 		if !strings.Contains(rec.Body.String(), a.needle) {
 			t.Errorf("%s does not contain %q — the console is not the tree this binary should embed", a.path, a.needle)
+		}
+	}
+
+	// The stylesheet names its fonts by URL. Each must be an allowlisted route
+	// answering with a font type, and the CSP must admit fonts at all: miss
+	// either and the browser falls back to system fonts without a word.
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "font-src 'self'") {
+		t.Errorf("CSP lacks font-src 'self', so the embedded fonts would be refused: %q", csp)
+	}
+	css := reqWith(h, http.MethodGet, "/style.css", "", "", "").Body.String()
+	fonts := regexp.MustCompile(`url\(\s*["']?([^"')]+\.woff2)["']?\s*\)`).FindAllStringSubmatch(css, -1)
+	if len(fonts) == 0 {
+		t.Error("/style.css references no .woff2: the @font-face rules are gone")
+	}
+	for _, m := range fonts {
+		p := path.Clean("/" + m[1]) // relative to /style.css
+		rec := reqWith(h, http.MethodGet, p, "", "", "")
+		if rec.Code != http.StatusOK {
+			t.Errorf("style.css font %s status = %d, want 200 (add it to dashboardAssets)", p, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "font/woff2" {
+			t.Errorf("style.css font %s content-type = %q, want font/woff2", p, ct)
 		}
 	}
 

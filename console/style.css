@@ -1,59 +1,126 @@
 /* ============================================================================
-   Kapkan Operator Console — design tokens + app shell + base
-   Vanilla CSS. No @import of remote resources. System font stack only.
-   Safe under CSP: default-src 'none'; style-src 'self' (no inline styles).
+   Kapkan Operator Console — fonts, design tokens, app shell, shared atoms
+   Vanilla CSS, no remote resources: the fonts are embedded in the binary and
+   served from this origin (CSP font-src 'self'). Safe under style-src 'self'
+   (no inline styles: dynamic values go through the CSSOM).
+
+   Two themes, Night (the default) and Paper, from the brand book. <html
+   data-theme> carries the effective one; theme.js sets it before first paint.
    ========================================================================== */
 
-:root {
-  /* --- Base surfaces (refined from brief palette) --- */
-  --base:        #0f1419;   /* app background          */
-  --surface:     #1a2029;   /* cards / panels          */
-  --surface-2:   #20283280; /* hover / nested fill     */
-  --inset:       #141a21;   /* wells / inputs / tracks */
-  --elevated:    #222b36;   /* drawers / popovers      */
-  --border:      #2a323d;   /* hairlines               */
-  --border-soft: #222a34;   /* quieter hairlines       */
-  --border-strong:#64727f;  /* control borders: >=3:1 on base, surface and inset (brand line-strong) */
+/* ---------- IBM Plex (SIL OFL 1.1, see fonts/OFL.txt) ----------
+   Latin, Latin Extended and Cyrillic subsets, as Google Fonts serves them.
+   unicode-range makes a page fetch only the subsets its text uses. Sans is one
+   variable file per subset, declared for the 400–600 weights the console uses;
+   Mono is static, 400 and 500. */
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400 600; font-display: swap;
+  src: url("fonts/plex-sans-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400 600; font-display: swap;
+  src: url("fonts/plex-sans-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400 600; font-display: swap;
+  src: url("fonts/plex-sans-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("fonts/plex-mono-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("fonts/plex-mono-400-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("fonts/plex-mono-400-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("fonts/plex-mono-500-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("fonts/plex-mono-500-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("fonts/plex-mono-500-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
 
-  /* --- Text: the brand's night ink and ink-muted (>=4.5:1 on every surface) --- */
+/* ============================================================================
+   Tokens — Night (default)
+   ========================================================================== */
+:root {
+  color-scheme: dark;
+
+  /* --- Surfaces --- */
+  --base:        #0f1419;   /* page                     */
+  --surface:     #1a2029;   /* cards, raised controls   */
+  --surface-2:   #20283280; /* open row / nested fill   */
+  --inset:       #141a21;   /* wells, inputs, tracks    */
+  --elevated:    #222b36;   /* popovers, drawers        */
+  --border:      #2a323d;   /* hairlines                */
+  --border-soft: #222a34;   /* quieter hairlines        */
+  --border-strong:#64727f;  /* control borders: >=3:1 on every surface */
+
+  /* --- Text (>=4.5:1 on every surface) --- */
   --text:        #e6e4df;
   --text-strong: #f2f6fb;
   --muted:       #9a9a94;
-  --faint:       #828e9c;  /* meets WCAG AA (>=4.5:1) on base/surface */
+  --faint:       #828e9c;
 
-  /* --- Brand constants: the night plate and the duty light (the mark itself
-     carries its colours as fills in icons.js and favicon.svg) --- */
+  /* --- Ink fill: the active pill, the primary button --- */
+  --ink-fill:    #e6e4df;
+  --on-ink:      #0f1419;
+
+  /* --- Brand constants: the night plate and the duty light. The plate stays
+     dark in both themes (the light only ever sits on dark). --- */
   --night:       #222b36;
   --on-night:    #e6e4df;
   --ember:       #ffb454;
 
-  /* --- Brand accent --- */
+  /* --- Accent (links, focus, the inbound series) --- */
   --accent:      #4ea1ff;
-  --accent-2:    #7bbcff;
-  --accent-ink:  #04152b;     /* text on accent fills  */
-  --accent-soft: #4ea1ff1f;   /* tinted fill           */
+  --accent-2:    #8cc2ff;    /* accent as text           */
+  --accent-ink:  #04152b;    /* text on a tone fill      */
+  --accent-soft: #4ea1ff1f;
   --accent-line: #4ea1ff4d;
 
-  /* --- Semantic severity (calm → elevated → active) --- */
-  --calm:        #3fcf6b;   /* success / all-clear     */
+  /* --- Status. Red only ever means a live attack. --- */
+  --calm:        #3fcf6b;
   --calm-soft:   #3fcf6b1c;
   --calm-line:   #3fcf6b4d;
 
-  --elev:        #ffb454;   /* warning / alert-only / dry-run */
+  --elev:        #ffb454;    /* watch-only, warnings     */
   --elev-soft:   #ffb4541c;
   --elev-line:   #ffb4544d;
 
-  --active:      #ff5c5c;   /* danger / mitigating / blackhole / outgoing */
+  --active:      #ff5c5c;    /* attack, blackhole        */
   --active-soft: #ff5c5c1c;
   --active-line: #ff5c5c4d;
 
-  /* --- Escalation ramp (amber → red across the ladder) ---
-     These are colour SLOTS keyed by data-tone, not a severity scale: the ladder
-     is ordered by the config array, not by this number. Slot 5 is the in-kernel
-     data plane and is deliberately OFF the amber→red ramp — it is the mildest
-     real drop, it happens on this box rather than at an upstream router, and it
-     must not be slot 1 (green), which the console uses to mean alert-only /
-     nothing dropped. */
+  --danger:      #d83b3b;    /* destructive button fill (white label >= AA) */
+  --on-danger:   #ffffff;
+  --err-text:    #ffd2d2;    /* text on an error tint    */
+  --tint-strong: #ffffff;    /* emphasis inside a tinted banner */
+
+  /* --- Escalation ramp: colour SLOTS keyed by data-tone, not a severity
+     scale (the ladder is ordered by the config array). Slot 5 is the in-kernel
+     data plane, deliberately off the amber→red ramp: the mildest real drop,
+     on this box, not a router upstream — and never slot 1 (green), which means
+     alert-only, nothing dropped. --- */
   --rung-1: #3fcf6b;   /* alert (calm)        */
   --rung-2: #ffb454;   /* flowspec (amber)    */
   --rung-3: #ff8a3d;   /* divert (orange)     */
@@ -63,42 +130,48 @@
   --dp-soft: #46c7e81c;
   --dp-line: #46c7e84d;
 
-  /* --- Chart inks --- */
+  /* --- Charts --- */
   --chart-in:  #4ea1ff;
   --chart-out: #b07bff;
   --chart-grid:#ffffff0f;
 
-  /* --- Type: system stack + monospace for data --- */
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
-          Arial, "Noto Sans", sans-serif;
-  --mono: ui-monospace, "SF Mono", "SFMono-Regular", "Menlo", "Consolas",
-          "Liberation Mono", monospace;
-
-  /* type scale */
-  --t-xs:   11px;
-  --t-sm:   12px;
-  --t-base: 13px;
-  --t-md:   14px;
-  --t-lg:   16px;
-  --t-xl:   20px;
-  --t-2xl:  26px;
-  --t-3xl:  34px;
-  --t-display: 46px;
-
-  --lh-tight: 1.15;
-  --lh-base:  1.45;
-
-  /* --- Spacing scale (4px base) --- */
-  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
-  --s-5: 20px; --s-6: 24px; --s-7: 32px; --s-8: 40px; --s-9: 56px;
-
-  /* --- Radius --- */
-  --r-xs: 4px; --r-sm: 6px; --r-md: 9px; --r-lg: 13px; --r-xl: 18px; --r-pill: 999px;
+  /* --- Neutral washes --- */
+  --hover:      #ffffff08;
+  --fill-muted: #ffffff0d;
+  --scrim:      #00060cb3;
+  --skel-1:     #ffffff08;
+  --skel-2:     #ffffff14;
+  --scroll:     #ffffff1a;
+  --scroll-hover:#ffffff2e;
 
   /* --- Elevation --- */
   --shadow-1: 0 1px 2px #0006;
   --shadow-2: 0 6px 20px -6px #000a, 0 2px 6px -2px #0008;
   --shadow-drawer: -24px 0 60px -20px #000c;
+
+  /* --- Type --- */
+  --font: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --t-xs:   12px;
+  --t-sm:   13px;
+  --t-base: 14px;
+  --t-md:   14px;
+  --t-lg:   16px;
+  --t-xl:   20px;
+  --t-2xl:  28px;
+  --t-3xl:  34px;
+  --t-display: 44px;
+
+  --lh-tight: 1.2;
+  --lh-base:  22px;
+
+  /* --- Spacing (4px base) --- */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-5: 20px; --s-6: 24px; --s-7: 32px; --s-8: 40px; --s-9: 56px;
+
+  /* --- Radius: cards 20, wells 12, pills round --- */
+  --r-xs: 4px; --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 20px; --r-pill: 999px;
 
   /* --- Motion (restrained; animate on state change only) --- */
   --ease: cubic-bezier(.2,.7,.3,1);
@@ -108,10 +181,81 @@
   --dur-slow: .4s;
 
   /* --- Layout --- */
-  --sidebar-w: 244px;
-  --sidebar-w-collapsed: 64px;
-  --topbar-h: 60px;
-  --focus-ring: 0 0 0 2px var(--base), 0 0 0 4px var(--accent);
+  --page-max: 1440px;
+  --page-x: 32px;
+}
+
+/* ============================================================================
+   Tokens — Paper
+   ========================================================================== */
+:root[data-theme="paper"] {
+  color-scheme: light;
+
+  --base:        #f7f5f0;
+  --surface:     #fdfcfa;
+  --surface-2:   #ede9e080;
+  --inset:       #ede9e0;
+  --elevated:    #fdfcfa;
+  --border:      #d8d3c8;
+  --border-soft: #e4dfd5;
+  --border-strong:#857f74;
+
+  --text:        #16181c;
+  --text-strong: #16181c;
+  --muted:       #5b5a55;
+  --faint:       #67635c;
+
+  --ink-fill:    #16181c;
+  --on-ink:      #f7f5f0;
+
+  --night:       #16181c;
+
+  --accent:      #1b64bf;
+  --accent-2:    #1b64bf;
+  --accent-ink:  #ffffff;
+  --accent-soft: #1b64bf14;
+  --accent-line: #1b64bf4d;
+
+  --calm:        #1e7b45;
+  --calm-soft:   #e3f1e7;
+  --calm-line:   #1e7b4559;
+
+  --elev:        #8f5c08;
+  --elev-soft:   #f6ead3;
+  --elev-line:   #8f5c0859;
+
+  --active:      #c42b2b;
+  --active-soft: #f9e4e1;
+  --active-line: #c42b2b59;
+
+  --danger:      #c42b2b;
+  --err-text:    #8f1d1d;
+  --tint-strong: #16181c;
+
+  --rung-1: #1e7b45;
+  --rung-2: #8f5c08;
+  --rung-3: #b4540f;
+  --rung-4: #c42b2b;
+  --rung-5: #0a6f88;
+  --dp:      #0a6f88;
+  --dp-soft: #e0eff2;
+  --dp-line: #0a6f8859;
+
+  --chart-in:  #1b64bf;
+  --chart-out: #7a4cc2;
+  --chart-grid:#16181c12;
+
+  --hover:      #16181c08;
+  --fill-muted: #16181c0d;
+  --scrim:      #16181c66;
+  --skel-1:     #16181c08;
+  --skel-2:     #16181c12;
+  --scroll:     #16181c26;
+  --scroll-hover:#16181c40;
+
+  --shadow-1: 0 1px 2px #16181c14;
+  --shadow-2: 0 8px 24px -8px #16181c38, 0 2px 6px -2px #16181c1f;
+  --shadow-drawer: -24px 0 60px -20px #16181c40;
 }
 
 /* ============================================================================ */
@@ -132,265 +276,299 @@ body {
 
 /* tabular numerals everywhere numbers live */
 .tnum, .data, .mono { font-variant-numeric: tabular-nums; }
-.mono { font-family: var(--mono); letter-spacing: -0.01em; }
+.mono { font-family: var(--mono); }
 
 /* base icon sizing — every inline SVG defaults to 16px unless a context overrides */
 .ico { width: 16px; height: 16px; flex: none; display: inline-block; vertical-align: middle; }
-.brand__mark .ico { width: 1.5em; height: 1.5em; }
 
-h1, h2, h3, h4 { margin: 0; color: var(--text-strong); font-weight: 650; line-height: var(--lh-tight); }
+h1, h2, h3, h4 { margin: 0; color: var(--text-strong); font-weight: 500; line-height: var(--lh-tight); }
+h1 { font-weight: 600; }
 p { margin: 0; }
-button { font-family: inherit; }
+button, input, select, textarea { font-family: inherit; }
+a { color: var(--accent-2); }
 
-:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--r-sm); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: #ffffff1a; border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
-::-webkit-scrollbar-thumb:hover { background: #ffffff2e; background-clip: padding-box; }
+::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover); background-clip: padding-box; }
 
 /* ============================================================================
-   App shell
+   App shell: top bar / main / (phone) tab bar
    ========================================================================== */
 .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
-  grid-template-rows: var(--topbar-h) 1fr;
-  grid-template-areas: "side top" "side main";
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: "top" "main" "tabbar";
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
-.app.is-collapsed { grid-template-columns: var(--sidebar-w-collapsed) 1fr; }
-
-/* --- Sidebar --- */
-.sidebar {
-  grid-area: side;
-  background: linear-gradient(180deg, #161c25, #12171f);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  z-index: 30;
-}
-/* The logo lockup, in the brand's proportions — em of the lockup size, which
-   is set so the mark is 32px: mark 1.5em; .49em from the mark to the
-   wordmark's ink; wordmark .94em tall, dropped .09em so the mark's centre sits
-   .36em above its baseline (as in the brand mark). The wordmark is outlined
-   paths, never typed: the console's CSP (default-src 'none', no font-src)
-   loads no web font, and the brand draws it from one file in one colour. */
-.brand {
-  display: flex; align-items: center; gap: .49em;
-  height: var(--topbar-h);
-  padding: 0 var(--s-4);
-  border-bottom: 1px solid var(--border-soft);
-  flex: none;
-  font-size: calc(32px / 1.5);
-}
-.brand__mark {
-  width: 1.5em; height: 1.5em; flex: none;
-  display: grid; place-items: center;
-}
-.brand__name { flex: none; color: var(--text); }
-.brand__word { display: block; height: .94em; width: auto; transform: translateY(.09em); }
-.is-collapsed .brand__name { display: none; }
-
-.nav { padding: var(--s-3) var(--s-3); display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; }
-.nav__label {
-  font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .08em;
-  color: var(--faint); padding: var(--s-4) var(--s-3) var(--s-2);
-}
-.is-collapsed .nav__label { text-align: center; padding-left: 0; padding-right: 0; }
-
-.nav__item {
-  display: flex; align-items: center; gap: var(--s-2);
-  padding: var(--s-2); height: 38px;
-  border-radius: var(--r-sm);
-  color: var(--muted); text-decoration: none;
-  background: none; border: 1px solid transparent; width: 100%; cursor: pointer;
-  font-size: var(--t-md); font-weight: 500; text-align: left;
-  transition: background var(--dur-fast), color var(--dur-fast);
-  white-space: nowrap;
-}
-.nav__item:hover { background: #ffffff08; color: var(--text); }
-.nav__item.is-active { background: var(--accent-soft); color: var(--accent-2); border-color: var(--accent-line); }
-.nav__item .ico { flex: none; width: 18px; height: 18px; }
-.nav__item__txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.nav__count {
-  margin-left: auto; flex: none; font-size: var(--t-xs); font-variant-numeric: tabular-nums;
-  background: #ffffff14; color: var(--text); border-radius: var(--r-pill);
-  padding: 1px 6px; min-width: 18px; text-align: center;
-}
-.nav__count.is-hot { background: var(--active); color: #fff; }
-.is-collapsed .nav__item__txt, .is-collapsed .nav__count { display: none; }
-.is-collapsed .nav__item { justify-content: center; padding-left: 0; padding-right: 0; }
-
-.sidebar__foot {
-  border-top: 1px solid var(--border-soft); padding: var(--s-3);
-  display: flex; flex-direction: column; gap: var(--s-2); flex: none;
-}
-
-/* role toggle (demo) */
-.role {
-  display: flex; background: var(--inset); border: 1px solid var(--border);
-  border-radius: var(--r-sm); padding: 3px; gap: 2px;
-}
-.role__btn {
-  flex: 1; border: none; background: none; color: var(--muted);
-  font-size: var(--t-sm); font-weight: 600; padding: 5px 6px; border-radius: 4px; cursor: pointer;
-  display: flex; align-items: center; justify-content: center; gap: 5px;
-}
-.role__btn.is-on { background: var(--accent); color: var(--accent-ink); }
-.role__btn .ico { width: 13px; height: 13px; }
-.is-collapsed .role__btn__txt { display: none; }
 
 /* --- Top bar --- */
 .topbar {
   grid-area: top;
+  min-width: 0;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px;
+  min-height: 84px;
+  padding: 16px var(--page-x);
   background: var(--base);
   border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: var(--s-4);
-  padding: 0 var(--s-5) 0 var(--s-4);
-  z-index: 20;
+  position: relative; z-index: 20;
 }
-.topbar__left { display: flex; align-items: center; gap: var(--s-3); min-width: 0; }
-.topbar__duty { display: flex; align-items: center; flex: none; }  /* the chip keeps its width; the posture wraps first */
-.topbar__spacer { flex: 1; }
-.topbar__right { display: flex; align-items: center; gap: var(--s-3); }
 
-.icon-btn {
-  width: 34px; height: 34px; flex: none; display: grid; place-items: center;
-  background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-  border-radius: var(--r-sm); cursor: pointer; transition: color var(--dur-fast), border-color var(--dur-fast);
+/* The logo lockup in the brand's proportions: the mark (its own ink tile)
+   and the wordmark, an outlined path in one colour — never typed. */
+.brand {
+  display: flex; align-items: center; gap: 12px; flex: none;
+  padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--text); border-radius: var(--r-md);
 }
-.icon-btn:hover { color: var(--text); border-color: var(--border-strong); }
-.icon-btn .ico { width: 17px; height: 17px; }
+.brand .ico { width: 36px; height: 36px; }
+.brand__word { display: block; width: 75px; height: 22px; transform: translateY(2px); }
 
-/* counters strip */
-.counters { display: flex; align-items: center; gap: var(--s-1); }
-.counter {
-  display: flex; flex-direction: column; align-items: flex-start;
-  padding: 4px var(--s-3); border-radius: var(--r-sm);
-  line-height: 1.1;
+/* Sections: a pill bar, the active one filled with ink */
+.topbar__nav { min-width: 0; display: flex; }
+.nav {
+  display: flex; gap: 2px; padding: 4px; min-width: 0;
+  border-radius: var(--r-pill); background: var(--inset); border: 1px solid var(--border);
 }
-.counter__val { font-size: var(--t-lg); font-weight: 700; color: var(--text-strong); font-variant-numeric: tabular-nums; }
-.counter__lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); }
-.counter.is-hot .counter__val { color: var(--active); }
-.counter__sep { width: 1px; height: 26px; background: var(--border); }
+.nav__item {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 40px; padding: 0 16px;
+  border: 0; border-radius: var(--r-pill); background: transparent;
+  color: var(--muted); font-size: 14px; font-weight: 500; line-height: 20px;
+  white-space: nowrap; cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.nav__item[hidden] { display: none; }
+.nav__item:hover { color: var(--text); background: var(--hover); }
+.nav__item.is-active { background: var(--ink-fill); color: var(--on-ink); }
+.nav__count {
+  min-width: 20px; height: 20px; padding: 0 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-pill); background: var(--border); color: var(--text);
+  font-family: var(--mono); font-size: 12px; font-weight: 500; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.nav__count[hidden] { display: none; }
+.nav__count.is-hot { background: var(--active-soft); color: var(--active); }
+.nav__item.is-active .nav__count { background: var(--base); }
 
-/* live + last updated */
+.topbar__spacer { flex: 1 1 0; min-width: 0; }
+.topbar__status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.topbar__status:empty { display: none; }
+.topbar__right { display: flex; align-items: center; gap: 8px; }
+
+/* live: the time of the last good poll, with a dot for the connection */
 .live {
-  display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: var(--t-sm);
-  white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 8px; padding: 0 8px;
+  font-family: var(--mono); font-size: 12px; line-height: 20px; color: var(--muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-.live__dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--calm);
-  box-shadow: 0 0 0 0 var(--calm-line);
-}
-.live.is-polling .live__dot { animation: pulse-dot 3s var(--ease) infinite; }
-@keyframes pulse-dot {
-  0% { box-shadow: 0 0 0 0 var(--calm-line); }
-  30% { box-shadow: 0 0 0 5px transparent; }
-  100% { box-shadow: 0 0 0 0 transparent; }
-}
-.live__time { font-variant-numeric: tabular-nums; color: var(--text); }
-/* engine unreachable: "no connection" stands where the duty light was, so the
-   heartbeat stops and only the time of the last good poll is left */
+.live__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--calm); flex: none; }
 .live.is-down .live__dot { background: var(--faint); }
-.live.is-down .live__txt { display: none; }
+
+/* round icon buttons (theme, reload, settings) */
+.icon-btn {
+  width: 44px; height: 44px; flex: none; padding: 0;
+  display: inline-grid; place-items: center;
+  border-radius: var(--r-pill); border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); cursor: pointer;
+  transition: border-color var(--dur-fast), background var(--dur-fast), color var(--dur-fast);
+}
+.icon-btn[hidden] { display: none; }
+.icon-btn:hover { border-color: var(--border-strong); }
+.icon-btn .ico { width: 18px; height: 18px; }
+.icon-btn.is-active { background: var(--ink-fill); border-color: var(--ink-fill); color: var(--on-ink); }
+.icon-btn--sm { width: 32px; height: 32px; }
+.icon-btn--sm .ico { width: 16px; height: 16px; }
 
 /* --- Main scroll region --- */
-.main { grid-area: main; overflow-y: auto; overflow-x: hidden; position: relative; }
-.view { padding: var(--s-6) var(--s-7) var(--s-9); max-width: 1480px; margin: 0 auto; }
+.main { grid-area: main; min-width: 0; overflow-y: auto; overflow-x: hidden; position: relative; }
+.view { max-width: var(--page-max); margin: 0 auto; padding: 32px var(--page-x) 48px; }
 .view[hidden] { display: none; }
+.updbanner-slot { max-width: var(--page-max); margin: 0 auto; padding: 24px var(--page-x) 0; }
+.updbanner-slot .banner { margin-bottom: 0; }
+
 .view-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--s-4); margin-bottom: var(--s-5); flex-wrap: wrap; }
-.view-head__title { font-size: var(--t-2xl); letter-spacing: -0.02em; }
-.view-head__sub { color: var(--muted); font-size: var(--t-md); margin-top: 4px; }
-.view-head__actions { display: flex; gap: var(--s-2); align-items: center; }
+.view-head__title { font-size: var(--t-2xl); line-height: 36px; font-weight: 600; letter-spacing: -0.02em; }
+.view-head__sub { color: var(--muted); margin-top: 4px; max-width: 760px; text-wrap: pretty; }
+.view-head__actions { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: center; }
+
+/* --- Phone tab bar (shown below 900px, see the end of this file) --- */
+.tabbar { grid-area: tabbar; display: none; position: relative; z-index: 20; }
+.tabbar__item {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  min-height: 52px; padding: 0; border: 0; border-radius: 14px; background: none;
+  color: var(--muted); font-size: 12px; font-weight: 500; line-height: 16px; cursor: pointer;
+}
+.tabbar__icon {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 56px; height: 30px; border-radius: var(--r-pill);
+}
+.tabbar__icon .ico { width: 18px; height: 18px; }
+.tabbar__item.is-active { color: var(--text); }
+.tabbar__item.is-active .tabbar__icon { background: var(--ink-fill); color: var(--on-ink); }
+.tabbar__count {
+  position: absolute; top: -2px; right: 6px;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-pill);
+  background: var(--active-soft); color: var(--active);
+  font-family: var(--mono); font-size: 11px; line-height: 18px; text-align: center;
+}
+.tabbar__count[hidden] { display: none; }
+/* "More": the sections that do not fit the bar, in a sheet above it */
+.more-pop {
+  position: absolute; right: 8px; bottom: calc(100% + 8px); min-width: 220px;
+  display: flex; flex-direction: column; gap: 2px; padding: 6px;
+  background: var(--elevated); border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-2);
+}
+.more-pop[hidden] { display: none; }
+.more-pop__item {
+  display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 14px;
+  border: 0; border-radius: var(--r-md); background: none; color: var(--text);
+  font-size: 14px; font-weight: 500; text-align: left; cursor: pointer;
+}
+.more-pop__item[hidden] { display: none; }
+.more-pop__item:hover { background: var(--hover); }
+.more-pop__item.is-active { background: var(--ink-fill); color: var(--on-ink); }
+.more-pop__item .ico { width: 18px; height: 18px; }
 
 /* ============================================================================
-   Badges / pills / buttons (shared atoms)
+   Shared atoms: chips, segmented control, buttons, badges, cards
    ========================================================================== */
+
+/* Status chips (top bar): soft tint, no border. The dot and icon sit 1px low:
+   beside lowercase Plex in a flex row the line box centres ~1.5px above the
+   x-height. */
+.chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 14px 0 12px; border: 0; border-radius: var(--r-pill);
+  font-size: 13px; font-weight: 500; line-height: 20px; white-space: nowrap;
+  text-decoration: none; background: var(--fill-muted); color: var(--muted);
+}
+button.chip { cursor: pointer; }
+button.chip:hover { box-shadow: inset 0 0 0 1px currentColor; }
+.chip__dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; position: relative; top: 1px; }
+.chip .ico { width: 16px; height: 16px; position: relative; top: 1px; }
+.chip--calm   { background: var(--calm-soft);   color: var(--calm); }
+.chip--attack { background: var(--active-soft); color: var(--active); }
+.chip--attack .chip__dot { animation: blink 1.1s steps(2, end) infinite; }
+.chip--watch  { background: var(--elev-soft);   color: var(--elev); }
+/* narrower than 1366px the watch-only chip says it in one word; the full
+   name stays for screen readers */
+.chip__short { display: none; }
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* Segmented control and section tabs: a pill track, the chosen one in ink */
+.seg {
+  display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 4px;
+  border-radius: var(--r-pill); background: var(--inset); border: 1px solid var(--border);
+}
+.seg__btn {
+  height: 32px; padding: 0 14px; border: 0; border-radius: var(--r-pill);
+  background: transparent; color: var(--muted);
+  font-size: var(--t-sm); font-weight: 500; line-height: 20px;
+  white-space: nowrap; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.seg__btn:hover { color: var(--text); }
+.seg__btn.is-on { background: var(--ink-fill); color: var(--on-ink); }
+.seg--tabs .seg__btn { height: 36px; padding: 0 16px; }
+
 .btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  padding: 8px 14px; border-radius: var(--r-sm); cursor: pointer;
-  font-size: var(--t-md); font-weight: 600; border: 1px solid transparent;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 40px; padding: 0 18px; border-radius: var(--r-pill); cursor: pointer;
+  font-size: var(--t-base); font-weight: 500; line-height: 20px;
+  border: 1px solid transparent; text-decoration: none;
   transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast), opacity var(--dur-fast);
   white-space: nowrap;
 }
 .btn .ico { width: 16px; height: 16px; }
-.btn--primary { background: var(--accent); color: var(--accent-ink); }
-.btn--primary:hover { background: var(--accent-2); }
+.btn--primary { background: var(--ink-fill); color: var(--on-ink); }
+.btn--primary:hover { opacity: .88; }
 .btn--ghost { background: var(--surface); border-color: var(--border); color: var(--text); }
 .btn--ghost:hover { border-color: var(--border-strong); }
-.btn--danger { background: #d83b3b; color: #fff; }  /* darker red so white label meets AA */
-.btn--danger:hover { filter: brightness(1.08); }
-.btn--sm { padding: 5px 10px; font-size: var(--t-sm); }
+.btn--danger { background: var(--danger); color: var(--on-danger); }
+.btn--danger:hover { opacity: .9; }
+.btn--sm { height: 32px; padding: 0 12px; font-size: var(--t-sm); gap: 6px; }
 .btn:disabled, .btn[aria-disabled="true"] { opacity: .4; cursor: not-allowed; pointer-events: none; }
 
+/* Badges: compact status tags inside tables and cards */
 .badge {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 9px; border-radius: var(--r-pill);
-  font-size: var(--t-xs); font-weight: 650; letter-spacing: .02em;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 10px; border-radius: var(--r-pill);
+  font-size: var(--t-xs); font-weight: 500; line-height: 18px;
   border: 1px solid transparent; white-space: nowrap;
 }
-.badge .ico { width: 12px; height: 12px; }
-.badge--calm   { background: var(--calm-soft);   color: var(--calm);   border-color: var(--calm-line); }
-.badge--elev   { background: var(--elev-soft);   color: var(--elev);   border-color: var(--elev-line); }
-.badge--active { background: var(--active-soft);  color: var(--active); border-color: var(--active-line); }
-.badge--muted  { background: #ffffff0d; color: var(--muted); border-color: var(--border); }
-.badge--accent { background: var(--accent-soft); color: var(--accent-2); border-color: var(--accent-line); }
+.badge .ico { width: 12px; height: 12px; position: relative; top: 1px; }
+.badge--calm   { background: var(--calm-soft);   color: var(--calm); }
+.badge--elev   { background: var(--elev-soft);   color: var(--elev); }
+.badge--active { background: var(--active-soft); color: var(--active); }
+.badge--muted  { background: var(--fill-muted);  color: var(--muted); }
+.badge--accent { background: var(--accent-soft); color: var(--accent-2); }
 /* dataplane: an in-kernel XDP drop on this box. Its own tone, because reusing
    flowspec's amber would tell an operator a router upstream is filtering. */
-.badge--dp     { background: var(--dp-soft); color: var(--dp); border-color: var(--dp-line); }
-
-/* dry-run treatment — calm but unmissable: dashed amber */
-.badge--dry {
-  background: repeating-linear-gradient(135deg, #ffb4541c 0 7px, #ffb45412 7px 14px);
-  color: var(--elev); border: 1px dashed var(--elev-line);
-}
-
-/* posture pill (top bar) */
-.posture {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 6px 13px 6px 11px; border-radius: var(--r-pill);
-  font-weight: 700; font-size: var(--t-md); border: 1px solid transparent;
-}
-.posture .ico { width: 16px; height: 16px; }
-.posture__dot { width: 9px; height: 9px; border-radius: 50%; }
-.posture--calm { background: var(--calm-soft); color: var(--calm); border-color: var(--calm-line); }
-.posture--calm .posture__dot { background: var(--calm); }
-.posture--mitigating { background: var(--elev-soft); color: var(--elev); border-color: var(--elev-line); }
-.posture--mitigating .posture__dot { background: var(--elev); }
-.posture--attack { background: var(--active-soft); color: var(--active); border-color: var(--active-line); }
-.posture--attack .posture__dot { background: var(--active); animation: blink 1.1s steps(2,end) infinite; }
-@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
-
-/* duty light (the brand's DutyLight chip): the top bar's mode — on duty, and
-   whether watch-only or live. A night plate whose ember light burns steady:
-   no blink, no pulse, no colour change, in either mode. */
-.duty {
-  display: inline-flex; align-items: center; gap: var(--s-2);
-  height: 32px; padding: 0 var(--s-4) 0 var(--s-3);
-  border-radius: var(--r-pill);
-  background: var(--night); color: var(--on-night);
-  font-size: var(--t-base); font-weight: 500; line-height: 18px;
-  white-space: nowrap;
-}
-.duty__light { width: 8px; height: 8px; border-radius: 50%; background: var(--ember); flex: none; }
-.duty__mode { opacity: .72; font-weight: 400; }
+.badge--dp     { background: var(--dp-soft); color: var(--dp); }
+/* watch-only: the watch tint with a dashed edge, so it reads apart from a warning */
+.badge--dry    { background: var(--elev-soft); color: var(--elev); border: 1px dashed var(--elev-line); }
 
 /* generic panel/card */
-.card {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
-  box-shadow: var(--shadow-1);
-}
-.card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); padding: var(--s-4) var(--s-5); border-bottom: 1px solid var(--border-soft); }
-.card__title { font-size: var(--t-md); font-weight: 650; color: var(--text-strong); display: flex; align-items: center; gap: 8px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-xl); overflow: hidden; }
+.card__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); padding: var(--s-4) var(--s-6); border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; }
+.card__title { font-size: var(--t-lg); font-weight: 500; line-height: 24px; color: var(--text-strong); display: flex; align-items: center; gap: 8px; }
 .card__title .ico { width: 16px; height: 16px; color: var(--muted); }
-.card__body { padding: var(--s-5); }
+.card__body { padding: var(--s-6); }
 
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ============================================================================
+   Shell breakpoints. The full bar (brand, six sections, two chips, the clock
+   and three buttons) is drawn for 1440px; narrower, it sheds the wordmark,
+   then tightens and says watch-only in one word, then gives the sections a
+   row of their own, and below 900px hands them to the tab bar at the bottom.
+   Measured with every section shown, under attack and watch-only, in all five
+   locales: French, the widest, needs 1421px at full size, 1298px without the
+   wordmark and about 1215px tightened.
+   ========================================================================== */
+@media (max-width: 1439px) {
+  :root { --page-x: 24px; }
+  .topbar { gap: 12px 16px; }
+  .brand__word { display: none; }
+}
+@media (max-width: 1365px) {
+  .nav__item { padding: 0 12px; }
+  .chip__long { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .chip__short { display: inline; }
+}
+@media (max-width: 1279px) {
+  .topbar__nav { order: 10; flex: 1 0 100%; }
+  .nav { overflow-x: auto; scrollbar-width: none; }
+  .nav::-webkit-scrollbar { display: none; }
+}
+@media (max-width: 899px) {
+  :root { --page-x: 16px; }
+  .topbar { min-height: 64px; padding-top: 12px; padding-bottom: 12px; gap: 8px 12px; }
+  /* the phone bar: the mark and the two chips. The sections are in the tab
+     bar; the clock, theme and reload live in Settings (under More) */
+  .topbar__nav, .topbar__right { display: none; }
+  .chip { height: 30px; padding: 0 12px 0 10px; gap: 6px; font-size: 12px; }
+  .chip .ico { width: 14px; height: 14px; }
+  .topbar__spacer { flex-basis: 0; }
+  .brand .ico { width: 32px; height: 32px; }
+  .icon-btn { width: 40px; height: 40px; }
+  .view { padding-top: 16px; padding-bottom: 32px; }
+  .updbanner-slot { padding-top: 16px; }
+  .view-head__title { font-size: 24px; line-height: 32px; }
+  .tabbar {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+    background: var(--base); border-top: 1px solid var(--border);
+  }
 }
 
 /* reduced motion */

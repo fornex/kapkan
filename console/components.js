@@ -132,23 +132,33 @@
       ? badge("badge--dry", I.t("mode.dryrun"), "shield-alert")
       : badge("badge--calm", I.t("mode.live"), "shield-check");
   }
-  /* The duty light (the brand's DutyLight chip), the top bar's mode: Kapkan is
-     on duty, and in which mode. A night plate with the ember light, which stays
-     lit and never blinks or pulses: it means presence, not alarm (only the
-     under-attack dot blinks). It is shown only while the engine answers;
-     otherwise noContact() takes its place, because a lit light over a dead
-     connection would be a false claim. */
-  function dutyChip(dry) {
-    return h("span", { class: "duty " + (dry ? "duty--watch" : "duty--live"), attrs: { title: dry ? I.t("mode.dryrun.full") : null } }, [
-      h("span", { class: "duty__light", attrs: { "aria-hidden": "true" } }),
-      h("span", {}, [I.t("duty.on") + " ", h("span", { class: "duty__mode", text: "· " + I.t(dry ? "duty.watch" : "duty.live") })])
+  /* ---------- the top bar's status chips ----------
+     What is happening, in one chip: calm, under attack, or no connection. Red
+     only ever means a live attack, so "mitigating" is red too: the attack is
+     still live, and how far the response has gone is the Overview's to say.
+     A chip that leads somewhere is a button: the attack chip opens Attacks. */
+  function postureChip(state, onOpen) {
+    var attack = state !== "calm";
+    return h(attack ? "button" : "span", {
+      class: "chip " + (attack ? "chip--attack" : "chip--calm"),
+      attrs: attack ? { type: "button" } : null,
+      onclick: attack ? onOpen : null
+    }, [h("span", { class: "chip__dot", attrs: { "aria-hidden": "true" } }), h("span", { text: I.t(attack ? "posture.attack" : "posture.calm") })]);
+  }
+  /* Watch-only is the one mode worth a chip: live is the normal state and goes
+     unmarked. Shown once, here; Settings explains it and how to turn it off,
+     so the chip opens Settings. The short label is for phones. */
+  function watchChip(onOpen) {
+    return h("button", { class: "chip chip--watch", attrs: { type: "button", title: I.t("mode.dryrun.hint") }, onclick: onOpen }, [
+      w.icon("eye"),
+      h("span", { class: "chip__long", text: I.t("mode.dryrun") }),
+      h("span", { class: "chip__short", attrs: { "aria-hidden": "true" }, text: I.t("mode.dryrun.short") })
     ]);
   }
-  function noContact() { return badge("badge--muted", I.t("duty.offline")); }
-  function posturePill(state) {
-    var map = { calm: "posture--calm", attack: "posture--attack", mitigating: "posture--mitigating" };
-    var key = { calm: "posture.calm", attack: "posture.attack", mitigating: "posture.mitigating" }[state];
-    return h("span", { class: "posture " + map[state] }, [h("span", { class: "posture__dot" }), h("span", { text: I.t(key) })]);
+  /* No poll has reached the engine: neither "calm" nor "under attack" can be
+     claimed, so this stands where the posture was. */
+  function offlineChip() {
+    return h("span", { class: "chip" }, [h("span", { class: "chip__dot", attrs: { "aria-hidden": "true" } }), h("span", { text: I.t("duty.offline") })]);
   }
 
   /* ---------- charts (hand-rolled SVG) ---------- */
@@ -551,8 +561,7 @@
 
   /* ---------- empty / loading / error blocks ---------- */
   function empty(iconName, title, sub, tone) {
-    var ic = h("div", { class: "empty__icon" }, w.icon(iconName));
-    if (tone === "muted") { ic.style.color = "var(--muted)"; ic.style.background = "#ffffff0a"; ic.style.borderColor = "var(--border)"; }
+    var ic = h("div", { class: "empty__icon" + (tone === "muted" ? " is-muted" : "") }, w.icon(iconName));
     return h("div", { class: "empty" }, [ic, h("div", { class: "empty__title", text: title }), h("div", { class: "empty__sub", text: sub })]);
   }
   function skeletonRows(n) {
@@ -562,7 +571,7 @@
 
   w.K = {
     h: h, svg: svg, clear: clear, mount: mount, append: append,
-    badge: badge, dirBadge: dirBadge, modeBadge: modeBadge, dutyChip: dutyChip, noContact: noContact, posturePill: posturePill,
+    badge: badge, dirBadge: dirBadge, modeBadge: modeBadge, postureChip: postureChip, watchChip: watchChip, offlineChip: offlineChip,
     sparkline: sparkline, areaChart: areaChart,
     ladder: ladder, gauge: gauge, confidence: confidence, baselineBar: baselineBar,
     routeDisplay: routeDisplay, shareGroup: shareGroup, timeline: timeline,

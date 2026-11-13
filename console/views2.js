@@ -419,7 +419,41 @@
       h("div", { class: "cols-2" }, [statusCard, netCard]),
       h("div", { class: "cols-2 mt-4" }, [thrCard, bgpCard]),
       h("div", { class: "mt-4" }, dpCard),
-      h("div", { class: "mt-4" }, reloadCard)
+      h("div", { class: "cols-2 mt-4" }, [reloadCard, lookCard(ctx)])
+    ]);
+  }
+
+  /* Language and theme: this browser's own preferences (both are kept in its
+     localStorage), so they live here; the top bar keeps only a quick switch
+     between Night and Paper. */
+  var THEME_KEY = { night: "theme.night", paper: "theme.paper", system: "theme.system" };
+  function lookCard(ctx) {
+    var pref = w.KapkanTheme ? w.KapkanTheme.pref() : "night";
+    function seg(labelId, items) {
+      return h("div", { class: "seg", attrs: { role: "group", "aria-labelledby": labelId } }, items.map(function (it) {
+        return h("button", { class: "seg__btn" + (it.on ? " is-on" : ""), attrs: { type: "button", "aria-pressed": String(it.on), lang: it.lang || null },
+          text: it.label, onclick: it.pick });
+      }));
+    }
+    return h("div", { class: "card" }, [
+      h("div", { class: "card__head" }, [
+        h("div", { class: "card__title" }, [w.icon("globe"), h("span", { text: I.t("look.title") })]),
+        h("span", { class: "td-muted", text: I.t("look.sub") })
+      ]),
+      h("div", { class: "card__body look" }, [
+        h("div", { class: "look__row" }, [
+          h("span", { class: "look__lbl", id: "look-lang", text: I.t("locale.title") }),
+          seg("look-lang", I.available.map(function (l) {
+            return { label: l.label, lang: l.code, on: l.code === I.locale, pick: function () { ctx.actions.setLocale(l.code); } };
+          }))
+        ]),
+        h("div", { class: "look__row" }, [
+          h("span", { class: "look__lbl", id: "look-theme", text: I.t("theme.title") }),
+          seg("look-theme", ["night", "paper", "system"].map(function (p) {
+            return { label: I.t(THEME_KEY[p]), on: p === pref, pick: function () { ctx.actions.setTheme(p); } };
+          }))
+        ])
+      ])
     ]);
   }
 

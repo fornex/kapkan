@@ -12,7 +12,11 @@ import (
 // files (no build step, no framework) served from the API listener so the
 // whole product — detector and UI — ships as one binary.
 //
-//go:embed static/index.html static/*.js static/*.css static/*.svg static/locales/*.js
+// The fonts are IBM Plex (SIL OFL 1.1). OFL.txt rides in the same embed and is
+// served beside them, so every copy of the binary carries the licence the
+// fonts require.
+//
+//go:embed static/index.html static/*.js static/*.css static/*.svg static/locales/*.js static/fonts/*.woff2 static/fonts/OFL.txt
 var dashboardFS embed.FS
 
 // dashboardAsset describes one served file.
@@ -26,6 +30,7 @@ type dashboardAsset struct {
 var dashboardAssets = map[string]dashboardAsset{
 	"GET /{$}":            {"static/index.html", "text/html; charset=utf-8"},
 	"GET /favicon.svg":    {"static/favicon.svg", "image/svg+xml; charset=utf-8"},
+	"GET /theme.js":       {"static/theme.js", "text/javascript; charset=utf-8"},
 	"GET /app.js":         {"static/app.js", "text/javascript; charset=utf-8"},
 	"GET /api.js":         {"static/api.js", "text/javascript; charset=utf-8"},
 	"GET /components.js":  {"static/components.js", "text/javascript; charset=utf-8"},
@@ -40,13 +45,28 @@ var dashboardAssets = map[string]dashboardAsset{
 	"GET /locales/ru.js":  {"static/locales/ru.js", "text/javascript; charset=utf-8"},
 	"GET /locales/fr.js":  {"static/locales/fr.js", "text/javascript; charset=utf-8"},
 	"GET /locales/es.js":  {"static/locales/es.js", "text/javascript; charset=utf-8"},
+
+	// Latin, Latin Extended and Cyrillic subsets; style.css picks them by
+	// unicode-range, so a page only fetches the scripts it shows.
+	"GET /fonts/plex-sans-latin.woff2":         {"static/fonts/plex-sans-latin.woff2", "font/woff2"},
+	"GET /fonts/plex-sans-latin-ext.woff2":     {"static/fonts/plex-sans-latin-ext.woff2", "font/woff2"},
+	"GET /fonts/plex-sans-cyrillic.woff2":      {"static/fonts/plex-sans-cyrillic.woff2", "font/woff2"},
+	"GET /fonts/plex-mono-400-latin.woff2":     {"static/fonts/plex-mono-400-latin.woff2", "font/woff2"},
+	"GET /fonts/plex-mono-400-latin-ext.woff2": {"static/fonts/plex-mono-400-latin-ext.woff2", "font/woff2"},
+	"GET /fonts/plex-mono-400-cyrillic.woff2":  {"static/fonts/plex-mono-400-cyrillic.woff2", "font/woff2"},
+	"GET /fonts/plex-mono-500-latin.woff2":     {"static/fonts/plex-mono-500-latin.woff2", "font/woff2"},
+	"GET /fonts/plex-mono-500-latin-ext.woff2": {"static/fonts/plex-mono-500-latin-ext.woff2", "font/woff2"},
+	"GET /fonts/plex-mono-500-cyrillic.woff2":  {"static/fonts/plex-mono-500-cyrillic.woff2", "font/woff2"},
+	"GET /fonts/OFL.txt":                       {"static/fonts/OFL.txt", "text/plain; charset=utf-8"},
 }
 
 // dashboardCSP locks the UI down: no inline scripts or styles execute (the
 // app's JS/CSS are separate same-origin files), and the page may only talk
 // back to its own origin — so even if attack-derived data slipped past the
-// DOM-text rendering, it could neither run nor exfiltrate.
-const dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+// DOM-text rendering, it could neither run nor exfiltrate. font-src admits
+// only the embedded Plex files above; without it the browser would drop them
+// silently and fall back to system fonts.
+const dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 // registerDashboard mounts the embedded UI. Each handler re-checks the
 // config per request, so a reload that toggles api.dashboard takes effect
