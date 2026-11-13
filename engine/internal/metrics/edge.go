@@ -123,4 +123,43 @@ var (
 		Name:      "acme_attempts_total",
 		Help:      "ACME issuance attempts, by zone and result.",
 	}, []string{"zone", "result"})
+
+	// EdgeSteerVerdict is 1 for the verdict a steered address holds at the
+	// sampler's last tick and 0 for the other three (announce, withdraw,
+	// drain, unknown); vip is the target key, "node" for the node itself. A
+	// stopped sampler freezes it: /steer, not this gauge, ages a verdict.
+	EdgeSteerVerdict = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "steer_verdict",
+		Help:      "1 for the steering verdict a target holds at the last tick (announce, withdraw, drain, unknown), 0 for the others.",
+	}, []string{"vip", "verdict"})
+
+	// EdgeSteerTransitionsTotal counts verdict changes by target, the verdict
+	// entered (to) and its reason (ok, refused, not_tls, unbound, drained,
+	// new_node, starting).
+	EdgeSteerTransitionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "steer_transitions_total",
+		Help:      "Steering verdict changes, by target, verdict entered and reason.",
+	}, []string{"vip", "to", "reason"})
+
+	// EdgeSteerProbeTotal counts observations by target and probe class: ok,
+	// refused, not_tls, soft, blind, none (not probed: the kernel does not
+	// hold the address, or could not say).
+	EdgeSteerProbeTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "steer_probe_total",
+		Help:      "Steering probe results, by target and class (ok, refused, not_tls, soft, blind, none).",
+	}, []string{"vip", "result"})
+
+	// EdgeSteerReadsTotal counts GET /steer requests answered (any status).
+	EdgeSteerReadsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "kapkan",
+		Subsystem: "edge",
+		Name:      "steer_reads_total",
+		Help:      "GET /steer requests answered.",
+	})
 )

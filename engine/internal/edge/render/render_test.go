@@ -769,12 +769,18 @@ func TestReuseportOncePerAddress(t *testing.T) {
 }
 
 func TestRenderDetailedInfo(t *testing.T) {
-	cases := map[string]struct{ h3, degraded string }{
-		"h3":             {"example.com,static.example.org", ""},
-		"h3-unsupported": {"", "example.com,static.example.org"},
-		"h3-no-cert":     {"", ""},
-		"h3-quiet":       {"example.com", ""},
-		"decide-open":    {"", ""},
+	cases := map[string]struct{ h3, degraded, tls string }{
+		"h3":             {"example.com,static.example.org", "", "example.com,plain.example.net,static.example.org"},
+		"h3-unsupported": {"", "example.com,static.example.org", "example.com,plain.example.net,static.example.org"},
+		"h3-no-cert":     {"", "", ""},
+		"h3-quiet":       {"example.com", "", "example.com"},
+		"decide-open":    {"", "", "example.com"},
+		// TLSZones (E7.2): a zone without a certificate has no :443 server,
+		// and the list follows the sorted zones, not the document's order
+		// (multi lists b, a, c, and c has no certificate).
+		"no-cert": {"", "", ""},
+		"empty":   {"", "", ""},
+		"multi":   {"", "", "a.example.com,b.example.com"},
 	}
 	for name, want := range cases {
 		_, info, err := render.RenderDetailed(loadFixture(t, name))
@@ -786,6 +792,36 @@ func TestRenderDetailedInfo(t *testing.T) {
 		}
 		if got := strings.Join(info.Degraded, ","); got != want.degraded {
 			t.Errorf("%s: Degraded %q, want %q", name, got, want.degraded)
+		}
+		if got := strings.Join(info.TLSZones, ","); got != want.tls {
+			t.Errorf("%s: TLSZones %q, want %q", name, got, want.tls)
+		}
+	}
+}
+
+// TestRenderTLSZonesListen443 ties Info.TLSZones to the render itself: on
+// every fixture it is exactly the zones whose file carries `listen 443 ssl`,
+// sorted. The new-node drain lifts only once every zone of the document is
+// in the list and has passed a join handshake (steer.Joiner.Check), so a
+// list wrong either way keeps a new node drained for good: a zone left out
+// never counts as ready, and one listed without a server meets the
+// catch-all's refusal on every attempt.
+func TestRenderTLSZonesListen443(t *testing.T) {
+	for _, name := range fixtureNames(t) {
+		in := loadFixture(t, name)
+		files, info, err := render.RenderDetailed(in)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var want []string
+		for _, z := range in.Doc.Zones {
+			if bytes.Contains(files[render.ZoneFile(z.Name)], []byte("listen 443 ssl")) {
+				want = append(want, z.Name)
+			}
+		}
+		sort.Strings(want)
+		if got, w := strings.Join(info.TLSZones, ","), strings.Join(want, ","); got != w {
+			t.Errorf("%s: TLSZones %q, but the zones whose files listen on 443 ssl are %q", name, got, w)
 		}
 	}
 }

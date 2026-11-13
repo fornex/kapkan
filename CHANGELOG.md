@@ -19,6 +19,27 @@ security-relevant.
 
 ## [Unreleased]
 
+### Added
+
+- **edge: self-steering, watch first.** With `steering.enabled: true` in `edge.yaml`, `kapkan
+  edge` keeps a damped verdict on whether this box should carry each address in `steering.vips`
+  (or the node itself), from its own kernel and a TLS probe of its own `:443` that sends no HTTP.
+  `GET /steer?vip=` on `status_listen` answers readers on this box `200` announce, `503`
+  withdraw or drain, and anything else (`425` unknown, no answer) means hold; `kapkan edge -steer
+  -vip A` answers with an exit code (`0` announce, `100` withdraw, `101` drain, any other holds)
+  and evaluates locally when the daemon does not answer. Only nothing listening on `:443`, the
+  address gone from the kernel, a non-TLS answer or your drain withdraws: nothing the brain sends
+  can. `kapkan edge -s drain|undrain|reset-holddown [-vip A] [-reason R] [-wait [-consumer NAME]]
+  [-force]` drains the node or one address without the daemon, and `-wait` returns once your
+  consumer has read the new verdict; a node without `state_dir/steering/state.json` starts drained
+  (`new_node`) until every zone answers with its certificate, and `-s undrain -force` brings up
+  the first node of a new address. `/healthz` gains a `steering` object, `-check` prints a live
+  evaluation, and four metrics arrive (`kapkan_edge_steer_verdict`,
+  `kapkan_edge_steer_transitions_total`, `kapkan_edge_steer_probe_total`,
+  `kapkan_edge_steer_reads_total`). Off by default; it needs `status_listen` and refuses
+  `omit_catch_all`. Install the new binary before you add `steering:` to `edge.yaml`: an older
+  one refuses the unknown key.
+
 ### Fixed
 
 - **edge:** if you run the withdraw loop the anycast guide carried in 1.8.0 and 1.9.0, replace it

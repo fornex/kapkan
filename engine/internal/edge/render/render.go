@@ -380,6 +380,10 @@ type Info struct {
 	// a zone without a certificate on a node that CAN is in neither list
 	// until its TLS server exists.
 	Degraded []string
+	// TLSZones are the zones that render a TLS server on :443 here — the
+	// ones with a certificate — sorted. The new-node drain's exit test reads
+	// them (internal/edge/steer, Joiner.Check); nothing else does.
+	TLSZones []string
 }
 
 // zoneData is one zone with every decision already made. The template only
@@ -423,7 +427,8 @@ func Render(in Inputs) (Files, error) {
 }
 
 // RenderDetailed is Render plus the facts about the render the node reports:
-// which zones got a QUIC listener and which were degraded to TCP here.
+// which zones got a QUIC listener and which were degraded to TCP here, and
+// which got a TLS server on :443 at all.
 func RenderDetailed(in Inputs) (Files, Info, error) {
 	var info Info
 	if in.Doc == nil {
@@ -464,6 +469,10 @@ func RenderDetailed(in Inputs) (Files, Info, error) {
 			// Only a zone with a certificate renders the TLS server whose
 			// location / declares $kapkan_path.
 			common.HasDecide = true
+		}
+		if zones[i].HasCert {
+			// The same condition renders the zone's `listen 443 ssl` server.
+			info.TLSZones = append(info.TLSZones, zones[i].Name)
 		}
 		if zones[i].H3 {
 			common.AnyH3 = true
