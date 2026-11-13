@@ -21,58 +21,6 @@
     ]);
   }
 
-  function statCard(opts) {
-    var card = h("div", { class: "stat" + (opts.hot ? " is-hot" : "") }, [
-      h("div", { class: "stat__top" }, [w.icon(opts.icon), h("span", { text: opts.label })]),
-      h("div", { class: "stat__val " + (opts.valClass || ""), text: opts.value }),
-      opts.sub ? h("div", { class: "stat__delta" }, [opts.subIcon ? w.icon(opts.subIcon) : null, h("span", { text: opts.sub })]) : null,
-      h("div", { class: "stat__spark" }, K.sparkline(opts.spark && opts.spark.length ? opts.spark : [0, 0], { color: opts.sparkColor || "var(--accent)" }))
-    ]);
-    return card;
-  }
-
-  function statsGrid(ctx) {
-    var s = ctx.status, b = ctx.buf, attacks = s.active_attacks, bans = s.active_bans;
-    return h("div", { class: "stats" }, [
-      statCard({ icon: "alert", label: I.t("stat.activeAttacks"), value: I.num(attacks), hot: attacks > 0,
-        valClass: attacks > 0 ? "is-hot" : "is-calm", spark: b.attacks, sparkColor: attacks > 0 ? "var(--active)" : "var(--calm)",
-        sub: attacks > 0 ? I.plural(attacks, "activeAttacks") : I.t("stat.allzero") }),
-      statCard({ icon: "ban", label: I.t("stat.activeBans"), value: I.num(bans), hot: bans > 0,
-        valClass: bans > 0 ? "is-hot" : "", spark: b.bans, sparkColor: bans > 0 ? "var(--active)" : "var(--accent)",
-        sub: bans > 0 ? I.plural(bans, "activeBans") : I.t("stat.allzero") }),
-      statCard({ icon: "server", label: I.t("stat.hostsTracked"), value: I.num(ctx.hosts.length),
-        spark: b.hosts, sparkColor: "var(--accent)", sub: I.plural(ctx.hosts.length, "hostsTracked") }),
-      statCard({ icon: "shield", label: I.t("stat.networks"), value: I.num(ctx.networks.length),
-        spark: b.aggIn, sparkColor: "var(--chart-in)", sub: ctx.networks.join("  ") })
-    ]);
-  }
-
-  function trafficStrip(ctx) {
-    var b = ctx.buf, agg = ctx.agg;
-    var markerFrac = null;
-    var idx = b.inAttack.indexOf(true);
-    if (idx >= 0 && ctx.posture !== "calm") markerFrac = idx / Math.max(1, b.inAttack.length - 1);
-    function card(labelKey, dirColor, vals, now, color) {
-      return h("div", { class: "tcard" }, [
-        h("div", { class: "tcard__head" }, [
-          h("div", { class: "tcard__label" }, [(function () { var d = h("span", { class: "tcard__dir" }); d.style.background = dirColor; return d; })(), h("span", { text: I.t(labelKey) })]),
-          h("div", { class: "tcard__now" }, [now, " ", h("small", { text: I.t("ov.now") })])
-        ]),
-        h("div", { class: "tcard__chart" }, K.areaChart(vals.length ? vals : [0, 0], { color: color, markerFrac: markerFrac }))
-      ]);
-    }
-    return h("div", { class: "card" }, [
-      h("div", { class: "card__head" }, [
-        h("div", { class: "card__title" }, [w.icon("activity"), h("span", { text: I.t("ov.traffic") })]),
-        markerFrac != null ? K.badge("badge--active", I.t("ov.attackwindow"), "alert") : null
-      ]),
-      h("div", { class: "card__body" }, h("div", { class: "traffic-strip" }, [
-        card("ov.ingress", "var(--chart-in)", ctx.buf.aggIn, I.mbps(agg.in_mbps), "var(--chart-in)"),
-        card("ov.egress", "var(--chart-out)", ctx.buf.aggOut, I.mbps(agg.out_mbps), "var(--chart-out)")
-      ]))
-    ]);
-  }
-
   /* ===== ATTACK CARD (hero) + ATTACKS TABLE (scalable) ===== */
   /* expand key namespaced so it can't collide with a host IP in state.expanded */
   function attackKey(a) { return "atk:" + (a.id || (a.scope + ":" + a.target)); }
@@ -203,47 +151,6 @@
     return h("div", {}, out);
   }
 
-  /* ===== OVERVIEW ===== */
-  function overview(root, ctx) {
-    var posture = ctx.posture;
-    var bannerCls = "posture-banner" + (posture === "attack" ? " is-attack" : posture === "mitigating" ? " is-mitigating" : "");
-    var iconName = posture === "calm" ? "shield-check" : "shield-alert";
-    var title, sub;
-    if (posture === "calm") {
-      var firstRun = ctx.hosts.length === 0;
-      title = firstRun ? I.t("ov.firstrun.title") : I.t("ov.allclear.title");
-      sub = firstRun ? I.t("ov.firstrun.sub") : I.t("ov.allclear.sub");
-    } else {
-      title = posture === "mitigating" ? I.t("posture.mitigating") : I.t("posture.attack");
-      sub = posture === "mitigating" ? I.t("ov.mitigating.sub") : I.t("ov.attack.sub");
-    }
-    var banner = h("div", { class: bannerCls }, [
-      h("div", { class: "posture-banner__icon" }, w.icon(iconName)),
-      h("div", {}, [
-        h("h2", { class: "posture-banner__title", text: title }),
-        h("p", { class: "posture-banner__sub", text: sub })
-      ]),
-      h("div", { class: "posture-banner__meta" }, [
-        K.modeBadge(ctx.status.dry_run),
-        h("div", { class: "live__time mono", style: { color: "var(--muted)", fontSize: "var(--t-sm)" }, text: I.t("se.uptime") + " " + I.duration(ctx.status.uptime_seconds) })
-      ])
-    ]);
-
-    var children = [banner];
-    children.push(dryRunBanner(ctx));   /* null when there is nothing to warn about */
-    children.push(filterBypassBanner(ctx)); /* likewise; above the traffic strip on purpose */
-    children.push(trafficStrip(ctx));
-    children.push(h("div", { class: "mt-6" }, statsGrid(ctx)));
-
-    if (posture !== "calm" && ctx.attacks.active.length) {
-      children.push(h("div", { class: "section-label", style: { marginTop: "var(--s-6)", marginBottom: "var(--s-2)" } }, [w.icon("flame"), h("span", { text: I.t("at.active") }), K.badge("badge--active", String(ctx.attacks.active.length))]));
-      children.push(attacksTable(ctx.attacks.active, ctx, { limit: 5 }));
-    } else if (ctx.attacks.recent.length) {
-      children.push(h("div", { class: "mt-6" }, recentMini(ctx)));
-    }
-    K.mount(root, children);
-  }
-
   /* ---------- DRY-RUN BANNERS ----------
      Returns null when there is nothing to say, so callers render it
      UNCONDITIONALLY. That matters: the loudest case here fires precisely when
@@ -331,24 +238,6 @@
     ]);
   }
 
-  function recentMini(ctx) {
-    var rows = ctx.attacks.recent.slice(0, 4).map(function (r) {
-      return h("tr", { class: "is-clickable", tabindex: "0", role: "button", onclick: function () { ctx.actions.openDrawer(r); }, onkeydown: keyAct(function () { ctx.actions.openDrawer(r); }) }, [
-        h("td", { class: "target-cell", text: r.scope === "group" ? r.group : r.target }),
-        h("td", {}, K.dirBadge(r.direction)),
-        h("td", { class: "td-muted", text: I.label("attackType", r.classification.type) }),
-        h("td", { class: "num", text: I.abbr(r.peak_rate) }),
-        h("td", { class: "td-muted", text: I.rel(new Date(r.ended_at || r.started_at)) })
-      ]);
-    });
-    return h("div", { class: "card" }, [
-      h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("clock"), h("span", { text: I.t("at.recent") })])),
-      h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
-        h("thead", {}, h("tr", {}, [th("col.target"), th("col.dir"), th("col.type"), thNum("col.peak"), th("col.ended")])),
-        h("tbody", {}, rows)
-      ]))
-    ]);
-  }
   function th(key) { return h("th", { text: I.t(key) }); }
   function thNum(key) { return h("th", { class: "num", text: I.t(key) }); }
 
@@ -634,8 +523,8 @@
   }
 
   w.Views = {
-    overview: overview, attacks: attacks, bans: bans, hosts: hosts,
-    attackCard: attackCard, statsGrid: statsGrid, trafficStrip: trafficStrip,
+    attacks: attacks, bans: bans, hosts: hosts,
+    attackCard: attackCard,
     viewHead: viewHead, th: th, thNum: thNum, dryRunBanner: dryRunBanner,
     filterBypassBanner: filterBypassBanner
   };
