@@ -38,6 +38,7 @@ var dashboardAssets = map[string]dashboardAsset{
 	"GET /icons.js":       {"static/icons.js", "text/javascript; charset=utf-8"},
 	"GET /views.js":       {"static/views.js", "text/javascript; charset=utf-8"},
 	"GET /views2.js":      {"static/views2.js", "text/javascript; charset=utf-8"},
+	"GET /overview.js":    {"static/overview.js", "text/javascript; charset=utf-8"},
 	"GET /style.css":      {"static/style.css", "text/css; charset=utf-8"},
 	"GET /components.css": {"static/components.css", "text/css; charset=utf-8"},
 	"GET /locales/en.js":  {"static/locales/en.js", "text/javascript; charset=utf-8"},

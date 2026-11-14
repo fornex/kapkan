@@ -34,6 +34,8 @@
   /* the phone's tab bar holds four places; the rest are under More */
   var PHONE_BAR = ["overview", "attacks", "mitigation"];
   var WINDOW = 60;
+  /* the Overview's inbound chart: fifteen minutes of 3s polls */
+  var OV_WINDOW = 300;
 
   /* The Edge view's tenant filter survives a reload of the page but not the
      browser session: it narrows what an operator is LOOKING at, and a filter
@@ -56,7 +58,10 @@
     filters: { scope: "", dir: "", type: "", group: "", q: "" },
     expanded: new Set(),
     drawer: { open: false, live: false, key: null, attack: null },
-    buf: { aggIn: [], aggOut: [], aggInPps: [], aggOutPps: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {}, hostMbps: {} },
+    buf: { aggIn: [], aggOut: [], aggInPps: [], aggOutPps: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {}, hostMbps: {},
+      ovIn: [], ovInPps: [], ovT: [], ovHot: [] },
+    /* the Overview chart's unit: "bps" or "pps" */
+    ovUnit: "bps",
     traffic: { key: null, available: false, points: [], loading: false, fetchedAt: 0 },
     /* scrubbing nodes — fetched on demand with a freshness guard, NOT in the
        3s poll: liveness moves at stale_after (15s) pace and the endpoint walks
@@ -104,13 +109,20 @@
   var EDGE_EVENTS_SECONDS = 86400;
 
   /* ---------- buffers ---------- */
-  function pushBuf() {
+  /* `at` is the poll's time. The boot-time prefill passes none: it repeats the
+     first answer so the sparklines start full, and the Overview's traffic
+     chart, which draws real time, must not take those copies for history. */
+  function pushBuf(at) {
     var s = API.getStatus(), agg = API.aggregate(), hostsData = API.getHosts().hosts;
     var b = state.buf;
     push(b.aggIn, agg.in_mbps); push(b.aggOut, agg.out_mbps);
     push(b.aggInPps, agg.in_pps); push(b.aggOutPps, agg.out_pps);
     push(b.attacks, s.active_attacks); push(b.bans, s.active_bans);
     push(b.hosts, hostsData.length); push(b.inAttack, s.active_attacks > 0);
+    if (at) {
+      pushOv(b.ovIn, agg.in_mbps); pushOv(b.ovInPps, agg.in_pps);
+      pushOv(b.ovT, at); pushOv(b.ovHot, s.active_attacks > 0);
+    }
     hostsData.forEach(function (host) {
       if (!b.hostPps[host.target]) b.hostPps[host.target] = [];
       push(b.hostPps[host.target], host.rates.pps);
@@ -119,7 +131,8 @@
     });
   }
   function push(arr, v) { arr.push(v); if (arr.length > WINDOW) arr.shift(); }
-  function prefill() { for (var i = 0; i < 24; i++) pushBuf(); }
+  function pushOv(arr, v) { arr.push(v); if (arr.length > OV_WINDOW) arr.shift(); }
+  function prefill() { for (var i = 0; i < 24; i++) pushBuf(null); }
 
   /* ---------- posture ---------- */
   function derivePosture(attacks) {
@@ -294,7 +307,11 @@
     live.title = I.t(ctx.online ? "live.title" : "live.title.down", { t: stamp });
 
     /* section counts: attacks in the alarm tint, mitigations in neutral */
-    var counts = { attacks: s.active_attacks || 0, bans: s.active_bans || 0 };
+    /* Mitigation counts the bans that mitigate: a ladder's alert rung holds a
+       ban with no method, which drops nothing (the Overview shows those as
+       unprotected) */
+    var mitigating = API.getBans().active.filter(function (b) { return b.method && b.method !== "none"; }).length;
+    var counts = { attacks: s.active_attacks || 0, bans: mitigating };
     document.querySelectorAll(".nav__count").forEach(function (el) {
       var v = counts[el.dataset.count];
       el.textContent = I.num(v);
@@ -444,6 +461,7 @@
     setTheme: function (pref) { Theme.set(pref); },
     setFilter: function (k, v) { state.filters[k] = v; renderView(); },
     setHostDir: function (d) { state.hostDir = d; renderView(); },
+    setOvUnit: function (u) { state.ovUnit = u; renderView(); },
     toggleHost: function (ip) { if (state.expanded.has(ip)) state.expanded.delete(ip); else state.expanded.add(ip); renderView(); },
     loadTraffic: function (key) {
       var t = state.traffic;
@@ -666,7 +684,7 @@
   }
   function poll() {
     return API.refresh().then(function () {
-      state.online = true; pushBuf(); render();
+      state.online = true; pushBuf(Date.now()); render();
     }, function (e) {
       if (w.console) w.console.warn("poll failed", e);
       state.online = false;
@@ -717,7 +735,7 @@
        system" is chosen) re-labels the switch and redraws the view, so the
        Settings choice it shows stays true */
     Theme.onChange(function () { buildShell(); renderShellDynamic(buildCtx()); renderView(); });
-    API.refresh().then(function () { state.online = true; prefill(); }).catch(function () {}).then(function () {
+    API.refresh().then(function () { state.online = true; prefill(); pushBuf(Date.now()); }).catch(function () {}).then(function () {
       render();
       setInterval(poll, API.POLL_MS);
       setInterval(tick, 1000);

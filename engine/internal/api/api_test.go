@@ -936,7 +936,7 @@ func TestDashboardServing(t *testing.T) {
 	// would otherwise serve 200s and leave a nav entry rendering nothing.
 	for _, a := range []struct{ path, needle string }{
 		{"/views.js", "w.Views = {"},
-		{"/views.js", "overview: overview"},
+		{"/overview.js", "V.overview = overview;"},
 		{"/views2.js", "V.edge = edge;"},
 		{"/views2.js", "V.edgenodes = edgeNodes;"},
 		{"/views2.js", "V.nodes = nodes;"},
