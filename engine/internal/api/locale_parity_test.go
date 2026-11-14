@@ -236,6 +236,13 @@ func TestLocaleParityRegistered(t *testing.T) {
 // address or by attack), the hosts and networks it watches, the other
 // groups' ladders, the traffic ratio, the BGP announcements and the hosts
 // with traffic (449 − 14 + 111 = 546; 13 − 3 + 8 = 18 plurals).
+//
+// Its diagram of how the protection is wired added 33 strings (ov.sch.*: the
+// nodes of the pipe, what each says about itself, the drop badges, the
+// control lines' labels and the legend) and six plurals: the attacked
+// addresses, networks and hosts on the pipe, those the attack still reaches,
+// those a blackhole leaves unreachable and those diverted to the packet
+// filters (546 + 33 = 579; 18 + 6 = 24 plurals).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -244,9 +251,9 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		want   int
 	}{
 		{"units", 0, 4},
-		{"plurals", 1, 18},
-		{"plurals", 0, 36},  // 18 keys × {one, other}: sources, recentAttacks + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5) + edgeUnboundTokens (E6.7) + eight ov* (the Overview)
-		{"strings", 0, 546}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history); +34: ed.lever.* (E6.8); +4: duty.* (the duty light); −13 +18: the redesigned top bar, tabs and theme; −14 +111: the redesigned Overview
+		{"plurals", 1, 24},
+		{"plurals", 0, 48},  // 24 keys × {one, other}: sources, recentAttacks + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5) + edgeUnboundTokens (E6.7) + fourteen ov* (the Overview and its diagram)
+		{"strings", 0, 579}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history); +34: ed.lever.* (E6.8); +4: duty.* (the duty light); −13 +18: the redesigned top bar, tabs and theme; −14 +111 +33: the redesigned Overview and its diagram
 		{"enums", 1, 9},
 		{"enums", 0, 59}, // +16: edgeEventKind (E6.7)
 		{"enumsShort", 1, 1},

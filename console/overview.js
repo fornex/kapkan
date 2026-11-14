@@ -534,13 +534,240 @@
      configured until then (or for a token that may not read it) */
   function fleetRow(row, label, total, inv) {
     if (!total) return;
-    if (inv && inv.ok && inv.list) {
+    if (inv && inv.ok && inv.list && inv.list.length) {
       var alive = inv.list.filter(function (n) { return n.alive; }).length;
       row(label, alive === inv.list.length ? "calm" : "elev", I.t("ov.hl.alive", { a: I.num(alive), n: I.num(inv.list.length) }),
         inv.list.map(function (n) { return n.name; }).join(", "));
     } else {
       row(label, "muted", I.t("ov.hl.configured", { n: I.num(total) }), null);
     }
+  }
+
+  /* ===================== how the protection is wired =====================
+     A pipe, left to right: the internet, the routers, Kapkan when it stands
+     in line (its XDP data plane is on), your networks. Under it, what Kapkan
+     steers: the routers over BGP, the packet filters and the request filters
+     where they exist — or, with no BGP at all, the person on call. It is
+     drawn from this deployment's own status, so it shows its real shape.
+
+     The volumes on the pipe are estimates: the inbound total, less the rate
+     each attacked address was seeing where its mitigation drops it (the flows
+     are exported before any drop, so they still carry the attack). They are
+     marked "≈". In watch-only nothing is dropped and the pipe says so.
+
+     It names neighbors, interfaces and nodes — topology — so it is drawn for
+     unscoped tokens only, like the Settings view's BGP block.
+
+     One fixed 1328px plane, scrolled sideways where the card is narrower;
+     the boxes are absolutely placed through the CSSOM and every line is one
+     path in one SVG over them. */
+  var SCH = { W: 1328, LANE: 112, ROW: 96, BOX_H: 104, BELOW: 320 };
+  function schBox(x, y, w, cls, kids) {
+    var el = h("div", { class: "sch__box" + (cls ? " " + cls : "") }, kids);
+    el.style.left = x + "px"; el.style.top = y + "px"; el.style.width = w + "px";
+    return el;
+  }
+  function schText(x, y, w, cls, text) {
+    var el = h("div", { class: "sch__label" + (cls ? " " + cls : ""), text: text });
+    el.style.left = x + "px"; el.style.top = y + "px"; el.style.width = w + "px";
+    return el;
+  }
+  function schSeg(x, w, hot) {
+    var el = h("div", { class: "sch__seg" + (hot ? " is-attack" : "") });
+    el.style.left = x + "px"; el.style.width = w + "px";
+    return el;
+  }
+  function schBadge(cx, w, cls, text) {
+    var el = h("div", { class: "sch__badge " + cls, text: text });
+    el.style.left = Math.round(cx - w / 2) + "px"; el.style.width = w + "px";
+    return el;
+  }
+  function namesLine(names, limit) {
+    if (!names.length) return null;
+    var shown = names.slice(0, limit).join(", ");
+    return names.length > limit ? shown + " " + I.t("ov.sch.more", { n: I.num(names.length - limit) }) : shown;
+  }
+
+  function scheme(ctx) {
+    var s = ctx.status;
+    if (!s.unscoped) return null;
+    var bgp = s.bgp || {}, peers = bgp.neighbors || [], hasBgp = peers.length > 0;
+    var dp = s.dataplane, inline = !!(dp && dp.enabled);
+    var nScrub = s.nodes_total || 0, nEdge = s.edge_nodes_total || 0;
+    var act = ctx.attacks.active, dry = ctx.dryRun;
+    var fmt = function (v) { return I.mbps(v); };
+    function mbpsOf(a) { return (a.rates && a.rates.mbps) || 0; }
+
+    /* where each attacked address's traffic ends, by its mitigation */
+    var drop = { router: 0, xdp: 0, divert: 0 }, routerActs = [], down = [], reaching = [], diverted = 0, announced = {};
+    act.forEach(function (a) {
+      var p = dry ? "none" : protOf(a, ctx);
+      if (p === "blackhole" || p === "flowspec") {
+        drop.router += mbpsOf(a);
+        if (routerActs.indexOf(p) < 0) routerActs.push(p);
+        if (p === "blackhole") down.push(targetOf(a));
+      } else if (p === "dataplane") drop.xdp += mbpsOf(a);
+      else if (p === "divert") { drop.divert += mbpsOf(a); diverted++; }
+      else reaching.push(targetOf(a));
+      if (p !== "none" && p !== "dataplane") announced[p] = (announced[p] || 0) + 1;
+    });
+    var total = ctx.agg.in_mbps;
+    var afterRouters = Math.max(0, total - drop.router - drop.divert);
+    var atNets = Math.max(0, afterRouters - drop.xdp);
+    var attack = act.length > 0;
+
+    var kids = [], paths = [];
+    var below = !inline || nScrub || nEdge;
+    var H = below ? 440 : (hasBgp ? 290 : 220);
+    var kX = 680, kW = 280;                 /* Kapkan in line */
+    var oX = 420, oW = 280;                 /* Kapkan beside the pipe */
+
+    /* the pipe and its segments */
+    var lane = h("div", { class: "sch__lane" }); lane.style.top = SCH.LANE + "px"; lane.style.width = SCH.W + "px";
+    kids.push(lane);
+    kids.push(schSeg(212, 96, attack));
+    kids.push(schText(200, 122, 120, "sch__vol" + (attack ? " is-attack" : ""), fmt(total)));
+    if (inline) {
+      kids.push(schSeg(572, 96, attack && (reaching.length > 0 || drop.xdp > 0)));
+      kids.push(schText(560, 122, 120, "sch__vol" + (attack && (reaching.length || drop.xdp) ? " is-attack" : ""), (attack ? "≈" : "") + fmt(afterRouters)));
+      kids.push(schSeg(972, 136, attack && reaching.length > 0));
+      kids.push(schText(960, 122, 160, "sch__vol" + (attack && reaching.length ? " is-attack" : ""), (attack ? "≈" : "") + fmt(atNets)));
+    } else {
+      kids.push(schSeg(572, 536, attack && reaching.length > 0));
+      kids.push(schText(760, 122, 160, "sch__vol" + (attack && reaching.length ? " is-attack" : ""), (attack ? "≈" : "") + fmt(atNets)));
+    }
+
+    /* the cards on the pipe */
+    kids.push(schBox(0, SCH.ROW, 200, "", [
+      h("b", { text: I.t("ov.sch.internet") }),
+      h("span", { class: "sch__sub" + (attack ? " is-attack" : ""), text: attack ? I.plural(act.length, "ovSchTargets") : I.t("ov.num.inbound") })
+    ]));
+    kids.push(schBox(320, SCH.ROW, 240, "", [h("b", { text: I.t("ov.sch.routers") })].concat(
+      hasBgp ? peers.slice(0, 2).map(function (p) { return h("span", { class: "sch__mono", text: p }); }).concat(peers.length > 2 ? [h("span", { class: "sch__sub", text: I.t("ov.sch.more", { n: I.num(peers.length - 2) }) })] : [])
+             : [h("span", { class: "sch__sub", text: I.t("ov.sch.routers.flows") })])));
+    var kapkanKids = [
+      h("div", { class: "sch__kapkan" }, [w.icon("brandmark"), h("span", {}, [h("b", { text: "Kapkan" }), " ", h("span", { class: "sch__mono", text: bgp.router_id || "" })])]),
+      h("span", { class: "sch__sub", text: inline ? I.t("ov.sch.inline") : I.t("ov.sch.oob") }),
+      h("span", { class: "sch__sub", text: inline
+        ? I.t("ov.sch.xdp", { list: (dp.interfaces || []).map(function (x) { return x.name; }).filter(Boolean).join(", ") || "—" })
+        : I.t(hasBgp ? "ov.sch.bgp.yes" : "ov.sch.bgp.no") })
+    ];
+    if (inline) kids.push(schBox(kX, SCH.ROW, kW, "is-night", kapkanKids));
+    else kids.push(schBox(oX, SCH.BELOW, oW, "is-night", kapkanKids));
+    var netState;
+    if (!attack) netState = h("span", { class: "sch__sub is-calm", text: I.t("ov.sch.net.calm") });
+    else if (reaching.length) netState = h("span", { class: "sch__sub is-attack", text: reaching.length === 1 ? I.t("ov.sch.net.reaches", { t: reaching[0] }) : I.plural(reaching.length, "ovSchReachesN") });
+    else netState = h("span", { class: "sch__sub is-calm", text: I.t("ov.sch.net.stopped") });
+    var netKids = [h("b", { text: I.t("ov.sch.networks") }),
+      h("span", { class: "sch__sub", text: [ctx.networks.length ? I.plural(ctx.networks.length, "ovSchNets") : null, I.plural(ctx.hosts.length, "ovSchHosts")].filter(Boolean).join(", ") }),
+      netState];
+    if (attack && !reaching.length) {
+      netKids.push(h("span", { class: "sch__sub", text: !down.length ? I.t("ov.sch.net.allup")
+        : down.length === 1 ? I.t("ov.sch.net.down1", { t: down[0] }) : I.plural(down.length, "ovSchDownN") }));
+    }
+    kids.push(schBox(1120, SCH.ROW, 208, "", netKids));
+
+    /* what was dropped where, over the node that drops it */
+    if (attack && dry) {
+      kids.push(schBadge(440, 330, "is-watch", I.t("ov.sch.dry")));
+    } else if (attack) {
+      if (drop.router > 0) {
+        kids.push(schBadge(440, 330, "is-attack", I.t("ov.sch.dropped", { what: routerActs.map(actName).join(I.t("ov.at.and")), v: fmt(drop.router) })));
+        paths.push({ d: "M 440 64 L 440 93", cls: "is-attack" });
+      }
+      if (inline) {
+        kids.push(schBadge(kX + kW / 2, 340, "is-xdp", drop.xdp > 0 ? I.t("ov.sch.dropped", { what: actName("dataplane"), v: fmt(drop.xdp) }) : I.t("ov.sch.xdp.ready")));
+        paths.push({ d: "M " + (kX + kW / 2) + " 64 L " + (kX + kW / 2) + " 93", cls: "is-xdp" });
+      }
+    }
+
+    /* the control lines, under the pipe */
+    var bgpLabel = dry ? I.t("ov.sch.bgp.dry") : Object.keys(announced).length
+      ? I.t("ov.sch.bgp.some", { list: Object.keys(announced).map(function (p) { return I.num(announced[p]) + " " + actName(p); }).join(", ") })
+      : I.t("ov.sch.bgp.none");
+    if (inline) {
+      if (hasBgp) {
+        paths.push({ d: "M " + (kX + 93) + " 200 L " + (kX + 93) + " 248 L 440 248 L 440 204", arrow: true });
+        kids.push(schText(456, 256, 300, "sch__ctl", bgpLabel));
+      }
+      if (nScrub) {
+        paths.push({ d: "M " + (kX + 187) + " 200 L " + (kX + 187) + " 290 L 890 290 L 890 316", arrow: true });
+        kids.push(schText(900, 294, 120, "sch__ctl", I.t("ov.sch.rules")));
+      }
+      if (nEdge) {
+        paths.push({ d: "M " + (kX + 187) + " 200 L " + (kX + 187) + " 290 L 1194 290 L 1194 316", arrow: true });
+        kids.push(schText(1204, 294, 120, "sch__ctl", I.t("ov.sch.zones")));
+      }
+    } else {
+      /* beside the pipe: flows come down from the routers, BGP goes back up */
+      paths.push({ d: "M 470 200 L 470 316", arrow: true });
+      kids.push(schText(370, 250, 92, "sch__ctl is-right", I.t("ov.sch.flows")));
+      if (hasBgp) {
+        paths.push({ d: "M 540 320 L 540 204", arrow: true });
+        kids.push(schText(552, 236, 300, "sch__ctl", bgpLabel));
+      }
+      if (nScrub) {
+        paths.push({ d: "M 700 372 L 756 372", arrow: true });
+        kids.push(schText(706, 350, 60, "sch__ctl", I.t("ov.sch.rules")));
+      }
+      if (nEdge) {
+        paths.push({ d: "M 600 424 L 600 434 L 1194 434 L 1194 428", arrow: true });
+        kids.push(schText(1040, 414, 140, "sch__ctl is-right", I.t("ov.sch.zones")));
+      }
+      if (!hasBgp && !nScrub) {
+        /* nothing to steer: what Kapkan does is tell the person on call */
+        var notify = s.notify || {}, via = Object.keys(notify).filter(function (k) { return notify[k]; }).map(function (k) { return k.charAt(0).toUpperCase() + k.slice(1); });
+        var lastAlert = act.concat(ctx.attacks.recent).reduce(function (m, a) { return Math.max(m, startedMs(a)); }, 0);
+        paths.push({ d: "M 700 372 L 756 372", arrow: true });
+        kids.push(schText(706, 350, 60, "sch__ctl", I.t("ov.sch.alerts")));
+        kids.push(schBox(760, SCH.BELOW, 260, "is-sunk", [
+          h("b", { text: I.t("ov.sch.oncall") }),
+          h("span", { class: "sch__sub", text: via.length ? via.join(", ") : I.t("ov.sch.nochannels") }),
+          lastAlert ? h("span", { class: "sch__sub", text: I.t("ov.sch.lastalert", { t: I.time(new Date(lastAlert)) }) }) : null
+        ]));
+      }
+    }
+    if (nScrub) {
+      var scrubNames = ctx.state.nodes && ctx.state.nodes.ok && ctx.state.nodes.list ? ctx.state.nodes.list.map(function (n) { return n.name; }) : [];
+      kids.push(schBox(760, SCH.BELOW, 260, "is-sunk", [
+        h("b", {}, [I.t("nav.nodes"), h("span", { class: "sch__sub", text: " · " + I.num(nScrub) })]),
+        scrubNames.length ? h("span", { class: "sch__mono", text: namesLine(scrubNames, 3) }) : null,
+        h("span", { class: "sch__sub" + (diverted ? " is-attack" : ""), text: diverted ? I.plural(diverted, "ovSchDiverting") : I.t("ov.sch.scrub.idle") })
+      ]));
+    }
+    if (nEdge) {
+      var inv = ctx.state.edgeInv, edgeNames = inv && inv.ok && inv.list ? inv.list.map(function (n) { return n.name; }) : [];
+      var alive = edgeNames.length ? inv.list.filter(function (n) { return n.alive; }).length : null;
+      kids.push(schBox(1060, SCH.BELOW, 268, "is-sunk", [
+        h("b", {}, [I.t("nav.edgenodes"), h("span", { class: "sch__sub", text: " · " + I.num(nEdge) })]),
+        edgeNames.length ? h("span", { class: "sch__mono", text: namesLine(edgeNames, 3) }) : null,
+        alive != null ? h("span", { class: "sch__sub", text: I.t("ov.hl.alive", { a: I.num(alive), n: I.num(inv.list.length) }) }) : null
+      ]));
+    }
+
+    var svg = K.svg("svg", { class: "sch__lines", width: SCH.W, height: H, viewBox: "0 0 " + SCH.W + " " + H, "aria-hidden": "true", focusable: "false" }, [
+      K.svg("defs", {}, K.svg("marker", { id: "ov-sch-arrow", orient: "auto", markerWidth: 6, markerHeight: 6, refX: 3, refY: 3, viewBox: "0 0 6 6" },
+        K.svg("path", { d: "M0 0 L6 3 L0 6 Z", class: "sch__head" })))
+    ].concat(paths.map(function (p) {
+      return K.svg("path", { d: p.d, class: "sch__path" + (p.cls ? " " + p.cls : ""), "marker-end": p.arrow ? "url(#ov-sch-arrow)" : null });
+    })));
+    var plane = h("div", { class: "sch__plane" }, [svg].concat(kids));
+    plane.style.width = SCH.W + "px"; plane.style.height = H + "px";
+
+    return h("section", { class: "ov-card ov-sch", attrs: { "aria-labelledby": "ov-sch-title" } }, [
+      h("div", { class: "ov-card__head" }, [
+        h("div", {}, [
+          h("h2", { class: "ov-card__title", id: "ov-sch-title", text: I.t("ov.sch.title") }),
+          h("p", { class: "ov-card__sub", text: I.t("ov.sch.sub") })
+        ]),
+        h("div", { class: "tr__legend" }, [
+          h("span", {}, [h("span", { class: "sch__key is-attack" }), I.t("ov.tr.attack")]),
+          h("span", {}, [h("span", { class: "sch__key" }), I.t("ov.sch.clean")]),
+          h("span", {}, [h("span", { class: "sch__key is-ctl" }), I.t("ov.sch.control")])
+        ])
+      ]),
+      h("div", { class: "sch__scroll" }, plane)
+    ]);
   }
 
   /* ===================== the page ===================== */
@@ -556,8 +783,26 @@
     K.mount(root, alarms.concat([
       h("div", { class: "ov-row" }, [hero(ctx), chronicle(ctx)]),
       h("div", { class: "ov-row" }, [traffic(ctx), stats(ctx)]),
-      h("div", { class: "ov-row" }, [activeAttacks(ctx), health(ctx)])
+      h("div", { class: "ov-row" }, [activeAttacks(ctx), health(ctx)]),
+      scheme(ctx)
     ]));
+    fitScheme(root);
+  }
+  /* The diagram's plane is 1328px; a card a little narrower scales it down to
+     fit rather than scroll. Narrower than 60% of it (a phone) it keeps its
+     size and scrolls sideways — scaled that far, its words would be too small
+     to read. Re-applied after every render: the reconcile resets the style. */
+  function fitScheme(root) {
+    var sc = root.querySelector(".sch__scroll"), plane = sc && sc.firstChild;
+    if (!plane) return;
+    /* measured with no scrollbars of its own: a scale only changes how the
+       plane is painted, not its layout box, so a scrolling wrapper would grow
+       a scrollbar for the unscaled size and shrink the width it measures */
+    sc.style.overflow = "hidden";
+    var k = sc.clientWidth / SCH.W, H = parseFloat(plane.style.height) || 0;
+    if (k >= 1 || k < 0.6) { sc.style.overflow = ""; sc.style.height = ""; return; }
+    plane.style.transform = "scale(" + k.toFixed(4) + ")";
+    sc.style.height = Math.ceil(H * k) + "px";
   }
 
   V.overview = overview;

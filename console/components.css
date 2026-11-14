@@ -662,6 +662,53 @@ textarea.input { height: auto; padding: 8px 12px; }
 .hl__dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--tone); position: relative; top: 1px; }
 .hl__sub { font-size: var(--t-sm); line-height: 18px; color: var(--muted); padding-left: 16px; overflow-wrap: anywhere; }
 
+/* how the protection is wired: one fixed plane, scrolled sideways when the
+   card is narrower; boxes placed by overview.js, lines in one SVG */
+.ov-sch { gap: var(--s-5); }
+.sch__scroll { overflow-x: auto; }
+.sch__plane { position: relative; transform-origin: 0 0; }
+.sch__lines { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.sch__path { fill: none; stroke: var(--accent-2); stroke-width: 1.5; stroke-dasharray: 4 4; stroke-linecap: round; stroke-linejoin: round; }
+.sch__path.is-attack { stroke: var(--active); stroke-dasharray: none; }
+.sch__path.is-xdp { stroke: var(--dp); stroke-dasharray: 3 3; }
+.sch__head { fill: var(--accent-2); }
+.sch__lane { position: absolute; left: 0; height: 72px; border-radius: 36px; background: var(--inset); border: 1px solid var(--border); }
+.sch__seg { position: absolute; top: 144px; height: 8px; border-radius: 4px; background: var(--border-strong); }
+.sch__seg.is-attack { background: var(--active); }
+.sch__label { position: absolute; font-size: var(--t-sm); line-height: 16px; }
+.sch__vol { text-align: center; font-family: var(--mono); font-size: var(--t-xs); color: var(--muted); }
+.sch__vol.is-attack { color: var(--active); }
+.sch__ctl { color: var(--accent-2); }
+.sch__ctl.is-right { text-align: right; }
+/* a box keeps the pipe's height and grows downward when a long address wraps */
+.sch__box {
+  position: absolute; min-height: 104px; padding: 12px 16px;
+  display: flex; flex-direction: column; justify-content: center;
+  border-radius: var(--r-lg); background: var(--surface); border: 1px solid var(--border-strong);
+  font-size: var(--t-sm); line-height: 20px;
+}
+.sch__box b { font-size: var(--t-base); font-weight: 500; }
+.sch__box.is-sunk { background: var(--inset); border-color: var(--border); }
+.sch__box.is-night { background: var(--night); color: var(--on-night); border-color: transparent; --muted: #a9a8a2; }
+.sch__sub { color: var(--muted); }
+.sch__sub.is-attack { color: var(--active); }
+.sch__sub.is-calm { color: var(--calm); }
+.sch__mono { font-family: var(--mono); font-size: var(--t-xs); }
+.sch__kapkan { display: flex; align-items: center; gap: 10px; }
+.sch__kapkan .ico { width: 28px; height: 28px; }
+.sch__badge {
+  position: absolute; top: 32px; height: 32px; padding: 0 14px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--r-pill); font-size: var(--t-sm); font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sch__badge.is-attack { background: var(--active-soft); color: var(--active); }
+.sch__badge.is-xdp { background: var(--dp-soft); color: var(--dp); }
+.sch__badge.is-watch { background: var(--elev-soft); color: var(--elev); }
+.sch__key { width: 18px; height: 6px; border-radius: 3px; background: var(--border-strong); }
+.sch__key.is-attack { background: var(--active); }
+.sch__key.is-ctl { height: 0; border-radius: 0; background: none; border-top: 2px dashed var(--accent-2); }
+
 @media (max-width: 899px) {
   .hero { padding: 20px; }
   .hero__title { font-size: 30px; line-height: 36px; }
