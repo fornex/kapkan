@@ -1,5 +1,5 @@
 /* views.js — per-screen render functions. Each renders into a view root that
-   app.js clears every 3s poll. UI state (filters/sort/expanded/drawer) lives in
+   app.js clears every 3s poll. UI state (filters/sort/expanded) lives in
    app.js and is passed in via ctx so it survives re-renders. */
 (function (w) {
   "use strict";
@@ -19,136 +19,6 @@
       h("div", {}, [h("h1", { class: "view-head__title", text: sec ? sec.title : title }), sub ? h("div", { class: "view-head__sub", text: sub }) : null]),
       right.length ? h("div", { class: "view-head__actions" }, right) : null
     ]);
-  }
-
-  /* ===== ATTACK CARD (hero) + ATTACKS TABLE (scalable) ===== */
-  /* expand key namespaced so it can't collide with a host IP in state.expanded */
-  function attackKey(a) { return "atk:" + (a.id || (a.scope + ":" + a.target)); }
-
-  /* operator quick actions shared by the hero card head and the table row.
-     opts.compact drops the source IP from the ban label to fit a narrow cell. */
-  function attackActions(a, ctx, opts) {
-    opts = opts || {};
-    var acts = [];
-    if (ctx.role !== "operator" || !a.active) return acts;
-    if (a.direction !== "outgoing" && a.sample && a.sample.top_sources && a.sample.top_sources.length) {
-      var topSrc = a.sample.top_sources[0].key;
-      acts.push(h("button", { class: "btn btn--ghost btn--sm", onclick: function (e) {
-        K.confirm(e.currentTarget, { title: I.t("bn.ban"), text: I.t("bn.ban.confirm", { t: topSrc }), danger: true, confirmLabel: I.t("bn.ban"),
-          onConfirm: function () { ctx.actions.ban(topSrc); } });
-      } }, [w.icon("ban"), h("span", { text: opts.compact ? I.t("bn.ban") : I.t("bn.ban") + " " + topSrc })]));
-    }
-    acts.push(h("button", { class: "btn btn--danger btn--sm", onclick: function (e) { ctx.actions.withdraw(e.currentTarget, a.target); } }, [w.icon("x"), h("span", { text: I.t("ac.withdraw") })]));
-    return acts;
-  }
-
-  /* rich detail blocks (ladder + metric/mitigation + sample). Shared by the hero
-     card body and the table's expanded row, so both stay in sync. */
-  function attackBody(a, ctx, opts) {
-    opts = opts || {};
-    var ladderBlock = h("div", {}, [
-      h("div", { class: "section-label" }, [w.icon("layers"), h("span", { text: I.t("ac.escalation") })]),
-      K.ladder(a.escalation, a.escalation_step, { live: a.active, startedMs: new Date(a.started_at).getTime(), compact: opts.compactLadder })
-    ]);
-    var mitHead = h("div", { class: "row between", style: { marginBottom: "var(--s-2)" } }, [
-      h("div", { class: "section-label", style: { marginBottom: "0" } }, [w.icon(a.method ? "shield" : "bell"), h("span", { text: I.t("ac.mitigation") })]),
-      a.dry_run ? K.badge("badge--dry", I.t("ac.simulated"), "shield-alert") : null
-    ]);
-    var mitigation = h("div", {}, [
-      mitHead,
-      a.method
-        ? K.routeDisplay(a, a.dry_run)
-        : h("div", { class: "route" }, h("div", { class: "route__line" }, h("span", { class: "route__v", text: I.t("ac.alertonly") })))
-    ]);
-    var grid = h("div", { class: "attack-card__grid" }, [
-      h("div", {}, [h("div", { class: "section-label" }, [w.icon("activity"), h("span", { text: I.t("ac.metricvsthreshold") })]), K.gauge(a.metric, a.rate, a.threshold)]),
-      mitigation
-    ]);
-    var sources = a.sample ? h("div", {}, [
-      h("div", { class: "section-label" }, [w.icon("target"), h("span", { text: I.t("ac.sample") })]),
-      h("div", { class: "shares" }, [
-        K.shareGroup(I.t(a.direction === "outgoing" ? "ac.topdest" : "ac.topsources"), a.sample.top_sources, { src: true }),
-        K.shareGroup(I.t("ac.topdstports"), a.sample.top_dst_ports, {})
-      ])
-    ]) : null;
-    var detailBtn = h("button", { class: "btn btn--ghost btn--sm", onclick: function () { ctx.actions.openDrawer(a); } }, [w.icon("search"), h("span", { text: I.t("at.viewdetail") })]);
-    return [ladderBlock, grid, sources, h("div", { class: "row", style: { justifyContent: "flex-end" } }, detailBtn)];
-  }
-
-  function attackCard(a, ctx, opts) {
-    opts = opts || {};
-    var isOut = a.direction === "outgoing";
-    var actions = attackActions(a, ctx);
-    var head = h("div", { class: "attack-card__head" }, [
-      h("div", { class: "attack-card__id" }, [
-        h("div", { class: "attack-card__target" }, [
-          h("span", { class: "mono", text: a.scope === "group" ? a.group : a.target }),
-          K.dirBadge(a.direction),
-          K.badge("badge--active", I.label("attackType", a.classification.type), "flame")
-        ]),
-        h("div", { class: "attack-card__sub" }, [
-          K.badge(a.scope === "group" ? "badge--elev" : "badge--muted", I.label("scope", a.scope)),
-          a.scope === "host" ? h("span", { text: I.t("col.group") + ": " + a.group }) : null,
-          K.confidence(a.classification.confidence),
-          isOut ? K.badge("badge--active", I.label("direction", "outgoing"), "arrow-up") : null
-        ])
-      ]),
-      actions.length ? h("div", { class: "attack-card__actions" }, actions) : null
-    ]);
-    return h("div", { class: "attack-card" + (isOut ? " is-outgoing" : "") }, [
-      head, h("div", { class: "attack-card__body" }, attackBody(a, ctx, opts))
-    ]);
-  }
-
-  /* Scalable list of active attacks: one compact row each, click to expand the
-     full detail inline (reuses attackBody). Handles many simultaneous attacks
-     where hero cards would overflow. opts.limit caps rows + shows a "to Attacks"
-     link with the overflow count (used on Overview). */
-  function attacksTable(list, ctx, opts) {
-    opts = opts || {};
-    var sorted = list.slice().sort(function (a, b) {
-      var ma = a.threshold ? a.rate / a.threshold : 0, mb = b.threshold ? b.rate / b.threshold : 0;
-      if (mb !== ma) return mb - ma;
-      return String(a.target || a.group) < String(b.target || b.group) ? -1 : 1;
-    });
-    var total = sorted.length;
-    if (opts.limit) sorted = sorted.slice(0, opts.limit);
-
-    var rows = [];
-    sorted.forEach(function (a) {
-      var key = attackKey(a), expanded = ctx.state.expanded.has(key);
-      var mult = a.threshold ? a.rate / a.threshold : null;
-      var sev = mult == null ? "var(--muted)" : mult >= 3 ? "var(--active)" : mult >= 1.5 ? "var(--elev)" : "var(--calm)";
-      var rung = (a.escalation && a.escalation[a.escalation_step]) ? a.escalation[a.escalation_step].action : null;
-      var actsCell = h("td", { class: "attacks-tbl__act", onclick: function (e) { e.stopPropagation(); } },
-        h("div", { class: "row", style: { justifyContent: "flex-end", gap: "var(--s-2)" } }, attackActions(a, ctx, { compact: true })));
-
-      rows.push(h("tr", { class: "is-clickable" + (expanded ? " is-open" : "") + (mult != null && mult >= 1.5 ? " is-hot" : ""),
-        tabindex: "0", role: "button", "data-akey": key,
-        onclick: function () { ctx.actions.toggleHost(key); }, onkeydown: keyAct(function () { ctx.actions.toggleHost(key); }) }, [
-        h("td", { class: "target-cell" }, [
-          h("span", { class: "row", style: { gap: "8px" } }, [w.icon(expanded ? "chevron-down" : "chevron-right"), h("span", { class: "mono", text: a.scope === "group" ? a.group : a.target })]),
-          h("span", { class: "td-muted", text: a.scope === "host" ? I.t("col.group") + ": " + a.group : I.label("scope", "group") })
-        ]),
-        h("td", {}, K.dirBadge(a.direction)),
-        h("td", {}, K.badge("badge--active", I.label("attackType", a.classification.type), "flame")),
-        h("td", { class: "num" }, [h("b", { class: "mono", style: { color: sev }, text: mult != null ? I.abbr(mult) + "×" : "—" }), h("div", { class: "td-muted mono", text: a.metric })]),
-        h("td", {}, rung ? K.badge("badge--muted", I.label("action", rung)) : h("span", { class: "td-muted", text: "—" })),
-        h("td", {}, a.method ? K.methodPill(a.method) : h("span", { class: "td-muted", text: I.t("ac.alertonly") })),
-        actsCell
-      ]));
-      if (expanded) rows.push(h("tr", { class: "attack-detail-row" }, h("td", { attrs: { colspan: "7" } }, h("div", { class: "attack-card__body" }, attackBody(a, ctx)))));
-    });
-
-    var out = [h("div", { class: "card" }, h("div", { class: "tablewrap" }, h("table", { class: "tbl attacks-tbl" }, [
-      h("thead", {}, h("tr", {}, [th("col.target"), th("col.dir"), th("col.type"), thNum("ac.metricvsthreshold"), th("ac.escalation"), th("col.method"), h("th", {})])),
-      h("tbody", {}, rows)
-    ])))];
-    if (opts.limit && total > opts.limit) {
-      out.push(h("button", { class: "btn btn--ghost btn--sm mt-4", onclick: function () { ctx.actions.setView("attacks"); } },
-        [w.icon("alert"), h("span", { text: I.t("nav.attacks") }), K.badge("badge--muted", "+" + (total - opts.limit))]));
-    }
-    return h("div", {}, out);
   }
 
   /* ---------- DRY-RUN BANNERS ----------
@@ -240,82 +110,6 @@
 
   function th(key) { return h("th", { text: I.t(key) }); }
   function thNum(key) { return h("th", { class: "num", text: I.t(key) }); }
-
-  /* ===== ATTACKS ===== */
-  function attacks(root, ctx) {
-    var f = ctx.state.filters;
-    var groups = ctx.groups.map(function (g) { return g.name; });
-    var types = Object.keys(I._en().enums.attackType);
-
-    function sel(key, val, options, labelFn) {
-      var s = h("select", { class: "select", id: "f-" + key, onchange: function (e) { ctx.actions.setFilter(key, e.target.value); } },
-        [h("option", { value: "", text: I.t("filter." + key) })].concat(options.map(function (o) {
-          return h("option", { value: o, text: labelFn ? labelFn(o) : o, attrs: (val === o ? { selected: "selected" } : {}) });
-        })));
-      return s;
-    }
-    var search = h("input", { class: "input mono", id: "f-q", placeholder: I.t("filter.search"), value: f.q || "",
-      oninput: function (e) { ctx.actions.setFilter("q", e.target.value); } });
-
-    var filters = h("div", { class: "filters" }, [
-      h("span", { class: "row", style: { color: "var(--muted)" } }, [w.icon("sliders")]),
-      sel("scope", f.scope, ["host", "group"], function (o) { return I.label("scope", o); }),
-      sel("dir", f.dir, ["incoming", "outgoing"], function (o) { return I.label("direction", o); }),
-      sel("type", f.type, types, function (o) { return I.label("attackType", o); }),
-      sel("group", f.group, groups),
-      search
-    ]);
-
-    function match(a) {
-      if (f.scope && a.scope !== f.scope) return false;
-      if (f.dir && a.direction !== f.dir) return false;
-      if (f.type && a.classification.type !== f.type) return false;
-      if (f.group && a.group !== f.group) return false;
-      if (f.q && String(a.target || a.group).indexOf(f.q) < 0) return false;
-      return true;
-    }
-
-    var active = ctx.attacks.active.filter(match);
-    var recent = ctx.attacks.recent.filter(match);
-
-    var activeBlock = active.length
-      ? attacksTable(active, ctx, {})
-      : h("div", { class: "card" }, K.empty("shield-check", I.t("at.empty.title"), I.t("at.empty.sub")));
-
-    var recentRows = recent.map(function (r) {
-      var dur = r.ended_at ? Math.round((new Date(r.ended_at) - new Date(r.started_at)) / 1000) : 0;
-      return h("tr", { class: "is-clickable", tabindex: "0", role: "button", onclick: function () { ctx.actions.openDrawer(r); }, onkeydown: keyAct(function () { ctx.actions.openDrawer(r); }) }, [
-        h("td", { class: "target-cell", text: r.scope === "group" ? r.group : r.target }),
-        h("td", {}, K.dirBadge(r.direction)),
-        h("td", { class: "td-muted", text: I.label("attackType", r.classification.type) }),
-        h("td", { class: "mono td-muted", text: r.metric }),
-        h("td", { class: "num", text: I.abbr(r.peak_rate) }),
-        h("td", { class: "td-muted", text: I.datetime(new Date(r.started_at)) }),
-        h("td", { class: "td-muted", text: I.duration(dur) })
-      ]);
-    });
-    var recentBlock = h("div", { class: "card" }, [
-      h("div", { class: "card__head" }, h("div", { class: "card__title" }, [w.icon("clock"), h("span", { text: I.t("at.recent") }), recent.length ? K.badge("badge--muted", String(recent.length)) : null])),
-      recent.length
-        ? h("div", { class: "tablewrap" }, h("table", { class: "tbl" }, [
-            h("thead", {}, h("tr", {}, [th("col.target"), th("col.dir"), th("col.type"), th("col.metric"), thNum("col.peak"), th("col.started"), th("col.duration")])),
-            h("tbody", {}, recentRows)
-          ]))
-        : h("div", { class: "card__body" }, h("p", { class: "td-muted", text: I.t("at.recent.empty") }))
-    ]);
-
-    /* keep keyboard focus on the same attack row across the live re-sort */
-    var af = document.activeElement;
-    var keepKey = (af && af.getAttribute) ? af.getAttribute("data-akey") : null;
-    K.mount(root, [
-      viewHead(I.t("nav.attacks"), null),
-      filters,
-      h("div", { class: "section-label", style: { marginTop: "var(--s-2)" } }, [w.icon("flame"), h("span", { text: I.t("at.active") }), active.length ? K.badge("badge--active", String(active.length)) : null]),
-      activeBlock,
-      h("div", { class: "mt-6" }, recentBlock)
-    ]);
-    if (keepKey) { var rf = root.querySelector('tr[data-akey="' + keepKey + '"]'); if (rf) rf.focus(); }
-  }
 
   /* ===== BANS / MITIGATION ===== */
   function bans(root, ctx) {
@@ -523,8 +317,7 @@
   }
 
   w.Views = {
-    attacks: attacks, bans: bans, hosts: hosts,
-    attackCard: attackCard,
+    bans: bans, hosts: hosts,
     viewHead: viewHead, th: th, thNum: thNum, dryRunBanner: dryRunBanner,
     filterBypassBanner: filterBypassBanner
   };

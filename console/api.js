@@ -202,6 +202,9 @@
        - else use the owning group's configured ladder and derive the step from
          elapsed time since started_at (mirrors the engine's rung advancement). */
   function deriveEscalation(a, groups, bansRaw) {
+    /* a group's summed traffic names no address to act on: the engine never
+       mitigates a group attack, so its ladder is the alert alone */
+    if (a.scope === "group") return { escalation: [{ after_seconds: 0, action: "none" }], step: 0, ban: null };
     var ban = null, i;
     for (i = 0; i < bansRaw.length; i++) {
       if (bansRaw[i].target === a.target && bansRaw[i].state === "active") { ban = bansRaw[i]; break; }

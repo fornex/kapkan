@@ -243,6 +243,17 @@ func TestLocaleParityRegistered(t *testing.T) {
 // addresses, networks and hosts on the pipe, those the attack still reaches,
 // those a blackhole leaves unreachable and those diverted to the packet
 // filters (546 + 33 = 579; 18 + 6 = 24 plurals).
+//
+// The Attacks screens (attacks.js) — the list with its filters and cards, the
+// table of the attacks that ended, and an attack's own page in place of the
+// side drawer — retired 62 strings: the old attack card's and the drawer's
+// ac.* labels and its detection-reason box, the old filters and recent-attacks
+// table, the posture's "mitigating", and the sources plural. They added 155
+// (at.*: the filters, a card, the ended table and how each attack ended, the
+// page's force chart, why it fired, what Kapkan did, the mitigation in place,
+// where the attack comes from, the sampled flows and the copied summary) and
+// four plurals: the attacks going on, those ended in the last day, the ended
+// count and the sampled flow records (579 − 62 + 155 = 672; 24 − 1 + 4 = 27).
 func TestLocaleParityParserSelfCheck(t *testing.T) {
 	en := loadCatalogs(t)[baseLocale]
 	for _, tc := range []struct {
@@ -251,9 +262,9 @@ func TestLocaleParityParserSelfCheck(t *testing.T) {
 		want   int
 	}{
 		{"units", 0, 4},
-		{"plurals", 1, 24},
-		{"plurals", 0, 48},  // 24 keys × {one, other}: sources, recentAttacks + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5) + edgeUnboundTokens (E6.7) + fourteen ov* (the Overview and its diagram)
-		{"strings", 0, 579}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history); +34: ed.lever.* (E6.8); +4: duty.* (the duty light); −13 +18: the redesigned top bar, tabs and theme; −14 +111 +33: the redesigned Overview and its diagram
+		{"plurals", 1, 27},
+		{"plurals", 0, 54},  // 27 keys × {one, other}: recentAttacks + edgeNodesUp, edgeWatchOnlyNodes, edgeReportingNodes, edgeActiveOnNodes, edgeBitingNodes + edgeH3ReadyNodes, edgeH3StillServing (E5.5) + edgeUnboundTokens (E6.7) + fourteen ov* (the Overview and its diagram) + four at* (the Attacks screens)
+		{"strings", 0, 672}, // +23: nav.nodes, col.node, nd.*; +32: nav.edge, ed.* (E4.5); +12: ed.h3* (E5.5); +34: ed.tenant/placement + nav.edgenodes + en.* (E6.7 fleet); +36: ed.hist/srcs/ev/state (E6.7 history); +34: ed.lever.* (E6.8); +4: duty.* (the duty light); −13 +18: the redesigned top bar, tabs and theme; −14 +111 +33: the redesigned Overview and its diagram; −62 +155: the Attacks screens and an attack's page
 		{"enums", 1, 9},
 		{"enums", 0, 59}, // +16: edgeEventKind (E6.7)
 		{"enumsShort", 1, 1},
