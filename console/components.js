@@ -122,11 +122,6 @@
     return h("span", { class: "badge " + cls, attrs: title ? { title: title } : null },
       [iconName ? w.icon(iconName) : null, h("span", { text: label })]);
   }
-  function dirBadge(dir) {
-    var out = dir === "outgoing";
-    return h("span", { class: "badge " + (out ? "badge--active" : "badge--muted"), attrs: { title: I.label("direction", dir) } },
-      [w.icon(out ? "arrow-up" : "arrow-down"), h("span", { text: I.label("direction", dir) })]);
-  }
   function modeBadge(dry) {
     return dry
       ? badge("badge--dry", I.t("mode.dryrun"), "shield-alert")
@@ -306,36 +301,6 @@
     return h("div", { class: "ladder" + (compact ? " ladder--compact" : "") + (config ? " ladder--config" : "") }, rungs);
   }
 
-  /* ---------- gauge: metric vs threshold ---------- */
-  function gauge(metricKey, rate, threshold) {
-    var mult = rate / threshold;
-    var scaleMax = Math.max(rate * 1.08, threshold * 2);
-    var sev = mult >= 3 ? "sev-active" : "sev-elev";
-    var fill = h("div", { class: "gauge__fill" }); fill.style.width = Math.min(100, rate / scaleMax * 100) + "%";
-    var tick = h("div", { class: "gauge__thresh" }); tick.style.left = (threshold / scaleMax * 100) + "%";
-    return h("div", { class: "gauge" }, [
-      h("div", { class: "gauge__top" }, [
-        h("span", { class: "gauge__metric", text: metricKey }),
-        h("span", { class: "gauge__mult " + sev }, [I.abbr(mult, "") + "× ", h("span", { style: { fontSize: "var(--t-sm)", fontWeight: "600" }, text: I.t("ac.overthreshold") })])
-      ]),
-      h("div", { class: "gauge__track" }, [fill, tick]),
-      h("div", { class: "gauge__scale" }, [
-        h("span", { text: "0" }),
-        h("span", { text: I.t("ac.threshold") + " " + I.abbr(threshold) }),
-        h("span", { text: I.abbr(scaleMax) })
-      ])
-    ]);
-  }
-
-  /* ---------- confidence bar ---------- */
-  function confidence(conf) {
-    var bar = h("i"); bar.style.width = Math.round(conf * 100) + "%";
-    return h("span", { class: "conf" }, [
-      h("span", { class: "conf__bar" }, bar),
-      h("span", { class: "conf__val", text: I.pct(conf) + " " + I.t("ac.confidence") })
-    ]);
-  }
-
   /* ---------- rate vs baseline bar (hosts) ---------- */
   function baselineBar(rate, baseline) {
     var wrap = h("div", { class: "bl-bar" });
@@ -349,30 +314,6 @@
     var base = h("div", { class: "bl-bar__base" }); base.style.left = "25%";
     wrap.appendChild(fill); wrap.appendChild(base);
     return { bar: wrap, mult: mult };
-  }
-
-  /* ---------- mitigation / route display ---------- */
-  function routeRow(k, vNode) { return h("div", { class: "route__line" }, [h("span", { class: "route__k", text: k }), h("span", { class: "route__v" }, vNode)]); }
-  function routeDisplay(obj, dry) {
-    var rows = [];
-    var method = obj.method;
-    rows.push(routeRow(I.t("col.method"), methodPill(method)));
-    if (obj.flowspec && obj.flowspec.length) {
-      obj.flowspec.forEach(function (r, i) {
-        rows.push(routeRow(i === 0 ? I.t("ac.flowspec") : "", h("span", { class: "route__rule" }, [
-          h("span", { text: r.match + " → " }),
-          h("span", { class: r.action === "discard" ? "op-discard" : "op-rate", text: r.action })
-        ])));
-      });
-    } else if (obj.route) {
-      rows.push(routeRow(I.t("ac.route"), h("span", { class: "mono", text: obj.route })));
-    }
-    if (obj.next_hop) rows.push(routeRow(I.t("ac.nexthop"), h("span", { class: "mono", text: obj.next_hop })));
-    if (obj.community) rows.push(routeRow(I.t("ac.community"), h("span", { class: "mono", text: obj.community })));
-    if (obj.local_pref != null) rows.push(routeRow(I.t("ac.localpref"), h("span", { class: "mono", text: String(obj.local_pref) })));
-    /* the dry-run cue is the dashed amber border + a badge in the section header
-       (rendered by the caller), so the box itself carries no inline tag. */
-    return h("div", { class: "route" + (dry ? " is-dry" : "") }, rows);
   }
 
   /* ---------- measured in-kernel drops ----------
@@ -452,50 +393,79 @@
     return h("div", { class: "kr" }, [h("div", { class: "kr__rows" }, rows), h("div", { class: "kr__foot" }, foot)]);
   }
 
-  /* ---------- share bars (sample) ---------- */
-  function shareGroup(title, list, opts) {
-    opts = opts || {};
-    var total = list.reduce(function (s, x) { return s + (x.packets || 1); }, 0);
-    var rows = list.slice(0, 5).map(function (x) {
-      var pct = (x.packets || 1) / total;
-      var bar = h("i"); bar.style.width = Math.max(2, pct * 100) + "%";
-      return h("div", { class: "share" }, [
-        h("span", { class: "share__key", text: opts.labelEnum ? I.label(opts.labelEnum, x.key) : x.key }),
-        h("span", { class: "share__pct", text: I.pct(pct) }),
-        h("span", { class: "share__bar" + (opts.src ? " is-src" : "") }, bar)
-      ]);
-    });
-    return h("div", { class: "share-group" }, [h("div", { class: "share-group__title", text: title }), rows]);
-  }
-
-  /* ---------- ban lifecycle timeline ---------- */
-  function timeline(attack) {
-    var items = [], esc = attack.escalation || [], step = attack.escalation_step || 0;
-    var start = new Date(attack.started_at);
-    items.push({ when: start, what: I.t("ac.detected"), detail: I.label("attackType", attack.classification.type) + " · " + I.pct(attack.classification.confidence) + " " + I.t("ac.confidence"), cls: "is-done" });
-    esc.forEach(function (stage, i) {
-      if (i === 0) return;
-      var done = i <= step;
-      var when = new Date(start.getTime() + stage.after_seconds * 1000);
-      items.push({ when: when, what: I.label("action", stage.action), detail: done ? "" : "pending", cls: done ? (i === step && attack.active ? "is-active" : "is-warn") : "" });
-    });
-    if (!attack.active && attack.ended_at) items.push({ when: new Date(attack.ended_at), what: I.label("banState", "withdrawn"), detail: "", cls: "is-done" });
-    return h("div", { class: "timeline" }, items.map(function (it) {
-      return h("div", { class: "tl-item" }, [
-        h("span", { class: "tl-dot " + it.cls }),
-        h("div", {}, [
-          h("div", { class: "tl-when", text: I.time(it.when) }),
-          h("div", { class: "tl-what", text: it.what }),
-          it.detail ? h("div", { class: "tl-detail", text: it.detail }) : null
-        ])
-      ]);
-    }));
-  }
-
   /* ---------- rejection callout ---------- */
   function rejection(reason) {
     var key = { whitelisted: "reject.whitelisted", outside_networks: "reject.outside", cap: "reject.cap" }[reason] || "reject.label";
     return h("div", { class: "reject" }, [w.icon("info"), h("div", {}, [h("b", { text: I.t("reject.label") + ": " }), I.t(key)])]);
+  }
+
+  /* ---------- the attack model ----------
+     Shared by the Overview and the Attacks screens, so "protected", "next
+     rung" and the names of the actions mean one thing everywhere.
+
+     The rung an address stands on decides how it is protected. The tone is
+     the escalation ramp's colour slot (style.css --rung-N), shared with the
+     ladder so a colour means the same thing on every screen; 0 is "not yet
+     acted on". An action this console does not know (a newer kapkan) keeps
+     its raw name and a neutral tone rather than borrowing another's. */
+  var ACT = {
+    none:      { tone: 0, name: "ov.act.none",      plan: "ov.plan.none",      now: "ov.now.none" },
+    flowspec:  { tone: 2, name: "ov.act.flowspec",  plan: "ov.plan.flowspec",  now: "ov.now.flowspec" },
+    divert:    { tone: 3, name: "ov.act.divert",    plan: "ov.plan.divert",    now: "ov.now.divert" },
+    dataplane: { tone: 5, name: "ov.act.dataplane", plan: "ov.plan.dataplane", now: "ov.now.dataplane" },
+    blackhole: { tone: 4, name: "ov.act.blackhole", plan: "ov.plan.blackhole", now: "ov.now.blackhole" }
+  };
+  function actName(act) { return ACT[act] ? I.t(ACT[act].name) : I.label("action", act); }
+  function actTone(act) { return ACT[act] ? ACT[act].tone : 0; }
+  /* the attack's target as the operator knows it */
+  function targetOf(a) { return a.scope === "group" ? a.group : a.target; }
+  function attackMult(a) { return a.threshold ? a.rate / a.threshold : null; }
+  function multText(m) { return m >= 10 ? I.num(Math.round(m)) : I._nf1.format(m); }
+  function startedMs(a) { return new Date(a.started_at).getTime(); }
+  /* The protection an attacked address has right now: the method of its live
+     ban — what the engine actually put in place, after any fallback — or
+     "none" while the ladder is still on its alert rung. An ended attack has
+     no live ban and reads "none" here; what it ended with is its own method. */
+  function protOf(a, ctx) {
+    var bans = ctx.bans.active;
+    for (var i = 0; i < bans.length; i++) {
+      if (bans[i].target === a.target) return bans[i].method || "none";
+    }
+    return "none";
+  }
+  /* The bans that mitigate. On a ladder's alert rung the engine already holds
+     a ban for the target, with no method: it reports, it drops nothing, so it
+     is counted as unprotected, never as mitigation. */
+  function mitigating(ctx) {
+    return ctx.bans.active.filter(function (b) { return b.method && b.method !== "none"; });
+  }
+  /* the next rung and when it fires, or null at the top of the ladder */
+  function nextRung(a) {
+    var esc = a.escalation || [], step = a.escalation_step || 0;
+    if (!a.active || step + 1 >= esc.length) return null;
+    return { action: esc[step + 1].action, atMs: startedMs(a) + esc[step + 1].after_seconds * 1000 };
+  }
+  /* A stable name for one attack across polls: an active attack keeps it when
+     it ends and moves to the recent list, so a page open on it stays open.
+     The direction is part of it: a host can be attacked and attacking at once. */
+  function attackKey(a) { return (a.scope || "host") + ":" + targetOf(a) + "|" + a.direction + "@" + a.started_at; }
+
+  /* a live countdown: app.js's 1s tick rewrites every [data-cd-target] */
+  function countdown(atMs) {
+    return h("span", { class: "mono", dataset: { cdTarget: atMs }, text: I.countdown((atMs - Date.now()) / 1000) });
+  }
+  /* "for how long", live: app.js's 1s tick rewrites every [data-since] */
+  function since(atMs) {
+    return h("span", { dataset: { since: atMs }, text: I.duration((Date.now() - atMs) / 1000) });
+  }
+  /* I.mbps / I.pps render "9.8 Gb/s"; the big numbers set the unit smaller */
+  function splitUnit(s) {
+    var i = s.lastIndexOf(" ");
+    return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i + 1)];
+  }
+  /* the round "go there" button a card carries into its section or page */
+  function arrowBtn(label, onclick) {
+    return h("button", { class: "icon-btn icon-btn--sm ov-go", attrs: { type: "button", "aria-label": label, title: label }, onclick: onclick }, w.icon("arrow-ne"));
   }
 
   /* ---------- toast ---------- */
@@ -510,8 +480,8 @@
   /* ---------- popover ----------
      A body-level panel anchored under a control: outside the view's reconciled
      tree, so the 3s poll re-renders underneath it without disturbing what the
-     operator is filling in. One at a time, under one id, so Escape (app.js) and
-     the drawer's Tab trap keep working for every panel built on it.
+     operator is filling in. One at a time, under one id, so Escape (app.js)
+     closes every panel built on it.
 
      Focus moves into the panel on open and back to the control that opened it
      on close — the zone-history card's own return-focus treatment, and the only
@@ -571,14 +541,18 @@
 
   w.K = {
     h: h, svg: svg, clear: clear, mount: mount, append: append,
-    badge: badge, dirBadge: dirBadge, modeBadge: modeBadge, postureChip: postureChip, watchChip: watchChip, offlineChip: offlineChip,
+    badge: badge, modeBadge: modeBadge, postureChip: postureChip, watchChip: watchChip, offlineChip: offlineChip,
     sparkline: sparkline, areaChart: areaChart,
-    ladder: ladder, gauge: gauge, confidence: confidence, baselineBar: baselineBar,
-    routeDisplay: routeDisplay, shareGroup: shareGroup, timeline: timeline,
+    ladder: ladder, baselineBar: baselineBar,
     dropCell: dropCell, kernelRules: kernelRules, bytesFmt: bytesFmt,
     rejection: rejection, toast: toast, popover: popover, confirm: confirm, closeConfirm: closeConfirm,
     empty: empty, skeletonRows: skeletonRows,
     ACTION_ICON: ACTION_ICON, methodPill: methodPill,
-    methodBadge: methodBadge, methodIcon: methodIcon, actionIcon: actionIcon
+    methodBadge: methodBadge, methodIcon: methodIcon, actionIcon: actionIcon,
+    countdown: countdown, since: since, splitUnit: splitUnit, arrowBtn: arrowBtn,
+    atk: {
+      ACT: ACT, actName: actName, actTone: actTone, targetOf: targetOf, mult: attackMult, multText: multText,
+      startedMs: startedMs, protOf: protOf, mitigating: mitigating, nextRung: nextRung, key: attackKey
+    }
   };
 })(window);

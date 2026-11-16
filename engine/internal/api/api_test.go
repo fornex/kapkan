@@ -937,6 +937,8 @@ func TestDashboardServing(t *testing.T) {
 	for _, a := range []struct{ path, needle string }{
 		{"/views.js", "w.Views = {"},
 		{"/overview.js", "V.overview = overview;"},
+		{"/attacks.js", "V.attacks = attacks;"},
+		{"/attacks.js", "V.attack = attackPage;"},
 		{"/views2.js", "V.edge = edge;"},
 		{"/views2.js", "V.edgenodes = edgeNodes;"},
 		{"/views2.js", "V.nodes = nodes;"},

@@ -70,7 +70,7 @@
   --surface:     #1a2029;   /* cards, raised controls   */
   --surface-2:   #20283280; /* open row / nested fill   */
   --inset:       #141a21;   /* wells, inputs, tracks    */
-  --elevated:    #222b36;   /* popovers, drawers        */
+  --elevated:    #222b36;   /* popovers                 */
   --border:      #2a323d;   /* hairlines                */
   --border-soft: #222a34;   /* quieter hairlines        */
   --border-strong:#64727f;  /* control borders: >=3:1 on every surface */
@@ -138,7 +138,6 @@
   /* --- Neutral washes --- */
   --hover:      #ffffff08;
   --fill-muted: #ffffff0d;
-  --scrim:      #00060cb3;
   --skel-1:     #ffffff08;
   --skel-2:     #ffffff14;
   --scroll:     #ffffff1a;
@@ -147,7 +146,6 @@
   /* --- Elevation --- */
   --shadow-1: 0 1px 2px #0006;
   --shadow-2: 0 6px 20px -6px #000a, 0 2px 6px -2px #0008;
-  --shadow-drawer: -24px 0 60px -20px #000c;
 
   /* --- Type --- */
   --font: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
@@ -247,7 +245,6 @@
 
   --hover:      #16181c08;
   --fill-muted: #16181c0d;
-  --scrim:      #16181c66;
   --skel-1:     #16181c08;
   --skel-2:     #16181c12;
   --scroll:     #16181c26;
@@ -255,7 +252,6 @@
 
   --shadow-1: 0 1px 2px #16181c14;
   --shadow-2: 0 8px 24px -8px #16181c38, 0 2px 6px -2px #16181c1f;
-  --shadow-drawer: -24px 0 60px -20px #16181c40;
 }
 
 /* ============================================================================ */

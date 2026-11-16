@@ -10,62 +10,15 @@
   "use strict";
   var K = w.K, I = w.I18N, h = K.h, V = w.Views;
 
-  /* ---------- the actions, in one place ----------
-     The rung an address stands on decides how it is protected. The tone is
-     the escalation ramp's colour slot (style.css --rung-N), shared with the
-     ladder so a colour means the same thing on every screen; 0 is "not yet
-     acted on". An action this console does not know (a newer kapkan) keeps
-     its raw name and a neutral tone rather than borrowing another's. */
-  var ACT = {
-    none:      { tone: 0, name: "ov.act.none",      plan: "ov.plan.none",      now: "ov.now.none" },
-    flowspec:  { tone: 2, name: "ov.act.flowspec",  plan: "ov.plan.flowspec",  now: "ov.now.flowspec" },
-    divert:    { tone: 3, name: "ov.act.divert",    plan: "ov.plan.divert",    now: "ov.now.divert" },
-    dataplane: { tone: 5, name: "ov.act.dataplane", plan: "ov.plan.dataplane", now: "ov.now.dataplane" },
-    blackhole: { tone: 4, name: "ov.act.blackhole", plan: "ov.plan.blackhole", now: "ov.now.blackhole" }
-  };
+  /* the attack model (what protects an address, its next rung, …) is shared
+     with the Attacks screens: components.js K.atk */
+  var A = K.atk, ACT = A.ACT, actName = A.actName, actTone = A.actTone, targetOf = A.targetOf,
+      mult = A.mult, multText = A.multText, startedMs = A.startedMs, protOf = A.protOf,
+      mitigating = A.mitigating, nextRung = A.nextRung, countdown = K.countdown, splitUnit = K.splitUnit,
+      arrowBtn = K.arrowBtn;
   /* the protection rows, mildest first; "none" is the empty part of the ring */
   var PROT_ROWS = ["none", "flowspec", "dataplane", "divert", "blackhole"];
-  function actName(act) { return ACT[act] ? I.t(ACT[act].name) : I.label("action", act); }
-  function actTone(act) { return ACT[act] ? ACT[act].tone : 0; }
 
-  /* the attack's target as the operator knows it */
-  function targetOf(a) { return a.scope === "group" ? a.group : a.target; }
-  function mult(a) { return a.threshold ? a.rate / a.threshold : null; }
-  function multText(m) { return m >= 10 ? I.num(Math.round(m)) : I._nf1.format(m); }
-  function startedMs(a) { return new Date(a.started_at).getTime(); }
-
-  /* The protection an attacked address has right now: the method of its live
-     ban — what the engine actually put in place, after any fallback — or
-     "none" while the ladder is still on its alert rung. */
-  function protOf(a, ctx) {
-    var bans = ctx.bans.active;
-    for (var i = 0; i < bans.length; i++) {
-      if (bans[i].target === a.target) return bans[i].method || "none";
-    }
-    return "none";
-  }
-  /* The bans that mitigate. On a ladder's alert rung the engine already holds
-     a ban for the target, with no method: it reports, it drops nothing, so it
-     is counted as unprotected, never as mitigation. */
-  function mitigating(ctx) {
-    return ctx.bans.active.filter(function (b) { return b.method && b.method !== "none"; });
-  }
-  /* the next rung and when it fires, or null at the top of the ladder */
-  function nextRung(a) {
-    var esc = a.escalation || [], step = a.escalation_step || 0;
-    if (!a.active || step + 1 >= esc.length) return null;
-    return { action: esc[step + 1].action, atMs: startedMs(a) + esc[step + 1].after_seconds * 1000 };
-  }
-  /* a live countdown: app.js's 1s tick rewrites every [data-cd-target] */
-  function countdown(atMs) {
-    return h("span", { class: "mono", dataset: { cdTarget: atMs }, text: I.countdown((atMs - Date.now()) / 1000) });
-  }
-
-  /* I.mbps / I.pps render "9.8 Gb/s"; the big numbers set the unit smaller */
-  function splitUnit(s) {
-    var i = s.lastIndexOf(" ");
-    return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i + 1)];
-  }
   /* a span of time as one big number and its unit: minutes, hours, days */
   function spanParts(sec) {
     sec = Math.max(0, sec);
@@ -78,9 +31,6 @@
       h("div", { class: "hero__fig" }, [h("span", { class: "hero__big", text: value }), unit ? h("span", { class: "hero__unit", text: unit }) : null]),
       h("div", { class: "hero__cap", text: caption })
     ]);
-  }
-  function arrowBtn(label, onclick) {
-    return h("button", { class: "icon-btn icon-btn--sm ov-go", attrs: { type: "button", "aria-label": label, title: label }, onclick: onclick }, w.icon("arrow-ne"));
   }
   function goSection(ctx, id) { return function () { ctx.actions.setSection(id); }; }
 
@@ -459,7 +409,7 @@
       if (ctx.role === "operator" && prot !== "none") {
         actions.push(h("button", { class: "btn btn--sm atk__withdraw", attrs: { type: "button" }, onclick: function (e) { ctx.actions.withdraw(e.currentTarget, a.target); }, text: I.t("ac.withdraw") }));
       }
-      actions.push(arrowBtn(I.t("ov.at.open", { t: targetOf(a) }), function () { ctx.actions.openDrawer(a); }));
+      actions.push(arrowBtn(I.t("ov.at.open", { t: targetOf(a) }), function () { ctx.actions.openAttack(a); }));
       return h("div", { class: "atk" }, [
         h("div", {}, [h("div", { class: "atk__ip mono", text: targetOf(a) }), h("div", { class: "atk__sub", text: (a.scope === "group" ? I.label("scope", "group") : a.group) + " · " + I.label("direction", a.direction) })]),
         h("div", {}, [h("div", { class: "atk__vec", text: I.label("attackType", a.classification.type) }), h("div", { class: "atk__sub", text: vline })]),

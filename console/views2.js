@@ -1,175 +1,8 @@
-/* views2.js — lighter views (Hostgroups, Traffic/Reports, Settings) +
-   the attack-detail drawer content. Extends window.Views. */
+/* views2.js — lighter views (Hostgroups, Traffic/Reports, Settings, the
+   packet and request filters, Edge). Extends window.Views. */
 (function (w) {
   "use strict";
   var K = w.K, I = w.I18N, h = K.h, V = w.Views;
-
-  /* ===== ATTACK DETAIL DRAWER ===== */
-  function attackDetail(a, ctx) {
-    var isLive = a.active;
-    var actions = [];
-    if (ctx.role === "operator" && isLive) {
-      actions.push(h("button", { class: "btn btn--danger btn--sm", onclick: function (e) { ctx.actions.withdraw(e.currentTarget, a.target); } }, [w.icon("x"), h("span", { text: I.t("ac.withdraw") })]));
-    }
-
-    var head = h("div", { class: "drawer__head" }, [
-      h("div", { class: "drawer__title" }, [
-        h("div", { class: "attack-card__target" }, [
-          h("span", { class: "mono", text: a.scope === "group" ? a.group : a.target }),
-          K.dirBadge(a.direction)
-        ]),
-        h("div", { class: "attack-card__sub" }, [
-          K.badge("badge--active", I.label("attackType", a.classification.type), "flame"),
-          K.badge(isLive ? "badge--active" : "badge--muted", isLive ? I.t("posture.mitigating") : I.label("banState", a.ban_state || "withdrawn")),
-          a.dry_run ? K.badge("badge--dry", I.t("mode.dryrun"), "shield-alert") : null
-        ])
-      ]),
-      h("button", { class: "icon-btn", attrs: { "aria-label": "Close" }, onclick: function () { ctx.actions.closeDrawer(); } }, w.icon("x"))
-    ]);
-
-    var sample = a.sample;
-    // For outgoing attacks the host itself is the single source, so the engine
-    // ranks the remote *destinations* (the victims) under top_sources/top_asns.
-    // Relabel accordingly so the panel doesn't call destinations "sources".
-    var isOut = a.direction === "outgoing";
-    var body = h("div", { class: "drawer__body" }, [
-      actions.length ? h("div", { class: "row", style: { justifyContent: "flex-end" } }, actions) : null,
-
-      section("ac.classification", "info", h("div", { class: "row wrap", style: { gap: "var(--s-4)" } }, [
-        K.badge("badge--active", I.label("attackType", a.classification.type), "flame"),
-        K.confidence(a.classification.confidence),
-        a.classification.src_port != null ? h("span", { class: "td-muted" }, ["src port ", h("span", { class: "mono", text: String(a.classification.src_port) })]) : null
-      ])),
-
-      section("ac.metricvsthreshold", "activity", K.gauge(a.metric, a.rate || a.peak_rate || 0, a.threshold)),
-
-      a.reason ? section("ac.why", "zap", reasonBody(a.reason)) : null,
-
-      section("ac.escalation", "layers", h("div", {}, [
-        K.ladder(a.escalation, a.escalation_step, { live: isLive, startedMs: new Date(a.started_at).getTime() }),
-        h("div", { class: "ladder__legend" }, [w.icon("info"), h("span", { text: I.t("lad.rampnote") })])
-      ])),
-
-      a.method || a.route
-        ? section("ac.mitigation", "shield", K.routeDisplay(a, a.dry_run))
-        : section("ac.mitigation", "bell", h("div", { class: "route" }, h("div", { class: "route__line" }, h("span", { class: "route__v", text: a.scope === "group" ? I.t("ac.groupnote") : I.t("ac.alertonly") })))),
-
-      // "Installed in kernel": each announced rule beside what the datapath
-      // measured for it. Only for a data-plane mitigation — for a flowspec ban
-      // the rules were handed to an upstream peer and this box counts nothing,
-      // so a panel of dashes would imply a measurement that does not exist.
-      a.method === "dataplane" ? section("ac.inkernel", "chip", K.kernelRules(a)) : null,
-
-      sample ? section("ac.sample", "target", h("div", {}, [
-        h("div", { class: "shares" }, [
-          K.shareGroup(I.t(isOut ? "ac.topdest" : "ac.topsources"), sample.top_sources, { src: true }),
-          (sample.top_asns && sample.top_asns.length) ? K.shareGroup(I.t(isOut ? "ac.topdestasns" : "ac.topasns"), sample.top_asns, { src: true }) : null,
-          K.shareGroup(I.t("ac.protocols"), sample.protocols, {}),
-          K.shareGroup(I.t("ac.topsrcports"), sample.top_src_ports, {}),
-          K.shareGroup(I.t("ac.topdstports"), sample.top_dst_ports, {})
-        ]),
-        h("div", { class: "td-muted", style: { marginTop: "var(--s-3)", fontSize: "var(--t-xs)" }, text: I.num(sample.total_packets) + " " + I.t("ac.totalpackets") })
-      ])) : null,
-
-      sample && sample.flows ? section("ac.rawflows", "database", rawFlows(sample.flows)) : null,
-
-      section("ac.lifecycle", "clock", K.timeline(a))
-    ]);
-
-    return [head, body];
-  }
-  function section(titleKey, icon, body) {
-    return h("div", {}, [h("div", { class: "section-label" }, [w.icon(icon), h("span", { text: I.t(titleKey) })]), body]);
-  }
-  /* "Why this fired" — renders the detection Reason: threshold provenance
-     (static vs learned baseline, with the baseline math), warm-up state, and
-     the protocol-share breakdown that drove classification. r is a.reason;
-     absent on attacks captured before explainability shipped (caller guards). */
-  function reasonBody(r) {
-    var blocks = [];
-    var isBaseline = r.threshold_source === "baseline" && r.baseline;
-
-    blocks.push(h("div", { class: "reason__src" }, [
-      isBaseline ? K.badge("badge--active", I.t("ac.why.baseline"), "activity")
-                 : K.badge("badge--muted", I.t("ac.why.static"), "shield"),
-      h("span", { class: "td-muted", text: isBaseline ? I.t("ac.why.baselinenote") : I.t("ac.why.staticnote") })
-    ]));
-
-    if (r.warming_up) {
-      var left = r.warmup_remaining_seconds ? I.countdown(r.warmup_remaining_seconds) : "—";
-      blocks.push(h("div", { class: "reason__warmup" }, [
-        w.icon("clock"), h("span", { text: I.t("ac.why.warmupnote", { t: left }) })
-      ]));
-    }
-
-    if (isBaseline) {
-      var b = r.baseline;
-      var eff = Math.min(b.ceiling, Math.max(b.floor, b.normal * b.factor));
-      var kv = [
-        ["ac.why.normal", I.abbr(b.normal), false],
-        ["ac.why.factor", "×" + I.abbr(b.factor, ""), false],
-        ["ac.why.floor", I.abbr(b.floor), false],
-        ["ac.why.ceiling", I.abbr(b.ceiling), false],
-        ["ac.why.effective", I.abbr(eff), true]
-      ];
-      blocks.push(h("div", { class: "reason__math" }, kv.map(function (row) {
-        return h("div", { class: "reason__kv" + (row[2] ? " is-eff" : "") }, [
-          h("span", { class: "reason__kv-k", text: I.t(row[0]) }),
-          h("span", { class: "reason__kv-v mono", text: row[1] })
-        ]);
-      })));
-      blocks.push(h("div", { class: "reason__formula mono td-muted", text: "min(ceiling, max(floor, normal × factor))" }));
-    }
-
-    var shares = r.shares || {};
-    var gate = r.dominant_share_gate || 0.5;
-    var list = [["udp", "UDP"], ["syn", "SYN"], ["tcp", "TCP"], ["icmp", "ICMP"], ["frag", "Frag"]]
-      .map(function (p) { return { key: p[1], v: shares[p[0]] || 0 }; })
-      .filter(function (x) { return x.v > 0; })
-      .sort(function (x, y) { return y.v - x.v; });
-    if (list.length) {
-      var anyDom = false;
-      var bars = list.map(function (x) {
-        var dom = x.v >= gate; if (dom) anyDom = true;
-        var bar = h("i"); bar.style.width = Math.max(2, x.v * 100) + "%";
-        return h("div", { class: "share" }, [
-          h("span", { class: "share__key" }, [
-            h("span", { text: x.key }),
-            dom ? h("span", { class: "reason__dom", text: I.t("ac.why.dominant") }) : null
-          ]),
-          h("span", { class: "share__pct", text: I.pct(x.v) }),
-          h("span", { class: "share__bar" + (dom ? " is-dom" : "") }, bar)
-        ]);
-      });
-      blocks.push(h("div", { class: "reason__shares" }, [
-        h("div", { class: "share-group__title", text: I.t("ac.why.shares") }),
-        bars,
-        h("div", { class: "reason__gate td-muted", text: I.t(anyDom ? "ac.why.gate" : "ac.why.mixed", { p: I.pct(gate) }) })
-      ]));
-    }
-
-    return h("div", { class: "reason" }, blocks);
-  }
-  function rawFlows(flows) {
-    var head = h("tr", {}, ["src", "ac.proto", "dst", "dport", "ac.flags", "ac.frag", "ac.packets"].map(function (k, i) {
-      var label = i === 0 ? "src → " : (k.indexOf(".") > 0 ? I.t(k) : k);
-      return h("th", { text: label });
-    }));
-    var rows = flows.map(function (f) {
-      var srcCell = [h("span", { text: f.src }), h("span", { class: "td-muted", text: ":" + f.src_port })];
-      if (f.src_country) srcCell.push(h("span", { class: "geo-tag", title: f.src_org || "", text: f.src_country }));
-      return h("tr", {}, [
-        h("td", {}, srcCell),
-        h("td", { text: f.proto }),
-        h("td", {}, [h("span", { text: f.dst }), h("span", { class: "td-muted", text: ":" + f.dst_port })]),
-        h("td", { text: String(f.dst_port) }),
-        h("td", {}, f.flags ? h("span", { class: "flag", text: f.flags }) : h("span", { class: "td-muted", text: "—" })),
-        h("td", {}, f.fragment ? h("span", { class: "flag", text: "Y" }) : h("span", { class: "td-muted", text: "—" })),
-        h("td", { class: "num", text: I.num(f.packets) })
-      ]);
-    });
-    return h("div", { class: "tablewrap" }, h("table", { class: "tbl flows" }, [h("thead", {}, head), h("tbody", {}, rows)]));
-  }
 
   /* ===== HOSTGROUPS ===== */
   /* full policy detail for one group — shown in the expanded table row */
@@ -924,8 +757,7 @@
         h("div", { class: "row", style: { gap: "var(--s-2)" } }, [
           seg,
           /* closing removes this button with the card, so the keyboard would
-             land on <body>; focus goes back to the row the card belongs to,
-             the drawer's own return-focus treatment */
+             land on <body>; focus goes back to the row the card belongs to */
           h("button", { class: "btn btn--ghost btn--sm", onclick: function () {
             ctx.actions.toggleEdgeZone(zone);
             var row = edgeZoneRow(root, zone);
@@ -1810,7 +1642,6 @@
   V.hostgroups = hostgroups;
   V.traffic = traffic;
   V.settings = settings;
-  V.attackDetail = attackDetail;
   V.nodes = nodes;
   V.edge = edge;
   V.edgenodes = edgeNodes;

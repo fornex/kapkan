@@ -12,7 +12,9 @@
      operator left it on. */
   var SECTIONS = [
     { id: "overview", key: "nav.overview", icon: "grid", views: ["overview"] },
-    { id: "attacks", key: "nav.attacks", icon: "activity", views: ["attacks"], count: "attacks" },
+    /* the attack page is Attacks' own: the section stays lit on it, but it is
+       a page you open, not a tab */
+    { id: "attacks", key: "nav.attacks", icon: "activity", views: ["attacks"], pages: ["attack"], count: "attacks" },
     { id: "mitigation", key: "nav.bans", icon: "ban", views: ["bans", "nodes"], count: "bans" },
     { id: "hosts", key: "nav.hosts", icon: "server", views: ["hosts"] },
     { id: "traffic", key: "nav.traffic", icon: "chart", views: ["traffic"] },
@@ -55,11 +57,17 @@
     lastTab: {},
     moreOpen: false,
     hostDir: "incoming",
-    filters: { scope: "", dir: "", type: "", group: "", q: "" },
+    filters: { scope: "", dir: "", type: "", group: "", prot: "", q: "" },
+    /* the attack page: which attack (K.atk.key), and the unit of its chart —
+       null is the attack's own metric, until the operator picks another */
+    attackKey: null,
+    atkMetric: null,
     expanded: new Set(),
-    drawer: { open: false, live: false, key: null, attack: null },
     buf: { aggIn: [], aggOut: [], aggInPps: [], aggOutPps: [], attacks: [], bans: [], hosts: [], inAttack: [], hostPps: {}, hostMbps: {},
-      ovIn: [], ovInPps: [], ovT: [], ovHot: [] },
+      ovIn: [], ovInPps: [], ovT: [], ovHot: [],
+      /* per attack: fifteen minutes of timestamped samples of its own rates,
+         for the Attacks cards and the attack page (see trackAttacks) */
+      atk: {} },
     /* the Overview chart's unit: "bps" or "pps" */
     ovUnit: "bps",
     traffic: { key: null, available: false, points: [], loading: false, fetchedAt: 0 },
@@ -129,6 +137,44 @@
       if (!b.hostMbps[host.target]) b.hostMbps[host.target] = [];
       push(b.hostMbps[host.target], host.rates.mbps);
     });
+    if (at) trackAttacks(at);
+  }
+  /* Per attack (K.atk.key), fifteen minutes of timestamped samples of its own
+     rates: what the Attacks cards and the attack page draw. The engine re-reads
+     a live attack's rates on every request, so these move with the attack. v
+     is the metric that fired; pps, mbps and fps are the totals. A buffer
+     starts when the attack is first seen, stops when it ends, and is dropped
+     once the attack has left the recent list. */
+  var ATK_WINDOW = 300;
+  var ATK_FIELDS = ["t", "v", "pps", "mbps", "fps"];
+  function trackAttacks(at) {
+    var b = state.buf, atks = API.getAttacks(), keep = {};
+    atks.active.concat(atks.recent).forEach(function (a) { keep[K.atk.key(a)] = true; });
+    Object.keys(b.atk).forEach(function (k) { if (!keep[k]) delete b.atk[k]; });
+    atks.active.forEach(function (a) {
+      var k = K.atk.key(a), buf = b.atk[k] || (b.atk[k] = seedAttack(a)), r = a.rates || {};
+      buf.t.push(at); buf.v.push(a.rate || 0); buf.pps.push(r.pps || 0); buf.mbps.push(r.mbps || 0); buf.fps.push(r.flows_per_sec || 0);
+      if (buf.t.length > ATK_WINDOW) ATK_FIELDS.forEach(function (f) { buf[f].shift(); });
+    });
+  }
+  /* An inbound attack on a host starts with the host's last minutes from the
+     per-host buffers, so its chart shows what came before it. They are paired
+     from the end with the Overview's poll times, which the boot prefill never
+     touches; the newest host sample is this poll's own and is left to the
+     attack. Only pps and mbps are kept per host, so a metric of its own (a
+     protocol's, flows) starts at the attack. */
+  function seedAttack(a) {
+    var buf = { t: [], v: [], pps: [], mbps: [], fps: [] };
+    if (a.scope === "group" || a.direction === "outgoing") return buf;
+    var b = state.buf, pp = b.hostPps[a.target] || [], mb = b.hostMbps[a.target] || [], times = b.ovT;
+    var n = Math.min(pp.length, mb.length, times.length) - 1;
+    for (var i = 0; i < n; i++) {
+      var p = pp[pp.length - 1 - n + i], m = mb[mb.length - 1 - n + i];
+      buf.t.push(times[times.length - 1 - n + i]);
+      buf.pps.push(p); buf.mbps.push(m); buf.fps.push(null);
+      buf.v.push(a.metric === "pps" ? p : a.metric === "mbps" ? m : null);
+    }
+    return buf;
   }
   function push(arr, v) { arr.push(v); if (arr.length > WINDOW) arr.shift(); }
   function pushOv(arr, v) { arr.push(v); if (arr.length > OV_WINDOW) arr.shift(); }
@@ -154,7 +200,10 @@
 
   /* ---------- sections ---------- */
   function sectionOf(view) {
-    for (var i = 0; i < SECTIONS.length; i++) if (SECTIONS[i].views.indexOf(view) >= 0) return SECTIONS[i];
+    for (var i = 0; i < SECTIONS.length; i++) {
+      var sec = SECTIONS[i];
+      if (sec.views.indexOf(view) >= 0 || (sec.pages && sec.pages.indexOf(view) >= 0)) return sec;
+    }
     return SECTIONS[0];
   }
   function sectionById(id) {
@@ -379,7 +428,7 @@
     var cur = sectionOf(state.view);
     SECTIONS.forEach(function (sec) {
       var on = sec === cur;
-      sec.views.forEach(function (v) {
+      sec.views.concat(sec.pages || []).forEach(function (v) {
         var view = document.getElementById("view-" + v);
         if (view) view.hidden = (state.view !== v);
       });
@@ -394,39 +443,6 @@
     /* More lights up for whichever section it holds */
     var more = document.getElementById("moreBtn");
     if (more) more.classList.toggle("is-active", PHONE_BAR.indexOf(cur.id) < 0);
-  }
-
-  /* ---------- drawer ---------- */
-  function openDrawer(a) {
-    state.drawer = { open: true, live: !!a.active, key: a.id || a.target, attack: a, returnFocus: document.activeElement };
-    renderDrawer();
-    document.getElementById("scrim").classList.add("is-open");
-    var d = document.getElementById("drawer");
-    d.classList.add("is-open"); d.removeAttribute("inert"); d.setAttribute("aria-hidden", "false");
-    var f = d.querySelector("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
-    (f || d).focus();
-  }
-  function renderDrawer() {
-    if (!state.drawer.open) return;
-    var a = state.drawer.attack;
-    if (state.drawer.live) { var live = API.getAttacks().active[0]; if (live) { a = live; state.drawer.attack = a; } }
-    var d = document.getElementById("drawer");
-    K.mount(d, V.attackDetail(a, buildCtx()));
-    /* if a re-render removed the focused control (e.g. attack ended → Withdraw
-       button gone), keep focus inside the modal instead of dropping to <body> */
-    if (document.activeElement === document.body) {
-      var f = d.querySelector("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
-      if (f) f.focus();
-    }
-  }
-  function closeDrawer() {
-    if (!state.drawer.open) return;
-    var rf = state.drawer.returnFocus;
-    state.drawer.open = false;
-    document.getElementById("scrim").classList.remove("is-open");
-    var d = document.getElementById("drawer");
-    d.classList.remove("is-open"); d.setAttribute("inert", ""); d.setAttribute("aria-hidden", "true");
-    if (rf && typeof rf.focus === "function") { try { rf.focus(); } catch (e) {} }
   }
 
   /* ---------- live region ---------- */
@@ -457,9 +473,10 @@
       actions.setView(shown.indexOf(v) >= 0 ? v : (shown[0] || sec.views[0]));
       document.getElementById("main").scrollTop = 0;
     },
-    setLocale: function (loc) { I.set(loc); buildShell(); renderShellDynamic(buildCtx()); renderView(); if (state.drawer.open) renderDrawer(); },
+    setLocale: function (loc) { I.set(loc); buildShell(); renderShellDynamic(buildCtx()); renderView(); },
     setTheme: function (pref) { Theme.set(pref); },
     setFilter: function (k, v) { state.filters[k] = v; renderView(); },
+    resetFilters: function () { state.filters = { scope: "", dir: "", type: "", group: "", prot: "", q: "" }; renderView(); },
     setHostDir: function (d) { state.hostDir = d; renderView(); },
     setOvUnit: function (u) { state.ovUnit = u; renderView(); },
     toggleHost: function (ip) { if (state.expanded.has(ip)) state.expanded.delete(ip); else state.expanded.add(ip); renderView(); },
@@ -647,10 +664,18 @@
       state.edgeTenant = "";
       try { sessionStorage.removeItem(TENANT_KEY); } catch (e) {}
     },
-    openDrawer: openDrawer, closeDrawer: closeDrawer,
+    /* an attack opens on its own page; the key survives the attack ending */
+    openAttack: function (a) {
+      state.attackKey = K.atk.key(a);
+      state.atkMetric = null;
+      state.expanded.delete("atk:flows");
+      actions.setView("attack");
+      document.getElementById("main").scrollTop = 0;
+    },
+    setAtkMetric: function (m) { state.atkMetric = m; renderView(); },
     withdraw: function (anchor, target) {
       K.confirm(anchor, { title: I.t("ac.withdraw"), text: I.t("ac.withdraw.confirm", { t: target }), danger: true, confirmLabel: I.t("ac.withdraw"),
-        onConfirm: function () { API.unban(target).then(function (r) { K.toast(r.ok ? I.t("ac.withdraw.ok") : I.t("reject.label"), r.ok ? "ok" : "err"); if (state.drawer.live) closeDrawer(); poll(); }); } });
+        onConfirm: function () { API.unban(target).then(function (r) { K.toast(r.ok ? I.t("ac.withdraw.ok") : I.t("reject.label"), r.ok ? "ok" : "err"); poll(); }); } });
     },
     ban: function (ip) {
       API.ban(ip).then(function (res) {
@@ -679,7 +704,6 @@
     renderShellDynamic(ctx);
     renderUpdateBanner(ctx);
     renderView(ctx);
-    if (state.drawer.open) renderDrawer();
     announceRung(ctx);
   }
   function poll() {
@@ -698,6 +722,9 @@
     document.querySelectorAll("[data-cd-target]").forEach(function (el) {
       el.textContent = I.countdown((parseInt(el.dataset.cdTarget, 10) - now) / 1000);
     });
+    document.querySelectorAll("[data-since]").forEach(function (el) {
+      el.textContent = I.duration((now - parseInt(el.dataset.since, 10)) / 1000);
+    });
     document.querySelectorAll("[data-bar-start]").forEach(function (el) {
       var s = parseInt(el.dataset.barStart, 10), e = parseInt(el.dataset.barEnd, 10);
       el.style.width = Math.max(0, Math.min(100, (now - s) / (e - s) * 100)) + "%";
@@ -708,21 +735,10 @@
   document.addEventListener("click", function (e) {
     if (state.moreOpen && !document.getElementById("tabbar").contains(e.target)) setMore(false);
   });
-  document.getElementById("scrim").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
       if (state.moreOpen) { setMore(false); var mb = document.getElementById("moreBtn"); if (mb) mb.focus(); }
-      closeDrawer(); K.closeConfirm(); return;
-    }
-    /* trap Tab within the open drawer (skip while a confirm popover is up) */
-    if (e.key === "Tab" && state.drawer.open && !document.getElementById("__confirm")) {
-      var d = document.getElementById("drawer");
-      var f = d.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
-      if (!f.length) return;
-      var first = f[0], last = f[f.length - 1];
-      if (!d.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
-      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      K.closeConfirm(); return;
     }
   });
 
