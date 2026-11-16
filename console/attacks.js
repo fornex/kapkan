@@ -715,13 +715,17 @@
     kids2.push(note(MIT_TEXT[prot] ? I.t(MIT_TEXT[prot]) : actName(prot)));
     if (prot === "dataplane") kids2.push(K.kernelRules(a));
     else {
-      var lines = [];
-      if (a.flowspec && a.flowspec.length) a.flowspec.forEach(function (r) { lines.push(r.match + " → " + r.action); });
-      else {
-        lines.push(a.target + (ban && ban.prefix ? ban.prefix : ""));
-        if (a.next_hop) lines.push(pad("next-hop") + a.next_hop);
-        if (a.community) lines.push(pad("community") + a.community);
-        if (a.local_pref != null) lines.push(pad("local-pref") + a.local_pref);
+      /* The live ban says what is on the wire now; the attack's own copy was
+         taken at detection, so a ladder that climbed from FlowSpec to
+         Blackhole would still show the FlowSpec rule. The rules belong to the
+         FlowSpec rung only: a blackhole or a divert is a route. */
+      var lines = [], b = ban || {};
+      if (prot === "flowspec") ((b.flowspec && b.flowspec.length ? b.flowspec : a.flowspec) || []).forEach(function (r) { lines.push(r.match + " → " + r.action); });
+      if (!lines.length) {
+        lines.push(a.target + (b.prefix || "")); /* api.js keeps only the "/32" of a ban's prefix */
+        if (b.next_hop) lines.push(pad("next-hop") + b.next_hop);
+        if (b.community) lines.push(pad("community") + b.community);
+        if (b.local_pref) lines.push(pad("local-pref") + b.local_pref);
       }
       kids2.push(h("pre", { class: "at-route mono", text: lines.join("\n") }));
     }
