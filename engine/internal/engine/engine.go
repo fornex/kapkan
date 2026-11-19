@@ -462,8 +462,10 @@ func (e *Engine) Run(ctx context.Context) {
 // windowedRates sums the window's completed seconds [now-window, now-1] for
 // host hs and returns the sampling-corrected per-second averages for both
 // directions. The current (in-progress) second is excluded so a partially
-// filled bucket never dilutes the average. ok is false when the window holds
-// no data.
+// filled bucket never dilutes the average. Seconds before the host's first
+// flow count as empty, though, so a new host's rates climb to its real level
+// over its first window (see baselineState.learn). ok is false when the
+// window holds no data.
 func (e *Engine) windowedRates(hs *hostState, nowSec int64) (in, out Rates, ok bool) {
 	var cin, cout counters
 	for s := nowSec - e.windowSec; s <= nowSec-1; s++ {
@@ -665,7 +667,7 @@ func (e *Engine) evalTick(now time.Time) {
 				// not train its baseline toward zero, and warm-up must not
 				// advance on empty seconds.
 				if g.Baseline != nil && !st.inAttack && rates[d].PPS > 0 {
-					hs.baselines[d].learn(rates[d], g.Baseline, nowSec)
+					hs.baselines[d].learn(rates[d], g.Baseline, nowSec, e.windowSec)
 				}
 			}
 
@@ -841,7 +843,7 @@ func (e *Engine) evalGroups(cfg *config.Config, totals [][2]Rates, hysteresis ti
 			// zero, which would floor-collapse its threshold and false-alert
 			// the first time members scale in.
 			if g.Baseline != nil && !st.inAttack && totals[gi][d].PPS > 0 {
-				gs.baselines[d].learn(totals[gi][d], g.Baseline, now.Unix())
+				gs.baselines[d].learn(totals[gi][d], g.Baseline, now.Unix(), e.windowSec)
 			}
 		}
 	}

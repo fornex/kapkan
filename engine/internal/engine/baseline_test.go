@@ -20,12 +20,17 @@ func baselineSettings(factor float64, halfLife, warmup int, floorPPS uint64) *co
 	}
 }
 
+// noWindow makes learn start the EWMA from its first sample. The unit tests
+// that pass it feed levels directly, not windows filling up after a start
+// (TestBaselineStartsFromFullWindow covers those).
+const noWindow = 0
+
 func TestBaselineEWMAMath(t *testing.T) {
 	bc := baselineSettings(3, 60, 0, 100)
 	var b baselineState
 
 	// First sample initializes.
-	b.learn(Rates{PPS: 1000, Mbps: 8, FlowsPerSec: 500}, bc, 1000)
+	b.learn(Rates{PPS: 1000, Mbps: 8, FlowsPerSec: 500}, bc, 1000, noWindow)
 	if !b.valid || b.pps != 1000 {
 		t.Fatalf("after init: %+v, want pps 1000", b)
 	}
@@ -33,7 +38,7 @@ func TestBaselineEWMAMath(t *testing.T) {
 	// One half-life of a doubled sustained level moves each metric to
 	// ~halfway. All three EWMAs must advance, not just pps.
 	for s := int64(1); s <= 60; s++ {
-		b.learn(Rates{PPS: 2000, Mbps: 16, FlowsPerSec: 1000}, bc, 1000+s)
+		b.learn(Rates{PPS: 2000, Mbps: 16, FlowsPerSec: 1000}, bc, 1000+s, noWindow)
 	}
 	if math.Abs(b.pps-1500) > 15 { // ~1% tolerance
 		t.Errorf("pps after one half-life at 2x = %v, want ~1500", b.pps)
@@ -49,13 +54,13 @@ func TestBaselineEWMAMath(t *testing.T) {
 func TestBaselinePoisonResistance(t *testing.T) {
 	bc := baselineSettings(3, 60, 0, 100)
 	var b baselineState
-	b.learn(Rates{PPS: 1000}, bc, 0)
+	b.learn(Rates{PPS: 1000}, bc, 0, noWindow)
 
 	// An attacker pushing 100x traffic for one half-life: every sample is
 	// clamped to baseline*factor, so the baseline grows at most as if the
 	// input were 3x — far below the would-be 50500 of unclamped EWMA.
 	for s := int64(1); s <= 60; s++ {
-		b.learn(Rates{PPS: 100000}, bc, s)
+		b.learn(Rates{PPS: 100000}, bc, s, noWindow)
 	}
 	unclampedHalfway := (1000.0 + 100000.0) / 2
 	if b.pps >= unclampedHalfway/10 {
@@ -64,6 +69,30 @@ func TestBaselinePoisonResistance(t *testing.T) {
 	// And it did grow toward the (clamped) 3x level, not stay frozen.
 	if b.pps <= 1000 {
 		t.Errorf("pps = %v, want growth above the initial 1000", b.pps)
+	}
+}
+
+// TestBaselineStartsFromFullWindow: the EWMA starts from the first sample
+// whose window shares no second with the first sample's — never from the
+// climb before it — and warm-up counts from the first sample. The climb is a
+// 5-second window over a steady 10000 pps after a restart 0.6 s into a
+// second: the first window holds 0.4 s of traffic, and the fifth still holds
+// that second.
+func TestBaselineStartsFromFullWindow(t *testing.T) {
+	bc := baselineSettings(3, 3600, 60, 100)
+	var b baselineState
+	for i, pps := range []float64{800, 2800, 4800, 6800, 8800} {
+		b.learn(Rates{PPS: pps}, bc, 1000+int64(i), 5)
+		if b.valid {
+			t.Fatalf("baseline started from %v pps, a window sharing a second with the first", pps)
+		}
+	}
+	b.learn(Rates{PPS: 10000}, bc, 1005, 5)
+	if !b.valid || b.pps != 10000 {
+		t.Fatalf("after the first full window: %+v, want pps 10000", b)
+	}
+	if b.firstSeen != 1000 {
+		t.Errorf("firstSeen = %d, want 1000: warm-up counts from the first sample", b.firstSeen)
 	}
 }
 
@@ -77,7 +106,7 @@ func TestEffectiveThresholds(t *testing.T) {
 		t.Errorf("invalid baseline: thresholds = %+v, want static", got)
 	}
 
-	b.learn(Rates{PPS: 4000, Mbps: 100, FlowsPerSec: 3000}, bc, 1000)
+	b.learn(Rates{PPS: 4000, Mbps: 100, FlowsPerSec: 3000}, bc, 1000, noWindow)
 	// Within warm-up: static still apply.
 	if got := effectiveThresholds(static, &b, bc, 1100); got != static {
 		t.Errorf("during warmup: thresholds = %+v, want static", got)
@@ -95,7 +124,7 @@ func TestEffectiveThresholds(t *testing.T) {
 
 	// Floor: a near-zero baseline cannot make detection hair-trigger.
 	var quiet baselineState
-	quiet.learn(Rates{PPS: 10, Mbps: 1, FlowsPerSec: 5}, bc, 1000)
+	quiet.learn(Rates{PPS: 10, Mbps: 1, FlowsPerSec: 5}, bc, 1000, noWindow)
 	got = effectiveThresholds(static, &quiet, bc, 1000+601)
 	if got.PPS != 5000 || got.Mbps != 50 || got.FlowsPerSec != 2000 {
 		t.Errorf("floored trio = %d/%d/%d, want 5000/50/2000", got.PPS, got.Mbps, got.FlowsPerSec)
@@ -103,7 +132,7 @@ func TestEffectiveThresholds(t *testing.T) {
 
 	// Ceiling: a huge baseline cannot raise the bar above static.
 	var fat baselineState
-	fat.learn(Rates{PPS: 70000, Mbps: 900, FlowsPerSec: 30000}, bc, 1000)
+	fat.learn(Rates{PPS: 70000, Mbps: 900, FlowsPerSec: 30000}, bc, 1000, noWindow)
 	got = effectiveThresholds(static, &fat, bc, 1000+601)
 	if got != static {
 		t.Errorf("ceiling: thresholds = %+v, want static %+v", got, static)
@@ -282,7 +311,7 @@ baseline:
 // never below the floor, on every architecture).
 func TestEffectiveThresholdsEdgeClamps(t *testing.T) {
 	var b baselineState
-	b.learn(Rates{PPS: 1000, Mbps: 10, FlowsPerSec: 500}, baselineSettings(3, 60, 0, 100), 0)
+	b.learn(Rates{PPS: 1000, Mbps: 10, FlowsPerSec: 500}, baselineSettings(3, 60, 0, 100), 0, noWindow)
 
 	// floor above static: the static ceiling wins (safety rule).
 	hiFloor := baselineSettings(3, 60, 0, 200000) // floor pps 200000 > static
@@ -532,5 +561,111 @@ func TestEvictionDiscardsBaseline(t *testing.T) {
 	}
 	if hs.baselines[dirIn].firstSeen != clk.Now().Unix() {
 		t.Errorf("firstSeen = %d, want the return tick %d (re-warmup)", hs.baselines[dirIn].firstSeen, clk.Now().Unix())
+	}
+}
+
+// rampBaseline enables baselines with a warm-up far shorter than the
+// half-life, as the defaults have it (600 s against 3600 s): the level the
+// EWMA starts from still dominates it when warm-up ends.
+const rampBaseline = `
+baseline:
+  factor: 3
+  half_life_seconds: 3600
+  warmup_seconds: 60
+  floor:
+    pps: 2000
+    mbps: 20
+    flows_per_sec: 500
+`
+
+// TestSteadyHostNotFlaggedAfterWarmup: a host sending at one rate from the
+// tick it is first seen learns that rate as its normal level and stays quiet
+// once warm-up ends. Its first windows read a fifth, two fifths, ... of the
+// rate, the seconds before its first flow counting as empty; a baseline that
+// started from the first of them held near a fifth of the rate through
+// warm-up, and the host crossed baseline*factor the moment warm-up ended — as
+// every steady host did after every restart. Runs on the production window.
+func TestSteadyHostNotFlaggedAfterWarmup(t *testing.T) {
+	clk := newMockClock()
+	e := New(groupsStore(t, baseYAML+rampBaseline), WithClock(clk.Now), WithWindow(5))
+	events := drain(e)
+	dst := netip.MustParseAddr("203.0.113.20")
+
+	for s := 0; s < 120; s++ { // two warm-ups
+		floodAt(e, dst.String(), 10, 1000) // 10000 pps
+		runTick(e, clk)
+	}
+	expectQuiet(t, events)
+
+	// The learned normal as the API reports it.
+	var learned *Rates
+	for _, h := range e.Snapshot() {
+		if h.Target == dst {
+			learned = h.Baseline
+		}
+	}
+	if learned == nil || math.Abs(learned.PPS-10000) > 100 {
+		t.Fatalf("learned baseline = %+v, want ~10000 pps", learned)
+	}
+
+	// And it is in force: 40000 pps, under the static 80000, is flagged
+	// against 3x the learned level once the window's average passes it.
+	for s := 0; s < 4; s++ { // window averages 16000, 22000, 28000, 34000
+		floodAt(e, dst.String(), 40, 1000)
+		runTick(e, clk)
+	}
+	ev := expectStart(t, events, MetricPPS, DirIncoming)
+	if ev.Reason == nil || ev.Reason.ThresholdSource != "baseline" || math.Abs(ev.Threshold-30000) > 300 {
+		t.Errorf("threshold = %v (reason %+v), want ~30000 from the baseline", ev.Threshold, ev.Reason)
+	}
+}
+
+// TestSteadyTotalGroupNotFlaggedAfterWarmup: the same for a calculation:total
+// group, whose sums ramp up with its members' windows.
+func TestSteadyTotalGroupNotFlaggedAfterWarmup(t *testing.T) {
+	clk := newMockClock()
+	e := New(groupsStore(t, groupsYAML+rampBaseline), WithClock(clk.Now), WithWindow(5))
+	events := drain(e)
+
+	for s := 0; s < 120; s++ {
+		floodAt(e, "203.0.113.33", 6, 1000) // two pool members, 12000 pps together
+		floodAt(e, "203.0.113.34", 6, 1000)
+		runTick(e, clk)
+	}
+	expectQuiet(t, events)
+
+	if got := e.groups["pool"].baselines[dirIn].pps; math.Abs(got-12000) > 120 {
+		t.Errorf("learned pool baseline = %v pps, want ~12000", got)
+	}
+}
+
+// TestLaterDirectionNotFlaggedAfterWarmup: each direction waits out its own
+// first window. Outgoing traffic that starts while the host has long been
+// receiving ramps up just the same, so the wait cannot be keyed to the host.
+func TestLaterDirectionNotFlaggedAfterWarmup(t *testing.T) {
+	clk := newMockClock()
+	e := New(groupsStore(t, directionsYAML+rampBaseline), WithClock(clk.Now), WithWindow(5))
+	events := drain(e)
+	src := netip.MustParseAddr("203.0.113.77")
+
+	for s := 0; s < 150; s++ {
+		floodAt(e, src.String(), 1, 500) // 500 pps in: under the 2000 floor, however learned
+		if s >= 30 {
+			for i := 0; i < 10; i++ {
+				e.Process(outboundFlow(src.String(), 1000)) // 10000 pps out
+			}
+		}
+		runTick(e, clk)
+	}
+	expectQuiet(t, events)
+
+	var learned *Rates
+	for _, h := range e.Snapshot() {
+		if h.Target == src {
+			learned = h.OutBaseline
+		}
+	}
+	if learned == nil || math.Abs(learned.PPS-10000) > 100 {
+		t.Errorf("learned outgoing baseline = %+v, want ~10000 pps", learned)
 	}
 }
