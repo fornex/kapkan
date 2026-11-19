@@ -38,6 +38,20 @@ security-relevant.
   could in 1.8.0 and 1.9.0 for up to `controller.report_interval_seconds` after a start. It reads
   `terminator.pid_file` once before the status listener starts and then every second on a tick of
   its own, so a self-report stuck on an unreachable brain no longer delays a dead nginx's `503`.
+- **detection:** a host with a learned baseline is no longer declared under attack the moment its
+  warm-up ends for traffic it has carried at the same rate all along. Its first measured rate
+  averaged the 5-second window that held its first traffic, the seconds before that traffic
+  counting as empty — a fifth of the real rate — and the baseline started there. With warm-up far
+  shorter than the half-life (600 s against 3600 s by default), the baseline was still about a
+  quarter of the real rate when warm-up ended, so the threshold, `factor` times it, sat below the
+  host's own traffic: about ten minutes after every restart, and after a host was first seen or
+  came back from going quiet, a host steady above the `floor` was flagged with
+  `reason.threshold_source: baseline`, and unless `dry_run` was on, the ban that followed put a
+  FlowSpec rule or a blackhole on legitimate traffic. `calculation: total` hostgroups learned their
+  sums the same way, and so did a direction whose traffic began after the other direction's. A
+  baseline now starts from the window after the one its first traffic arrived in, five seconds
+  after it is first seen, and `/api/v1/hosts` shows none until then; warm-up still counts from
+  first sight. Baselines live only in memory, so the restart that installs the fix relearns them.
 
 ## [1.9.0] - 2026-11-12
 

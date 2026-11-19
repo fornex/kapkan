@@ -11,21 +11,41 @@ import (
 // tick, under the same protection as the owning state.
 type baselineState struct {
 	pps, mbps, fps float64
-	// firstSeen is the Unix second of the first learning sample; baseline
-	// gating activates only warmup_seconds after it.
+	// firstSeen is the Unix second of the first learning sample, set once
+	// seen is; baseline gating activates only warmup_seconds after it.
 	firstSeen int64
-	valid     bool
+	seen      bool
+	// valid reports that pps/mbps/fps hold a learned level. It trails
+	// firstSeen by one window (see learn).
+	valid bool
 }
 
-// learn folds one per-second measurement into the EWMA. Two poisoning
-// bounds apply: callers must not invoke learn while the subject is under
-// attack, and each input is clamped to baseline*factor so a slow attacker
-// ramp can raise the baseline at most geometrically with the half-life
-// period — never instantly.
-func (b *baselineState) learn(r Rates, bc *config.BaselineSettings, nowSec int64) {
+// learn folds one per-second measurement, the average over the trailing
+// windowSec seconds, into the EWMA. Two poisoning bounds apply: callers must
+// not invoke learn while the subject is under attack, and each input is
+// clamped to baseline*factor so a slow attacker ramp can raise the baseline
+// at most geometrically with the half-life period — never instantly.
+//
+// The EWMA starts from the first sample whose window shares no second with
+// the first sample's. That one normally holds the subject's first traffic,
+// with seconds from before it that read as empty, and the second the traffic
+// arrived in may be observed only in part (a restart, traffic starting
+// mid-second): the first samples climb to the real level over one window, a
+// fifth of it, two fifths, ... with 5 seconds. Started from the first of
+// them, the baseline would stay near it through warm-up — far shorter than
+// the half-life, and the clamp above holds each sample to factor times the
+// baseline — and a subject steady since it was first seen would cross
+// baseline*factor the moment warm-up ended: every steady host, after every
+// restart. Warm-up still counts from the first sample.
+func (b *baselineState) learn(r Rates, bc *config.BaselineSettings, nowSec, windowSec int64) {
 	if !b.valid {
+		if !b.seen {
+			b.firstSeen, b.seen = nowSec, true
+		}
+		if nowSec-b.firstSeen < windowSec {
+			return
+		}
 		b.pps, b.mbps, b.fps = r.PPS, r.Mbps, r.FlowsPerSec
-		b.firstSeen = nowSec
 		b.valid = true
 		return
 	}
